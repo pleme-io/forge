@@ -1,0 +1,43 @@
+# PostgreSQL Database Provisioning Configuration (Basic)
+#
+# This configuration enables automatic database provisioning without CDC.
+# All operations are idempotent and safe to run multiple times.
+#
+# Usage:
+#   export APP_USER_PASSWORD="your-secure-password"
+#   forge-provision postgres provision --config postgres-basic-config.yaml
+
+# Connection settings
+connection:
+  # PostgreSQL host (default: 127.0.0.1)
+  host: "postgres.database.svc.cluster.local"
+
+  # PostgreSQL port (default: 5432)
+  port: 5432
+
+  # Admin user for database operations (default: postgres)
+  admin_user: "postgres"
+
+# Database configuration
+database:
+  # Database name (required)
+  name: "app_db"
+
+  # Schema to use (default: public)
+  schema: "public"
+
+# Application user configuration
+user:
+  # Username (required)
+  name: "app_user"
+
+  # Environment variable containing the password (required)
+  # The actual password is read from this env var at runtime
+  password_env: "APP_USER_PASSWORD"
+
+# PostgreSQL extensions to enable (default: [])
+# Common extensions: uuid-ossp, pg_trgm, hstore, pg_stat_statements
+extensions:
+  - "uuid-ossp"
+  - "pg_trgm"
+  - "hstore"

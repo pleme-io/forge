@@ -1,0 +1,18 @@
+[package]
+name = "postgres-provision"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "postgres-provision"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"

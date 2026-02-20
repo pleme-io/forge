@@ -1,0 +1,69 @@
+# Global Deployment Configuration
+# ===============================
+# Default values for all products and services in the monorepo.
+# Place this file at: nix/tools/nexus-deploy/deploy.yaml
+#
+# All fields are optional - if not provided, built-in defaults will be used.
+# Product and service configs can override any of these values.
+
+# Container registry configuration
+registry:
+  # Registry host (e.g., ghcr.io, docker.io, quay.io)
+  host: ghcr.io
+
+  # Organization/namespace in the registry
+  organization: pleme-io
+
+  # Project/monorepo name
+  project: nexus
+
+  # Image name pattern (supports: {host}, {organization}, {project}, {product}, {service})
+  image_pattern: "{host}/{organization}/{project}/{product}-{service}"
+
+# Attic binary cache configuration
+cache:
+  # Cache server name (used with attic push {server}:{cache})
+  server: pleme
+
+# Kubernetes configuration
+kubernetes:
+  # Label key for product identification
+  product_label_key: product
+
+  # Label key for service identification
+  service_label_key: service
+
+  # Namespace pattern (supports: {product}, {environment})
+  namespace_pattern: "{product}-{environment}"
+
+  # Additional labels to apply to all Kubernetes resources
+  additional_labels:
+    managed-by: nexus-deploy
+    team: backend
+
+# Repository path configuration
+paths:
+  # Root directory for products (relative to repo root)
+  products_root: pkgs/products
+
+  # Federation directory (relative to product directory)
+  federation_path: infrastructure/apollo-federation
+
+  # Services directory (relative to product directory)
+  services_path: services/rust
+
+  # Kubernetes manifest path pattern
+  # Supports: {cluster}, {product}, {environment}, {service}
+  k8s_manifest_pattern: "nix/k8s/clusters/{cluster}/infrastructure/{product}-{environment}/services/{service}/kustomization.yaml"
+
+# Apollo GraphQL Federation configuration
+federation:
+  # Default port for GraphQL endpoints
+  port: 8080
+
+  # Default protocol (http or https)
+  protocol: http
+
+  # Routing URL pattern for federation
+  # Supports: {protocol}, {service}, {product}, {environment}, {port}
+  routing_url_pattern: "{protocol}://{service}.{product}-{environment}:{port}/graphql"

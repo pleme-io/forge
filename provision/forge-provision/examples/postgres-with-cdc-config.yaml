@@ -1,0 +1,62 @@
+# PostgreSQL Database Provisioning Configuration with CDC
+#
+# This configuration enables automatic database provisioning with Change Data Capture (CDC).
+# CDC enables real-time replication of database changes via logical replication.
+# All operations are idempotent and safe to run multiple times.
+#
+# Usage:
+#   export APP_USER_PASSWORD="your-secure-password"
+#   export CDC_REPLICATION_PASSWORD="your-replication-password"
+#   forge-provision postgres provision --config postgres-with-cdc-config.yaml
+
+# Connection settings
+connection:
+  # PostgreSQL host
+  host: "postgres.database.svc.cluster.local"
+
+  # PostgreSQL port (default: 5432)
+  port: 5432
+
+  # Admin user for database operations (default: postgres)
+  admin_user: "postgres"
+
+# Database configuration
+database:
+  # Database name (required)
+  name: "email_db"
+
+  # Schema to use (default: public)
+  schema: "email"
+
+# Application user configuration
+user:
+  # Username (required)
+  name: "email"
+
+  # Environment variable containing the password (required)
+  # Set this env var before running: export APP_USER_PASSWORD="secret123"
+  password_env: "APP_USER_PASSWORD"
+
+# PostgreSQL extensions to enable
+extensions:
+  - "uuid-ossp"  # UUID generation
+  - "pg_trgm"    # Trigram matching for text search
+
+# Change Data Capture (CDC) configuration
+# This sets up logical replication for real-time data synchronization
+cdc:
+  # Replication user name (default: cdc_replication)
+  user: "cdc_replication"
+
+  # Environment variable containing the replication user password (required)
+  # Set this env var before running: export CDC_REPLICATION_PASSWORD="repl_secret123"
+  password_env: "CDC_REPLICATION_PASSWORD"
+
+  # Publication name for logical replication (default: cdc_publication)
+  publication: "cdc_publication"
+
+# CDC Notes:
+# - PostgreSQL logical replication captures DML (INSERT/UPDATE/DELETE) automatically
+# - DDL changes (CREATE TABLE, ALTER, etc.) require application-level tracking
+# - Requires PostgreSQL 10+ with wal_level=logical
+# - Used by Pvortex CDC pipeline to stream changes to Elasticsearch/ClickHouse

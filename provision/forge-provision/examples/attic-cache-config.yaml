@@ -1,0 +1,44 @@
+# Attic Binary Cache Provisioning Configuration
+#
+# This configuration enables automatic provisioning of an Attic binary cache.
+# All operations are idempotent and safe to run multiple times.
+#
+# Usage:
+#   export ATTIC_JWT_TOKEN="your-jwt-token"
+#   forge-provision attic-cache provision --config attic-cache-config.yaml
+
+# Cache name (required)
+cache_name: "my-cache"
+
+# Server configuration
+server:
+  # Attic server endpoint (default: http://attic-cache:80)
+  endpoint: "http://attic-cache:80"
+
+  # Server name in config file (default: local)
+  name: "local"
+
+# Cache configuration
+cache:
+  # Whether cache is publicly readable (default: false)
+  is_public: false
+
+  # Nix store directory (default: /nix/store)
+  store_dir: "/nix/store"
+
+  # Cache priority - lower = higher priority (default: 40)
+  priority: 40
+
+  # Upstream cache key names (default: [])
+  upstream_cache_key_names: []
+
+# Environment variable containing JWT token (required)
+token_env: "ATTIC_JWT_TOKEN"
+
+# Config directory path (optional)
+# Defaults to:
+#   - $XDG_CONFIG_HOME/attic if XDG_CONFIG_HOME is set
+#   - $HOME/.config/attic if HOME is set
+#   - /tmp/attic otherwise (works for non-root containers)
+# Uncomment to override:
+# config_dir: "/custom/path/to/attic"

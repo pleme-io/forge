@@ -1,0 +1,24 @@
+# Attic Binary Cache Provisioning Configuration
+
+server_url: "http://attic-server.infrastructure.svc.cluster.local"
+admin_token: "admin-token-here"
+
+caches:
+  - name: "my-project"
+    public: false
+    retention_period: "30d"
+
+  - name: "shared"
+    public: true
+    retention_period: "90d"
+
+tokens:
+  - name: "project-builder"
+    cache: "my-project"
+    read: true
+    write: true
+
+  - name: "project-readonly"
+    cache: "my-project"
+    read: true
+    write: false

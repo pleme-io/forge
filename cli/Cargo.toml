@@ -1,0 +1,97 @@
+[package]
+name = "forge"
+version = "0.1.0"
+edition = "2021"
+authors = ["Pleme Team <team@pleme.io>"]
+description = "Deployment orchestrator for service infrastructure"
+
+[dependencies]
+# CLI framework
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Kubernetes client
+kube = { version = "0.95", features = [
+  "runtime",
+  "client",
+  "derive",
+  "rustls-tls",
+], default-features = false }
+k8s-openapi = { version = "0.23", features = ["v1_31"] }
+
+# Git operations (using system git command via std::process::Command)
+# No dependencies needed - git must be in PATH
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Terminal UI
+indicatif = "0.17"
+console = "0.15"
+colored = "2.1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Process execution
+tokio-process = "0.2"
+
+# HTTP client (for health checks) - using rustls instead of OpenSSL
+reqwest = { version = "0.12", features = [
+  "json",
+  "rustls-tls",
+], default-features = false }
+
+# Time/Duration utilities
+humantime = "2.1"
+
+# Base64 encoding/decoding
+base64 = "0.22"
+
+# Time utilities
+chrono = "0.4"
+
+# URL encoding for Pushgateway
+urlencoding = "2.1"
+
+# Cryptographic hashing
+sha2 = "0.10"
+md5 = "0.7"
+
+# Binary location utilities
+which = "6.0"
+
+# Regular expressions (for bundle verification)
+regex = "1.11"
+
+# Glob patterns (for migration file exclusion)
+glob = "0.3"
+
+# TOML parsing (for seed data files)
+toml = "0.8"
+
+# Directory walking (for observability code scanning)
+walkdir = "2.5"
+
+# Guard for cleanup on scope exit
+scopeguard = "1.2"
+
+# UUID for release IDs
+uuid = { version = "1.11", features = ["serde"] }
+
+[dev-dependencies]
+# Test utilities
+tokio-test = "0.4"
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"

@@ -1,0 +1,40 @@
+# PostgreSQL Database Provisioning Configuration (Email Service Example)
+#
+# This configuration demonstrates YAML-driven database initialization for a
+# real-world email service with CDC enabled.
+# All operations are idempotent and safe to run multiple times.
+#
+# Usage:
+#   export APP_USER_PASSWORD="your-secure-password"
+#   export CDC_REPLICATION_PASSWORD="your-replication-password"
+#   forge-provision postgres provision --config email-db-config.yaml
+
+# Connection settings (optional - defaults shown)
+connection:
+  host: 127.0.0.1
+  port: 5432
+  admin_user: postgres
+
+# Database configuration
+database:
+  name: email_db
+  # Schema to use (optional - defaults to "public")
+  schema: public
+
+# Application user configuration
+user:
+  name: email
+  # Password will be read from this environment variable
+  password_env: APP_USER_PASSWORD
+
+# Extensions to enable (optional - uuid-ossp is default)
+extensions:
+  - uuid-ossp
+  - pg_trgm
+
+# CDC configuration (optional)
+cdc:
+  user: cdc_replication
+  # Password will be read from this environment variable
+  password_env: CDC_REPLICATION_PASSWORD
+  publication: cdc_publication
