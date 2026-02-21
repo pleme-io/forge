@@ -1,7 +1,7 @@
 # Global Deployment Configuration
 # ===============================
 # Default values for all products and services in the monorepo.
-# Place this file at: nix/tools/nexus-deploy/deploy.yaml
+# Place this file at the root of your product repository
 #
 # All fields are optional - if not provided, built-in defaults will be used.
 # Product and service configs can override any of these values.
@@ -15,7 +15,7 @@ registry:
   organization: pleme-io
 
   # Project/monorepo name
-  project: nexus
+  project: lilitu
 
   # Image name pattern (supports: {host}, {organization}, {project}, {product}, {service})
   image_pattern: "{host}/{organization}/{project}/{product}-{service}"

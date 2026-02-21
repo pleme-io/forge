@@ -71,7 +71,7 @@ struct PangeaComponent {
     description: &'static str,
     flake_attr: &'static str,
     has_dedicated_flake: bool,
-    /// External repository name (if not in nexus monorepo)
+    /// External repository name (if not in the product repository)
     external_repo: Option<&'static str>,
 }
 
