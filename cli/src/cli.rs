@@ -1251,6 +1251,12 @@ pub enum Commands {
         dry_run: bool,
     },
 
+    /// Ruby gem operations (build, push to RubyGems.org)
+    Gem {
+        #[command(subcommand)]
+        command: GemCommands,
+    },
+
     /// Helm chart operations
     Helm {
         #[command(subcommand)]
@@ -1423,6 +1429,36 @@ pub enum PangeaCommands {
 
     /// Regenerate gemset.nix for pangea compiler (Ruby)
     RegenerateCompiler,
+}
+
+/// Ruby gem subcommands
+#[derive(Subcommand)]
+pub enum GemCommands {
+    /// Build a .gem file from a gemspec
+    Build {
+        /// Working directory (where *.gemspec lives)
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Gem name (must match <name>.gemspec). Auto-detected if only one gemspec exists.
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Build and push a gem to RubyGems.org
+    Push {
+        /// Working directory (where *.gemspec lives)
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Gem name (must match <name>.gemspec). Auto-detected if only one gemspec exists.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// RubyGems API key (or set GEM_HOST_API_KEY env var)
+        #[arg(long, env = "GEM_HOST_API_KEY")]
+        api_key: Option<String>,
+    },
 }
 
 /// Helm chart subcommands

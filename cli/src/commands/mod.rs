@@ -10,6 +10,7 @@ pub mod e2e;
 pub mod federation;
 pub mod federation_tests;
 pub mod flux;
+pub mod gem;
 pub mod frontend_validation;
 pub mod github_runner_ci;
 pub mod helm;

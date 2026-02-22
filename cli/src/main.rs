@@ -24,7 +24,7 @@ mod infrastructure;
 mod services;
 mod ui;
 
-use cli::{BootstrapCommands, Cli, Commands, HelmCommands, PangeaCommands};
+use cli::{BootstrapCommands, Cli, Commands, GemCommands, HelmCommands, PangeaCommands};
 use commands::{
     bootstrap, build, comprehensive_release, deploy, federation, github_runner_ci,
     integration_tests, kenshi, kenshi_agent, migrations, nix_builder, pangea, push, rollout,
@@ -845,6 +845,18 @@ async fn main() -> Result<()> {
             use std::path::Path;
             commands::seed::unseed(Path::new(&working_dir), &env, dry_run).await?;
         }
+        Commands::Gem { command } => match command {
+            GemCommands::Build { working_dir, name } => {
+                commands::gem::build(&working_dir, name)?;
+            }
+            GemCommands::Push {
+                working_dir,
+                name,
+                api_key,
+            } => {
+                commands::gem::push(&working_dir, name, api_key)?;
+            }
+        },
         Commands::Helm { command } => match command {
             HelmCommands::Lint { chart_dir } => {
                 commands::helm::lint(&chart_dir)?;
