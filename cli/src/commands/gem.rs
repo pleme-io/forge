@@ -252,6 +252,34 @@ pub fn push(
     Ok(())
 }
 
+/// Run tests for a Ruby gem using bundle exec rake spec.
+pub fn test(working_dir: &str, name: Option<String>) -> Result<()> {
+    let dir = Path::new(working_dir);
+    if !dir.exists() {
+        bail!("Working directory not found: {}", working_dir);
+    }
+
+    let gem_name = match name {
+        Some(n) => n,
+        None => detect_gem_name(dir)?,
+    };
+
+    info!("Running tests for gem: {}", gem_name);
+
+    let status = Command::new("bundle")
+        .args(["exec", "rake", "spec"])
+        .current_dir(dir)
+        .status()
+        .context("Failed to run bundle exec rake spec")?;
+
+    if !status.success() {
+        bail!("Tests failed for {}", gem_name);
+    }
+
+    info!("Tests passed: {}", gem_name);
+    Ok(())
+}
+
 // --- Helpers ---
 
 fn find_gem_file(dir: &Path, prefix: &str) -> Result<String> {
