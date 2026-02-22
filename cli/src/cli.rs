@@ -1560,6 +1560,14 @@ pub enum HelmCommands {
         /// Chart version override
         #[arg(long)]
         version: Option<String>,
+
+        /// External library chart directory (copied as sibling for file:// deps)
+        #[arg(long)]
+        lib_chart_dir: Option<String>,
+
+        /// Library chart name (default: pleme-lib)
+        #[arg(long, default_value = "pleme-lib")]
+        lib_chart_name: String,
     },
 
     /// Lint a chart (helm lint + helm template validation)
@@ -1567,6 +1575,14 @@ pub enum HelmCommands {
         /// Chart directory
         #[arg(long, required = true)]
         chart_dir: String,
+
+        /// External library chart directory (copied as sibling for file:// deps)
+        #[arg(long)]
+        lib_chart_dir: Option<String>,
+
+        /// Library chart name (default: pleme-lib)
+        #[arg(long, default_value = "pleme-lib")]
+        lib_chart_name: String,
     },
 
     /// Render chart templates for debugging

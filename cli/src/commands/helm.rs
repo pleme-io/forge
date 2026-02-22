@@ -54,6 +54,63 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     Ok(())
 }
 
+/// Lint with optional library chart workspace isolation.
+///
+/// If `lib_chart_dir` is provided, creates a temp workspace with the chart
+/// and its library dependency for file:// resolution.
+pub fn lint_with_lib(chart_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &str) -> Result<()> {
+    match lib_chart_dir {
+        Some(lib_dir) => {
+            let chart_path = Path::new(chart_dir);
+            let chart_name = chart_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .context("Invalid chart directory name")?;
+
+            let parent_dir = chart_path
+                .parent()
+                .and_then(|p| p.to_str())
+                .context("Invalid chart parent directory")?;
+
+            let (_tmpdir, tmp_chart_path) =
+                prepare_chart_workspace(chart_name, parent_dir, Some(lib_dir), lib_chart_name)?;
+
+            lint(&tmp_chart_path)
+        }
+        None => lint(chart_dir),
+    }
+}
+
+/// Release with optional library chart workspace isolation.
+pub fn release_with_lib(
+    chart_dir: &str,
+    registry: &str,
+    version: Option<&str>,
+    lib_chart_dir: Option<&str>,
+    lib_chart_name: &str,
+) -> Result<()> {
+    match lib_chart_dir {
+        Some(lib_dir) => {
+            let chart_path = Path::new(chart_dir);
+            let chart_name = chart_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .context("Invalid chart directory name")?;
+
+            let parent_dir = chart_path
+                .parent()
+                .and_then(|p| p.to_str())
+                .context("Invalid chart parent directory")?;
+
+            let (_tmpdir, tmp_chart_path) =
+                prepare_chart_workspace(chart_name, parent_dir, Some(lib_dir), lib_chart_name)?;
+
+            release(&tmp_chart_path, registry, version)
+        }
+        None => release(chart_dir, registry, version),
+    }
+}
+
 /// Package a chart directory into a .tgz tarball.
 pub fn package(chart_dir: &str, output: &str, version: Option<&str>) -> Result<String> {
     let chart_path = Path::new(chart_dir);

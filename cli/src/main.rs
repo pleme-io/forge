@@ -870,8 +870,8 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Helm { command } => match command {
-            HelmCommands::Lint { chart_dir } => {
-                commands::helm::lint(&chart_dir)?;
+            HelmCommands::Lint { chart_dir, lib_chart_dir, lib_chart_name } => {
+                commands::helm::lint_with_lib(&chart_dir, lib_chart_dir.as_deref(), &lib_chart_name)?;
             }
             HelmCommands::Package {
                 chart_dir,
@@ -897,8 +897,10 @@ async fn main() -> Result<()> {
                 chart_dir,
                 registry,
                 version,
+                lib_chart_dir,
+                lib_chart_name,
             } => {
-                commands::helm::release(&chart_dir, &registry, version.as_deref())?;
+                commands::helm::release_with_lib(&chart_dir, &registry, version.as_deref(), lib_chart_dir.as_deref(), &lib_chart_name)?;
             }
             HelmCommands::Template {
                 chart_dir,
