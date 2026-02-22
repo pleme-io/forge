@@ -1,6 +1,6 @@
 //! Ruby gem lifecycle commands
 //!
-//! Provides build and push operations for publishing Ruby gems to RubyGems.org.
+//! Provides build, push, and version bump operations for Ruby gems.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -36,6 +36,103 @@ fn detect_gem_name(dir: &Path) -> Result<String> {
             dir.display()
         ),
     }
+}
+
+/// Find the version.rb file for a gem.
+///
+/// Searches for the pattern `lib/<gem-name>/version.rb` where the gem name
+/// may use hyphens in the directory name (e.g., `lib/abstract-synthesizer/version.rb`).
+fn find_version_file(dir: &Path, gem_name: &str) -> Result<std::path::PathBuf> {
+    // Try hyphenated name first (abstract-synthesizer → lib/abstract-synthesizer/version.rb)
+    let path = dir.join("lib").join(gem_name).join("version.rb");
+    if path.exists() {
+        return Ok(path);
+    }
+
+    // Try underscored name (abstract-synthesizer → lib/abstract_synthesizer/version.rb)
+    let underscored = gem_name.replace('-', "_");
+    let path = dir.join("lib").join(&underscored).join("version.rb");
+    if path.exists() {
+        return Ok(path);
+    }
+
+    bail!(
+        "Version file not found. Tried:\n  lib/{}/version.rb\n  lib/{}/version.rb",
+        gem_name,
+        underscored
+    )
+}
+
+/// Parse a semver version string into (major, minor, patch).
+fn parse_version(version: &str) -> Result<(u64, u64, u64)> {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() != 3 {
+        bail!("Invalid version format '{}' — expected X.Y.Z", version);
+    }
+
+    let major = parts[0].parse::<u64>().context("Invalid major version")?;
+    let minor = parts[1].parse::<u64>().context("Invalid minor version")?;
+    let patch = parts[2].parse::<u64>().context("Invalid patch version")?;
+
+    Ok((major, minor, patch))
+}
+
+/// Bump a version by the given level.
+fn bump_version(major: u64, minor: u64, patch: u64, level: &str) -> Result<String> {
+    match level {
+        "patch" => Ok(format!("{}.{}.{}", major, minor, patch + 1)),
+        "minor" => Ok(format!("{}.{}.0", major, minor + 1)),
+        "major" => Ok(format!("{}.0.0", major + 1)),
+        _ => bail!("Invalid bump level '{}' — use patch, minor, or major", level),
+    }
+}
+
+/// Bump the version in a gem's version.rb file.
+///
+/// Finds `VERSION = %(X.Y.Z).freeze` and updates it.
+/// Returns (old_version, new_version).
+pub fn bump(working_dir: &str, level: &str, name: Option<String>) -> Result<(String, String)> {
+    let dir = Path::new(working_dir);
+    if !dir.exists() {
+        bail!("Working directory not found: {}", working_dir);
+    }
+
+    let gem_name = match name {
+        Some(n) => n,
+        None => detect_gem_name(dir)?,
+    };
+
+    let version_file = find_version_file(dir, &gem_name)?;
+    let content = std::fs::read_to_string(&version_file)
+        .with_context(|| format!("Failed to read {}", version_file.display()))?;
+
+    // Match VERSION = %(X.Y.Z).freeze
+    let re = regex::Regex::new(r#"VERSION\s*=\s*%\((\d+\.\d+\.\d+)\)\.freeze"#)
+        .context("Failed to compile version regex")?;
+
+    let caps = re
+        .captures(&content)
+        .with_context(|| format!("No VERSION = %(X.Y.Z).freeze found in {}", version_file.display()))?;
+
+    let old_version = caps[1].to_string();
+    let (major, minor, patch) = parse_version(&old_version)?;
+    let new_version = bump_version(major, minor, patch, level)?;
+
+    // Replace in file
+    let new_content = content.replace(
+        &format!("VERSION = %({}).freeze", old_version),
+        &format!("VERSION = %({}).freeze", new_version),
+    );
+
+    std::fs::write(&version_file, &new_content)
+        .with_context(|| format!("Failed to write {}", version_file.display()))?;
+
+    info!(
+        "{}: {} → {} ({})",
+        gem_name, old_version, new_version, level
+    );
+
+    Ok((old_version, new_version))
 }
 
 /// Build a .gem file from a gemspec.

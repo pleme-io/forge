@@ -846,6 +846,14 @@ async fn main() -> Result<()> {
             commands::seed::unseed(Path::new(&working_dir), &env, dry_run).await?;
         }
         Commands::Gem { command } => match command {
+            GemCommands::Bump {
+                working_dir,
+                level,
+                name,
+            } => {
+                let (old, new) = commands::gem::bump(&working_dir, &level, name)?;
+                println!("{} → {}", old, new);
+            }
             GemCommands::Build { working_dir, name } => {
                 commands::gem::build(&working_dir, name)?;
             }

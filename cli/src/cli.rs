@@ -1445,6 +1445,21 @@ pub enum GemCommands {
         name: Option<String>,
     },
 
+    /// Bump gem version (patch, minor, or major)
+    Bump {
+        /// Working directory (where *.gemspec lives)
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Version bump level
+        #[arg(long, default_value = "patch")]
+        level: String,
+
+        /// Gem name (auto-detected from gemspec if omitted)
+        #[arg(long)]
+        name: Option<String>,
+    },
+
     /// Build and push a gem to RubyGems.org
     Push {
         /// Working directory (where *.gemspec lives)
