@@ -404,6 +404,205 @@ pub fn bump(
     Ok((old_version, new_version))
 }
 
+/// Discover chart directories inside a parent directory.
+///
+/// Returns chart names that have a Chart.yaml, excluding `exclude_name`.
+fn discover_charts(charts_dir: &str, exclude_name: &str) -> Result<Vec<String>> {
+    let dir = Path::new(charts_dir);
+    if !dir.exists() {
+        bail!("Charts directory not found: {}", charts_dir);
+    }
+
+    let mut charts: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .filter(|e| {
+            let name = e.file_name();
+            let name_str = name.to_string_lossy();
+            name_str != exclude_name && e.path().join("Chart.yaml").exists()
+        })
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+
+    charts.sort();
+    Ok(charts)
+}
+
+/// Prepare a temp directory with a chart and its library dependency.
+///
+/// Copies the chart and (optionally) the library chart into a temp dir
+/// so `helm dependency update` can resolve `file://` references.
+/// Returns (temp_dir_path, chart_path_inside_temp).
+fn prepare_chart_workspace(
+    chart_name: &str,
+    charts_dir: &str,
+    lib_chart_dir: Option<&str>,
+    lib_chart_name: &str,
+) -> Result<(tempfile::TempDir, String)> {
+    let tmpdir = tempfile::tempdir().context("Failed to create temp directory")?;
+    let tmp_path = tmpdir.path();
+
+    // Copy chart
+    let src_chart = Path::new(charts_dir).join(chart_name);
+    let dst_chart = tmp_path.join(chart_name);
+    copy_dir_recursive(&src_chart, &dst_chart)
+        .with_context(|| format!("Failed to copy chart {}", chart_name))?;
+
+    // Copy library chart (either from external dir or from charts_dir)
+    let lib_src = match lib_chart_dir {
+        Some(ext) => Path::new(ext).to_path_buf(),
+        None => Path::new(charts_dir).join(lib_chart_name),
+    };
+
+    if lib_src.exists() {
+        let dst_lib = tmp_path.join(lib_chart_name);
+        copy_dir_recursive(&lib_src, &dst_lib)
+            .with_context(|| format!("Failed to copy library chart from {}", lib_src.display()))?;
+    }
+
+    let chart_path = dst_chart.to_string_lossy().to_string();
+    Ok((tmpdir, chart_path))
+}
+
+/// Recursively copy a directory.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Lint all charts in a directory.
+///
+/// Discovers charts, sets up temp workspaces with library dependencies,
+/// and runs lint on each. Returns error if any chart fails.
+pub fn lint_all(charts_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &str) -> Result<()> {
+    let charts = discover_charts(charts_dir, lib_chart_name)?;
+    if charts.is_empty() {
+        bail!("No charts found in {}", charts_dir);
+    }
+
+    info!("Discovered {} charts: {}", charts.len(), charts.join(", "));
+
+    let mut failed = Vec::new();
+
+    for chart_name in &charts {
+        println!();
+        println!("==========================================");
+        println!("  Linting {}", chart_name);
+        println!("==========================================");
+
+        let (_tmpdir, chart_path) =
+            prepare_chart_workspace(chart_name, charts_dir, lib_chart_dir, lib_chart_name)?;
+
+        match lint(&chart_path) {
+            Ok(()) => println!("PASS: {}", chart_name),
+            Err(e) => {
+                println!("FAIL: {} — {}", chart_name, e);
+                failed.push(chart_name.clone());
+            }
+        }
+    }
+
+    println!();
+    if failed.is_empty() {
+        info!("All {} charts passed lint", charts.len());
+        Ok(())
+    } else {
+        bail!(
+            "{}/{} charts failed lint: {}",
+            failed.len(),
+            charts.len(),
+            failed.join(", ")
+        )
+    }
+}
+
+/// Release all charts: lint → package → push to OCI registry.
+///
+/// Discovers charts, sets up temp workspaces, and runs the full
+/// release lifecycle for each chart.
+pub fn release_all(
+    charts_dir: &str,
+    lib_chart_dir: Option<&str>,
+    lib_chart_name: &str,
+    registry: &str,
+) -> Result<()> {
+    let charts = discover_charts(charts_dir, lib_chart_name)?;
+    if charts.is_empty() {
+        bail!("No charts found in {}", charts_dir);
+    }
+
+    info!("Discovered {} charts: {}", charts.len(), charts.join(", "));
+
+    let output_dir = "dist";
+    std::fs::create_dir_all(output_dir)?;
+
+    let mut failed = Vec::new();
+    let mut released = Vec::new();
+
+    for chart_name in &charts {
+        println!();
+        println!("==========================================");
+        println!("  Releasing {}", chart_name);
+        println!("==========================================");
+
+        let (_tmpdir, chart_path) =
+            prepare_chart_workspace(chart_name, charts_dir, lib_chart_dir, lib_chart_name)?;
+
+        // Lint
+        println!("--- Lint ---");
+        if let Err(e) = lint(&chart_path) {
+            println!("FAIL: {} lint — {}", chart_name, e);
+            failed.push(chart_name.clone());
+            continue;
+        }
+
+        // Package
+        println!("--- Package ---");
+        let tgz = match package(&chart_path, output_dir, None) {
+            Ok(t) => t,
+            Err(e) => {
+                println!("FAIL: {} package — {}", chart_name, e);
+                failed.push(chart_name.clone());
+                continue;
+            }
+        };
+
+        // Push
+        println!("--- Push ---");
+        if let Err(e) = push(&tgz, registry) {
+            println!("FAIL: {} push — {}", chart_name, e);
+            failed.push(chart_name.clone());
+            continue;
+        }
+
+        println!("DONE: {}", chart_name);
+        released.push(chart_name.clone());
+    }
+
+    println!();
+    info!("Released {}/{} charts", released.len(), charts.len());
+
+    if !failed.is_empty() {
+        bail!(
+            "{} chart(s) failed: {}",
+            failed.len(),
+            failed.join(", ")
+        )
+    }
+
+    Ok(())
+}
+
 // --- Helpers ---
 
 /// Parse a semver version string "X.Y.Z" into components.

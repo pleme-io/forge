@@ -85,6 +85,9 @@ walkdir = "2.5"
 # Guard for cleanup on scope exit
 scopeguard = "1.2"
 
+# Temp directories (for chart workspace isolation)
+tempfile = "3.14"
+
 # UUID for release IDs
 uuid = { version = "1.11", features = ["serde"] }
 

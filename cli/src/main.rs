@@ -865,6 +865,9 @@ async fn main() -> Result<()> {
             } => {
                 commands::gem::push(&working_dir, name, api_key, otp)?;
             }
+            GemCommands::Test { working_dir, name } => {
+                commands::gem::test(&working_dir, name)?;
+            }
         },
         Commands::Helm { command } => match command {
             HelmCommands::Lint { chart_dir } => {
@@ -912,6 +915,21 @@ async fn main() -> Result<()> {
             } => {
                 let (old, new) = commands::helm::bump(&charts_dir, &lib_chart_name, &level, !no_commit)?;
                 println!("{} → {}", old, new);
+            }
+            HelmCommands::LintAll {
+                charts_dir,
+                lib_chart_dir,
+                lib_chart_name,
+            } => {
+                commands::helm::lint_all(&charts_dir, lib_chart_dir.as_deref(), &lib_chart_name)?;
+            }
+            HelmCommands::ReleaseAll {
+                charts_dir,
+                lib_chart_dir,
+                lib_chart_name,
+                registry,
+            } => {
+                commands::helm::release_all(&charts_dir, lib_chart_dir.as_deref(), &lib_chart_name, &registry)?;
             }
         },
         Commands::PostDeployVerify {

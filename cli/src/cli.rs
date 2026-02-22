@@ -1478,6 +1478,17 @@ pub enum GemCommands {
         #[arg(long)]
         otp: Option<String>,
     },
+
+    /// Run tests for a gem (bundle exec rake spec)
+    Test {
+        /// Working directory (where *.gemspec lives)
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Gem name (auto-detected from gemspec if omitted)
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 /// Helm chart subcommands
@@ -1590,5 +1601,41 @@ pub enum HelmCommands {
         /// Skip git commit and tag
         #[arg(long)]
         no_commit: bool,
+    },
+
+    /// Lint all charts in a directory (replaces shell-based lint-all)
+    LintAll {
+        /// Directory containing chart subdirectories
+        #[arg(long, default_value = "charts")]
+        charts_dir: String,
+
+        /// External library chart directory (for file:// dependency resolution).
+        /// If not set, assumes the lib chart is already in charts-dir.
+        #[arg(long)]
+        lib_chart_dir: Option<String>,
+
+        /// Library chart name to exclude from lint targets
+        #[arg(long, default_value = "pleme-lib")]
+        lib_chart_name: String,
+    },
+
+    /// Release all charts: lint, package, push to OCI (replaces shell-based release-all)
+    ReleaseAll {
+        /// Directory containing chart subdirectories
+        #[arg(long, default_value = "charts")]
+        charts_dir: String,
+
+        /// External library chart directory (for file:// dependency resolution).
+        /// If not set, assumes the lib chart is already in charts-dir.
+        #[arg(long)]
+        lib_chart_dir: Option<String>,
+
+        /// Library chart name to exclude from release targets
+        #[arg(long, default_value = "pleme-lib")]
+        lib_chart_name: String,
+
+        /// OCI registry URL
+        #[arg(long, default_value = "oci://ghcr.io/pleme-io/charts")]
+        registry: String,
     },
 }
