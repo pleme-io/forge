@@ -1572,4 +1572,23 @@ pub enum HelmCommands {
         #[arg(long)]
         set: Vec<String>,
     },
+
+    /// Bump library chart version and update all dependent Chart.yaml files
+    Bump {
+        /// Path to the charts directory containing all chart subdirectories
+        #[arg(long, default_value = "charts")]
+        charts_dir: String,
+
+        /// Name of the library chart to bump (directory name)
+        #[arg(long, default_value = "pleme-lib")]
+        lib_chart_name: String,
+
+        /// Version bump level (patch, minor, major)
+        #[arg(long, default_value = "patch")]
+        level: String,
+
+        /// Skip git commit and tag
+        #[arg(long)]
+        no_commit: bool,
+    },
 }

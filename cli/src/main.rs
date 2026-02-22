@@ -904,6 +904,15 @@ async fn main() -> Result<()> {
             } => {
                 commands::helm::template(&chart_dir, values.as_deref(), &set)?;
             }
+            HelmCommands::Bump {
+                charts_dir,
+                lib_chart_name,
+                level,
+                no_commit,
+            } => {
+                let (old, new) = commands::helm::bump(&charts_dir, &lib_chart_name, &level, !no_commit)?;
+                println!("{} → {}", old, new);
+            }
         },
         Commands::PostDeployVerify {
             environment,
