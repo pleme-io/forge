@@ -1251,6 +1251,12 @@ pub enum Commands {
         dry_run: bool,
     },
 
+    /// Helm chart operations
+    Helm {
+        #[command(subcommand)]
+        command: HelmCommands,
+    },
+
     /// Verify deployment health after release
     /// Checks health endpoint and GraphQL introspection
     PostDeployVerify {
@@ -1417,4 +1423,98 @@ pub enum PangeaCommands {
 
     /// Regenerate gemset.nix for pangea compiler (Ruby)
     RegenerateCompiler,
+}
+
+/// Helm chart subcommands
+#[derive(Subcommand)]
+pub enum HelmCommands {
+    /// Package a Helm chart into a .tgz tarball
+    Package {
+        /// Chart directory (e.g., charts/pleme-microservice)
+        #[arg(long, required = true)]
+        chart_dir: String,
+
+        /// Output directory for the packaged chart
+        #[arg(long, default_value = "dist")]
+        output: String,
+
+        /// Chart version override (default: read from Chart.yaml)
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Push a packaged chart to OCI registry
+    Push {
+        /// Path to chart .tgz tarball
+        #[arg(long, required = true)]
+        chart: String,
+
+        /// OCI registry URL
+        #[arg(long, default_value = "oci://ghcr.io/pleme-io/charts")]
+        registry: String,
+    },
+
+    /// Deploy a service by updating HelmRelease image tag in k8s repo
+    Deploy {
+        /// Service name
+        #[arg(long, required = true)]
+        service: String,
+
+        /// Image tag to deploy
+        #[arg(long, required = true)]
+        image_tag: String,
+
+        /// Path to k8s repo
+        #[arg(long, default_value = "../k8s")]
+        k8s_repo: String,
+
+        /// Target environment (staging, production)
+        #[arg(long, default_value = "staging")]
+        environment: String,
+
+        /// Commit and push changes to git
+        #[arg(long)]
+        commit: bool,
+
+        /// Watch FluxCD reconciliation after deploy
+        #[arg(long)]
+        watch: bool,
+    },
+
+    /// Full chart lifecycle: lint, package, push
+    Release {
+        /// Chart directory
+        #[arg(long, required = true)]
+        chart_dir: String,
+
+        /// OCI registry URL
+        #[arg(long, default_value = "oci://ghcr.io/pleme-io/charts")]
+        registry: String,
+
+        /// Chart version override
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Lint a chart (helm lint + helm template validation)
+    Lint {
+        /// Chart directory
+        #[arg(long, required = true)]
+        chart_dir: String,
+    },
+
+    /// Render chart templates for debugging
+    Template {
+        /// Chart directory
+        #[arg(long, required = true)]
+        chart_dir: String,
+
+        /// Values file to use
+        #[arg(long)]
+        values: Option<String>,
+
+        /// Set individual values (key=value)
+        #[arg(long)]
+        set: Vec<String>,
+    },
 }

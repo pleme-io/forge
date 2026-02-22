@@ -24,7 +24,7 @@ mod infrastructure;
 mod services;
 mod ui;
 
-use cli::{BootstrapCommands, Cli, Commands, PangeaCommands};
+use cli::{BootstrapCommands, Cli, Commands, HelmCommands, PangeaCommands};
 use commands::{
     bootstrap, build, comprehensive_release, deploy, federation, github_runner_ci,
     integration_tests, kenshi, kenshi_agent, migrations, nix_builder, pangea, push, rollout,
@@ -845,6 +845,45 @@ async fn main() -> Result<()> {
             use std::path::Path;
             commands::seed::unseed(Path::new(&working_dir), &env, dry_run).await?;
         }
+        Commands::Helm { command } => match command {
+            HelmCommands::Lint { chart_dir } => {
+                commands::helm::lint(&chart_dir)?;
+            }
+            HelmCommands::Package {
+                chart_dir,
+                output,
+                version,
+            } => {
+                commands::helm::package(&chart_dir, &output, version.as_deref())?;
+            }
+            HelmCommands::Push { chart, registry } => {
+                commands::helm::push(&chart, &registry)?;
+            }
+            HelmCommands::Deploy {
+                service,
+                image_tag,
+                k8s_repo,
+                environment,
+                commit,
+                watch,
+            } => {
+                commands::helm::deploy(&service, &image_tag, &k8s_repo, &environment, commit, watch)?;
+            }
+            HelmCommands::Release {
+                chart_dir,
+                registry,
+                version,
+            } => {
+                commands::helm::release(&chart_dir, &registry, version.as_deref())?;
+            }
+            HelmCommands::Template {
+                chart_dir,
+                values,
+                set,
+            } => {
+                commands::helm::template(&chart_dir, values.as_deref(), &set)?;
+            }
+        },
         Commands::PostDeployVerify {
             environment,
             service,

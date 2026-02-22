@@ -12,6 +12,7 @@ pub mod federation_tests;
 pub mod flux;
 pub mod frontend_validation;
 pub mod github_runner_ci;
+pub mod helm;
 pub mod integration_tests;
 pub mod kenshi;
 pub mod kenshi_agent;
