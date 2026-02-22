@@ -1473,6 +1473,10 @@ pub enum GemCommands {
         /// RubyGems API key (or set GEM_HOST_API_KEY env var)
         #[arg(long, env = "GEM_HOST_API_KEY")]
         api_key: Option<String>,
+
+        /// OTP code for multi-factor authentication
+        #[arg(long)]
+        otp: Option<String>,
     },
 }
 

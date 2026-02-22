@@ -184,7 +184,12 @@ pub fn build(working_dir: &str, name: Option<String>) -> Result<String> {
 }
 
 /// Build and push a gem to RubyGems.org.
-pub fn push(working_dir: &str, name: Option<String>, api_key: Option<String>) -> Result<()> {
+pub fn push(
+    working_dir: &str,
+    name: Option<String>,
+    api_key: Option<String>,
+    otp: Option<String>,
+) -> Result<()> {
     // Resolve API key
     let key = match api_key {
         Some(k) => k,
@@ -207,15 +212,35 @@ pub fn push(working_dir: &str, name: Option<String>, api_key: Option<String>) ->
         }
     };
 
+    // Write credentials file (gem push reads from ~/.gem/credentials)
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let gem_dir = Path::new(&home).join(".gem");
+    std::fs::create_dir_all(&gem_dir)?;
+    let creds_path = gem_dir.join("credentials");
+    let creds_content = format!("---\n:rubygems_api_key: {}\n", key);
+    std::fs::write(&creds_path, &creds_content)?;
+
+    // Set permissions to 0600
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
     info!("=== Build ===");
     let gem_file = build(working_dir, name)?;
 
     info!("=== Push ===");
     let gem_path = Path::new(working_dir).join(&gem_file);
 
+    let mut args = vec!["push".to_string(), gem_path.to_str().unwrap().to_string()];
+    if let Some(otp_code) = &otp {
+        args.push("--otp".to_string());
+        args.push(otp_code.clone());
+    }
+
     let status = Command::new("gem")
-        .args(["push", gem_path.to_str().unwrap()])
-        .env("GEM_HOST_API_KEY", &key)
+        .args(&args)
         .status()
         .context("Failed to run gem push")?;
 

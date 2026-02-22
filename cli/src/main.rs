@@ -861,8 +861,9 @@ async fn main() -> Result<()> {
                 working_dir,
                 name,
                 api_key,
+                otp,
             } => {
-                commands::gem::push(&working_dir, name, api_key)?;
+                commands::gem::push(&working_dir, name, api_key, otp)?;
             }
         },
         Commands::Helm { command } => match command {
