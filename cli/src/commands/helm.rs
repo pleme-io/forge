@@ -144,13 +144,21 @@ pub fn package(chart_dir: &str, output: &str, version: Option<&str>) -> Result<S
         bail!("helm package failed for {}", chart_dir);
     }
 
-    // Find the generated tarball
-    let chart_name = chart_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("chart");
+    // Find the generated tarball — use name from Chart.yaml, not the directory
+    // basename (which may contain a Nix store hash prefix).
+    let chart_yaml = chart_path.join("Chart.yaml");
+    let chart_name = if chart_yaml.exists() {
+        let content = std::fs::read_to_string(&chart_yaml).unwrap_or_default();
+        extract_yaml_field(&content, "name").unwrap_or_else(|_| "chart".to_string())
+    } else {
+        chart_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("chart")
+            .to_string()
+    };
 
-    let tgz_path = find_latest_tgz(output, chart_name)?;
+    let tgz_path = find_latest_tgz(output, &chart_name)?;
     info!("Packaged: {}", tgz_path);
     Ok(tgz_path)
 }
