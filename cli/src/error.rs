@@ -41,6 +41,9 @@ pub enum RegistryError {
 
     #[error("Image not found at path: {path}")]
     ImageNotFound { path: String },
+
+    #[error("Manifest index creation failed: {message}")]
+    ManifestFailed { message: String },
 }
 
 /// Git operation errors

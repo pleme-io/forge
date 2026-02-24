@@ -33,7 +33,7 @@
 use crate::commands::service_config::{DatabaseType, ServiceConfig};
 use crate::config::{resolve_deploy_yaml_path, DeployConfig};
 use crate::path_builder::PathBuilder;
-use crate::infrastructure::registry::RegistryCredentials;
+use crate::infrastructure::registry::{ArchImage, RegistryClient, RegistryCredentials};
 use crate::repo::get_tool_path;
 use anyhow::{anyhow, bail, Context, Result};
 use colored::Colorize;
@@ -634,8 +634,8 @@ pub async fn build_rust_service(
 
 /// Verify image exists in registry and return its digest
 /// This provides a cryptographic guarantee that we're deploying exactly what we pushed
-async fn verify_image_in_registry(registry: &str, tag: &str) -> Result<String> {
-    let full_tag = format!("{}:amd64-{}", registry, tag);
+async fn verify_image_in_registry(registry: &str, full_tag_suffix: &str) -> Result<String> {
+    let full_tag = format!("{}:{}", registry, full_tag_suffix);
 
     // Get token for authenticated registry access
     let github_token = RegistryCredentials::discover_token(None)
@@ -708,41 +708,57 @@ async fn verify_image_digest_matches(
     Ok(())
 }
 
-/// Helper: Push Docker image using skopeo
-async fn push_docker_image(image_path: &str, registry: &str, tag: &str) -> Result<()> {
-    // Tag format: {registry}:amd64-{git-sha} to match deploy expectations
-    let full_tag = format!("{}:amd64-{}", registry, tag);
-
-    println!("📤 Pushing {} to {}...", image_path, full_tag);
-
-    // Discover GHCR token from environment, gh CLI, or kubectl
-    let github_token = RegistryCredentials::discover_token(None)
-        .context("Cannot authenticate with GHCR")?;
-
-    // Extract organization from registry URL for credentials
-    // GHCR requires org name (not arbitrary username) when creating new packages
+/// Push docker images to the registry using the unified multi-arch strategy.
+///
+/// Accepts one or more (arch, path) pairs. For a single image, pushes with
+/// arch-prefixed tags. For multiple images, also creates an OCI manifest index.
+async fn push_docker_images(
+    images: &[ArchImage],
+    registry: &str,
+    tag_suffix: &str,
+) -> Result<()> {
     let organization = crate::infrastructure::registry::extract_organization(registry)
         .unwrap_or_else(|_| "user".to_string());
 
-    let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-    let mut cmd = Command::new(&skopeo);
-    cmd.args(&[
-        "copy",
-        "--insecure-policy",
-        "--dest-creds",
-        &format!("{}:{}", organization, github_token),
-        &format!("docker-archive:{}", image_path),
-        &format!("docker://{}", full_tag),
-    ]);
+    let client = RegistryClient::discover(None, &organization)
+        .context("Cannot authenticate with GHCR")?
+        .with_retries(3);
 
-    let status = cmd.status().await.context("Failed to run skopeo")?;
+    let arches: Vec<&str> = images.iter().map(|i| i.arch.as_str()).collect();
+    println!(
+        "📤 Pushing {} image{} to {}...",
+        arches.join(" + "),
+        if images.len() > 1 { "s" } else { "" },
+        registry
+    );
 
-    if !status.success() {
-        bail!("❌ Failed to push image to {}", full_tag);
+    let result = client
+        .push_multiarch(registry, images, tag_suffix)
+        .await
+        .context("Multi-arch push failed")?;
+
+    println!();
+    for tag in &result.arch_tags {
+        println!("   ✅ {}", tag);
+    }
+    for tag in &result.manifest_tags {
+        println!("   ✅ {} (manifest index)", tag);
     }
 
-    println!("✅ Pushed: {}", full_tag);
     Ok(())
+}
+
+/// Backward-compatible wrapper: push a single amd64 image
+async fn push_docker_image(image_path: &str, registry: &str, tag_suffix: &str) -> Result<()> {
+    push_docker_images(
+        &[ArchImage {
+            arch: "amd64".to_string(),
+            path: image_path.to_string(),
+        }],
+        registry,
+        tag_suffix,
+    )
+    .await
 }
 
 /// Push Rust service Docker image to GHCR (orchestration only, no nix build)
@@ -760,10 +776,13 @@ pub async fn push_rust_service(
 }
 
 /// Push Rust service images with explicit tag (internal implementation)
+///
+/// Discovers available arch images from result-{arch} symlinks, then delegates
+/// to the unified push_docker_images strategy.
 pub async fn push_rust_service_with_tag(
     service: String,
     registry: String,
-    cache_name: String,
+    _cache_name: String,
     _attic_token: String,
     _github_token: String,
     tag_suffix: String,
@@ -785,84 +804,20 @@ pub async fn push_rust_service_with_tag(
     println!("Tag suffix: {}", tag_suffix);
     println!();
 
-    // Discover GHCR token from environment, gh CLI, or kubectl
-    let github_token = RegistryCredentials::discover_token(None)
-        .context("Cannot authenticate with GHCR")?;
+    // Collect available architecture images
+    let mut images = vec![ArchImage {
+        arch: "amd64".to_string(),
+        path: "result-amd64".to_string(),
+    }];
 
-    // Extract organization from registry URL for credentials
-    // Example: "ghcr.io/org/project/service" -> "org"
-    let organization = registry.split('/').nth(1).ok_or_else(|| {
-        anyhow!(
-            "Invalid registry format: {}. Expected format: host/organization/...",
-            registry
-        )
-    })?;
-
-    // Push AMD64 image using skopeo
-    println!("📦 {}", "Pushing AMD64 image...".bold());
-    let amd64_tags = vec![
-        format!("{}:amd64-latest", registry),
-        format!("{}:amd64-{}", registry, tag_suffix),
-    ];
-
-    let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-    for tag in &amd64_tags {
-        Command::new(&skopeo)
-            .args(&[
-                "copy",
-                "--insecure-policy",
-                &format!("--dest-creds={}:{}", organization, github_token),
-                &format!("docker-archive:result-amd64"),
-                &format!("docker://{}", tag),
-            ])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .await
-            .context("Failed to push AMD64 image with skopeo")?;
-    }
-
-    // Push ARM64 image if it exists
     if Path::new("result-arm64").exists() {
-        println!();
-        println!("📦 {}", "Pushing ARM64 image...".bold());
-        let arm64_tags = vec![
-            format!("{}:arm64-latest", registry),
-            format!("{}:arm64-{}", registry, tag_suffix),
-        ];
-
-        let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-        for tag in &arm64_tags {
-            Command::new(&skopeo)
-                .args(&[
-                    "copy",
-                    "--insecure-policy",
-                    &format!("--dest-creds={}:{}", organization, github_token),
-                    &format!("docker-archive:result-arm64"),
-                    &format!("docker://{}", tag),
-                ])
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status()
-                .await
-                .context("Failed to push ARM64 image with skopeo")?;
-        }
+        images.push(ArchImage {
+            arch: "arm64".to_string(),
+            path: "result-arm64".to_string(),
+        });
     }
 
-    println!();
-    println!("✅ {}", "All images pushed successfully!".green().bold());
-    println!(
-        "   AMD64: {}:amd64-latest, {}:amd64-{}",
-        registry, registry, tag_suffix
-    );
-    if Path::new("result-arm64").exists() {
-        println!(
-            "   ARM64: {}:arm64-latest, {}:arm64-{}",
-            registry, registry, tag_suffix
-        );
-    }
-
-    Ok(())
+    push_docker_images(&images, &registry, &tag_suffix).await
 }
 
 /// Resolve namespace for an environment from deploy.yaml
@@ -1037,6 +992,7 @@ pub async fn orchestrate_release(
     single_environment: bool,
     namespace_override: Option<String>,
     image_path: Option<String>,
+    image_path_arm64: Option<String>,
     watch: bool,
     push_only: bool,
     deploy_only: bool,
@@ -1255,7 +1211,12 @@ pub async fn orchestrate_release(
     } else {
         get_tag_suffix().await?
     };
-    println!("🏷️  Image tag: amd64-{}", tag_suffix);
+    let has_arm64 = image_path_arm64.is_some();
+    if has_arm64 {
+        println!("🏷️  Image tags: amd64-{}, arm64-{}, {} (manifest)", tag_suffix, tag_suffix, tag_suffix);
+    } else {
+        println!("🏷️  Image tag: amd64-{}", tag_suffix);
+    }
     println!();
 
     // Step 1: Push (skip if deploy-only)
@@ -1264,31 +1225,55 @@ pub async fn orchestrate_release(
             .as_ref()
             .context("--image-path required for push")?;
 
-        println!("Step 1: {}", "Pushing to GHCR...".bold());
-        push_docker_image(img_path, &registry, &tag_suffix).await?;
+        // Collect all architecture images
+        let mut images = vec![ArchImage {
+            arch: "amd64".to_string(),
+            path: img_path.clone(),
+        }];
 
-        // Step 1.5: Verify image exists in registry and capture digest
+        if let Some(arm64_path) = &image_path_arm64 {
+            images.push(ArchImage {
+                arch: "arm64".to_string(),
+                path: arm64_path.clone(),
+            });
+        }
+
+        println!("Step 1: {}", "Pushing to GHCR...".bold());
+        push_docker_images(&images, &registry, &tag_suffix).await?;
+
+        // Step 1.5: Verify amd64 image exists in registry and capture digest
         println!();
         println!("Step 1.5: {}", "Verifying image in registry...".bold());
-        let pushed_digest = verify_image_in_registry(&registry, &tag_suffix).await?;
+        let verify_tag = format!("amd64-{}", tag_suffix);
+        let pushed_digest = verify_image_in_registry(&registry, &verify_tag).await?;
         println!("   📋 Captured digest: {}", pushed_digest);
         println!();
 
         // If push-only, we're done
         if push_only {
             println!("{}", "━".repeat(60).bright_green());
-            println!(
-                "{}  Tag: amd64-{}",
-                "PUSH COMPLETE".green().bold(),
-                tag_suffix
-            );
+            if has_arm64 {
+                println!(
+                    "{}  Tags: amd64-{}, arm64-{}, {} (manifest)",
+                    "PUSH COMPLETE".green().bold(),
+                    tag_suffix,
+                    tag_suffix,
+                    tag_suffix
+                );
+            } else {
+                println!(
+                    "{}  Tag: amd64-{}",
+                    "PUSH COMPLETE".green().bold(),
+                    tag_suffix
+                );
+            }
             println!("{}", "━".repeat(60).bright_green());
             return Ok(());
         }
 
         // Step 2.5: Verify image digest hasn't changed (race condition protection)
         // before deploying
-        verify_image_digest_matches(&registry, &tag_suffix, &pushed_digest).await?;
+        verify_image_digest_matches(&registry, &verify_tag, &pushed_digest).await?;
     }
 
     // Step 2: Run migrations BEFORE deployment (using pushed image)

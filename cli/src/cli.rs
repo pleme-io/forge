@@ -412,6 +412,12 @@ pub enum Commands {
         #[arg(long)]
         image_path: Option<String>,
 
+        /// Path to ARM64 Nix build result (e.g., result-arm64).
+        /// When provided, both architectures are pushed and an OCI manifest
+        /// index is created under the plain SHA tag.
+        #[arg(long)]
+        image_path_arm64: Option<String>,
+
         /// Watch rollout progress
         #[arg(long)]
         watch: bool,

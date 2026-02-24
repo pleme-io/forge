@@ -1,7 +1,7 @@
 //! Container registry operations
 //!
-//! Handles pushing images to GHCR using skopeo.
-//! Extracts token discovery and push retry logic for reuse.
+//! Handles pushing images to GHCR using skopeo and multi-arch manifest
+//! creation using regctl. All push paths in forge converge here.
 
 use anyhow::{Context, Result};
 use std::process::Stdio;
@@ -10,6 +10,26 @@ use tracing::{info, warn};
 
 use crate::error::RegistryError;
 use crate::repo::get_tool_path;
+
+/// An architecture-specific image to push
+#[derive(Clone, Debug)]
+pub struct ArchImage {
+    /// Architecture name (e.g., "amd64", "arm64")
+    pub arch: String,
+    /// Path to docker-archive image file
+    pub path: String,
+}
+
+/// Result of a multi-arch push operation
+#[derive(Debug)]
+pub struct MultiArchPushResult {
+    /// Tags pushed per architecture (e.g., ["amd64-abc1234", "amd64-latest"])
+    pub arch_tags: Vec<String>,
+    /// Manifest index tags (e.g., ["abc1234", "latest"]) — empty if single arch
+    pub manifest_tags: Vec<String>,
+    /// The git SHA used for tagging
+    pub tag_suffix: String,
+}
 
 /// Registry credentials for authentication
 #[derive(Clone)]
@@ -246,6 +266,127 @@ impl RegistryClient {
         }
 
         Ok(pushed)
+    }
+
+    /// Push one or more architecture-specific images and create a manifest index.
+    ///
+    /// This is the unified multi-arch push strategy. All push paths in forge
+    /// should converge here.
+    ///
+    /// For each image in `images`:
+    ///   - Pushes as `{registry}:{arch}-{tag_suffix}` and `{registry}:{arch}-latest`
+    ///
+    /// If more than one architecture is provided:
+    ///   - Creates an OCI manifest index under `{registry}:{tag_suffix}` and `{registry}:latest`
+    ///     using regctl
+    pub async fn push_multiarch(
+        &self,
+        registry: &str,
+        images: &[ArchImage],
+        tag_suffix: &str,
+    ) -> Result<MultiArchPushResult, RegistryError> {
+        if images.is_empty() {
+            return Err(RegistryError::PushFailed {
+                attempts: 0,
+                message: "No images provided".to_string(),
+            });
+        }
+
+        let mut arch_tags = Vec::new();
+        let mut source_refs = Vec::new();
+
+        // Step 1: Push each architecture image with arch-prefixed tags
+        for image in images {
+            let tags = vec![
+                format!("{}-{}", image.arch, tag_suffix),
+                format!("{}-latest", image.arch),
+            ];
+
+            for tag in &tags {
+                info!("Pushing {}:{}", registry, tag);
+                self.push(&image.path, registry, tag).await?;
+                arch_tags.push(format!("{}:{}", registry, tag));
+            }
+
+            // Track the immutable arch-sha tag as source for manifest index
+            source_refs.push(format!("{}:{}-{}", registry, image.arch, tag_suffix));
+        }
+
+        // Step 2: Create manifest index if multiple architectures
+        let manifest_tags = if images.len() > 1 {
+            let tags = vec![tag_suffix.to_string(), "latest".to_string()];
+
+            info!("Creating multi-arch manifest index...");
+            self.create_manifest_index(registry, &tags, &source_refs)
+                .await?;
+
+            tags.iter()
+                .map(|t| format!("{}:{}", registry, t))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        Ok(MultiArchPushResult {
+            arch_tags,
+            manifest_tags,
+            tag_suffix: tag_suffix.to_string(),
+        })
+    }
+
+    /// Create an OCI manifest index from arch-tagged images already in the registry.
+    ///
+    /// Uses regctl to create a manifest list. Falls back gracefully if regctl
+    /// is not available (logs warning, skips manifest creation).
+    async fn create_manifest_index(
+        &self,
+        registry: &str,
+        tags: &[String],
+        source_refs: &[String],
+    ) -> Result<(), RegistryError> {
+        let regctl = get_tool_path("REGCTL_BIN", "regctl");
+
+        for tag in tags {
+            let target = format!("{}:{}", registry, tag);
+            let mut cmd = Command::new(&regctl);
+            cmd.args(["index", "create", &target]);
+
+            for source in source_refs {
+                cmd.args(["--ref", source]);
+            }
+
+            // Authenticate via regctl host config (inline JSON)
+            let host = registry.split('/').next().unwrap_or("ghcr.io");
+            cmd.env(
+                "regclient_hosts",
+                format!(
+                    "{{\"{}\":{{\"user\":\"{}\",\"pass\":\"{}\"}}}}",
+                    host, self.credentials.organization, self.credentials.token
+                ),
+            );
+
+            cmd.stdout(Stdio::inherit());
+            cmd.stderr(Stdio::piped());
+
+            let output = cmd.output().await.map_err(|e| RegistryError::ManifestFailed {
+                message: format!("Failed to run regctl: {}", e),
+            })?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(RegistryError::ManifestFailed {
+                    message: format!(
+                        "regctl index create failed for {}: {}",
+                        target,
+                        stderr.trim()
+                    ),
+                });
+            }
+
+            info!("Created manifest index: {}", target);
+        }
+
+        Ok(())
     }
 }
 
