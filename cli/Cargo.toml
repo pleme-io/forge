@@ -66,6 +66,10 @@ urlencoding = "2.1"
 # Cryptographic hashing
 sha2 = "0.10"
 md5 = "0.7"
+blake3 = "1.5"
+
+# Attestation framework
+tameshi = "0.1"
 
 # Binary location utilities
 which = "6.0"

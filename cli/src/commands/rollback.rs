@@ -303,6 +303,7 @@ pub async fn execute(
             tag: entry.previous_tag.clone(),
             built_at: now.clone(),
             previous_tag: entry.current_tag.clone(),
+            attestation: None, // Attestation is not preserved during rollback
         };
 
         let json = serde_json::to_string_pretty(&artifact)

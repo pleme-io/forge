@@ -58,6 +58,24 @@ pub struct ArtifactInfo {
     /// Previous image tag for rollback (set when a new tag is written).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub previous_tag: String,
+
+    /// Attestation information (populated by Phase 1.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<AttestationInfoRecord>,
+}
+
+/// Attestation record persisted in artifact.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationInfoRecord {
+    /// Blake3 signature hash (prefixed: "blake3:abc...").
+    pub signature: String,
+    /// Certification hash (prefixed: "blake3:def...").
+    pub certification_hash: String,
+    /// Compliance hash if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compliance_hash: Option<String>,
+    /// Whether the product certification passed.
+    pub certified: bool,
 }
 
 fn default_release_mode() -> String {

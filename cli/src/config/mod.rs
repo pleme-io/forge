@@ -59,7 +59,7 @@ pub use product::{
 };
 pub use product_release::{HealthCheckConfig, ProductReleaseConfig, ProductServiceConfig};
 pub use registry::{CacheConfig, RegistryConfig};
-pub use release::{ArtifactInfo, EnvironmentConfig, EnvironmentsConfig, ReleaseConfig};
+pub use release::{ArtifactInfo, AttestationInfoRecord, EnvironmentConfig, EnvironmentsConfig, ReleaseConfig};
 pub use service::{LocalConfig, ServiceConfig};
 
 use anyhow::{anyhow, bail, Context, Result};
