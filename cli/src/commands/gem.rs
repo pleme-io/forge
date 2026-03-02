@@ -7,6 +7,8 @@ use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
+use crate::version;
+
 /// Detect the gem name from a directory by finding the single *.gemspec file.
 fn detect_gem_name(dir: &Path) -> Result<String> {
     let gemspecs: Vec<_> = std::fs::read_dir(dir)?
@@ -63,29 +65,7 @@ fn find_version_file(dir: &Path, gem_name: &str) -> Result<std::path::PathBuf> {
     )
 }
 
-/// Parse a semver version string into (major, minor, patch).
-fn parse_version(version: &str) -> Result<(u64, u64, u64)> {
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() != 3 {
-        bail!("Invalid version format '{}' — expected X.Y.Z", version);
-    }
-
-    let major = parts[0].parse::<u64>().context("Invalid major version")?;
-    let minor = parts[1].parse::<u64>().context("Invalid minor version")?;
-    let patch = parts[2].parse::<u64>().context("Invalid patch version")?;
-
-    Ok((major, minor, patch))
-}
-
-/// Bump a version by the given level.
-fn bump_version(major: u64, minor: u64, patch: u64, level: &str) -> Result<String> {
-    match level {
-        "patch" => Ok(format!("{}.{}.{}", major, minor, patch + 1)),
-        "minor" => Ok(format!("{}.{}.0", major, minor + 1)),
-        "major" => Ok(format!("{}.0.0", major + 1)),
-        _ => bail!("Invalid bump level '{}' — use patch, minor, or major", level),
-    }
-}
+// Version parsing and bumping delegated to crate::version module.
 
 /// Bump the version in a gem's version.rb file.
 ///
@@ -115,8 +95,7 @@ pub fn bump(working_dir: &str, level: &str, name: Option<String>) -> Result<(Str
         .with_context(|| format!("No VERSION = %(X.Y.Z).freeze found in {}", version_file.display()))?;
 
     let old_version = caps[1].to_string();
-    let (major, minor, patch) = parse_version(&old_version)?;
-    let new_version = bump_version(major, minor, patch, level)?;
+    let new_version = version::bump_semver(&old_version, level)?;
 
     // Replace in file
     let new_content = content.replace(

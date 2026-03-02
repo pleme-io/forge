@@ -236,6 +236,68 @@ pub fn commit_and_push_in(workdir: &Path, files: &[&Path], message: &str, branch
     Ok(())
 }
 
+/// Check if the git working tree is clean (no uncommitted changes).
+pub fn is_working_tree_clean() -> Result<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .context("Failed to execute git status")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Git status failed: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.trim().is_empty())
+}
+
+/// Check if a git tag exists locally.
+pub fn tag_exists(tag: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["tag", "--list", tag])
+        .output()
+        .context("Failed to execute git tag --list")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Git tag list failed: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(!stdout.trim().is_empty())
+}
+
+/// Create an annotated git tag.
+pub fn create_tag(tag: &str, message: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["tag", "-a", tag, "-m", message])
+        .output()
+        .context("Failed to execute git tag")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Git tag creation failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
+/// Push a git tag to the remote.
+pub fn push_tag(tag: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["push", "origin", tag])
+        .output()
+        .context("Failed to execute git push tag")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Git push tag failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
 /// Commit and push changes
 pub fn commit_and_push(manifest_path: &Path, old_tag: &str, new_tag: &str) -> Result<()> {
     let workdir = get_repo_root()?;

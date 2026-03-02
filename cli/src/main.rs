@@ -6,6 +6,9 @@ mod cli;
 mod commands;
 mod config;
 
+// Shared utilities
+mod version;
+
 // Legacy modules (to be migrated)
 mod cloudflare;
 mod git;
@@ -24,7 +27,7 @@ mod infrastructure;
 mod services;
 mod ui;
 
-use cli::{BootstrapCommands, Cli, Commands, GemCommands, HelmCommands, PangeaCommands};
+use cli::{BootstrapCommands, Cli, Commands, GemCommands, HelmCommands, InfraCommands, LocalCommands, PangeaCommands, ToolCommands, TypescriptCommands};
 use commands::{
     bootstrap, build, comprehensive_release, deploy, federation, github_runner_ci,
     integration_tests, kenshi, kenshi_agent, migrations, nix_builder, pangea, push, rollout,
@@ -934,6 +937,105 @@ async fn main() -> Result<()> {
                 registry,
             } => {
                 commands::helm::release_all(&charts_dir, lib_chart_dir.as_deref(), &lib_chart_name, &registry)?;
+            }
+        },
+        Commands::Tool { command } => match command {
+            ToolCommands::Release {
+                name,
+                repo,
+                language,
+                working_dir,
+                dry_run,
+            } => {
+                commands::tool::release(&name, &repo, &language, &working_dir, dry_run).await?;
+            }
+            ToolCommands::Bump {
+                name,
+                language,
+                level,
+                working_dir,
+            } => {
+                commands::tool::bump(&name, &language, &level, &working_dir)?;
+            }
+            ToolCommands::Check {
+                name,
+                language,
+                working_dir,
+            } => {
+                commands::tool::check(&name, &language, &working_dir)?;
+            }
+            ToolCommands::Regenerate {
+                language,
+                working_dir,
+            } => {
+                commands::tool::regenerate(&language, &working_dir)?;
+            }
+        },
+        Commands::Infra { command } => match command {
+            InfraCommands::Up {
+                working_dir,
+                services,
+            } => {
+                commands::infra::up(&working_dir, &services)?;
+            }
+            InfraCommands::Down { working_dir } => {
+                commands::infra::down(&working_dir)?;
+            }
+            InfraCommands::Clean { working_dir } => {
+                commands::infra::clean(&working_dir)?;
+            }
+        },
+        Commands::Local { command } => match command {
+            LocalCommands::Up {
+                name,
+                flake_attr,
+                port,
+                compose_file,
+            } => {
+                commands::local::up(&name, &flake_attr, port, compose_file.as_deref()).await?;
+            }
+            LocalCommands::Down {
+                name,
+                compose_file,
+            } => {
+                commands::local::down(&name, compose_file.as_deref())?;
+            }
+        },
+        Commands::TestCi {
+            working_dir,
+            threads,
+        } => {
+            commands::test_ci::execute(&working_dir, threads)?;
+        }
+        Commands::TestCoverage {
+            working_dir,
+            format,
+        } => {
+            commands::test_ci::coverage(&working_dir, &format)?;
+        }
+        Commands::ImageRelease {
+            name,
+            registry,
+            amd64_attr,
+            arm64_attr,
+            amd64_image,
+            arm64_image,
+            working_dir,
+        } => {
+            commands::image_release::execute(
+                &name,
+                &registry,
+                amd64_attr.as_deref(),
+                arm64_attr.as_deref(),
+                amd64_image.as_deref(),
+                arm64_image.as_deref(),
+                &working_dir,
+            )
+            .await?;
+        }
+        Commands::Typescript { command } => match command {
+            TypescriptCommands::Regenerate { project } => {
+                commands::typescript::regenerate(&project)?;
             }
         },
         Commands::PostDeployVerify {

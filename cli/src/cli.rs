@@ -1269,6 +1269,83 @@ pub enum Commands {
         command: HelmCommands,
     },
 
+    /// Tool release lifecycle (build, bump, check, regenerate)
+    Tool {
+        #[command(subcommand)]
+        command: ToolCommands,
+    },
+
+    /// Infrastructure services (docker compose up/down/clean)
+    Infra {
+        #[command(subcommand)]
+        command: InfraCommands,
+    },
+
+    /// Local development services (build + run Docker locally)
+    Local {
+        #[command(subcommand)]
+        command: LocalCommands,
+    },
+
+    /// Run tests in CI mode (nextest with fallback to cargo test)
+    TestCi {
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Number of test threads
+        #[arg(long, default_value = "4")]
+        threads: u32,
+    },
+
+    /// Run tests with coverage (cargo-tarpaulin)
+    TestCoverage {
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Output format (html, xml, json, lcov)
+        #[arg(long, default_value = "html")]
+        format: String,
+    },
+
+    /// Release multi-arch OCI images (build + push + manifest index)
+    ImageRelease {
+        /// Image name
+        #[arg(long, required = true)]
+        name: String,
+
+        /// Container registry URL (without tag)
+        #[arg(long, required = true)]
+        registry: String,
+
+        /// Nix flake attribute for amd64 image (builds if provided)
+        #[arg(long)]
+        amd64_attr: Option<String>,
+
+        /// Nix flake attribute for arm64 image (builds if provided)
+        #[arg(long)]
+        arm64_attr: Option<String>,
+
+        /// Path to pre-built amd64 image tarball
+        #[arg(long)]
+        amd64_image: Option<String>,
+
+        /// Path to pre-built arm64 image tarball
+        #[arg(long)]
+        arm64_image: Option<String>,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+    },
+
+    /// TypeScript project operations
+    Typescript {
+        #[command(subcommand)]
+        command: TypescriptCommands,
+    },
+
     /// Verify deployment health after release
     /// Checks health endpoint and GraphQL introspection
     PostDeployVerify {
@@ -1659,5 +1736,151 @@ pub enum HelmCommands {
         /// OCI registry URL
         #[arg(long, default_value = "oci://ghcr.io/pleme-io/charts")]
         registry: String,
+    },
+}
+
+/// Tool release lifecycle subcommands
+#[derive(Subcommand)]
+pub enum ToolCommands {
+    /// Build all targets, tag, and create a GitHub release
+    Release {
+        /// Tool name (e.g., zoekt-mcp, codesearch)
+        #[arg(long, required = true)]
+        name: String,
+
+        /// GitHub repo (e.g., pleme-io/zoekt-mcp)
+        #[arg(long, required = true)]
+        repo: String,
+
+        /// Source language (rust or zig)
+        #[arg(long, required = true)]
+        language: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Print what would happen without executing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Bump version in the appropriate manifest
+    Bump {
+        /// Tool name
+        #[arg(long, required = true)]
+        name: String,
+
+        /// Source language (rust or zig)
+        #[arg(long, required = true)]
+        language: String,
+
+        /// Version bump level (patch, minor, major)
+        #[arg(long, default_value = "patch")]
+        level: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+    },
+
+    /// Run format, lint, and test checks
+    Check {
+        /// Tool name
+        #[arg(long, required = true)]
+        name: String,
+
+        /// Source language (rust or zig)
+        #[arg(long, required = true)]
+        language: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+    },
+
+    /// Regenerate lockfiles / build metadata (e.g., crate2nix generate)
+    Regenerate {
+        /// Source language (rust or zig)
+        #[arg(long, required = true)]
+        language: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+    },
+}
+
+/// Infrastructure subcommands (docker compose lifecycle)
+#[derive(Subcommand)]
+pub enum InfraCommands {
+    /// Start infrastructure services
+    Up {
+        /// Working directory (repo root)
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Specific services to start (empty = all)
+        #[arg(long)]
+        services: Vec<String>,
+    },
+
+    /// Stop infrastructure services
+    Down {
+        /// Working directory (repo root)
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+    },
+
+    /// Stop services and remove volumes + orphans
+    Clean {
+        /// Working directory (repo root)
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+    },
+}
+
+/// Local development subcommands
+#[derive(Subcommand)]
+pub enum LocalCommands {
+    /// Build a Nix Docker image and run it locally
+    Up {
+        /// Container / service name
+        #[arg(long, required = true)]
+        name: String,
+
+        /// Nix flake attribute for the Docker image
+        #[arg(long, default_value = "dockerImage-amd64")]
+        flake_attr: String,
+
+        /// Host port to bind
+        #[arg(long, default_value = "8080")]
+        port: u16,
+
+        /// Use docker compose file instead of nix build + docker run
+        #[arg(long)]
+        compose_file: Option<String>,
+    },
+
+    /// Stop and remove a locally running container
+    Down {
+        /// Container / service name
+        #[arg(long, required = true)]
+        name: String,
+
+        /// Use docker compose file to stop
+        #[arg(long)]
+        compose_file: Option<String>,
+    },
+}
+
+/// TypeScript subcommands
+#[derive(Subcommand)]
+pub enum TypescriptCommands {
+    /// Regenerate pleme-linker lockfiles for TypeScript projects
+    Regenerate {
+        /// Project directories to regenerate (can be specified multiple times)
+        #[arg(long, required = true)]
+        project: Vec<String>,
     },
 }

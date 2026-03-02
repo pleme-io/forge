@@ -25,6 +25,12 @@ pub enum DeployError {
 
     #[error("Migration error: {0}")]
     Migration(#[from] MigrationError),
+
+    #[error("Tool error: {0}")]
+    Tool(#[from] ToolError),
+
+    #[error("Infrastructure error: {0}")]
+    Infra(#[from] InfraError),
 }
 
 /// Container registry errors
@@ -121,6 +127,38 @@ pub enum MigrationError {
 
     #[error("Database connection failed: {message}")]
     ConnectionFailed { message: String },
+}
+
+/// Tool lifecycle errors (release, bump, check)
+#[derive(Error, Debug)]
+pub enum ToolError {
+    #[error("Version not found in manifest: {manifest}")]
+    VersionNotFound { manifest: String },
+
+    #[error("Unsupported language: {language}")]
+    UnsupportedLanguage { language: String },
+
+    #[error("Tag already exists: {tag}")]
+    TagAlreadyExists { tag: String },
+
+    #[error("GitHub release failed: {message}")]
+    GitHubReleaseFailed { message: String },
+}
+
+/// Infrastructure errors (docker, compose, services)
+#[derive(Error, Debug)]
+pub enum InfraError {
+    #[error("Docker not available: {message}")]
+    DockerNotAvailable { message: String },
+
+    #[error("Compose file not found: {path}")]
+    ComposeFileNotFound { path: String },
+
+    #[error("Service timed out: {service} after {timeout_secs}s")]
+    ServiceTimeout {
+        service: String,
+        timeout_secs: u64,
+    },
 }
 
 #[cfg(test)]
