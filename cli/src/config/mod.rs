@@ -132,7 +132,7 @@ pub fn resolve_k8s_repo_root(product_config: &ProductConfig, product_repo_root: 
 
         // Auto-clone if repo URL is configured and local path doesn't exist
         if let Some(repo_url) = &k8s.repo {
-            let clone_dir = std::env::temp_dir().join(format!("forge-k8s-{}", uuid::Uuid::new_v4()));
+            let clone_dir = std::env::temp_dir().join(format!("forge-k8s-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)));
             println!("📦 Cloning k8s repo: {} → {}", repo_url, clone_dir.display());
             let status = std::process::Command::new("git")
                 .args(["clone", "--depth", "1", "--branch", &k8s.branch, repo_url, &clone_dir.to_string_lossy()])

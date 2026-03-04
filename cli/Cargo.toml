@@ -93,7 +93,7 @@ scopeguard = "1.2"
 tempfile = "3.14"
 
 # UUID for release IDs
-uuid = { version = "1.11", features = ["serde", "v4"] }
+uuid = { version = "1.11", features = ["serde"] }
 
 [features]
 default = []
