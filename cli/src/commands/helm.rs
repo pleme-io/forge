@@ -9,6 +9,9 @@ use std::process::Command;
 use tracing::{info, warn};
 
 /// Run `helm lint` + `helm template` validation on a chart directory.
+///
+/// Library charts (type: library) skip `helm template` since they are not
+/// directly installable.
 pub fn lint(chart_dir: &str) -> Result<()> {
     let chart_path = Path::new(chart_dir);
     if !chart_path.exists() {
@@ -16,6 +19,16 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     }
 
     info!("Linting chart: {}", chart_dir);
+
+    // Detect library charts — they cannot be templated
+    let is_library = {
+        let chart_yaml = chart_path.join("Chart.yaml");
+        chart_yaml.exists()
+            && std::fs::read_to_string(&chart_yaml)
+                .unwrap_or_default()
+                .lines()
+                .any(|line| line.trim() == "type: library")
+    };
 
     // helm dependency update (resolves file:// references)
     let dep_status = Command::new("helm")
@@ -37,17 +50,21 @@ pub fn lint(chart_dir: &str) -> Result<()> {
         bail!("helm lint failed for {}", chart_dir);
     }
 
-    // helm template (validation)
-    let template_status = Command::new("helm")
-        .args([
-            "template", "test", chart_dir,
-            "--set", "image.repository=test",
-        ])
-        .status()
-        .context("Failed to run helm template")?;
+    // helm template (validation) — skip for library charts
+    if is_library {
+        info!("Skipping helm template for library chart");
+    } else {
+        let template_status = Command::new("helm")
+            .args([
+                "template", "test", chart_dir,
+                "--set", "image.repository=test",
+            ])
+            .status()
+            .context("Failed to run helm template")?;
 
-    if !template_status.success() {
-        bail!("helm template validation failed for {}", chart_dir);
+        if !template_status.success() {
+            bail!("helm template validation failed for {}", chart_dir);
+        }
     }
 
     info!("Lint passed: {}", chart_dir);
