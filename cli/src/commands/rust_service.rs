@@ -1612,18 +1612,22 @@ pub async fn deploy_rust_service(
     deploy_rust_service_with_tag(service, manifest, registry, namespace, watch, deploy_tag, None, None).await
 }
 
-/// Update a kustomization image tag using targeted text replacement.
+/// Update an image tag in a manifest using targeted text replacement.
 ///
-/// Instead of round-tripping through serde_yaml (which destroys comments,
-/// reformats multi-line strings, and can corrupt patch: | blocks), this
-/// function finds the image entry matching `service_name` and replaces
-/// only the `newTag` value.
+/// Supports two formats:
 ///
-/// Expected YAML structure:
+/// 1. Kustomize `images:` section:
 /// ```yaml
 /// images:
 /// - name: ghcr.io/your-org/your-project/my-backend
 ///   newTag: amd64-abc123
+/// ```
+///
+/// 2. HelmRelease `values.image.tag`:
+/// ```yaml
+///     image:
+///       repository: ghcr.io/your-org/my-service
+///       tag: amd64-abc123
 /// ```
 fn update_kustomization_image_tag(
     content: &str,
@@ -1634,6 +1638,7 @@ fn update_kustomization_image_tag(
     let mut result = Vec::with_capacity(lines.len());
     let mut found = false;
     let mut matched_name = false;
+    let mut matched_helm_repo = false;
 
     for (i, line) in lines.iter().enumerate() {
         if matched_name {
@@ -1654,6 +1659,22 @@ fn update_kustomization_image_tag(
             }
         }
 
+        if matched_helm_repo {
+            // Previous line was `repository:` containing service_name
+            // Next line should be `tag: ...`
+            let trimmed = line.trim();
+            if trimmed.starts_with("tag:") {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                result.push(format!("{}tag: {}", indent, new_tag));
+                found = true;
+                matched_helm_repo = false;
+                continue;
+            }
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                matched_helm_repo = false;
+            }
+        }
+
         // Check if this line is `- name: <something containing service_name>`
         let trimmed = line.trim();
         if trimmed.starts_with("- name:") {
@@ -1663,12 +1684,20 @@ fn update_kustomization_image_tag(
             }
         }
 
+        // Check if this line is `repository: <something containing service_name>` (HelmRelease)
+        if trimmed.starts_with("repository:") {
+            let repo_value = trimmed.trim_start_matches("repository:").trim();
+            if repo_value.contains(service_name) {
+                matched_helm_repo = true;
+            }
+        }
+
         result.push(line.to_string());
     }
 
     if !found {
         bail!(
-            "No image entry matching '{}' found in kustomization manifest",
+            "No image entry matching '{}' found in manifest",
             service_name
         );
     }
