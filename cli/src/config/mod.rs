@@ -116,18 +116,36 @@ pub fn auto_discover_product(repo_root: &str) -> Result<String> {
 /// Resolve the root directory for k8s manifests.
 ///
 /// If product deploy.yaml has `k8s.local`, resolve relative to product repo root.
+/// If the local path doesn't exist but `k8s.repo` is configured, auto-clone into a temp dir.
 /// Otherwise, manifests are in the same repo (product_repo_root).
 pub fn resolve_k8s_repo_root(product_config: &ProductConfig, product_repo_root: &Path) -> PathBuf {
     if let Some(k8s) = &product_config.k8s {
-        let k8s_path = Path::new(&k8s.local);
-        if k8s_path.is_absolute() {
-            k8s_path.to_path_buf()
+        let k8s_path = if Path::new(&k8s.local).is_absolute() {
+            PathBuf::from(&k8s.local)
         } else {
-            product_repo_root
-                .join(k8s_path)
-                .canonicalize()
-                .unwrap_or_else(|_| product_repo_root.join(k8s_path))
+            product_repo_root.join(&k8s.local)
+        };
+
+        if k8s_path.exists() {
+            return k8s_path.canonicalize().unwrap_or(k8s_path);
         }
+
+        // Auto-clone if repo URL is configured and local path doesn't exist
+        if let Some(repo_url) = &k8s.repo {
+            let clone_dir = std::env::temp_dir().join(format!("forge-k8s-{}", uuid::Uuid::new_v4()));
+            println!("📦 Cloning k8s repo: {} → {}", repo_url, clone_dir.display());
+            let status = std::process::Command::new("git")
+                .args(["clone", "--depth", "1", "--branch", &k8s.branch, repo_url, &clone_dir.to_string_lossy()])
+                .status();
+            match status {
+                Ok(s) if s.success() => return clone_dir,
+                Ok(s) => eprintln!("⚠️  k8s repo clone failed (exit {}), falling back to local path", s.code().unwrap_or(-1)),
+                Err(e) => eprintln!("⚠️  Failed to run git clone: {}, falling back to local path", e),
+            }
+        }
+
+        // Fall through: path doesn't exist and no repo URL (or clone failed)
+        k8s_path
     } else {
         product_repo_root.to_path_buf()
     }

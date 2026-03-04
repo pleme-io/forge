@@ -156,9 +156,10 @@ async fn check_local_image_exists(name: &str) -> Result<bool> {
 /// Push a locally-built Docker image to the registry.
 ///
 /// Images are built during pre-release E2E gates and loaded into Docker.
-/// This function tags them with the release SHA and pushes to the registry,
+/// `deploy_tag` is the full deploy tag (e.g., "amd64-bb90b44").
+/// This function tags the image and pushes to the registry,
 /// avoiding a redundant Nix rebuild.
-async fn push_prebuilt_image(local_name: &str, registry: &str, tag: &str) -> Result<()> {
+async fn push_prebuilt_image(local_name: &str, registry: &str, deploy_tag: &str) -> Result<()> {
     // Get the image ID (handles any tag the Nix build assigned)
     let output = Command::new("docker")
         .args(["images", "-q", local_name])
@@ -174,7 +175,7 @@ async fn push_prebuilt_image(local_name: &str, registry: &str, tag: &str) -> Res
     // Use the first image ID if multiple exist
     let image_id = image_id.lines().next().unwrap_or(&image_id);
 
-    let full_tag = format!("{}:amd64-{}", registry, tag);
+    let full_tag = format!("{}:{}", registry, deploy_tag);
 
     // Tag with registry URL and SHA
     let status = Command::new("docker")
@@ -399,7 +400,8 @@ pub async fn product_release(
                     ">>".dimmed(),
                     svc.name.cyan()
                 );
-                push_prebuilt_image(&local_image, &registry_url, &git_sha).await?;
+                let deploy_tag = format!("amd64-{}", git_sha);
+                push_prebuilt_image(&local_image, &registry_url, &deploy_tag).await?;
             } else {
                 // Fallback: build via Nix (when --skip-gates or no local image)
                 if skip_gates {
@@ -638,10 +640,10 @@ pub async fn product_release(
             let svc_release =
                 DeployConfig::load_service_release_config(&product, &svc.path, &repo_root)?;
 
-            // Resolve image tag: for build environments use git_sha (just pushed in Phase 1),
+            // Resolve image tag: for build environments use arch-prefixed git_sha (pushed in Phase 1),
             // for deploy-only environments use the stored artifact tag from deploy.yaml.
             let image_tag = if svc_release.should_build_artifact(env_name) {
-                git_sha.clone()
+                format!("amd64-{}", git_sha)
             } else {
                 svc_release
                     .artifact

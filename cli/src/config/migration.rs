@@ -138,7 +138,7 @@ pub struct ServiceMigrationConfig {
 }
 
 fn default_database_type() -> String {
-    "postgres".to_string()
+    "none".to_string()
 }
 
 fn default_schema_migrations() -> bool {

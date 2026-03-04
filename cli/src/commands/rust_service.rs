@@ -43,6 +43,21 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tokio::select;
 
+/// Compute the tag to use for deployment.
+///
+/// In normal mode: `tag_suffix` is a raw git SHA, deploy tag is `{arch}-{sha}`
+/// In deploy-only mode: `tag_suffix` IS the deploy tag (e.g., "amd64-bb90b44"), used as-is
+/// In multi-arch mode: deploy tag is `{sha}` (manifest list)
+fn compute_deploy_tag(tag_suffix: &str, arch: &str, deploy_only: bool, has_arm64: bool) -> String {
+    if deploy_only {
+        tag_suffix.to_string()
+    } else if has_arm64 {
+        tag_suffix.to_string()
+    } else {
+        format!("{}-{}", arch, tag_suffix)
+    }
+}
+
 /// Resolve deploy.yaml path from SERVICE_DIR, checking deploy/{service_name}.yaml first.
 fn resolve_deploy_yaml_from_service_dir() -> Result<PathBuf> {
     let service_dir = std::env::var("SERVICE_DIR")
@@ -937,6 +952,7 @@ fn get_manifest_path_for_env(env: &str) -> Result<String> {
 /// - Committing the changes
 /// - Triggering flux reconcile
 ///
+/// `deploy_tag` is the full image tag (e.g., "amd64-bb90b44") used for the manifest.
 /// When `k8s_repo_root` is Some, manifest paths are resolved and git operations
 /// happen relative to that directory (separate k8s repo).
 async fn deploy_to_environment(
@@ -944,7 +960,7 @@ async fn deploy_to_environment(
     env: &str,
     namespace: &str,
     registry: &str,
-    tag_suffix: &str,
+    deploy_tag: &str,
     watch: bool,
     k8s_repo_root: Option<&std::path::Path>,
     k8s_branch: Option<&str>,
@@ -968,7 +984,7 @@ async fn deploy_to_environment(
         registry.to_string(),
         namespace.to_string(),
         watch,
-        tag_suffix.to_string(),
+        deploy_tag.to_string(),
         k8s_repo_root.map(|p| p.to_path_buf()),
         k8s_branch.map(|s| s.to_string()),
     )
@@ -1202,20 +1218,23 @@ pub async fn orchestrate_release(
     }
 
     // Tag resolution:
-    // - deploy_only with image_tag: use the provided tag
-    // - otherwise: get_tag_suffix() (RELEASE_GIT_SHA or git rev-parse)
-    let tag_suffix = if deploy_only {
-        image_tag
-            .clone()
-            .context("--image-tag required with --deploy-only")?
-    } else {
-        get_tag_suffix().await?
-    };
+    // - deploy_only with image_tag: user provides the full deploy tag (e.g., "amd64-bb90b44")
+    // - otherwise: get_tag_suffix() returns raw git SHA, deploy_tag adds arch prefix
     let has_arm64 = image_path_arm64.is_some();
+    let (tag_suffix, deploy_tag) = if deploy_only {
+        let full_tag = image_tag
+            .clone()
+            .context("--image-tag required with --deploy-only")?;
+        (full_tag.clone(), full_tag)
+    } else {
+        let sha = get_tag_suffix().await?;
+        let dtag = compute_deploy_tag(&sha, "amd64", false, has_arm64);
+        (sha, dtag)
+    };
     if has_arm64 {
         println!("🏷️  Image tags: amd64-{}, arm64-{}, {} (manifest)", tag_suffix, tag_suffix, tag_suffix);
     } else {
-        println!("🏷️  Image tag: amd64-{}", tag_suffix);
+        println!("🏷️  Image tag: {}", deploy_tag);
     }
     println!();
 
@@ -1241,10 +1260,10 @@ pub async fn orchestrate_release(
         println!("Step 1: {}", "Pushing to GHCR...".bold());
         push_docker_images(&images, &registry, &tag_suffix).await?;
 
-        // Step 1.5: Verify amd64 image exists in registry and capture digest
+        // Step 1.5: Verify image exists in registry and capture digest
         println!();
         println!("Step 1.5: {}", "Verifying image in registry...".bold());
-        let verify_tag = format!("amd64-{}", tag_suffix);
+        let verify_tag = deploy_tag.clone();
         let pushed_digest = verify_image_in_registry(&registry, &verify_tag).await?;
         println!("   📋 Captured digest: {}", pushed_digest);
         println!();
@@ -1262,9 +1281,9 @@ pub async fn orchestrate_release(
                 );
             } else {
                 println!(
-                    "{}  Tag: amd64-{}",
+                    "{}  Tag: {}",
                     "PUSH COMPLETE".green().bold(),
-                    tag_suffix
+                    deploy_tag
                 );
             }
             println!("{}", "━".repeat(60).bright_green());
@@ -1319,7 +1338,7 @@ pub async fn orchestrate_release(
             }
 
             // Run migrations for this environment
-            let migration_image_tag = format!("amd64-{}", tag_suffix);
+            let migration_image_tag = deploy_tag.clone();
             crate::commands::migrations::run_migrations(
                 &config,
                 namespace.clone(),
@@ -1357,7 +1376,7 @@ pub async fn orchestrate_release(
         // Deploy to this environment (updates manifest, commits)
         last_git_sha =
             deploy_to_environment(
-                &service, env, &namespace, &registry, &tag_suffix, watch,
+                &service, env, &namespace, &registry, &deploy_tag, watch,
                 k8s_repo_root.as_deref(),
                 k8s_branch.as_deref(),
             ).await?;
@@ -1376,7 +1395,7 @@ pub async fn orchestrate_release(
         // - shinka_gating=false: Set expected-tag annotation and continue (recommended)
         //   The K8s layer handles coordination via Shinka + wait-for-migrations init container
         if deploy_config.service.migration.shinka_gating {
-            let expected_image_tag = format!("amd64-{}", tag_suffix);
+            let expected_image_tag = deploy_tag.clone();
             crate::commands::migrations::wait_for_shinka_migration(
                 &deploy_config.product.name,
                 &service,
@@ -1401,7 +1420,7 @@ pub async fn orchestrate_release(
                 .unwrap_or_else(|| {
                     format!("{}-{}", deploy_config.product.name, service)
                 });
-            let expected_image_tag = format!("amd64-{}", tag_suffix);
+            let expected_image_tag = deploy_tag.clone();
             crate::commands::migrations::set_expected_tag_if_exists(
                 &migration_name,
                 &namespace,
@@ -1558,6 +1577,15 @@ pub async fn orchestrate_release(
         }
     }
 
+    // Cleanup: remove temp k8s clone if we created one
+    if let Some(ref k8s_root) = k8s_repo_root {
+        if k8s_root.starts_with(std::env::temp_dir()) {
+            if let Err(e) = std::fs::remove_dir_all(k8s_root) {
+                eprintln!("⚠️  Failed to clean up temp k8s repo: {}", e);
+            }
+        }
+    }
+
     println!("{}", "━".repeat(80).bright_green());
     println!(
         "{}",
@@ -1570,7 +1598,7 @@ pub async fn orchestrate_release(
 
 /// Deploy Rust service to Kubernetes via GitOps
 ///
-/// Returns the git SHA suffix used in the deployment
+/// Returns the deploy tag used in the deployment
 /// Deploy Rust service - wrapper that gets tag internally
 pub async fn deploy_rust_service(
     service: String,
@@ -1579,8 +1607,9 @@ pub async fn deploy_rust_service(
     namespace: String,
     watch: bool,
 ) -> Result<String> {
-    let tag_suffix = get_tag_suffix().await?;
-    deploy_rust_service_with_tag(service, manifest, registry, namespace, watch, tag_suffix, None, None).await
+    let sha = get_tag_suffix().await?;
+    let deploy_tag = compute_deploy_tag(&sha, "amd64", false, false);
+    deploy_rust_service_with_tag(service, manifest, registry, namespace, watch, deploy_tag, None, None).await
 }
 
 /// Update a kustomization image tag using targeted text replacement.
@@ -1655,6 +1684,7 @@ fn update_kustomization_image_tag(
 
 /// Deploy Rust service with explicit tag (internal implementation)
 ///
+/// `tag_suffix` is the full deploy tag (e.g., "amd64-bb90b44" or "bb90b44" for multi-arch).
 /// When `k8s_workdir` is Some, git operations (add/commit/push) happen in that
 /// directory instead of the product repo root (for separate k8s repos).
 pub async fn deploy_rust_service_with_tag(
@@ -1667,7 +1697,7 @@ pub async fn deploy_rust_service_with_tag(
     k8s_workdir: Option<std::path::PathBuf>,
     k8s_branch: Option<String>,
 ) -> Result<String> {
-    let image_tag = format!("{}:amd64-{}", registry, tag_suffix);
+    let image_tag = format!("{}:{}", registry, tag_suffix);
 
     println!(
         "🎯 {} {} {}",
@@ -1689,7 +1719,6 @@ pub async fn deploy_rust_service_with_tag(
             println!("   ✅ Image verified in registry");
         }
         Err(e) => {
-            // Check if this is just a missing token (non-interactive environment)
             let err_str = format!("{}", e);
             if err_str.contains("GITHUB_TOKEN") || err_str.contains("GHCR_TOKEN") {
                 eprintln!(
@@ -1698,7 +1727,7 @@ pub async fn deploy_rust_service_with_tag(
                 );
             } else {
                 bail!(
-                    "❌ Image {}:amd64-{} does not exist in registry.\n   \
+                    "❌ Image {}:{} does not exist in registry.\n   \
                      Cannot deploy a non-existent image.\n   \
                      Error: {}",
                     registry,
@@ -1717,7 +1746,7 @@ pub async fn deploy_rust_service_with_tag(
         .await
         .context("Failed to read manifest")?;
 
-    let new_tag = format!("amd64-{}", tag_suffix);
+    let new_tag = tag_suffix.clone();
     let updated_manifest =
         update_kustomization_image_tag(&manifest_content, &service, &new_tag)?;
 
@@ -1813,7 +1842,7 @@ async fn print_deployment_report(
     println!("  {} Docker Image", "✓".green());
     println!("    • Built with crate2nix (per-crate Attic caching)");
     println!("    • Pushed to GHCR: {}", deploy_config.registry_url());
-    println!("    • Tags: amd64-latest, amd64-{}", tag_suffix);
+    println!("    • Tag: {}", tag_suffix);
     println!();
 
     println!("  {} GitOps Deployment", "✓".green());
@@ -1879,7 +1908,7 @@ async fn print_deployment_report(
             println!("    • Current pod status: {}", phase);
             println!("    • Current image: {}", image.dimmed());
 
-            let expected_image = format!("{}:amd64-{}", deploy_config.registry_url(), tag_suffix);
+            let expected_image = format!("{}:{}", deploy_config.registry_url(), tag_suffix);
             if image.contains(tag_suffix) {
                 println!("    • {} New image is already deployed!", "✓".green());
             } else {
@@ -1913,7 +1942,7 @@ async fn print_deployment_report(
     println!(
         "  $ {}",
         format!(
-            "docker pull {}:amd64-{}",
+            "docker pull {}:{}",
             deploy_config.registry_url(),
             tag_suffix
         )
@@ -1946,7 +1975,7 @@ async fn print_deployment_report(
         .yellow()
     );
     println!(
-        "    Expected: {}:amd64-{}",
+        "    Expected: {}:{}",
         deploy_config.registry_url(),
         tag_suffix
     );
@@ -2170,7 +2199,8 @@ pub async fn release_rust_service(
     // Capture git tag ONCE at the start to ensure consistency across build/push/deploy
     // IMPORTANT: This prevents tag mismatch when HEAD moves between steps
     let tag_suffix = get_tag_suffix().await?;
-    println!("🏷️  Tag suffix: {}", tag_suffix);
+    let deploy_tag = compute_deploy_tag(&tag_suffix, "amd64", false, false);
+    println!("🏷️  Deploy tag: {}", deploy_tag);
     println!();
 
     // Step 1: Build
@@ -2200,7 +2230,7 @@ pub async fn release_rust_service(
     // Step 2.5: Verify image exists in registry and capture digest
     println!();
     println!("Step 2.5/9: {}", "Verifying image in registry...".bold());
-    let pushed_digest = verify_image_in_registry(&registry, &tag_suffix).await?;
+    let pushed_digest = verify_image_in_registry(&registry, &deploy_tag).await?;
     println!("   📋 Captured digest: {}", pushed_digest);
 
     // Step 3: Run migrations BEFORE deploying (CRITICAL: database must be ready before new pods start)
@@ -2219,8 +2249,7 @@ pub async fn release_rust_service(
 
     println!();
     println!("Step 3/9: {}", "Running database migrations...".bold());
-    // Format full image tag with architecture prefix
-    let image_tag = format!("amd64-{}", tag_suffix);
+    let image_tag = deploy_tag.clone();
     crate::commands::migrations::run_migrations(
         &config,
         namespace.clone(),
@@ -2235,7 +2264,7 @@ pub async fn release_rust_service(
         "Step 3.5/9: {}",
         "Verifying image integrity before deploy...".bold()
     );
-    verify_image_digest_matches(&registry, &tag_suffix, &pushed_digest).await?;
+    verify_image_digest_matches(&registry, &deploy_tag, &pushed_digest).await?;
 
     // Step 4: Deploy (commits manifest changes to git) - AFTER migrations pass
     println!();
@@ -2246,7 +2275,7 @@ pub async fn release_rust_service(
         registry.clone(),
         namespace.clone(),
         true,
-        tag_suffix.clone(),
+        deploy_tag.clone(),
         None,
         None,
     )
@@ -2391,15 +2420,12 @@ pub async fn release_rust_service(
         let full_image_tag = {
             let amd64_result = federation_tests_dir.join("result-amd64");
             let arm64_result = federation_tests_dir.join("result-arm64");
+            let has_arm64 = arm64_result.exists();
 
-            if amd64_result.exists() && arm64_result.exists() {
-                // Both architectures built - use multi-arch tag (just the SHA)
-                // This should match whatever the push step uses for multi-arch manifests
-                git_sha_before_release.clone()
-            } else if amd64_result.exists() {
-                format!("amd64-{}", git_sha_before_release)
-            } else if arm64_result.exists() {
-                format!("arm64-{}", git_sha_before_release)
+            if amd64_result.exists() {
+                compute_deploy_tag(&git_sha_before_release, "amd64", false, has_arm64)
+            } else if has_arm64 {
+                compute_deploy_tag(&git_sha_before_release, "arm64", false, false)
             } else {
                 // Fallback to just SHA if no result files found
                 git_sha_before_release.clone()
@@ -2481,7 +2507,7 @@ pub async fn release_rust_service(
     println!("{}", "━".repeat(80).bright_blue());
     println!("📊 {}", "DEPLOYMENT REPORT".bright_blue().bold());
     println!("{}", "━".repeat(80).bright_blue());
-    print_deployment_report(&service, &namespace, &deploy_config, &tag_suffix).await?;
+    print_deployment_report(&service, &namespace, &deploy_config, &deploy_tag).await?;
 
     // Step 9: Post-release FluxCD health check with retry (can be skipped via config)
     // CRITICAL: Verify GitOps system is still healthy after deployment

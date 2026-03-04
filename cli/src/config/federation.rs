@@ -107,7 +107,7 @@ pub struct ServiceFederationConfig {
 }
 
 fn default_federation_enabled() -> bool {
-    true
+    false
 }
 
 fn default_schema_extractor() -> String {
@@ -129,7 +129,7 @@ fn default_min_schema_size() -> u64 {
 impl Default for ServiceFederationConfig {
     fn default() -> Self {
         Self {
-            enabled: default_federation_enabled(),
+            enabled: false,
             schema_extractor: default_schema_extractor(),
             schema_output: None,
             graphql_path: default_graphql_path(),
