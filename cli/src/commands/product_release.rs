@@ -16,6 +16,7 @@ use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use tokio::process::Command;
 
+#[cfg(feature = "attestation")]
 use crate::commands::attestation;
 use crate::config::DeployConfig;
 
@@ -448,112 +449,127 @@ pub async fn product_release(
     // ─── Phase 1.5: Compute attestation ─────────────────────────────────────
     // Compute attestation hashes after all artifacts are pushed.
     // Generates sekiban-compatible annotations for injection into HelmRelease values.
-    println!("{}", "Phase 1.5: Compute attestation".bold());
+    // Requires the "attestation" feature (tameshi crate).
+    // ─── Phase 1.5: Compute attestation ─────────────────────────────────────
+    // Requires the "attestation" feature (tameshi crate).
+    #[cfg(feature = "attestation")]
+    let attestation_info: Option<crate::config::AttestationInfoRecord> = {
+        println!("{}", "Phase 1.5: Compute attestation".bold());
 
-    let repo_path = std::path::Path::new(&repo_root);
-    let source_att = attestation::compute_source_attestation(repo_path, &git_sha)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "   {} Source attestation failed (non-fatal): {}",
-                "WARN".yellow(),
-                e
-            );
-            // Return a minimal source attestation so the pipeline can continue
-            tameshi::ci::source_attestation(
-                "unknown",
-                &git_sha,
-                "refs/heads/main",
-                false,
-                tameshi::hash::Blake3Hash::digest(b"unknown"),
-                tameshi::hash::Blake3Hash::digest(b"unknown"),
-                0,
-                false,
-            )
-        });
-    println!("   {} Source attestation computed", "OK".green());
+        let repo_path = std::path::Path::new(&repo_root);
+        let source_att = attestation::compute_source_attestation(repo_path, &git_sha)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "   {} Source attestation failed (non-fatal): {}",
+                    "WARN".yellow(),
+                    e
+                );
+                tameshi::ci::source_attestation(
+                    "unknown",
+                    &git_sha,
+                    "refs/heads/main",
+                    false,
+                    tameshi::hash::Blake3Hash::digest(b"unknown"),
+                    tameshi::hash::Blake3Hash::digest(b"unknown"),
+                    0,
+                    false,
+                )
+            });
+        println!("   {} Source attestation computed", "OK".green());
 
-    let mut build_atts = Vec::new();
-    let mut image_atts = Vec::new();
-    for svc in &product_config.services {
-        // Build attestation (best-effort — nix path-info may not be available)
-        match attestation::compute_build_attestation(&svc.name, repo_path).await {
-            Ok(att) => {
-                build_atts.push(att);
-                println!("   {} Build attestation: {}", "OK".green(), svc.name.cyan());
+        let mut build_atts = Vec::new();
+        let mut image_atts = Vec::new();
+        for svc in &product_config.services {
+            match attestation::compute_build_attestation(&svc.name, repo_path).await {
+                Ok(att) => {
+                    build_atts.push(att);
+                    println!("   {} Build attestation: {}", "OK".green(), svc.name.cyan());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "   {} Build attestation for {} failed (non-fatal): {}",
+                        "WARN".yellow(),
+                        svc.name,
+                        e
+                    );
+                }
+            }
+
+            let registry_url =
+                DeployConfig::load_service_registry_url(&product, &svc.path, &repo_root)?;
+            let image_tag = format!("amd64-{}", git_sha);
+            match attestation::compute_image_attestation(&registry_url, &image_tag).await {
+                Ok(att) => {
+                    image_atts.push(att);
+                    println!("   {} Image attestation: {}", "OK".green(), svc.name.cyan());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "   {} Image attestation for {} failed (non-fatal): {}",
+                        "WARN".yellow(),
+                        svc.name,
+                        e
+                    );
+                }
+            }
+        }
+
+        let certification = attestation::compose_product_certification(
+            &product,
+            target_env,
+            "plo",
+            source_att,
+            build_atts,
+            image_atts,
+            vec![],
+        );
+
+        let result = match &certification {
+            Ok(cert) => {
+                let values = attestation::generate_attestation_values(cert);
+                let info = attestation::generate_attestation_info(cert);
+                println!(
+                    "   {} Product certification: {} (certified: {})",
+                    "OK".green(),
+                    if cert.certified {
+                        "PASSED".green().to_string()
+                    } else {
+                        "FAILED".yellow().to_string()
+                    },
+                    cert.certified
+                );
+                println!(
+                    "   {} Signature: {}",
+                    ">>".dimmed(),
+                    values.signature.dimmed()
+                );
+                Some(crate::config::AttestationInfoRecord {
+                    signature: info.signature,
+                    certification_hash: info.certification_hash,
+                    compliance_hash: info.compliance_hash,
+                    certified: info.certified,
+                })
             }
             Err(e) => {
                 eprintln!(
-                    "   {} Build attestation for {} failed (non-fatal): {}",
+                    "   {} Product certification failed (non-fatal): {}",
                     "WARN".yellow(),
-                    svc.name,
                     e
                 );
+                None
             }
-        }
-
-        // Image attestation
-        let registry_url =
-            DeployConfig::load_service_registry_url(&product, &svc.path, &repo_root)?;
-        let image_tag = format!("amd64-{}", git_sha);
-        match attestation::compute_image_attestation(&registry_url, &image_tag).await {
-            Ok(att) => {
-                image_atts.push(att);
-                println!("   {} Image attestation: {}", "OK".green(), svc.name.cyan());
-            }
-            Err(e) => {
-                eprintln!(
-                    "   {} Image attestation for {} failed (non-fatal): {}",
-                    "WARN".yellow(),
-                    svc.name,
-                    e
-                );
-            }
-        }
-    }
-
-    // Compose product certification
-    let certification = attestation::compose_product_certification(
-        &product,
-        target_env,
-        "plo", // Default cluster
-        source_att,
-        build_atts,
-        image_atts,
-        vec![], // Chart attestations: populated when helm chart pipeline is integrated
-    );
-
-    let attestation_info = match &certification {
-        Ok(cert) => {
-            let values = attestation::generate_attestation_values(cert);
-            let info = attestation::generate_attestation_info(cert);
-            println!(
-                "   {} Product certification: {} (certified: {})",
-                "OK".green(),
-                if cert.certified {
-                    "PASSED".green().to_string()
-                } else {
-                    "FAILED".yellow().to_string()
-                },
-                cert.certified
-            );
-            println!(
-                "   {} Signature: {}",
-                ">>".dimmed(),
-                values.signature.dimmed()
-            );
-            Some(info)
-        }
-        Err(e) => {
-            eprintln!(
-                "   {} Product certification failed (non-fatal): {}",
-                "WARN".yellow(),
-                e
-            );
-            None
-        }
+        };
+        println!();
+        result
     };
-    println!();
+
+    #[cfg(not(feature = "attestation"))]
+    let attestation_info: Option<crate::config::AttestationInfoRecord> = {
+        println!("{}", "Phase 1.5: Attestation skipped (feature disabled)".dimmed());
+        println!();
+        None
+    };
 
     // ─── Phase 2: Deploy per environment ────────────────────────────────────
     if build_only {
@@ -565,13 +581,7 @@ pub async fn product_release(
 
         // Jump straight to Phase 3: persist artifact tags
         println!("{}", "Phase 3: Persist artifact tags".bold());
-        let att_record = attestation_info.as_ref().map(|info| crate::config::AttestationInfoRecord {
-            signature: info.signature.clone(),
-            certification_hash: info.certification_hash.clone(),
-            compliance_hash: info.compliance_hash.clone(),
-            certified: info.certified,
-        });
-        write_artifact_tags(&product, &product_config.services, &repo_root, &git_sha, att_record.as_ref()).await?;
+        write_artifact_tags(&product, &product_config.services, &repo_root, &git_sha, attestation_info.as_ref()).await?;
         println!();
 
         println!(

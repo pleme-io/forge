@@ -1,3 +1,4 @@
+#[cfg(feature = "attestation")]
 pub mod attestation;
 pub mod bootstrap;
 pub mod build;

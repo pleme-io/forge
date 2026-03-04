@@ -68,8 +68,8 @@ sha2 = "0.10"
 md5 = "0.7"
 blake3 = "1.5"
 
-# Attestation framework
-tameshi = "0.1"
+# Attestation framework (optional — not needed for basic push/release workflows)
+tameshi = { version = "0.1", optional = true }
 
 # Binary location utilities
 which = "6.0"
@@ -94,6 +94,10 @@ tempfile = "3.14"
 
 # UUID for release IDs
 uuid = { version = "1.11", features = ["serde"] }
+
+[features]
+default = []
+attestation = ["tameshi"]
 
 [dev-dependencies]
 # Test utilities
