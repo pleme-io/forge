@@ -14,6 +14,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    devenv = {
+      url = "github:cachix/devenv";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     substrate = {
       url = "github:pleme-io/substrate";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -28,8 +33,9 @@
     };
   };
 
-  outputs = inputs @ { self, nixpkgs, flake-parts, fenix, substrate, crate2nix, ... }:
+  outputs = inputs @ { self, nixpkgs, flake-parts, fenix, substrate, crate2nix, devenv, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
+      imports = [ inputs.devenv.flakeModule ];
       systems = [ "aarch64-darwin" "x86_64-linux" "aarch64-linux" ];
 
       perSystem = { system, ... }: let
@@ -90,6 +96,20 @@
         crate2nixBin = crate2nix.packages.${system}.default;
 
       in {
+        # ── devenv shell ─────────────────────────────────────────
+        devenv.shells.default = {
+          imports = [ "${substrate}/lib/devenv/rust.nix" ];
+
+          packages = with pkgs; [
+            cmake perl git
+            crate2nixBin
+          ];
+
+          env = {
+            RUST_SRC_PATH = "${pkgs.fenixRustToolchain or ""}/lib/rustlib/src/rust/library";
+          };
+        };
+
         # ── packages ───────────────────────────────────────────────
         packages = {
           forge-cli = forgeCli;
