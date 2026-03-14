@@ -277,9 +277,10 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
     info!("=== Locking {} for {} ===", platform, name);
 
     // Step 1: Build via nix
+    // Use --impure for builds requiring system tools (e.g. Xcode for Ghostty)
     info!("[1/3] Building...");
     let build_output = tokio::process::Command::new("nix")
-        .args(["build", "--print-out-paths"])
+        .args(["build", "--print-out-paths", "--impure"])
         .current_dir(dir)
         .output()
         .await
@@ -293,14 +294,27 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
     let store_path = String::from_utf8_lossy(&build_output.stdout).trim().to_string();
     info!("  -> {}", store_path);
 
-    // Step 2: Run tests
+    // Step 2: Run tests (language-specific; "nix" = build-only, no test runner)
     info!("[2/3] Testing...");
-    match language {
-        "rust" => run_cmd(dir, "cargo", &["test", "--quiet"])?,
-        "zig" => run_cmd(dir, "zig", &["build", "test"])?,
-        _ => info!("  (no test runner for {})", language),
-    }
-    info!("  -> pass");
+    let test_result = match language {
+        "rust" => {
+            run_cmd(dir, "cargo", &["test", "--quiet"])?;
+            "pass"
+        }
+        "zig" => {
+            run_cmd(dir, "zig", &["build", "test"])?;
+            "pass"
+        }
+        "nix" => {
+            info!("  (nix-only build — test phase is the nix build itself)");
+            "build-only"
+        }
+        other => {
+            info!("  (no test runner for {other})");
+            "skipped"
+        }
+    };
+    info!("  -> {}", test_result);
 
     // Step 3: Write lock file
     info!("[3/3] Writing lock...");
@@ -315,7 +329,7 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
         "rev": rev,
         "date": date,
         "store_path": store_path,
-        "tests": "pass",
+        "tests": test_result,
     });
 
     std::fs::write(&lock_path, serde_json::to_string_pretty(&lock_content)?)
