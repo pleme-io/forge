@@ -1809,6 +1809,25 @@ pub enum ToolCommands {
         #[arg(long, default_value = ".")]
         working_dir: String,
     },
+
+    /// Lock platform — build, test, and write a JSON lock certifying this platform
+    Lock {
+        /// Tool name
+        #[arg(long, required = true)]
+        name: String,
+
+        /// Source language (rust or zig)
+        #[arg(long, required = true)]
+        language: String,
+
+        /// Platform identifier (e.g., aarch64-darwin, x86_64-linux)
+        #[arg(long, required = true)]
+        platform: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+    },
 }
 
 /// Infrastructure subcommands (docker compose lifecycle)

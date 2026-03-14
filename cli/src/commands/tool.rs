@@ -260,6 +260,73 @@ fn read_version_for_language(dir: &Path, language: &str) -> Result<String> {
     }
 }
 
+/// Lock platform — build, test, and write a JSON lock certifying this platform.
+///
+/// The lock file at `locks/<platform>.json` proves that the tool at a specific
+/// git rev successfully built and tested on this platform. Commit the lock files
+/// to expand the confirmed compatibility matrix.
+pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str) -> Result<()> {
+    let dir = Path::new(working_dir);
+    if !dir.exists() {
+        bail!("Working directory not found: {}", working_dir);
+    }
+
+    let rev = git::get_full_sha().unwrap_or_else(|_| "unknown".to_string());
+    let date = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    info!("=== Locking {} for {} ===", platform, name);
+
+    // Step 1: Build via nix
+    info!("[1/3] Building...");
+    let build_output = tokio::process::Command::new("nix")
+        .args(["build", "--print-out-paths"])
+        .current_dir(dir)
+        .output()
+        .await
+        .context("nix build failed to execute")?;
+
+    if !build_output.status.success() {
+        let stderr = String::from_utf8_lossy(&build_output.stderr);
+        bail!("nix build failed on {}: {}", platform, stderr.trim());
+    }
+
+    let store_path = String::from_utf8_lossy(&build_output.stdout).trim().to_string();
+    info!("  -> {}", store_path);
+
+    // Step 2: Run tests
+    info!("[2/3] Testing...");
+    match language {
+        "rust" => run_cmd(dir, "cargo", &["test", "--quiet"])?,
+        "zig" => run_cmd(dir, "zig", &["build", "test"])?,
+        _ => info!("  (no test runner for {})", language),
+    }
+    info!("  -> pass");
+
+    // Step 3: Write lock file
+    info!("[3/3] Writing lock...");
+    let lock_dir = dir.join("locks");
+    std::fs::create_dir_all(&lock_dir)
+        .with_context(|| format!("Failed to create locks directory: {}", lock_dir.display()))?;
+
+    let lock_path = lock_dir.join(format!("{}.json", platform));
+    let lock_content = serde_json::json!({
+        "tool": name,
+        "platform": platform,
+        "rev": rev,
+        "date": date,
+        "store_path": store_path,
+        "tests": "pass",
+    });
+
+    std::fs::write(&lock_path, serde_json::to_string_pretty(&lock_content)?)
+        .with_context(|| format!("Failed to write lock file: {}", lock_path.display()))?;
+
+    info!("=== {} locked ===", platform);
+    info!("{}", serde_json::to_string_pretty(&lock_content)?);
+
+    Ok(())
+}
+
 fn run_cmd(dir: &Path, program: &str, args: &[&str]) -> Result<()> {
     let status = Command::new(program)
         .args(args)

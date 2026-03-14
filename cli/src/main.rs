@@ -970,6 +970,14 @@ async fn main() -> Result<()> {
             } => {
                 commands::tool::regenerate(&language, &working_dir)?;
             }
+            ToolCommands::Lock {
+                name,
+                language,
+                platform,
+                working_dir,
+            } => {
+                commands::tool::lock(&name, &language, &platform, &working_dir).await?;
+            }
         },
         Commands::Infra { command } => match command {
             InfraCommands::Up {
