@@ -12,10 +12,10 @@ registry:
   host: ghcr.io
 
   # Organization/namespace in the registry
-  organization: pleme-io
+  organization: your-org
 
   # Project/monorepo name
-  project: lilitu
+  project: your-project
 
   # Image name pattern (supports: {host}, {organization}, {project}, {product}, {service})
   image_pattern: "{host}/{organization}/{project}/{product}-{service}"
@@ -23,7 +23,7 @@ registry:
 # Attic binary cache configuration
 cache:
   # Cache server name (used with attic push {server}:{cache})
-  server: pleme
+  server: your-cache
 
 # Kubernetes configuration
 kubernetes:
@@ -38,7 +38,7 @@ kubernetes:
 
   # Additional labels to apply to all Kubernetes resources
   additional_labels:
-    managed-by: nexus-deploy
+    managed-by: forge-deploy
     team: backend
 
 # Repository path configuration
