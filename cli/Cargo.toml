@@ -42,9 +42,6 @@ colored = "2.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-# Process execution
-tokio-process = "0.2"
-
 # HTTP client (for health checks) - using rustls instead of OpenSSL
 reqwest = { version = "0.12", features = [
   "json",
