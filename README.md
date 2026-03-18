@@ -101,7 +101,7 @@ nix run .#release:provision
 
 | Command | Description |
 |---------|-------------|
-| `run-migrations` | Execute database migrations via Shinka |
+| `run-migrations` | Execute database migrations via the migration controller |
 | `flux-reconcile` | Trigger FluxCD reconciliation |
 | `nix-builder-verify` | Verify nix-builder image |
 | `nix-builder-test` | Run tests inside a nix-builder container |
