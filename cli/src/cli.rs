@@ -1346,6 +1346,12 @@ pub enum Commands {
         command: TypescriptCommands,
     },
 
+    /// Pangea infrastructure SDLC (test, plan, apply, verify, destroy)
+    PangeaInfra {
+        #[command(subcommand)]
+        command: PangeaInfraCommands,
+    },
+
     /// Verify deployment health after release
     /// Checks health endpoint and GraphQL introspection
     PostDeployVerify {
@@ -1901,5 +1907,125 @@ pub enum TypescriptCommands {
         /// Project directories to regenerate (can be specified multiple times)
         #[arg(long, required = true)]
         project: Vec<String>,
+    },
+}
+
+/// Pangea infrastructure SDLC subcommands
+#[derive(Subcommand)]
+pub enum PangeaInfraCommands {
+    /// Run RSpec synthesis tests for a pangea architecture
+    Test {
+        /// Architecture name (e.g., k3s_cluster_iam, k3s_dev_cluster)
+        #[arg(long, required = true)]
+        architecture: String,
+
+        /// Working directory (pangea-architectures repo root)
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+    },
+
+    /// Run terraform plan (tests must pass first)
+    Plan {
+        /// Pangea workspace name
+        #[arg(long, required = true)]
+        workspace: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+    },
+
+    /// Apply terraform changes (tests + plan must pass first)
+    Apply {
+        /// Pangea workspace name
+        #[arg(long, required = true)]
+        workspace: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Skip confirmation prompt
+        #[arg(long)]
+        auto_approve: bool,
+    },
+
+    /// Run InSpec verification against live infrastructure
+    Verify {
+        /// Pangea workspace name
+        #[arg(long, required = true)]
+        workspace: String,
+
+        /// Path to InSpec profile directory
+        #[arg(long, required = true)]
+        inspec_profile: String,
+
+        /// InSpec target (e.g., aws://us-east-1)
+        #[arg(long, default_value = "aws://")]
+        target: String,
+    },
+
+    /// Full lifecycle: test → plan → confirm → apply → verify
+    Cycle {
+        /// Pangea workspace name
+        #[arg(long, required = true)]
+        workspace: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Architecture name for tests
+        #[arg(long, required = true)]
+        architecture: String,
+
+        /// Path to InSpec profile (optional, skips verify if not provided)
+        #[arg(long)]
+        inspec_profile: Option<String>,
+
+        /// InSpec target
+        #[arg(long, default_value = "aws://")]
+        inspec_target: String,
+    },
+
+    /// Destroy infrastructure (with confirmation)
+    Destroy {
+        /// Pangea workspace name
+        #[arg(long, required = true)]
+        workspace: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Skip confirmation prompt
+        #[arg(long)]
+        auto_approve: bool,
+    },
+
+    /// Detect drift: test → plan (no apply)
+    Drift {
+        /// Pangea workspace name
+        #[arg(long, required = true)]
+        workspace: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
+
+        /// Architecture name for tests
+        #[arg(long, required = true)]
+        architecture: String,
+    },
+
+    /// Show workspace status
+    Status {
+        /// Pangea workspace name
+        #[arg(long, required = true)]
+        workspace: String,
+
+        /// Working directory
+        #[arg(long, default_value = ".")]
+        working_dir: String,
     },
 }

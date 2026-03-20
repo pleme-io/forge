@@ -27,11 +27,11 @@ mod infrastructure;
 mod services;
 mod ui;
 
-use cli::{BootstrapCommands, Cli, Commands, GemCommands, HelmCommands, InfraCommands, LocalCommands, PangeaCommands, ToolCommands, TypescriptCommands};
+use cli::{BootstrapCommands, Cli, Commands, GemCommands, HelmCommands, InfraCommands, LocalCommands, PangeaCommands, PangeaInfraCommands, ToolCommands, TypescriptCommands};
 use commands::{
     bootstrap, build, comprehensive_release, deploy, federation, github_runner_ci,
-    integration_tests, kenshi, kenshi_agent, migrations, nix_builder, pangea, push, rollout,
-    rust_service, service_config, status, test, web_build_verify, workspace_deps,
+    integration_tests, kenshi, kenshi_agent, migrations, nix_builder, pangea, pangea_infra, push,
+    rollout, rust_service, service_config, status, test, web_build_verify, workspace_deps,
 };
 
 /// Setup environment for root flake pattern
@@ -1044,6 +1044,69 @@ async fn main() -> Result<()> {
         Commands::Typescript { command } => match command {
             TypescriptCommands::Regenerate { project } => {
                 commands::typescript::regenerate(&project)?;
+            }
+        },
+        Commands::PangeaInfra { command } => match command {
+            PangeaInfraCommands::Test {
+                architecture,
+                working_dir,
+            } => {
+                pangea_infra::test(&working_dir, &architecture)?;
+            }
+            PangeaInfraCommands::Plan {
+                workspace,
+                working_dir,
+            } => {
+                pangea_infra::plan(&workspace, &working_dir)?;
+            }
+            PangeaInfraCommands::Apply {
+                workspace,
+                working_dir,
+                auto_approve,
+            } => {
+                pangea_infra::apply(&workspace, &working_dir, auto_approve)?;
+            }
+            PangeaInfraCommands::Verify {
+                workspace,
+                inspec_profile,
+                target,
+            } => {
+                pangea_infra::verify(&workspace, &inspec_profile, &target)?;
+            }
+            PangeaInfraCommands::Cycle {
+                workspace,
+                working_dir,
+                architecture,
+                inspec_profile,
+                inspec_target,
+            } => {
+                pangea_infra::cycle(
+                    &workspace,
+                    &working_dir,
+                    &architecture,
+                    inspec_profile.as_deref(),
+                    &inspec_target,
+                )?;
+            }
+            PangeaInfraCommands::Destroy {
+                workspace,
+                working_dir,
+                auto_approve,
+            } => {
+                pangea_infra::destroy(&workspace, &working_dir, auto_approve)?;
+            }
+            PangeaInfraCommands::Drift {
+                workspace,
+                working_dir,
+                architecture,
+            } => {
+                pangea_infra::drift(&workspace, &working_dir, &architecture)?;
+            }
+            PangeaInfraCommands::Status {
+                workspace,
+                working_dir,
+            } => {
+                pangea_infra::status(&workspace, &working_dir)?;
             }
         },
         Commands::PostDeployVerify {
