@@ -1518,6 +1518,25 @@ pub enum PangeaCommands {
 
     /// Regenerate gemset.nix for pangea compiler (Ruby)
     RegenerateCompiler,
+
+    /// Auto-generate RSpec synthesis specs for pangea resources
+    SpecGen {
+        /// Provider gem directory (e.g., ~/code/github/pleme-io/pangea-aws)
+        #[arg(long, required = true)]
+        provider_dir: String,
+
+        /// Specific resource to generate spec for (e.g., aws_vpc). Omit for all untested.
+        #[arg(long)]
+        resource: Option<String>,
+
+        /// Overwrite existing specs
+        #[arg(long)]
+        force: bool,
+
+        /// Dry run — print generated spec to stdout without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Ruby gem subcommands

@@ -627,6 +627,9 @@ async fn main() -> Result<()> {
             PangeaCommands::RegenerateCompiler => {
                 pangea::regenerate_compiler().await?;
             }
+            PangeaCommands::SpecGen { provider_dir, resource, force, dry_run } => {
+                pangea::spec_gen(&provider_dir, resource.as_deref(), force, dry_run)?;
+            }
         },
         Commands::EnsureWorkspaceDeps { repo_root } => {
             workspace_deps::execute(repo_root).await?;
