@@ -1019,8 +1019,24 @@ pub async fn orchestrate_release(
         bail!("Cannot use both --push-only and --deploy-only");
     }
 
-    // Load deployment configuration first (hierarchical: global → product → service)
-    let deploy_config = DeployConfig::load_for_service(&service)?;
+    // Auto-detect standalone mode: no deploy.yaml in service dir or repo root.
+    // Standalone services use the simpler push-only flow without DeployConfig.
+    // This lets services like shinryu-mcp, hanabi (when standalone), etc. use the
+    // same `nix run .#release` handle as full monorepo product services.
+    let deploy_config_result = DeployConfig::load_for_service(&service);
+    if deploy_config_result.is_err() {
+        // No deploy.yaml found — fall back to standalone push-only mode
+        return orchestrate_standalone_release(
+            service,
+            registry,
+            image_path,
+            image_path_arm64,
+            deploy_only,
+            image_tag,
+        )
+        .await;
+    }
+    let deploy_config = deploy_config_result?;
 
     // Determine which environments to deploy to
     // Respects active_environments filter from deploy.yaml
@@ -1592,6 +1608,75 @@ pub async fn orchestrate_release(
         "✅ RELEASE COMPLETE - ALL SYSTEMS HEALTHY".green().bold()
     );
     println!("{}", "━".repeat(80).bright_green());
+
+    Ok(())
+}
+
+/// Standalone release: push images for services without a deploy.yaml.
+///
+/// Used by `nix run .#release` for services that don't follow the monorepo
+/// product layout (e.g., shinryu-mcp, standalone microservices). Pushes per-arch
+/// images with auto-generated tags and creates a multi-arch manifest if both
+/// architectures are present. Skips all DeployConfig-dependent steps (FluxCD
+/// health checks, environment promotion, kustomization updates, post-deploy
+/// verification).
+///
+/// The intent is that the cluster's GitOps stack reconciles the new image tag
+/// independently — this function only handles "build artifact → registry".
+pub async fn orchestrate_standalone_release(
+    service: String,
+    registry: String,
+    image_path: Option<String>,
+    image_path_arm64: Option<String>,
+    deploy_only: bool,
+    _image_tag: Option<String>,
+) -> Result<()> {
+    if deploy_only {
+        bail!("--deploy-only is not supported in standalone mode (no deploy.yaml). Use --image-path/--image-path-arm64 to push directly.");
+    }
+
+    println!("🚀 {} {} {}",
+        service.cyan().bold(),
+        "Standalone Release".bold(),
+        "(no deploy.yaml — push only)".dimmed()
+    );
+    println!("{}", "=".repeat(60));
+    println!();
+
+    if image_path.is_none() && image_path_arm64.is_none() {
+        bail!("Standalone release requires --image-path and/or --image-path-arm64");
+    }
+
+    let tag_suffix = get_tag_suffix().await?;
+
+    let mut images = vec![];
+    if let Some(path) = image_path.as_ref() {
+        images.push(ArchImage {
+            arch: "amd64".to_string(),
+            path: path.clone(),
+        });
+    }
+    if let Some(path) = image_path_arm64.as_ref() {
+        images.push(ArchImage {
+            arch: "arm64".to_string(),
+            path: path.clone(),
+        });
+    }
+
+    println!("🏷️  Registry: {}", registry.cyan());
+    println!("🏷️  SHA: {}", tag_suffix.dimmed());
+    println!();
+
+    push_docker_images(&images, &registry, &tag_suffix).await?;
+
+    println!();
+    println!("{}", "━".repeat(60).bright_green());
+    println!("{}", "✅ STANDALONE RELEASE COMPLETE".green().bold());
+    println!("{}", "━".repeat(60).bright_green());
+    println!();
+    println!("ℹ️  Image pushed to {}:{}", registry, tag_suffix);
+    println!("ℹ️  GitOps reconciliation should pick up the new tag automatically.");
+    println!("ℹ️  Run `flux reconcile helmrelease <name>` to force immediate reconciliation.");
 
     Ok(())
 }
