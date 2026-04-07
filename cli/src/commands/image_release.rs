@@ -55,54 +55,76 @@ pub async fn execute(
         push_image(&skopeo, arm64, registry, "arm64-latest")?;
     }
 
-    // Create manifest index if both architectures are present
+    // Create multi-arch manifest index if both architectures are present.
+    //
+    // Uses modern regctl `index create` (which accepts source per-arch
+    // images via repeated `--ref` flags). The legacy `manifest put`
+    // syntax — which took source refs as positional args — was removed
+    // and now reads manifest content from stdin only.
     if arm64_path.is_some() {
         info!("Creating multi-arch manifest index...");
 
         let regctl = get_tool_path("regctl");
 
-        // Create manifest for SHA tag
+        // SHA-pinned multi-arch index.
         let status = Command::new(&regctl)
             .args([
-                "manifest",
-                "put",
-                &format!("{}:{}", registry, sha),
-                "--content-type",
-                "application/vnd.oci.image.index.v1+json",
-                "--format",
                 "index",
+                "create",
+                &format!("{}:{}", registry, sha),
+                "--ref",
                 &format!("{}:{}", registry, amd64_tag),
+                "--ref",
                 &format!("{}:arm64-{}", registry, sha),
             ])
             .status()
-            .context("Failed to create manifest index")?;
+            .context("Failed to create multi-arch index (sha)")?;
 
         if !status.success() {
-            bail!("regctl manifest put failed");
+            bail!("regctl index create (sha) failed");
         }
 
-        // Create manifest for latest tag
+        // Floating `latest` multi-arch index.
         let status = Command::new(&regctl)
             .args([
-                "manifest",
-                "put",
-                &format!("{}:latest", registry),
-                "--content-type",
-                "application/vnd.oci.image.index.v1+json",
-                "--format",
                 "index",
+                "create",
+                &format!("{}:latest", registry),
+                "--ref",
                 &format!("{}:amd64-latest", registry),
+                "--ref",
                 &format!("{}:arm64-latest", registry),
             ])
             .status()
-            .context("Failed to create latest manifest index")?;
+            .context("Failed to create multi-arch index (latest)")?;
 
         if !status.success() {
-            bail!("regctl manifest put (latest) failed");
+            bail!("regctl index create (latest) failed");
         }
     }
 
-    info!("Image release complete: {}:{}", registry, sha);
+    // Build the actual list of tags pushed so the summary is accurate.
+    // The previous summary printed a single misleading tag (`:sha`) which
+    // didn't always exist (e.g. when arm64_path is None, no multi-arch
+    // index is created and the unprefixed tag never gets created).
+    let mut tags_pushed = vec![
+        format!("{}:amd64-{}", registry, sha),
+        format!("{}:amd64-latest", registry),
+    ];
+    if arm64_path.is_some() {
+        tags_pushed.push(format!("{}:arm64-{}", registry, sha));
+        tags_pushed.push(format!("{}:arm64-latest", registry));
+        tags_pushed.push(format!("{}:{}", registry, sha));
+        tags_pushed.push(format!("{}:latest", registry));
+    }
+    info!(
+        "Image release complete — {} tags pushed for {}:",
+        tags_pushed.len(),
+        name
+    );
+    for tag in &tags_pushed {
+        info!("  {}", tag);
+    }
     Ok(())
 }
 
