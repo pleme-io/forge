@@ -380,3 +380,140 @@ impl Default for FederationTestsConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_federation_config_defaults() {
+        let config = FederationConfig::default();
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.protocol, "http");
+        assert!(config.routing_url_pattern.contains("{service}"));
+        assert!(config.bff_admin_url.is_none());
+    }
+
+    #[test]
+    fn test_service_federation_config_defaults() {
+        let config = ServiceFederationConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.schema_extractor, "extract-schema");
+        assert_eq!(config.graphql_path, "/graphql");
+        assert!(config.required);
+        assert_eq!(config.min_schema_size, 100);
+    }
+
+    #[test]
+    fn test_schema_output_name_default() {
+        let config = ServiceFederationConfig::default();
+        assert_eq!(config.schema_output_name("cart"), "cart.graphql");
+    }
+
+    #[test]
+    fn test_schema_output_name_custom() {
+        let mut config = ServiceFederationConfig::default();
+        config.schema_output = Some("custom.graphql".to_string());
+        assert_eq!(config.schema_output_name("cart"), "custom.graphql");
+    }
+
+    #[test]
+    fn test_validate_disabled_passes() {
+        let config = ServiceFederationConfig::default();
+        assert!(config.validate("cart").is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_schema_extractor() {
+        let mut config = ServiceFederationConfig::default();
+        config.enabled = true;
+        config.schema_extractor = "".to_string();
+        assert!(config.validate("cart").is_err());
+    }
+
+    #[test]
+    fn test_validate_graphql_path_no_leading_slash() {
+        let mut config = ServiceFederationConfig::default();
+        config.enabled = true;
+        config.graphql_path = "graphql".to_string();
+        assert!(config.validate("cart").is_err());
+    }
+
+    #[test]
+    fn test_validate_valid_enabled_config() {
+        let mut config = ServiceFederationConfig::default();
+        config.enabled = true;
+        assert!(config.validate("cart").is_ok());
+    }
+
+    #[test]
+    fn test_federation_tests_job_name_default() {
+        let config = ServiceFederationTestsConfig::default();
+        assert_eq!(config.job_name("myapp", "cart", "staging"), "myapp-cart-federation-tests");
+    }
+
+    #[test]
+    fn test_federation_tests_job_name_custom_pattern() {
+        let mut config = ServiceFederationTestsConfig::default();
+        config.job_name_pattern = Some("tests-{product}-{service}-{environment}".to_string());
+        assert_eq!(config.job_name("myapp", "cart", "staging"), "tests-myapp-cart-staging");
+    }
+
+    #[test]
+    fn test_federation_tests_namespace_default() {
+        let config = ServiceFederationTestsConfig::default();
+        assert_eq!(config.namespace("myapp", "staging"), "myapp-staging");
+    }
+
+    #[test]
+    fn test_federation_tests_namespace_custom_pattern() {
+        let mut config = ServiceFederationTestsConfig::default();
+        config.namespace_pattern = Some("ns-{product}-{environment}".to_string());
+        assert_eq!(config.namespace("myapp", "staging"), "ns-myapp-staging");
+    }
+
+    #[test]
+    fn test_federation_tests_validate_disabled_passes() {
+        let config = ServiceFederationTestsConfig::default();
+        assert!(config.validate("cart").is_ok());
+    }
+
+    #[test]
+    fn test_federation_tests_validate_empty_suite() {
+        let mut config = ServiceFederationTestsConfig::default();
+        config.enabled = true;
+        config.suite = "  ".to_string();
+        assert!(config.validate("cart").is_err());
+    }
+
+    #[test]
+    fn test_federation_tests_validate_zero_timeout() {
+        let mut config = ServiceFederationTestsConfig::default();
+        config.enabled = true;
+        config.timeout_seconds = 0;
+        assert!(config.validate("cart").is_err());
+    }
+
+    #[test]
+    fn test_federation_tests_validate_empty_router_url() {
+        let mut config = ServiceFederationTestsConfig::default();
+        config.enabled = true;
+        config.router_url = "".to_string();
+        assert!(config.validate("cart").is_err());
+    }
+
+    #[test]
+    fn test_federation_tests_validate_bad_router_url_scheme() {
+        let mut config = ServiceFederationTestsConfig::default();
+        config.enabled = true;
+        config.router_url = "ftp://localhost".to_string();
+        assert!(config.validate("cart").is_err());
+    }
+
+    #[test]
+    fn test_federation_tests_validate_valid() {
+        let mut config = ServiceFederationTestsConfig::default();
+        config.enabled = true;
+        assert!(config.validate("cart").is_ok());
+    }
+}

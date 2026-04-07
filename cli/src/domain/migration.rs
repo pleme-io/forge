@@ -203,4 +203,81 @@ mod tests {
         );
         assert!(!config.should_skip());
     }
+
+    #[test]
+    fn test_database_type_from_str_all_variants() {
+        assert_eq!(DatabaseType::from_str("postgresql"), Some(DatabaseType::Postgres));
+        assert_eq!(DatabaseType::from_str("elasticsearch"), Some(DatabaseType::Elasticsearch));
+        assert_eq!(DatabaseType::from_str("elastic"), Some(DatabaseType::Elasticsearch));
+        assert_eq!(DatabaseType::from_str("es"), Some(DatabaseType::Elasticsearch));
+        assert_eq!(DatabaseType::from_str("databend"), Some(DatabaseType::Databend));
+        assert_eq!(DatabaseType::from_str(""), Some(DatabaseType::None));
+        assert_eq!(DatabaseType::from_str("POSTGRES"), Some(DatabaseType::Postgres));
+        assert_eq!(DatabaseType::from_str("ClickHouse"), Some(DatabaseType::ClickHouse));
+    }
+
+    #[test]
+    fn test_database_type_run_mode_all_variants() {
+        assert_eq!(DatabaseType::Elasticsearch.run_mode(), Some("migrate_elasticsearch"));
+        assert_eq!(DatabaseType::Databend.run_mode(), Some("MIGRATE"));
+    }
+
+    #[test]
+    fn test_database_type_name() {
+        assert_eq!(DatabaseType::Postgres.name(), "PostgreSQL");
+        assert_eq!(DatabaseType::ClickHouse.name(), "ClickHouse");
+        assert_eq!(DatabaseType::Elasticsearch.name(), "Elasticsearch");
+        assert_eq!(DatabaseType::Databend.name(), "Databend");
+        assert_eq!(DatabaseType::None.name(), "None");
+    }
+
+    #[test]
+    fn test_migration_config_image_ref_empty_tag() {
+        let config = MigrationConfig::new(DatabaseType::Postgres, "api", "ns")
+            .with_image("ghcr.io/org/img");
+        assert_eq!(config.image_ref(), "ghcr.io/org/img");
+    }
+
+    #[test]
+    fn test_migration_config_should_skip() {
+        let config = MigrationConfig::new(DatabaseType::None, "api", "ns");
+        assert!(config.should_skip());
+
+        let config2 = MigrationConfig::new(DatabaseType::ClickHouse, "api", "ns");
+        assert!(!config2.should_skip());
+    }
+
+    #[test]
+    fn test_migration_config_with_timeout() {
+        let config = MigrationConfig::new(DatabaseType::Postgres, "api", "ns")
+            .with_timeout(Duration::from_secs(600));
+        assert_eq!(config.timeout, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn test_migration_config_default_timeout() {
+        let config = MigrationConfig::new(DatabaseType::Postgres, "api", "ns");
+        assert_eq!(config.timeout, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_migration_resources_default() {
+        let resources = MigrationResources::default();
+        assert_eq!(resources.memory_request, "128Mi");
+        assert_eq!(resources.memory_limit, "256Mi");
+        assert_eq!(resources.cpu_request, "100m");
+        assert_eq!(resources.cpu_limit, "500m");
+    }
+
+    #[test]
+    fn test_migration_result_fields() {
+        let result = MigrationResult {
+            success: true,
+            duration: Duration::from_secs(42),
+            logs: Some("all good".to_string()),
+        };
+        assert!(result.success);
+        assert_eq!(result.duration, Duration::from_secs(42));
+        assert_eq!(result.logs.as_deref(), Some("all good"));
+    }
 }

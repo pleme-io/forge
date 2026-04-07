@@ -200,7 +200,96 @@ mod tests {
         let service = ServiceDefinition::platform("platform", "operator");
 
         assert_eq!(service.service_type, ServiceType::Platform);
-        // Registry uses get_registry_base() which defaults to "ghcr.io/org/project"
         assert!(service.registry.ends_with("/platform-operator"));
+    }
+
+    #[test]
+    fn test_service_type_from_str_all_variants() {
+        assert_eq!(ServiceType::from_str("rust"), Some(ServiceType::Rust));
+        assert_eq!(ServiceType::from_str("web"), Some(ServiceType::Web));
+        assert_eq!(ServiceType::from_str("wasm"), Some(ServiceType::Wasm));
+        assert_eq!(ServiceType::from_str("infrastructure"), Some(ServiceType::Infrastructure));
+        assert_eq!(ServiceType::from_str("infra"), Some(ServiceType::Infrastructure));
+        assert_eq!(ServiceType::from_str("platform"), Some(ServiceType::Platform));
+        assert_eq!(ServiceType::from_str("unknown"), None);
+        assert_eq!(ServiceType::from_str("RUST"), Some(ServiceType::Rust));
+        assert_eq!(ServiceType::from_str("Web"), Some(ServiceType::Web));
+    }
+
+    #[test]
+    fn test_service_type_default_flake_attr() {
+        assert_eq!(ServiceType::Rust.default_flake_attr(), "dockerImage-amd64");
+        assert_eq!(ServiceType::Web.default_flake_attr(), "dockerImage");
+        assert_eq!(ServiceType::Wasm.default_flake_attr(), "dockerImage");
+        assert_eq!(ServiceType::Infrastructure.default_flake_attr(), "dockerImage");
+        assert_eq!(ServiceType::Platform.default_flake_attr(), "dockerImage");
+    }
+
+    #[test]
+    fn test_service_definition_with_database() {
+        let service = ServiceDefinition::rust("api", "myapp")
+            .with_database(DatabaseType::ClickHouse);
+        assert_eq!(service.database_type, DatabaseType::ClickHouse);
+    }
+
+    #[test]
+    fn test_service_definition_with_graphql() {
+        let service = ServiceDefinition::rust("api", "myapp")
+            .with_graphql(false);
+        assert!(!service.graphql_enabled);
+    }
+
+    #[test]
+    fn test_service_definition_with_federation() {
+        let service = ServiceDefinition::rust("api", "myapp")
+            .with_federation(false);
+        assert!(!service.federation_enabled);
+    }
+
+    #[test]
+    fn test_service_definition_with_service_dir() {
+        let service = ServiceDefinition::rust("api", "myapp")
+            .with_service_dir("custom/path");
+        assert_eq!(service.service_dir, "custom/path");
+    }
+
+    #[test]
+    fn test_service_definition_with_registry() {
+        let service = ServiceDefinition::rust("api", "myapp")
+            .with_registry("custom-registry.io/img");
+        assert_eq!(service.registry, "custom-registry.io/img");
+    }
+
+    #[test]
+    fn test_service_definition_deployment_name() {
+        let service = ServiceDefinition::rust("cart", "myapp");
+        assert_eq!(service.deployment_name(), "cart-deployment");
+    }
+
+    #[test]
+    fn test_service_definition_manifest_path() {
+        let service = ServiceDefinition::rust("cart", "myapp");
+        let path = service.manifest_path("primary", "staging");
+        assert_eq!(
+            path,
+            "nix/k8s/clusters/primary/products/myapp-staging/services/cart/kustomization.yaml"
+        );
+    }
+
+    #[test]
+    fn test_web_service_defaults() {
+        let service = ServiceDefinition::web("frontend", "myapp");
+        assert_eq!(service.database_type, DatabaseType::None);
+        assert!(!service.graphql_enabled);
+        assert!(!service.federation_enabled);
+        assert!(service.service_dir.contains("services/web/frontend"));
+    }
+
+    #[test]
+    fn test_platform_service_name_reuse() {
+        let service = ServiceDefinition::platform("pangea", "auth");
+        assert_eq!(service.name, "pangea");
+        assert_eq!(service.product, "pangea");
+        assert!(service.service_dir.contains("pangea-auth"));
     }
 }

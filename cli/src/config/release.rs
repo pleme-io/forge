@@ -259,3 +259,192 @@ impl EnvironmentsConfig {
         self.environments.keys().cloned().collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_release_config_defaults() {
+        let config = ReleaseConfig::default();
+        assert_eq!(config.default_mode, "staging");
+        assert!(config.active_environments.is_none());
+        assert_eq!(config.environment_order, vec!["staging"]);
+        assert!(!config.wait_between_environments);
+        assert!(!config.continue_on_failure);
+    }
+
+    #[test]
+    fn test_effective_environments_without_active() {
+        let config = ReleaseConfig::default();
+        assert_eq!(config.effective_environments(), &["staging"]);
+    }
+
+    #[test]
+    fn test_effective_environments_with_active() {
+        let config = ReleaseConfig {
+            active_environments: Some(vec!["staging".to_string(), "production".to_string()]),
+            environment_order: vec!["staging".to_string(), "production".to_string(), "production-b".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(config.effective_environments(), &["staging", "production"]);
+    }
+
+    #[test]
+    fn test_should_build_artifact_no_build_envs() {
+        let config = ReleaseConfig::default();
+        assert!(config.should_build_artifact("staging"));
+        assert!(config.should_build_artifact("production"));
+    }
+
+    #[test]
+    fn test_should_build_artifact_with_build_envs() {
+        let config = ReleaseConfig {
+            build_environments: Some(vec!["staging".to_string()]),
+            ..Default::default()
+        };
+        assert!(config.should_build_artifact("staging"));
+        assert!(!config.should_build_artifact("production"));
+    }
+
+    #[test]
+    fn test_validate_invalid_default_mode() {
+        let mut config = ReleaseConfig::default();
+        config.default_mode = "invalid".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_environment_order() {
+        let mut config = ReleaseConfig::default();
+        config.environment_order = vec![];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_active_env_not_in_order() {
+        let config = ReleaseConfig {
+            active_environments: Some(vec!["production".to_string()]),
+            environment_order: vec!["staging".to_string()],
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_active_environments() {
+        let config = ReleaseConfig {
+            active_environments: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_valid_multi_env() {
+        let config = ReleaseConfig {
+            default_mode: "all".to_string(),
+            active_environments: Some(vec!["staging".to_string(), "production".to_string()]),
+            environment_order: vec!["staging".to_string(), "production".to_string()],
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_get_environments_all_mode() {
+        let config = ReleaseConfig {
+            environment_order: vec!["staging".to_string(), "production".to_string()],
+            ..Default::default()
+        };
+        let envs = config.get_environments("all");
+        assert_eq!(envs, vec!["staging", "production"]);
+    }
+
+    #[test]
+    fn test_get_environments_staging_mode() {
+        let config = ReleaseConfig::default();
+        let envs = config.get_environments("staging");
+        assert_eq!(envs, vec!["staging"]);
+    }
+
+    #[test]
+    fn test_get_environments_specific_env() {
+        let config = ReleaseConfig {
+            environment_order: vec!["staging".to_string(), "production".to_string()],
+            ..Default::default()
+        };
+        let envs = config.get_environments("production");
+        assert_eq!(envs, vec!["production"]);
+    }
+
+    #[test]
+    fn test_get_environments_inactive_env_returns_empty() {
+        let config = ReleaseConfig {
+            active_environments: Some(vec!["staging".to_string()]),
+            environment_order: vec!["staging".to_string(), "production".to_string()],
+            ..Default::default()
+        };
+        let envs = config.get_environments("production");
+        assert!(envs.is_empty());
+    }
+
+    #[test]
+    fn test_get_environments_all_mode_respects_active() {
+        let config = ReleaseConfig {
+            active_environments: Some(vec!["staging".to_string()]),
+            environment_order: vec!["staging".to_string(), "production".to_string()],
+            ..Default::default()
+        };
+        let envs = config.get_environments("all");
+        assert_eq!(envs, vec!["staging"]);
+    }
+
+    #[test]
+    fn test_environments_config_get_direct() {
+        let mut envs = EnvironmentsConfig::default();
+        envs.environments.insert("staging".to_string(), EnvironmentConfig {
+            cluster: "primary".to_string(),
+            namespace: "ns".to_string(),
+            architectures: vec!["amd64".to_string()],
+        });
+        let aliases = HashMap::new();
+        assert!(envs.get("staging", &aliases).is_some());
+        assert!(envs.get("production", &aliases).is_none());
+    }
+
+    #[test]
+    fn test_environments_config_get_with_alias() {
+        let mut envs = EnvironmentsConfig::default();
+        envs.environments.insert("production-a".to_string(), EnvironmentConfig {
+            cluster: "c".to_string(),
+            namespace: "ns".to_string(),
+            architectures: vec!["amd64".to_string()],
+        });
+        let mut aliases = HashMap::new();
+        aliases.insert("production".to_string(), "production-a".to_string());
+        assert!(envs.get("production", &aliases).is_some());
+    }
+
+    #[test]
+    fn test_environments_config_names() {
+        let mut envs = EnvironmentsConfig::default();
+        envs.environments.insert("staging".to_string(), EnvironmentConfig {
+            cluster: "c".to_string(),
+            namespace: "ns".to_string(),
+            architectures: vec!["amd64".to_string()],
+        });
+        let names = envs.names();
+        assert_eq!(names.len(), 1);
+        assert!(names.contains(&"staging".to_string()));
+    }
+
+    #[test]
+    fn test_artifact_info_default() {
+        let artifact = ArtifactInfo::default();
+        assert!(artifact.tag.is_empty());
+        assert!(artifact.built_at.is_empty());
+        assert!(artifact.previous_tag.is_empty());
+        assert!(artifact.attestation.is_none());
+    }
+}

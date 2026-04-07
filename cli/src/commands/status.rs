@@ -1427,3 +1427,23 @@ fn print_json_status(status: &ServiceStatus) -> Result<()> {
     println!("{}", json);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_output_format_from_str_json() {
+        assert_eq!(OutputFormat::from_str("json"), OutputFormat::Json);
+        assert_eq!(OutputFormat::from_str("JSON"), OutputFormat::Json);
+        assert_eq!(OutputFormat::from_str("Json"), OutputFormat::Json);
+    }
+
+    #[test]
+    fn test_output_format_from_str_text_default() {
+        assert_eq!(OutputFormat::from_str("text"), OutputFormat::Text);
+        assert_eq!(OutputFormat::from_str(""), OutputFormat::Text);
+        assert_eq!(OutputFormat::from_str("yaml"), OutputFormat::Text);
+        assert_eq!(OutputFormat::from_str("anything"), OutputFormat::Text);
+    }
+}
