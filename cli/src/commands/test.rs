@@ -506,3 +506,48 @@ fn print_success_summary() {
     );
     println!();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_test_type_from_str_unit() {
+        assert_eq!(TestType::from_str("unit").unwrap(), TestType::Unit);
+        assert_eq!(TestType::from_str("Unit").unwrap(), TestType::Unit);
+        assert_eq!(TestType::from_str("UNIT").unwrap(), TestType::Unit);
+    }
+
+    #[test]
+    fn test_test_type_from_str_integration() {
+        assert_eq!(TestType::from_str("integration").unwrap(), TestType::Integration);
+    }
+
+    #[test]
+    fn test_test_type_from_str_all() {
+        assert_eq!(TestType::from_str("all").unwrap(), TestType::All);
+        assert_eq!(TestType::from_str("").unwrap(), TestType::All);
+    }
+
+    #[test]
+    fn test_test_type_from_str_invalid() {
+        assert!(TestType::from_str("smoke").is_err());
+    }
+
+    #[test]
+    fn test_service_type_from_str_rust() {
+        assert_eq!(ServiceType::from_str("rust").unwrap(), ServiceType::Rust);
+        assert_eq!(ServiceType::from_str("Rust").unwrap(), ServiceType::Rust);
+    }
+
+    #[test]
+    fn test_service_type_from_str_web() {
+        assert_eq!(ServiceType::from_str("web").unwrap(), ServiceType::Web);
+    }
+
+    #[test]
+    fn test_service_type_from_str_invalid() {
+        assert!(ServiceType::from_str("python").is_err());
+        assert!(ServiceType::from_str("").is_err());
+    }
+}

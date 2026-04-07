@@ -1280,3 +1280,61 @@ pub async fn execute_pre_deployment_tests(
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_duration_seconds() {
+        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("0s").unwrap(), Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
+        assert_eq!(parse_duration("1m").unwrap(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
+    }
+
+    #[test]
+    fn test_parse_duration_no_suffix_assumes_seconds() {
+        assert_eq!(parse_duration("120").unwrap(), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_parse_duration_whitespace_trimmed() {
+        assert_eq!(parse_duration(" 30s ").unwrap(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_parse_duration_invalid() {
+        assert!(parse_duration("abc").is_err());
+        assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn test_test_counts_total() {
+        let counts = TestCounts {
+            passed: 10,
+            failed: 2,
+            skipped: 3,
+        };
+        assert_eq!(counts.total(), 15);
+    }
+
+    #[test]
+    fn test_test_counts_default() {
+        let counts = TestCounts::default();
+        assert_eq!(counts.passed, 0);
+        assert_eq!(counts.failed, 0);
+        assert_eq!(counts.skipped, 0);
+        assert_eq!(counts.total(), 0);
+    }
+}
