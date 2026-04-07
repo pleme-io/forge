@@ -476,3 +476,243 @@ impl CloudflareConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ab_slice_validate_empty_name() {
+        let slice = AbSliceConfig {
+            name: "  ".to_string(),
+            kustomization: "kust".to_string(),
+            delay_secs: 0,
+        };
+        assert!(slice.validate(0).is_err());
+    }
+
+    #[test]
+    fn test_ab_slice_validate_empty_kustomization() {
+        let slice = AbSliceConfig {
+            name: "a".to_string(),
+            kustomization: "".to_string(),
+            delay_secs: 0,
+        };
+        assert!(slice.validate(0).is_err());
+    }
+
+    #[test]
+    fn test_ab_slice_validate_valid() {
+        let slice = AbSliceConfig {
+            name: "a".to_string(),
+            kustomization: "my-kust".to_string(),
+            delay_secs: 0,
+        };
+        assert!(slice.validate(0).is_ok());
+    }
+
+    #[test]
+    fn test_deployment_config_validate_disabled_passes() {
+        let mut config = DeploymentConfig::default();
+        config.enabled = false;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_deployment_config_validate_empty_flux_commands() {
+        let mut config = DeploymentConfig::default();
+        config.flux_commands = vec![];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_deployment_config_validate_whitespace_flux_command() {
+        let mut config = DeploymentConfig::default();
+        config.flux_commands = vec!["  ".to_string()];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_deployment_config_validate_zero_timeout() {
+        let mut config = DeploymentConfig::default();
+        config.deployment_wait_timeout_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_deployment_config_validate_ab_split_needs_2_slices() {
+        let mut config = DeploymentConfig::default();
+        config.production_strategy = ProductionStrategy::AbSplit;
+        config.ab_slices = vec![AbSliceConfig {
+            name: "a".to_string(),
+            kustomization: "k".to_string(),
+            delay_secs: 0,
+        }];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_deployment_config_validate_ab_split_duplicate_names() {
+        let mut config = DeploymentConfig::default();
+        config.production_strategy = ProductionStrategy::AbSplit;
+        config.ab_slices = vec![
+            AbSliceConfig { name: "a".to_string(), kustomization: "k1".to_string(), delay_secs: 0 },
+            AbSliceConfig { name: "a".to_string(), kustomization: "k2".to_string(), delay_secs: 300 },
+        ];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_deployment_config_validate_ab_split_valid() {
+        let mut config = DeploymentConfig::default();
+        config.production_strategy = ProductionStrategy::AbSplit;
+        config.ab_slices = vec![
+            AbSliceConfig { name: "a".to_string(), kustomization: "k1".to_string(), delay_secs: 0 },
+            AbSliceConfig { name: "b".to_string(), kustomization: "k2".to_string(), delay_secs: 300 },
+        ];
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_deployment_config_default_values() {
+        let config = DeploymentConfig::default();
+        assert!(config.enabled);
+        assert!(!config.skip_flux_health_check);
+        assert!(config.wait_for_rollout);
+        assert_eq!(config.deployment_wait_timeout_secs, 600);
+        assert_eq!(config.nix_connect_timeout_secs, 5);
+        assert_eq!(config.production_strategy, ProductionStrategy::Single);
+        assert!(!config.flux_commands.is_empty());
+    }
+
+    #[test]
+    fn test_pre_deployment_tests_validate_disabled_passes() {
+        let config = PreDeploymentTestsConfig::default();
+        assert!(config.validate("my-svc").is_ok());
+    }
+
+    #[test]
+    fn test_pre_deployment_tests_validate_empty_suite_name() {
+        let config = PreDeploymentTestsConfig {
+            enabled: true,
+            test_suites: vec![PreDeploymentTestSuite {
+                name: "".to_string(),
+                description: "d".to_string(),
+                command: "npm test".to_string(),
+                working_dir: ".".to_string(),
+                timeout: "5m".to_string(),
+                retry_on_failure: false,
+                max_retries: 0,
+            }],
+            execution: PreDeploymentTestExecution::default(),
+            on_failure: PreDeploymentTestOnFailure::default(),
+        };
+        assert!(config.validate("svc").is_err());
+    }
+
+    #[test]
+    fn test_pre_deployment_tests_validate_empty_command() {
+        let config = PreDeploymentTestsConfig {
+            enabled: true,
+            test_suites: vec![PreDeploymentTestSuite {
+                name: "unit".to_string(),
+                description: "d".to_string(),
+                command: "  ".to_string(),
+                working_dir: ".".to_string(),
+                timeout: "5m".to_string(),
+                retry_on_failure: false,
+                max_retries: 0,
+            }],
+            execution: PreDeploymentTestExecution::default(),
+            on_failure: PreDeploymentTestOnFailure::default(),
+        };
+        assert!(config.validate("svc").is_err());
+    }
+
+    #[test]
+    fn test_pre_deployment_tests_validate_invalid_on_failure_action() {
+        let config = PreDeploymentTestsConfig {
+            enabled: true,
+            test_suites: vec![],
+            execution: PreDeploymentTestExecution::default(),
+            on_failure: PreDeploymentTestOnFailure {
+                action: "crash".to_string(),
+                notify: vec![],
+            },
+        };
+        assert!(config.validate("svc").is_err());
+    }
+
+    #[test]
+    fn test_cloudflare_config_validate_disabled_passes() {
+        let config = CloudflareConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_cloudflare_config_validate_enabled_missing_zone_id() {
+        let config = CloudflareConfig {
+            enabled: true,
+            zone_id: None,
+            api_token: Some("tok".into()),
+            base_url: Some("https://example.com".into()),
+            files: vec!["/env.js".into()],
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_cloudflare_config_validate_enabled_missing_api_token() {
+        let config = CloudflareConfig {
+            enabled: true,
+            zone_id: Some("zone".into()),
+            api_token: None,
+            base_url: Some("https://example.com".into()),
+            files: vec!["/env.js".into()],
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_cloudflare_config_validate_enabled_missing_base_url() {
+        let config = CloudflareConfig {
+            enabled: true,
+            zone_id: Some("zone".into()),
+            api_token: Some("tok".into()),
+            base_url: None,
+            files: vec!["/env.js".into()],
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_cloudflare_config_validate_bad_base_url() {
+        let config = CloudflareConfig {
+            enabled: true,
+            zone_id: Some("zone".into()),
+            api_token: Some("tok".into()),
+            base_url: Some("ftp://example.com".into()),
+            files: vec!["/env.js".into()],
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_cloudflare_config_validate_full_valid() {
+        let config = CloudflareConfig {
+            enabled: true,
+            zone_id: Some("zone".into()),
+            api_token: Some("tok".into()),
+            base_url: Some("https://example.com".into()),
+            files: vec!["/env.js".into()],
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_production_strategy_serde_roundtrip() {
+        let json = serde_json::to_string(&ProductionStrategy::AbSplit).unwrap();
+        let deserialized: ProductionStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, ProductionStrategy::AbSplit);
+    }
+}

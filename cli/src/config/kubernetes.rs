@@ -204,3 +204,98 @@ impl ManifestPathsConfig {
             .or(self.kustomization.as_ref())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kubernetes_config_defaults() {
+        let config = KubernetesConfig::default();
+        assert_eq!(config.product_label_key, "product");
+        assert_eq!(config.service_label_key, "app");
+        assert_eq!(config.namespace_pattern, "{product}-{environment}");
+        assert!(config.deployment_name.is_none());
+        assert!(config.additional_labels.is_empty());
+    }
+
+    #[test]
+    fn test_paths_config_defaults() {
+        let config = PathsConfig::default();
+        assert_eq!(config.products_root, "pkgs/products");
+        assert_eq!(config.federation_path, "infrastructure/hive-router");
+        assert_eq!(config.services_path, "services/rust");
+        assert_eq!(config.k8s_root, "nix/k8s/clusters");
+        assert!(config.k8s_manifest_pattern.contains("{cluster}"));
+        assert!(config.k8s_manifest_pattern.contains("{service}"));
+    }
+
+    #[test]
+    fn test_kustomization_for_env_direct_env() {
+        let mut config = ManifestPathsConfig::default();
+        config.environments.insert(
+            "staging".to_string(),
+            ManifestPaths {
+                kustomization: Some("path/to/staging/kustomization.yaml".to_string()),
+                deployment: None,
+                configmap: None,
+            },
+        );
+        assert_eq!(
+            config.kustomization_for_env("staging").unwrap(),
+            "path/to/staging/kustomization.yaml"
+        );
+    }
+
+    #[test]
+    fn test_kustomization_for_env_fallback_to_flat() {
+        let mut config = ManifestPathsConfig::default();
+        config.kustomization = Some("flat/kustomization.yaml".to_string());
+        assert_eq!(
+            config.kustomization_for_env("production").unwrap(),
+            "flat/kustomization.yaml"
+        );
+    }
+
+    #[test]
+    fn test_kustomization_for_env_env_takes_precedence() {
+        let mut config = ManifestPathsConfig::default();
+        config.kustomization = Some("flat/kustomization.yaml".to_string());
+        config.environments.insert(
+            "staging".to_string(),
+            ManifestPaths {
+                kustomization: Some("env/kustomization.yaml".to_string()),
+                deployment: None,
+                configmap: None,
+            },
+        );
+        assert_eq!(
+            config.kustomization_for_env("staging").unwrap(),
+            "env/kustomization.yaml"
+        );
+    }
+
+    #[test]
+    fn test_kustomization_for_env_no_match() {
+        let config = ManifestPathsConfig::default();
+        assert!(config.kustomization_for_env("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_kustomization_for_env_env_exists_but_no_kustomization() {
+        let mut config = ManifestPathsConfig::default();
+        config.environments.insert(
+            "staging".to_string(),
+            ManifestPaths {
+                kustomization: None,
+                deployment: Some("deployment.yaml".to_string()),
+                configmap: None,
+            },
+        );
+        config.kustomization = Some("flat/kustomization.yaml".to_string());
+        assert_eq!(
+            config.kustomization_for_env("staging").unwrap(),
+            "flat/kustomization.yaml"
+        );
+    }
+}
