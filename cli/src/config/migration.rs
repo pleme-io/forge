@@ -318,3 +318,160 @@ fn default_search_api_url() -> String {
 fn default_search_timeout() -> u64 {
     120
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_memory_format_mi() {
+        assert_eq!(validate_memory_format("128Mi").unwrap(), 128 * 1024 * 1024);
+        assert_eq!(validate_memory_format("1Mi").unwrap(), 1024 * 1024);
+    }
+
+    #[test]
+    fn test_validate_memory_format_gi() {
+        assert_eq!(validate_memory_format("1Gi").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(validate_memory_format("2Gi").unwrap(), 2 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_validate_memory_format_decimal_units() {
+        assert_eq!(validate_memory_format("1G").unwrap(), 1_000_000_000);
+        assert_eq!(validate_memory_format("500M").unwrap(), 500_000_000);
+    }
+
+    #[test]
+    fn test_validate_memory_format_invalid_unit() {
+        assert!(validate_memory_format("128Ki").is_err());
+        assert!(validate_memory_format("128").is_err());
+        assert!(validate_memory_format("abc").is_err());
+    }
+
+    #[test]
+    fn test_validate_memory_format_non_numeric() {
+        assert!(validate_memory_format("abcMi").is_err());
+    }
+
+    #[test]
+    fn test_validate_memory_format_too_large() {
+        assert!(validate_memory_format("2048Gi").is_err());
+    }
+
+    #[test]
+    fn test_validate_memory_format_whitespace_trimmed() {
+        assert!(validate_memory_format(" 128Mi ").is_ok());
+    }
+
+    #[test]
+    fn test_validate_cpu_format_millicores() {
+        assert_eq!(validate_cpu_format("100m").unwrap(), 100);
+        assert_eq!(validate_cpu_format("500m").unwrap(), 500);
+        assert_eq!(validate_cpu_format("1000m").unwrap(), 1000);
+    }
+
+    #[test]
+    fn test_validate_cpu_format_decimal_cores() {
+        assert_eq!(validate_cpu_format("0.5").unwrap(), 500);
+        assert_eq!(validate_cpu_format("2").unwrap(), 2000);
+        assert_eq!(validate_cpu_format("1.5").unwrap(), 1500);
+    }
+
+    #[test]
+    fn test_validate_cpu_format_invalid() {
+        assert!(validate_cpu_format("abcm").is_err());
+        assert!(validate_cpu_format("abc").is_err());
+    }
+
+    #[test]
+    fn test_validate_cpu_format_too_large() {
+        assert!(validate_cpu_format("200000m").is_err());
+    }
+
+    #[test]
+    fn test_validate_cpu_format_whitespace_trimmed() {
+        assert!(validate_cpu_format(" 100m ").is_ok());
+    }
+
+    #[test]
+    fn test_service_migration_config_validate_default_passes() {
+        let config = ServiceMigrationConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_service_migration_config_validate_memory_request_exceeds_limit() {
+        let mut config = ServiceMigrationConfig::default();
+        config.memory_request = "512Mi".to_string();
+        config.memory_limit = "256Mi".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_service_migration_config_validate_cpu_request_exceeds_limit() {
+        let mut config = ServiceMigrationConfig::default();
+        config.cpu_request = "1000m".to_string();
+        config.cpu_limit = "500m".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_service_migration_config_validate_invalid_database_type() {
+        let mut config = ServiceMigrationConfig::default();
+        config.database_type = "redis".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_service_migration_config_validate_all_valid_db_types() {
+        for db_type in ["postgres", "postgresql", "databend", "clickhouse", "elasticsearch", "meilisearch", "none"] {
+            let mut config = ServiceMigrationConfig::default();
+            config.database_type = db_type.to_string();
+            assert!(config.validate().is_ok(), "Expected '{}' to be valid", db_type);
+        }
+    }
+
+    #[test]
+    fn test_service_migration_config_validate_empty_schema_path() {
+        let mut config = ServiceMigrationConfig::default();
+        config.schema_migrations = true;
+        config.schema_migrations_path = "".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_service_migration_config_validate_empty_data_path() {
+        let mut config = ServiceMigrationConfig::default();
+        config.data_migrations = true;
+        config.data_migrations_path = "".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_service_migration_config_validate_shinka_timeout_bounds() {
+        let mut config = ServiceMigrationConfig::default();
+        config.shinka_gating = true;
+        config.shinka_timeout_secs = 10;
+        assert!(config.validate().is_err());
+
+        config.shinka_timeout_secs = 2000;
+        assert!(config.validate().is_err());
+
+        config.shinka_timeout_secs = 600;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_service_migration_config_validate_invalid_memory_format() {
+        let mut config = ServiceMigrationConfig::default();
+        config.memory_request = "invalid".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_service_migration_config_validate_invalid_cpu_format() {
+        let mut config = ServiceMigrationConfig::default();
+        config.cpu_request = "invalid".to_string();
+        assert!(config.validate().is_err());
+    }
+}

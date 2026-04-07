@@ -559,3 +559,207 @@ impl Default for NixConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_config_defaults() {
+        let config = ConnectionConfig::default();
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 5432);
+        assert_eq!(config.admin_user, "postgres");
+        assert_eq!(config.admin_database, "postgres");
+        assert_eq!(config.retry_interval_secs, 2);
+        assert_eq!(config.max_retry_attempts, 30);
+        assert_eq!(config.connection_timeout_secs, 10);
+        assert_eq!(config.max_connections, 2);
+    }
+
+    #[test]
+    fn test_connection_config_validate_default_passes() {
+        let config = ConnectionConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_connection_config_validate_zero_port() {
+        let mut config = ConnectionConfig::default();
+        config.port = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_connection_config_validate_retry_interval_out_of_range() {
+        let mut config = ConnectionConfig::default();
+        config.retry_interval_secs = 0;
+        assert!(config.validate().is_err());
+
+        config.retry_interval_secs = 100;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_connection_config_validate_max_retry_too_high() {
+        let mut config = ConnectionConfig::default();
+        config.max_retry_attempts = 1001;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_connection_config_validate_timeout_out_of_range() {
+        let mut config = ConnectionConfig::default();
+        config.connection_timeout_secs = 0;
+        assert!(config.validate().is_err());
+
+        config.connection_timeout_secs = 301;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_connection_config_validate_max_connections_out_of_range() {
+        let mut config = ConnectionConfig::default();
+        config.max_connections = 0;
+        assert!(config.validate().is_err());
+
+        config.max_connections = 51;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_attic_provision_config_validate_empty_cache_name() {
+        let config = AtticProvisionConfig {
+            cache_name: "".to_string(),
+            server: AtticServerConfig::default(),
+            cache: CacheConfig::default(),
+            token_env: "TOKEN".to_string(),
+            config_dir: "/tmp".to_string(),
+            http_timeout_secs: 30,
+            http_max_retries: 3,
+            http_retry_interval_secs: 2,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_attic_provision_config_validate_timeout_out_of_range() {
+        let config = AtticProvisionConfig {
+            cache_name: "cache".to_string(),
+            server: AtticServerConfig::default(),
+            cache: CacheConfig::default(),
+            token_env: "TOKEN".to_string(),
+            config_dir: "/tmp".to_string(),
+            http_timeout_secs: 1,
+            http_max_retries: 3,
+            http_retry_interval_secs: 2,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_attic_provision_config_validate_max_retries_too_high() {
+        let config = AtticProvisionConfig {
+            cache_name: "cache".to_string(),
+            server: AtticServerConfig::default(),
+            cache: CacheConfig::default(),
+            token_env: "TOKEN".to_string(),
+            config_dir: "/tmp".to_string(),
+            http_timeout_secs: 30,
+            http_max_retries: 11,
+            http_retry_interval_secs: 2,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_attic_provision_config_validate_retry_interval_out_of_range() {
+        let config = AtticProvisionConfig {
+            cache_name: "cache".to_string(),
+            server: AtticServerConfig::default(),
+            cache: CacheConfig::default(),
+            token_env: "TOKEN".to_string(),
+            config_dir: "/tmp".to_string(),
+            http_timeout_secs: 30,
+            http_max_retries: 3,
+            http_retry_interval_secs: 0,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_attic_provision_config_validate_valid() {
+        let config = AtticProvisionConfig {
+            cache_name: "cache".to_string(),
+            server: AtticServerConfig::default(),
+            cache: CacheConfig::default(),
+            token_env: "TOKEN".to_string(),
+            config_dir: "/tmp".to_string(),
+            http_timeout_secs: 30,
+            http_max_retries: 3,
+            http_retry_interval_secs: 2,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_attic_server_config_defaults() {
+        let config = AtticServerConfig::default();
+        assert_eq!(config.endpoint, "http://attic-cache:80");
+        assert_eq!(config.name, "local");
+    }
+
+    #[test]
+    fn test_cache_config_defaults() {
+        let config = CacheConfig::default();
+        assert!(!config.is_public);
+        assert_eq!(config.store_dir, "/nix/store");
+        assert_eq!(config.priority, 40);
+        assert_eq!(config.keypair_strategy, "Generate");
+    }
+
+    #[test]
+    fn test_ssh_config_defaults() {
+        let config = SshConfig::default();
+        assert_eq!(config.port, 22);
+        assert!(config.permit_root_login);
+        assert!(!config.use_pam);
+        assert!(config.host_key_types.contains(&"rsa".to_string()));
+        assert!(config.host_key_types.contains(&"ed25519".to_string()));
+    }
+
+    #[test]
+    fn test_nix_config_defaults() {
+        let config = NixConfig::default();
+        assert!(!config.substituters.is_empty());
+        assert!(!config.trusted_public_keys.is_empty());
+        assert_eq!(config.max_jobs, "auto");
+        assert_eq!(config.cores, 4);
+        assert!(config.experimental_features.contains(&"flakes".to_string()));
+    }
+
+    #[test]
+    fn test_postgres_config_yaml_roundtrip() {
+        let yaml = r#"
+connection:
+  host: "db.example.com"
+  port: 5433
+database:
+  name: "mydb"
+  schema: "public"
+user:
+  name: "appuser"
+  password_env: "DB_PASSWORD"
+extensions:
+  - "uuid-ossp"
+  - "pg_trgm"
+"#;
+        let config: PostgresConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.connection.host, "db.example.com");
+        assert_eq!(config.connection.port, 5433);
+        assert_eq!(config.database.name, "mydb");
+        assert_eq!(config.user.name, "appuser");
+        assert_eq!(config.extensions.len(), 2);
+        assert!(config.cdc.is_none());
+    }
+}

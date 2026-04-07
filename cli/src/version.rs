@@ -206,4 +206,101 @@ mod tests {
         std::fs::write(&path, "{\"name\": \"test\", \"version\": \"3.0.1\"}").unwrap();
         assert_eq!(read_package_json_version(&path).unwrap(), "3.0.1");
     }
+
+    #[test]
+    fn test_parse_semver_non_numeric_component() {
+        assert!(parse_semver("1.a.3").is_err());
+        assert!(parse_semver("x.2.3").is_err());
+        assert!(parse_semver("1.2.z").is_err());
+    }
+
+    #[test]
+    fn test_parse_semver_empty_string() {
+        assert!(parse_semver("").is_err());
+    }
+
+    #[test]
+    fn test_bump_semver_from_zero() {
+        assert_eq!(bump_semver("0.0.0", "patch").unwrap(), "0.0.1");
+        assert_eq!(bump_semver("0.0.0", "minor").unwrap(), "0.1.0");
+        assert_eq!(bump_semver("0.0.0", "major").unwrap(), "1.0.0");
+    }
+
+    #[test]
+    fn test_bump_semver_resets_lower_components() {
+        assert_eq!(bump_semver("1.5.9", "minor").unwrap(), "1.6.0");
+        assert_eq!(bump_semver("3.7.2", "major").unwrap(), "4.0.0");
+    }
+
+    #[test]
+    fn test_read_cargo_version_missing_file() {
+        let path = Path::new("/nonexistent/Cargo.toml");
+        assert!(read_cargo_version(path).is_err());
+    }
+
+    #[test]
+    fn test_read_cargo_version_no_version_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(&path, "[package]\nname = \"test\"\nedition = \"2021\"\n").unwrap();
+        assert!(read_cargo_version(&path).is_err());
+    }
+
+    #[test]
+    fn test_read_zig_version_missing_file() {
+        let path = Path::new("/nonexistent/build.zig.zon");
+        assert!(read_zig_version(path).is_err());
+    }
+
+    #[test]
+    fn test_write_zig_version_no_version_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build.zig.zon");
+        std::fs::write(&path, ".{\n    .name = \"test\",\n}\n").unwrap();
+        assert!(write_zig_version(&path, "1.0.0").is_err());
+    }
+
+    #[test]
+    fn test_read_chart_version_missing_file() {
+        let path = Path::new("/nonexistent/Chart.yaml");
+        assert!(read_chart_version(path).is_err());
+    }
+
+    #[test]
+    fn test_read_chart_version_no_version_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        std::fs::write(&path, "apiVersion: v2\nname: mychart\ntype: application\n").unwrap();
+        assert!(read_chart_version(&path).is_err());
+    }
+
+    #[test]
+    fn test_read_package_json_version_no_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        std::fs::write(&path, "{\"name\": \"test\"}").unwrap();
+        assert!(read_package_json_version(&path).is_err());
+    }
+
+    #[test]
+    fn test_read_package_json_version_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        std::fs::write(&path, "not json at all").unwrap();
+        assert!(read_package_json_version(&path).is_err());
+    }
+
+    #[test]
+    fn test_read_package_json_version_missing_file() {
+        let path = Path::new("/nonexistent/package.json");
+        assert!(read_package_json_version(path).is_err());
+    }
+
+    #[test]
+    fn test_read_cargo_version_with_leading_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(&path, "[package]\nname = \"test\"\n  version = \"2.0.1\"\n").unwrap();
+        assert_eq!(read_cargo_version(&path).unwrap(), "2.0.1");
+    }
 }

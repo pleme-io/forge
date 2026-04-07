@@ -328,3 +328,196 @@ impl ProductConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_product(name: &str) -> ProductConfig {
+        ProductConfig {
+            name: name.to_string(),
+            environment: "staging".to_string(),
+            cluster: "primary".to_string(),
+            release: None,
+            k8s: None,
+            domain: None,
+            observability: ObservabilityConfig::default(),
+            seed: SeedConfig::default(),
+            dirs: DirsConfig::default(),
+            endpoints: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_metric_prefix_default() {
+        let p = make_product("myapp");
+        assert_eq!(p.metric_prefix(), "myapp");
+    }
+
+    #[test]
+    fn test_metric_prefix_override() {
+        let mut p = make_product("myapp");
+        p.observability.metric_prefix = Some("custom_prefix".to_string());
+        assert_eq!(p.metric_prefix(), "custom_prefix");
+    }
+
+    #[test]
+    fn test_dashboard_folder_default() {
+        let p = make_product("myapp");
+        assert_eq!(p.dashboard_folder(), "Myapp");
+    }
+
+    #[test]
+    fn test_dashboard_folder_override() {
+        let mut p = make_product("myapp");
+        p.observability.dashboard_folder = Some("Custom Folder".to_string());
+        assert_eq!(p.dashboard_folder(), "Custom Folder");
+    }
+
+    #[test]
+    fn test_redis_key_prefix_default() {
+        let p = make_product("myapp");
+        assert_eq!(p.redis_key_prefix(), "myapp");
+    }
+
+    #[test]
+    fn test_redis_key_prefix_override() {
+        let mut p = make_product("myapp");
+        p.observability.redis_key_prefix = Some("custom".to_string());
+        assert_eq!(p.redis_key_prefix(), "custom");
+    }
+
+    #[test]
+    fn test_seed_email_domain_default() {
+        let p = make_product("myapp");
+        assert_eq!(p.seed_email_domain(), "@myapp.test");
+    }
+
+    #[test]
+    fn test_seed_email_domain_override() {
+        let mut p = make_product("myapp");
+        p.seed.email_domain = Some("@custom.test".to_string());
+        assert_eq!(p.seed_email_domain(), "@custom.test");
+    }
+
+    #[test]
+    fn test_postgres_cluster_default() {
+        let p = make_product("myapp");
+        assert_eq!(p.postgres_cluster(), "myapp-postgres");
+    }
+
+    #[test]
+    fn test_db_name_default() {
+        let p = make_product("myapp");
+        assert_eq!(p.db_name(), "myapp");
+    }
+
+    #[test]
+    fn test_db_name_override() {
+        let mut p = make_product("myapp");
+        p.seed.db_name = Some("custom_db".to_string());
+        assert_eq!(p.db_name(), "custom_db");
+    }
+
+    #[test]
+    fn test_namespace_for_env_staging() {
+        let p = make_product("myapp");
+        assert_eq!(p.namespace_for_env("staging"), "myapp-staging");
+    }
+
+    #[test]
+    fn test_namespace_for_env_production_simplified() {
+        let p = make_product("myapp");
+        assert_eq!(p.namespace_for_env("production-a"), "myapp-production");
+        assert_eq!(p.namespace_for_env("production-b"), "myapp-production");
+        assert_eq!(p.namespace_for_env("production"), "myapp-production");
+    }
+
+    #[test]
+    fn test_namespace_for_env_custom() {
+        let p = make_product("myapp");
+        assert_eq!(p.namespace_for_env("dev"), "myapp-dev");
+    }
+
+    #[test]
+    fn test_resolve_dir_none() {
+        let p = make_product("myapp");
+        let root = std::path::Path::new("/repo");
+        assert!(p.resolve_dir(root, None).is_none());
+    }
+
+    #[test]
+    fn test_resolve_dir_relative() {
+        let p = make_product("myapp");
+        let root = std::path::Path::new("/repo");
+        let result = p.resolve_dir(root, Some("services/rust/backend"));
+        assert_eq!(result.unwrap(), std::path::PathBuf::from("/repo/services/rust/backend"));
+    }
+
+    #[test]
+    fn test_resolve_dir_absolute() {
+        let p = make_product("myapp");
+        let root = std::path::Path::new("/repo");
+        let result = p.resolve_dir(root, Some("/absolute/path"));
+        assert_eq!(result.unwrap(), std::path::PathBuf::from("/absolute/path"));
+    }
+
+    #[test]
+    fn test_endpoint_url_found() {
+        let mut p = make_product("myapp");
+        let mut staging = std::collections::HashMap::new();
+        staging.insert("health".to_string(), "https://api.staging.myapp.io/health".to_string());
+        p.endpoints.insert("staging".to_string(), staging);
+        assert_eq!(p.endpoint_url("staging", "health"), Some("https://api.staging.myapp.io/health"));
+    }
+
+    #[test]
+    fn test_endpoint_url_not_found() {
+        let p = make_product("myapp");
+        assert!(p.endpoint_url("staging", "health").is_none());
+    }
+
+    #[test]
+    fn test_validate_valid_product() {
+        let p = make_product("myapp");
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_name() {
+        let p = make_product("");
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_uppercase_name() {
+        let p = make_product("MyApp");
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_name_with_underscore() {
+        let p = make_product("my_app");
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_name_with_hyphen_ok() {
+        let p = make_product("my-app");
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_environment() {
+        let mut p = make_product("myapp");
+        p.environment = "".to_string();
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_cluster() {
+        let mut p = make_product("myapp");
+        p.cluster = "".to_string();
+        assert!(p.validate().is_err());
+    }
+}

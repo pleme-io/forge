@@ -269,4 +269,130 @@ mod tests {
         assert!(steps.contains(&ReleaseStep::Deploy));
         assert!(steps.contains(&ReleaseStep::Migrate));
     }
+
+    #[test]
+    fn test_minimal_steps() {
+        let steps = ReleaseConfig::minimal_steps();
+        assert_eq!(steps.len(), 3);
+        assert!(steps.contains(&ReleaseStep::Push));
+        assert!(steps.contains(&ReleaseStep::Deploy));
+        assert!(steps.contains(&ReleaseStep::FluxReconcile));
+        assert!(!steps.contains(&ReleaseStep::Migrate));
+    }
+
+    #[test]
+    fn test_release_config_without_watch() {
+        let config = ReleaseConfig::new("api", "myproduct", "ns").without_watch();
+        assert!(!config.watch_rollout);
+    }
+
+    #[test]
+    fn test_release_config_with_steps() {
+        let custom_steps = vec![ReleaseStep::Build, ReleaseStep::Push];
+        let config = ReleaseConfig::new("api", "myproduct", "ns")
+            .with_steps(custom_steps.clone());
+        assert_eq!(config.steps, custom_steps);
+    }
+
+    #[test]
+    fn test_validate_registry_required_for_push() {
+        let config = ReleaseConfig::new("api", "myproduct", "myproduct-staging")
+            .with_manifest("path/kustomization.yaml")
+            .with_image("result");
+        let result = config.validate();
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("Registry")));
+    }
+
+    #[test]
+    fn test_validate_manifest_required_for_deploy() {
+        let config = ReleaseConfig::new("api", "myproduct", "myproduct-staging")
+            .with_registry("ghcr.io/org/img")
+            .with_image("result");
+        let result = config.validate();
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("Manifest")));
+    }
+
+    #[test]
+    fn test_validate_image_required_for_push() {
+        let config = ReleaseConfig::new("api", "myproduct", "myproduct-staging")
+            .with_registry("ghcr.io/org/img")
+            .with_manifest("path/kustomization.yaml");
+        let result = config.validate();
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("Image")));
+    }
+
+    #[test]
+    fn test_validate_no_registry_needed_without_push() {
+        let config = ReleaseConfig::new("api", "myproduct", "myproduct-staging")
+            .with_steps(vec![ReleaseStep::Build])
+            .with_manifest("path/kustomization.yaml");
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_step_result_success() {
+        let result = StepResult::success(ReleaseStep::Build, Duration::from_secs(10));
+        assert!(result.success);
+        assert!(result.message.is_none());
+        assert_eq!(result.step, ReleaseStep::Build);
+        assert_eq!(result.duration, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_step_result_failure() {
+        let result = StepResult::failure(ReleaseStep::Push, Duration::from_secs(5), "timeout");
+        assert!(!result.success);
+        assert_eq!(result.message.as_deref(), Some("timeout"));
+        assert_eq!(result.step, ReleaseStep::Push);
+    }
+
+    #[test]
+    fn test_release_step_name_and_emoji_all_variants() {
+        let all_steps = vec![
+            ReleaseStep::Build,
+            ReleaseStep::Push,
+            ReleaseStep::Deploy,
+            ReleaseStep::FluxReconcile,
+            ReleaseStep::Migrate,
+            ReleaseStep::ExtractSchema,
+            ReleaseStep::UpdateFederation,
+            ReleaseStep::IntegrationTests,
+            ReleaseStep::Rollout,
+        ];
+        for step in &all_steps {
+            assert!(!step.name().is_empty());
+            assert!(!step.emoji().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_release_phase_equality() {
+        assert_eq!(ReleasePhase::Pending, ReleasePhase::Pending);
+        assert_eq!(ReleasePhase::Completed, ReleasePhase::Completed);
+        assert_eq!(ReleasePhase::Skipped, ReleasePhase::Skipped);
+        assert_eq!(
+            ReleasePhase::InProgress(ReleaseStep::Build),
+            ReleasePhase::InProgress(ReleaseStep::Build)
+        );
+        assert_eq!(
+            ReleasePhase::Failed(ReleaseStep::Push),
+            ReleasePhase::Failed(ReleaseStep::Push)
+        );
+        assert_ne!(ReleasePhase::Pending, ReleasePhase::Completed);
+    }
+
+    #[test]
+    fn test_validate_multiple_errors_accumulated() {
+        let config = ReleaseConfig::new("", "myproduct", "");
+        let result = config.validate();
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.len() >= 2, "Expected at least 2 errors, got {}", errors.len());
+    }
 }

@@ -177,4 +177,161 @@ mod tests {
         let deploy_err: DeployError = registry_err.into();
         assert!(matches!(deploy_err, DeployError::Registry(_)));
     }
+
+    #[test]
+    fn test_registry_error_invalid_format_display() {
+        let err = RegistryError::InvalidFormat {
+            registry: "bad-registry".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("bad-registry"));
+        assert!(msg.contains("Invalid registry format"));
+    }
+
+    #[test]
+    fn test_registry_error_push_failed_display() {
+        let err = RegistryError::PushFailed {
+            attempts: 3,
+            message: "network error".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("3"));
+        assert!(msg.contains("network error"));
+    }
+
+    #[test]
+    fn test_registry_error_image_not_found_display() {
+        let err = RegistryError::ImageNotFound {
+            path: "/tmp/result".to_string(),
+        };
+        assert!(err.to_string().contains("/tmp/result"));
+    }
+
+    #[test]
+    fn test_registry_error_manifest_failed_display() {
+        let err = RegistryError::ManifestFailed {
+            message: "index error".to_string(),
+        };
+        assert!(err.to_string().contains("index error"));
+    }
+
+    #[test]
+    fn test_git_error_variants() {
+        assert!(GitError::NotARepository.to_string().contains("git repository"));
+        assert!(GitError::ShaFailed("bad ref".into()).to_string().contains("bad ref"));
+        assert!(GitError::CommandFailed { command: "push".into() }.to_string().contains("push"));
+        assert!(GitError::DirtyWorkingTree.to_string().contains("Uncommitted"));
+    }
+
+    #[test]
+    fn test_nix_build_error_variants() {
+        assert!(NixBuildError::CargoNixMissing.to_string().contains("Cargo.nix"));
+        let err = NixBuildError::BuildFailed {
+            flake_attr: ".#pkg".into(),
+            message: "eval failed".into(),
+        };
+        assert!(err.to_string().contains(".#pkg"));
+        assert!(NixBuildError::FlakeNotFound { path: "/tmp".into() }.to_string().contains("/tmp"));
+    }
+
+    #[test]
+    fn test_kubernetes_error_variants() {
+        let err = KubernetesError::DeploymentNotFound {
+            name: "web".into(),
+            namespace: "prod".into(),
+        };
+        assert!(err.to_string().contains("web"));
+        assert!(err.to_string().contains("prod"));
+
+        let err = KubernetesError::RolloutTimeout { timeout_secs: 120 };
+        assert!(err.to_string().contains("120"));
+
+        let err = KubernetesError::FluxReconcileFailed { message: "conflict".into() };
+        assert!(err.to_string().contains("conflict"));
+
+        let err = KubernetesError::KustomizationFailed { path: "k/path".into() };
+        assert!(err.to_string().contains("k/path"));
+    }
+
+    #[test]
+    fn test_config_error_variants() {
+        let err = ConfigError::MissingField { field: "name".into() };
+        assert!(err.to_string().contains("name"));
+
+        let err = ConfigError::InvalidValue { field: "port".into(), value: "abc".into() };
+        assert!(err.to_string().contains("port"));
+        assert!(err.to_string().contains("abc"));
+
+        let err = ConfigError::FileNotFound { path: "/etc/config".into() };
+        assert!(err.to_string().contains("/etc/config"));
+
+        let err = ConfigError::ParseError { message: "unexpected token".into() };
+        assert!(err.to_string().contains("unexpected token"));
+    }
+
+    #[test]
+    fn test_migration_error_variants() {
+        let err = MigrationError::JobFailed { job_name: "api-mig".into() };
+        assert!(err.to_string().contains("api-mig"));
+
+        let err = MigrationError::Timeout { timeout_secs: 300 };
+        assert!(err.to_string().contains("300"));
+
+        let err = MigrationError::UnknownDatabaseType { db_type: "redis".into() };
+        assert!(err.to_string().contains("redis"));
+
+        let err = MigrationError::ConnectionFailed { message: "refused".into() };
+        assert!(err.to_string().contains("refused"));
+    }
+
+    #[test]
+    fn test_tool_error_variants() {
+        let err = ToolError::VersionNotFound { manifest: "Cargo.toml".into() };
+        assert!(err.to_string().contains("Cargo.toml"));
+
+        let err = ToolError::UnsupportedLanguage { language: "cobol".into() };
+        assert!(err.to_string().contains("cobol"));
+
+        let err = ToolError::TagAlreadyExists { tag: "v1.0.0".into() };
+        assert!(err.to_string().contains("v1.0.0"));
+
+        let err = ToolError::GitHubReleaseFailed { message: "403".into() };
+        assert!(err.to_string().contains("403"));
+    }
+
+    #[test]
+    fn test_infra_error_variants() {
+        let err = InfraError::DockerNotAvailable { message: "not running".into() };
+        assert!(err.to_string().contains("not running"));
+
+        let err = InfraError::ComposeFileNotFound { path: "docker-compose.yaml".into() };
+        assert!(err.to_string().contains("docker-compose.yaml"));
+
+        let err = InfraError::ServiceTimeout {
+            service: "postgres".into(),
+            timeout_secs: 60,
+        };
+        assert!(err.to_string().contains("postgres"));
+        assert!(err.to_string().contains("60"));
+    }
+
+    #[test]
+    fn test_all_deploy_error_from_conversions() {
+        let _: DeployError = GitError::NotARepository.into();
+        let _: DeployError = NixBuildError::CargoNixMissing.into();
+        let _: DeployError = KubernetesError::RolloutTimeout { timeout_secs: 1 }.into();
+        let _: DeployError = ConfigError::MissingField { field: "x".into() }.into();
+        let _: DeployError = MigrationError::Timeout { timeout_secs: 1 }.into();
+        let _: DeployError = ToolError::TagAlreadyExists { tag: "v1".into() }.into();
+        let _: DeployError = InfraError::DockerNotAvailable { message: "no".into() }.into();
+    }
+
+    #[test]
+    fn test_deploy_error_display_wraps_inner() {
+        let err: DeployError = GitError::NotARepository.into();
+        assert!(err.to_string().contains("Git error"));
+
+        let err: DeployError = ConfigError::MissingField { field: "x".into() }.into();
+        assert!(err.to_string().contains("Configuration error"));
+    }
 }
