@@ -260,10 +260,256 @@ impl<'a> PathBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{
+        DeployConfig, GlobalConfig, ProductConfig, ServiceConfig,
+    };
+
+    fn make_config() -> DeployConfig {
+        let yaml = r#"
+name: cart
+migration:
+  database_type: postgres
+graphql:
+  enabled: false
+federation_tests:
+  enabled: false
+release:
+  default_mode: staging
+"#;
+        let service: ServiceConfig = serde_yaml::from_str(yaml).unwrap();
+        let mut product = ProductConfig {
+            name: "myapp".to_string(),
+            environment: "staging".to_string(),
+            cluster: "primary".to_string(),
+            release: None,
+            k8s: None,
+            domain: None,
+            observability: Default::default(),
+            seed: Default::default(),
+            dirs: Default::default(),
+            endpoints: Default::default(),
+        };
+        // Ensure product validation passes
+        let _ = product.validate();
+
+        DeployConfig {
+            global: GlobalConfig::default(),
+            product,
+            service,
+        }
+    }
+
+    fn make_builder(config: &DeployConfig) -> PathBuilder {
+        PathBuilder {
+            config,
+            repo_root: PathBuf::from("/repo"),
+        }
+    }
 
     #[test]
-    fn test_path_expansion() {
-        // TODO: Add comprehensive tests for path expansion
-        // This requires setting up a mock DeployConfig
+    fn test_expand_pattern_substitutes_all_variables() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let result = builder.expand_pattern("{product}/{service}/{cluster}/{environment}/{namespace}").unwrap();
+        assert_eq!(
+            result,
+            PathBuf::from("/repo/myapp/cart/primary/staging/myapp-staging")
+        );
+    }
+
+    #[test]
+    fn test_k8s_manifest_uses_default_pattern() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let manifest = builder.k8s_manifest().unwrap();
+        assert!(manifest.to_string_lossy().contains("nix/k8s/clusters/primary"));
+        assert!(manifest.to_string_lossy().contains("myapp-staging"));
+        assert!(manifest.to_string_lossy().contains("services/cart"));
+        assert!(manifest.to_string_lossy().ends_with("kustomization.yaml"));
+    }
+
+    #[test]
+    fn test_k8s_service_dir_is_parent_of_manifest() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let manifest = builder.k8s_manifest().unwrap();
+        let service_dir = builder.k8s_service_dir().unwrap();
+        assert_eq!(manifest.parent().unwrap(), service_dir);
+    }
+
+    #[test]
+    fn test_k8s_product_dir() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let dir = builder.k8s_product_dir().unwrap();
+        assert_eq!(
+            dir,
+            PathBuf::from("/repo/nix/k8s/clusters/primary/products/myapp-staging")
+        );
+    }
+
+    #[test]
+    fn test_subgraph_schema_default() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let schema = builder.subgraph_schema().unwrap();
+        assert!(schema.to_string_lossy().contains("pkgs/products/myapp"));
+        assert!(schema.to_string_lossy().ends_with("cart.graphql"));
+    }
+
+    #[test]
+    fn test_subgraph_schema_custom_path() {
+        let mut config = make_config();
+        config.service.graphql.subgraph_path = Some("custom/{service}.gql".to_string());
+        let builder = make_builder(&config);
+        let schema = builder.subgraph_schema().unwrap();
+        assert_eq!(schema, PathBuf::from("/repo/custom/cart.gql"));
+    }
+
+    #[test]
+    fn test_supergraph_router_default() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let router = builder.supergraph_router().unwrap();
+        assert!(router.to_string_lossy().contains("hive-router/supergraph.graphql"));
+    }
+
+    #[test]
+    fn test_supergraph_router_custom_path() {
+        let mut config = make_config();
+        config.service.graphql.supergraph_router_path = Some("custom/supergraph.graphql".to_string());
+        let builder = make_builder(&config);
+        let router = builder.supergraph_router().unwrap();
+        assert_eq!(router, PathBuf::from("/repo/custom/supergraph.graphql"));
+    }
+
+    #[test]
+    fn test_hive_router_deployment_default() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let dep = builder.hive_router_deployment().unwrap();
+        assert!(dep.to_string_lossy().ends_with("hive-router-deployment.yaml"));
+    }
+
+    #[test]
+    fn test_hive_router_deployment_custom_path() {
+        let mut config = make_config();
+        config.service.graphql.hive_router_deployment_path = Some("custom/deployment.yaml".to_string());
+        let builder = make_builder(&config);
+        let dep = builder.hive_router_deployment().unwrap();
+        assert_eq!(dep, PathBuf::from("/repo/custom/deployment.yaml"));
+    }
+
+    #[test]
+    fn test_product_root() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let root = builder.product_root().unwrap();
+        assert_eq!(root, PathBuf::from("/repo/pkgs/products/myapp"));
+    }
+
+    #[test]
+    fn test_service_root() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let root = builder.service_root().unwrap();
+        assert_eq!(root, PathBuf::from("/repo/pkgs/products/myapp/services/rust/cart"));
+    }
+
+    #[test]
+    fn test_version_file() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let v = builder.version_file().unwrap();
+        assert!(v.to_string_lossy().ends_with(".version"));
+    }
+
+    #[test]
+    fn test_nix_result_with_arch() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let r = builder.nix_result("amd64").unwrap();
+        assert!(r.to_string_lossy().ends_with("result-amd64"));
+    }
+
+    #[test]
+    fn test_relative_path_inside_repo() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let abs = PathBuf::from("/repo/some/file.txt");
+        let rel = builder.relative_path(&abs).unwrap();
+        assert_eq!(rel, PathBuf::from("some/file.txt"));
+    }
+
+    #[test]
+    fn test_relative_path_outside_repo_fails() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let abs = PathBuf::from("/other/file.txt");
+        assert!(builder.relative_path(&abs).is_err());
+    }
+
+    #[test]
+    fn test_to_relative_string_inside_repo() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let abs = PathBuf::from("/repo/some/file.txt");
+        assert_eq!(builder.to_relative_string(&abs), "some/file.txt");
+    }
+
+    #[test]
+    fn test_to_relative_string_outside_repo_returns_full_path() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let abs = PathBuf::from("/other/file.txt");
+        assert_eq!(builder.to_relative_string(&abs), "/other/file.txt");
+    }
+
+    #[test]
+    fn test_repo_root_accessor() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        assert_eq!(builder.repo_root(), Path::new("/repo"));
+    }
+
+    #[test]
+    fn test_federation_dir() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let dir = builder.federation_dir().unwrap();
+        assert!(dir.to_string_lossy().contains("infrastructure/hive-router"));
+    }
+
+    #[test]
+    fn test_supergraph_config() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let cfg_path = builder.supergraph_config().unwrap();
+        assert!(cfg_path.to_string_lossy().ends_with("supergraph-config.yaml"));
+    }
+
+    #[test]
+    fn test_subgraphs_dir() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let dir = builder.subgraphs_dir().unwrap();
+        assert!(dir.to_string_lossy().ends_with("subgraphs"));
+    }
+
+    #[test]
+    fn test_k8s_hive_router_dir() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let dir = builder.k8s_hive_router_dir().unwrap();
+        assert!(dir.to_string_lossy().contains("hive-router"));
+        assert!(dir.to_string_lossy().contains("myapp-staging"));
+    }
+
+    #[test]
+    fn test_services_dir() {
+        let config = make_config();
+        let builder = make_builder(&config);
+        let dir = builder.services_dir().unwrap();
+        assert_eq!(dir, PathBuf::from("/repo/pkgs/products/myapp/services/rust"));
     }
 }
