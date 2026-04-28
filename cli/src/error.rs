@@ -34,6 +34,11 @@ pub enum DeployError {
 }
 
 /// Container registry errors
+///
+/// Each fallible operation carries the exact input that failed (registry,
+/// tag, image path) so callers can build precise telemetry, retry the
+/// failing step in isolation, and produce attestation-grade failure
+/// records without reconstructing context from logs.
 #[derive(Error, Debug)]
 pub enum RegistryError {
     #[error("GHCR token not found. Set GHCR_TOKEN env var or authenticate with `gh auth login`")]
@@ -42,14 +47,22 @@ pub enum RegistryError {
     #[error("Invalid registry format: {registry}. Expected: host/organization/project/image")]
     InvalidFormat { registry: String },
 
-    #[error("Push failed after {attempts} attempts: {message}")]
-    PushFailed { attempts: u32, message: String },
+    #[error("Push to {registry}:{tag} failed after {attempts} attempts: {message}")]
+    PushFailed {
+        registry: String,
+        tag: String,
+        attempts: u32,
+        message: String,
+    },
 
-    #[error("Image not found at path: {path}")]
-    ImageNotFound { path: String },
+    #[error("Local image archive not found: {path}")]
+    LocalImageNotFound { path: String },
 
-    #[error("Manifest index creation failed: {message}")]
-    ManifestFailed { message: String },
+    #[error("Remote image not found: {registry}:{tag}")]
+    RemoteImageNotFound { registry: String, tag: String },
+
+    #[error("Manifest index creation failed for {target}: {message}")]
+    ManifestFailed { target: String, message: String },
 }
 
 /// Git operation errors
@@ -191,47 +204,136 @@ mod tests {
     #[test]
     fn test_registry_error_push_failed_display() {
         let err = RegistryError::PushFailed {
+            registry: "ghcr.io/myorg/myproj/svc".to_string(),
+            tag: "amd64-abc1234".to_string(),
             attempts: 3,
             message: "network error".to_string(),
         };
         let msg = err.to_string();
         assert!(msg.contains("3"));
         assert!(msg.contains("network error"));
+        assert!(
+            msg.contains("ghcr.io/myorg/myproj/svc"),
+            "registry must appear in display: {msg}"
+        );
+        assert!(
+            msg.contains("amd64-abc1234"),
+            "tag must appear in display: {msg}"
+        );
     }
 
     #[test]
-    fn test_registry_error_image_not_found_display() {
-        let err = RegistryError::ImageNotFound {
+    fn test_registry_error_local_image_not_found_display() {
+        let err = RegistryError::LocalImageNotFound {
             path: "/tmp/result".to_string(),
         };
         assert!(err.to_string().contains("/tmp/result"));
     }
 
     #[test]
+    fn test_registry_error_remote_image_not_found_display() {
+        let err = RegistryError::RemoteImageNotFound {
+            registry: "ghcr.io/myorg/myproj/svc".to_string(),
+            tag: "amd64-deadbeef".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("ghcr.io/myorg/myproj/svc"));
+        assert!(msg.contains("amd64-deadbeef"));
+    }
+
+    #[test]
     fn test_registry_error_manifest_failed_display() {
         let err = RegistryError::ManifestFailed {
+            target: "ghcr.io/myorg/myproj/svc:abc1234".to_string(),
             message: "index error".to_string(),
         };
-        assert!(err.to_string().contains("index error"));
+        let msg = err.to_string();
+        assert!(msg.contains("index error"));
+        assert!(
+            msg.contains("ghcr.io/myorg/myproj/svc:abc1234"),
+            "target must appear in display: {msg}"
+        );
+    }
+
+    /// Local vs remote image-not-found are distinct conditions and must not
+    /// be representable by a single variant. This test pins the split so a
+    /// future "merge them back" refactor fails the build.
+    #[test]
+    fn test_registry_error_image_not_found_split_is_typed() {
+        fn classify(e: &RegistryError) -> &'static str {
+            match e {
+                RegistryError::LocalImageNotFound { .. } => "local",
+                RegistryError::RemoteImageNotFound { .. } => "remote",
+                _ => "other",
+            }
+        }
+        assert_eq!(
+            classify(&RegistryError::LocalImageNotFound {
+                path: "/tmp/x".into(),
+            }),
+            "local"
+        );
+        assert_eq!(
+            classify(&RegistryError::RemoteImageNotFound {
+                registry: "ghcr.io/o/p/s".into(),
+                tag: "amd64-x".into(),
+            }),
+            "remote"
+        );
+    }
+
+    /// Push failures must always carry the registry+tag they targeted so
+    /// downstream telemetry never has to reconstruct context from log lines.
+    #[test]
+    fn test_registry_error_push_failed_carries_target() {
+        let err = RegistryError::PushFailed {
+            registry: "ghcr.io/o/p/s".into(),
+            tag: "arm64-cafebab".into(),
+            attempts: 2,
+            message: "exit 1".into(),
+        };
+        match err {
+            RegistryError::PushFailed { registry, tag, .. } => {
+                assert_eq!(registry, "ghcr.io/o/p/s");
+                assert_eq!(tag, "arm64-cafebab");
+            }
+            _ => panic!("expected PushFailed"),
+        }
     }
 
     #[test]
     fn test_git_error_variants() {
-        assert!(GitError::NotARepository.to_string().contains("git repository"));
-        assert!(GitError::ShaFailed("bad ref".into()).to_string().contains("bad ref"));
-        assert!(GitError::CommandFailed { command: "push".into() }.to_string().contains("push"));
-        assert!(GitError::DirtyWorkingTree.to_string().contains("Uncommitted"));
+        assert!(GitError::NotARepository
+            .to_string()
+            .contains("git repository"));
+        assert!(GitError::ShaFailed("bad ref".into())
+            .to_string()
+            .contains("bad ref"));
+        assert!(GitError::CommandFailed {
+            command: "push".into()
+        }
+        .to_string()
+        .contains("push"));
+        assert!(GitError::DirtyWorkingTree
+            .to_string()
+            .contains("Uncommitted"));
     }
 
     #[test]
     fn test_nix_build_error_variants() {
-        assert!(NixBuildError::CargoNixMissing.to_string().contains("Cargo.nix"));
+        assert!(NixBuildError::CargoNixMissing
+            .to_string()
+            .contains("Cargo.nix"));
         let err = NixBuildError::BuildFailed {
             flake_attr: ".#pkg".into(),
             message: "eval failed".into(),
         };
         assert!(err.to_string().contains(".#pkg"));
-        assert!(NixBuildError::FlakeNotFound { path: "/tmp".into() }.to_string().contains("/tmp"));
+        assert!(NixBuildError::FlakeNotFound {
+            path: "/tmp".into()
+        }
+        .to_string()
+        .contains("/tmp"));
     }
 
     #[test]
@@ -246,65 +348,96 @@ mod tests {
         let err = KubernetesError::RolloutTimeout { timeout_secs: 120 };
         assert!(err.to_string().contains("120"));
 
-        let err = KubernetesError::FluxReconcileFailed { message: "conflict".into() };
+        let err = KubernetesError::FluxReconcileFailed {
+            message: "conflict".into(),
+        };
         assert!(err.to_string().contains("conflict"));
 
-        let err = KubernetesError::KustomizationFailed { path: "k/path".into() };
+        let err = KubernetesError::KustomizationFailed {
+            path: "k/path".into(),
+        };
         assert!(err.to_string().contains("k/path"));
     }
 
     #[test]
     fn test_config_error_variants() {
-        let err = ConfigError::MissingField { field: "name".into() };
+        let err = ConfigError::MissingField {
+            field: "name".into(),
+        };
         assert!(err.to_string().contains("name"));
 
-        let err = ConfigError::InvalidValue { field: "port".into(), value: "abc".into() };
+        let err = ConfigError::InvalidValue {
+            field: "port".into(),
+            value: "abc".into(),
+        };
         assert!(err.to_string().contains("port"));
         assert!(err.to_string().contains("abc"));
 
-        let err = ConfigError::FileNotFound { path: "/etc/config".into() };
+        let err = ConfigError::FileNotFound {
+            path: "/etc/config".into(),
+        };
         assert!(err.to_string().contains("/etc/config"));
 
-        let err = ConfigError::ParseError { message: "unexpected token".into() };
+        let err = ConfigError::ParseError {
+            message: "unexpected token".into(),
+        };
         assert!(err.to_string().contains("unexpected token"));
     }
 
     #[test]
     fn test_migration_error_variants() {
-        let err = MigrationError::JobFailed { job_name: "api-mig".into() };
+        let err = MigrationError::JobFailed {
+            job_name: "api-mig".into(),
+        };
         assert!(err.to_string().contains("api-mig"));
 
         let err = MigrationError::Timeout { timeout_secs: 300 };
         assert!(err.to_string().contains("300"));
 
-        let err = MigrationError::UnknownDatabaseType { db_type: "redis".into() };
+        let err = MigrationError::UnknownDatabaseType {
+            db_type: "redis".into(),
+        };
         assert!(err.to_string().contains("redis"));
 
-        let err = MigrationError::ConnectionFailed { message: "refused".into() };
+        let err = MigrationError::ConnectionFailed {
+            message: "refused".into(),
+        };
         assert!(err.to_string().contains("refused"));
     }
 
     #[test]
     fn test_tool_error_variants() {
-        let err = ToolError::VersionNotFound { manifest: "Cargo.toml".into() };
+        let err = ToolError::VersionNotFound {
+            manifest: "Cargo.toml".into(),
+        };
         assert!(err.to_string().contains("Cargo.toml"));
 
-        let err = ToolError::UnsupportedLanguage { language: "cobol".into() };
+        let err = ToolError::UnsupportedLanguage {
+            language: "cobol".into(),
+        };
         assert!(err.to_string().contains("cobol"));
 
-        let err = ToolError::TagAlreadyExists { tag: "v1.0.0".into() };
+        let err = ToolError::TagAlreadyExists {
+            tag: "v1.0.0".into(),
+        };
         assert!(err.to_string().contains("v1.0.0"));
 
-        let err = ToolError::GitHubReleaseFailed { message: "403".into() };
+        let err = ToolError::GitHubReleaseFailed {
+            message: "403".into(),
+        };
         assert!(err.to_string().contains("403"));
     }
 
     #[test]
     fn test_infra_error_variants() {
-        let err = InfraError::DockerNotAvailable { message: "not running".into() };
+        let err = InfraError::DockerNotAvailable {
+            message: "not running".into(),
+        };
         assert!(err.to_string().contains("not running"));
 
-        let err = InfraError::ComposeFileNotFound { path: "docker-compose.yaml".into() };
+        let err = InfraError::ComposeFileNotFound {
+            path: "docker-compose.yaml".into(),
+        };
         assert!(err.to_string().contains("docker-compose.yaml"));
 
         let err = InfraError::ServiceTimeout {
@@ -323,7 +456,10 @@ mod tests {
         let _: DeployError = ConfigError::MissingField { field: "x".into() }.into();
         let _: DeployError = MigrationError::Timeout { timeout_secs: 1 }.into();
         let _: DeployError = ToolError::TagAlreadyExists { tag: "v1".into() }.into();
-        let _: DeployError = InfraError::DockerNotAvailable { message: "no".into() }.into();
+        let _: DeployError = InfraError::DockerNotAvailable {
+            message: "no".into(),
+        }
+        .into();
     }
 
     #[test]
