@@ -155,7 +155,7 @@ impl RegistryClient {
     ) -> Result<(), RegistryError> {
         // Verify image exists
         if !tokio::fs::try_exists(image_path).await.unwrap_or(false) {
-            return Err(RegistryError::ImageNotFound {
+            return Err(RegistryError::LocalImageNotFound {
                 path: image_path.to_string(),
             });
         }
@@ -192,12 +192,16 @@ impl RegistryClient {
                 }
                 Ok(status) => {
                     return Err(RegistryError::PushFailed {
+                        registry: registry.to_string(),
+                        tag: tag.to_string(),
                         attempts,
                         message: format!("Exit code: {:?}", status.code()),
                     });
                 }
                 Err(e) => {
                     return Err(RegistryError::PushFailed {
+                        registry: registry.to_string(),
+                        tag: tag.to_string(),
                         attempts,
                         message: e.to_string(),
                     });
@@ -230,20 +234,24 @@ impl RegistryClient {
             .output()
             .await
             .map_err(|e| RegistryError::PushFailed {
+                registry: registry.to_string(),
+                tag: tag.to_string(),
                 attempts: 1,
                 message: format!("skopeo inspect failed: {}", e),
             })?;
 
         if !output.status.success() {
-            return Err(RegistryError::ImageNotFound {
-                path: format!("{}:{}", registry, tag),
+            return Err(RegistryError::RemoteImageNotFound {
+                registry: registry.to_string(),
+                tag: tag.to_string(),
             });
         }
 
         let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if digest.is_empty() {
-            return Err(RegistryError::ImageNotFound {
-                path: format!("{}:{} (empty digest)", registry, tag),
+            return Err(RegistryError::RemoteImageNotFound {
+                registry: registry.to_string(),
+                tag: tag.to_string(),
             });
         }
 
@@ -287,6 +295,8 @@ impl RegistryClient {
     ) -> Result<MultiArchPushResult, RegistryError> {
         if images.is_empty() {
             return Err(RegistryError::PushFailed {
+                registry: registry.to_string(),
+                tag: tag_suffix.to_string(),
                 attempts: 0,
                 message: "No images provided".to_string(),
             });
@@ -320,9 +330,7 @@ impl RegistryClient {
             self.create_manifest_index(registry, &tags, &source_refs)
                 .await?;
 
-            tags.iter()
-                .map(|t| format!("{}:{}", registry, t))
-                .collect()
+            tags.iter().map(|t| format!("{}:{}", registry, t)).collect()
         } else {
             Vec::new()
         };
@@ -368,18 +376,19 @@ impl RegistryClient {
             cmd.stdout(Stdio::inherit());
             cmd.stderr(Stdio::piped());
 
-            let output = cmd.output().await.map_err(|e| RegistryError::ManifestFailed {
-                message: format!("Failed to run regctl: {}", e),
-            })?;
+            let output = cmd
+                .output()
+                .await
+                .map_err(|e| RegistryError::ManifestFailed {
+                    target: target.clone(),
+                    message: format!("Failed to run regctl: {}", e),
+                })?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(RegistryError::ManifestFailed {
-                    message: format!(
-                        "regctl index create failed for {}: {}",
-                        target,
-                        stderr.trim()
-                    ),
+                    target: target.clone(),
+                    message: format!("regctl index create failed: {}", stderr.trim()),
                 });
             }
 
@@ -431,5 +440,51 @@ mod tests {
     fn test_generate_auto_tags() {
         let tags = tokio_test::block_on(generate_auto_tags("amd64", "abc1234"));
         assert_eq!(tags, vec!["amd64-abc1234", "amd64-latest"]);
+    }
+
+    /// Pushing a non-existent local archive must produce a typed
+    /// `LocalImageNotFound` carrying the offending path — not a stringly
+    /// `PushFailed`. This pins the discriminator so callers can pattern-match
+    /// "missing local artifact" without parsing error strings.
+    #[test]
+    fn test_push_missing_local_archive_returns_local_image_not_found() {
+        let client = RegistryClient::new(RegistryCredentials::new("org", "tok"));
+        let missing = "/tmp/forge-test-missing-image-archive-does-not-exist";
+        let err = tokio_test::block_on(client.push_with_retries(
+            missing,
+            "ghcr.io/o/p/s",
+            "amd64-deadbeef",
+            1,
+        ))
+        .expect_err("push of nonexistent archive must fail");
+        match err {
+            RegistryError::LocalImageNotFound { path } => assert_eq!(path, missing),
+            other => panic!("expected LocalImageNotFound, got: {other:?}"),
+        }
+    }
+
+    /// Multi-arch push with empty image list must surface the registry +
+    /// tag_suffix it was invoked with. This guarantees structured
+    /// provenance even on the trivially-empty input failure path.
+    #[test]
+    fn test_push_multiarch_empty_carries_target() {
+        let client = RegistryClient::new(RegistryCredentials::new("org", "tok"));
+        let registry = "ghcr.io/o/p/s";
+        let suffix = "abc1234";
+        let err = tokio_test::block_on(client.push_multiarch(registry, &[], suffix))
+            .expect_err("empty multiarch push must fail");
+        match err {
+            RegistryError::PushFailed {
+                registry: r,
+                tag,
+                attempts,
+                ..
+            } => {
+                assert_eq!(r, registry);
+                assert_eq!(tag, suffix);
+                assert_eq!(attempts, 0);
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
+        }
     }
 }
