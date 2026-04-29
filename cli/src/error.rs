@@ -31,6 +31,9 @@ pub enum DeployError {
 
     #[error("Infrastructure error: {0}")]
     Infra(#[from] InfraError),
+
+    #[error("Attic cache error: {0}")]
+    Attic(#[from] AtticError),
 }
 
 /// Container registry errors
@@ -173,6 +176,43 @@ pub enum ToolError {
 
     #[error("GitHub release failed: {message}")]
     GitHubReleaseFailed { message: String },
+}
+
+/// Attic binary cache errors
+///
+/// Each variant carries the cache name (and, where applicable, the
+/// offending store path or server URL) so callers can attach failure
+/// records to the exact attic step without parsing log output.
+/// `PushFailed` and `LoginFailed` keep `exit_code` and `stderr` as
+/// separate fields rather than fused into a single message string so
+/// downstream telemetry, retry, and Phase 1 attestation records can
+/// pattern-match on the failure shape (THEORY §V.4). The split between
+/// `ExecFailed` (could not spawn `attic`) and the operation-specific
+/// failure variants matches the pattern already established for
+/// `NixBuildError` and `RegistryError`.
+#[derive(Error, Debug)]
+pub enum AtticError {
+    #[error("Failed to spawn attic for cache {cache}: {message}")]
+    ExecFailed { cache: String, message: String },
+
+    #[error("Attic push to cache {cache} of {store_path} failed (exit {exit_code:?}): {stderr}")]
+    PushFailed {
+        cache: String,
+        store_path: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+
+    #[error("Attic login to {server_url} for cache {cache} failed (exit {exit_code:?}): {stderr}")]
+    LoginFailed {
+        cache: String,
+        server_url: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+
+    #[error("Attic login to {server_url} for cache {cache} requires a token (none provided)")]
+    TokenRequired { cache: String, server_url: String },
 }
 
 /// Infrastructure errors (docker, compose, services)
@@ -561,6 +601,156 @@ mod tests {
             message: "no".into(),
         }
         .into();
+        let _: DeployError = AtticError::ExecFailed {
+            cache: "c".into(),
+            message: "m".into(),
+        }
+        .into();
+    }
+
+    #[test]
+    fn test_attic_error_exec_failed_display() {
+        let err = AtticError::ExecFailed {
+            cache: "main".into(),
+            message: "No such file or directory".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("main"), "cache must appear: {msg}");
+        assert!(msg.contains("No such file"), "message must appear: {msg}");
+    }
+
+    #[test]
+    fn test_attic_error_push_failed_display() {
+        let err = AtticError::PushFailed {
+            cache: "main".into(),
+            store_path: "/nix/store/abc-foo".into(),
+            exit_code: Some(2),
+            stderr: "unauthorized".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("main"), "cache must appear: {msg}");
+        assert!(
+            msg.contains("/nix/store/abc-foo"),
+            "store_path must appear: {msg}"
+        );
+        assert!(msg.contains('2'), "exit code must appear: {msg}");
+        assert!(msg.contains("unauthorized"), "stderr must appear: {msg}");
+    }
+
+    #[test]
+    fn test_attic_error_login_failed_display() {
+        let err = AtticError::LoginFailed {
+            cache: "main".into(),
+            server_url: "https://attic.example.com".into(),
+            exit_code: Some(1),
+            stderr: "bad creds".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("main"), "cache must appear: {msg}");
+        assert!(
+            msg.contains("https://attic.example.com"),
+            "server_url must appear: {msg}"
+        );
+        assert!(msg.contains("bad creds"), "stderr must appear: {msg}");
+    }
+
+    #[test]
+    fn test_attic_error_token_required_display() {
+        let err = AtticError::TokenRequired {
+            cache: "main".into(),
+            server_url: "https://attic.example.com".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("main"));
+        assert!(msg.contains("https://attic.example.com"));
+        assert!(msg.contains("token"));
+    }
+
+    /// Exec / push / login / token-required are distinct conditions and must
+    /// not be representable by a single fused-message variant. Pinning the
+    /// discriminator lets downstream code pattern-match on the failure shape
+    /// without parsing strings — same arc as RegistryError and NixBuildError.
+    #[test]
+    fn test_attic_error_failure_split_is_typed() {
+        fn classify(e: &AtticError) -> &'static str {
+            match e {
+                AtticError::ExecFailed { .. } => "exec",
+                AtticError::PushFailed { .. } => "push",
+                AtticError::LoginFailed { .. } => "login",
+                AtticError::TokenRequired { .. } => "token",
+            }
+        }
+        assert_eq!(
+            classify(&AtticError::ExecFailed {
+                cache: "c".into(),
+                message: "m".into(),
+            }),
+            "exec"
+        );
+        assert_eq!(
+            classify(&AtticError::PushFailed {
+                cache: "c".into(),
+                store_path: "/nix/store/x".into(),
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "push"
+        );
+        assert_eq!(
+            classify(&AtticError::LoginFailed {
+                cache: "c".into(),
+                server_url: "u".into(),
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "login"
+        );
+        assert_eq!(
+            classify(&AtticError::TokenRequired {
+                cache: "c".into(),
+                server_url: "u".into(),
+            }),
+            "token"
+        );
+    }
+
+    /// `PushFailed` must surface both the cache and the store_path it was
+    /// invoked with — never only embed them in stderr — so attestation
+    /// records and retry schedulers can recover the inputs without log
+    /// scraping (THEORY §V.4).
+    #[test]
+    fn test_attic_error_push_failed_carries_inputs() {
+        let err = AtticError::PushFailed {
+            cache: "prod-cache".into(),
+            store_path: "/nix/store/abcdef-pkg".into(),
+            exit_code: Some(11),
+            stderr: "error: connection refused".into(),
+        };
+        match err {
+            AtticError::PushFailed {
+                cache,
+                store_path,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cache, "prod-cache");
+                assert_eq!(store_path, "/nix/store/abcdef-pkg");
+                assert_eq!(exit_code, Some(11));
+                assert!(stderr.contains("connection refused"));
+            }
+            _ => panic!("expected PushFailed"),
+        }
+    }
+
+    #[test]
+    fn test_attic_deploy_error_wraps_inner() {
+        let err: DeployError = AtticError::ExecFailed {
+            cache: "c".into(),
+            message: "x".into(),
+        }
+        .into();
+        assert!(matches!(err, DeployError::Attic(_)));
+        assert!(err.to_string().contains("Attic cache error"));
     }
 
     #[test]
