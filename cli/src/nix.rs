@@ -8,6 +8,9 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, info};
 
+use crate::error::NixBuildError;
+use crate::repo::get_tool_path;
+
 /// Result of a Nix build operation
 #[derive(Debug, Clone)]
 pub struct NixBuildResult {
@@ -18,6 +21,57 @@ pub struct NixBuildResult {
     pub flake_attr: String,
 }
 
+/// Run `nix build` with the given args and return the resulting store path.
+///
+/// `label` is the human-readable identifier (flake attribute or full
+/// flake reference) attached to any returned `NixBuildError` so failure
+/// records carry the offending input by construction.
+///
+/// Returns typed errors:
+/// - [`NixBuildError::ExecFailed`] when `nix` cannot be spawned.
+/// - [`NixBuildError::BuildFailed`] when nix exits non-zero. `exit_code`
+///   and `stderr` are kept as separate fields rather than fused into a
+///   single message so downstream telemetry / retry / Phase 1
+///   attestation can pattern-match on the failure shape.
+/// - [`NixBuildError::EmptyStorePath`] when nix exits zero but prints no
+///   store path — a contract violation that callers must distinguish
+///   from a real build failure.
+async fn run_nix_build_typed(
+    nix_bin: &str,
+    args: &[&str],
+    label: &str,
+) -> Result<String, NixBuildError> {
+    debug!("{} {}", nix_bin, args.join(" "));
+
+    let output = Command::new(nix_bin)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| NixBuildError::ExecFailed {
+            flake_attr: label.to_string(),
+            message: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        return Err(NixBuildError::BuildFailed {
+            flake_attr: label.to_string(),
+            exit_code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if store_path.is_empty() {
+        return Err(NixBuildError::EmptyStorePath {
+            flake_attr: label.to_string(),
+        });
+    }
+
+    Ok(store_path)
+}
+
 /// Build a Nix flake attribute and return the store path
 ///
 /// # Arguments
@@ -26,7 +80,9 @@ pub struct NixBuildResult {
 ///
 /// # Errors
 ///
-/// Returns an error if the nix build command fails.
+/// Returns an error if the nix build command fails. The underlying
+/// [`NixBuildError`] is preserved across the anyhow boundary and can be
+/// recovered with `err.downcast_ref::<NixBuildError>()`.
 ///
 /// # Examples
 ///
@@ -38,44 +94,19 @@ pub async fn build_flake_attr(flake_attr: &str) -> Result<NixBuildResult> {
     debug!("Building Nix flake attribute: {}", flake_attr);
 
     // --impure required for path inputs like substrate in the root flake
-    let output = Command::new("nix")
-        .args([
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let store_path = run_nix_build_typed(
+        &nix_bin,
+        &[
             "build",
             flake_attr,
             "--no-link",
             "--print-out-paths",
             "--impure",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .context("Failed to execute nix build command")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        anyhow::bail!(
-            "Nix build failed for {}\n\n  \
-             Exit code: {:?}\n  \
-             Stderr: {}\n  \
-             Stdout: {}",
-            flake_attr,
-            output.status.code(),
-            stderr.trim(),
-            stdout.trim()
-        );
-    }
-
-    let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    if store_path.is_empty() {
-        anyhow::bail!(
-            "Nix build succeeded but returned empty path for {}",
-            flake_attr
-        );
-    }
+        ],
+        flake_attr,
+    )
+    .await?;
 
     debug!("Built {} at: {}", flake_attr, store_path);
 
@@ -143,39 +174,13 @@ pub async fn build_docker_image_from_dir(
     );
     debug!("Flake reference: {}", flake_ref);
 
-    // Build from the specific flake directory
-    let output = Command::new("nix")
-        .args(["build", &flake_ref, "--no-link", "--print-out-paths"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .context("Failed to execute nix build command")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        anyhow::bail!(
-            "Nix build failed for {}\n\n  \
-             Exit code: {:?}\n  \
-             Stderr: {}\n  \
-             Stdout: {}",
-            flake_ref,
-            output.status.code(),
-            stderr.trim(),
-            stdout.trim()
-        );
-    }
-
-    let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    if store_path.is_empty() {
-        anyhow::bail!(
-            "Nix build succeeded but returned empty path for {}",
-            flake_ref
-        );
-    }
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let store_path = run_nix_build_typed(
+        &nix_bin,
+        &["build", &flake_ref, "--no-link", "--print-out-paths"],
+        &flake_ref,
+    )
+    .await?;
 
     info!("   ✅ Built: {}", store_path);
 
@@ -287,5 +292,100 @@ mod tests {
         // This should fail because the attribute doesn't exist
         let result = build_flake_attr(".#nonexistent-package-xyz").await;
         assert!(result.is_err());
+    }
+
+    /// Write an executable shim script that pretends to be `nix`. The
+    /// returned tempdir keeps the shim alive until the caller drops it.
+    /// Tests invoke the shim by absolute path so they don't have to mutate
+    /// global PATH (which races under parallel test execution).
+    fn make_nix_shim(body: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shim = dir.path().join("nix");
+        std::fs::write(&shim, body).expect("write shim");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&shim).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&shim, perms).unwrap();
+        }
+        let path = shim.display().to_string();
+        (dir, path)
+    }
+
+    /// When the resolved nix binary cannot be spawned, `run_nix_build_typed`
+    /// must surface `ExecFailed` carrying the offending label (not a stringly
+    /// anyhow `Failed to execute nix build command`). Pins the typed split
+    /// so telemetry can distinguish "nix missing" from "nix said no".
+    #[tokio::test]
+    async fn test_run_nix_build_typed_exec_failed_carries_label() {
+        // Absolute path that does not exist — Command::spawn fails
+        // deterministically without touching global PATH state.
+        let result = run_nix_build_typed(
+            "/nonexistent/path/to/nix-binary-that-does-not-exist",
+            &["build", ".#x"],
+            ".#x",
+        )
+        .await;
+        let err = result.expect_err("missing nix binary must fail");
+        match err {
+            NixBuildError::ExecFailed { flake_attr, .. } => {
+                assert_eq!(flake_attr, ".#x");
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// Build failures must produce `BuildFailed` carrying the flake
+    /// attribute, an exit code, and the captured stderr — never a fused
+    /// stringly bag. Uses a shim invoked by absolute path so the test is
+    /// hermetic and parallel-safe.
+    #[tokio::test]
+    async fn test_run_nix_build_typed_build_failed_carries_structured_fields() {
+        let (_dir, shim) = make_nix_shim("#!/bin/sh\necho 'attribute foo missing' 1>&2\nexit 7\n");
+        let result = run_nix_build_typed(&shim, &["build", ".#thing"], ".#thing").await;
+        let err = result.expect_err("nonzero exit must fail");
+        match err {
+            NixBuildError::BuildFailed {
+                flake_attr,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(flake_attr, ".#thing");
+                assert_eq!(exit_code, Some(7));
+                assert!(
+                    stderr.contains("attribute foo missing"),
+                    "stderr field must capture the nix stderr verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected BuildFailed, got: {other:?}"),
+        }
+    }
+
+    /// A nix invocation that exits zero with empty stdout must produce
+    /// `EmptyStorePath` — distinct from a real build failure — so callers
+    /// can treat "contract violation" differently from "nix said no".
+    #[tokio::test]
+    async fn test_run_nix_build_typed_empty_store_path() {
+        let (_dir, shim) = make_nix_shim("#!/bin/sh\nexit 0\n");
+        let result = run_nix_build_typed(&shim, &["build", ".#empty"], ".#empty").await;
+        let err = result.expect_err("empty stdout must fail");
+        match err {
+            NixBuildError::EmptyStorePath { flake_attr } => {
+                assert_eq!(flake_attr, ".#empty");
+            }
+            other => panic!("expected EmptyStorePath, got: {other:?}"),
+        }
+    }
+
+    /// On the success path, `run_nix_build_typed` must return the trimmed
+    /// stdout verbatim as the store path.
+    #[tokio::test]
+    async fn test_run_nix_build_typed_success_returns_store_path() {
+        let (_dir, shim) = make_nix_shim("#!/bin/sh\necho '/nix/store/abc123-out'\nexit 0\n");
+        let store_path = run_nix_build_typed(&shim, &["build", ".#ok"], ".#ok")
+            .await
+            .expect("success path");
+        assert_eq!(store_path, "/nix/store/abc123-out");
     }
 }

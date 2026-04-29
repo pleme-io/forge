@@ -82,13 +82,30 @@ pub enum GitError {
 }
 
 /// Nix build errors
+///
+/// Each variant carries the offending flake attribute (or full flake
+/// reference) so callers can attach failure records to the exact build
+/// step without parsing log output. `BuildFailed` keeps `exit_code` and
+/// `stderr` as separate fields rather than a fused `message` string so
+/// downstream telemetry, retry, and Phase 1 attestation records can
+/// pattern-match on the failure shape (THEORY §V.4).
 #[derive(Error, Debug)]
 pub enum NixBuildError {
     #[error("Cargo.nix not found. Run `nix run .#generateCargoNix` first")]
     CargoNixMissing,
 
-    #[error("Build failed for {flake_attr}: {message}")]
-    BuildFailed { flake_attr: String, message: String },
+    #[error("Nix build failed for {flake_attr} (exit {exit_code:?}): {stderr}")]
+    BuildFailed {
+        flake_attr: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+
+    #[error("Nix build for {flake_attr} produced an empty store path")]
+    EmptyStorePath { flake_attr: String },
+
+    #[error("Failed to spawn nix for {flake_attr}: {message}")]
+    ExecFailed { flake_attr: String, message: String },
 
     #[error("Flake not found at {path}")]
     FlakeNotFound { path: String },
@@ -168,10 +185,7 @@ pub enum InfraError {
     ComposeFileNotFound { path: String },
 
     #[error("Service timed out: {service} after {timeout_secs}s")]
-    ServiceTimeout {
-        service: String,
-        timeout_secs: u64,
-    },
+    ServiceTimeout { service: String, timeout_secs: u64 },
 }
 
 #[cfg(test)]
@@ -326,14 +340,101 @@ mod tests {
             .contains("Cargo.nix"));
         let err = NixBuildError::BuildFailed {
             flake_attr: ".#pkg".into(),
-            message: "eval failed".into(),
+            exit_code: Some(101),
+            stderr: "eval failed".into(),
         };
-        assert!(err.to_string().contains(".#pkg"));
+        let msg = err.to_string();
+        assert!(msg.contains(".#pkg"), "flake_attr must appear: {msg}");
+        assert!(msg.contains("101"), "exit_code must appear: {msg}");
+        assert!(msg.contains("eval failed"), "stderr must appear: {msg}");
         assert!(NixBuildError::FlakeNotFound {
             path: "/tmp".into()
         }
         .to_string()
         .contains("/tmp"));
+    }
+
+    /// Build-failed, empty-output, and exec-failed are distinct conditions
+    /// and must not be representable by a single fused-message variant.
+    /// This test pins the discriminator so downstream code can pattern-match
+    /// on the failure shape without parsing strings.
+    #[test]
+    fn test_nix_build_error_failure_split_is_typed() {
+        fn classify(e: &NixBuildError) -> &'static str {
+            match e {
+                NixBuildError::BuildFailed { .. } => "build",
+                NixBuildError::EmptyStorePath { .. } => "empty",
+                NixBuildError::ExecFailed { .. } => "exec",
+                NixBuildError::CargoNixMissing => "cargo_nix",
+                NixBuildError::FlakeNotFound { .. } => "flake",
+            }
+        }
+        assert_eq!(
+            classify(&NixBuildError::BuildFailed {
+                flake_attr: ".#pkg".into(),
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "build"
+        );
+        assert_eq!(
+            classify(&NixBuildError::EmptyStorePath {
+                flake_attr: ".#pkg".into(),
+            }),
+            "empty"
+        );
+        assert_eq!(
+            classify(&NixBuildError::ExecFailed {
+                flake_attr: ".#pkg".into(),
+                message: "no such file".into(),
+            }),
+            "exec"
+        );
+    }
+
+    /// `BuildFailed` must surface the flake_attr it was invoked with — never
+    /// only embed it in stderr — so attestation records and retry schedulers
+    /// can recover the input without log scraping.
+    #[test]
+    fn test_nix_build_error_build_failed_carries_flake_attr() {
+        let err = NixBuildError::BuildFailed {
+            flake_attr: ".#postgres-bootstrap-image".into(),
+            exit_code: Some(1),
+            stderr: "error: attribute 'foo' missing".into(),
+        };
+        match err {
+            NixBuildError::BuildFailed {
+                flake_attr,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(flake_attr, ".#postgres-bootstrap-image");
+                assert_eq!(exit_code, Some(1));
+                assert!(stderr.contains("attribute 'foo' missing"));
+            }
+            _ => panic!("expected BuildFailed"),
+        }
+    }
+
+    #[test]
+    fn test_nix_build_error_empty_store_path_display() {
+        let err = NixBuildError::EmptyStorePath {
+            flake_attr: ".#thing".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(".#thing"));
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn test_nix_build_error_exec_failed_display() {
+        let err = NixBuildError::ExecFailed {
+            flake_attr: ".#thing".into(),
+            message: "No such file or directory".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(".#thing"));
+        assert!(msg.contains("No such file"));
     }
 
     #[test]
