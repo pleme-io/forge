@@ -69,6 +69,16 @@ pub enum RegistryError {
 }
 
 /// Git operation errors
+///
+/// The exec / op / remote-op split mirrors the typed shape adopted on
+/// the registry, nix, and attic surfaces: every fallible call to `git`
+/// surfaces the operation label, the captured exit code, and the
+/// captured stderr as separate fields rather than a fused string. For
+/// network-side operations (push / pull on a specific remote+branch),
+/// `RemoteOpFailed` additionally carries the (remote, branch) tuple so
+/// downstream telemetry, retry schedulers, and Phase 1 attestation
+/// records (THEORY §V.4) can recover the exact endpoint that failed
+/// without parsing log output.
 #[derive(Error, Debug)]
 pub enum GitError {
     #[error("Not a git repository")]
@@ -82,6 +92,25 @@ pub enum GitError {
 
     #[error("Uncommitted changes detected")]
     DirtyWorkingTree,
+
+    #[error("Failed to spawn git for {op}: {message}")]
+    ExecFailed { op: String, message: String },
+
+    #[error("Git {op} failed (exit {exit_code:?}): {stderr}")]
+    OpFailed {
+        op: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+
+    #[error("Git {op} {remote}/{branch} failed (exit {exit_code:?}): {stderr}")]
+    RemoteOpFailed {
+        op: String,
+        remote: String,
+        branch: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
 }
 
 /// Nix build errors
@@ -357,27 +386,186 @@ mod tests {
 
     #[test]
     fn test_git_error_variants() {
-        assert!(GitError::NotARepository
+        assert!(
+            GitError::NotARepository
+                .to_string()
+                .contains("git repository")
+        );
+        assert!(
+            GitError::ShaFailed("bad ref".into())
+                .to_string()
+                .contains("bad ref")
+        );
+        assert!(
+            GitError::CommandFailed {
+                command: "push".into()
+            }
             .to_string()
-            .contains("git repository"));
-        assert!(GitError::ShaFailed("bad ref".into())
-            .to_string()
-            .contains("bad ref"));
-        assert!(GitError::CommandFailed {
-            command: "push".into()
+            .contains("push")
+        );
+        assert!(
+            GitError::DirtyWorkingTree
+                .to_string()
+                .contains("Uncommitted")
+        );
+    }
+
+    #[test]
+    fn test_git_error_exec_failed_display() {
+        let err = GitError::ExecFailed {
+            op: "rev-parse".into(),
+            message: "No such file or directory".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("rev-parse"), "op must appear: {msg}");
+        assert!(msg.contains("No such file"), "message must appear: {msg}");
+    }
+
+    #[test]
+    fn test_git_error_op_failed_display() {
+        let err = GitError::OpFailed {
+            op: "status".into(),
+            exit_code: Some(128),
+            stderr: "fatal: not a git repository".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("status"), "op must appear: {msg}");
+        assert!(msg.contains("128"), "exit_code must appear: {msg}");
+        assert!(
+            msg.contains("not a git repository"),
+            "stderr must appear: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_git_error_remote_op_failed_display() {
+        let err = GitError::RemoteOpFailed {
+            op: "push".into(),
+            remote: "origin".into(),
+            branch: "main".into(),
+            exit_code: Some(1),
+            stderr: "rejected (non-fast-forward)".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("push"), "op must appear: {msg}");
+        assert!(msg.contains("origin"), "remote must appear: {msg}");
+        assert!(msg.contains("main"), "branch must appear: {msg}");
+        assert!(msg.contains('1'), "exit_code must appear: {msg}");
+        assert!(
+            msg.contains("non-fast-forward"),
+            "stderr must appear: {msg}"
+        );
+    }
+
+    /// Exec / op / remote-op are distinct conditions and must not be
+    /// representable by a single fused-message variant. Pinning the
+    /// discriminator lets downstream code pattern-match on the failure
+    /// shape without parsing strings — same arc as RegistryError,
+    /// NixBuildError, and AtticError.
+    #[test]
+    fn test_git_error_failure_split_is_typed() {
+        fn classify(e: &GitError) -> &'static str {
+            match e {
+                GitError::NotARepository => "not_a_repo",
+                GitError::ShaFailed(_) => "sha",
+                GitError::CommandFailed { .. } => "command",
+                GitError::DirtyWorkingTree => "dirty",
+                GitError::ExecFailed { .. } => "exec",
+                GitError::OpFailed { .. } => "op",
+                GitError::RemoteOpFailed { .. } => "remote_op",
+            }
         }
-        .to_string()
-        .contains("push"));
-        assert!(GitError::DirtyWorkingTree
-            .to_string()
-            .contains("Uncommitted"));
+        assert_eq!(
+            classify(&GitError::ExecFailed {
+                op: "x".into(),
+                message: "m".into(),
+            }),
+            "exec"
+        );
+        assert_eq!(
+            classify(&GitError::OpFailed {
+                op: "x".into(),
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "op"
+        );
+        assert_eq!(
+            classify(&GitError::RemoteOpFailed {
+                op: "push".into(),
+                remote: "origin".into(),
+                branch: "main".into(),
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "remote_op"
+        );
+    }
+
+    /// `RemoteOpFailed` must surface the (op, remote, branch) tuple it
+    /// was invoked with — never only embed it in stderr — so attestation
+    /// records and retry schedulers can recover the failing endpoint
+    /// without log scraping (THEORY §V.4).
+    #[test]
+    fn test_git_error_remote_op_failed_carries_endpoint() {
+        let err = GitError::RemoteOpFailed {
+            op: "pull".into(),
+            remote: "origin".into(),
+            branch: "release/1.2".into(),
+            exit_code: Some(128),
+            stderr: "could not resolve hostname".into(),
+        };
+        match err {
+            GitError::RemoteOpFailed {
+                op,
+                remote,
+                branch,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "pull");
+                assert_eq!(remote, "origin");
+                assert_eq!(branch, "release/1.2");
+                assert_eq!(exit_code, Some(128));
+                assert!(stderr.contains("resolve hostname"));
+            }
+            _ => panic!("expected RemoteOpFailed"),
+        }
+    }
+
+    /// `OpFailed` must surface (op, exit_code, stderr) as separate
+    /// fields. Pre-existing call sites used `anyhow::bail!("Git X failed:
+    /// {stderr}")` which fused the operation label and stderr into one
+    /// stringly bag — invisible to retry schedulers and attestation
+    /// chains.
+    #[test]
+    fn test_git_error_op_failed_carries_structured_fields() {
+        let err = GitError::OpFailed {
+            op: "tag --list".into(),
+            exit_code: Some(2),
+            stderr: "fatal: malformed object name".into(),
+        };
+        match err {
+            GitError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "tag --list");
+                assert_eq!(exit_code, Some(2));
+                assert!(stderr.contains("malformed object name"));
+            }
+            _ => panic!("expected OpFailed"),
+        }
     }
 
     #[test]
     fn test_nix_build_error_variants() {
-        assert!(NixBuildError::CargoNixMissing
-            .to_string()
-            .contains("Cargo.nix"));
+        assert!(
+            NixBuildError::CargoNixMissing
+                .to_string()
+                .contains("Cargo.nix")
+        );
         let err = NixBuildError::BuildFailed {
             flake_attr: ".#pkg".into(),
             exit_code: Some(101),
@@ -387,11 +575,13 @@ mod tests {
         assert!(msg.contains(".#pkg"), "flake_attr must appear: {msg}");
         assert!(msg.contains("101"), "exit_code must appear: {msg}");
         assert!(msg.contains("eval failed"), "stderr must appear: {msg}");
-        assert!(NixBuildError::FlakeNotFound {
-            path: "/tmp".into()
-        }
-        .to_string()
-        .contains("/tmp"));
+        assert!(
+            NixBuildError::FlakeNotFound {
+                path: "/tmp".into()
+            }
+            .to_string()
+            .contains("/tmp")
+        );
     }
 
     /// Build-failed, empty-output, and exec-failed are distinct conditions
