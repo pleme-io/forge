@@ -6,20 +6,8 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{info, warn};
 
+use crate::infrastructure::registry::RegistryRef;
 use crate::repo::get_tool_path;
-
-/// Extract organization name from registry URL
-/// Example: "ghcr.io/org/project/service" -> "org"
-fn extract_organization(registry: &str) -> Result<String> {
-    let parts: Vec<&str> = registry.split('/').collect();
-    if parts.len() < 2 {
-        return Err(anyhow!(
-            "Invalid registry format: {}. Expected format: host/organization/...",
-            registry
-        ));
-    }
-    Ok(parts[1].to_string())
-}
 
 /// Get git SHA for tagging - Single source of truth
 ///
@@ -109,8 +97,13 @@ pub async fn update_kustomization(
         .await
         .context("Failed to read kustomization.yaml")?;
 
-    // Extract service name from registry for matching (last path component)
-    let service_match = registry.split('/').last().unwrap_or(registry);
+    // Extract service name from registry for matching (last path component).
+    // Falls back to the raw input only when the registry string has no
+    // recognizable structure — RegistryRef rejects malformed input.
+    let parsed_registry = RegistryRef::parse(registry).ok();
+    let service_match = parsed_registry
+        .as_ref()
+        .map_or(registry, RegistryRef::image_name);
 
     // Use targeted text replacement instead of serde_yaml round-trip.
     // Round-tripping through serde_yaml destroys comments, reformats
@@ -125,7 +118,10 @@ pub async fn update_kustomization(
             let trimmed = line.trim();
             if trimmed.starts_with("newTag:") {
                 let old_tag = trimmed.trim_start_matches("newTag:").trim();
-                info!("   Updating {} from {} to {}", service_match, old_tag, new_tag);
+                info!(
+                    "   Updating {} from {} to {}",
+                    service_match, old_tag, new_tag
+                );
                 let indent = &line[..line.len() - line.trim_start().len()];
                 result.push(format!("{}newTag: {}", indent, new_tag));
                 updated = true;
@@ -140,9 +136,7 @@ pub async fn update_kustomization(
         let trimmed = line.trim();
         if trimmed.starts_with("- name:") {
             let name_value = trimmed.trim_start_matches("- name:").trim();
-            if registry.contains(name_value)
-                || name_value.contains(service_match)
-            {
+            if registry.contains(name_value) || name_value.contains(service_match) {
                 matched_name = true;
             }
         }
@@ -359,7 +353,10 @@ pub async fn push_with_retry(
     let mut attempts = 0;
 
     // Extract organization from registry URL for credentials
-    let organization = extract_organization(&registry)?;
+    let organization = RegistryRef::parse(registry)
+        .with_context(|| format!("Invalid registry URL: {registry}"))?
+        .organization()
+        .to_string();
 
     loop {
         attempts += 1;

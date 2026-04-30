@@ -737,7 +737,10 @@ async fn push_with_retry(
 
     match skopeo_check {
         Ok(output) if output.status.success() => {
-            debug!("Found skopeo: {}", String::from_utf8_lossy(&output.stdout).trim());
+            debug!(
+                "Found skopeo: {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
         }
         _ => {
             anyhow::bail!(
@@ -760,7 +763,10 @@ async fn push_with_retry(
 
         // Extract organization from registry URL for credentials
         // e.g., "ghcr.io/myorg/project/image" -> "myorg"
-        let organization = registry.split('/').nth(1).unwrap_or("user");
+        let parsed_registry = crate::infrastructure::registry::RegistryRef::parse(registry).ok();
+        let organization = parsed_registry
+            .as_ref()
+            .map_or("user", |r| r.organization());
 
         let result = Command::new(&skopeo)
             .args(&[
