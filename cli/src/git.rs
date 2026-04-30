@@ -2,6 +2,84 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::error::GitError;
+
+/// Run `git <args>` (resolved against `workdir` if any) and return its
+/// captured stdout, or a typed `GitError`.
+///
+/// `op` is the human-readable label attached to any returned error and
+/// is what discriminates "git couldn't spawn" (`GitError::ExecFailed`)
+/// from "git ran but exited non-zero" (`GitError::OpFailed`).
+/// `bin` defaults to `"git"` for production callers; tests pass an
+/// absolute shim path so they don't mutate global PATH and remain
+/// parallel-safe — same hermetic-test discipline as `nix.rs`'s
+/// `run_nix_build_typed` and `attic.rs`'s `run_attic_capture`.
+fn git_capture(
+    bin: &str,
+    args: &[&str],
+    workdir: Option<&Path>,
+    op: &str,
+) -> Result<Vec<u8>, GitError> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    if let Some(w) = workdir {
+        cmd.current_dir(w);
+    }
+    let output = cmd.output().map_err(|e| GitError::ExecFailed {
+        op: op.to_string(),
+        message: e.to_string(),
+    })?;
+    if !output.status.success() {
+        return Err(GitError::OpFailed {
+            op: op.to_string(),
+            exit_code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(output.stdout)
+}
+
+/// Run a git operation against a specific (remote, branch) endpoint —
+/// `git push origin <branch>`, `git pull origin <branch>` — and surface
+/// failures as `GitError::RemoteOpFailed` so callers can recover the
+/// exact endpoint from the typed record without parsing the bail!
+/// string. Mirror of `git_capture` for the network half of the surface.
+fn git_capture_remote(
+    bin: &str,
+    args: &[&str],
+    workdir: Option<&Path>,
+    op: &str,
+    remote: &str,
+    branch: &str,
+) -> Result<Vec<u8>, GitError> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    if let Some(w) = workdir {
+        cmd.current_dir(w);
+    }
+    let output = cmd.output().map_err(|e| GitError::ExecFailed {
+        op: op.to_string(),
+        message: e.to_string(),
+    })?;
+    if !output.status.success() {
+        return Err(GitError::RemoteOpFailed {
+            op: op.to_string(),
+            remote: remote.to_string(),
+            branch: branch.to_string(),
+            exit_code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(output.stdout)
+}
+
+fn stdout_string(bytes: Vec<u8>) -> Result<String> {
+    Ok(String::from_utf8(bytes)
+        .context("Git output is not valid UTF-8")?
+        .trim()
+        .to_string())
+}
+
 /// Get the root directory of the git repository
 ///
 /// Root flake pattern (ONLY supported pattern):
@@ -16,62 +94,25 @@ pub fn get_repo_root() -> Result<PathBuf> {
     }
 
     // Fall back to git command
-    let output = Command::new("git")
-        .args(&["rev-parse", "--show-toplevel"])
-        .output()
-        .context("Failed to execute git rev-parse --show-toplevel")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Git command failed: {}", stderr);
-    }
-
-    let repo_root = String::from_utf8(output.stdout)
-        .context("Git output is not valid UTF-8")?
-        .trim()
-        .to_string();
-
-    Ok(PathBuf::from(repo_root))
+    let stdout = git_capture("git", &["rev-parse", "--show-toplevel"], None, "rev-parse")?;
+    Ok(PathBuf::from(stdout_string(stdout)?))
 }
 
 /// Get full git SHA (40 characters)
 pub fn get_full_sha() -> Result<String> {
-    let output = Command::new("git")
-        .args(&["rev-parse", "HEAD"])
-        .output()
-        .context("Failed to execute git rev-parse")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Git command failed: {}", stderr);
-    }
-
-    let sha = String::from_utf8(output.stdout)
-        .context("Git output is not valid UTF-8")?
-        .trim()
-        .to_string();
-
-    Ok(sha)
+    let stdout = git_capture("git", &["rev-parse", "HEAD"], None, "rev-parse")?;
+    stdout_string(stdout)
 }
 
 /// Get short git SHA (7 characters)
 pub fn get_short_sha() -> Result<String> {
-    let output = Command::new("git")
-        .args(&["rev-parse", "--short=7", "HEAD"])
-        .output()
-        .context("Failed to execute git rev-parse")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Git command failed: {}", stderr);
-    }
-
-    let sha = String::from_utf8(output.stdout)
-        .context("Git output is not valid UTF-8")?
-        .trim()
-        .to_string();
-
-    Ok(sha)
+    let stdout = git_capture(
+        "git",
+        &["rev-parse", "--short=7", "HEAD"],
+        None,
+        "rev-parse",
+    )?;
+    stdout_string(stdout)
 }
 
 /// Update kustomization.yaml with new image tag
@@ -178,123 +219,68 @@ pub async fn update_configmap_git_sha(manifest_path: &Path, git_sha: &str) -> Re
 /// Commit and push changes in an explicit working directory.
 ///
 /// Used for multi-repo deployments (e.g., k8s manifests in a separate repo).
-pub fn commit_and_push_in(workdir: &Path, files: &[&Path], message: &str, branch: &str) -> Result<()> {
+pub fn commit_and_push_in(
+    workdir: &Path,
+    files: &[&Path],
+    message: &str,
+    branch: &str,
+) -> Result<()> {
     // Pull from origin first to avoid conflicts
-    let pull_result = Command::new("git")
-        .args(&["pull", "origin", branch])
-        .current_dir(workdir)
-        .output()
-        .context("Failed to execute git pull")?;
-
-    if !pull_result.status.success() {
-        let stderr = String::from_utf8_lossy(&pull_result.stderr);
-        anyhow::bail!("Git pull failed: {}", stderr);
-    }
+    git_capture_remote(
+        "git",
+        &["pull", "origin", branch],
+        Some(workdir),
+        "pull",
+        "origin",
+        branch,
+    )?;
 
     // Add each file
     for file in files {
-        let relative_path = file
-            .strip_prefix(workdir)
-            .unwrap_or(file);
-
-        let add_result = Command::new("git")
-            .args(&["add", relative_path.to_str().unwrap()])
-            .current_dir(workdir)
-            .output()
-            .context("Failed to execute git add")?;
-
-        if !add_result.status.success() {
-            let stderr = String::from_utf8_lossy(&add_result.stderr);
-            anyhow::bail!("Git add failed for {}: {}", relative_path.display(), stderr);
-        }
+        let relative_path = file.strip_prefix(workdir).unwrap_or(file);
+        let rel = relative_path.to_str().unwrap();
+        git_capture("git", &["add", rel], Some(workdir), "add")?;
     }
 
     // Create commit
-    let commit_result = Command::new("git")
-        .args(&["commit", "-m", message])
-        .current_dir(workdir)
-        .output()
-        .context("Failed to execute git commit")?;
-
-    if !commit_result.status.success() {
-        let stderr = String::from_utf8_lossy(&commit_result.stderr);
-        anyhow::bail!("Git commit failed: {}", stderr);
-    }
+    git_capture("git", &["commit", "-m", message], Some(workdir), "commit")?;
 
     // Push
-    let push_result = Command::new("git")
-        .args(&["push", "origin", branch])
-        .current_dir(workdir)
-        .output()
-        .context("Failed to execute git push")?;
-
-    if !push_result.status.success() {
-        let stderr = String::from_utf8_lossy(&push_result.stderr);
-        anyhow::bail!("Git push failed: {}", stderr);
-    }
+    git_capture_remote(
+        "git",
+        &["push", "origin", branch],
+        Some(workdir),
+        "push",
+        "origin",
+        branch,
+    )?;
 
     Ok(())
 }
 
 /// Check if the git working tree is clean (no uncommitted changes).
 pub fn is_working_tree_clean() -> Result<bool> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .context("Failed to execute git status")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Git status failed: {}", stderr);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.trim().is_empty())
+    let stdout = git_capture("git", &["status", "--porcelain"], None, "status")?;
+    let s = String::from_utf8_lossy(&stdout);
+    Ok(s.trim().is_empty())
 }
 
 /// Check if a git tag exists locally.
 pub fn tag_exists(tag: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["tag", "--list", tag])
-        .output()
-        .context("Failed to execute git tag --list")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Git tag list failed: {}", stderr);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(!stdout.trim().is_empty())
+    let stdout = git_capture("git", &["tag", "--list", tag], None, "tag --list")?;
+    let s = String::from_utf8_lossy(&stdout);
+    Ok(!s.trim().is_empty())
 }
 
 /// Create an annotated git tag.
 pub fn create_tag(tag: &str, message: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["tag", "-a", tag, "-m", message])
-        .output()
-        .context("Failed to execute git tag")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Git tag creation failed: {}", stderr);
-    }
-
+    git_capture("git", &["tag", "-a", tag, "-m", message], None, "tag -a")?;
     Ok(())
 }
 
 /// Push a git tag to the remote.
 pub fn push_tag(tag: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["push", "origin", tag])
-        .output()
-        .context("Failed to execute git push tag")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Git push tag failed: {}", stderr);
-    }
-
+    git_capture_remote("git", &["push", "origin", tag], None, "push", "origin", tag)?;
     Ok(())
 }
 
@@ -303,16 +289,14 @@ pub fn commit_and_push(manifest_path: &Path, old_tag: &str, new_tag: &str) -> Re
     let workdir = get_repo_root()?;
 
     // Pull from origin first to avoid conflicts
-    let pull_result = Command::new("git")
-        .args(&["pull", "origin", "main"])
-        .current_dir(&workdir)
-        .output()
-        .context("Failed to execute git pull")?;
-
-    if !pull_result.status.success() {
-        let stderr = String::from_utf8_lossy(&pull_result.stderr);
-        anyhow::bail!("Git pull failed: {}", stderr);
-    }
+    git_capture_remote(
+        "git",
+        &["pull", "origin", "main"],
+        Some(&workdir),
+        "pull",
+        "origin",
+        "main",
+    )?;
 
     // Convert absolute path to relative path from repo root
     let relative_path = manifest_path
@@ -320,16 +304,12 @@ pub fn commit_and_push(manifest_path: &Path, old_tag: &str, new_tag: &str) -> Re
         .context("Manifest path should be inside repository")?;
 
     // Add manifest to index
-    let add_result = Command::new("git")
-        .args(&["add", relative_path.to_str().unwrap()])
-        .current_dir(&workdir)
-        .output()
-        .context("Failed to execute git add")?;
-
-    if !add_result.status.success() {
-        let stderr = String::from_utf8_lossy(&add_result.stderr);
-        anyhow::bail!("Git add failed: {}", stderr);
-    }
+    git_capture(
+        "git",
+        &["add", relative_path.to_str().unwrap()],
+        Some(&workdir),
+        "add",
+    )?;
 
     // Also add ConfigMap if it exists
     let service_name = manifest_path
@@ -347,17 +327,12 @@ pub fn commit_and_push(manifest_path: &Path, old_tag: &str, new_tag: &str) -> Re
         let config_map_relative = config_map_path
             .strip_prefix(&workdir)
             .context("ConfigMap path should be inside repository")?;
-
-        let add_config_result = Command::new("git")
-            .args(&["add", config_map_relative.to_str().unwrap()])
-            .current_dir(&workdir)
-            .output()
-            .context("Failed to execute git add for ConfigMap")?;
-
-        if !add_config_result.status.success() {
-            let stderr = String::from_utf8_lossy(&add_config_result.stderr);
-            anyhow::bail!("Git add ConfigMap failed: {}", stderr);
-        }
+        git_capture(
+            "git",
+            &["add", config_map_relative.to_str().unwrap()],
+            Some(&workdir),
+            "add",
+        )?;
     }
 
     // Extract service name from manifest path (e.g., .../services/auth/kustomization.yaml -> auth)
@@ -373,28 +348,180 @@ pub fn commit_and_push(manifest_path: &Path, old_tag: &str, new_tag: &str) -> Re
     );
 
     // Create commit
-    let commit_result = Command::new("git")
-        .args(&["commit", "-m", &message])
-        .current_dir(&workdir)
-        .output()
-        .context("Failed to execute git commit")?;
-
-    if !commit_result.status.success() {
-        let stderr = String::from_utf8_lossy(&commit_result.stderr);
-        anyhow::bail!("Git commit failed: {}", stderr);
-    }
+    git_capture("git", &["commit", "-m", &message], Some(&workdir), "commit")?;
 
     // Push using system git command (uses SSH config and agent automatically)
-    let push_result = Command::new("git")
-        .args(&["push", "origin", "main"])
-        .current_dir(&workdir)
-        .output()
-        .context("Failed to execute git push")?;
-
-    if !push_result.status.success() {
-        let stderr = String::from_utf8_lossy(&push_result.stderr);
-        anyhow::bail!("Git push failed: {}", stderr);
-    }
+    git_capture_remote(
+        "git",
+        &["push", "origin", "main"],
+        Some(&workdir),
+        "push",
+        "origin",
+        "main",
+    )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::GitError;
+
+    /// Write an executable shim that pretends to be `git`. The returned
+    /// tempdir keeps the shim alive until the caller drops it. Tests
+    /// invoke the shim by absolute path so they don't mutate global PATH
+    /// (which would race under parallel test execution). Same discipline
+    /// as `nix.rs::make_nix_shim` and `attic.rs`'s shim.
+    fn make_git_shim(body: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shim = dir.path().join("git");
+        std::fs::write(&shim, body).expect("write shim");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&shim).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&shim, perms).unwrap();
+        }
+        let path = shim.display().to_string();
+        (dir, path)
+    }
+
+    /// When the resolved git binary cannot be spawned, `git_capture` must
+    /// surface `ExecFailed` carrying the offending op label — never a
+    /// stringly anyhow `Failed to execute git`. Pins the typed split so
+    /// telemetry can distinguish "git missing" from "git said no".
+    #[test]
+    fn test_git_capture_exec_failed_carries_op() {
+        let result = git_capture(
+            "/nonexistent/path/to/git-binary-that-does-not-exist",
+            &["rev-parse", "HEAD"],
+            None,
+            "rev-parse",
+        );
+        let err = result.expect_err("missing git binary must fail");
+        match err {
+            GitError::ExecFailed { op, .. } => {
+                assert_eq!(op, "rev-parse");
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// Non-zero exits must produce `OpFailed` carrying the op label, the
+    /// exit code, and the captured stderr — never a fused stringly bag.
+    /// Uses an absolute-path shim so the test is hermetic and
+    /// parallel-safe.
+    #[test]
+    fn test_git_capture_op_failed_carries_structured_fields() {
+        let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'fatal: bad object' 1>&2\nexit 128\n");
+        let result = git_capture(&shim, &["rev-parse", "HEAD"], None, "rev-parse");
+        let err = result.expect_err("nonzero exit must fail");
+        match err {
+            GitError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "rev-parse");
+                assert_eq!(exit_code, Some(128));
+                assert!(
+                    stderr.contains("bad object"),
+                    "stderr field must capture the git stderr verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected OpFailed, got: {other:?}"),
+        }
+    }
+
+    /// Success path: `git_capture` returns the trimmed stdout verbatim.
+    #[test]
+    fn test_git_capture_success_returns_stdout() {
+        let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'deadbeef'\nexit 0\n");
+        let stdout =
+            git_capture(&shim, &["rev-parse", "HEAD"], None, "rev-parse").expect("must succeed");
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "deadbeef");
+    }
+
+    /// Network-side ops must surface `RemoteOpFailed` carrying the
+    /// (op, remote, branch) tuple they targeted so attestation records
+    /// and retry schedulers recover the exact endpoint from the typed
+    /// record without parsing the bail! string (THEORY §V.4).
+    #[test]
+    fn test_git_capture_remote_failed_carries_endpoint() {
+        let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'remote: rejected' 1>&2\nexit 1\n");
+        let result = git_capture_remote(
+            &shim,
+            &["push", "origin", "main"],
+            None,
+            "push",
+            "origin",
+            "main",
+        );
+        let err = result.expect_err("nonzero exit must fail");
+        match err {
+            GitError::RemoteOpFailed {
+                op,
+                remote,
+                branch,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "push");
+                assert_eq!(remote, "origin");
+                assert_eq!(branch, "main");
+                assert_eq!(exit_code, Some(1));
+                assert!(stderr.contains("rejected"));
+            }
+            other => panic!("expected RemoteOpFailed, got: {other:?}"),
+        }
+    }
+
+    /// `git_capture_remote` must surface an exec-time failure as
+    /// `ExecFailed`, not as `RemoteOpFailed` — the typed split keeps
+    /// "couldn't spawn git" structurally distinct from "git rejected
+    /// the network operation."
+    #[test]
+    fn test_git_capture_remote_exec_failed_is_distinct() {
+        let result = git_capture_remote(
+            "/nonexistent/path/to/git",
+            &["push", "origin", "main"],
+            None,
+            "push",
+            "origin",
+            "main",
+        );
+        let err = result.expect_err("missing binary must fail");
+        match err {
+            GitError::ExecFailed { op, .. } => assert_eq!(op, "push"),
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// Success path on the network side: `git_capture_remote` returns
+    /// the trimmed stdout verbatim.
+    #[test]
+    fn test_git_capture_remote_success_returns_stdout() {
+        let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'Everything up-to-date'\nexit 0\n");
+        let stdout = git_capture_remote(
+            &shim,
+            &["push", "origin", "main"],
+            None,
+            "push",
+            "origin",
+            "main",
+        )
+        .expect("must succeed");
+        assert!(String::from_utf8_lossy(&stdout).contains("up-to-date"));
+    }
+
+    #[test]
+    fn test_git_client_sha() {
+        // This test only works in a git repo
+        if let Ok(sha) = get_short_sha() {
+            assert!(!sha.is_empty());
+            assert!(sha.len() >= 7); // Short SHA is at least 7 chars
+        }
+    }
 }
