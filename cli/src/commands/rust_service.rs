@@ -32,8 +32,8 @@
 
 use crate::commands::service_config::{DatabaseType, ServiceConfig};
 use crate::config::{resolve_deploy_yaml_path, DeployConfig};
-use crate::path_builder::PathBuilder;
 use crate::infrastructure::registry::{ArchImage, RegistryClient, RegistryCredentials};
+use crate::path_builder::PathBuilder;
 use crate::repo::get_tool_path;
 use anyhow::{anyhow, bail, Context, Result};
 use colored::Colorize;
@@ -657,7 +657,10 @@ async fn verify_image_in_registry(registry: &str, full_tag_suffix: &str) -> Resu
         .context("Registry token required for image verification")?;
 
     // Extract organization from registry URL for credentials
-    let organization = registry.split('/').nth(1).unwrap_or("user");
+    let parsed_registry = crate::infrastructure::registry::RegistryRef::parse(registry).ok();
+    let organization = parsed_registry
+        .as_ref()
+        .map_or("user", |r| r.organization());
 
     println!("   🔍 Verifying image in registry: {}", full_tag.dimmed());
 
@@ -727,11 +730,7 @@ async fn verify_image_digest_matches(
 ///
 /// Accepts one or more (arch, path) pairs. For a single image, pushes with
 /// arch-prefixed tags. For multiple images, also creates an OCI manifest index.
-async fn push_docker_images(
-    images: &[ArchImage],
-    registry: &str,
-    tag_suffix: &str,
-) -> Result<()> {
+async fn push_docker_images(images: &[ArchImage], registry: &str, tag_suffix: &str) -> Result<()> {
     let organization = crate::infrastructure::registry::extract_organization(registry)
         .unwrap_or_else(|_| "user".to_string());
 
@@ -1187,15 +1186,14 @@ pub async fn orchestrate_release(
     let repo_root = crate::git::get_repo_root()?;
     let product_dir = crate::config::resolve_product_dir(&repo_root, &deploy_config.product.name);
     let k8s_repo_root = if deploy_config.product.k8s.is_some() {
-        Some(crate::config::resolve_k8s_repo_root(&deploy_config.product, &product_dir))
+        Some(crate::config::resolve_k8s_repo_root(
+            &deploy_config.product,
+            &product_dir,
+        ))
     } else {
         None
     };
-    let k8s_branch = deploy_config
-        .product
-        .k8s
-        .as_ref()
-        .map(|k| k.branch.clone());
+    let k8s_branch = deploy_config.product.k8s.as_ref().map(|k| k.branch.clone());
 
     // Determine the service directory for pre-deployment tests
     let pre_deploy_service_dir = if service == "web" {
@@ -1248,7 +1246,10 @@ pub async fn orchestrate_release(
         (sha, dtag)
     };
     if has_arm64 {
-        println!("🏷️  Image tags: amd64-{}, arm64-{}, {} (manifest)", tag_suffix, tag_suffix, tag_suffix);
+        println!(
+            "🏷️  Image tags: amd64-{}, arm64-{}, {} (manifest)",
+            tag_suffix, tag_suffix, tag_suffix
+        );
     } else {
         println!("🏷️  Image tag: {}", deploy_tag);
     }
@@ -1296,11 +1297,7 @@ pub async fn orchestrate_release(
                     tag_suffix
                 );
             } else {
-                println!(
-                    "{}  Tag: {}",
-                    "PUSH COMPLETE".green().bold(),
-                    deploy_tag
-                );
+                println!("{}  Tag: {}", "PUSH COMPLETE".green().bold(), deploy_tag);
             }
             println!("{}", "━".repeat(60).bright_green());
             return Ok(());
@@ -1390,12 +1387,17 @@ pub async fn orchestrate_release(
         );
 
         // Deploy to this environment (updates manifest, commits)
-        last_git_sha =
-            deploy_to_environment(
-                &service, env, &namespace, &registry, &deploy_tag, watch,
-                k8s_repo_root.as_deref(),
-                k8s_branch.as_deref(),
-            ).await?;
+        last_git_sha = deploy_to_environment(
+            &service,
+            env,
+            &namespace,
+            &registry,
+            &deploy_tag,
+            watch,
+            k8s_repo_root.as_deref(),
+            k8s_branch.as_deref(),
+        )
+        .await?;
         last_namespace = namespace.clone();
 
         // Trigger flux reconcile for this namespace (non-blocking unless it's the last env)
@@ -1433,9 +1435,7 @@ pub async fn orchestrate_release(
                 .migration
                 .shinka_migration_name
                 .clone()
-                .unwrap_or_else(|| {
-                    format!("{}-{}", deploy_config.product.name, service)
-                });
+                .unwrap_or_else(|| format!("{}-{}", deploy_config.product.name, service));
             let expected_image_tag = deploy_tag.clone();
             crate::commands::migrations::set_expected_tag_if_exists(
                 &migration_name,
@@ -1635,7 +1635,8 @@ pub async fn orchestrate_standalone_release(
         bail!("--deploy-only is not supported in standalone mode (no deploy.yaml). Use --image-path/--image-path-arm64 to push directly.");
     }
 
-    println!("🚀 {} {} {}",
+    println!(
+        "🚀 {} {} {}",
         service.cyan().bold(),
         "Standalone Release".bold(),
         "(no deploy.yaml — push only)".dimmed()
@@ -1694,7 +1695,10 @@ pub async fn deploy_rust_service(
 ) -> Result<String> {
     let sha = get_tag_suffix().await?;
     let deploy_tag = compute_deploy_tag(&sha, "amd64", false, false);
-    deploy_rust_service_with_tag(service, manifest, registry, namespace, watch, deploy_tag, None, None).await
+    deploy_rust_service_with_tag(
+        service, manifest, registry, namespace, watch, deploy_tag, None, None,
+    )
+    .await
 }
 
 /// Update an image tag in a manifest using targeted text replacement.
@@ -1861,8 +1865,7 @@ pub async fn deploy_rust_service_with_tag(
         .context("Failed to read manifest")?;
 
     let new_tag = tag_suffix.clone();
-    let updated_manifest =
-        update_kustomization_image_tag(&manifest_content, &service, &new_tag)?;
+    let updated_manifest = update_kustomization_image_tag(&manifest_content, &service, &new_tag)?;
 
     tokio::fs::write(&manifest, &updated_manifest)
         .await

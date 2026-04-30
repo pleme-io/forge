@@ -390,7 +390,10 @@ impl RegistryClient {
             }
 
             // Authenticate via regctl host config (inline JSON)
-            let host = registry.split('/').next().unwrap_or("ghcr.io");
+            let host = RegistryRef::parse(registry)
+                .map(|r| r.host().to_string())
+                .unwrap_or_else(|_| "ghcr.io".to_string());
+            let host = host.as_str();
             cmd.env(
                 "regclient_hosts",
                 format!(
@@ -425,17 +428,89 @@ impl RegistryClient {
     }
 }
 
-/// Extract organization name from registry URL
+/// Typed reference to a container registry path.
 ///
-/// Example: "ghcr.io/org/project/service" -> "org"
-pub fn extract_organization(registry: &str) -> Result<String, RegistryError> {
-    let parts: Vec<&str> = registry.split('/').collect();
-    if parts.len() < 2 {
-        return Err(RegistryError::InvalidFormat {
-            registry: registry.to_string(),
-        });
+/// Parses a registry string of the shape `host/organization[/path...]` into
+/// its components once at the boundary, so downstream code never has to
+/// re-`split('/')` and re-validate. An invalid registry string fails to
+/// construct — invalid pipelines become structurally impossible.
+///
+/// Grammar:
+/// - `host`: first non-empty segment (e.g., `ghcr.io`)
+/// - `organization`: second non-empty segment (e.g., `pleme-io`)
+/// - `path`: remaining segments; the last is the conventional image name
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegistryRef {
+    host: String,
+    organization: String,
+    path: Vec<String>,
+}
+
+impl RegistryRef {
+    /// Parse a registry string into its typed components.
+    ///
+    /// Rejects strings without at least `host/organization`. Empty segments
+    /// (leading, trailing, or doubled slashes) are rejected too — the
+    /// concrete failure carries the offending input.
+    pub fn parse(registry: &str) -> Result<Self, RegistryError> {
+        let trimmed = registry.trim();
+        if trimmed.is_empty() {
+            return Err(RegistryError::InvalidFormat {
+                registry: registry.to_string(),
+            });
+        }
+        let parts: Vec<&str> = trimmed.split('/').collect();
+        if parts.len() < 2 || parts.iter().any(|p| p.is_empty()) {
+            return Err(RegistryError::InvalidFormat {
+                registry: registry.to_string(),
+            });
+        }
+        let host = parts[0].to_string();
+        let organization = parts[1].to_string();
+        let path = parts[2..].iter().map(|s| (*s).to_string()).collect();
+        Ok(Self {
+            host,
+            organization,
+            path,
+        })
     }
-    Ok(parts[1].to_string())
+
+    /// Registry host (e.g., `ghcr.io`).
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Owning organization (e.g., `pleme-io`).
+    pub fn organization(&self) -> &str {
+        &self.organization
+    }
+
+    /// Conventional image name — the last path segment, falling back to the
+    /// organization when the registry has no project/image components.
+    pub fn image_name(&self) -> &str {
+        self.path.last().map_or(&self.organization, |s| s.as_str())
+    }
+}
+
+impl std::fmt::Display for RegistryRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.host, self.organization)?;
+        for segment in &self.path {
+            write!(f, "/{segment}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Extract organization name from registry URL.
+///
+/// Example: `ghcr.io/org/project/service` -> `org`.
+///
+/// Thin wrapper over [`RegistryRef::parse`] preserved for callers that only
+/// need the organization string. New code should use `RegistryRef` directly
+/// to keep the parsed structure available.
+pub fn extract_organization(registry: &str) -> Result<String, RegistryError> {
+    RegistryRef::parse(registry).map(|r| r.organization)
 }
 
 /// Generate architecture-prefixed tags
@@ -512,5 +587,88 @@ mod tests {
             }
             other => panic!("expected PushFailed, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_registry_ref_parse_full_four_part() {
+        let r = RegistryRef::parse("ghcr.io/myorg/myproject/service").unwrap();
+        assert_eq!(r.host(), "ghcr.io");
+        assert_eq!(r.organization(), "myorg");
+        assert_eq!(r.image_name(), "service");
+    }
+
+    #[test]
+    fn test_registry_ref_parse_three_part() {
+        let r = RegistryRef::parse("ghcr.io/pleme-io/shinryu-mcp").unwrap();
+        assert_eq!(r.host(), "ghcr.io");
+        assert_eq!(r.organization(), "pleme-io");
+        assert_eq!(r.image_name(), "shinryu-mcp");
+    }
+
+    #[test]
+    fn test_registry_ref_parse_two_part_image_falls_back_to_org() {
+        let r = RegistryRef::parse("ghcr.io/pleme-io").unwrap();
+        assert_eq!(r.host(), "ghcr.io");
+        assert_eq!(r.organization(), "pleme-io");
+        // No path segments: image_name falls back to organization.
+        assert_eq!(r.image_name(), "pleme-io");
+    }
+
+    #[test]
+    fn test_registry_ref_parse_rejects_single_segment() {
+        let err = RegistryRef::parse("ghcr.io").unwrap_err();
+        assert!(matches!(err, RegistryError::InvalidFormat { .. }));
+        assert!(err.to_string().contains("ghcr.io"));
+    }
+
+    #[test]
+    fn test_registry_ref_parse_rejects_empty() {
+        assert!(matches!(
+            RegistryRef::parse("").unwrap_err(),
+            RegistryError::InvalidFormat { .. }
+        ));
+        assert!(matches!(
+            RegistryRef::parse("   ").unwrap_err(),
+            RegistryError::InvalidFormat { .. }
+        ));
+    }
+
+    #[test]
+    fn test_registry_ref_parse_rejects_empty_segments() {
+        // Leading slash, trailing slash, doubled slash all produce empty segments.
+        assert!(RegistryRef::parse("/ghcr.io/org").is_err());
+        assert!(RegistryRef::parse("ghcr.io/org/").is_err());
+        assert!(RegistryRef::parse("ghcr.io//org").is_err());
+    }
+
+    #[test]
+    fn test_registry_ref_display_round_trips() {
+        for input in [
+            "ghcr.io/myorg/myproject/service",
+            "ghcr.io/pleme-io/shinryu-mcp",
+            "ghcr.io/pleme-io",
+        ] {
+            let r = RegistryRef::parse(input).unwrap();
+            assert_eq!(r.to_string(), input, "round-trip failed for {input}");
+        }
+    }
+
+    #[test]
+    fn test_registry_ref_trims_whitespace() {
+        let r = RegistryRef::parse("  ghcr.io/myorg/img  ").unwrap();
+        assert_eq!(r.host(), "ghcr.io");
+        assert_eq!(r.image_name(), "img");
+    }
+
+    #[test]
+    fn test_extract_organization_delegates_to_registry_ref() {
+        // The legacy helper now routes through RegistryRef::parse.
+        assert_eq!(
+            extract_organization("ghcr.io/pleme-io/forge").unwrap(),
+            "pleme-io"
+        );
+        // Same rejection semantics.
+        assert!(extract_organization("ghcr.io").is_err());
+        assert!(extract_organization("").is_err());
     }
 }
