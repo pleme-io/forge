@@ -18,6 +18,7 @@ mod nix_hooks;
 mod observability;
 mod path_builder;
 mod repo;
+mod retry;
 mod tools;
 
 // New architecture modules
