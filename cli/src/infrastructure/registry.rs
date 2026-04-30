@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 use crate::error::RegistryError;
 use crate::repo::get_tool_path;
+use crate::retry::{run_with_policy, RetryPolicy};
 
 /// An architecture-specific image to push
 #[derive(Clone, Debug)]
@@ -145,7 +146,15 @@ impl RegistryClient {
             .await
     }
 
-    /// Push an image with custom retry count
+    /// Push an image with custom retry count.
+    ///
+    /// Drives [`crate::retry::run_with_policy`] with a network-shaped
+    /// schedule (exponential backoff capped at 30s, see
+    /// [`RetryPolicy::network`]) so transient skopeo failures retry on
+    /// 250ms / 500ms / 1s / ... instead of the legacy fixed 2s. Every
+    /// failure produces a typed `RegistryError::PushFailed` carrying the
+    /// final `attempts` count, the registry+tag tuple, and a structured
+    /// message containing the exit code and captured stderr.
     pub async fn push_with_retries(
         &self,
         image_path: &str,
@@ -160,54 +169,71 @@ impl RegistryClient {
             });
         }
 
-        let mut attempts = 0;
+        let policy = {
+            let net = RetryPolicy::network();
+            RetryPolicy::new(
+                retries.max(1),
+                net.initial_backoff,
+                net.factor,
+                net.max_backoff,
+            )
+        };
 
-        loop {
-            attempts += 1;
+        run_with_policy(
+            &policy,
+            |_e: &RegistryError| true,
+            |attempt| async move {
+                let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
+                let output = Command::new(&skopeo)
+                    .args([
+                        "copy",
+                        "--insecure-policy",
+                        &format!("--retry-times={}", retries),
+                        &format!(
+                            "--dest-creds={}:{}",
+                            self.credentials.organization, self.credentials.token
+                        ),
+                        &format!("docker-archive:{}", image_path),
+                        &format!("docker://{}:{}", registry, tag),
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .await;
 
-            let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-            let result = Command::new(&skopeo)
-                .args([
-                    "copy",
-                    "--insecure-policy",
-                    &format!("--retry-times={}", retries),
-                    &format!(
-                        "--dest-creds={}:{}",
-                        self.credentials.organization, self.credentials.token
-                    ),
-                    &format!("docker-archive:{}", image_path),
-                    &format!("docker://{}:{}", registry, tag),
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .status()
-                .await;
-
-            match result {
-                Ok(status) if status.success() => return Ok(()),
-                Ok(_) | Err(_) if attempts < retries => {
-                    warn!("Push attempt {} failed, retrying...", attempts);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    continue;
+                match output {
+                    Ok(out) if out.status.success() => Ok(()),
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                        if attempt < policy.max_attempts {
+                            warn!("Push attempt {} failed, retrying...", attempt);
+                        }
+                        Err(RegistryError::PushFailed {
+                            registry: registry.to_string(),
+                            tag: tag.to_string(),
+                            attempts: attempt,
+                            message: format!(
+                                "Exit code: {:?}; stderr: {}",
+                                out.status.code(),
+                                stderr
+                            ),
+                        })
+                    }
+                    Err(e) => {
+                        if attempt < policy.max_attempts {
+                            warn!("Push attempt {} failed, retrying...", attempt);
+                        }
+                        Err(RegistryError::PushFailed {
+                            registry: registry.to_string(),
+                            tag: tag.to_string(),
+                            attempts: attempt,
+                            message: e.to_string(),
+                        })
+                    }
                 }
-                Ok(status) => {
-                    return Err(RegistryError::PushFailed {
-                        registry: registry.to_string(),
-                        tag: tag.to_string(),
-                        attempts,
-                        message: format!("Exit code: {:?}", status.code()),
-                    });
-                }
-                Err(e) => {
-                    return Err(RegistryError::PushFailed {
-                        registry: registry.to_string(),
-                        tag: tag.to_string(),
-                        attempts,
-                        message: e.to_string(),
-                    });
-                }
-            }
-        }
+            },
+        )
+        .await
     }
 
     /// Verify an image tag exists in the registry.
