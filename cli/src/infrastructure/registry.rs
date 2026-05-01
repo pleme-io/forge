@@ -152,9 +152,13 @@ impl RegistryClient {
     /// schedule (exponential backoff capped at 30s, see
     /// [`RetryPolicy::network`]) so transient skopeo failures retry on
     /// 250ms / 500ms / 1s / ... instead of the legacy fixed 2s. Every
-    /// failure produces a typed `RegistryError::PushFailed` carrying the
-    /// final `attempts` count, the registry+tag tuple, and a structured
-    /// message containing the exit code and captured stderr.
+    /// non-zero exit produces a typed `RegistryError::PushFailed`
+    /// carrying the final `attempts` count, the registry+tag tuple, and
+    /// the structured `(exit_code, stderr)` pair the canonical retry
+    /// classifier consumes. Spawn failures (skopeo not on PATH) surface
+    /// as `RegistryError::ExecFailed`, distinct from a real push
+    /// failure — same discipline as `AtticError::ExecFailed`,
+    /// `NixBuildError::ExecFailed`, and `GitError::ExecFailed`.
     pub async fn push_with_retries(
         &self,
         image_path: &str,
@@ -182,16 +186,17 @@ impl RegistryClient {
         run_with_policy(
             &policy,
             |e: &RegistryError| match e {
-                // Only `PushFailed` carries a captured-stderr message; every
-                // other variant is a structural precondition failure
-                // (`LocalImageNotFound`, `RemoteImageNotFound`, `TokenNotFound`,
-                // `ManifestFailed`, etc.) and must short-circuit so a permanent
-                // failure does not burn retry budget. This consumes the typed
-                // classifier lifted into `crate::retry::is_transient_network_stderr`,
-                // which is the canonical match against skopeo / regctl /
-                // attic / curl stderr dialects (HTTP 5xx, connection-level
-                // failures, I/O timeouts, mid-stream EOF).
-                RegistryError::PushFailed { message, .. } => is_transient_network_stderr(message),
+                // Only `PushFailed` carries captured stderr; every other
+                // variant is a structural precondition failure
+                // (`ExecFailed`, `LocalImageNotFound`, `RemoteImageNotFound`,
+                // `TokenNotFound`, `ManifestFailed`, etc.) and must
+                // short-circuit so a permanent failure does not burn retry
+                // budget. The classifier inspects the typed `stderr` field
+                // directly (not a fused `message` string), so a synthetic
+                // "Exit code: Some(503)" embedded in a serialized message
+                // can never trip the 5xx markers — the structural shape
+                // pins what is and isn't transient.
+                RegistryError::PushFailed { stderr, .. } => is_transient_network_stderr(stderr),
                 _ => false,
             },
             |attempt| async move {
@@ -224,24 +229,14 @@ impl RegistryClient {
                             registry: registry.to_string(),
                             tag: tag.to_string(),
                             attempts: attempt,
-                            message: format!(
-                                "Exit code: {:?}; stderr: {}",
-                                out.status.code(),
-                                stderr
-                            ),
+                            exit_code: out.status.code(),
+                            stderr,
                         })
                     }
-                    Err(e) => {
-                        if attempt < policy.max_attempts {
-                            warn!("Push attempt {} failed, retrying...", attempt);
-                        }
-                        Err(RegistryError::PushFailed {
-                            registry: registry.to_string(),
-                            tag: tag.to_string(),
-                            attempts: attempt,
-                            message: e.to_string(),
-                        })
-                    }
+                    Err(e) => Err(RegistryError::ExecFailed {
+                        operation: format!("push {}:{}", registry, tag),
+                        message: e.to_string(),
+                    }),
                 }
             },
         )
@@ -271,11 +266,9 @@ impl RegistryClient {
             ])
             .output()
             .await
-            .map_err(|e| RegistryError::PushFailed {
-                registry: registry.to_string(),
-                tag: tag.to_string(),
-                attempts: 1,
-                message: format!("skopeo inspect failed: {}", e),
+            .map_err(|e| RegistryError::ExecFailed {
+                operation: format!("inspect {}:{}", registry, tag),
+                message: e.to_string(),
             })?;
 
         if !output.status.success() {
@@ -336,7 +329,8 @@ impl RegistryClient {
                 registry: registry.to_string(),
                 tag: tag_suffix.to_string(),
                 attempts: 0,
-                message: "No images provided".to_string(),
+                exit_code: None,
+                stderr: "no images provided to multi-arch push".to_string(),
             });
         }
 
@@ -578,7 +572,10 @@ mod tests {
 
     /// Multi-arch push with empty image list must surface the registry +
     /// tag_suffix it was invoked with. This guarantees structured
-    /// provenance even on the trivially-empty input failure path.
+    /// provenance even on the trivially-empty input failure path. The
+    /// precondition variant carries `exit_code: None` and `attempts: 0`
+    /// so callers can distinguish "never attempted" from "attempted and
+    /// failed."
     #[test]
     fn test_push_multiarch_empty_carries_target() {
         let client = RegistryClient::new(RegistryCredentials::new("org", "tok"));
@@ -591,11 +588,14 @@ mod tests {
                 registry: r,
                 tag,
                 attempts,
-                ..
+                exit_code,
+                stderr,
             } => {
                 assert_eq!(r, registry);
                 assert_eq!(tag, suffix);
                 assert_eq!(attempts, 0);
+                assert_eq!(exit_code, None, "precondition failure: never spawned");
+                assert!(stderr.contains("no images"));
             }
             other => panic!("expected PushFailed, got: {other:?}"),
         }
@@ -685,7 +685,8 @@ mod tests {
     }
 
     /// Classifier wired into `push_with_retries` must consume the
-    /// `is_transient_network_stderr` primitive on `PushFailed.message`.
+    /// `is_transient_network_stderr` primitive on `PushFailed.stderr`
+    /// (the typed structural field, NOT a fused `message: String`).
     /// A representative skopeo "503 Service Unavailable" trips it; a
     /// "401 Unauthorized" does not. Other variants (no captured stderr)
     /// are unconditionally terminal.
@@ -697,7 +698,7 @@ mod tests {
         use crate::retry::is_transient_network_stderr;
 
         let classify = |e: &RegistryError| match e {
-            RegistryError::PushFailed { message, .. } => is_transient_network_stderr(message),
+            RegistryError::PushFailed { stderr, .. } => is_transient_network_stderr(stderr),
             _ => false,
         };
 
@@ -705,7 +706,8 @@ mod tests {
             registry: "ghcr.io/o/p/s".into(),
             tag: "amd64-abc1234".into(),
             attempts: 1,
-            message: "Exit code: Some(1); stderr: received unexpected HTTP status: 503 Service Unavailable".into(),
+            exit_code: Some(1),
+            stderr: "received unexpected HTTP status: 503 Service Unavailable".into(),
         };
         assert!(classify(&transient), "5xx must classify as transient");
 
@@ -713,7 +715,8 @@ mod tests {
             registry: "ghcr.io/o/p/s".into(),
             tag: "amd64-abc1234".into(),
             attempts: 1,
-            message: "Exit code: Some(1); stderr: 401 Unauthorized: bad credentials".into(),
+            exit_code: Some(1),
+            stderr: "401 Unauthorized: bad credentials".into(),
         };
         assert!(
             !classify(&terminal_401),
@@ -724,7 +727,8 @@ mod tests {
             registry: "ghcr.io/o/p/s".into(),
             tag: "amd64-abc1234".into(),
             attempts: 1,
-            message: "Exit code: Some(1); stderr: 404 manifest unknown".into(),
+            exit_code: Some(1),
+            stderr: "404 manifest unknown".into(),
         };
         assert!(
             !classify(&terminal_404),
@@ -741,5 +745,63 @@ mod tests {
             path: "/nonexistent".into(),
         };
         assert!(!classify(&local_missing));
+
+        // ExecFailed (the spawn-failure path) is structurally distinct
+        // from PushFailed and must short-circuit. A skopeo-not-on-PATH
+        // precondition has no stderr to inspect; burning 5 attempts ×
+        // exponential backoff against it would produce only the same
+        // ENOENT five times.
+        let exec_missing = RegistryError::ExecFailed {
+            operation: "push ghcr.io/o/p/s:tag".into(),
+            message: "No such file or directory".into(),
+        };
+        assert!(!classify(&exec_missing));
+    }
+
+    /// Pre-migration regression guard. The `push_with_retries` classifier
+    /// used to inspect a fused `message: String` of the form
+    /// "Exit code: Some(N); stderr: ...", so a synthetic exit code
+    /// of 500–504 (numerically a 5xx HTTP marker) trip the transient
+    /// classifier even when the actual stderr was terminal. Splitting
+    /// `message` into typed `(exit_code, stderr)` makes that ambiguity
+    /// structurally impossible: the classifier inspects the typed
+    /// `stderr` field directly. This test pins the new shape so a
+    /// regression that re-fuses the message can never reintroduce the
+    /// false-transient.
+    #[test]
+    fn test_push_classifier_inspects_typed_stderr_not_synthetic_message() {
+        use crate::retry::is_transient_network_stderr;
+
+        let classify = |e: &RegistryError| match e {
+            RegistryError::PushFailed { stderr, .. } => is_transient_network_stderr(stderr),
+            _ => false,
+        };
+
+        // A terminal 401 with a literal "504" exit code must NOT trip
+        // the transient classifier — the classifier only inspects the
+        // typed stderr field, not a synthetic concatenation.
+        let terminal_with_5xx_exit_code = RegistryError::PushFailed {
+            registry: "ghcr.io/o/p/s".into(),
+            tag: "amd64-abc1234".into(),
+            attempts: 1,
+            exit_code: Some(504),
+            stderr: "401 Unauthorized: bad credentials".into(),
+        };
+        assert!(
+            !classify(&terminal_with_5xx_exit_code),
+            "exit_code is structurally separate from stderr; \
+             a non-5xx stderr must short-circuit even if exit_code happens to match a 5xx marker"
+        );
+
+        // Symmetric: a transient 503 stderr must trip the classifier
+        // even when exit_code is a non-5xx number.
+        let transient_with_non_5xx_exit_code = RegistryError::PushFailed {
+            registry: "ghcr.io/o/p/s".into(),
+            tag: "amd64-abc1234".into(),
+            attempts: 1,
+            exit_code: Some(1),
+            stderr: "received unexpected HTTP status: 503".into(),
+        };
+        assert!(classify(&transient_with_non_5xx_exit_code));
     }
 }

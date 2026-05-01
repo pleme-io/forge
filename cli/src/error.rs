@@ -42,6 +42,16 @@ pub enum DeployError {
 /// tag, image path) so callers can build precise telemetry, retry the
 /// failing step in isolation, and produce attestation-grade failure
 /// records without reconstructing context from logs.
+///
+/// `PushFailed` keeps `exit_code` and `stderr` as separate fields rather
+/// than fused into a single `message` string so downstream telemetry,
+/// retry classifiers (THEORY §V.4 Phase 1 records), and attestation
+/// chains can pattern-match on the failure shape — same arc as
+/// `NixBuildError::BuildFailed`, `AtticError::PushFailed`, and
+/// `GitError::OpFailed`. The split between `ExecFailed` ("could not
+/// spawn the registry CLI") and the operation-specific failure variants
+/// matches the discipline already established for `NixBuildError`,
+/// `AtticError`, and `GitError`.
 #[derive(Error, Debug)]
 pub enum RegistryError {
     #[error("GHCR token not found. Set GHCR_TOKEN env var or authenticate with `gh auth login`")]
@@ -50,12 +60,18 @@ pub enum RegistryError {
     #[error("Invalid registry format: {registry}. Expected: host/organization/project/image")]
     InvalidFormat { registry: String },
 
-    #[error("Push to {registry}:{tag} failed after {attempts} attempts: {message}")]
+    #[error("Failed to spawn registry CLI for {operation}: {message}")]
+    ExecFailed { operation: String, message: String },
+
+    #[error(
+        "Push to {registry}:{tag} failed after {attempts} attempts (exit {exit_code:?}): {stderr}"
+    )]
     PushFailed {
         registry: String,
         tag: String,
         attempts: u32,
-        message: String,
+        exit_code: Option<i32>,
+        stderr: String,
     },
 
     #[error("Local image archive not found: {path}")]
@@ -290,11 +306,13 @@ mod tests {
             registry: "ghcr.io/myorg/myproj/svc".to_string(),
             tag: "amd64-abc1234".to_string(),
             attempts: 3,
-            message: "network error".to_string(),
+            exit_code: Some(1),
+            stderr: "network error".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("3"));
-        assert!(msg.contains("network error"));
+        assert!(msg.contains("3"), "attempts must appear: {msg}");
+        assert!(msg.contains("network error"), "stderr must appear: {msg}");
+        assert!(msg.contains('1'), "exit_code must appear: {msg}");
         assert!(
             msg.contains("ghcr.io/myorg/myproj/svc"),
             "registry must appear in display: {msg}"
@@ -302,6 +320,98 @@ mod tests {
         assert!(
             msg.contains("amd64-abc1234"),
             "tag must appear in display: {msg}"
+        );
+    }
+
+    /// `ExecFailed` (the spawn-failure path: skopeo / regctl could not
+    /// be executed at all) must surface as a typed variant carrying the
+    /// operation label and the underlying message — same shape as
+    /// `AtticError::ExecFailed`, `NixBuildError::ExecFailed`, and
+    /// `GitError::ExecFailed`. Pinning the discriminator lets telemetry
+    /// distinguish "skopeo missing" from "skopeo said no" without
+    /// parsing strings.
+    #[test]
+    fn test_registry_error_exec_failed_display() {
+        let err = RegistryError::ExecFailed {
+            operation: "push docker-archive".into(),
+            message: "No such file or directory".into(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("push docker-archive"),
+            "operation must appear: {msg}"
+        );
+        assert!(msg.contains("No such file"), "message must appear: {msg}");
+    }
+
+    /// `PushFailed` must surface (registry, tag, attempts, exit_code,
+    /// stderr) as separate fields. The pre-migration shape fused
+    /// `(exit_code, stderr)` into a single `message: String` —
+    /// invisible to retry classifiers (which had to substring-match on
+    /// the fused string) and to Phase 1 attestation records (which
+    /// could not recover the structured tuple). The split mirrors
+    /// `NixBuildError::BuildFailed`, `AtticError::PushFailed`, and
+    /// `GitError::OpFailed`.
+    #[test]
+    fn test_registry_error_push_failed_carries_structured_fields() {
+        let err = RegistryError::PushFailed {
+            registry: "ghcr.io/o/p/s".into(),
+            tag: "amd64-deadbee".into(),
+            attempts: 3,
+            exit_code: Some(2),
+            stderr: "received unexpected HTTP status: 503".into(),
+        };
+        match err {
+            RegistryError::PushFailed {
+                registry,
+                tag,
+                attempts,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(registry, "ghcr.io/o/p/s");
+                assert_eq!(tag, "amd64-deadbee");
+                assert_eq!(attempts, 3);
+                assert_eq!(exit_code, Some(2));
+                assert!(stderr.contains("503"));
+            }
+            _ => panic!("expected PushFailed"),
+        }
+    }
+
+    /// Exec / push are distinct conditions and must not be representable
+    /// by a single fused-message variant. Pinning the discriminator lets
+    /// downstream code pattern-match on the failure shape without
+    /// parsing strings — same arc as AtticError, NixBuildError, GitError.
+    #[test]
+    fn test_registry_error_failure_split_is_typed() {
+        fn classify(e: &RegistryError) -> &'static str {
+            match e {
+                RegistryError::TokenNotFound => "token",
+                RegistryError::InvalidFormat { .. } => "invalid_format",
+                RegistryError::ExecFailed { .. } => "exec",
+                RegistryError::PushFailed { .. } => "push",
+                RegistryError::LocalImageNotFound { .. } => "local",
+                RegistryError::RemoteImageNotFound { .. } => "remote",
+                RegistryError::ManifestFailed { .. } => "manifest",
+            }
+        }
+        assert_eq!(
+            classify(&RegistryError::ExecFailed {
+                operation: "push".into(),
+                message: "no such file".into(),
+            }),
+            "exec"
+        );
+        assert_eq!(
+            classify(&RegistryError::PushFailed {
+                registry: "ghcr.io/o/p/s".into(),
+                tag: "x".into(),
+                attempts: 1,
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "push"
         );
     }
 
@@ -373,7 +483,8 @@ mod tests {
             registry: "ghcr.io/o/p/s".into(),
             tag: "arm64-cafebab".into(),
             attempts: 2,
-            message: "exit 1".into(),
+            exit_code: Some(1),
+            stderr: "exit 1".into(),
         };
         match err {
             RegistryError::PushFailed { registry, tag, .. } => {
@@ -386,28 +497,20 @@ mod tests {
 
     #[test]
     fn test_git_error_variants() {
-        assert!(
-            GitError::NotARepository
-                .to_string()
-                .contains("git repository")
-        );
-        assert!(
-            GitError::ShaFailed("bad ref".into())
-                .to_string()
-                .contains("bad ref")
-        );
-        assert!(
-            GitError::CommandFailed {
-                command: "push".into()
-            }
+        assert!(GitError::NotARepository
             .to_string()
-            .contains("push")
-        );
-        assert!(
-            GitError::DirtyWorkingTree
-                .to_string()
-                .contains("Uncommitted")
-        );
+            .contains("git repository"));
+        assert!(GitError::ShaFailed("bad ref".into())
+            .to_string()
+            .contains("bad ref"));
+        assert!(GitError::CommandFailed {
+            command: "push".into()
+        }
+        .to_string()
+        .contains("push"));
+        assert!(GitError::DirtyWorkingTree
+            .to_string()
+            .contains("Uncommitted"));
     }
 
     #[test]
@@ -561,11 +664,9 @@ mod tests {
 
     #[test]
     fn test_nix_build_error_variants() {
-        assert!(
-            NixBuildError::CargoNixMissing
-                .to_string()
-                .contains("Cargo.nix")
-        );
+        assert!(NixBuildError::CargoNixMissing
+            .to_string()
+            .contains("Cargo.nix"));
         let err = NixBuildError::BuildFailed {
             flake_attr: ".#pkg".into(),
             exit_code: Some(101),
@@ -575,13 +676,11 @@ mod tests {
         assert!(msg.contains(".#pkg"), "flake_attr must appear: {msg}");
         assert!(msg.contains("101"), "exit_code must appear: {msg}");
         assert!(msg.contains("eval failed"), "stderr must appear: {msg}");
-        assert!(
-            NixBuildError::FlakeNotFound {
-                path: "/tmp".into()
-            }
-            .to_string()
-            .contains("/tmp")
-        );
+        assert!(NixBuildError::FlakeNotFound {
+            path: "/tmp".into()
+        }
+        .to_string()
+        .contains("/tmp"));
     }
 
     /// Build-failed, empty-output, and exec-failed are distinct conditions
