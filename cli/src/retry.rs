@@ -124,6 +124,72 @@ impl Default for RetryPolicy {
     }
 }
 
+/// Markers in captured stderr that signal a transient network/server
+/// failure worth retrying. The list is canonical across the dialects
+/// forge's external CLIs speak: skopeo (Go's `net/http`), regctl (Go),
+/// attic (reqwest/hyper), git-over-HTTPS (curl), and the underlying
+/// HTTP servers (GHCR, attic-server). Sourced from the substring set
+/// the pre-existing `attic_command_with_retry` matched in production
+/// (b0db1da's prior context) plus the Go-stdlib timeout/EOF idioms.
+///
+/// Markers are matched as plain substrings (case-sensitive on the
+/// canonical capitalization the tools emit). Numeric codes ("500",
+/// "502", "503", "504") match alongside their named forms because
+/// different tools emit one or the other; matching both is harmless.
+const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
+    // HTTP 5xx — numeric forms first (skopeo / regctl emit numeric).
+    "500",
+    "502",
+    "503",
+    "504",
+    // HTTP 5xx — named forms (attic / curl emit named).
+    "Internal Server Error",
+    "InternalServerError",
+    "Bad Gateway",
+    "Service Unavailable",
+    "Gateway Timeout",
+    // Connection-level failures — both Go-stdlib lowercase and curl mixed-case.
+    "Connection refused",
+    "connection refused",
+    "Connection reset",
+    "connection reset",
+    "Connection aborted",
+    // I/O timeouts (Go net/http and TLS handshake variants).
+    "i/o timeout",
+    "TLS handshake timeout",
+    "timeout",
+    // Mid-stream TCP drops (servers closing under load).
+    "unexpected EOF",
+    "EOF",
+];
+
+/// Heuristic classifier: does `stderr` indicate a transient network or
+/// upstream-server failure that should be retried, vs a terminal failure
+/// (auth, not-found, missing tool, manifest mismatch) that should fail
+/// fast?
+///
+/// Returns `true` for HTTP 5xx (numeric or named), connection-level errors
+/// (refused / reset / aborted), I/O and TLS-handshake timeouts, and EOF /
+/// unexpected-EOF (typical TCP drop mid-stream). Returns `false` for
+/// anything else — including empty stderr, so a typed `ExecFailed` /
+/// `TokenRequired` / `LocalImageNotFound` whose record carries no stderr
+/// short-circuits without burning retry budget.
+///
+/// This is the typed lift of the substring-classifier the pre-existing
+/// `commands/github_runner_ci.rs::attic_command_with_retry` carried
+/// inline. Centralizing it pre-empts the planned migrations of
+/// `attic_command_with_retry` and `push_with_retry` (b0db1da's
+/// follow-up) — both consume this primitive instead of carrying their
+/// own substring lists.
+pub fn is_transient_network_stderr(stderr: &str) -> bool {
+    if stderr.is_empty() {
+        return false;
+    }
+    TRANSIENT_NETWORK_STDERR_MARKERS
+        .iter()
+        .any(|m| stderr.contains(m))
+}
+
 /// Run `op` under `policy`, retrying transient errors per the schedule.
 ///
 /// `op` receives the 1-indexed attempt number so callers can build error
@@ -171,6 +237,126 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+
+    /// HTTP 5xx in numeric form must match — skopeo/regctl emit numeric.
+    #[test]
+    fn test_transient_classifier_matches_http_5xx_numeric() {
+        assert!(is_transient_network_stderr(
+            "manifest invalid: 500 Internal Server Error"
+        ));
+        assert!(is_transient_network_stderr(
+            "received unexpected HTTP status: 502"
+        ));
+        assert!(is_transient_network_stderr(
+            "registry returned 503 (retry-after: 5s)"
+        ));
+        assert!(is_transient_network_stderr("upstream said 504"));
+    }
+
+    /// HTTP 5xx in named form must match — attic/curl emit named.
+    #[test]
+    fn test_transient_classifier_matches_http_5xx_named() {
+        assert!(is_transient_network_stderr("Bad Gateway from cdn"));
+        assert!(is_transient_network_stderr(
+            "Service Unavailable; please retry"
+        ));
+        assert!(is_transient_network_stderr("Internal Server Error"));
+        assert!(is_transient_network_stderr(
+            "InternalServerError: cache write failed"
+        ));
+        assert!(is_transient_network_stderr("Gateway Timeout"));
+    }
+
+    /// Connection-level failures must match in both Go-stdlib lowercase
+    /// and curl mixed-case dialects.
+    #[test]
+    fn test_transient_classifier_matches_connection_failures() {
+        assert!(is_transient_network_stderr(
+            "dial tcp 1.2.3.4:443: connect: connection refused"
+        ));
+        assert!(is_transient_network_stderr(
+            "curl: Connection refused on attempt"
+        ));
+        assert!(is_transient_network_stderr(
+            "read tcp: connection reset by peer"
+        ));
+        assert!(is_transient_network_stderr("Connection reset"));
+        assert!(is_transient_network_stderr(
+            "Connection aborted by remote endpoint"
+        ));
+    }
+
+    /// I/O timeouts and TLS handshake timeouts are transient.
+    #[test]
+    fn test_transient_classifier_matches_timeouts() {
+        assert!(is_transient_network_stderr(
+            "read tcp 10.0.0.1: i/o timeout"
+        ));
+        assert!(is_transient_network_stderr(
+            "TLS handshake timeout after 30s"
+        ));
+        // Bare "timeout" — the substring catches the broader class.
+        assert!(is_transient_network_stderr("operation timeout reached"));
+    }
+
+    /// Mid-stream EOF (TCP drop while a response is streaming) is transient.
+    #[test]
+    fn test_transient_classifier_matches_eof() {
+        assert!(is_transient_network_stderr("post manifest: unexpected EOF"));
+        assert!(is_transient_network_stderr("read body: EOF"));
+    }
+
+    /// Empty stderr must NOT be classified transient. A typed error whose
+    /// record carries no stderr (ExecFailed, TokenRequired,
+    /// LocalImageNotFound) must short-circuit, not retry.
+    #[test]
+    fn test_transient_classifier_empty_stderr_is_terminal() {
+        assert!(!is_transient_network_stderr(""));
+    }
+
+    /// Terminal failures common to skopeo / regctl / attic / git must NOT
+    /// match. Pinning these explicitly is the load-bearing test: if a
+    /// future marker is added that swallows one of these, the regression
+    /// shows up here, not in production via burned retry budget.
+    #[test]
+    fn test_transient_classifier_terminal_failures_do_not_match() {
+        // skopeo / regctl
+        assert!(!is_transient_network_stderr(
+            "401 Unauthorized: bad credentials"
+        ));
+        assert!(!is_transient_network_stderr("403 Forbidden: denied"));
+        assert!(!is_transient_network_stderr(
+            "404 manifest unknown: ghcr.io/o/p"
+        ));
+        assert!(!is_transient_network_stderr(
+            "manifest invalid: bad image config digest"
+        ));
+        // git
+        assert!(!is_transient_network_stderr(
+            "fatal: remote rejected: pre-receive hook declined"
+        ));
+        assert!(!is_transient_network_stderr(
+            "non-fast-forward: tip of branch is behind remote"
+        ));
+        // attic
+        assert!(!is_transient_network_stderr(
+            "configuration error: cache 'foo' not found"
+        ));
+        // exec-missing
+        assert!(!is_transient_network_stderr("skopeo: command not found"));
+        assert!(!is_transient_network_stderr(
+            "No such file or directory (os error 2)"
+        ));
+    }
+
+    /// An HTTP 4xx error code embedded in a message must NOT match the
+    /// 5xx markers. Specifically, "400 Bad Request" must not trip the
+    /// "Bad Gateway" marker (different word) or any 5xx numeric.
+    #[test]
+    fn test_transient_classifier_4xx_does_not_match() {
+        assert!(!is_transient_network_stderr("400 Bad Request"));
+        assert!(!is_transient_network_stderr("429 Too Many Requests"));
+    }
 
     /// `compute_delay` is a pure function of `attempt`. Pin the schedule
     /// directly so a future schedule change shows up as a test diff, not
