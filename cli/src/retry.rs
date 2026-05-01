@@ -190,6 +190,72 @@ pub fn is_transient_network_stderr(stderr: &str) -> bool {
         .any(|m| stderr.contains(m))
 }
 
+/// Captured output of a single failed external-command attempt.
+///
+/// Typed error shape for ad-hoc retry call sites (`commands/push.rs`,
+/// `commands/github_runner_ci.rs`) whose public surface returns
+/// `anyhow::Result<()>` and where a domain-specific error enum
+/// (`RegistryError`, `AtticError`, `GitError`, `NixBuildError`) does not
+/// yet exist. Carries the structural-record tuple THEORY §V.4 Phase 1
+/// attestation records need: `(operation, attempt, exit_code, stderr,
+/// stdout)`. The hand-rolled retry loops this type displaces all fused
+/// these fields into free-form `anyhow::bail!("…: {}", stderr)` strings;
+/// pinning them as separate fields means a future telemetry / replay /
+/// attestation consumer can recover the exact failure tuple without log
+/// scraping.
+///
+/// Transient/terminal classification is via [`Self::is_transient`], which
+/// delegates to [`is_transient_network_stderr`] against the captured
+/// stderr. Empty stderr (the spawn-failure path: `Command::output().await`
+/// returned `Err`, or a tool was found but produced no stderr) is
+/// unconditionally terminal so the retry loop never burns budget on a
+/// "binary not on PATH" or "operating-system fork failed" precondition.
+#[derive(Debug, Clone)]
+pub struct CommandAttemptFailure {
+    /// Caller-supplied label for the failed operation
+    /// (e.g. `"login to Attic"`, `"push ghcr.io/o/p:tag"`).
+    pub operation: String,
+    /// 1-indexed attempt number on which the failure occurred.
+    pub attempt: u32,
+    /// Exit code from the child process, if it exited normally. `None`
+    /// when the process could not be spawned (or was killed by signal).
+    pub exit_code: Option<i32>,
+    /// Captured stderr, trimmed. Empty when the process could not be
+    /// spawned. Consumed by [`Self::is_transient`].
+    pub stderr: String,
+    /// Captured stdout, trimmed. Used as a Display fallback when stderr
+    /// is empty.
+    pub stdout: String,
+}
+
+impl CommandAttemptFailure {
+    /// True iff the captured stderr matches a transient network/server
+    /// failure marker (HTTP 5xx, connection-level, I/O timeout, EOF).
+    /// Empty stderr is terminal by construction.
+    pub fn is_transient(&self) -> bool {
+        is_transient_network_stderr(&self.stderr)
+    }
+}
+
+impl std::fmt::Display for CommandAttemptFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let detail = if !self.stderr.is_empty() {
+            self.stderr.as_str()
+        } else if !self.stdout.is_empty() {
+            self.stdout.as_str()
+        } else {
+            "(no captured output)"
+        };
+        write!(
+            f,
+            "Failed to {}: {} (exit {:?}, attempt {})",
+            self.operation, detail, self.exit_code, self.attempt
+        )
+    }
+}
+
+impl std::error::Error for CommandAttemptFailure {}
+
 /// Run `op` under `policy`, retrying transient errors per the schedule.
 ///
 /// `op` receives the 1-indexed attempt number so callers can build error
@@ -568,6 +634,175 @@ mod tests {
         )
         .await;
         assert_eq!(*seen.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    /// `CommandAttemptFailure::is_transient` must return true on stderr
+    /// matching a canonical 5xx / connection / timeout / EOF marker. Pins
+    /// the typed structural-record shape that ad-hoc retry sites consume
+    /// instead of carrying their own substring lists.
+    #[test]
+    fn test_command_attempt_failure_is_transient_on_5xx() {
+        let f = CommandAttemptFailure {
+            operation: "push to Attic cache".to_string(),
+            attempt: 2,
+            exit_code: Some(1),
+            stderr: "received unexpected HTTP status: 503".to_string(),
+            stdout: String::new(),
+        };
+        assert!(f.is_transient());
+    }
+
+    /// Terminal failures (auth, not-found, manifest mismatch) must NOT
+    /// be classified transient — they must short-circuit the retry loop
+    /// instead of burning the full budget × backoff.
+    #[test]
+    fn test_command_attempt_failure_is_not_transient_on_terminal() {
+        let f = CommandAttemptFailure {
+            operation: "login to Attic".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            stderr: "401 Unauthorized: bad token".to_string(),
+            stdout: String::new(),
+        };
+        assert!(!f.is_transient());
+    }
+
+    /// Empty stderr — the spawn-failure path (`Command::output()` failed,
+    /// or the process exited with no stderr) — must be terminal. A
+    /// "binary not on PATH" precondition must never burn retry budget.
+    #[test]
+    fn test_command_attempt_failure_empty_stderr_is_terminal() {
+        let f = CommandAttemptFailure {
+            operation: "push image".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: String::new(),
+            stdout: "skopeo: command not found".to_string(),
+        };
+        assert!(!f.is_transient());
+    }
+
+    /// Display surfaces operation, exit code, attempt — the structural
+    /// tuple downstream telemetry / attestation expects on the failure
+    /// record. Must NOT lose any field by fusing them into a single
+    /// stringly anyhow::bail!() (which is what the hand-rolled loops did).
+    #[test]
+    fn test_command_attempt_failure_display_surfaces_fields() {
+        let f = CommandAttemptFailure {
+            operation: "push ghcr.io/o/p:abc1234".to_string(),
+            attempt: 3,
+            exit_code: Some(2),
+            stderr: "manifest invalid: 503".to_string(),
+            stdout: String::new(),
+        };
+        let s = f.to_string();
+        assert!(s.contains("push ghcr.io/o/p:abc1234"));
+        assert!(s.contains("manifest invalid: 503"));
+        assert!(s.contains("exit Some(2)"));
+        assert!(s.contains("attempt 3"));
+    }
+
+    /// Display falls back to stdout when stderr is empty. Pins the
+    /// fallback chain stderr → stdout → "(no captured output)" so a
+    /// future caller never produces a record with no human-readable
+    /// detail.
+    #[test]
+    fn test_command_attempt_failure_display_falls_back_to_stdout() {
+        let f = CommandAttemptFailure {
+            operation: "use cache".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            stderr: String::new(),
+            stdout: "configuration error: cache 'foo' not found".to_string(),
+        };
+        let s = f.to_string();
+        assert!(s.contains("configuration error: cache 'foo' not found"));
+    }
+
+    /// Final fallback when both stderr and stdout are empty. The record
+    /// still surfaces operation + exit_code + attempt so telemetry can
+    /// pin the failing call site even when the tool produces no output.
+    #[test]
+    fn test_command_attempt_failure_display_no_output_fallback() {
+        let f = CommandAttemptFailure {
+            operation: "noisy op".to_string(),
+            attempt: 5,
+            exit_code: None,
+            stderr: String::new(),
+            stdout: String::new(),
+        };
+        let s = f.to_string();
+        assert!(s.contains("(no captured output)"));
+        assert!(s.contains("noisy op"));
+        assert!(s.contains("attempt 5"));
+    }
+
+    /// Classifier closure shaped like the one inside the migrated retry
+    /// helpers: drives `run_with_policy` so a transient
+    /// `CommandAttemptFailure` retries while a terminal one
+    /// short-circuits. Mirrors the discipline registry.rs adopted for
+    /// `RegistryError::PushFailed` (ff89296), now applied to the
+    /// structural-record shape ad-hoc helpers consume.
+    #[tokio::test]
+    async fn test_run_with_policy_consumes_command_attempt_failure() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        // Transient: classifier returns true on 503; loop retries until
+        // exhaustion and returns the LAST error.
+        let p = RetryPolicy::new(3, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let res: Result<(), CommandAttemptFailure> = run_with_policy(
+            &p,
+            |e: &CommandAttemptFailure| e.is_transient(),
+            move |attempt| {
+                let calls = calls_clone.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(CommandAttemptFailure {
+                        operation: "test".to_string(),
+                        attempt,
+                        exit_code: Some(1),
+                        stderr: "503 Service Unavailable".to_string(),
+                        stdout: String::new(),
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let err = res.unwrap_err();
+        assert_eq!(err.attempt, 3, "last error must carry final attempt count");
+
+        // Terminal: classifier returns false on 401; loop short-circuits
+        // after a single call.
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let res: Result<(), CommandAttemptFailure> = run_with_policy(
+            &p,
+            |e: &CommandAttemptFailure| e.is_transient(),
+            move |attempt| {
+                let calls = calls_clone.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(CommandAttemptFailure {
+                        operation: "test".to_string(),
+                        attempt,
+                        exit_code: Some(1),
+                        stderr: "401 Unauthorized".to_string(),
+                        stdout: String::new(),
+                    })
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "terminal must short-circuit on first attempt"
+        );
+        assert!(res.is_err());
     }
 
     /// `max_attempts = 1` is "no retry": a transient error returns

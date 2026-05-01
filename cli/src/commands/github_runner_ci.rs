@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::git;
 use crate::repo::get_tool_path;
+use crate::retry::{run_with_policy, CommandAttemptFailure, RetryPolicy};
 
 /// Check if SAFE mode is enabled (retry on errors)
 /// Default: true (retries enabled by default)
@@ -630,81 +631,94 @@ pub async fn execute(
     Ok(())
 }
 
-/// Execute attic command with optional retry logic
+/// Execute an `attic` subcommand with retry-on-transient.
+///
+/// Drives [`crate::retry::run_with_policy`] with a network-shaped policy
+/// (5 attempts × 250ms × factor=2 capped at 30s) when `safe_mode` is on,
+/// or [`RetryPolicy::immediate`] (no retry) when off. The transient /
+/// terminal classifier is the canonical
+/// [`crate::retry::is_transient_network_stderr`] (consumed via
+/// [`CommandAttemptFailure::is_transient`]), shared with
+/// `infrastructure/registry.rs::push_with_retries` and
+/// `commands/push.rs::push_with_retry` — the duplication budget on the
+/// hand-rolled retry loops is now redeemed (THEORY §I.3 ¶5). Failures
+/// produce a [`CommandAttemptFailure`] carrying the structural-record
+/// tuple `(operation, attempt, exit_code, stderr, stdout)`; the LAST
+/// error from the loop is mapped to `anyhow::Error` at the public
+/// boundary so existing call sites remain unchanged.
 async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: bool) -> Result<()> {
-    let max_retries = if safe_mode { 5 } else { 1 };
-    let mut attempts = 0;
+    let policy = if safe_mode {
+        RetryPolicy::network()
+    } else {
+        RetryPolicy::immediate()
+    };
+    let max_attempts = policy.max_attempts;
+    let attic = get_tool_path("ATTIC_BIN", "attic");
+    let op = operation.to_string();
 
-    loop {
-        attempts += 1;
+    let result = run_with_policy(
+        &policy,
+        |e: &CommandAttemptFailure| e.is_transient(),
+        |attempt| {
+            let attic = attic.clone();
+            let op = op.clone();
+            async move {
+                debug!("Running: attic {}", args.join(" "));
+                let output = Command::new(&attic)
+                    .args(args)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .output()
+                    .await;
 
-        debug!("Running: attic {}", args.join(" "));
+                match output {
+                    Ok(out) if out.status.success() => {
+                        debug!("attic command succeeded on attempt {}", attempt);
+                        Ok(())
+                    }
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                        if !stdout.is_empty() {
+                            debug!("attic stdout: {}", stdout);
+                        }
+                        if !stderr.is_empty() {
+                            debug!("attic stderr: {}", stderr);
+                        }
+                        if attempt < max_attempts {
+                            warn!(
+                                "⚠️  {} failed (attempt {}/{}): retrying...",
+                                op, attempt, max_attempts
+                            );
+                        }
+                        Err(CommandAttemptFailure {
+                            operation: op.clone(),
+                            attempt,
+                            exit_code: out.status.code(),
+                            stderr,
+                            stdout,
+                        })
+                    }
+                    Err(spawn_err) => {
+                        // Spawn-failure path: empty stderr → terminal under
+                        // `is_transient_network_stderr`, so this short-circuits
+                        // the loop instead of burning budget on a "binary not
+                        // on PATH" precondition.
+                        Err(CommandAttemptFailure {
+                            operation: op.clone(),
+                            attempt,
+                            exit_code: None,
+                            stderr: String::new(),
+                            stdout: format!("Failed to spawn attic: {}", spawn_err),
+                        })
+                    }
+                }
+            }
+        },
+    )
+    .await;
 
-        let output = Command::new("attic")
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
-            .context(format!("Failed to execute attic command for {}", operation))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if !stdout.is_empty() {
-            debug!("attic stdout: {}", stdout.trim());
-        }
-
-        if !stderr.is_empty() {
-            debug!("attic stderr: {}", stderr.trim());
-        }
-
-        // Check for specific HTTP errors that indicate service issues
-        let is_retryable_error = stderr.contains("503")
-            || stderr.contains("Service Unavailable")
-            || stderr.contains("502")
-            || stderr.contains("Bad Gateway")
-            || stderr.contains("500")
-            || stderr.contains("Internal Server Error")
-            || stderr.contains("InternalServerError")
-            || stderr.contains("Connection refused")
-            || stderr.contains("Connection reset")
-            || stderr.contains("timeout");
-
-        if output.status.success() {
-            debug!("attic command succeeded on attempt {}", attempts);
-            return Ok(());
-        }
-
-        // If not in safe mode or not retryable, fail immediately
-        if !safe_mode || !is_retryable_error || attempts >= max_retries {
-            let error_msg = if !stderr.is_empty() {
-                stderr.trim().to_string()
-            } else if !stdout.is_empty() {
-                stdout.trim().to_string()
-            } else {
-                format!("Command exited with status: {:?}", output.status.code())
-            };
-
-            return Err(anyhow::anyhow!(
-                "Failed to {}: {} (attempt {}/{})",
-                operation,
-                error_msg,
-                attempts,
-                max_retries
-            ));
-        }
-
-        // Exponential backoff: 2s, 4s, 8s, 16s, 32s
-        let wait_secs = 2u64.pow(attempts - 1).min(32);
-        warn!(
-            "⚠️  {} failed (attempt {}/{}): retrying in {}s...",
-            operation, attempts, max_retries, wait_secs
-        );
-        debug!("Error was: {}", stderr.trim());
-
-        tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
-    }
+    result.map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 async fn push_with_retry(
@@ -714,27 +728,21 @@ async fn push_with_retry(
     token: &str,
     retries: u32,
 ) -> Result<()> {
-    let mut attempts = 0;
     let safe_mode = is_safe_mode();
 
-    // Check if image file exists
+    // Pre-loop: image file must exist. Structural precondition; not a
+    // retry-recoverable failure.
     debug!("Verifying image file: {}", image_path);
-    let image_metadata = tokio::fs::metadata(image_path).await;
-    match image_metadata {
-        Ok(meta) => {
-            debug!("Image file found, size: {} bytes", meta.len());
-        }
-        Err(e) => {
-            anyhow::bail!("Image file not found at {}: {}", image_path, e);
-        }
+    match tokio::fs::metadata(image_path).await {
+        Ok(meta) => debug!("Image file found, size: {} bytes", meta.len()),
+        Err(e) => anyhow::bail!("Image file not found at {}: {}", image_path, e),
     }
 
     let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
 
-    // Check if skopeo is available
+    // Pre-loop: skopeo must be available. Same structural precondition.
     debug!("Checking if skopeo is available at: {}", skopeo);
     let skopeo_check = Command::new(&skopeo).arg("--version").output().await;
-
     match skopeo_check {
         Ok(output) if output.status.success() => {
             debug!(
@@ -752,73 +760,91 @@ async fn push_with_retry(
         }
     }
 
-    loop {
-        attempts += 1;
+    // Extract organization from registry URL for credentials. Falls
+    // back to "user" when the registry is malformed (single-segment),
+    // matching pre-existing behaviour.
+    let parsed_registry = crate::infrastructure::registry::RegistryRef::parse(registry).ok();
+    let organization = parsed_registry
+        .as_ref()
+        .map_or("user", |r| r.organization())
+        .to_string();
 
-        debug!("Pushing {}:{} (attempt {})", registry, tag, attempts);
-        debug!(
-            "Command: skopeo copy docker-archive:{} docker://{}:{}",
-            image_path, registry, tag
-        );
+    // Outer retry: shared `run_with_policy` with the canonical
+    // network-shaped schedule (or immediate when safe_mode is off). The
+    // `retries` parameter is preserved as skopeo's internal
+    // `--retry-times` (a per-blob retry inside skopeo); the OUTER loop
+    // is bounded by the typed policy. Pre-existing code conflated the
+    // two: when `safe_mode` was on, the outer loop never terminated
+    // (the `attempts < retries || safe_mode` guard was always true).
+    // The migration fixes that bug by construction.
+    let policy = if safe_mode {
+        RetryPolicy::network()
+    } else {
+        RetryPolicy::immediate()
+    };
+    let max_attempts = policy.max_attempts;
+    let op = format!("push {}:{}", registry, tag);
 
-        // Extract organization from registry URL for credentials
-        // e.g., "ghcr.io/myorg/project/image" -> "myorg"
-        let parsed_registry = crate::infrastructure::registry::RegistryRef::parse(registry).ok();
-        let organization = parsed_registry
-            .as_ref()
-            .map_or("user", |r| r.organization());
+    let result = run_with_policy(
+        &policy,
+        |e: &CommandAttemptFailure| e.is_transient(),
+        |attempt| {
+            let skopeo = skopeo.clone();
+            let organization = organization.clone();
+            let op = op.clone();
+            async move {
+                debug!("Pushing {}:{} (attempt {})", registry, tag, attempt);
+                let result = Command::new(&skopeo)
+                    .args([
+                        "copy",
+                        "--insecure-policy",
+                        &format!("--retry-times={}", retries),
+                        &format!("--dest-creds={}:{}", organization, token),
+                        &format!("docker-archive:{}", image_path),
+                        &format!("docker://{}:{}", registry, tag),
+                    ])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .output()
+                    .await;
 
-        let result = Command::new(&skopeo)
-            .args(&[
-                "copy",
-                "--insecure-policy",
-                &format!("--retry-times={}", retries),
-                &format!("--dest-creds={}:{}", organization, token),
-                &format!("docker-archive:{}", image_path),
-                &format!("docker://{}:{}", registry, tag),
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await;
-
-        match result {
-            Ok(output) if output.status.success() => {
-                debug!("Push successful for {}:{}", registry, tag);
-                return Ok(());
-            }
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
-                if !stdout.is_empty() {
-                    debug!("skopeo stdout: {}", stdout.trim());
+                match result {
+                    Ok(output) if output.status.success() => {
+                        debug!("Push successful for {}:{}", registry, tag);
+                        Ok(())
+                    }
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        if !stdout.is_empty() {
+                            debug!("skopeo stdout: {}", stdout);
+                        }
+                        if !stderr.is_empty() {
+                            debug!("skopeo stderr: {}", stderr);
+                        }
+                        if attempt < max_attempts {
+                            warn!("Push attempt {} failed, retrying...", attempt);
+                        }
+                        Err(CommandAttemptFailure {
+                            operation: op.clone(),
+                            attempt,
+                            exit_code: output.status.code(),
+                            stderr,
+                            stdout,
+                        })
+                    }
+                    Err(spawn_err) => Err(CommandAttemptFailure {
+                        operation: op.clone(),
+                        attempt,
+                        exit_code: None,
+                        stderr: String::new(),
+                        stdout: format!("Failed to execute skopeo command: {}", spawn_err),
+                    }),
                 }
-                if !stderr.is_empty() {
-                    debug!("skopeo stderr: {}", stderr.trim());
-                }
+            }
+        },
+    )
+    .await;
 
-                if attempts < retries || safe_mode {
-                    warn!("Push attempt {} failed, retrying...", attempts);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    continue;
-                } else {
-                    anyhow::bail!(
-                        "Push failed after {} attempts (exit code: {:?})\nStderr: {}\nStdout: {}",
-                        attempts,
-                        output.status.code(),
-                        stderr.trim(),
-                        stdout.trim()
-                    );
-                }
-            }
-            Err(e) => {
-                // This usually means the command itself couldn't be executed
-                anyhow::bail!(
-                    "Failed to execute skopeo command: {}. Is skopeo installed?",
-                    e
-                );
-            }
-        }
-    }
+    result.map_err(|e| anyhow::anyhow!("{}", e))
 }
