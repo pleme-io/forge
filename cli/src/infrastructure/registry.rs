@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::error::RegistryError;
 use crate::repo::get_tool_path;
-use crate::retry::{run_with_policy, RetryPolicy};
+use crate::retry::{is_transient_network_stderr, run_with_policy, RetryPolicy};
 
 /// An architecture-specific image to push
 #[derive(Clone, Debug)]
@@ -181,7 +181,19 @@ impl RegistryClient {
 
         run_with_policy(
             &policy,
-            |_e: &RegistryError| true,
+            |e: &RegistryError| match e {
+                // Only `PushFailed` carries a captured-stderr message; every
+                // other variant is a structural precondition failure
+                // (`LocalImageNotFound`, `RemoteImageNotFound`, `TokenNotFound`,
+                // `ManifestFailed`, etc.) and must short-circuit so a permanent
+                // failure does not burn retry budget. This consumes the typed
+                // classifier lifted into `crate::retry::is_transient_network_stderr`,
+                // which is the canonical match against skopeo / regctl /
+                // attic / curl stderr dialects (HTTP 5xx, connection-level
+                // failures, I/O timeouts, mid-stream EOF).
+                RegistryError::PushFailed { message, .. } => is_transient_network_stderr(message),
+                _ => false,
+            },
             |attempt| async move {
                 let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
                 let output = Command::new(&skopeo)
@@ -670,5 +682,64 @@ mod tests {
         // Same rejection semantics.
         assert!(extract_organization("ghcr.io").is_err());
         assert!(extract_organization("").is_err());
+    }
+
+    /// Classifier wired into `push_with_retries` must consume the
+    /// `is_transient_network_stderr` primitive on `PushFailed.message`.
+    /// A representative skopeo "503 Service Unavailable" trips it; a
+    /// "401 Unauthorized" does not. Other variants (no captured stderr)
+    /// are unconditionally terminal.
+    ///
+    /// Mirrors the closure shape inside `push_with_retries` so a future
+    /// drift between the two surfaces fails this test, not production.
+    #[test]
+    fn test_push_classifier_distinguishes_transient_from_terminal() {
+        use crate::retry::is_transient_network_stderr;
+
+        let classify = |e: &RegistryError| match e {
+            RegistryError::PushFailed { message, .. } => is_transient_network_stderr(message),
+            _ => false,
+        };
+
+        let transient = RegistryError::PushFailed {
+            registry: "ghcr.io/o/p/s".into(),
+            tag: "amd64-abc1234".into(),
+            attempts: 1,
+            message: "Exit code: Some(1); stderr: received unexpected HTTP status: 503 Service Unavailable".into(),
+        };
+        assert!(classify(&transient), "5xx must classify as transient");
+
+        let terminal_401 = RegistryError::PushFailed {
+            registry: "ghcr.io/o/p/s".into(),
+            tag: "amd64-abc1234".into(),
+            attempts: 1,
+            message: "Exit code: Some(1); stderr: 401 Unauthorized: bad credentials".into(),
+        };
+        assert!(
+            !classify(&terminal_401),
+            "auth failure must not burn retry budget"
+        );
+
+        let terminal_404 = RegistryError::PushFailed {
+            registry: "ghcr.io/o/p/s".into(),
+            tag: "amd64-abc1234".into(),
+            attempts: 1,
+            message: "Exit code: Some(1); stderr: 404 manifest unknown".into(),
+        };
+        assert!(
+            !classify(&terminal_404),
+            "manifest-unknown must not burn retry budget"
+        );
+
+        let other = RegistryError::TokenNotFound;
+        assert!(
+            !classify(&other),
+            "non-PushFailed variants must short-circuit (no captured stderr)"
+        );
+
+        let local_missing = RegistryError::LocalImageNotFound {
+            path: "/nonexistent".into(),
+        };
+        assert!(!classify(&local_missing));
     }
 }
