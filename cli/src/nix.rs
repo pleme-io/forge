@@ -295,23 +295,16 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Write an executable shim script that pretends to be `nix`. The
-    /// returned tempdir keeps the shim alive until the caller drops it.
-    /// Tests invoke the shim by absolute path so they don't have to mutate
-    /// global PATH (which races under parallel test execution).
+    use crate::test_support::make_executable_shim;
+
+    /// Write an executable shim script that pretends to be `nix`.
+    /// Delegates to the shared
+    /// `crate::test_support::make_executable_shim` so the shim
+    /// discipline (absolute-path invocation, 0o755 chmod, tempdir
+    /// lifetime) lives in one place — same primitive as
+    /// `git.rs`'s `make_git_shim` and `attic.rs`'s `make_attic_shim`.
     fn make_nix_shim(body: &str) -> (tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let shim = dir.path().join("nix");
-        std::fs::write(&shim, body).expect("write shim");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&shim).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&shim, perms).unwrap();
-        }
-        let path = shim.display().to_string();
-        (dir, path)
+        make_executable_shim("nix", body)
     }
 
     /// When the resolved nix binary cannot be spawned, `run_nix_build_typed`
