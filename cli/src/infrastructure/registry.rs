@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::error::RegistryError;
 use crate::repo::get_tool_path;
-use crate::retry::{is_transient_network_stderr, run_with_policy, RetryPolicy};
+use crate::retry::{is_transient_network_stderr, run_with_policy, CapturedFailure, RetryPolicy};
 
 /// An architecture-specific image to push
 #[derive(Clone, Debug)]
@@ -221,7 +221,7 @@ impl RegistryClient {
                 match output {
                     Ok(out) if out.status.success() => Ok(()),
                     Ok(out) => {
-                        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                        let cf = CapturedFailure::from_output(&out);
                         if attempt < policy.max_attempts {
                             warn!("Push attempt {} failed, retrying...", attempt);
                         }
@@ -229,8 +229,8 @@ impl RegistryClient {
                             registry: registry.to_string(),
                             tag: tag.to_string(),
                             attempts: attempt,
-                            exit_code: out.status.code(),
-                            stderr,
+                            exit_code: cf.exit_code,
+                            stderr: cf.stderr,
                         })
                     }
                     Err(e) => Err(RegistryError::ExecFailed {

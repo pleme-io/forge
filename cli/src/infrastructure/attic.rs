@@ -12,29 +12,25 @@ use tracing::{info, warn};
 
 use crate::error::AtticError;
 use crate::repo::get_tool_path;
-
-/// Captured outcome of an attic invocation.
-///
-/// `exit_code` is the attic CLI exit code (or `None` if killed by signal);
-/// `stderr` is the captured stderr trimmed of trailing whitespace.
-struct AtticInvocation {
-    exit_code: Option<i32>,
-    stderr: String,
-}
+use crate::retry::CapturedFailure;
 
 /// Spawn `attic` with the given args, capture stderr, and return the
-/// invocation outcome on a non-zero exit. Returns `None` on success.
+/// non-success outcome as a typed [`CapturedFailure`]. Returns `None` on
+/// success.
 ///
 /// Spawn failures (the `attic` binary cannot be executed at all) surface
 /// as `AtticError::ExecFailed` carrying `cache` so callers can
 /// distinguish "attic missing" from "attic said no" without parsing
-/// strings.
+/// strings. The `(exit_code, stderr)` extraction discipline lives in
+/// [`CapturedFailure`] so this site cannot drift on UTF-8-lossy decode
+/// or trim — same canonical extraction the typed-error producer sites
+/// in `git.rs`, `nix.rs`, and `infrastructure/registry.rs` consume.
 async fn run_attic_capture(
     attic_bin: &str,
     args: &[&str],
     cache: &str,
     token: Option<&str>,
-) -> Result<Option<AtticInvocation>, AtticError> {
+) -> Result<Option<CapturedFailure>, AtticError> {
     let mut cmd = Command::new(attic_bin);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(t) = token {
@@ -46,14 +42,7 @@ async fn run_attic_capture(
         message: e.to_string(),
     })?;
 
-    if output.status.success() {
-        Ok(None)
-    } else {
-        Ok(Some(AtticInvocation {
-            exit_code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        }))
-    }
+    Ok(CapturedFailure::from_output_if_failed(&output))
 }
 
 /// Client for Attic cache operations
@@ -127,12 +116,12 @@ impl AtticClient {
         )
         .await?;
 
-        if let Some(AtticInvocation { exit_code, stderr }) = outcome {
+        if let Some(cf) = outcome {
             return Err(AtticError::PushFailed {
                 cache: self.cache_name.clone(),
                 store_path: store_path.to_string(),
-                exit_code,
-                stderr,
+                exit_code: cf.exit_code,
+                stderr: cf.stderr,
             });
         }
 
@@ -180,12 +169,12 @@ impl AtticClient {
         )
         .await?;
 
-        if let Some(AtticInvocation { exit_code, stderr }) = outcome {
+        if let Some(cf) = outcome {
             return Err(AtticError::LoginFailed {
                 cache: self.cache_name.clone(),
                 server_url: server_url.to_string(),
-                exit_code,
-                stderr,
+                exit_code: cf.exit_code,
+                stderr: cf.stderr,
             });
         }
 

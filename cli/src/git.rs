@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::GitError;
+use crate::retry::CapturedFailure;
 
 /// Run `git <args>` (resolved against `workdir` if any) and return its
 /// captured stdout, or a typed `GitError`.
@@ -29,11 +30,11 @@ fn git_capture(
         op: op.to_string(),
         message: e.to_string(),
     })?;
-    if !output.status.success() {
+    if let Some(cf) = CapturedFailure::from_output_if_failed(&output) {
         return Err(GitError::OpFailed {
             op: op.to_string(),
-            exit_code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            exit_code: cf.exit_code,
+            stderr: cf.stderr,
         });
     }
     Ok(output.stdout)
@@ -61,13 +62,13 @@ fn git_capture_remote(
         op: op.to_string(),
         message: e.to_string(),
     })?;
-    if !output.status.success() {
+    if let Some(cf) = CapturedFailure::from_output_if_failed(&output) {
         return Err(GitError::RemoteOpFailed {
             op: op.to_string(),
             remote: remote.to_string(),
             branch: branch.to_string(),
-            exit_code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            exit_code: cf.exit_code,
+            stderr: cf.stderr,
         });
     }
     Ok(output.stdout)
