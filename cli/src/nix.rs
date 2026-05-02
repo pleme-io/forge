@@ -10,6 +10,7 @@ use tracing::{debug, info};
 
 use crate::error::NixBuildError;
 use crate::repo::get_tool_path;
+use crate::retry::CapturedFailure;
 
 /// Result of a Nix build operation
 #[derive(Debug, Clone)]
@@ -54,11 +55,11 @@ async fn run_nix_build_typed(
             message: e.to_string(),
         })?;
 
-    if !output.status.success() {
+    if let Some(cf) = CapturedFailure::from_output_if_failed(&output) {
         return Err(NixBuildError::BuildFailed {
             flake_attr: label.to_string(),
-            exit_code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            exit_code: cf.exit_code,
+            stderr: cf.stderr,
         });
     }
 

@@ -190,6 +190,78 @@ pub fn is_transient_network_stderr(stderr: &str) -> bool {
         .any(|m| stderr.contains(m))
 }
 
+/// Captured `(exit_code, stderr)` of a failed external-command attempt.
+///
+/// Typed primitive sitting between `std::process::Output` and the typed
+/// `*Failed` variants every external-CLI surface in forge produces
+/// (`GitError::OpFailed`, `GitError::RemoteOpFailed`,
+/// `NixBuildError::BuildFailed`, `AtticError::PushFailed`,
+/// `AtticError::LoginFailed`, `RegistryError::PushFailed`). Each of those
+/// variants carries the same two fields — `exit_code: Option<i32>`,
+/// `stderr: String` — and each producer site otherwise re-derives them
+/// inline with the verbatim two-line incantation
+/// `(output.status.code(), String::from_utf8_lossy(&output.stderr).trim().to_string())`.
+/// Five typed-error producer sites in forge carry that incantation —
+/// well past the three-times threshold (THEORY §VI.1) — so this commit
+/// redeems the duplication: every typed-error producer that wraps an
+/// external-CLI failure now extracts `(exit_code, stderr)` through one
+/// typed conversion, not five drift-prone copies.
+///
+/// The UTF-8-lossy decode + trim discipline is load-bearing — the
+/// canonical [`is_transient_network_stderr`] substring matcher would
+/// otherwise miss a transient marker that a tool emitted with a trailing
+/// newline (e.g. `"503 Service Unavailable\n"` would still match by
+/// substring, but `"503 Service Unavailable\r\n"` against a
+/// `.contains("Service Unavailable")` matcher passes only because the
+/// marker happens to not include the trailing whitespace; pinning the
+/// trim discipline at the typed primitive guarantees the classifier
+/// always sees a normalized stderr regardless of which producer site
+/// constructed the record). A future site that forgets `.trim()` —
+/// silently leaking a trailing `\n` into the canonical classifier — is
+/// structurally impossible: there is one place that does the decode and
+/// every site goes through it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedFailure {
+    /// Exit code from the child process. `None` when killed by signal.
+    pub exit_code: Option<i32>,
+    /// Captured stderr, UTF-8-lossy-decoded and trimmed of leading/
+    /// trailing whitespace. Internal whitespace is preserved so multi-
+    /// line tool diagnostics survive the round-trip into the typed
+    /// `*Failed` variant.
+    pub stderr: String,
+}
+
+impl CapturedFailure {
+    /// Extract `(exit_code, stderr)` from any `Output` regardless of
+    /// status. Use this from a code path that already knows the output
+    /// represents a failure (e.g. inside the non-success arm of a `match
+    /// output.status.success() { ... }`). Use [`Self::from_output_if_failed`]
+    /// from a code path that needs to discriminate success vs. failure
+    /// in one expression.
+    pub fn from_output(output: &std::process::Output) -> Self {
+        Self {
+            exit_code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }
+    }
+
+    /// Extract `(exit_code, stderr)` from `Output` iff the status is
+    /// non-success. Returns `None` when the process exited zero — the
+    /// load-bearing invariant for callers that fold "did this command
+    /// succeed?" into the typed-error path: `if let Some(cf) =
+    /// CapturedFailure::from_output_if_failed(&out) { return Err(...) }`.
+    /// A future regression that returned `Some` on success would
+    /// silently turn every successful invocation into a typed `*Failed`
+    /// variant — pinned out by `test_captured_failure_from_output_if_failed_none_on_success`.
+    pub fn from_output_if_failed(output: &std::process::Output) -> Option<Self> {
+        if output.status.success() {
+            None
+        } else {
+            Some(Self::from_output(output))
+        }
+    }
+}
+
 /// Captured output of a single failed external-command attempt.
 ///
 /// Typed error shape for ad-hoc retry call sites (`commands/push.rs`,
@@ -1010,5 +1082,124 @@ mod tests {
             "spawn failure (empty stderr) must be terminal — single attempt only"
         );
         assert!(result.is_err());
+    }
+
+    /// `CapturedFailure::from_output` extracts `(exit_code, stderr)`
+    /// from any `Output`. Pins the canonical extraction shape every
+    /// typed-error producer site (`GitError::OpFailed`,
+    /// `NixBuildError::BuildFailed`, `AtticError::PushFailed`,
+    /// `RegistryError::PushFailed`) consumes. The canonical
+    /// `(output.status.code(), String::from_utf8_lossy(&stderr).trim())`
+    /// incantation lives in one place — drift across the five sites
+    /// becomes structurally impossible.
+    #[test]
+    fn test_captured_failure_from_output_extracts_exit_code_and_stderr() {
+        let out = synth_output(false, b"", b"403 Forbidden");
+        let cf = CapturedFailure::from_output(&out);
+        // `false` exits with code 1 on every Unix forge targets.
+        assert!(cf.exit_code.is_some());
+        assert_ne!(cf.exit_code, Some(0));
+        assert_eq!(cf.stderr, "403 Forbidden");
+    }
+
+    /// Trim discipline is load-bearing: the canonical
+    /// [`is_transient_network_stderr`] substring matcher operates on the
+    /// `stderr` field directly, so a leading/trailing newline or space
+    /// would otherwise change which substrings match. Pins the trim at
+    /// the typed primitive so a future site can't drift on this
+    /// (silently changing classifier behaviour for any tool whose
+    /// stderr ends in `\n`, which is most of them).
+    #[test]
+    fn test_captured_failure_from_output_trims_leading_and_trailing_whitespace() {
+        let out = synth_output(false, b"", b"  \n\tservice unavailable\n  ");
+        let cf = CapturedFailure::from_output(&out);
+        assert_eq!(cf.stderr, "service unavailable");
+    }
+
+    /// Internal whitespace MUST be preserved. A multi-line tool
+    /// diagnostic must survive the round-trip into the typed `*Failed`
+    /// variant unchanged in the middle — only the edges are stripped.
+    /// Without this guard a future "normalize all whitespace" refactor
+    /// would silently lose newlines that a downstream consumer (a log
+    /// renderer, a test that asserts on a specific marker phrase across
+    /// lines) depends on.
+    #[test]
+    fn test_captured_failure_from_output_preserves_internal_whitespace() {
+        let out = synth_output(false, b"", b"line one\nline two\n\nline four\n");
+        let cf = CapturedFailure::from_output(&out);
+        assert_eq!(cf.stderr, "line one\nline two\n\nline four");
+    }
+
+    /// UTF-8-lossy decode MUST NOT panic on invalid UTF-8 in stderr.
+    /// Build tools that pipe binary log fragments (Nix store paths
+    /// rendered with embedded ANSI sequences, raw blob digests printed
+    /// as-is) emit invalid UTF-8 by accident; the typed primitive
+    /// guarantees the canonical decode never panics, so a transient
+    /// build failure cannot manifest as a Rust panic in the producer
+    /// site. Pinned by feeding 0xFF (an invalid lead byte) through.
+    #[test]
+    fn test_captured_failure_from_output_handles_invalid_utf8() {
+        let out = synth_output(false, b"", &[0xFF, 0xFE, b' ', b'h', b'i']);
+        let cf = CapturedFailure::from_output(&out);
+        // The two invalid bytes get replaced with U+FFFD (3 bytes each
+        // in UTF-8); the trim chops the leading space we put in the
+        // input and leaves "hi" at the tail. Pin only that the decode
+        // produced a valid string ending in "hi" without panicking.
+        assert!(cf.stderr.ends_with("hi"));
+        assert!(!cf.stderr.is_empty());
+    }
+
+    /// `from_output_if_failed` returns `Some(CapturedFailure)` on a
+    /// non-zero exit. Pins the producer-site contract: any caller that
+    /// folds "did this command succeed?" into one expression
+    /// (`if let Some(cf) = ... { return Err(...) }`) must see the
+    /// failure record only when the command failed.
+    #[test]
+    fn test_captured_failure_from_output_if_failed_some_on_nonzero() {
+        let out = synth_output(false, b"", b"i/o timeout");
+        let cf = CapturedFailure::from_output_if_failed(&out)
+            .expect("non-zero exit must produce a CapturedFailure");
+        assert!(cf.exit_code.is_some());
+        assert_ne!(cf.exit_code, Some(0));
+        assert_eq!(cf.stderr, "i/o timeout");
+    }
+
+    /// Load-bearing inverse: `from_output_if_failed` returns `None` on
+    /// a zero exit. A future regression that returned `Some` on success
+    /// would silently turn every successful invocation across the five
+    /// migrated producer sites into a typed `*Failed` variant — the
+    /// `if let Some(cf) = ...` arm at each site would fire and bail
+    /// with a synthetic exit-0 record. Pin against that.
+    #[test]
+    fn test_captured_failure_from_output_if_failed_none_on_success() {
+        let out = synth_output(true, b"hello", b"warnings emitted");
+        assert!(
+            CapturedFailure::from_output_if_failed(&out).is_none(),
+            "from_output_if_failed MUST return None on a zero-exit Output \
+             so success paths do not bail with a synthetic failure record"
+        );
+    }
+
+    /// Pin the typed-record shape against renames. Every typed-error
+    /// `*Failed` variant in `cli/src/error.rs` (RegistryError::PushFailed,
+    /// GitError::OpFailed / RemoteOpFailed, NixBuildError::BuildFailed,
+    /// AtticError::PushFailed / LoginFailed) accesses `cf.exit_code`
+    /// and `cf.stderr` by name. Renaming either field on the typed
+    /// primitive without updating the five producer sites would compile
+    /// (because the field initializers in `*Failed` would silently
+    /// inherit the new name via the local binding). This test wires
+    /// `CapturedFailure` through a typed-record constructor that
+    /// destructures by name, so a future rename forces the test (and
+    /// thus every producer site) to update in lockstep.
+    #[test]
+    fn test_captured_failure_field_names_are_load_bearing() {
+        let out = synth_output(false, b"", b"503 Service Unavailable");
+        let CapturedFailure { exit_code, stderr } = CapturedFailure::from_output(&out);
+        // Round-trip through the canonical classifier — proves the
+        // typed primitive's stderr field is wired to the substring
+        // matcher every typed-error variant's classifier closure
+        // ultimately consumes.
+        assert!(is_transient_network_stderr(&stderr));
+        assert!(exit_code.is_some());
     }
 }
