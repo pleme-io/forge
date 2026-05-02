@@ -369,24 +369,15 @@ mod tests {
     use super::*;
     use crate::error::GitError;
 
-    /// Write an executable shim that pretends to be `git`. The returned
-    /// tempdir keeps the shim alive until the caller drops it. Tests
-    /// invoke the shim by absolute path so they don't mutate global PATH
-    /// (which would race under parallel test execution). Same discipline
-    /// as `nix.rs::make_nix_shim` and `attic.rs`'s shim.
+    use crate::test_support::make_executable_shim;
+
+    /// Write an executable shim that pretends to be `git`. Delegates to
+    /// the shared `crate::test_support::make_executable_shim` so the
+    /// shim discipline (absolute-path invocation, 0o755 chmod, tempdir
+    /// lifetime) lives in one place — same primitive as
+    /// `nix.rs`'s `make_nix_shim` and `attic.rs`'s `make_attic_shim`.
     fn make_git_shim(body: &str) -> (tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let shim = dir.path().join("git");
-        std::fs::write(&shim, body).expect("write shim");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&shim).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&shim, perms).unwrap();
-        }
-        let path = shim.display().to_string();
-        (dir, path)
+        make_executable_shim("git", body)
     }
 
     /// When the resolved git binary cannot be spawned, `git_capture` must

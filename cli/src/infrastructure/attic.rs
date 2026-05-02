@@ -210,24 +210,16 @@ mod tests {
         assert!(client.token.is_some());
     }
 
-    /// Write an executable shim script that pretends to be `attic`. The
-    /// returned tempdir keeps the shim alive until the caller drops it.
-    /// Tests invoke the shim by absolute path (via `ATTIC_BIN`) so they
-    /// don't have to mutate global PATH (which races under parallel test
-    /// execution).
+    use crate::test_support::make_executable_shim;
+
+    /// Write an executable shim script that pretends to be `attic`.
+    /// Delegates to the shared
+    /// `crate::test_support::make_executable_shim` so the shim
+    /// discipline (absolute-path invocation, 0o755 chmod, tempdir
+    /// lifetime) lives in one place — same primitive as
+    /// `git.rs`'s `make_git_shim` and `nix.rs`'s `make_nix_shim`.
     fn make_attic_shim(body: &str) -> (tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let shim = dir.path().join("attic");
-        std::fs::write(&shim, body).expect("write shim");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&shim).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&shim, perms).unwrap();
-        }
-        let path = shim.display().to_string();
-        (dir, path)
+        make_executable_shim("attic", body)
     }
 
     /// When the `attic` binary cannot be spawned, `push` must surface

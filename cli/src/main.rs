@@ -28,6 +28,10 @@ mod infrastructure;
 mod services;
 mod ui;
 
+// Test-only shared infrastructure (hermetic shim helpers, etc.)
+#[cfg(test)]
+mod test_support;
+
 use cli::{BootstrapCommands, Cli, Commands, GemCommands, HelmCommands, InfraCommands, LocalCommands, PangeaCommands, PangeaInfraCommands, ToolCommands, TypescriptCommands};
 use commands::{
     bootstrap, build, comprehensive_release, deploy, federation, github_runner_ci,
