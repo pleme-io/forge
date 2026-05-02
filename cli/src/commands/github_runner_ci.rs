@@ -664,26 +664,24 @@ async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: boo
             let op = op.clone();
             async move {
                 debug!("Running: attic {}", args.join(" "));
-                let output = Command::new(&attic)
+                let captured = Command::new(&attic)
                     .args(args)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .output()
                     .await;
 
-                match output {
-                    Ok(out) if out.status.success() => {
+                match CommandAttemptFailure::from_capture(captured, &op, attempt) {
+                    Ok(_) => {
                         debug!("attic command succeeded on attempt {}", attempt);
                         Ok(())
                     }
-                    Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                        if !stdout.is_empty() {
-                            debug!("attic stdout: {}", stdout);
+                    Err(failure) => {
+                        if !failure.stdout.is_empty() {
+                            debug!("attic stdout: {}", failure.stdout);
                         }
-                        if !stderr.is_empty() {
-                            debug!("attic stderr: {}", stderr);
+                        if !failure.stderr.is_empty() {
+                            debug!("attic stderr: {}", failure.stderr);
                         }
                         if attempt < max_attempts {
                             warn!(
@@ -691,26 +689,7 @@ async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: boo
                                 op, attempt, max_attempts
                             );
                         }
-                        Err(CommandAttemptFailure {
-                            operation: op.clone(),
-                            attempt,
-                            exit_code: out.status.code(),
-                            stderr,
-                            stdout,
-                        })
-                    }
-                    Err(spawn_err) => {
-                        // Spawn-failure path: empty stderr → terminal under
-                        // `is_transient_network_stderr`, so this short-circuits
-                        // the loop instead of burning budget on a "binary not
-                        // on PATH" precondition.
-                        Err(CommandAttemptFailure {
-                            operation: op.clone(),
-                            attempt,
-                            exit_code: None,
-                            stderr: String::new(),
-                            stdout: format!("Failed to spawn attic: {}", spawn_err),
-                        })
+                        Err(failure)
                     }
                 }
             }
@@ -794,7 +773,7 @@ async fn push_with_retry(
             let op = op.clone();
             async move {
                 debug!("Pushing {}:{} (attempt {})", registry, tag, attempt);
-                let result = Command::new(&skopeo)
+                let captured = Command::new(&skopeo)
                     .args([
                         "copy",
                         "--insecure-policy",
@@ -808,38 +787,23 @@ async fn push_with_retry(
                     .output()
                     .await;
 
-                match result {
-                    Ok(output) if output.status.success() => {
+                match CommandAttemptFailure::from_capture(captured, &op, attempt) {
+                    Ok(_) => {
                         debug!("Push successful for {}:{}", registry, tag);
                         Ok(())
                     }
-                    Ok(output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                        if !stdout.is_empty() {
-                            debug!("skopeo stdout: {}", stdout);
+                    Err(failure) => {
+                        if !failure.stdout.is_empty() {
+                            debug!("skopeo stdout: {}", failure.stdout);
                         }
-                        if !stderr.is_empty() {
-                            debug!("skopeo stderr: {}", stderr);
+                        if !failure.stderr.is_empty() {
+                            debug!("skopeo stderr: {}", failure.stderr);
                         }
                         if attempt < max_attempts {
                             warn!("Push attempt {} failed, retrying...", attempt);
                         }
-                        Err(CommandAttemptFailure {
-                            operation: op.clone(),
-                            attempt,
-                            exit_code: output.status.code(),
-                            stderr,
-                            stdout,
-                        })
+                        Err(failure)
                     }
-                    Err(spawn_err) => Err(CommandAttemptFailure {
-                        operation: op.clone(),
-                        attempt,
-                        exit_code: None,
-                        stderr: String::new(),
-                        stdout: format!("Failed to execute skopeo command: {}", spawn_err),
-                    }),
                 }
             }
         },

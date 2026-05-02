@@ -380,7 +380,7 @@ pub async fn push_with_retry(
             let op = op.clone();
             async move {
                 let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-                let result = Command::new(&skopeo)
+                let captured = Command::new(&skopeo)
                     .args([
                         "copy",
                         "--insecure-policy",
@@ -394,28 +394,14 @@ pub async fn push_with_retry(
                     .output()
                     .await;
 
-                match result {
-                    Ok(output) if output.status.success() => Ok(()),
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                match CommandAttemptFailure::from_capture(captured, &op, attempt) {
+                    Ok(_) => Ok(()),
+                    Err(failure) => {
                         if attempt < max_attempts {
                             warn!("Push attempt {} failed, retrying...", attempt);
                         }
-                        Err(CommandAttemptFailure {
-                            operation: op.clone(),
-                            attempt,
-                            exit_code: output.status.code(),
-                            stderr,
-                            stdout: String::new(),
-                        })
+                        Err(failure)
                     }
-                    Err(spawn_err) => Err(CommandAttemptFailure {
-                        operation: op.clone(),
-                        attempt,
-                        exit_code: None,
-                        stderr: String::new(),
-                        stdout: format!("Push command failed: {}", spawn_err),
-                    }),
                 }
             }
         },

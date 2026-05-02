@@ -235,6 +235,55 @@ impl CommandAttemptFailure {
     pub fn is_transient(&self) -> bool {
         is_transient_network_stderr(&self.stderr)
     }
+
+    /// Convert a `Command::output()` result into a typed
+    /// `CommandAttemptFailure` or success `Output`. Lifts the
+    /// `match { Ok success | Ok non-success | Err spawn }` body every
+    /// retry-loop in forge would otherwise duplicate
+    /// (`commands/github_runner_ci.rs::{attic_command_with_retry,
+    /// push_with_retry}`, `commands/push.rs::push_with_retry`). The
+    /// returned `Err` is the structural-record shape `run_with_policy`
+    /// consumes; success returns the captured `Output` so callers retain
+    /// stdout/stderr access for logging.
+    ///
+    /// Three failure shapes collapse into one typed mapping:
+    /// - `Ok(out)` with `out.status.success()` → success `Output` is
+    ///   returned verbatim (callers may inspect stdout/stderr).
+    /// - `Ok(out)` with non-zero status → typed record carrying
+    ///   `(operation, attempt, exit_code, stderr, stdout)`. Both stderr
+    ///   and stdout are decoded UTF-8-lossy and trimmed.
+    /// - `Err(spawn_err)` (process could not be spawned) → typed record
+    ///   with `exit_code: None`, empty `stderr`, and the spawn error in
+    ///   `stdout`. Empty stderr is unconditionally terminal under
+    ///   [`is_transient_network_stderr`], so the retry loop short-
+    ///   circuits rather than burning budget on a "binary not on PATH"
+    ///   or "fork failed" precondition. The operation name already
+    ///   appears in the record's `operation` field, so the spawn-error
+    ///   message format is uniform across call sites (no per-site
+    ///   "Failed to execute X" / "X command failed" prefix variation).
+    pub fn from_capture(
+        captured: Result<std::process::Output, std::io::Error>,
+        operation: impl Into<String>,
+        attempt: u32,
+    ) -> Result<std::process::Output, Self> {
+        match captured {
+            Ok(out) if out.status.success() => Ok(out),
+            Ok(out) => Err(Self {
+                operation: operation.into(),
+                attempt,
+                exit_code: out.status.code(),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            }),
+            Err(spawn_err) => Err(Self {
+                operation: operation.into(),
+                attempt,
+                exit_code: None,
+                stderr: String::new(),
+                stdout: format!("failed to spawn process: {spawn_err}"),
+            }),
+        }
+    }
 }
 
 impl std::fmt::Display for CommandAttemptFailure {
@@ -826,5 +875,140 @@ mod tests {
         .await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(result.unwrap_err(), "once");
+    }
+
+    /// Helper: synthesize a `std::process::Output` with the given exit
+    /// status, stdout, and stderr. Lets the `from_capture` tests pin the
+    /// typed conversion without driving a real subprocess.
+    fn synth_output(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+        // ExitStatus has no public constructor; produce one by running a
+        // trivial host binary whose exit code is deterministic. `true`
+        // (exit 0) and `false` (exit 1) ship on every platform forge
+        // targets and the OS-level fork is a few hundred microseconds.
+        let bin = if success { "true" } else { "false" };
+        let status = std::process::Command::new(bin)
+            .status()
+            .expect("host must provide /usr/bin/true and /usr/bin/false for the test runner");
+        std::process::Output {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    /// Success case — `from_capture` returns the captured `Output` so
+    /// callers can still read stdout/stderr (e.g., for debug-logging the
+    /// happy path).
+    #[test]
+    fn test_from_capture_success_returns_output() {
+        let out = synth_output(true, b"hello", b"");
+        let result = CommandAttemptFailure::from_capture(Ok(out), "test op", 1);
+        let captured = result.expect("success must return Output");
+        assert!(captured.status.success());
+        assert_eq!(captured.stdout, b"hello");
+    }
+
+    /// Non-zero exit — `from_capture` produces a typed record carrying
+    /// `(operation, attempt, exit_code, stderr, stdout)` as separate
+    /// destructurable fields. Pins the structural-record shape against a
+    /// future "fuse them into a single message" regression.
+    #[test]
+    fn test_from_capture_non_zero_exit_carries_structured_fields() {
+        let out = synth_output(false, b" raw stdout \n", b"  503 Service Unavailable\n");
+        let err = CommandAttemptFailure::from_capture(Ok(out), "push ghcr.io/o/p:tag", 7)
+            .expect_err("non-zero exit must produce a failure record");
+        assert_eq!(err.operation, "push ghcr.io/o/p:tag");
+        assert_eq!(err.attempt, 7);
+        // `false` exits with code 1 on every Unix; pin only that the
+        // exit_code is present and non-zero.
+        assert!(err.exit_code.is_some());
+        assert_ne!(err.exit_code, Some(0));
+        // stderr / stdout trimmed of leading/trailing whitespace.
+        assert_eq!(err.stderr, "503 Service Unavailable");
+        assert_eq!(err.stdout, "raw stdout");
+        // The transient classifier sees the trimmed stderr and matches.
+        assert!(err.is_transient());
+    }
+
+    /// Spawn-failure path — `Err(io::Error)` produces a record with
+    /// `exit_code: None`, EMPTY `stderr`, and the spawn error in
+    /// `stdout`. Empty stderr is the load-bearing invariant: it makes
+    /// the record terminal under [`is_transient_network_stderr`] so the
+    /// retry loop never burns budget on a "binary not on PATH"
+    /// precondition. This is the same discipline the prior typed-error
+    /// `ExecFailed` variants (Registry, Nix, Attic, Git) adopted —
+    /// every spawn-failure path on every external-CLI surface in forge
+    /// short-circuits the retry loop by construction.
+    #[test]
+    fn test_from_capture_spawn_failure_is_terminal_by_construction() {
+        let spawn_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let captured: Result<std::process::Output, std::io::Error> = Err(spawn_err);
+        let err = CommandAttemptFailure::from_capture(captured, "spawn missing tool", 3)
+            .expect_err("spawn failure must produce a record");
+        assert_eq!(err.operation, "spawn missing tool");
+        assert_eq!(err.attempt, 3);
+        assert_eq!(err.exit_code, None);
+        assert!(
+            err.stderr.is_empty(),
+            "stderr MUST be empty so the classifier short-circuits"
+        );
+        assert!(
+            !err.is_transient(),
+            "spawn-failure record MUST be terminal — empty stderr → terminal by construction"
+        );
+        assert!(err.stdout.contains("failed to spawn process"));
+        assert!(err.stdout.contains("no such file"));
+    }
+
+    /// `from_capture` Display surfaces the same five-field tuple
+    /// downstream telemetry / attestation expects, regardless of whether
+    /// the failure came from a non-zero exit or a spawn error. The
+    /// fallback chain stderr → stdout → "(no captured output)" remains
+    /// intact across the typed mapping.
+    #[test]
+    fn test_from_capture_display_preserves_fallback_chain() {
+        // Spawn-failure: stderr empty → Display falls back to stdout
+        // (which carries the spawn-error message).
+        let spawn_err = std::io::Error::other("permission denied");
+        let captured: Result<std::process::Output, std::io::Error> = Err(spawn_err);
+        let err = CommandAttemptFailure::from_capture(captured, "exec foo", 1)
+            .expect_err("spawn failure must produce a record");
+        let s = err.to_string();
+        assert!(s.contains("exec foo"));
+        assert!(s.contains("permission denied"));
+        assert!(s.contains("attempt 1"));
+    }
+
+    /// `from_capture` drives `run_with_policy` end-to-end: a transient
+    /// stderr (HTTP 503) retries to exhaustion; a spawn failure
+    /// short-circuits on the first attempt. Pins that the typed mapping
+    /// composes correctly with the canonical retry primitive — no
+    /// inter-primitive glue is needed at the call site.
+    #[tokio::test]
+    async fn test_from_capture_composes_with_run_with_policy() {
+        // Spawn failure: short-circuits on attempt 1.
+        let p = RetryPolicy::new(5, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result: Result<(), CommandAttemptFailure> = run_with_policy(
+            &p,
+            |e: &CommandAttemptFailure| e.is_transient(),
+            move |attempt| {
+                let calls = calls_clone.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let captured: Result<std::process::Output, std::io::Error> =
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "x"));
+                    CommandAttemptFailure::from_capture(captured, "spawn x", attempt).map(|_| ())
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "spawn failure (empty stderr) must be terminal — single attempt only"
+        );
+        assert!(result.is_err());
     }
 }
