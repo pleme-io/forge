@@ -160,6 +160,17 @@ pub enum NixBuildError {
 }
 
 /// Kubernetes errors
+///
+/// `FluxReconcileFailed` and `KustomizationFailed` keep `exit_code` and
+/// `stderr` as separate fields rather than fused into a single `message`
+/// string so downstream telemetry, retry classifiers (THEORY §V.4
+/// Phase 1 records), and attestation chains can pattern-match on the
+/// failure shape — same arc as `RegistryError::PushFailed`,
+/// `NixBuildError::BuildFailed`, `AtticError::PushFailed`, and
+/// `GitError::OpFailed`. The split between `ExecFailed` ("could not
+/// spawn the kubernetes CLI") and the operation-specific failure
+/// variants matches the discipline already established for the four
+/// preceding typed-error families.
 #[derive(Error, Debug)]
 pub enum KubernetesError {
     #[error("Deployment {name} not found in namespace {namespace}")]
@@ -168,11 +179,22 @@ pub enum KubernetesError {
     #[error("Rollout timed out after {timeout_secs}s")]
     RolloutTimeout { timeout_secs: u64 },
 
-    #[error("Flux reconciliation failed: {message}")]
-    FluxReconcileFailed { message: String },
+    #[error("Failed to spawn kubernetes CLI for {op}: {message}")]
+    ExecFailed { op: String, message: String },
 
-    #[error("Kustomization update failed: {path}")]
-    KustomizationFailed { path: String },
+    #[error("Flux reconcile of {resource} failed (exit {exit_code:?}): {stderr}")]
+    FluxReconcileFailed {
+        resource: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+
+    #[error("Kustomization update for {path} failed (exit {exit_code:?}): {stderr}")]
+    KustomizationFailed {
+        path: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
 }
 
 /// Configuration errors
@@ -779,14 +801,155 @@ mod tests {
         assert!(err.to_string().contains("120"));
 
         let err = KubernetesError::FluxReconcileFailed {
-            message: "conflict".into(),
+            resource: "kustomization/api".into(),
+            exit_code: Some(1),
+            stderr: "conflict".into(),
         };
-        assert!(err.to_string().contains("conflict"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("kustomization/api"),
+            "resource must appear: {msg}"
+        );
+        assert!(msg.contains("conflict"), "stderr must appear: {msg}");
+        assert!(msg.contains('1'), "exit_code must appear: {msg}");
 
         let err = KubernetesError::KustomizationFailed {
             path: "k/path".into(),
+            exit_code: Some(2),
+            stderr: "yaml parse error".into(),
         };
-        assert!(err.to_string().contains("k/path"));
+        let msg = err.to_string();
+        assert!(msg.contains("k/path"), "path must appear: {msg}");
+        assert!(
+            msg.contains("yaml parse error"),
+            "stderr must appear: {msg}"
+        );
+        assert!(msg.contains('2'), "exit_code must appear: {msg}");
+    }
+
+    /// `ExecFailed` (the spawn-failure path: kubectl / flux could not
+    /// be executed at all) must surface as a typed variant carrying the
+    /// operation label and the underlying message — same shape as
+    /// `RegistryError::ExecFailed`, `AtticError::ExecFailed`,
+    /// `NixBuildError::ExecFailed`, and `GitError::ExecFailed`.
+    /// Pinning the discriminator lets telemetry distinguish "kubectl
+    /// missing" from "kubectl said no" without parsing strings.
+    #[test]
+    fn test_kubernetes_error_exec_failed_display() {
+        let err = KubernetesError::ExecFailed {
+            op: "flux reconcile".into(),
+            message: "No such file or directory".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("flux reconcile"), "op must appear: {msg}");
+        assert!(msg.contains("No such file"), "message must appear: {msg}");
+    }
+
+    /// `FluxReconcileFailed` must surface (resource, exit_code, stderr)
+    /// as separate fields. The pre-migration shape fused everything
+    /// into a single `message: String` — invisible to retry classifiers
+    /// (which had to substring-match on the fused string) and to Phase
+    /// 1 attestation records (which could not recover the structured
+    /// tuple). The split mirrors `RegistryError::PushFailed`,
+    /// `NixBuildError::BuildFailed`, `AtticError::PushFailed`, and
+    /// `GitError::OpFailed`.
+    #[test]
+    fn test_kubernetes_error_flux_reconcile_failed_carries_structured_fields() {
+        let err = KubernetesError::FluxReconcileFailed {
+            resource: "kustomization/flux-system".into(),
+            exit_code: Some(1),
+            stderr: "context deadline exceeded".into(),
+        };
+        match err {
+            KubernetesError::FluxReconcileFailed {
+                resource,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(resource, "kustomization/flux-system");
+                assert_eq!(exit_code, Some(1));
+                assert!(stderr.contains("context deadline"));
+            }
+            _ => panic!("expected FluxReconcileFailed"),
+        }
+    }
+
+    /// `KustomizationFailed` must surface (path, exit_code, stderr) as
+    /// separate fields so attestation records and retry schedulers can
+    /// recover the failing kustomization without log scraping
+    /// (THEORY §V.4).
+    #[test]
+    fn test_kubernetes_error_kustomization_failed_carries_structured_fields() {
+        let err = KubernetesError::KustomizationFailed {
+            path: "clusters/lilitu/api/kustomization.yaml".into(),
+            exit_code: Some(2),
+            stderr: "field newTag not found".into(),
+        };
+        match err {
+            KubernetesError::KustomizationFailed {
+                path,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(path, "clusters/lilitu/api/kustomization.yaml");
+                assert_eq!(exit_code, Some(2));
+                assert!(stderr.contains("field newTag"));
+            }
+            _ => panic!("expected KustomizationFailed"),
+        }
+    }
+
+    /// Exec / deployment-not-found / rollout-timeout / flux-reconcile /
+    /// kustomization are distinct conditions and must not be
+    /// representable by a single fused-message variant. Pinning the
+    /// discriminator lets downstream code pattern-match on the failure
+    /// shape without parsing strings — same arc as RegistryError,
+    /// GitError, NixBuildError, and AtticError.
+    #[test]
+    fn test_kubernetes_error_failure_split_is_typed() {
+        fn classify(e: &KubernetesError) -> &'static str {
+            match e {
+                KubernetesError::DeploymentNotFound { .. } => "not_found",
+                KubernetesError::RolloutTimeout { .. } => "timeout",
+                KubernetesError::ExecFailed { .. } => "exec",
+                KubernetesError::FluxReconcileFailed { .. } => "flux",
+                KubernetesError::KustomizationFailed { .. } => "kustomization",
+            }
+        }
+        assert_eq!(
+            classify(&KubernetesError::ExecFailed {
+                op: "x".into(),
+                message: "m".into(),
+            }),
+            "exec"
+        );
+        assert_eq!(
+            classify(&KubernetesError::FluxReconcileFailed {
+                resource: "r".into(),
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "flux"
+        );
+        assert_eq!(
+            classify(&KubernetesError::KustomizationFailed {
+                path: "p".into(),
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "kustomization"
+        );
+        assert_eq!(
+            classify(&KubernetesError::DeploymentNotFound {
+                name: "n".into(),
+                namespace: "ns".into(),
+            }),
+            "not_found"
+        );
+        assert_eq!(
+            classify(&KubernetesError::RolloutTimeout { timeout_secs: 1 }),
+            "timeout"
+        );
     }
 
     #[test]
