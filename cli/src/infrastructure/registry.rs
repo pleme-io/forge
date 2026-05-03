@@ -411,19 +411,16 @@ impl RegistryClient {
             cmd.stdout(Stdio::inherit());
             cmd.stderr(Stdio::piped());
 
-            let output = cmd
-                .output()
-                .await
-                .map_err(|e| RegistryError::ManifestFailed {
-                    target: target.clone(),
-                    message: format!("Failed to run regctl: {}", e),
-                })?;
+            let output = cmd.output().await.map_err(|e| RegistryError::ExecFailed {
+                operation: format!("create manifest index for {}", target),
+                message: e.to_string(),
+            })?;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
+            if let Some(cf) = CapturedFailure::from_output_if_failed(&output) {
                 return Err(RegistryError::ManifestFailed {
                     target: target.clone(),
-                    message: format!("regctl index create failed: {}", stderr.trim()),
+                    exit_code: cf.exit_code,
+                    stderr: cf.stderr,
                 });
             }
 

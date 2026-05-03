@@ -43,15 +43,22 @@ pub enum DeployError {
 /// failing step in isolation, and produce attestation-grade failure
 /// records without reconstructing context from logs.
 ///
-/// `PushFailed` keeps `exit_code` and `stderr` as separate fields rather
-/// than fused into a single `message` string so downstream telemetry,
-/// retry classifiers (THEORY §V.4 Phase 1 records), and attestation
-/// chains can pattern-match on the failure shape — same arc as
-/// `NixBuildError::BuildFailed`, `AtticError::PushFailed`, and
-/// `GitError::OpFailed`. The split between `ExecFailed` ("could not
-/// spawn the registry CLI") and the operation-specific failure variants
-/// matches the discipline already established for `NixBuildError`,
-/// `AtticError`, and `GitError`.
+/// `PushFailed` and `ManifestFailed` keep `exit_code` and `stderr` as
+/// separate fields rather than fused into a single `message` string so
+/// downstream telemetry, retry classifiers (THEORY §V.4 Phase 1
+/// records), and attestation chains can pattern-match on the failure
+/// shape — same arc as `NixBuildError::BuildFailed`,
+/// `AtticError::PushFailed`, `GitError::OpFailed`, and the
+/// `KubernetesError::FluxReconcileFailed` / `KustomizationFailed` pair.
+/// The split between `ExecFailed` ("could not spawn the registry CLI")
+/// and the operation-specific failure variants matches the discipline
+/// already established for `NixBuildError`, `AtticError`, `GitError`,
+/// and `KubernetesError`. Spawn-failure of any registry operation —
+/// `skopeo copy`, `skopeo inspect`, `regctl index create` — flows
+/// through the single shared `ExecFailed` variant carrying the
+/// operation label and the underlying io error message; an operation
+/// that ran-but-failed flows through the operation-specific variant
+/// carrying the structural (target, exit_code, stderr) tuple.
 #[derive(Error, Debug)]
 pub enum RegistryError {
     #[error("GHCR token not found. Set GHCR_TOKEN env var or authenticate with `gh auth login`")]
@@ -80,8 +87,12 @@ pub enum RegistryError {
     #[error("Remote image not found: {registry}:{tag}")]
     RemoteImageNotFound { registry: String, tag: String },
 
-    #[error("Manifest index creation failed for {target}: {message}")]
-    ManifestFailed { target: String, message: String },
+    #[error("Manifest index creation failed for {target} (exit {exit_code:?}): {stderr}")]
+    ManifestFailed {
+        target: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
 }
 
 /// Git operation errors
@@ -435,6 +446,14 @@ mod tests {
             }),
             "push"
         );
+        assert_eq!(
+            classify(&RegistryError::ManifestFailed {
+                target: "ghcr.io/o/p/s:tag".into(),
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "manifest"
+        );
     }
 
     #[test]
@@ -460,14 +479,50 @@ mod tests {
     fn test_registry_error_manifest_failed_display() {
         let err = RegistryError::ManifestFailed {
             target: "ghcr.io/myorg/myproj/svc:abc1234".to_string(),
-            message: "index error".to_string(),
+            exit_code: Some(1),
+            stderr: "index error".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("index error"));
+        assert!(msg.contains("index error"), "stderr must appear: {msg}");
+        assert!(msg.contains('1'), "exit_code must appear: {msg}");
         assert!(
             msg.contains("ghcr.io/myorg/myproj/svc:abc1234"),
             "target must appear in display: {msg}"
         );
+    }
+
+    /// `ManifestFailed` must surface (target, exit_code, stderr) as
+    /// separate fields. The pre-migration shape fused (exit_code,
+    /// stderr) into a single `message: String` — invisible to retry
+    /// classifiers (which had to substring-match on the fused string)
+    /// and to Phase 1 attestation records (which could not recover the
+    /// structured tuple). The split mirrors `RegistryError::PushFailed`,
+    /// `NixBuildError::BuildFailed`, `AtticError::PushFailed`,
+    /// `GitError::OpFailed`, and the
+    /// `KubernetesError::FluxReconcileFailed` / `KustomizationFailed`
+    /// pair — `RegistryError::ManifestFailed` was the last op-failure
+    /// variant in `cli/src/error.rs` carrying a fused `message` field.
+    /// A future regression that re-fused the (exit_code, stderr) tuple
+    /// into a `message: String` field fails this test at compile time.
+    #[test]
+    fn test_registry_error_manifest_failed_carries_structured_fields() {
+        let err = RegistryError::ManifestFailed {
+            target: "ghcr.io/o/p/s:abc1234".into(),
+            exit_code: Some(2),
+            stderr: "received unexpected HTTP status: 503".into(),
+        };
+        match err {
+            RegistryError::ManifestFailed {
+                target,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(target, "ghcr.io/o/p/s:abc1234");
+                assert_eq!(exit_code, Some(2));
+                assert!(stderr.contains("503"));
+            }
+            _ => panic!("expected ManifestFailed"),
+        }
     }
 
     /// Local vs remote image-not-found are distinct conditions and must not
