@@ -419,6 +419,65 @@ where
     }
 }
 
+/// Drive `spawn` under `policy`, mapping each attempt's
+/// `std::io::Result<Output>` into the canonical [`CommandAttemptFailure`]
+/// shape and routing transient failures through the canonical
+/// [`is_transient_network_stderr`] classifier.
+///
+/// Lifts the verbatim triple
+/// `run_with_policy(policy, |e| e.is_transient(), |attempt| async {
+///   CommandAttemptFailure::from_capture(Command::new(..).output().await, op, attempt)
+/// })`
+/// that three sites in forge — `commands/push.rs::push_with_retry`,
+/// `commands/github_runner_ci.rs::attic_command_with_retry`, and
+/// `commands/github_runner_ci.rs::push_with_retry` — each carry verbatim
+/// modulo per-site logging. Three identically-shaped bodies past the
+/// three-times threshold (THEORY §VI.1) — this primitive is the
+/// law-redeeming consolidation.
+///
+/// `spawn(attempt)` returns a future yielding `std::io::Result<Output>`
+/// — the shape `tokio::process::Command::output().await` already
+/// produces. On a zero-exit `Output`, the `Output` is returned. On a
+/// non-zero exit, a [`CommandAttemptFailure`] is constructed via
+/// [`CommandAttemptFailure::from_capture`] (the canonical
+/// UTF-8-lossy-plus-trim mapping), and routed through
+/// [`run_with_policy`] with the canonical classifier. Spawn failures
+/// (`Err(io::Error)` — binary not on PATH, fork failed) become a
+/// `CommandAttemptFailure` with empty stderr — terminal by
+/// construction under the classifier — so the retry loop short-
+/// circuits without burning budget on a structural precondition.
+///
+/// The helper does NOT log or warn on per-attempt failure. Callers that
+/// want per-attempt visibility log on the returned `Err`, or wrap
+/// `spawn` to tee stderr to `tracing::debug!`. Centralizing the warning
+/// in the helper would conflate two separable concerns (retry policy vs.
+/// observability dialect) and force every call site to share a single
+/// log message shape.
+pub async fn retry_command<F, Fut>(
+    policy: &RetryPolicy,
+    operation: impl Into<String>,
+    mut spawn: F,
+) -> Result<std::process::Output, CommandAttemptFailure>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = std::io::Result<std::process::Output>>,
+{
+    let operation = operation.into();
+    run_with_policy(
+        policy,
+        |e: &CommandAttemptFailure| e.is_transient(),
+        |attempt| {
+            let op = operation.clone();
+            let fut = spawn(attempt);
+            async move {
+                let captured = fut.await;
+                CommandAttemptFailure::from_capture(captured, op, attempt)
+            }
+        },
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1201,5 +1260,195 @@ mod tests {
         // ultimately consumes.
         assert!(is_transient_network_stderr(&stderr));
         assert!(exit_code.is_some());
+    }
+
+    /// `retry_command` returns the captured `Output` verbatim on the
+    /// first zero-exit attempt — `spawn` is invoked exactly once and
+    /// the loop short-circuits without consulting the classifier.
+    #[tokio::test]
+    async fn test_retry_command_first_success_returns_output() {
+        let p = RetryPolicy::immediate();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_command(&p, "echo hello", move |_attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(synth_output(true, b"hello\n", b""))
+            }
+        })
+        .await;
+        let output = result.expect("zero-exit must return Output");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello\n");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Always-transient failure (HTTP 503 in stderr) must invoke
+    /// `spawn` exactly `max_attempts` times and return the LAST
+    /// `CommandAttemptFailure` — no synthetic wrapper. Pins that
+    /// `retry_command` composes the canonical classifier with the
+    /// canonical `from_capture` mapping end-to-end, so callers never
+    /// need to thread `|e: &CommandAttemptFailure| e.is_transient()`
+    /// or `CommandAttemptFailure::from_capture(...)` through their
+    /// retry call sites.
+    #[tokio::test]
+    async fn test_retry_command_exhausts_on_transient_stderr() {
+        let p = RetryPolicy::new(4, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_command(&p, "push transient", move |_attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(synth_output(
+                    false,
+                    b"",
+                    b"received unexpected HTTP status: 503",
+                ))
+            }
+        })
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 4, "must exhaust attempts");
+        let err = result.expect_err("transient exhaustion must produce Err");
+        assert_eq!(err.attempt, 4, "last error must carry final attempt");
+        assert_eq!(err.operation, "push transient");
+        assert!(err.is_transient());
+        assert!(err.stderr.contains("503"));
+    }
+
+    /// Terminal stderr (HTTP 401) must short-circuit on the first
+    /// attempt — the canonical classifier returns `false` and
+    /// `run_with_policy` exits without consulting the schedule.
+    /// Pinning this guards against a future regression where
+    /// `retry_command` accidentally swaps in a permissive
+    /// "always-transient" classifier (which would burn budget on
+    /// terminal failures).
+    #[tokio::test]
+    async fn test_retry_command_short_circuits_on_terminal_stderr() {
+        let p = RetryPolicy::new(10, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_command(&p, "login terminal", move |_attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(synth_output(false, b"", b"401 Unauthorized: bad creds"))
+            }
+        })
+        .await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "terminal must short-circuit"
+        );
+        let err = result.expect_err("terminal must produce Err");
+        assert_eq!(err.attempt, 1);
+        assert!(!err.is_transient());
+    }
+
+    /// Spawn failure (`Err(io::Error)` — binary not on PATH) MUST be
+    /// terminal by construction. The lifted helper carries the same
+    /// "empty stderr → terminal" invariant the four pre-existing
+    /// `*::ExecFailed` typed-error variants encode, so a missing tool
+    /// never burns retry budget. Pin this against a future regression
+    /// where `retry_command` accidentally treats spawn errors as
+    /// transient (which would amplify "skopeo not installed" into a
+    /// 5-attempt × 30-second backoff, then fail anyway).
+    #[tokio::test]
+    async fn test_retry_command_spawn_failure_is_terminal() {
+        let p = RetryPolicy::new(5, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_command(&p, "spawn missing", move |_attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such file",
+                ))
+            }
+        })
+        .await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "spawn failure must short-circuit on attempt 1"
+        );
+        let err = result.expect_err("spawn failure must produce Err");
+        assert_eq!(err.exit_code, None);
+        assert!(
+            err.stderr.is_empty(),
+            "spawn failure must carry empty stderr"
+        );
+        assert!(err.stdout.contains("no such file"));
+        assert!(!err.is_transient());
+    }
+
+    /// `spawn` receives the 1-indexed attempt number on every call.
+    /// Pins the contract callers rely on when they want the per-
+    /// attempt counter to flow into per-attempt log messages or
+    /// per-attempt `--retry-times` parameters of the underlying tool.
+    /// Same shape `run_with_policy` already pins for its inner
+    /// closure, lifted up through the typed-Output mapping.
+    #[tokio::test]
+    async fn test_retry_command_passes_attempt_index() {
+        let p = RetryPolicy::new(3, Duration::ZERO, 1, Duration::ZERO);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let seen_clone = seen.clone();
+        let _ = retry_command(&p, "track attempts", move |attempt| {
+            let seen = seen_clone.clone();
+            async move {
+                seen.lock().unwrap().push(attempt);
+                Ok(synth_output(false, b"", b"503"))
+            }
+        })
+        .await;
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    /// Eventual success — fail twice transient, then succeed on the
+    /// third attempt. Pins that `retry_command` stops the loop the
+    /// moment a zero-exit `Output` arrives and returns it verbatim,
+    /// regardless of how many transients preceded.
+    #[tokio::test]
+    async fn test_retry_command_eventual_success() {
+        let p = RetryPolicy::new(5, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_command(&p, "eventually ok", move |_attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if n < 3 {
+                    Ok(synth_output(false, b"", b"i/o timeout"))
+                } else {
+                    Ok(synth_output(true, b"done", b""))
+                }
+            }
+        })
+        .await;
+        let output = result.expect("must succeed on attempt 3");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"done");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// Operation label must surface on the returned
+    /// `CommandAttemptFailure` — the structural-record tuple Phase 1
+    /// attestation records (THEORY §V.4) and per-attempt logs depend
+    /// on. Pinning this guards against a future regression where the
+    /// helper accidentally drops the caller-supplied operation label
+    /// (e.g. by passing an empty string into `from_capture`).
+    #[tokio::test]
+    async fn test_retry_command_operation_label_surfaces_on_failure() {
+        let p = RetryPolicy::new(1, Duration::ZERO, 1, Duration::ZERO);
+        let result = retry_command(&p, "push ghcr.io/o/p:abc1234", |_attempt| async {
+            Ok(synth_output(false, b"", b"401 Unauthorized"))
+        })
+        .await;
+        let err = result.expect_err("must fail");
+        assert_eq!(err.operation, "push ghcr.io/o/p:abc1234");
     }
 }

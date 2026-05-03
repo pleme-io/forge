@@ -6,7 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::git;
 use crate::repo::get_tool_path;
-use crate::retry::{run_with_policy, CommandAttemptFailure, RetryPolicy};
+use crate::retry::{retry_command, RetryPolicy};
 
 /// Check if SAFE mode is enabled (retry on errors)
 /// Default: true (retries enabled by default)
@@ -633,19 +633,16 @@ pub async fn execute(
 
 /// Execute an `attic` subcommand with retry-on-transient.
 ///
-/// Drives [`crate::retry::run_with_policy`] with a network-shaped policy
+/// Drives [`crate::retry::retry_command`] with a network-shaped policy
 /// (5 attempts × 250ms × factor=2 capped at 30s) when `safe_mode` is on,
-/// or [`RetryPolicy::immediate`] (no retry) when off. The transient /
-/// terminal classifier is the canonical
-/// [`crate::retry::is_transient_network_stderr`] (consumed via
-/// [`CommandAttemptFailure::is_transient`]), shared with
-/// `infrastructure/registry.rs::push_with_retries` and
-/// `commands/push.rs::push_with_retry` — the duplication budget on the
-/// hand-rolled retry loops is now redeemed (THEORY §I.3 ¶5). Failures
-/// produce a [`CommandAttemptFailure`] carrying the structural-record
-/// tuple `(operation, attempt, exit_code, stderr, stdout)`; the LAST
-/// error from the loop is mapped to `anyhow::Error` at the public
-/// boundary so existing call sites remain unchanged.
+/// or [`RetryPolicy::immediate`] (no retry) when off. The lifted helper
+/// composes the canonical `is_transient_network_stderr` classifier with
+/// the canonical `CommandAttemptFailure::from_capture` mapping in one
+/// primitive — the duplication budget on the hand-rolled retry loops in
+/// `commands/push.rs::push_with_retry` and `commands/github_runner_ci.rs`
+/// is redeemed by construction (THEORY §VI.1). The LAST
+/// `CommandAttemptFailure` from the loop is mapped to `anyhow::Error` at
+/// the public boundary so existing call sites remain unchanged.
 async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: bool) -> Result<()> {
     let policy = if safe_mode {
         RetryPolicy::network()
@@ -655,49 +652,55 @@ async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: boo
     let max_attempts = policy.max_attempts;
     let attic = get_tool_path("ATTIC_BIN", "attic");
     let op = operation.to_string();
+    let op_for_warn = op.clone();
 
-    let result = run_with_policy(
-        &policy,
-        |e: &CommandAttemptFailure| e.is_transient(),
-        |attempt| {
-            let attic = attic.clone();
-            let op = op.clone();
-            async move {
-                debug!("Running: attic {}", args.join(" "));
-                let captured = Command::new(&attic)
-                    .args(args)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output()
-                    .await;
+    let result = retry_command(&policy, &op, |attempt| {
+        let attic = attic.clone();
+        let op_for_warn = op_for_warn.clone();
+        async move {
+            debug!("Running: attic {}", args.join(" "));
+            let outcome = Command::new(&attic)
+                .args(args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .await;
 
-                match CommandAttemptFailure::from_capture(captured, &op, attempt) {
-                    Ok(_) => {
-                        debug!("attic command succeeded on attempt {}", attempt);
-                        Ok(())
+            match outcome.as_ref() {
+                Ok(out) if out.status.success() => {
+                    debug!("attic command succeeded on attempt {}", attempt);
+                }
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if !stdout.trim().is_empty() {
+                        debug!("attic stdout: {}", stdout.trim());
                     }
-                    Err(failure) => {
-                        if !failure.stdout.is_empty() {
-                            debug!("attic stdout: {}", failure.stdout);
-                        }
-                        if !failure.stderr.is_empty() {
-                            debug!("attic stderr: {}", failure.stderr);
-                        }
-                        if attempt < max_attempts {
-                            warn!(
-                                "⚠️  {} failed (attempt {}/{}): retrying...",
-                                op, attempt, max_attempts
-                            );
-                        }
-                        Err(failure)
+                    if !stderr.trim().is_empty() {
+                        debug!("attic stderr: {}", stderr.trim());
+                    }
+                    if attempt < max_attempts {
+                        warn!(
+                            "⚠️  {} failed (attempt {}/{}): retrying...",
+                            op_for_warn, attempt, max_attempts
+                        );
+                    }
+                }
+                Err(_) => {
+                    if attempt < max_attempts {
+                        warn!(
+                            "⚠️  {} failed (attempt {}/{}): retrying...",
+                            op_for_warn, attempt, max_attempts
+                        );
                     }
                 }
             }
-        },
-    )
+            outcome
+        }
+    })
     .await;
 
-    result.map_err(|e| anyhow::anyhow!("{}", e))
+    result.map(|_| ()).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 async fn push_with_retry(
@@ -748,8 +751,8 @@ async fn push_with_retry(
         .map_or("user", |r| r.organization())
         .to_string();
 
-    // Outer retry: shared `run_with_policy` with the canonical
-    // network-shaped schedule (or immediate when safe_mode is off). The
+    // Outer retry: shared `retry_command` (composes the canonical
+    // classifier with `CommandAttemptFailure::from_capture`). The
     // `retries` parameter is preserved as skopeo's internal
     // `--retry-times` (a per-blob retry inside skopeo); the OUTER loop
     // is bounded by the typed policy. Pre-existing code conflated the
@@ -764,51 +767,52 @@ async fn push_with_retry(
     let max_attempts = policy.max_attempts;
     let op = format!("push {}:{}", registry, tag);
 
-    let result = run_with_policy(
-        &policy,
-        |e: &CommandAttemptFailure| e.is_transient(),
-        |attempt| {
-            let skopeo = skopeo.clone();
-            let organization = organization.clone();
-            let op = op.clone();
-            async move {
-                debug!("Pushing {}:{} (attempt {})", registry, tag, attempt);
-                let captured = Command::new(&skopeo)
-                    .args([
-                        "copy",
-                        "--insecure-policy",
-                        &format!("--retry-times={}", retries),
-                        &format!("--dest-creds={}:{}", organization, token),
-                        &format!("docker-archive:{}", image_path),
-                        &format!("docker://{}:{}", registry, tag),
-                    ])
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output()
-                    .await;
+    let result = retry_command(&policy, &op, |attempt| {
+        let skopeo = skopeo.clone();
+        let organization = organization.clone();
+        async move {
+            debug!("Pushing {}:{} (attempt {})", registry, tag, attempt);
+            let outcome = Command::new(&skopeo)
+                .args([
+                    "copy",
+                    "--insecure-policy",
+                    &format!("--retry-times={}", retries),
+                    &format!("--dest-creds={}:{}", organization, token),
+                    &format!("docker-archive:{}", image_path),
+                    &format!("docker://{}:{}", registry, tag),
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .await;
 
-                match CommandAttemptFailure::from_capture(captured, &op, attempt) {
-                    Ok(_) => {
-                        debug!("Push successful for {}:{}", registry, tag);
-                        Ok(())
+            match outcome.as_ref() {
+                Ok(out) if out.status.success() => {
+                    debug!("Push successful for {}:{}", registry, tag);
+                }
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if !stdout.trim().is_empty() {
+                        debug!("skopeo stdout: {}", stdout.trim());
                     }
-                    Err(failure) => {
-                        if !failure.stdout.is_empty() {
-                            debug!("skopeo stdout: {}", failure.stdout);
-                        }
-                        if !failure.stderr.is_empty() {
-                            debug!("skopeo stderr: {}", failure.stderr);
-                        }
-                        if attempt < max_attempts {
-                            warn!("Push attempt {} failed, retrying...", attempt);
-                        }
-                        Err(failure)
+                    if !stderr.trim().is_empty() {
+                        debug!("skopeo stderr: {}", stderr.trim());
+                    }
+                    if attempt < max_attempts {
+                        warn!("Push attempt {} failed, retrying...", attempt);
+                    }
+                }
+                Err(_) => {
+                    if attempt < max_attempts {
+                        warn!("Push attempt {} failed, retrying...", attempt);
                     }
                 }
             }
-        },
-    )
+            outcome
+        }
+    })
     .await;
 
-    result.map_err(|e| anyhow::anyhow!("{}", e))
+    result.map(|_| ()).map_err(|e| anyhow::anyhow!("{}", e))
 }
