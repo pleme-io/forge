@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::infrastructure::registry::RegistryRef;
 use crate::repo::get_tool_path;
-use crate::retry::{run_with_policy, CommandAttemptFailure, RetryPolicy};
+use crate::retry::{retry_command, RetryPolicy};
 
 /// Get git SHA for tagging - Single source of truth
 ///
@@ -343,19 +343,18 @@ pub async fn execute(
 
 /// Push a single image to GHCR with retries using skopeo.
 ///
-/// Drives [`crate::retry::run_with_policy`] with a network-shaped policy
+/// Drives [`crate::retry::retry_command`] with a network-shaped policy
 /// (5 attempts × 250ms × factor=2 capped at 30s) — the canonical
-/// frontier shape — using the typed
-/// [`CommandAttemptFailure::is_transient`] classifier shared with
-/// `infrastructure/registry.rs::push_with_retries` and
-/// `commands/github_runner_ci.rs`. The migration also closes a
-/// fidelity gap in the pre-existing loop: it used `.status()` and
-/// discarded stderr, so a captured failure record could not name the
-/// transient (HTTP 5xx, EOF, timeout) that would distinguish a retry
-/// from a terminal short-circuit. The new loop uses `.output()` and
-/// carries stderr in the typed failure record. The `retries` parameter
-/// is preserved as skopeo's internal `--retry-times` (per-blob retry
-/// inside skopeo); the OUTER loop is bounded by the typed policy.
+/// frontier shape — which composes the canonical
+/// `is_transient_network_stderr` classifier with the canonical
+/// `CommandAttemptFailure::from_capture` mapping in one primitive.
+/// Pre-migration this site (and two siblings in
+/// `commands/github_runner_ci.rs`) carried the
+/// `run_with_policy + classifier + from_capture` triple verbatim —
+/// three identically-shaped bodies past the three-times threshold
+/// (THEORY §VI.1). The `retries` parameter is preserved as skopeo's
+/// internal `--retry-times` (per-blob retry inside skopeo); the OUTER
+/// loop is bounded by the typed policy.
 pub async fn push_with_retry(
     image_path: &str,
     registry: &str,
@@ -372,41 +371,35 @@ pub async fn push_with_retry(
     let max_attempts = policy.max_attempts;
     let op = format!("push {}:{}", registry, tag);
 
-    let result = run_with_policy(
-        &policy,
-        |e: &CommandAttemptFailure| e.is_transient(),
-        |attempt| {
-            let organization = organization.clone();
-            let op = op.clone();
-            async move {
-                let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-                let captured = Command::new(&skopeo)
-                    .args([
-                        "copy",
-                        "--insecure-policy",
-                        &format!("--retry-times={}", retries),
-                        &format!("--dest-creds={}:{}", organization, token),
-                        &format!("docker-archive:{}", image_path),
-                        &format!("docker://{}:{}", registry, tag),
-                    ])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .output()
-                    .await;
-
-                match CommandAttemptFailure::from_capture(captured, &op, attempt) {
-                    Ok(_) => Ok(()),
-                    Err(failure) => {
-                        if attempt < max_attempts {
-                            warn!("Push attempt {} failed, retrying...", attempt);
-                        }
-                        Err(failure)
-                    }
-                }
+    let result = retry_command(&policy, &op, |attempt| {
+        let organization = organization.clone();
+        async move {
+            let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
+            let outcome = Command::new(&skopeo)
+                .args([
+                    "copy",
+                    "--insecure-policy",
+                    &format!("--retry-times={}", retries),
+                    &format!("--dest-creds={}:{}", organization, token),
+                    &format!("docker-archive:{}", image_path),
+                    &format!("docker://{}:{}", registry, tag),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .await;
+            if outcome
+                .as_ref()
+                .map(|o| !o.status.success())
+                .unwrap_or(true)
+                && attempt < max_attempts
+            {
+                warn!("Push attempt {} failed, retrying...", attempt);
             }
-        },
-    )
+            outcome
+        }
+    })
     .await;
 
-    result.map_err(|e| anyhow::anyhow!("{}", e))
+    result.map(|_| ()).map_err(|e| anyhow::anyhow!("{}", e))
 }
