@@ -10,7 +10,41 @@ use tracing::{info, warn};
 
 use crate::error::RegistryError;
 use crate::repo::get_tool_path;
-use crate::retry::{is_transient_network_stderr, run_with_policy, CapturedFailure, RetryPolicy};
+use crate::retry::{retry_command, CapturedFailure, CommandAttemptFailure, RetryPolicy};
+
+/// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
+/// `RegistryError` variant whose structural shape matches the captured
+/// failure. Spawn-failure (skopeo not on PATH) routes to `ExecFailed`
+/// carrying the operation label and the spawn-error message; non-zero
+/// exit routes to `PushFailed` carrying `(registry, tag, attempts,
+/// exit_code, stderr)` — the structural-record tuple the canonical retry
+/// classifier and Phase 1 attestation records (THEORY §V.4) consume.
+///
+/// Lifting the match into a small named helper keeps the `push_with_retries`
+/// body short, makes the typed-error mapping unit-testable without driving
+/// a real subprocess, and pins the dispatch on the typed
+/// [`crate::retry::CommandAttemptFailure::is_spawn_failure`] predicate
+/// (not a substring-match on the failure string).
+fn classify_push_failure(
+    failure: CommandAttemptFailure,
+    registry: &str,
+    tag: &str,
+) -> RegistryError {
+    if failure.is_spawn_failure() {
+        RegistryError::ExecFailed {
+            operation: failure.operation,
+            message: failure.stdout,
+        }
+    } else {
+        RegistryError::PushFailed {
+            registry: registry.to_string(),
+            tag: tag.to_string(),
+            attempts: failure.attempt,
+            exit_code: failure.exit_code,
+            stderr: failure.stderr,
+        }
+    }
+}
 
 /// An architecture-specific image to push
 #[derive(Clone, Debug)]
@@ -148,17 +182,35 @@ impl RegistryClient {
 
     /// Push an image with custom retry count.
     ///
-    /// Drives [`crate::retry::run_with_policy`] with a network-shaped
+    /// Drives [`crate::retry::retry_command`] with a network-shaped
     /// schedule (exponential backoff capped at 30s, see
     /// [`RetryPolicy::network`]) so transient skopeo failures retry on
-    /// 250ms / 500ms / 1s / ... instead of the legacy fixed 2s. Every
-    /// non-zero exit produces a typed `RegistryError::PushFailed`
-    /// carrying the final `attempts` count, the registry+tag tuple, and
-    /// the structured `(exit_code, stderr)` pair the canonical retry
-    /// classifier consumes. Spawn failures (skopeo not on PATH) surface
-    /// as `RegistryError::ExecFailed`, distinct from a real push
-    /// failure — same discipline as `AtticError::ExecFailed`,
-    /// `NixBuildError::ExecFailed`, and `GitError::ExecFailed`.
+    /// 250ms / 500ms / 1s / ... instead of the legacy fixed 2s. The
+    /// canonical primitive composes the canonical
+    /// `is_transient_network_stderr` classifier with the canonical
+    /// `CommandAttemptFailure::from_capture` mapping in one call, so this
+    /// site no longer carries the `run_with_policy + classifier +
+    /// from_capture` triple inline (commit 26ddcef migrated three sibling
+    /// retry call sites onto `retry_command`; this commit closes the arc
+    /// by migrating the fourth — the only remaining hand-rolled
+    /// `run_with_policy` call site in forge).
+    ///
+    /// On exhaustion, the returned `CommandAttemptFailure` is dispatched
+    /// to one of two typed-error variants via
+    /// [`crate::retry::CommandAttemptFailure::is_spawn_failure`]:
+    /// - spawn failure (skopeo not on PATH) → `RegistryError::ExecFailed`
+    ///   carrying the `push {registry}:{tag}` op label and the underlying
+    ///   spawn-error message.
+    /// - non-zero exit → `RegistryError::PushFailed` carrying the
+    ///   registry+tag tuple, the final `attempts` count (recovered from
+    ///   the typed record's `attempt` field — preserves the pre-migration
+    ///   semantics), and the structured `(exit_code, stderr)` pair.
+    ///
+    /// The split between `ExecFailed` (could not spawn) and `PushFailed`
+    /// (skopeo ran and rejected) matches the discipline already
+    /// established for `AtticError::ExecFailed`,
+    /// `NixBuildError::ExecFailed`, `GitError::ExecFailed`, and
+    /// `KubernetesError::ExecFailed` — same arc, fifth surface migrated.
     pub async fn push_with_retries(
         &self,
         image_path: &str,
@@ -182,65 +234,42 @@ impl RegistryClient {
                 net.max_backoff,
             )
         };
+        let max_attempts = policy.max_attempts;
+        let op = format!("push {}:{}", registry, tag);
 
-        run_with_policy(
-            &policy,
-            |e: &RegistryError| match e {
-                // Only `PushFailed` carries captured stderr; every other
-                // variant is a structural precondition failure
-                // (`ExecFailed`, `LocalImageNotFound`, `RemoteImageNotFound`,
-                // `TokenNotFound`, `ManifestFailed`, etc.) and must
-                // short-circuit so a permanent failure does not burn retry
-                // budget. The classifier inspects the typed `stderr` field
-                // directly (not a fused `message` string), so a synthetic
-                // "Exit code: Some(503)" embedded in a serialized message
-                // can never trip the 5xx markers — the structural shape
-                // pins what is and isn't transient.
-                RegistryError::PushFailed { stderr, .. } => is_transient_network_stderr(stderr),
-                _ => false,
-            },
-            |attempt| async move {
-                let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-                let output = Command::new(&skopeo)
-                    .args([
-                        "copy",
-                        "--insecure-policy",
-                        &format!("--retry-times={}", retries),
-                        &format!(
-                            "--dest-creds={}:{}",
-                            self.credentials.organization, self.credentials.token
-                        ),
-                        &format!("docker-archive:{}", image_path),
-                        &format!("docker://{}:{}", registry, tag),
-                    ])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .output()
-                    .await;
+        let result = retry_command(&policy, &op, |attempt| async move {
+            let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
+            let outcome = Command::new(&skopeo)
+                .args([
+                    "copy",
+                    "--insecure-policy",
+                    &format!("--retry-times={}", retries),
+                    &format!(
+                        "--dest-creds={}:{}",
+                        self.credentials.organization, self.credentials.token
+                    ),
+                    &format!("docker-archive:{}", image_path),
+                    &format!("docker://{}:{}", registry, tag),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .await;
+            if outcome
+                .as_ref()
+                .map(|o| !o.status.success())
+                .unwrap_or(true)
+                && attempt < max_attempts
+            {
+                warn!("Push attempt {} failed, retrying...", attempt);
+            }
+            outcome
+        })
+        .await;
 
-                match output {
-                    Ok(out) if out.status.success() => Ok(()),
-                    Ok(out) => {
-                        let cf = CapturedFailure::from_output(&out);
-                        if attempt < policy.max_attempts {
-                            warn!("Push attempt {} failed, retrying...", attempt);
-                        }
-                        Err(RegistryError::PushFailed {
-                            registry: registry.to_string(),
-                            tag: tag.to_string(),
-                            attempts: attempt,
-                            exit_code: cf.exit_code,
-                            stderr: cf.stderr,
-                        })
-                    }
-                    Err(e) => Err(RegistryError::ExecFailed {
-                        operation: format!("push {}:{}", registry, tag),
-                        message: e.to_string(),
-                    }),
-                }
-            },
-        )
-        .await
+        result
+            .map(|_| ())
+            .map_err(|failure| classify_push_failure(failure, registry, tag))
     }
 
     /// Verify an image tag exists in the registry.
@@ -681,124 +710,133 @@ mod tests {
         assert!(extract_organization("").is_err());
     }
 
-    /// Classifier wired into `push_with_retries` must consume the
-    /// `is_transient_network_stderr` primitive on `PushFailed.stderr`
-    /// (the typed structural field, NOT a fused `message: String`).
-    /// A representative skopeo "503 Service Unavailable" trips it; a
-    /// "401 Unauthorized" does not. Other variants (no captured stderr)
-    /// are unconditionally terminal.
-    ///
-    /// Mirrors the closure shape inside `push_with_retries` so a future
-    /// drift between the two surfaces fails this test, not production.
+    /// `classify_push_failure` dispatches a post-`retry_command`
+    /// `CommandAttemptFailure` to the typed `RegistryError` variant whose
+    /// structural shape matches. Pre-migration this dispatch was inline
+    /// in `push_with_retries` (the `Err(e) => Err(ExecFailed)` arm vs the
+    /// `Ok(out) non-success => Err(PushFailed)` arm of the `match output`
+    /// body). Post-migration the dispatch is one named helper consuming
+    /// the typed [`crate::retry::CommandAttemptFailure::is_spawn_failure`]
+    /// predicate. Pinning the four-case mapping lets the typed-error
+    /// surface evolve (e.g., adding a `RegistryError::PushTimeout`
+    /// variant) without subtle drift between this site and the canonical
+    /// retry primitive.
     #[test]
-    fn test_push_classifier_distinguishes_transient_from_terminal() {
-        use crate::retry::is_transient_network_stderr;
-
-        let classify = |e: &RegistryError| match e {
-            RegistryError::PushFailed { stderr, .. } => is_transient_network_stderr(stderr),
-            _ => false,
+    fn test_classify_push_failure_dispatches_on_spawn_vs_op() {
+        // Spawn-failure (skopeo not on PATH): empty stderr, exit_code
+        // None, spawn-error message in stdout. Must produce
+        // `RegistryError::ExecFailed` — never `PushFailed` — because
+        // the underlying CLI never ran. Same discipline the four
+        // sibling typed-error families (Atti, Nix, Git, Kubernetes)
+        // already encode for their `ExecFailed` variants.
+        let spawn = CommandAttemptFailure {
+            operation: "push ghcr.io/o/p/s:tag".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: String::new(),
+            stdout: "failed to spawn process: No such file or directory".to_string(),
         };
+        match classify_push_failure(spawn, "ghcr.io/o/p/s", "amd64-abc1234") {
+            RegistryError::ExecFailed { operation, message } => {
+                assert_eq!(operation, "push ghcr.io/o/p/s:tag");
+                assert!(
+                    message.contains("No such file or directory"),
+                    "spawn-error message must flow through stdout: {message}"
+                );
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
 
-        let transient = RegistryError::PushFailed {
-            registry: "ghcr.io/o/p/s".into(),
-            tag: "amd64-abc1234".into(),
-            attempts: 1,
+        // Op-failure with transient stderr (HTTP 503): exit_code Some,
+        // stderr populated. Must produce `RegistryError::PushFailed`
+        // carrying the structural-record tuple — registry, tag, the
+        // typed `attempt` count, exit_code, and stderr — verbatim.
+        let transient = CommandAttemptFailure {
+            operation: "push ghcr.io/o/p/s:tag".to_string(),
+            attempt: 5,
             exit_code: Some(1),
-            stderr: "received unexpected HTTP status: 503 Service Unavailable".into(),
+            stderr: "received unexpected HTTP status: 503 Service Unavailable".to_string(),
+            stdout: String::new(),
         };
-        assert!(classify(&transient), "5xx must classify as transient");
+        match classify_push_failure(transient, "ghcr.io/o/p/s", "amd64-abc1234") {
+            RegistryError::PushFailed {
+                registry,
+                tag,
+                attempts,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(registry, "ghcr.io/o/p/s");
+                assert_eq!(tag, "amd64-abc1234");
+                assert_eq!(
+                    attempts, 5,
+                    "attempts must be recovered from CommandAttemptFailure.attempt"
+                );
+                assert_eq!(exit_code, Some(1));
+                assert!(stderr.contains("503"));
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
+        }
 
-        let terminal_401 = RegistryError::PushFailed {
-            registry: "ghcr.io/o/p/s".into(),
-            tag: "amd64-abc1234".into(),
-            attempts: 1,
+        // Op-failure with terminal stderr (HTTP 401): same `PushFailed`
+        // shape — the dispatch does NOT inspect transient-vs-terminal
+        // (that classification happens INSIDE `retry_command` to decide
+        // whether to retry). By the time the helper is called, the
+        // retry loop has already exhausted; the dispatch only chooses
+        // between `ExecFailed` and `PushFailed` based on whether the
+        // CLI actually ran.
+        let terminal = CommandAttemptFailure {
+            operation: "push ghcr.io/o/p/s:tag".to_string(),
+            attempt: 1,
             exit_code: Some(1),
-            stderr: "401 Unauthorized: bad credentials".into(),
+            stderr: "401 Unauthorized: bad credentials".to_string(),
+            stdout: String::new(),
         };
-        assert!(
-            !classify(&terminal_401),
-            "auth failure must not burn retry budget"
-        );
-
-        let terminal_404 = RegistryError::PushFailed {
-            registry: "ghcr.io/o/p/s".into(),
-            tag: "amd64-abc1234".into(),
-            attempts: 1,
-            exit_code: Some(1),
-            stderr: "404 manifest unknown".into(),
-        };
-        assert!(
-            !classify(&terminal_404),
-            "manifest-unknown must not burn retry budget"
-        );
-
-        let other = RegistryError::TokenNotFound;
-        assert!(
-            !classify(&other),
-            "non-PushFailed variants must short-circuit (no captured stderr)"
-        );
-
-        let local_missing = RegistryError::LocalImageNotFound {
-            path: "/nonexistent".into(),
-        };
-        assert!(!classify(&local_missing));
-
-        // ExecFailed (the spawn-failure path) is structurally distinct
-        // from PushFailed and must short-circuit. A skopeo-not-on-PATH
-        // precondition has no stderr to inspect; burning 5 attempts ×
-        // exponential backoff against it would produce only the same
-        // ENOENT five times.
-        let exec_missing = RegistryError::ExecFailed {
-            operation: "push ghcr.io/o/p/s:tag".into(),
-            message: "No such file or directory".into(),
-        };
-        assert!(!classify(&exec_missing));
+        match classify_push_failure(terminal, "ghcr.io/o/p/s", "amd64-abc1234") {
+            RegistryError::PushFailed {
+                attempts, stderr, ..
+            } => {
+                assert_eq!(
+                    attempts, 1,
+                    "terminal failure short-circuits at attempt 1; helper preserves that"
+                );
+                assert!(stderr.contains("401"));
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
+        }
     }
 
-    /// Pre-migration regression guard. The `push_with_retries` classifier
-    /// used to inspect a fused `message: String` of the form
-    /// "Exit code: Some(N); stderr: ...", so a synthetic exit code
-    /// of 500–504 (numerically a 5xx HTTP marker) trip the transient
-    /// classifier even when the actual stderr was terminal. Splitting
-    /// `message` into typed `(exit_code, stderr)` makes that ambiguity
-    /// structurally impossible: the classifier inspects the typed
-    /// `stderr` field directly. This test pins the new shape so a
-    /// regression that re-fuses the message can never reintroduce the
-    /// false-transient.
+    /// Regression guard for the `is_spawn_failure` predicate at the
+    /// dispatch site. A spawn-failure record carries `exit_code: None`
+    /// AND empty `stderr`. A non-zero-exit record with empty `stderr`
+    /// (a CLI that ran, exited non-zero, and emitted nothing) is
+    /// structurally distinct: it must dispatch to `PushFailed`, not
+    /// `ExecFailed`, because the CLI did run. Pinning this guards
+    /// against a future regression that drops the `exit_code.is_none()`
+    /// half of the predicate.
     #[test]
-    fn test_push_classifier_inspects_typed_stderr_not_synthetic_message() {
-        use crate::retry::is_transient_network_stderr;
-
-        let classify = |e: &RegistryError| match e {
-            RegistryError::PushFailed { stderr, .. } => is_transient_network_stderr(stderr),
-            _ => false,
+    fn test_classify_push_failure_silent_op_failure_routes_to_push_failed() {
+        let silent_op = CommandAttemptFailure {
+            operation: "push ghcr.io/o/p/s:tag".to_string(),
+            attempt: 2,
+            exit_code: Some(125),
+            stderr: String::new(),
+            stdout: String::new(),
         };
-
-        // A terminal 401 with a literal "504" exit code must NOT trip
-        // the transient classifier — the classifier only inspects the
-        // typed stderr field, not a synthetic concatenation.
-        let terminal_with_5xx_exit_code = RegistryError::PushFailed {
-            registry: "ghcr.io/o/p/s".into(),
-            tag: "amd64-abc1234".into(),
-            attempts: 1,
-            exit_code: Some(504),
-            stderr: "401 Unauthorized: bad credentials".into(),
-        };
-        assert!(
-            !classify(&terminal_with_5xx_exit_code),
-            "exit_code is structurally separate from stderr; \
-             a non-5xx stderr must short-circuit even if exit_code happens to match a 5xx marker"
-        );
-
-        // Symmetric: a transient 503 stderr must trip the classifier
-        // even when exit_code is a non-5xx number.
-        let transient_with_non_5xx_exit_code = RegistryError::PushFailed {
-            registry: "ghcr.io/o/p/s".into(),
-            tag: "amd64-abc1234".into(),
-            attempts: 1,
-            exit_code: Some(1),
-            stderr: "received unexpected HTTP status: 503".into(),
-        };
-        assert!(classify(&transient_with_non_5xx_exit_code));
+        // Sanity: this is NOT a spawn failure (exit_code is Some).
+        assert!(!silent_op.is_spawn_failure());
+        match classify_push_failure(silent_op, "ghcr.io/o/p/s", "amd64-abc1234") {
+            RegistryError::PushFailed {
+                attempts,
+                exit_code,
+                stderr,
+                ..
+            } => {
+                assert_eq!(attempts, 2);
+                assert_eq!(exit_code, Some(125));
+                assert!(stderr.is_empty());
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
+        }
     }
 }
