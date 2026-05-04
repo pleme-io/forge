@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::GitError;
-use crate::retry::CapturedFailure;
+use crate::retry::classify_capture;
 
 /// Run `git <args>` (resolved against `workdir` if any) and return its
 /// captured stdout, or a typed `GitError`.
@@ -15,6 +15,19 @@ use crate::retry::CapturedFailure;
 /// absolute shim path so they don't mutate global PATH and remain
 /// parallel-safe — same hermetic-test discipline as `nix.rs`'s
 /// `run_nix_build_typed` and `attic.rs`'s `run_attic_capture`.
+///
+/// Spawn-vs-op dispatch flows through the canonical
+/// [`crate::retry::classify_capture`] primitive: spawn failures
+/// (`Err(io::Error)` — git not on PATH) route to `GitError::ExecFailed`;
+/// non-zero exits route to `GitError::OpFailed` carrying the structural
+/// `(exit_code, stderr)` tuple [`crate::retry::CapturedFailure`]
+/// extracts. The two-step
+/// `cmd.output().map_err(|e| ExecFailed{...})?; if let Some(cf) =
+/// CapturedFailure::from_output_if_failed(&out) { return Err(OpFailed{...}) }`
+/// pattern this site previously inlined now lives in one place
+/// alongside three sibling typed-error producer sites
+/// (`git_capture_remote`, `nix.rs::run_nix_build_typed`,
+/// `infrastructure/registry.rs::create_manifest_index`).
 fn git_capture(
     bin: &str,
     args: &[&str],
@@ -26,17 +39,18 @@ fn git_capture(
     if let Some(w) = workdir {
         cmd.current_dir(w);
     }
-    let output = cmd.output().map_err(|e| GitError::ExecFailed {
-        op: op.to_string(),
-        message: e.to_string(),
-    })?;
-    if let Some(cf) = CapturedFailure::from_output_if_failed(&output) {
-        return Err(GitError::OpFailed {
+    let output = classify_capture(
+        cmd.output(),
+        |e| GitError::ExecFailed {
+            op: op.to_string(),
+            message: e.to_string(),
+        },
+        |cf| GitError::OpFailed {
             op: op.to_string(),
             exit_code: cf.exit_code,
             stderr: cf.stderr,
-        });
-    }
+        },
+    )?;
     Ok(output.stdout)
 }
 
@@ -45,6 +59,12 @@ fn git_capture(
 /// failures as `GitError::RemoteOpFailed` so callers can recover the
 /// exact endpoint from the typed record without parsing the bail!
 /// string. Mirror of `git_capture` for the network half of the surface.
+///
+/// Spawn-vs-op dispatch flows through the canonical
+/// [`crate::retry::classify_capture`] primitive — same shape as
+/// [`git_capture`], with the op-failure arm producing
+/// `GitError::RemoteOpFailed` (carrying `(remote, branch, exit_code,
+/// stderr)`) instead of `GitError::OpFailed`.
 fn git_capture_remote(
     bin: &str,
     args: &[&str],
@@ -58,19 +78,20 @@ fn git_capture_remote(
     if let Some(w) = workdir {
         cmd.current_dir(w);
     }
-    let output = cmd.output().map_err(|e| GitError::ExecFailed {
-        op: op.to_string(),
-        message: e.to_string(),
-    })?;
-    if let Some(cf) = CapturedFailure::from_output_if_failed(&output) {
-        return Err(GitError::RemoteOpFailed {
+    let output = classify_capture(
+        cmd.output(),
+        |e| GitError::ExecFailed {
+            op: op.to_string(),
+            message: e.to_string(),
+        },
+        |cf| GitError::RemoteOpFailed {
             op: op.to_string(),
             remote: remote.to_string(),
             branch: branch.to_string(),
             exit_code: cf.exit_code,
             stderr: cf.stderr,
-        });
-    }
+        },
+    )?;
     Ok(output.stdout)
 }
 

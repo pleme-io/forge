@@ -10,7 +10,7 @@ use tracing::{debug, info};
 
 use crate::error::NixBuildError;
 use crate::repo::get_tool_path;
-use crate::retry::CapturedFailure;
+use crate::retry::classify_capture;
 
 /// Result of a Nix build operation
 #[derive(Debug, Clone)]
@@ -44,24 +44,33 @@ async fn run_nix_build_typed(
 ) -> Result<String, NixBuildError> {
     debug!("{} {}", nix_bin, args.join(" "));
 
-    let output = Command::new(nix_bin)
+    let captured = Command::new(nix_bin)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .await
-        .map_err(|e| NixBuildError::ExecFailed {
+        .await;
+
+    // Spawn-vs-op dispatch flows through the canonical
+    // [`classify_capture`] primitive — same shape as
+    // `git.rs::git_capture` and
+    // `infrastructure/registry.rs::create_manifest_index`. Spawn
+    // failures (`Err(io::Error)` — nix not on PATH) route to
+    // `NixBuildError::ExecFailed`; non-zero exits route to
+    // `NixBuildError::BuildFailed` carrying the structural
+    // `(exit_code, stderr)` tuple `CapturedFailure` extracts.
+    let output = classify_capture(
+        captured,
+        |e| NixBuildError::ExecFailed {
             flake_attr: label.to_string(),
             message: e.to_string(),
-        })?;
-
-    if let Some(cf) = CapturedFailure::from_output_if_failed(&output) {
-        return Err(NixBuildError::BuildFailed {
+        },
+        |cf| NixBuildError::BuildFailed {
             flake_attr: label.to_string(),
             exit_code: cf.exit_code,
             stderr: cf.stderr,
-        });
-    }
+        },
+    )?;
 
     let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if store_path.is_empty() {
