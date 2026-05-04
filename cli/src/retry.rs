@@ -262,6 +262,79 @@ impl CapturedFailure {
     }
 }
 
+/// Classify an external-CLI invocation's `io::Result<Output>` into one of
+/// three structural shapes — success, spawn-failure, op-failure — and
+/// route each non-success shape into a typed-error variant supplied by
+/// the caller.
+///
+/// Lifts the verbatim two-step pattern
+/// ```text
+/// let output = cmd.output().await.map_err(|e| <Family>::ExecFailed {
+///     <op_field>: ..., message: e.to_string(),
+/// })?;
+/// if let Some(cf) = CapturedFailure::from_output_if_failed(&output) {
+///     return Err(<Family>::<OpFailed> {
+///         <op_field>: ..., exit_code: cf.exit_code, stderr: cf.stderr,
+///     });
+/// }
+/// ```
+/// that four typed-error producer sites in forge carry verbatim modulo
+/// per-site `<Family>` and per-site `<op_field>`:
+/// `git.rs::git_capture`, `git.rs::git_capture_remote`,
+/// `nix.rs::run_nix_build_typed`, and
+/// `infrastructure/registry.rs::create_manifest_index`. Four
+/// identically-shaped bodies past the three-times threshold
+/// (THEORY §VI.1) — this primitive is the law-redeeming consolidation
+/// for the typed-error producer surface, the same way `retry_command`
+/// (commit 26ddcef) consolidated the typed-error retry-driver surface.
+///
+/// The caller supplies two closures, one per non-success shape:
+/// - `on_spawn` receives the underlying `std::io::Error` and produces
+///   the family-specific `*::ExecFailed` variant. Spawn-failure means
+///   the CLI binary could not be invoked at all (not on PATH, fork
+///   failed, permission denied) — the canonical discipline four typed-
+///   error families already encode for their `ExecFailed` variants
+///   (Registry, Nix, Attic, Git).
+/// - `on_op` receives the canonical [`CapturedFailure`] (UTF-8-lossy-
+///   trimmed stderr + extracted exit_code) and produces the family-
+///   specific operation-failure variant (`*::OpFailed`,
+///   `*::BuildFailed`, `*::ManifestFailed`, etc.). The `CapturedFailure`
+///   typed primitive guarantees the `(exit_code, stderr)` extraction
+///   never drifts on UTF-8 decode or trim discipline — the
+///   load-bearing invariant the canonical
+///   [`is_transient_network_stderr`] classifier relies on across every
+///   typed-error consumer.
+///
+/// On success, the captured `Output` is returned verbatim so the caller
+/// can extract `stdout` / inspect the status / etc. without re-running
+/// the command.
+///
+/// The split between `on_spawn` (could not spawn) and `on_op` (CLI ran
+/// and rejected) is the typed analog of
+/// [`CommandAttemptFailure::is_spawn_failure`] (commit 34c1a35), which
+/// performs the same discrimination one phase later (after the retry
+/// loop) for retry-call-site consumers. Together the two predicates
+/// cover both the non-retry direct-call-site shape (this helper) and
+/// the retry-loop post-dispatch shape — every typed-error producer in
+/// forge that drives a `tokio::process::Command` against an external
+/// CLI now flows through one of the two canonical primitives, with the
+/// same structural-record discipline at both surfaces.
+pub fn classify_capture<E, FExec, FOp>(
+    captured: std::io::Result<std::process::Output>,
+    on_spawn: FExec,
+    on_op: FOp,
+) -> Result<std::process::Output, E>
+where
+    FExec: FnOnce(std::io::Error) -> E,
+    FOp: FnOnce(CapturedFailure) -> E,
+{
+    match captured {
+        Ok(out) if out.status.success() => Ok(out),
+        Ok(out) => Err(on_op(CapturedFailure::from_output(&out))),
+        Err(e) => Err(on_spawn(e)),
+    }
+}
+
 /// Captured output of a single failed external-command attempt.
 ///
 /// Typed error shape for ad-hoc retry call sites (`commands/push.rs`,
@@ -1550,5 +1623,216 @@ mod tests {
         .await;
         let err = result.expect_err("must fail");
         assert_eq!(err.operation, "push ghcr.io/o/p:abc1234");
+    }
+
+    /// Synthetic typed-error family used to pin `classify_capture`'s
+    /// dispatch contract without coupling the retry-module tests to any
+    /// of the production error families in `cli/src/error.rs`. Mirrors
+    /// the structural shape every production family already carries
+    /// (the four already-migrated families — Registry, Nix, Attic, Git
+    /// — each pair `ExecFailed` with a per-family op-failure variant
+    /// carrying `(exit_code: Option<i32>, stderr: String)`).
+    #[derive(Debug, PartialEq, Eq)]
+    enum FakeError {
+        ExecFailed {
+            op: String,
+            message: String,
+        },
+        OpFailed {
+            op: String,
+            exit_code: Option<i32>,
+            stderr: String,
+        },
+    }
+    impl std::fmt::Display for FakeError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{:?}", self)
+        }
+    }
+    impl std::error::Error for FakeError {}
+
+    /// Success — `classify_capture` returns the captured `Output`
+    /// verbatim so the caller can read `stdout` (or inspect status, or
+    /// debug-log) without re-running the command. Pins the load-bearing
+    /// invariant that `on_op` and `on_spawn` are NEVER invoked on a
+    /// zero-exit `Output` — same discipline
+    /// `CapturedFailure::from_output_if_failed` already encodes for its
+    /// own surface.
+    #[test]
+    fn test_classify_capture_success_returns_output() {
+        let out = synth_output(true, b"hello world\n", b"");
+        let result: Result<std::process::Output, FakeError> = classify_capture(
+            Ok(out),
+            |_e| panic!("on_spawn must NOT fire on success"),
+            |_cf| panic!("on_op must NOT fire on success"),
+        );
+        let captured = result.expect("zero-exit must return Output");
+        assert!(captured.status.success());
+        assert_eq!(captured.stdout, b"hello world\n");
+    }
+
+    /// Spawn-failure (`Err(io::Error)` — binary not on PATH, fork
+    /// failed) routes to `on_spawn`. `on_op` MUST NOT fire — the CLI
+    /// never ran, so there is no captured stderr to dispatch on. Pins
+    /// the same discriminator the four already-migrated `ExecFailed`
+    /// variants encode at their producer sites.
+    #[test]
+    fn test_classify_capture_spawn_failure_routes_to_on_spawn() {
+        let captured: std::io::Result<std::process::Output> = Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file or directory",
+        ));
+        let result: Result<std::process::Output, FakeError> = classify_capture(
+            captured,
+            |e| FakeError::ExecFailed {
+                op: "spawn missing tool".to_string(),
+                message: e.to_string(),
+            },
+            |_cf| panic!("on_op MUST NOT fire on spawn-failure (CLI never ran)"),
+        );
+        match result.expect_err("spawn failure must produce Err") {
+            FakeError::ExecFailed { op, message } => {
+                assert_eq!(op, "spawn missing tool");
+                assert!(
+                    message.contains("no such file"),
+                    "spawn-error message must flow through: {message}"
+                );
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// Op-failure (`Ok(out)` with non-zero status) routes to `on_op`,
+    /// which receives the canonical [`CapturedFailure`] carrying the
+    /// extracted `(exit_code, stderr)` tuple — UTF-8-lossy-decoded and
+    /// trimmed by [`CapturedFailure::from_output`]. `on_spawn` MUST NOT
+    /// fire — the CLI ran. The structural-record tuple flows verbatim
+    /// into the caller-supplied `OpFailed` variant by name; every
+    /// production family's op-failure variant already destructures
+    /// `cf.exit_code` and `cf.stderr` this way.
+    #[test]
+    fn test_classify_capture_op_failure_routes_to_on_op_with_captured_failure() {
+        let out = synth_output(false, b"", b"  503 Service Unavailable\n  ");
+        let result: Result<std::process::Output, FakeError> = classify_capture(
+            Ok(out),
+            |_e| panic!("on_spawn MUST NOT fire on op-failure (CLI ran)"),
+            |cf| FakeError::OpFailed {
+                op: "push transient".to_string(),
+                exit_code: cf.exit_code,
+                stderr: cf.stderr,
+            },
+        );
+        match result.expect_err("non-zero exit must produce Err") {
+            FakeError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "push transient");
+                assert!(exit_code.is_some());
+                assert_ne!(exit_code, Some(0));
+                // Trim discipline — leading/trailing whitespace stripped
+                // by `CapturedFailure::from_output` — load-bearing for
+                // the canonical classifier.
+                assert_eq!(stderr, "503 Service Unavailable");
+                // The trimmed stderr round-trips through the canonical
+                // transient classifier — proves the dispatch preserves
+                // the structural-record shape downstream consumers
+                // (retry, telemetry, attestation) depend on.
+                assert!(is_transient_network_stderr(&stderr));
+            }
+            other => panic!("expected OpFailed, got: {other:?}"),
+        }
+    }
+
+    /// Discriminator pin: spawn-failure and op-failure are distinct
+    /// arms — a single `classify_capture` call cannot route to both,
+    /// and the load-bearing invariant is that `on_op` does not fire on
+    /// `Err(io::Error)` (no captured stderr exists to extract) and
+    /// `on_spawn` does not fire on `Ok(out)` non-success (the CLI ran).
+    /// Pinning this guards against a future regression that conflates
+    /// the two arms (e.g., synthesizing an empty `CapturedFailure` from
+    /// a spawn error and routing through `on_op` — which would silently
+    /// turn every "binary not on PATH" failure into an
+    /// `OpFailed { exit_code: None, stderr: "" }` record, drift-prone
+    /// against the canonical classifier and against the
+    /// `is_spawn_failure` post-loop predicate).
+    #[test]
+    fn test_classify_capture_arms_are_disjoint() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        // Spawn-failure: only on_spawn fires.
+        let spawn_fired = AtomicU32::new(0);
+        let op_fired = AtomicU32::new(0);
+        let captured: std::io::Result<std::process::Output> = Err(std::io::Error::other("x"));
+        let _: Result<std::process::Output, FakeError> = classify_capture(
+            captured,
+            |_e| {
+                spawn_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::ExecFailed {
+                    op: "x".to_string(),
+                    message: "x".to_string(),
+                }
+            },
+            |_cf| {
+                op_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::OpFailed {
+                    op: "x".to_string(),
+                    exit_code: None,
+                    stderr: String::new(),
+                }
+            },
+        );
+        assert_eq!(spawn_fired.load(Ordering::SeqCst), 1);
+        assert_eq!(op_fired.load(Ordering::SeqCst), 0);
+
+        // Op-failure: only on_op fires.
+        let spawn_fired = AtomicU32::new(0);
+        let op_fired = AtomicU32::new(0);
+        let out = synth_output(false, b"", b"401 Unauthorized");
+        let _: Result<std::process::Output, FakeError> = classify_capture(
+            Ok(out),
+            |_e| {
+                spawn_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::ExecFailed {
+                    op: "x".to_string(),
+                    message: "x".to_string(),
+                }
+            },
+            |_cf| {
+                op_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::OpFailed {
+                    op: "x".to_string(),
+                    exit_code: None,
+                    stderr: String::new(),
+                }
+            },
+        );
+        assert_eq!(spawn_fired.load(Ordering::SeqCst), 0);
+        assert_eq!(op_fired.load(Ordering::SeqCst), 1);
+
+        // Success: neither fires.
+        let spawn_fired = AtomicU32::new(0);
+        let op_fired = AtomicU32::new(0);
+        let out = synth_output(true, b"ok", b"");
+        let _: Result<std::process::Output, FakeError> = classify_capture(
+            Ok(out),
+            |_e| {
+                spawn_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::ExecFailed {
+                    op: "x".to_string(),
+                    message: "x".to_string(),
+                }
+            },
+            |_cf| {
+                op_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::OpFailed {
+                    op: "x".to_string(),
+                    exit_code: None,
+                    stderr: String::new(),
+                }
+            },
+        );
+        assert_eq!(spawn_fired.load(Ordering::SeqCst), 0);
+        assert_eq!(op_fired.load(Ordering::SeqCst), 0);
     }
 }

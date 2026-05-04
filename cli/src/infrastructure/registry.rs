@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::error::RegistryError;
 use crate::repo::get_tool_path;
-use crate::retry::{retry_command, CapturedFailure, CommandAttemptFailure, RetryPolicy};
+use crate::retry::{classify_capture, retry_command, CommandAttemptFailure, RetryPolicy};
 
 /// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
 /// `RegistryError` variant whose structural shape matches the captured
@@ -440,18 +440,27 @@ impl RegistryClient {
             cmd.stdout(Stdio::inherit());
             cmd.stderr(Stdio::piped());
 
-            let output = cmd.output().await.map_err(|e| RegistryError::ExecFailed {
-                operation: format!("create manifest index for {}", target),
-                message: e.to_string(),
-            })?;
-
-            if let Some(cf) = CapturedFailure::from_output_if_failed(&output) {
-                return Err(RegistryError::ManifestFailed {
-                    target: target.clone(),
+            // Spawn-vs-op dispatch flows through the canonical
+            // [`classify_capture`] primitive — same shape as
+            // `git.rs::git_capture` and `nix.rs::run_nix_build_typed`.
+            // Spawn failures (`Err(io::Error)` — regctl not on PATH)
+            // route to `RegistryError::ExecFailed`; non-zero exits route
+            // to `RegistryError::ManifestFailed` carrying the
+            // structural `(target, exit_code, stderr)` tuple
+            // `CapturedFailure` extracts.
+            let target_for_err = target.clone();
+            classify_capture(
+                cmd.output().await,
+                |e| RegistryError::ExecFailed {
+                    operation: format!("create manifest index for {}", target),
+                    message: e.to_string(),
+                },
+                |cf| RegistryError::ManifestFailed {
+                    target: target_for_err,
                     exit_code: cf.exit_code,
                     stderr: cf.stderr,
-                });
-            }
+                },
+            )?;
 
             info!("Created manifest index: {}", target);
         }
