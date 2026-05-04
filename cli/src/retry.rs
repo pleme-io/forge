@@ -308,6 +308,35 @@ impl CommandAttemptFailure {
         is_transient_network_stderr(&self.stderr)
     }
 
+    /// True iff this record represents a process that could not be spawned
+    /// (binary not on PATH, fork failed, permission denied), as opposed to
+    /// a process that ran-but-exited-non-zero.
+    ///
+    /// The structural shape of a spawn-failure record is fixed by
+    /// [`Self::from_capture`]: `exit_code: None` and an empty `stderr`
+    /// (the spawn error is moved into `stdout` for Display fallback).
+    /// A non-zero-exit op-failure always carries `Some(_)` exit code (or
+    /// `None` only when killed by signal — but with non-empty stderr).
+    /// The conjunction `exit_code.is_none() && stderr.is_empty()` is
+    /// load-bearing: it lets typed-error producer sites that consume
+    /// `retry_command`'s output discriminate `*::ExecFailed` (spawn could
+    /// not run the CLI) from `*::PushFailed` / `*::OpFailed` /
+    /// `*::BuildFailed` (CLI ran and rejected the request) without
+    /// substring-parsing the failure message — same discipline the four
+    /// pre-existing typed-error families established with their
+    /// `ExecFailed` variants (Registry, Nix, Attic, Git).
+    ///
+    /// A retry-loop site that wants to short-circuit on spawn-failure
+    /// already gets that for free via [`Self::is_transient`] (empty
+    /// stderr is terminal). This predicate is the post-loop dispatch
+    /// shape: once `retry_command` returns `Err(CommandAttemptFailure)`,
+    /// the call site uses `is_spawn_failure()` to choose between the two
+    /// typed-error variants (`ExecFailed` vs the operation-specific
+    /// failure).
+    pub fn is_spawn_failure(&self) -> bool {
+        self.exit_code.is_none() && self.stderr.is_empty()
+    }
+
     /// Convert a `Command::output()` result into a typed
     /// `CommandAttemptFailure` or success `Output`. Lifts the
     /// `match { Ok success | Ok non-success | Err spawn }` body every
@@ -1089,6 +1118,77 @@ mod tests {
         );
         assert!(err.stdout.contains("failed to spawn process"));
         assert!(err.stdout.contains("no such file"));
+    }
+
+    /// `is_spawn_failure()` discriminates the two structural shapes
+    /// `from_capture` produces: a spawn-failure (`Err(io::Error)` →
+    /// `exit_code: None` + empty stderr) returns `true`; a non-zero exit
+    /// (`Ok(out)` with stderr populated) returns `false`. This is the
+    /// post-`retry_command` dispatch shape typed-error producer sites
+    /// consume to choose between `*::ExecFailed` (spawn could not run
+    /// the CLI) and `*::PushFailed` / `*::OpFailed` / `*::BuildFailed`
+    /// (CLI ran and rejected the request), without substring-parsing
+    /// the failure message.
+    #[test]
+    fn test_is_spawn_failure_discriminates_spawn_from_op() {
+        // Spawn-failure: produced by the `Err(io::Error)` arm of
+        // from_capture. exit_code: None + empty stderr.
+        let spawn_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let captured: Result<std::process::Output, std::io::Error> = Err(spawn_err);
+        let f = CommandAttemptFailure::from_capture(captured, "exec missing", 1)
+            .expect_err("spawn failure must produce a record");
+        assert!(f.is_spawn_failure(), "spawn failure must discriminate true");
+
+        // Op-failure: produced by the `Ok(out)` non-success arm of
+        // from_capture. exit_code: Some(_) + non-empty stderr.
+        let out = synth_output(false, b"", b"401 Unauthorized");
+        let f = CommandAttemptFailure::from_capture(Ok(out), "auth op", 1)
+            .expect_err("non-zero exit must produce a record");
+        assert!(
+            !f.is_spawn_failure(),
+            "op failure (CLI ran with stderr) must NOT discriminate as spawn"
+        );
+
+        // Op-failure with transient stderr: also not a spawn failure.
+        let out = synth_output(false, b"", b"503 Service Unavailable");
+        let f = CommandAttemptFailure::from_capture(Ok(out), "transient op", 1)
+            .expect_err("non-zero exit must produce a record");
+        assert!(!f.is_spawn_failure());
+        assert!(f.is_transient(), "transient op must remain transient");
+    }
+
+    /// `is_spawn_failure()` and `is_transient()` are independent
+    /// predicates: every spawn-failure is terminal (because empty
+    /// stderr cannot trip the transient classifier), but a terminal
+    /// failure is NOT necessarily a spawn-failure (auth-fail / 404 /
+    /// manifest-mismatch all have non-empty stderr but are terminal).
+    /// Pinning this guards against a future regression that conflates
+    /// the two predicates — typed-error producer sites depend on
+    /// `is_spawn_failure()` discriminating the structural shape, NOT
+    /// the classifier's transient/terminal verdict.
+    #[test]
+    fn test_is_spawn_failure_independent_of_is_transient() {
+        // Terminal op (401) — not transient, not a spawn failure.
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            stderr: "401 Unauthorized".to_string(),
+            stdout: String::new(),
+        };
+        assert!(!f.is_transient());
+        assert!(!f.is_spawn_failure());
+
+        // Spawn failure — not transient, IS a spawn failure.
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: String::new(),
+            stdout: "failed to spawn process: no such file".to_string(),
+        };
+        assert!(!f.is_transient());
+        assert!(f.is_spawn_failure());
     }
 
     /// `from_capture` Display surfaces the same five-field tuple
