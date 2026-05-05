@@ -12,13 +12,49 @@ use tracing::{info, warn};
 
 use crate::error::AtticError;
 use crate::repo::get_tool_path;
-use crate::retry::classify_capture;
+use crate::retry::{classify_capture, retry_command, CommandAttemptFailure, RetryPolicy};
+
+/// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
+/// `AtticError` variant whose structural shape matches the captured
+/// failure. Spawn-failure (attic not on PATH) routes to `ExecFailed`
+/// carrying the cache name and the spawn-error message; non-zero exit
+/// routes to `PushFailed` carrying `(cache, store_path, attempts,
+/// exit_code, stderr)` — the structural-record tuple Phase 1
+/// attestation records (THEORY §V.4) consume.
+///
+/// Mirror of `infrastructure/registry.rs::classify_push_failure` for the
+/// attic surface; same `is_spawn_failure` predicate, same
+/// typed-record-tuple shape modulo per-family field names. The two
+/// helpers together close the post-`retry_command` dispatch surface for
+/// every typed-error producer in forge that wraps a network-shaped CLI
+/// in `retry_command`.
+fn classify_attic_push_failure(
+    failure: CommandAttemptFailure,
+    cache: &str,
+    store_path: &str,
+) -> AtticError {
+    if failure.is_spawn_failure() {
+        AtticError::ExecFailed {
+            cache: cache.to_string(),
+            message: failure.stdout,
+        }
+    } else {
+        AtticError::PushFailed {
+            cache: cache.to_string(),
+            store_path: store_path.to_string(),
+            attempts: failure.attempt,
+            exit_code: failure.exit_code,
+            stderr: failure.stderr,
+        }
+    }
+}
 
 /// Client for Attic cache operations
 pub struct AtticClient {
     cache_name: String,
     token: Option<String>,
     attic_bin: Option<String>,
+    default_retries: u32,
 }
 
 impl AtticClient {
@@ -28,12 +64,23 @@ impl AtticClient {
             cache_name: cache_name.into(),
             token: None,
             attic_bin: None,
+            default_retries: 3,
         }
     }
 
     /// Set authentication token
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
+        self
+    }
+
+    /// Override the default retry budget for [`Self::push`]. Mirrors
+    /// `RegistryClient::with_retries`. Tests pin the schedule by
+    /// constructing the client with `with_retries(N)` and a hermetic
+    /// shim; production callers leave the default of 3 in place.
+    #[cfg(test)]
+    pub fn with_retries(mut self, retries: u32) -> Self {
+        self.default_retries = retries;
         self
     }
 
@@ -67,46 +114,105 @@ impl AtticClient {
         client
     }
 
-    /// Push a store path to the cache.
+    /// Push a store path to the cache, retrying transient network
+    /// failures.
+    ///
+    /// Drives [`crate::retry::retry_command`] with a network-shaped
+    /// schedule (exponential backoff capped at 30s, see
+    /// [`RetryPolicy::network`]) so transient attic failures (HTTP 5xx
+    /// from the cache backend, mid-stream EOF, connection refused) retry
+    /// on 250ms / 500ms / 1s / ... — same idiom the registry surface
+    /// adopted for `skopeo copy` (commit b0db1da). The structural
+    /// equivalence between attic-push and skopeo-copy on the typed-error
+    /// producer surface (both wrap an idempotent network upload that
+    /// can transiently fail with a retryable HTTP marker) collapses
+    /// onto one primitive instead of two divergent retry loops.
     ///
     /// Returns typed errors:
     /// - [`AtticError::ExecFailed`] when `attic` cannot be spawned.
-    /// - [`AtticError::PushFailed`] when attic exits non-zero, carrying
-    ///   the offending cache, store path, exit code, and captured stderr.
-    ///
-    /// Spawn-vs-op dispatch flows through the canonical
-    /// [`crate::retry::classify_capture`] primitive — same shape as
-    /// `git.rs::git_capture`, `nix.rs::run_nix_build_typed`, and
-    /// `infrastructure/registry.rs::create_manifest_index`. The two
-    /// closures the helper takes (`on_spawn` → `ExecFailed`, `on_op` →
-    /// `PushFailed`) replace the bespoke `run_attic_capture`
-    /// `Result<Option<CapturedFailure>, AtticError>` shape that
-    /// previously bridged the two halves at this call site.
+    /// - [`AtticError::PushFailed`] when attic exhausts the retry budget
+    ///   or fails terminally, carrying the offending cache, store path,
+    ///   final attempt count, exit code, and captured stderr.
     pub async fn push(&self, store_path: &str) -> Result<(), AtticError> {
+        self.push_with_retries(store_path, self.default_retries)
+            .await
+    }
+
+    /// Push with an explicit retry budget. The budget is clamped to `>=
+    /// 1` by [`RetryPolicy::new`], so a degenerate `0` cannot silently
+    /// turn the loop into a no-op. The transient-vs-terminal classifier
+    /// is the canonical `is_transient_network_stderr` substring matcher
+    /// — same one `RegistryClient::push_with_retries` uses; pinning one
+    /// classifier across both surfaces means a future addition to the
+    /// transient-marker list (e.g., a new attic-server-flavored error
+    /// shape) lights up retries on both surfaces in the same commit.
+    ///
+    /// On exhaustion the returned `CommandAttemptFailure` is dispatched
+    /// to one of two typed-error variants via
+    /// [`crate::retry::CommandAttemptFailure::is_spawn_failure`]:
+    /// - spawn failure (attic not on PATH) → `AtticError::ExecFailed`
+    ///   carrying the cache name and the spawn-error message.
+    /// - non-zero exit → `AtticError::PushFailed` carrying the
+    ///   structural-record tuple (cache, store_path, attempts,
+    ///   exit_code, stderr) — the same shape
+    ///   `RegistryError::PushFailed` carries on the sibling registry
+    ///   surface, so a downstream consumer (telemetry, replay,
+    ///   attestation) can write one destructure pattern that works
+    ///   across both push surfaces.
+    pub async fn push_with_retries(
+        &self,
+        store_path: &str,
+        retries: u32,
+    ) -> Result<(), AtticError> {
         info!("Pushing to Attic cache: {}", self.cache_name);
 
+        let policy = {
+            let net = RetryPolicy::network();
+            RetryPolicy::new(
+                retries.max(1),
+                net.initial_backoff,
+                net.factor,
+                net.max_backoff,
+            )
+        };
+        let max_attempts = policy.max_attempts;
         let attic_bin = self.resolve_attic_bin();
-        let mut cmd = Command::new(&attic_bin);
-        cmd.args(["push", &self.cache_name, store_path])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(t) = self.token.as_deref() {
-            cmd.env("ATTIC_TOKEN", t);
-        }
+        let cache = self.cache_name.clone();
+        let token = self.token.clone();
+        let op = format!("push {} to {}", store_path, cache);
 
-        classify_capture(
-            cmd.output().await,
-            |e| AtticError::ExecFailed {
-                cache: self.cache_name.clone(),
-                message: e.to_string(),
-            },
-            |cf| AtticError::PushFailed {
-                cache: self.cache_name.clone(),
-                store_path: store_path.to_string(),
-                exit_code: cf.exit_code,
-                stderr: cf.stderr,
-            },
-        )?;
+        let result = retry_command(&policy, &op, |attempt| {
+            let attic_bin = attic_bin.clone();
+            let cache = cache.clone();
+            let token = token.clone();
+            async move {
+                let mut cmd = Command::new(&attic_bin);
+                cmd.args(["push", &cache, store_path])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                if let Some(t) = token.as_deref() {
+                    cmd.env("ATTIC_TOKEN", t);
+                }
+                let outcome = cmd.output().await;
+                if outcome
+                    .as_ref()
+                    .map(|o| !o.status.success())
+                    .unwrap_or(true)
+                    && attempt < max_attempts
+                {
+                    warn!(
+                        "Attic push attempt {}/{} failed, retrying...",
+                        attempt, max_attempts
+                    );
+                }
+                outcome
+            }
+        })
+        .await;
+
+        result.map(|_| ()).map_err(|failure| {
+            classify_attic_push_failure(failure, &self.cache_name, store_path)
+        })?;
 
         info!("Successfully pushed to Attic cache");
         Ok(())
@@ -237,13 +343,19 @@ mod tests {
     }
 
     /// `push` failures must produce `PushFailed` carrying cache,
-    /// store_path, exit code, and captured stderr — never a fused
-    /// `bail!("Attic push failed")`. Uses a shim invoked by absolute
-    /// path so the test is hermetic and parallel-safe.
+    /// store_path, attempts, exit code, and captured stderr — never a
+    /// fused `bail!("Attic push failed")`. Uses a shim invoked by
+    /// absolute path so the test is hermetic and parallel-safe. The
+    /// `cache full` stderr is terminal under
+    /// `is_transient_network_stderr`, so the retry loop short-circuits
+    /// at attempt 1 — pinning that the typed `attempts` field tracks the
+    /// real attempt count, not the retry budget.
     #[tokio::test]
     async fn test_push_returns_push_failed_with_structured_fields() {
         let (_dir, shim) = make_attic_shim("#!/bin/sh\necho 'cache full' 1>&2\nexit 17\n");
-        let client = AtticClient::new("cache-y").with_attic_bin(&shim);
+        let client = AtticClient::new("cache-y")
+            .with_attic_bin(&shim)
+            .with_retries(5);
         let err = client
             .push("/nix/store/zzz-thing")
             .await
@@ -252,11 +364,16 @@ mod tests {
             AtticError::PushFailed {
                 cache,
                 store_path,
+                attempts,
                 exit_code,
                 stderr,
             } => {
                 assert_eq!(cache, "cache-y");
                 assert_eq!(store_path, "/nix/store/zzz-thing");
+                assert_eq!(
+                    attempts, 1,
+                    "terminal stderr ('cache full') must short-circuit at attempt 1 even with retries=5"
+                );
                 assert_eq!(exit_code, Some(17));
                 assert!(
                     stderr.contains("cache full"),
@@ -416,6 +533,250 @@ mod tests {
                 );
             }
             other => panic!("expected LoginFailed, got: {other:?}"),
+        }
+    }
+
+    /// `classify_attic_push_failure` dispatches a post-`retry_command`
+    /// `CommandAttemptFailure` to the typed `AtticError` variant whose
+    /// structural shape matches. Mirror of
+    /// `infrastructure/registry.rs::test_classify_push_failure_dispatches_on_spawn_vs_op`
+    /// for the attic surface. A pure unit test of the dispatch helper
+    /// — no subprocess, no shim, no retry-loop driving — so the typed
+    /// mapping can evolve (e.g., adding `AtticError::PushTimeout`)
+    /// without subtle drift between this site and the canonical retry
+    /// primitive.
+    #[test]
+    fn test_classify_attic_push_failure_dispatches_on_spawn_vs_op() {
+        // Spawn-failure (attic not on PATH): empty stderr, exit_code
+        // None, spawn-error message in stdout. Must produce
+        // `AtticError::ExecFailed` — never `PushFailed` — because the
+        // CLI never ran. Same discipline the four sibling typed-error
+        // families (Registry, Nix, Git, Kubernetes) encode for their
+        // `ExecFailed` variants.
+        let spawn = CommandAttemptFailure {
+            operation: "push /nix/store/abc to cache-x".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: String::new(),
+            stdout: "failed to spawn process: No such file or directory".to_string(),
+        };
+        match classify_attic_push_failure(spawn, "cache-x", "/nix/store/abc") {
+            AtticError::ExecFailed { cache, message } => {
+                assert_eq!(cache, "cache-x");
+                assert!(
+                    message.contains("No such file or directory"),
+                    "spawn-error message must flow through stdout: {message}"
+                );
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+
+        // Op-failure with transient stderr (HTTP 503): exit_code Some,
+        // stderr populated, attempt > 1 (the typed record's attempt
+        // count after the retry loop exhausted). Must produce
+        // `AtticError::PushFailed` carrying the structural-record
+        // tuple — cache, store_path, the typed `attempt` count,
+        // exit_code, and stderr — verbatim.
+        let transient = CommandAttemptFailure {
+            operation: "push /nix/store/abc to cache-x".to_string(),
+            attempt: 5,
+            exit_code: Some(1),
+            stderr: "received unexpected HTTP status: 503 Service Unavailable".to_string(),
+            stdout: String::new(),
+        };
+        match classify_attic_push_failure(transient, "cache-x", "/nix/store/abc") {
+            AtticError::PushFailed {
+                cache,
+                store_path,
+                attempts,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cache, "cache-x");
+                assert_eq!(store_path, "/nix/store/abc");
+                assert_eq!(
+                    attempts, 5,
+                    "attempts must be recovered from CommandAttemptFailure.attempt"
+                );
+                assert_eq!(exit_code, Some(1));
+                assert!(stderr.contains("503"));
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
+        }
+
+        // Op-failure with terminal stderr (HTTP 401): same `PushFailed`
+        // shape — the dispatch does NOT inspect transient-vs-terminal
+        // (that classification happens INSIDE `retry_command` to
+        // decide whether to retry). By the time the helper is called,
+        // the retry loop has already exhausted; the dispatch only
+        // chooses between `ExecFailed` and `PushFailed` based on
+        // whether the CLI actually ran.
+        let terminal = CommandAttemptFailure {
+            operation: "push /nix/store/abc to cache-x".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            stderr: "401 Unauthorized: bad token".to_string(),
+            stdout: String::new(),
+        };
+        match classify_attic_push_failure(terminal, "cache-x", "/nix/store/abc") {
+            AtticError::PushFailed {
+                attempts, stderr, ..
+            } => {
+                assert_eq!(
+                    attempts, 1,
+                    "terminal failure short-circuits at attempt 1; helper preserves that"
+                );
+                assert!(stderr.contains("401"));
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
+        }
+    }
+
+    /// Regression guard for the `is_spawn_failure` predicate at the
+    /// attic dispatch site. A spawn-failure record carries `exit_code:
+    /// None` AND empty `stderr`. A non-zero-exit record with empty
+    /// `stderr` (a CLI that ran, exited non-zero, and emitted nothing)
+    /// is structurally distinct: it must dispatch to `PushFailed`, not
+    /// `ExecFailed`, because the CLI did run. Pinning this guards
+    /// against a future regression that drops the `exit_code.is_none()`
+    /// half of the predicate. Mirror of
+    /// `infrastructure/registry.rs::test_classify_push_failure_silent_op_failure_routes_to_push_failed`.
+    #[test]
+    fn test_classify_attic_push_failure_silent_op_failure_routes_to_push_failed() {
+        let silent_op = CommandAttemptFailure {
+            operation: "push /nix/store/abc to cache-x".to_string(),
+            attempt: 2,
+            exit_code: Some(125),
+            stderr: String::new(),
+            stdout: String::new(),
+        };
+        // Sanity: this is NOT a spawn failure (exit_code is Some).
+        assert!(!silent_op.is_spawn_failure());
+        match classify_attic_push_failure(silent_op, "cache-x", "/nix/store/abc") {
+            AtticError::PushFailed {
+                attempts,
+                exit_code,
+                stderr,
+                ..
+            } => {
+                assert_eq!(attempts, 2);
+                assert_eq!(exit_code, Some(125));
+                assert!(stderr.is_empty());
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
+        }
+    }
+
+    /// Transient stderr (HTTP 503) drives `retry_command` through every
+    /// attempt in the retry budget. Pins:
+    /// - the typed `attempts` field tracks the real attempt count
+    ///   (matches `retries`, not the network policy's default 5).
+    /// - the canonical `is_transient_network_stderr` classifier matches
+    ///   attic-flavored 5xx markers — pre-migration the attic surface
+    ///   had no retry loop at all, so a transient 5xx during a release
+    ///   surfaced as a hard `PushFailed` with `attempts: 1`. Post-
+    ///   migration it surfaces with `attempts: retries`, the typed
+    ///   shape `RegistryError::PushFailed` already encoded for the
+    ///   sibling registry surface.
+    ///
+    /// Uses `retries=2` so the test costs ~250ms (one delay between
+    /// attempts 1 and 2 under `RetryPolicy::network()`'s 250ms initial
+    /// backoff) — fast enough to run in the unit-test loop.
+    #[tokio::test]
+    async fn test_push_transient_stderr_exhausts_retries() {
+        let (_dir, shim) = make_attic_shim(
+            "#!/bin/sh\necho 'received unexpected HTTP status: 503 Service Unavailable' 1>&2\nexit 1\n",
+        );
+        let client = AtticClient::new("cache-503")
+            .with_attic_bin(&shim)
+            .with_retries(2);
+        let err = client
+            .push("/nix/store/transient")
+            .await
+            .expect_err("transient stderr must exhaust retries and fail");
+        match err {
+            AtticError::PushFailed {
+                cache,
+                store_path,
+                attempts,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cache, "cache-503");
+                assert_eq!(store_path, "/nix/store/transient");
+                assert_eq!(
+                    attempts, 2,
+                    "transient stderr must drive the retry loop through every attempt; \
+                     got attempts={attempts}, expected 2 (matches retries=2)"
+                );
+                assert_eq!(exit_code, Some(1));
+                assert!(
+                    stderr.contains("503"),
+                    "stderr must capture the transient marker verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
+        }
+    }
+
+    /// Terminal stderr (HTTP 401) short-circuits the retry loop at
+    /// attempt 1, even with a generous retry budget. Pins that the
+    /// canonical `is_transient_network_stderr` classifier returns
+    /// `false` on auth failures, and that the typed `attempts` field
+    /// reflects the short-circuit (1, not the retries budget). Without
+    /// this pin, a future regression that broadens the transient
+    /// classifier to match `Unauthorized` would silently turn every
+    /// auth failure into a five-attempt retry storm against the cache
+    /// backend — visible only in elapsed-time telemetry, not in the
+    /// typed-error surface.
+    #[tokio::test]
+    async fn test_push_terminal_stderr_short_circuits_at_attempt_1() {
+        let (_dir, shim) =
+            make_attic_shim("#!/bin/sh\necho '401 Unauthorized: bad token' 1>&2\nexit 1\n");
+        let client = AtticClient::new("cache-401")
+            .with_attic_bin(&shim)
+            .with_retries(5);
+        let err = client
+            .push("/nix/store/auth-fail")
+            .await
+            .expect_err("terminal stderr must short-circuit");
+        match err {
+            AtticError::PushFailed {
+                attempts, stderr, ..
+            } => {
+                assert_eq!(
+                    attempts, 1,
+                    "terminal stderr ('401 Unauthorized') must short-circuit at attempt 1 \
+                     even with retries=5; got attempts={attempts}"
+                );
+                assert!(stderr.contains("401"));
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
+        }
+    }
+
+    /// `push_with_retries(_, 0)` must clamp to `>= 1` (one attempt) via
+    /// `RetryPolicy::new`'s clamping discipline — never silently turn
+    /// the loop into a no-op that succeeds without ever spawning the
+    /// CLI. Pins the load-bearing invariant at the public-API
+    /// boundary: a degenerate retries=0 input from a future caller
+    /// must produce a real attempt, not a synthesized success.
+    #[tokio::test]
+    async fn test_push_with_retries_zero_clamps_to_one_attempt() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\necho 'fail' 1>&2\nexit 1\n");
+        let client = AtticClient::new("cache-zero").with_attic_bin(&shim);
+        let err = client
+            .push_with_retries("/nix/store/x", 0)
+            .await
+            .expect_err("retries=0 must still drive at least one attempt that fails");
+        match err {
+            AtticError::PushFailed { attempts, .. } => {
+                assert_eq!(
+                    attempts, 1,
+                    "retries=0 must clamp to >= 1; got attempts={attempts}"
+                );
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
         }
     }
 }
