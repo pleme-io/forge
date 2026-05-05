@@ -289,10 +289,13 @@ pub enum AtticError {
     #[error("Failed to spawn attic for cache {cache}: {message}")]
     ExecFailed { cache: String, message: String },
 
-    #[error("Attic push to cache {cache} of {store_path} failed (exit {exit_code:?}): {stderr}")]
+    #[error(
+        "Attic push to cache {cache} of {store_path} failed after {attempts} attempts (exit {exit_code:?}): {stderr}"
+    )]
     PushFailed {
         cache: String,
         store_path: String,
+        attempts: u32,
         exit_code: Option<i32>,
         stderr: String,
     },
@@ -1202,6 +1205,7 @@ mod tests {
         let err = AtticError::PushFailed {
             cache: "main".into(),
             store_path: "/nix/store/abc-foo".into(),
+            attempts: 4,
             exit_code: Some(2),
             stderr: "unauthorized".into(),
         };
@@ -1213,6 +1217,10 @@ mod tests {
         );
         assert!(msg.contains('2'), "exit code must appear: {msg}");
         assert!(msg.contains("unauthorized"), "stderr must appear: {msg}");
+        assert!(
+            msg.contains('4'),
+            "attempts must appear in display so retry-exhaustion telemetry recovers it: {msg}"
+        );
     }
 
     #[test]
@@ -1269,6 +1277,7 @@ mod tests {
             classify(&AtticError::PushFailed {
                 cache: "c".into(),
                 store_path: "/nix/store/x".into(),
+                attempts: 1,
                 exit_code: Some(1),
                 stderr: "x".into(),
             }),
@@ -1292,15 +1301,20 @@ mod tests {
         );
     }
 
-    /// `PushFailed` must surface both the cache and the store_path it was
-    /// invoked with — never only embed them in stderr — so attestation
-    /// records and retry schedulers can recover the inputs without log
-    /// scraping (THEORY §V.4).
+    /// `PushFailed` must surface the cache, the store_path, and the final
+    /// `attempts` count it was driven through — never only embed them in
+    /// stderr — so attestation records and retry schedulers can recover
+    /// the inputs and exhaustion-distance without log scraping
+    /// (THEORY §V.4). The `attempts` field mirrors the structural shape
+    /// already established for `RegistryError::PushFailed`, so a
+    /// downstream consumer (telemetry, replay, attestation) can write one
+    /// destructure pattern that works across both push surfaces.
     #[test]
     fn test_attic_error_push_failed_carries_inputs() {
         let err = AtticError::PushFailed {
             cache: "prod-cache".into(),
             store_path: "/nix/store/abcdef-pkg".into(),
+            attempts: 5,
             exit_code: Some(11),
             stderr: "error: connection refused".into(),
         };
@@ -1308,11 +1322,13 @@ mod tests {
             AtticError::PushFailed {
                 cache,
                 store_path,
+                attempts,
                 exit_code,
                 stderr,
             } => {
                 assert_eq!(cache, "prod-cache");
                 assert_eq!(store_path, "/nix/store/abcdef-pkg");
+                assert_eq!(attempts, 5);
                 assert_eq!(exit_code, Some(11));
                 assert!(stderr.contains("connection refused"));
             }
