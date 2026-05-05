@@ -12,38 +12,7 @@ use tracing::{info, warn};
 
 use crate::error::AtticError;
 use crate::repo::get_tool_path;
-use crate::retry::CapturedFailure;
-
-/// Spawn `attic` with the given args, capture stderr, and return the
-/// non-success outcome as a typed [`CapturedFailure`]. Returns `None` on
-/// success.
-///
-/// Spawn failures (the `attic` binary cannot be executed at all) surface
-/// as `AtticError::ExecFailed` carrying `cache` so callers can
-/// distinguish "attic missing" from "attic said no" without parsing
-/// strings. The `(exit_code, stderr)` extraction discipline lives in
-/// [`CapturedFailure`] so this site cannot drift on UTF-8-lossy decode
-/// or trim — same canonical extraction the typed-error producer sites
-/// in `git.rs`, `nix.rs`, and `infrastructure/registry.rs` consume.
-async fn run_attic_capture(
-    attic_bin: &str,
-    args: &[&str],
-    cache: &str,
-    token: Option<&str>,
-) -> Result<Option<CapturedFailure>, AtticError> {
-    let mut cmd = Command::new(attic_bin);
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(t) = token {
-        cmd.env("ATTIC_TOKEN", t);
-    }
-
-    let output = cmd.output().await.map_err(|e| AtticError::ExecFailed {
-        cache: cache.to_string(),
-        message: e.to_string(),
-    })?;
-
-    Ok(CapturedFailure::from_output_if_failed(&output))
-}
+use crate::retry::classify_capture;
 
 /// Client for Attic cache operations
 pub struct AtticClient {
@@ -104,26 +73,40 @@ impl AtticClient {
     /// - [`AtticError::ExecFailed`] when `attic` cannot be spawned.
     /// - [`AtticError::PushFailed`] when attic exits non-zero, carrying
     ///   the offending cache, store path, exit code, and captured stderr.
+    ///
+    /// Spawn-vs-op dispatch flows through the canonical
+    /// [`crate::retry::classify_capture`] primitive — same shape as
+    /// `git.rs::git_capture`, `nix.rs::run_nix_build_typed`, and
+    /// `infrastructure/registry.rs::create_manifest_index`. The two
+    /// closures the helper takes (`on_spawn` → `ExecFailed`, `on_op` →
+    /// `PushFailed`) replace the bespoke `run_attic_capture`
+    /// `Result<Option<CapturedFailure>, AtticError>` shape that
+    /// previously bridged the two halves at this call site.
     pub async fn push(&self, store_path: &str) -> Result<(), AtticError> {
         info!("Pushing to Attic cache: {}", self.cache_name);
 
         let attic_bin = self.resolve_attic_bin();
-        let outcome = run_attic_capture(
-            &attic_bin,
-            &["push", &self.cache_name, store_path],
-            &self.cache_name,
-            self.token.as_deref(),
-        )
-        .await?;
+        let mut cmd = Command::new(&attic_bin);
+        cmd.args(["push", &self.cache_name, store_path])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(t) = self.token.as_deref() {
+            cmd.env("ATTIC_TOKEN", t);
+        }
 
-        if let Some(cf) = outcome {
-            return Err(AtticError::PushFailed {
+        classify_capture(
+            cmd.output().await,
+            |e| AtticError::ExecFailed {
+                cache: self.cache_name.clone(),
+                message: e.to_string(),
+            },
+            |cf| AtticError::PushFailed {
                 cache: self.cache_name.clone(),
                 store_path: store_path.to_string(),
                 exit_code: cf.exit_code,
                 stderr: cf.stderr,
-            });
-        }
+            },
+        )?;
 
         info!("Successfully pushed to Attic cache");
         Ok(())
@@ -151,6 +134,15 @@ impl AtticClient {
     /// - [`AtticError::ExecFailed`] when `attic` cannot be spawned.
     /// - [`AtticError::LoginFailed`] when attic exits non-zero, carrying
     ///   cache, server URL, exit code, and captured stderr.
+    ///
+    /// Spawn-vs-op dispatch flows through
+    /// [`crate::retry::classify_capture`] — same shape as
+    /// [`Self::push`], with the op-failure closure producing
+    /// `LoginFailed` (carrying `(cache, server_url, exit_code, stderr)`)
+    /// instead of `PushFailed`. The token enters the call as a CLI
+    /// argument, NOT as `ATTIC_TOKEN`, so no env injection happens
+    /// here — preserving the discriminator the test fixture in this
+    /// module pins.
     pub async fn login(&self, server_url: &str) -> Result<(), AtticError> {
         let token = self
             .token
@@ -161,22 +153,24 @@ impl AtticClient {
             })?;
 
         let attic_bin = self.resolve_attic_bin();
-        let outcome = run_attic_capture(
-            &attic_bin,
-            &["login", &self.cache_name, server_url, token],
-            &self.cache_name,
-            None,
-        )
-        .await?;
+        let mut cmd = Command::new(&attic_bin);
+        cmd.args(["login", &self.cache_name, server_url, token])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-        if let Some(cf) = outcome {
-            return Err(AtticError::LoginFailed {
+        classify_capture(
+            cmd.output().await,
+            |e| AtticError::ExecFailed {
+                cache: self.cache_name.clone(),
+                message: e.to_string(),
+            },
+            |cf| AtticError::LoginFailed {
                 cache: self.cache_name.clone(),
                 server_url: server_url.to_string(),
                 exit_code: cf.exit_code,
                 stderr: cf.stderr,
-            });
-        }
+            },
+        )?;
 
         Ok(())
     }
@@ -347,5 +341,81 @@ mod tests {
         let client = AtticClient::new("cache-opt").with_attic_bin(&shim);
         let ok = client.push_optional("/nix/store/whatever").await;
         assert!(!ok, "push_optional must return false on failure");
+    }
+
+    /// `push` must forward `self.token` to the spawned `attic` process
+    /// as the `ATTIC_TOKEN` env var. Pre-migration this invariant was
+    /// owned by the (now-deleted) `run_attic_capture` helper; post-
+    /// migration the env injection lives inline at the call site, so
+    /// pinning it as a structural test guards against a future drift
+    /// that drops the `cmd.env("ATTIC_TOKEN", t)` line and silently
+    /// produces an unauthenticated push (which `attic` would reject
+    /// with a 401 — not visibly broken in a test that doesn't assert
+    /// on the token surface).
+    ///
+    /// Uses a shim that emits the observed `ATTIC_TOKEN` value on
+    /// stderr and exits non-zero, then matches the typed
+    /// `AtticError::PushFailed.stderr` against the expected token.
+    /// Hermetic and parallel-safe: shim invoked by absolute path; no
+    /// process-global env mutation.
+    #[tokio::test]
+    async fn test_push_forwards_token_as_attic_token_env() {
+        let (_dir, shim) =
+            make_attic_shim("#!/bin/sh\necho \"observed-token=$ATTIC_TOKEN\" 1>&2\nexit 11\n");
+        let client = AtticClient::new("cache-tok")
+            .with_token("sekrit-123")
+            .with_attic_bin(&shim);
+        let err = client
+            .push("/nix/store/anything")
+            .await
+            .expect_err("nonzero exit must fail");
+        match err {
+            AtticError::PushFailed { stderr, .. } => {
+                assert!(
+                    stderr.contains("observed-token=sekrit-123"),
+                    "ATTIC_TOKEN must be forwarded verbatim; got stderr: {stderr:?}"
+                );
+            }
+            other => panic!("expected PushFailed, got: {other:?}"),
+        }
+    }
+
+    /// `login` must NOT inject `ATTIC_TOKEN` into the spawned `attic`
+    /// process — the token is supplied as a CLI argument. Pre-migration
+    /// this was the discriminator between the two call sites of
+    /// `run_attic_capture` (the `token: Option<&str>` parameter); post-
+    /// migration `login` simply omits the `cmd.env("ATTIC_TOKEN", ...)`
+    /// line. Pinning the absent-env property at the structural level
+    /// guards against a future "harmonize the two call sites" refactor
+    /// that adds env injection back to `login` (which would leak the
+    /// real token into both the env AND the argv, broadening the
+    /// attack surface for `ps`-style observation on shared hosts).
+    ///
+    /// The shim emits `LOGIN_SAW_TOKEN=<value>` on stderr; absent the
+    /// env, the value is empty.
+    #[tokio::test]
+    async fn test_login_does_not_inject_attic_token_env() {
+        let (_dir, shim) =
+            make_attic_shim("#!/bin/sh\necho \"LOGIN_SAW_TOKEN=$ATTIC_TOKEN\" 1>&2\nexit 5\n");
+        let client = AtticClient::new("cache-login")
+            .with_token("must-not-leak-into-env")
+            .with_attic_bin(&shim);
+        let err = client
+            .login("https://attic.example.com")
+            .await
+            .expect_err("nonzero exit must fail");
+        match err {
+            AtticError::LoginFailed { stderr, .. } => {
+                assert!(
+                    stderr.contains("LOGIN_SAW_TOKEN="),
+                    "shim must observe the env var probe; got stderr: {stderr:?}"
+                );
+                assert!(
+                    !stderr.contains("LOGIN_SAW_TOKEN=must-not-leak-into-env"),
+                    "login MUST NOT forward token via ATTIC_TOKEN env; got stderr: {stderr:?}"
+                );
+            }
+            other => panic!("expected LoginFailed, got: {other:?}"),
+        }
     }
 }
