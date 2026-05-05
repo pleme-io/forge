@@ -93,6 +93,22 @@ pub enum RegistryError {
         exit_code: Option<i32>,
         stderr: String,
     },
+
+    /// Multi-arch push invoked with no images. A precondition failure —
+    /// no CLI was spawned, no attempt was made — distinct by construction
+    /// from `PushFailed` (which represents a real push attempt that the
+    /// registry rejected). The pre-existing shape synthesized
+    /// `PushFailed { attempts: 0, exit_code: None, stderr: "no images
+    /// provided to multi-arch push" }`, requiring callers to interpret
+    /// `attempts == 0` as the discriminator. That conflated two
+    /// structurally distinct conditions — pinning the split into a
+    /// typed variant makes the invalid state (a `PushFailed` carrying
+    /// `attempts: 0`) structurally unrepresentable (THEORY §V.1).
+    #[error("Multi-arch push to {registry}:{tag_suffix} invoked with no images")]
+    NoImagesProvided {
+        registry: String,
+        tag_suffix: String,
+    },
 }
 
 /// Git operation errors
@@ -427,6 +443,7 @@ mod tests {
                 RegistryError::LocalImageNotFound { .. } => "local",
                 RegistryError::RemoteImageNotFound { .. } => "remote",
                 RegistryError::ManifestFailed { .. } => "manifest",
+                RegistryError::NoImagesProvided { .. } => "no_images",
             }
         }
         assert_eq!(
@@ -454,6 +471,60 @@ mod tests {
             }),
             "manifest"
         );
+        assert_eq!(
+            classify(&RegistryError::NoImagesProvided {
+                registry: "ghcr.io/o/p/s".into(),
+                tag_suffix: "abc1234".into(),
+            }),
+            "no_images"
+        );
+    }
+
+    /// `NoImagesProvided` must surface (registry, tag_suffix) as separate
+    /// fields — never embed them in a synthesized `PushFailed { attempts:
+    /// 0, exit_code: None, stderr: ... }` — so callers can pattern-match
+    /// "never attempted" structurally instead of by interpreting
+    /// `attempts == 0`. The pre-migration shape conflated this
+    /// precondition failure with a real push failure, requiring callers
+    /// to discriminate by inspecting numeric fields. Pinning the typed
+    /// variant makes the invalid state (a `PushFailed` carrying `attempts:
+    /// 0`) structurally unrepresentable — same arc as the typed
+    /// ExecFailed / OpFailed split established for AtticError, NixBuildError,
+    /// GitError, and KubernetesError (THEORY §V.1).
+    #[test]
+    fn test_registry_error_no_images_provided_carries_target() {
+        let err = RegistryError::NoImagesProvided {
+            registry: "ghcr.io/o/p/s".into(),
+            tag_suffix: "abc1234".into(),
+        };
+        match err {
+            RegistryError::NoImagesProvided {
+                registry,
+                tag_suffix,
+            } => {
+                assert_eq!(registry, "ghcr.io/o/p/s");
+                assert_eq!(tag_suffix, "abc1234");
+            }
+            _ => panic!("expected NoImagesProvided"),
+        }
+    }
+
+    /// Display surface of `NoImagesProvided` must include the registry +
+    /// tag_suffix — no fused stringly bag — so error messages surface the
+    /// exact precondition input without re-formatting at the call site.
+    #[test]
+    fn test_registry_error_no_images_provided_display() {
+        let err = RegistryError::NoImagesProvided {
+            registry: "ghcr.io/myorg/myproj/svc".into(),
+            tag_suffix: "deadbeef".into(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ghcr.io/myorg/myproj/svc"),
+            "registry must appear: {msg}"
+        );
+        assert!(msg.contains("deadbeef"), "tag_suffix must appear: {msg}");
+        assert!(msg.contains("no images"), "diagnosis must appear: {msg}");
     }
 
     #[test]

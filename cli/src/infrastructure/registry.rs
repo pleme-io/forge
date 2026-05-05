@@ -354,12 +354,19 @@ impl RegistryClient {
         tag_suffix: &str,
     ) -> Result<MultiArchPushResult, RegistryError> {
         if images.is_empty() {
-            return Err(RegistryError::PushFailed {
+            // Precondition failure — no CLI was spawned, no attempt was
+            // made — distinct by construction from `PushFailed` (which
+            // represents a real push attempt the registry rejected).
+            // Pre-migration this site synthesized `PushFailed { attempts:
+            // 0, exit_code: None, stderr: "no images provided..." }`,
+            // requiring callers to interpret `attempts == 0` as the
+            // discriminator. The typed `NoImagesProvided` variant
+            // (cli/src/error.rs) makes that invalid state — a
+            // `PushFailed` with `attempts: 0` — structurally
+            // unrepresentable (THEORY §V.1).
+            return Err(RegistryError::NoImagesProvided {
                 registry: registry.to_string(),
-                tag: tag_suffix.to_string(),
-                attempts: 0,
-                exit_code: None,
-                stderr: "no images provided to multi-arch push".to_string(),
+                tag_suffix: tag_suffix.to_string(),
             });
         }
 
@@ -605,34 +612,33 @@ mod tests {
         }
     }
 
-    /// Multi-arch push with empty image list must surface the registry +
-    /// tag_suffix it was invoked with. This guarantees structured
-    /// provenance even on the trivially-empty input failure path. The
-    /// precondition variant carries `exit_code: None` and `attempts: 0`
-    /// so callers can distinguish "never attempted" from "attempted and
-    /// failed."
+    /// Multi-arch push with empty image list must surface
+    /// `NoImagesProvided` carrying the (registry, tag_suffix) tuple it
+    /// was invoked with — never a synthesized `PushFailed { attempts: 0,
+    /// exit_code: None, stderr: "no images..." }`. The precondition
+    /// failure (no CLI was spawned, no attempt was made) is structurally
+    /// distinct from `PushFailed` (a real push attempt the registry
+    /// rejected); pinning the typed variant makes the invalid state — a
+    /// `PushFailed` carrying `attempts: 0` — structurally unrepresentable
+    /// (THEORY §V.1). Same arc as the typed ExecFailed / OpFailed split
+    /// established for AtticError, NixBuildError, GitError, and
+    /// KubernetesError.
     #[test]
-    fn test_push_multiarch_empty_carries_target() {
+    fn test_push_multiarch_empty_returns_no_images_provided() {
         let client = RegistryClient::new(RegistryCredentials::new("org", "tok"));
         let registry = "ghcr.io/o/p/s";
         let suffix = "abc1234";
         let err = tokio_test::block_on(client.push_multiarch(registry, &[], suffix))
             .expect_err("empty multiarch push must fail");
         match err {
-            RegistryError::PushFailed {
+            RegistryError::NoImagesProvided {
                 registry: r,
-                tag,
-                attempts,
-                exit_code,
-                stderr,
+                tag_suffix,
             } => {
                 assert_eq!(r, registry);
-                assert_eq!(tag, suffix);
-                assert_eq!(attempts, 0);
-                assert_eq!(exit_code, None, "precondition failure: never spawned");
-                assert!(stderr.contains("no images"));
+                assert_eq!(tag_suffix, suffix);
             }
-            other => panic!("expected PushFailed, got: {other:?}"),
+            other => panic!("expected NoImagesProvided, got: {other:?}"),
         }
     }
 
