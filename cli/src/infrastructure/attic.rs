@@ -13,7 +13,8 @@ use tracing::{info, warn};
 use crate::error::AtticError;
 use crate::repo::get_tool_path;
 use crate::retry::{
-    classify_capture, log_retry_attempt, retry_command, CommandAttemptFailure, RetryPolicy,
+    classify_attempt_failure, classify_capture, log_retry_attempt, retry_command,
+    CommandAttemptFailure, RetryPolicy,
 };
 
 /// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
@@ -24,31 +25,32 @@ use crate::retry::{
 /// exit_code, stderr)` — the structural-record tuple Phase 1
 /// attestation records (THEORY §V.4) consume.
 ///
-/// Mirror of `infrastructure/registry.rs::classify_push_failure` for the
-/// attic surface; same `is_spawn_failure` predicate, same
-/// typed-record-tuple shape modulo per-family field names. The two
-/// helpers together close the post-`retry_command` dispatch surface for
-/// every typed-error producer in forge that wraps a network-shaped CLI
-/// in `retry_command`.
+/// Drives the canonical [`classify_attempt_failure`] primitive — same
+/// helper `infrastructure/registry.rs::classify_push_failure` consumes,
+/// so the `is_spawn_failure` discriminator lives in one place across
+/// both retry-driven typed-error producer surfaces. The two helpers
+/// together close the post-`retry_command` dispatch surface for every
+/// typed-error producer in forge that wraps a network-shaped CLI in
+/// `retry_command`.
 fn classify_attic_push_failure(
     failure: CommandAttemptFailure,
     cache: &str,
     store_path: &str,
 ) -> AtticError {
-    if failure.is_spawn_failure() {
-        AtticError::ExecFailed {
+    classify_attempt_failure(
+        failure,
+        |spawn| AtticError::ExecFailed {
             cache: cache.to_string(),
-            message: failure.stdout,
-        }
-    } else {
-        AtticError::PushFailed {
+            message: spawn.stdout,
+        },
+        |op| AtticError::PushFailed {
             cache: cache.to_string(),
             store_path: store_path.to_string(),
-            attempts: failure.attempt,
-            exit_code: failure.exit_code,
-            stderr: failure.stderr,
-        }
-    }
+            attempts: op.attempt,
+            exit_code: op.exit_code,
+            stderr: op.stderr,
+        },
+    )
 }
 
 /// Client for Attic cache operations

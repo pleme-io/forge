@@ -11,8 +11,8 @@ use tracing::info;
 use crate::error::RegistryError;
 use crate::repo::get_tool_path;
 use crate::retry::{
-    classify_capture, classify_capture_query, log_retry_attempt, retry_command,
-    CommandAttemptFailure, RetryPolicy,
+    classify_attempt_failure, classify_capture, classify_capture_query, log_retry_attempt,
+    retry_command, CommandAttemptFailure, RetryPolicy,
 };
 
 /// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
@@ -23,30 +23,31 @@ use crate::retry::{
 /// exit_code, stderr)` — the structural-record tuple the canonical retry
 /// classifier and Phase 1 attestation records (THEORY §V.4) consume.
 ///
-/// Lifting the match into a small named helper keeps the `push_with_retries`
-/// body short, makes the typed-error mapping unit-testable without driving
-/// a real subprocess, and pins the dispatch on the typed
-/// [`crate::retry::CommandAttemptFailure::is_spawn_failure`] predicate
-/// (not a substring-match on the failure string).
+/// Drives the canonical [`classify_attempt_failure`] primitive — sibling
+/// of [`classify_capture`] for the post-retry shape. The dispatch (which
+/// closure runs) lives in the primitive; this site only owns the
+/// per-family variant constructors, so the `(registry, tag)` and
+/// `operation` lookups stay at the call site where they're meaningful.
+/// Mirror of `infrastructure/attic.rs::classify_attic_push_failure`.
 fn classify_push_failure(
     failure: CommandAttemptFailure,
     registry: &str,
     tag: &str,
 ) -> RegistryError {
-    if failure.is_spawn_failure() {
-        RegistryError::ExecFailed {
-            operation: failure.operation,
-            message: failure.stdout,
-        }
-    } else {
-        RegistryError::PushFailed {
+    classify_attempt_failure(
+        failure,
+        |spawn| RegistryError::ExecFailed {
+            operation: spawn.operation,
+            message: spawn.stdout,
+        },
+        |op| RegistryError::PushFailed {
             registry: registry.to_string(),
             tag: tag.to_string(),
-            attempts: failure.attempt,
-            exit_code: failure.exit_code,
-            stderr: failure.stderr,
-        }
-    }
+            attempts: op.attempt,
+            exit_code: op.exit_code,
+            stderr: op.stderr,
+        },
+    )
 }
 
 /// An architecture-specific image to push
