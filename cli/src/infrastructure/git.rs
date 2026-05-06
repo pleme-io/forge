@@ -9,6 +9,7 @@ use tokio::process::Command;
 use tracing::info;
 
 use crate::error::GitError;
+use crate::retry::classify_capture_query;
 
 /// Client for git operations
 pub struct GitClient {
@@ -64,6 +65,16 @@ impl GitClient {
     }
 
     /// Get short git SHA via rev-parse
+    ///
+    /// Spawn-vs-op dispatch flows through the canonical
+    /// [`classify_capture_query`] primitive — same query-shape pattern
+    /// `verify_tag_exists` and `rev_parse_full` (`get_full_sha`) drive.
+    /// Spawn failures (`Err(io::Error)` — git not on PATH) route to
+    /// `GitError::NotARepository` (the historical mapping this site
+    /// established before the typed-error split — "couldn't even run git"
+    /// has long meant "not a git repository" at this surface);
+    /// non-zero exits route to `GitError::ShaFailed` carrying the trimmed
+    /// stderr from the canonical [`crate::retry::CapturedFailure`] tuple.
     async fn rev_parse_short(&self) -> Result<String, GitError> {
         let mut cmd = Command::new("git");
         cmd.args(["rev-parse", "--short", "HEAD"]);
@@ -72,14 +83,12 @@ impl GitClient {
             cmd.current_dir(dir);
         }
 
-        let output = cmd.output().await.map_err(|_| GitError::NotARepository)?;
+        let sha = classify_capture_query(
+            cmd.output().await,
+            |_e| GitError::NotARepository,
+            |cf| GitError::ShaFailed(cf.stderr),
+        )?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::ShaFailed(stderr.trim().to_string()));
-        }
-
-        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if sha.is_empty() {
             return Err(GitError::ShaFailed("Empty SHA returned".to_string()));
         }
@@ -88,6 +97,10 @@ impl GitClient {
     }
 
     /// Get full git SHA
+    ///
+    /// Spawn-vs-op dispatch flows through the canonical
+    /// [`classify_capture_query`] primitive — sibling of `rev_parse_short`
+    /// for the 40-char form.
     pub async fn get_full_sha(&self) -> Result<String, GitError> {
         let mut cmd = Command::new("git");
         cmd.args(["rev-parse", "HEAD"]);
@@ -96,14 +109,11 @@ impl GitClient {
             cmd.current_dir(dir);
         }
 
-        let output = cmd.output().await.map_err(|_| GitError::NotARepository)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::ShaFailed(stderr.trim().to_string()));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        classify_capture_query(
+            cmd.output().await,
+            |_e| GitError::NotARepository,
+            |cf| GitError::ShaFailed(cf.stderr),
+        )
     }
 
     /// Check if working tree is clean

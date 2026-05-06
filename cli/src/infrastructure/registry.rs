@@ -10,7 +10,9 @@ use tracing::{info, warn};
 
 use crate::error::RegistryError;
 use crate::repo::get_tool_path;
-use crate::retry::{classify_capture, retry_command, CommandAttemptFailure, RetryPolicy};
+use crate::retry::{
+    classify_capture, classify_capture_query, retry_command, CommandAttemptFailure, RetryPolicy,
+};
 
 /// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
 /// `RegistryError` variant whose structural shape matches the captured
@@ -276,13 +278,26 @@ impl RegistryClient {
     ///
     /// Uses `skopeo inspect` to check if the tag is present.
     /// Returns the image digest on success.
+    ///
+    /// Spawn-vs-op dispatch flows through the canonical
+    /// [`classify_capture_query`] primitive — the query-shape dual of
+    /// `classify_capture` (the op-shape primitive `create_manifest_index`
+    /// already drives). Spawn failures (`Err(io::Error)` — skopeo not on
+    /// PATH) route to `RegistryError::ExecFailed` carrying the operation
+    /// label and the underlying spawn-error message; non-zero exits route
+    /// to `RegistryError::RemoteImageNotFound` carrying the (registry, tag)
+    /// tuple. The op-failure variant deliberately discards `(exit_code,
+    /// stderr)` — `RemoteImageNotFound` is a precondition variant ("the
+    /// queried tag isn't there"), not a structural CLI failure that needs
+    /// the captured tuple. The `_cf` ignore in the op-failure closure
+    /// makes that intent structural at the call site.
     pub async fn verify_tag_exists(
         &self,
         registry: &str,
         tag: &str,
     ) -> Result<String, RegistryError> {
         let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-        let output = Command::new(&skopeo)
+        let captured = Command::new(&skopeo)
             .args([
                 "inspect",
                 &format!(
@@ -294,20 +309,20 @@ impl RegistryClient {
                 &format!("docker://{}:{}", registry, tag),
             ])
             .output()
-            .await
-            .map_err(|e| RegistryError::ExecFailed {
+            .await;
+
+        let digest = classify_capture_query(
+            captured,
+            |e| RegistryError::ExecFailed {
                 operation: format!("inspect {}:{}", registry, tag),
                 message: e.to_string(),
-            })?;
-
-        if !output.status.success() {
-            return Err(RegistryError::RemoteImageNotFound {
+            },
+            |_cf| RegistryError::RemoteImageNotFound {
                 registry: registry.to_string(),
                 tag: tag.to_string(),
-            });
-        }
+            },
+        )?;
 
-        let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if digest.is_empty() {
             return Err(RegistryError::RemoteImageNotFound {
                 registry: registry.to_string(),

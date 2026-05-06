@@ -10,7 +10,7 @@ use tracing::{debug, info};
 
 use crate::error::NixBuildError;
 use crate::repo::get_tool_path;
-use crate::retry::classify_capture;
+use crate::retry::classify_capture_query;
 
 /// Result of a Nix build operation
 #[derive(Debug, Clone)]
@@ -52,14 +52,16 @@ async fn run_nix_build_typed(
         .await;
 
     // Spawn-vs-op dispatch flows through the canonical
-    // [`classify_capture`] primitive — same shape as
-    // `git.rs::git_capture` and
-    // `infrastructure/registry.rs::create_manifest_index`. Spawn
-    // failures (`Err(io::Error)` — nix not on PATH) route to
+    // [`classify_capture_query`] primitive — query-shape sibling of
+    // `classify_capture` (the op-shape primitive `git.rs::git_capture`
+    // and `infrastructure/registry.rs::create_manifest_index` drive).
+    // Spawn failures (`Err(io::Error)` — nix not on PATH) route to
     // `NixBuildError::ExecFailed`; non-zero exits route to
     // `NixBuildError::BuildFailed` carrying the structural
-    // `(exit_code, stderr)` tuple `CapturedFailure` extracts.
-    let output = classify_capture(
+    // `(exit_code, stderr)` tuple `CapturedFailure` extracts. The
+    // canonical UTF-8-lossy-trim of the success-stdout is performed
+    // by the primitive — no per-site re-derivation.
+    let store_path = classify_capture_query(
         captured,
         |e| NixBuildError::ExecFailed {
             flake_attr: label.to_string(),
@@ -72,7 +74,6 @@ async fn run_nix_build_typed(
         },
     )?;
 
-    let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if store_path.is_empty() {
         return Err(NixBuildError::EmptyStorePath {
             flake_attr: label.to_string(),
