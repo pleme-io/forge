@@ -649,6 +649,82 @@ where
     .await
 }
 
+/// Log a "retry attempt failed" warning iff `outcome` represents a failure
+/// AND another attempt remains in budget, then return the captured `outcome`
+/// verbatim. The pass-through is the load-bearing invariant: callers chain
+/// the helper into `retry_command`'s spawn closure as the final expression
+/// so the typed retry primitive consumes the same `io::Result<Output>`
+/// shape it would have received without the log.
+///
+/// Lifts the verbatim eight-line pattern
+/// ```text
+/// let outcome = cmd.output().await;
+/// if outcome
+///     .as_ref()
+///     .map(|o| !o.status.success())
+///     .unwrap_or(true)
+///     && attempt < max_attempts
+/// {
+///     warn!("...attempt {}/{} failed, retrying...", attempt, max_attempts);
+/// }
+/// outcome
+/// ```
+/// that four retry-driven external-CLI sites in forge carry verbatim modulo
+/// per-site warning format:
+/// `infrastructure/registry.rs::push_with_retries`,
+/// `infrastructure/attic.rs::push_with_retries`,
+/// `commands/github_runner_ci.rs::attic_command_with_retry`,
+/// `commands/github_runner_ci.rs::push_with_retry`. Four identically-shaped
+/// bodies past the three-times threshold (THEORY §VI.1) — this primitive is
+/// the law-redeeming consolidation for the per-attempt warn-on-failure
+/// dispatch shape, sibling of the four canonical retry primitives in this
+/// module ([`RetryPolicy`], [`run_with_policy`], [`retry_command`],
+/// [`classify_capture`] / [`classify_capture_query`]).
+///
+/// The "failure" predicate matches the structural shape `retry_command`
+/// itself uses to discriminate retryable outcomes: an `Ok(out)` with
+/// `out.status.success() == false`, OR an `Err(io::Error)` (spawn-failure).
+/// Both shapes are "this attempt did not succeed" from the retry-loop's
+/// perspective; the caller does not need to discriminate spawn-vs-op here
+/// (that is the job of the post-loop dispatch helpers
+/// `classify_attic_push_failure` / `classify_push_failure` / et al.).
+///
+/// The "another attempt remains" predicate (`attempt < max_attempts`)
+/// suppresses the warn on the LAST attempt — there is no retry after the
+/// final attempt, so warning "...retrying..." would mis-describe what
+/// happens next. The caller-supplied final-failure path (the post-loop
+/// dispatch onto a typed `*::PushFailed` / `*::ExecFailed` variant) owns
+/// the terminal-failure log surface; this primitive owns only the
+/// per-attempt-with-budget-remaining surface.
+///
+/// Logs at `warn!` level via `tracing` — same level the four pre-migration
+/// sites used. The message format `"{op} failed (attempt {n}/{max}):
+/// retrying..."` standardizes on the most informative pre-migration shape
+/// (`commands/github_runner_ci.rs::attic_command_with_retry`'s); the two
+/// infrastructure/* sites previously emitted "Push attempt {n} failed,
+/// retrying..." without the operation label, so post-migration their warns
+/// gain the op label by construction.
+pub fn log_retry_attempt(
+    outcome: std::io::Result<std::process::Output>,
+    operation: &str,
+    attempt: u32,
+    max_attempts: u32,
+) -> std::io::Result<std::process::Output> {
+    let failed = outcome
+        .as_ref()
+        .map(|o| !o.status.success())
+        .unwrap_or(true);
+    if failed && attempt < max_attempts {
+        tracing::warn!(
+            "{} failed (attempt {}/{}): retrying...",
+            operation,
+            attempt,
+            max_attempts
+        );
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2131,5 +2207,130 @@ mod tests {
         );
         assert_eq!(spawn_fired.load(Ordering::SeqCst), 0);
         assert_eq!(op_fired.load(Ordering::SeqCst), 0);
+    }
+
+    /// Success on a non-final attempt — `log_retry_attempt` returns the
+    /// captured `Ok(Output)` verbatim. The pass-through is the load-bearing
+    /// invariant: the helper sits inside `retry_command`'s spawn closure as
+    /// the final expression, and the typed retry primitive consumes the
+    /// returned value. A future regression that swallowed `Output.stdout`
+    /// (e.g. by deconstructing and reconstructing the `Output` for logging)
+    /// would silently corrupt every query-shaped `retry_command` call site.
+    #[test]
+    fn test_log_retry_attempt_success_returns_outcome_verbatim() {
+        let out = synth_output(true, b"hello\n", b"");
+        let result = log_retry_attempt(Ok(out), "push transient", 1, 5);
+        let captured = result.expect("success outcome must pass through Ok");
+        assert!(captured.status.success());
+        assert_eq!(captured.stdout, b"hello\n");
+    }
+
+    /// Op-failure on a non-final attempt — `log_retry_attempt` returns the
+    /// captured `Ok(Output)` verbatim and emits a warn-level retry log on
+    /// the side. Pins the pass-through (the structural invariant) without
+    /// asserting the warn (an observability concern; the `tracing` macro is
+    /// a no-op when no subscriber is configured, which is the test default
+    /// — a future test that pinned the warn would need a `tracing-test`-
+    /// shaped harness, separately disposed). The body covers the same cell
+    /// `infrastructure/registry.rs::push_with_retries`'s pre-migration body
+    /// covered: failed status × retry budget remaining.
+    #[test]
+    fn test_log_retry_attempt_op_failure_with_budget_returns_outcome_verbatim() {
+        let out = synth_output(false, b"", b"503 Service Unavailable\n");
+        let result = log_retry_attempt(Ok(out), "push ghcr.io/o/p:tag", 2, 5);
+        let captured = result.expect("op-failure must still pass Ok(Output) through");
+        assert!(!captured.status.success());
+        assert_eq!(captured.stderr, b"503 Service Unavailable\n");
+    }
+
+    /// Op-failure on the FINAL attempt — `log_retry_attempt` returns the
+    /// outcome verbatim WITHOUT emitting the "retrying..." warn (because no
+    /// retry follows). The "another attempt remains" predicate (`attempt <
+    /// max_attempts`) is load-bearing: emitting "retrying..." on the final
+    /// attempt would mis-describe what happens next (the post-loop dispatch
+    /// onto the typed `*::PushFailed` / `*::ExecFailed` variant fires
+    /// instead). Pins the suppressed-on-final-attempt invariant via the
+    /// structural pass-through; the warn-side-effect-suppression is documented
+    /// in the helper's contract.
+    #[test]
+    fn test_log_retry_attempt_op_failure_on_final_attempt_returns_outcome_verbatim() {
+        let out = synth_output(false, b"", b"i/o timeout\n");
+        // attempt == max_attempts: no retry follows.
+        let result = log_retry_attempt(Ok(out), "push ghcr.io/o/p:tag", 5, 5);
+        let captured = result.expect("op-failure on final attempt must still pass Ok(Output)");
+        assert!(!captured.status.success());
+        assert_eq!(captured.stderr, b"i/o timeout\n");
+    }
+
+    /// Spawn-failure on a non-final attempt — `log_retry_attempt` returns
+    /// the captured `Err(io::Error)` verbatim. The error kind, message, and
+    /// the underlying error chain MUST flow through unchanged so the
+    /// downstream `retry_command` → `CommandAttemptFailure::from_capture`
+    /// dispatch can route the spawn-failure to the typed
+    /// `*::ExecFailed` variant via `is_spawn_failure()`. A future regression
+    /// that synthesized a fake `Output` from the spawn error would silently
+    /// turn every "binary not on PATH" precondition into a `*::PushFailed`
+    /// record — invisible at the typed-error surface but visible in
+    /// telemetry / replay / attestation as drift.
+    #[test]
+    fn test_log_retry_attempt_spawn_failure_returns_outcome_verbatim() {
+        let captured: std::io::Result<std::process::Output> = Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file or directory",
+        ));
+        let result = log_retry_attempt(captured, "push ghcr.io/o/p:tag", 1, 5);
+        let err = result.expect_err("spawn-failure must pass Err(io::Error) through");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("no such file"));
+    }
+
+    /// Spawn-failure on the FINAL attempt — same pass-through invariant,
+    /// no warn. The post-loop typed-error dispatch
+    /// (`is_spawn_failure()` → `*::ExecFailed`) owns the terminal-failure
+    /// log surface for spawn errors; this primitive does not duplicate it.
+    #[test]
+    fn test_log_retry_attempt_spawn_failure_on_final_attempt_returns_outcome_verbatim() {
+        let captured: std::io::Result<std::process::Output> =
+            Err(std::io::Error::other("permission denied"));
+        let result = log_retry_attempt(captured, "push ghcr.io/o/p:tag", 5, 5);
+        let err = result.expect_err("spawn-failure on final attempt must pass Err through");
+        assert!(err.to_string().contains("permission denied"));
+    }
+
+    /// `log_retry_attempt` composes with `retry_command` end-to-end: the
+    /// spawn closure invokes the helper as its final expression and
+    /// `retry_command` consumes the returned `io::Result<Output>` exactly as
+    /// it would have without the helper. Pins the integration shape every
+    /// migrated call site uses — a future regression in either primitive
+    /// that broke the closure-return contract (e.g. by changing the success
+    /// type) would fail the build at every call site, but is also pinned
+    /// here at the primitive level so the regression surfaces in
+    /// `cli/src/retry.rs`'s test suite first. Drives an always-transient
+    /// stderr (HTTP 503) through `retries=3` and asserts the final attempt
+    /// count surfaces on the `CommandAttemptFailure`.
+    #[tokio::test]
+    async fn test_log_retry_attempt_composes_with_retry_command() {
+        let p = RetryPolicy::new(3, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let max_attempts = p.max_attempts;
+        let result = retry_command(&p, "push composed", move |attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let outcome = Ok(synth_output(false, b"", b"503 Service Unavailable"));
+                log_retry_attempt(outcome, "push composed", attempt, max_attempts)
+            }
+        })
+        .await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "retry_command must drive every attempt; log_retry_attempt is pure pass-through"
+        );
+        let err = result.expect_err("transient exhaustion must produce Err");
+        assert_eq!(err.attempt, 3);
+        assert!(err.is_transient());
+        assert!(err.stderr.contains("503"));
     }
 }

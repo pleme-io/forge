@@ -6,7 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::git;
 use crate::repo::get_tool_path;
-use crate::retry::{retry_command, RetryPolicy};
+use crate::retry::{log_retry_attempt, retry_command, RetryPolicy};
 
 /// Check if SAFE mode is enabled (retry on errors)
 /// Default: true (retries enabled by default)
@@ -652,11 +652,10 @@ async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: boo
     let max_attempts = policy.max_attempts;
     let attic = get_tool_path("ATTIC_BIN", "attic");
     let op = operation.to_string();
-    let op_for_warn = op.clone();
 
     let result = retry_command(&policy, &op, |attempt| {
         let attic = attic.clone();
-        let op_for_warn = op_for_warn.clone();
+        let op = op.clone();
         async move {
             debug!("Running: attic {}", args.join(" "));
             let outcome = Command::new(&attic)
@@ -666,11 +665,14 @@ async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: boo
                 .output()
                 .await;
 
-            match outcome.as_ref() {
-                Ok(out) if out.status.success() => {
+            // Domain-specific debug logging of stdout/stderr (preserved
+            // verbatim from the pre-migration body) — separate concern
+            // from the canonical per-attempt warn that
+            // `log_retry_attempt` owns.
+            if let Ok(out) = outcome.as_ref() {
+                if out.status.success() {
                     debug!("attic command succeeded on attempt {}", attempt);
-                }
-                Ok(out) => {
+                } else {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
                     if !stdout.trim().is_empty() {
@@ -679,23 +681,9 @@ async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: boo
                     if !stderr.trim().is_empty() {
                         debug!("attic stderr: {}", stderr.trim());
                     }
-                    if attempt < max_attempts {
-                        warn!(
-                            "⚠️  {} failed (attempt {}/{}): retrying...",
-                            op_for_warn, attempt, max_attempts
-                        );
-                    }
-                }
-                Err(_) => {
-                    if attempt < max_attempts {
-                        warn!(
-                            "⚠️  {} failed (attempt {}/{}): retrying...",
-                            op_for_warn, attempt, max_attempts
-                        );
-                    }
                 }
             }
-            outcome
+            log_retry_attempt(outcome, &op, attempt, max_attempts)
         }
     })
     .await;
@@ -770,6 +758,7 @@ async fn push_with_retry(
     let result = retry_command(&policy, &op, |attempt| {
         let skopeo = skopeo.clone();
         let organization = organization.clone();
+        let op = op.clone();
         async move {
             debug!("Pushing {}:{} (attempt {})", registry, tag, attempt);
             let outcome = Command::new(&skopeo)
@@ -786,11 +775,14 @@ async fn push_with_retry(
                 .output()
                 .await;
 
-            match outcome.as_ref() {
-                Ok(out) if out.status.success() => {
+            // Domain-specific debug logging of stdout/stderr (preserved
+            // verbatim from the pre-migration body) — separate concern
+            // from the canonical per-attempt warn that
+            // `log_retry_attempt` owns.
+            if let Ok(out) = outcome.as_ref() {
+                if out.status.success() {
                     debug!("Push successful for {}:{}", registry, tag);
-                }
-                Ok(out) => {
+                } else {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
                     if !stdout.trim().is_empty() {
@@ -799,17 +791,9 @@ async fn push_with_retry(
                     if !stderr.trim().is_empty() {
                         debug!("skopeo stderr: {}", stderr.trim());
                     }
-                    if attempt < max_attempts {
-                        warn!("Push attempt {} failed, retrying...", attempt);
-                    }
-                }
-                Err(_) => {
-                    if attempt < max_attempts {
-                        warn!("Push attempt {} failed, retrying...", attempt);
-                    }
                 }
             }
-            outcome
+            log_retry_attempt(outcome, &op, attempt, max_attempts)
         }
     })
     .await;

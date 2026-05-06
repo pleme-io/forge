@@ -12,7 +12,9 @@ use tracing::{info, warn};
 
 use crate::error::AtticError;
 use crate::repo::get_tool_path;
-use crate::retry::{classify_capture, retry_command, CommandAttemptFailure, RetryPolicy};
+use crate::retry::{
+    classify_capture, log_retry_attempt, retry_command, CommandAttemptFailure, RetryPolicy,
+};
 
 /// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
 /// `AtticError` variant whose structural shape matches the captured
@@ -185,6 +187,7 @@ impl AtticClient {
             let attic_bin = attic_bin.clone();
             let cache = cache.clone();
             let token = token.clone();
+            let op = op.clone();
             async move {
                 let mut cmd = Command::new(&attic_bin);
                 cmd.args(["push", &cache, store_path])
@@ -193,19 +196,7 @@ impl AtticClient {
                 if let Some(t) = token.as_deref() {
                     cmd.env("ATTIC_TOKEN", t);
                 }
-                let outcome = cmd.output().await;
-                if outcome
-                    .as_ref()
-                    .map(|o| !o.status.success())
-                    .unwrap_or(true)
-                    && attempt < max_attempts
-                {
-                    warn!(
-                        "Attic push attempt {}/{} failed, retrying...",
-                        attempt, max_attempts
-                    );
-                }
-                outcome
+                log_retry_attempt(cmd.output().await, &op, attempt, max_attempts)
             }
         })
         .await;

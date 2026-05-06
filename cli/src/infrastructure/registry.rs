@@ -6,12 +6,13 @@
 use anyhow::{Context, Result};
 use std::process::Stdio;
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::error::RegistryError;
 use crate::repo::get_tool_path;
 use crate::retry::{
-    classify_capture, classify_capture_query, retry_command, CommandAttemptFailure, RetryPolicy,
+    classify_capture, classify_capture_query, log_retry_attempt, retry_command,
+    CommandAttemptFailure, RetryPolicy,
 };
 
 /// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
@@ -239,33 +240,28 @@ impl RegistryClient {
         let max_attempts = policy.max_attempts;
         let op = format!("push {}:{}", registry, tag);
 
-        let result = retry_command(&policy, &op, |attempt| async move {
-            let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-            let outcome = Command::new(&skopeo)
-                .args([
-                    "copy",
-                    "--insecure-policy",
-                    &format!("--retry-times={}", retries),
-                    &format!(
-                        "--dest-creds={}:{}",
-                        self.credentials.organization, self.credentials.token
-                    ),
-                    &format!("docker-archive:{}", image_path),
-                    &format!("docker://{}:{}", registry, tag),
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await;
-            if outcome
-                .as_ref()
-                .map(|o| !o.status.success())
-                .unwrap_or(true)
-                && attempt < max_attempts
-            {
-                warn!("Push attempt {} failed, retrying...", attempt);
+        let result = retry_command(&policy, &op, |attempt| {
+            let op = op.clone();
+            async move {
+                let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
+                let outcome = Command::new(&skopeo)
+                    .args([
+                        "copy",
+                        "--insecure-policy",
+                        &format!("--retry-times={}", retries),
+                        &format!(
+                            "--dest-creds={}:{}",
+                            self.credentials.organization, self.credentials.token
+                        ),
+                        &format!("docker-archive:{}", image_path),
+                        &format!("docker://{}:{}", registry, tag),
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .await;
+                log_retry_attempt(outcome, &op, attempt, max_attempts)
             }
-            outcome
         })
         .await;
 
