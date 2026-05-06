@@ -725,6 +725,80 @@ pub fn log_retry_attempt(
     outcome
 }
 
+/// Dispatch a post-[`retry_command`] [`CommandAttemptFailure`] to the typed
+/// family-error variant whose structural shape matches the captured failure.
+/// Routes through the canonical [`CommandAttemptFailure::is_spawn_failure`]
+/// predicate: spawn failure (CLI not on PATH, fork failed, permission denied)
+/// → `on_spawn`; non-zero exit (CLI ran and rejected the request) → `on_op`.
+///
+/// Lifts the verbatim two-arm `if failure.is_spawn_failure() { *::ExecFailed
+/// {..} } else { *::PushFailed {..} }` match every typed-error producer site
+/// that consumes `retry_command` carries inline:
+/// `infrastructure/registry.rs::classify_push_failure` and
+/// `infrastructure/attic.rs::classify_attic_push_failure`. Two
+/// identically-shaped bodies past the duplication threshold the forge
+/// command-module surface enforces (≥2; PRIME DIRECTIVE) — this primitive
+/// is the law-redeeming consolidation for the post-`retry_command`
+/// dispatch surface, the `CommandAttemptFailure`-shape dual of
+/// [`classify_capture`]'s consolidation for the pre-retry
+/// `io::Result<Output>`-shape surface (commit b75a273).
+///
+/// The closures consume the whole [`CommandAttemptFailure`] by value rather
+/// than picking individual fields at the boundary, so per-family error
+/// variants can read whichever subset they need by name (registry's
+/// `ExecFailed` reads `failure.operation`; attic's reads only the spawn
+/// message via `failure.stdout`; both `*::PushFailed` variants read
+/// `failure.attempt` / `failure.exit_code` / `failure.stderr`). Passing
+/// the whole record also future-proofs against per-family variants that
+/// later want richer evidence — e.g., a `*::PushFailed` carrying both
+/// stderr AND the trimmed stdout — without changing this primitive's
+/// signature.
+///
+/// # The `is_spawn_failure` invariant is load-bearing
+///
+/// The discriminator delegates to [`CommandAttemptFailure::is_spawn_failure`]
+/// — the same `exit_code.is_none() && stderr.is_empty()` shape pinned by
+/// `test_classify_*_silent_op_failure_routes_to_push_failed` at both
+/// migrated call sites. A future regression that broadened the predicate
+/// (e.g., to `exit_code.is_none()` alone) would silently route a
+/// signal-killed CLI op-failure into `*::ExecFailed`. Pinning the dispatch
+/// at this primitive means a single regression test on
+/// `classify_attempt_failure` covers every downstream typed-error family
+/// that consumes it.
+///
+/// # Sibling primitives
+///
+/// - [`classify_capture`] / [`classify_capture_query`]: pre-retry shape
+///   (raw `io::Result<Output>`). Dispatch happens BEFORE the retry loop;
+///   used by direct-call-site producer sites (`git_capture`,
+///   `run_nix_build_typed`, `verify_tag_exists`, `create_manifest_index`)
+///   that don't drive a retry budget at all.
+/// - `classify_attempt_failure` (this): post-retry shape
+///   ([`CommandAttemptFailure`]). Dispatch happens AFTER the retry loop;
+///   used by retry-driven typed-error producer sites
+///   (`AtticClient::push_with_retries`, `RegistryClient::push_with_retries`).
+///
+/// Together the two primitives close the typed-error producer surface for
+/// every external-CLI invocation in forge: every site routes through one
+/// of the two structural shapes, and every site uses the same canonical
+/// `(exit_code, stderr)` extraction discipline (UTF-8-lossy + trim) — no
+/// site re-derives the match arms inline.
+pub fn classify_attempt_failure<E, FSpawn, FOp>(
+    failure: CommandAttemptFailure,
+    on_spawn: FSpawn,
+    on_op: FOp,
+) -> E
+where
+    FSpawn: FnOnce(CommandAttemptFailure) -> E,
+    FOp: FnOnce(CommandAttemptFailure) -> E,
+{
+    if failure.is_spawn_failure() {
+        on_spawn(failure)
+    } else {
+        on_op(failure)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2332,5 +2406,105 @@ mod tests {
         assert_eq!(err.attempt, 3);
         assert!(err.is_transient());
         assert!(err.stderr.contains("503"));
+    }
+
+    /// `classify_attempt_failure` routes a spawn-failure record (empty
+    /// stderr + `exit_code: None`) through the `on_spawn` closure, NOT
+    /// `on_op`. The structural shape of a spawn-failure is fixed by
+    /// [`CommandAttemptFailure::from_capture`]: the spawn-error message
+    /// flows through `stdout` and stderr is empty. Pinning the dispatch
+    /// at the primitive level guards against a regression at any of the
+    /// downstream call sites (`classify_push_failure` /
+    /// `classify_attic_push_failure`) routing a missing-CLI failure to a
+    /// `*::PushFailed` variant — which would silently set
+    /// `attempts: 1, exit_code: None, stderr: ""` instead of routing the
+    /// spawn-error message into the `*::ExecFailed.message` field.
+    #[test]
+    fn test_classify_attempt_failure_routes_spawn_to_on_spawn() {
+        let spawn = CommandAttemptFailure {
+            operation: "op".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: String::new(),
+            stdout: "failed to spawn process: No such file or directory".to_string(),
+        };
+        // `tag` is one of {"spawn", "op"} so the assertion pins which
+        // closure ran without inspecting the failure record itself.
+        let tag: &'static str = classify_attempt_failure(spawn, |_| "spawn", |_| "op");
+        assert_eq!(tag, "spawn");
+    }
+
+    /// `classify_attempt_failure` routes a non-zero-exit op-failure
+    /// record (CLI ran and rejected) through the `on_op` closure, NOT
+    /// `on_spawn`. The structural shape of an op-failure is `exit_code:
+    /// Some(_)` with stderr potentially populated.
+    #[test]
+    fn test_classify_attempt_failure_routes_op_to_on_op() {
+        let op = CommandAttemptFailure {
+            operation: "op".to_string(),
+            attempt: 3,
+            exit_code: Some(1),
+            stderr: "received unexpected HTTP status: 503".to_string(),
+            stdout: String::new(),
+        };
+        let tag: &'static str = classify_attempt_failure(op, |_| "spawn", |_| "op");
+        assert_eq!(tag, "op");
+    }
+
+    /// Regression guard for the silent-op-failure shape: a CLI that ran,
+    /// exited non-zero, and emitted nothing on stderr (`exit_code:
+    /// Some(_)` AND empty stderr) is structurally distinct from a
+    /// spawn-failure (`exit_code: None` AND empty stderr). The two share
+    /// "empty stderr" but the typed dispatch must route them to different
+    /// closures. Mirror of the silent-op-failure regression guards at the
+    /// two migrated call sites
+    /// (`test_classify_push_failure_silent_op_failure_routes_to_push_failed`
+    /// in registry.rs / attic.rs); pinning at the primitive level means a
+    /// future regression on the `is_spawn_failure` predicate is caught
+    /// here first.
+    #[test]
+    fn test_classify_attempt_failure_silent_op_routes_to_on_op() {
+        let silent_op = CommandAttemptFailure {
+            operation: "op".to_string(),
+            attempt: 2,
+            exit_code: Some(125),
+            stderr: String::new(),
+            stdout: String::new(),
+        };
+        // Sanity: this is NOT a spawn failure (exit_code is Some).
+        assert!(!silent_op.is_spawn_failure());
+        let tag: &'static str = classify_attempt_failure(silent_op, |_| "spawn", |_| "op");
+        assert_eq!(
+            tag, "op",
+            "silent op-failure must route to on_op even though stderr is empty"
+        );
+    }
+
+    /// The closures receive the whole [`CommandAttemptFailure`] by value
+    /// (not borrowed, not destructured at the boundary). Pinning the
+    /// signature at the primitive level guards against a future
+    /// "optimization" that takes only the fields each closure happens to
+    /// read today — which would force every per-family classifier to
+    /// destructure the record at the call site and re-derive the
+    /// `(attempts, exit_code, stderr)` tuple instead of consuming the
+    /// canonical record. Captures: `failure.operation`,
+    /// `failure.attempt`, `failure.exit_code`, `failure.stderr`,
+    /// `failure.stdout` must all flow into the closure unchanged.
+    #[test]
+    fn test_classify_attempt_failure_passes_whole_failure_to_closure() {
+        let op = CommandAttemptFailure {
+            operation: "verbatim-op-label".to_string(),
+            attempt: 7,
+            exit_code: Some(42),
+            stderr: "verbatim-stderr".to_string(),
+            stdout: "verbatim-stdout".to_string(),
+        };
+        let echoed: CommandAttemptFailure =
+            classify_attempt_failure(op, |spawn| spawn, |op_failure| op_failure);
+        assert_eq!(echoed.operation, "verbatim-op-label");
+        assert_eq!(echoed.attempt, 7);
+        assert_eq!(echoed.exit_code, Some(42));
+        assert_eq!(echoed.stderr, "verbatim-stderr");
+        assert_eq!(echoed.stdout, "verbatim-stdout");
     }
 }
