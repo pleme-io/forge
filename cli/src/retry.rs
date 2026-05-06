@@ -335,6 +335,75 @@ where
     }
 }
 
+/// Query-shaped dual of [`classify_capture`]: routes the same three
+/// structural shapes (success / spawn-failure / op-failure) but returns
+/// the trimmed UTF-8-lossy stdout on success instead of the raw `Output`.
+///
+/// Lifts the verbatim three-step pattern
+/// ```text
+/// let output = cmd.output().await.map_err(|e| <Family>::ExecFailed { ... })?;
+/// if !output.status.success() {
+///     // op-failure produces a domain-specific variant — sometimes carrying
+///     // (exit_code, stderr), sometimes a precondition variant that ignores
+///     // both because the structural meaning is "the queried thing isn't there"
+///     return Err(<Family>::<QueryFailed> { ... });
+/// }
+/// let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+/// ```
+/// that four typed-error producer sites in forge carry verbatim modulo per-
+/// site `<Family>` and per-site op-failure shape:
+/// `nix.rs::run_nix_build_typed` (already on `classify_capture`, still
+/// re-derives the trim),
+/// `infrastructure/git.rs::GitClient::rev_parse_short`,
+/// `infrastructure/git.rs::GitClient::get_full_sha`,
+/// `infrastructure/registry.rs::RegistryClient::verify_tag_exists`. Four
+/// identically-shaped bodies past the three-times threshold (THEORY §VI.1)
+/// — this primitive is the law-redeeming consolidation for the typed-error
+/// query-shape surface, the dual of [`classify_capture`]'s consolidation
+/// for the typed-error op-shape surface (commit b75a273).
+///
+/// The split between [`classify_capture`] and [`classify_capture_query`]
+/// is structural, not stylistic: a producer site that consumes both stdout
+/// AND stderr from a successful invocation (e.g. `regctl index create`,
+/// where the manifest digest may surface on stderr depending on the
+/// dialect) wants the raw `Output`. A producer site that only consumes
+/// stdout (the canonical "query the registry / SCM / build-tool for a
+/// single value" shape) wants the trimmed `String` directly. Pinning the
+/// two shapes as separate primitives keeps the per-site signature minimal:
+/// query-shaped sites no longer carry the trim incantation as a fifth
+/// load-bearing line, and op-shape sites no longer return `Result<String,
+/// E>` and force their callers to re-discriminate empty-vs-nonempty when
+/// the structural meaning is "the CLI ran and produced bytes."
+///
+/// The op-failure closure receives the canonical [`CapturedFailure`]
+/// (UTF-8-lossy-trimmed stderr + extracted exit_code) — same as
+/// [`classify_capture`] — so a site that DOES want the structural-record
+/// tuple in its op-failure variant (`GitError::ShaFailed` carrying the
+/// stderr) destructures `cf.exit_code` and `cf.stderr` by name, and a
+/// site that does NOT want them (`RegistryError::RemoteImageNotFound`
+/// carrying only `(registry, tag)` because the precondition meaning is
+/// "the queried tag isn't there") simply ignores `cf` with `|_cf| ...`.
+/// Either choice keeps the typed-error producer surface uniform across
+/// the four already-migrated families (Registry, Nix, Attic, Git) and
+/// the canonical retry primitives.
+pub fn classify_capture_query<E, FExec, FOp>(
+    captured: std::io::Result<std::process::Output>,
+    on_spawn: FExec,
+    on_op: FOp,
+) -> Result<String, E>
+where
+    FExec: FnOnce(std::io::Error) -> E,
+    FOp: FnOnce(CapturedFailure) -> E,
+{
+    match captured {
+        Ok(out) if out.status.success() => {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+        Ok(out) => Err(on_op(CapturedFailure::from_output(&out))),
+        Err(e) => Err(on_spawn(e)),
+    }
+}
+
 /// Captured output of a single failed external-command attempt.
 ///
 /// Typed error shape for ad-hoc retry call sites (`commands/push.rs`,
@@ -1815,6 +1884,234 @@ mod tests {
         let op_fired = AtomicU32::new(0);
         let out = synth_output(true, b"ok", b"");
         let _: Result<std::process::Output, FakeError> = classify_capture(
+            Ok(out),
+            |_e| {
+                spawn_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::ExecFailed {
+                    op: "x".to_string(),
+                    message: "x".to_string(),
+                }
+            },
+            |_cf| {
+                op_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::OpFailed {
+                    op: "x".to_string(),
+                    exit_code: None,
+                    stderr: String::new(),
+                }
+            },
+        );
+        assert_eq!(spawn_fired.load(Ordering::SeqCst), 0);
+        assert_eq!(op_fired.load(Ordering::SeqCst), 0);
+    }
+
+    /// Success — `classify_capture_query` returns the trimmed UTF-8-lossy
+    /// stdout as `String`. The trim discipline is load-bearing — query-
+    /// shaped sites (`get_sha`, `verify_tag_exists`, build store-path
+    /// resolution) feed the returned string directly into downstream
+    /// equality checks, environment variables, or attestation records;
+    /// a leaked trailing `\n` from a tool's printed output (every UNIX
+    /// CLI's default convention) would silently break those consumers.
+    /// Pinning the trim at the typed primitive guarantees no caller can
+    /// drift onto a `from_utf8_lossy(&out.stdout).to_string()` shape that
+    /// forgets the trim.
+    #[test]
+    fn test_classify_capture_query_success_returns_trimmed_stdout() {
+        let out = synth_output(true, b"  abc1234\n  ", b"");
+        let result: Result<String, FakeError> = classify_capture_query(
+            Ok(out),
+            |_e| panic!("on_spawn must NOT fire on success"),
+            |_cf| panic!("on_op must NOT fire on success"),
+        );
+        let stdout = result.expect("zero-exit must return trimmed stdout");
+        assert_eq!(
+            stdout, "abc1234",
+            "trim discipline must strip leading/trailing whitespace"
+        );
+    }
+
+    /// Internal whitespace must survive the trim — only leading and
+    /// trailing whitespace is stripped. Same discipline
+    /// `CapturedFailure::from_output` already encodes for stderr, lifted
+    /// to the success-stdout path. Without this guard a future regression
+    /// that swapped `.trim()` for `.replace(char::is_whitespace, "")`
+    /// (or a similar over-aggressive normalization) would silently corrupt
+    /// query results that legitimately carry internal whitespace
+    /// (multi-line build outputs, sha256 digests with line-wrapped surrounds).
+    #[test]
+    fn test_classify_capture_query_preserves_internal_whitespace() {
+        let out = synth_output(true, b"\nline one\nline two\n", b"");
+        let result: Result<String, FakeError> = classify_capture_query(
+            Ok(out),
+            |_e| panic!("on_spawn must NOT fire on success"),
+            |_cf| panic!("on_op must NOT fire on success"),
+        );
+        let stdout = result.expect("zero-exit must return trimmed stdout");
+        assert_eq!(stdout, "line one\nline two");
+    }
+
+    /// Empty stdout on success returns an empty `String` — the post-check
+    /// `if digest.is_empty() { ... }` discipline that
+    /// `verify_tag_exists` / `rev_parse_short` / `run_nix_build_typed`
+    /// each carry stays at the producer site (it's a per-family
+    /// precondition variant, not a structural classifier concern). Pinning
+    /// this means the primitive does NOT silently turn empty-stdout into
+    /// a typed-error variant — a future caller that wants the post-check
+    /// keeps owning it.
+    #[test]
+    fn test_classify_capture_query_empty_stdout_returns_empty_string() {
+        let out = synth_output(true, b"", b"");
+        let result: Result<String, FakeError> = classify_capture_query(
+            Ok(out),
+            |_e| panic!("on_spawn must NOT fire on success"),
+            |_cf| panic!("on_op must NOT fire on success"),
+        );
+        let stdout = result.expect("zero-exit must return Ok even on empty stdout");
+        assert!(
+            stdout.is_empty(),
+            "empty stdout must return empty String, not Err"
+        );
+    }
+
+    /// Spawn-failure (`Err(io::Error)` — git/skopeo/nix not on PATH)
+    /// routes to `on_spawn`. Same discipline `classify_capture` encodes,
+    /// lifted to the query-shape return type. `on_op` MUST NOT fire — the
+    /// CLI never ran, no stdout exists.
+    #[test]
+    fn test_classify_capture_query_spawn_failure_routes_to_on_spawn() {
+        let captured: std::io::Result<std::process::Output> = Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file or directory",
+        ));
+        let result: Result<String, FakeError> = classify_capture_query(
+            captured,
+            |e| FakeError::ExecFailed {
+                op: "rev-parse".to_string(),
+                message: e.to_string(),
+            },
+            |_cf| panic!("on_op MUST NOT fire on spawn-failure (CLI never ran)"),
+        );
+        match result.expect_err("spawn failure must produce Err") {
+            FakeError::ExecFailed { op, message } => {
+                assert_eq!(op, "rev-parse");
+                assert!(
+                    message.contains("no such file"),
+                    "spawn-error message must flow through: {message}"
+                );
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// Op-failure (`Ok(out)` with non-zero status) routes to `on_op`,
+    /// which receives the canonical [`CapturedFailure`] carrying the
+    /// extracted `(exit_code, stderr)` tuple — UTF-8-lossy-decoded and
+    /// trimmed. A query-shape site that wants the structural tuple
+    /// (e.g. `GitError::ShaFailed` carrying the stderr) destructures
+    /// `cf.exit_code` and `cf.stderr` by name; a site that wants only
+    /// the precondition meaning (e.g. `RegistryError::RemoteImageNotFound`
+    /// carrying just the (registry, tag) tuple — "the queried thing
+    /// isn't there") ignores `cf` with `|_cf| ...`. Both shapes are
+    /// in-tree consumers of this primitive.
+    #[test]
+    fn test_classify_capture_query_op_failure_routes_to_on_op_with_captured_failure() {
+        let out = synth_output(false, b"", b"  fatal: not a git repository  \n");
+        let result: Result<String, FakeError> = classify_capture_query(
+            Ok(out),
+            |_e| panic!("on_spawn MUST NOT fire on op-failure (CLI ran)"),
+            |cf| FakeError::OpFailed {
+                op: "rev-parse".to_string(),
+                exit_code: cf.exit_code,
+                stderr: cf.stderr,
+            },
+        );
+        match result.expect_err("non-zero exit must produce Err") {
+            FakeError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "rev-parse");
+                assert!(exit_code.is_some());
+                assert_ne!(exit_code, Some(0));
+                assert_eq!(
+                    stderr, "fatal: not a git repository",
+                    "trim discipline must strip leading/trailing whitespace from stderr"
+                );
+            }
+            other => panic!("expected OpFailed, got: {other:?}"),
+        }
+    }
+
+    /// Discriminator pin: the three arms (success / op-failure /
+    /// spawn-failure) are disjoint — exactly one closure fires per call.
+    /// Same shape `test_classify_capture_arms_are_disjoint` pins for the
+    /// op-shape primitive, lifted to the query-shape primitive. Without
+    /// this guard a future regression that conflated op-failure with
+    /// spawn-failure (e.g. synthesizing an empty `CapturedFailure` from
+    /// an `Err(io::Error)` and routing through `on_op`) would silently
+    /// turn every "git not on PATH" failure into a `ShaFailed("")`
+    /// record, drift-prone against the canonical
+    /// [`CommandAttemptFailure::is_spawn_failure`] post-loop predicate.
+    #[test]
+    fn test_classify_capture_query_arms_are_disjoint() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // Spawn-failure: only on_spawn fires.
+        let spawn_fired = AtomicU32::new(0);
+        let op_fired = AtomicU32::new(0);
+        let captured: std::io::Result<std::process::Output> = Err(std::io::Error::other("x"));
+        let _: Result<String, FakeError> = classify_capture_query(
+            captured,
+            |_e| {
+                spawn_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::ExecFailed {
+                    op: "x".to_string(),
+                    message: "x".to_string(),
+                }
+            },
+            |_cf| {
+                op_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::OpFailed {
+                    op: "x".to_string(),
+                    exit_code: None,
+                    stderr: String::new(),
+                }
+            },
+        );
+        assert_eq!(spawn_fired.load(Ordering::SeqCst), 1);
+        assert_eq!(op_fired.load(Ordering::SeqCst), 0);
+
+        // Op-failure: only on_op fires.
+        let spawn_fired = AtomicU32::new(0);
+        let op_fired = AtomicU32::new(0);
+        let out = synth_output(false, b"", b"401 Unauthorized");
+        let _: Result<String, FakeError> = classify_capture_query(
+            Ok(out),
+            |_e| {
+                spawn_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::ExecFailed {
+                    op: "x".to_string(),
+                    message: "x".to_string(),
+                }
+            },
+            |_cf| {
+                op_fired.fetch_add(1, Ordering::SeqCst);
+                FakeError::OpFailed {
+                    op: "x".to_string(),
+                    exit_code: None,
+                    stderr: String::new(),
+                }
+            },
+        );
+        assert_eq!(spawn_fired.load(Ordering::SeqCst), 0);
+        assert_eq!(op_fired.load(Ordering::SeqCst), 1);
+
+        // Success: neither fires.
+        let spawn_fired = AtomicU32::new(0);
+        let op_fired = AtomicU32::new(0);
+        let out = synth_output(true, b"abc1234", b"");
+        let _: Result<String, FakeError> = classify_capture_query(
             Ok(out),
             |_e| {
                 spawn_fired.fetch_add(1, Ordering::SeqCst);
