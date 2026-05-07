@@ -170,15 +170,7 @@ impl AtticClient {
     ) -> Result<(), AtticError> {
         info!("Pushing to Attic cache: {}", self.cache_name);
 
-        let policy = {
-            let net = RetryPolicy::network();
-            RetryPolicy::new(
-                retries.max(1),
-                net.initial_backoff,
-                net.factor,
-                net.max_backoff,
-            )
-        };
+        let policy = RetryPolicy::network().with_max_attempts(retries);
         let max_attempts = policy.max_attempts;
         let attic_bin = self.resolve_attic_bin();
         let cache = self.cache_name.clone();
