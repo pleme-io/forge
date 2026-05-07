@@ -88,6 +88,57 @@ impl RetryPolicy {
         }
     }
 
+    /// Builder-style override of `max_attempts` on an existing policy.
+    /// Clamps to `>= 1` (same discipline as [`Self::new`]) so a degenerate
+    /// `0` from a caller-supplied `retries` parameter cannot silently turn
+    /// the retry loop into a no-op. The schedule (`initial_backoff`,
+    /// `factor`, `max_backoff`) is preserved verbatim.
+    ///
+    /// Lifts the verbatim eight-line pattern
+    /// ```text
+    /// let policy = {
+    ///     let net = RetryPolicy::network();
+    ///     RetryPolicy::new(
+    ///         retries.max(1),
+    ///         net.initial_backoff,
+    ///         net.factor,
+    ///         net.max_backoff,
+    ///     )
+    /// };
+    /// ```
+    /// that the two retry-driven typed-error producer sites in forge that
+    /// override the canonical [`Self::network`] schedule's budget —
+    /// `infrastructure/attic.rs::push_with_retries` and
+    /// `infrastructure/registry.rs::push_with_retries` — carry verbatim.
+    /// Two identically-shaped bodies past the duplication threshold the
+    /// forge command-module surface enforces (≥2; PRIME DIRECTIVE) — this
+    /// primitive is the law-redeeming consolidation for the
+    /// "canonical-schedule + caller-budget" policy-build shape, sibling
+    /// of [`Self::network`] (the canonical schedule) and
+    /// [`Self::immediate`] (the no-retry shape).
+    ///
+    /// Composes with both factory constructors: `RetryPolicy::network()
+    /// .with_max_attempts(retries)` gives the canonical exponential
+    /// schedule with a caller-overridden budget; `RetryPolicy::immediate()
+    /// .with_max_attempts(n)` is degenerate (immediate's
+    /// `initial_backoff` is zero, so all delays are zero regardless of
+    /// `n`) but composes cleanly without a special case.
+    ///
+    /// # The clamping invariant is load-bearing
+    ///
+    /// Without the clamp, a public-API caller passing `0` would produce a
+    /// policy whose `max_attempts: 0` makes `run_with_policy`'s
+    /// `attempt >= max` predicate true on the first call, returning the
+    /// first error without ever consuming the retry budget — visible only
+    /// as a regression in attempt-count telemetry, not in the typed-error
+    /// surface. Pinning the clamp at this primitive means a future
+    /// retry-driven site that takes a caller-supplied budget cannot
+    /// silently produce a no-op loop.
+    pub fn with_max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = max_attempts.max(1);
+        self
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -1003,6 +1054,95 @@ mod tests {
     fn test_new_clamps_zero_max_attempts() {
         let p = RetryPolicy::new(0, Duration::ZERO, 1, Duration::ZERO);
         assert_eq!(p.max_attempts, 1, "max_attempts must clamp up to 1");
+    }
+
+    /// `with_max_attempts` overrides the budget without touching the
+    /// schedule. The two retry-driven typed-error producer sites that drive
+    /// `RetryPolicy::network().with_max_attempts(retries)`
+    /// (`AtticClient::push_with_retries`, `RegistryClient::push_with_retries`)
+    /// rely on this — the canonical Bazel/Buck2/SLSA-shape exponential
+    /// schedule (250ms × factor=2 capped at 30s) must survive the override
+    /// verbatim. A future regression that perturbed the schedule fields
+    /// (e.g., reset `max_backoff` to zero) would silently turn every
+    /// retry-driven push into a fixed-zero-backoff loop, hammering the
+    /// upstream cache/registry on every transient. Pinning every schedule
+    /// field at the primitive boundary catches that here.
+    #[test]
+    fn test_with_max_attempts_preserves_network_schedule() {
+        let net = RetryPolicy::network();
+        let p = net.clone().with_max_attempts(7);
+        assert_eq!(p.max_attempts, 7, "max_attempts must take the override");
+        assert_eq!(
+            p.initial_backoff, net.initial_backoff,
+            "initial_backoff must survive the override verbatim"
+        );
+        assert_eq!(
+            p.factor, net.factor,
+            "factor must survive the override verbatim"
+        );
+        assert_eq!(
+            p.max_backoff, net.max_backoff,
+            "max_backoff must survive the override verbatim"
+        );
+    }
+
+    /// `with_max_attempts(0)` clamps to `1` — same discipline as
+    /// [`RetryPolicy::new`]. The clamp is load-bearing because the two
+    /// public-API call sites
+    /// (`AtticClient::push_with_retries(_, retries: u32)`,
+    /// `RegistryClient::push_with_retries(_, _, _, retries: u32)`) accept a
+    /// caller-supplied `retries` value; without the clamp, a `0` would
+    /// produce a policy whose `max_attempts: 0` makes
+    /// `run_with_policy`'s `attempt >= max` predicate true on the first
+    /// call, returning the first error without ever consuming the retry
+    /// budget — visible only in attempt-count telemetry, not in the
+    /// typed-error surface. Pinning the clamp here (and not relying on
+    /// `RetryPolicy::new`'s clamp, since `with_max_attempts` does not call
+    /// `new`) closes that drift path by construction.
+    #[test]
+    fn test_with_max_attempts_clamps_zero_to_one() {
+        let p = RetryPolicy::network().with_max_attempts(0);
+        assert_eq!(p.max_attempts, 1, "with_max_attempts(0) must clamp up to 1");
+        // Schedule still survives the clamp verbatim — the clamp targets
+        // only `max_attempts`.
+        let net = RetryPolicy::network();
+        assert_eq!(p.initial_backoff, net.initial_backoff);
+        assert_eq!(p.factor, net.factor);
+        assert_eq!(p.max_backoff, net.max_backoff);
+    }
+
+    /// `with_max_attempts` composes with both factory constructors. The
+    /// `immediate()` composition is structurally degenerate
+    /// (`initial_backoff: ZERO` makes every `compute_delay` zero
+    /// regardless of `max_attempts`), but must compose cleanly without a
+    /// special case — a future caller that wants a "no-backoff but N
+    /// attempts" shape can express it without reaching for
+    /// `RetryPolicy::new` directly.
+    #[test]
+    fn test_with_max_attempts_composes_with_immediate() {
+        let p = RetryPolicy::immediate().with_max_attempts(4);
+        assert_eq!(p.max_attempts, 4);
+        assert_eq!(p.initial_backoff, Duration::ZERO);
+        assert_eq!(p.compute_delay(2), Duration::ZERO);
+        assert_eq!(p.compute_delay(10), Duration::ZERO);
+    }
+
+    /// `with_max_attempts` is idempotent under repeat-application: the
+    /// last call wins, the schedule still survives. Pins that the builder
+    /// does not accumulate state across chained calls (a future
+    /// regression that turned the override into an additive `+=` would
+    /// silently double the budget on chained calls — invisible in
+    /// production except as a longer worst-case retry storm).
+    #[test]
+    fn test_with_max_attempts_repeated_application_takes_last() {
+        let p = RetryPolicy::network()
+            .with_max_attempts(3)
+            .with_max_attempts(9);
+        assert_eq!(p.max_attempts, 9, "last call must win");
+        let net = RetryPolicy::network();
+        assert_eq!(p.initial_backoff, net.initial_backoff);
+        assert_eq!(p.factor, net.factor);
+        assert_eq!(p.max_backoff, net.max_backoff);
     }
 
     /// Success on the first call must not retry. `op` is invoked exactly
