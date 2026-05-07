@@ -6,7 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::git;
 use crate::repo::get_tool_path;
-use crate::retry::{log_retry_attempt, retry_command, RetryPolicy};
+use crate::retry::{debug_log_capture_streams, log_retry_attempt, retry_command, RetryPolicy};
 
 /// Check if SAFE mode is enabled (retry on errors)
 /// Default: true (retries enabled by default)
@@ -665,22 +665,19 @@ async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: boo
                 .output()
                 .await;
 
-            // Domain-specific debug logging of stdout/stderr (preserved
-            // verbatim from the pre-migration body) — separate concern
-            // from the canonical per-attempt warn that
-            // `log_retry_attempt` owns.
+            // Domain-specific debug observability. The non-success
+            // streams-tee dispatch flows through the canonical
+            // [`debug_log_capture_streams`] primitive — sibling of
+            // [`log_retry_attempt`] in the retry primitive set, so the
+            // `<tool> stdout/stderr: <trimmed>` message format is pinned
+            // by one test in `cli/src/retry.rs` instead of duplicated
+            // across every retry-driven CI surface. The success arm is
+            // domain-specific (per-call-site context).
             if let Ok(out) = outcome.as_ref() {
                 if out.status.success() {
                     debug!("attic command succeeded on attempt {}", attempt);
                 } else {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    if !stdout.trim().is_empty() {
-                        debug!("attic stdout: {}", stdout.trim());
-                    }
-                    if !stderr.trim().is_empty() {
-                        debug!("attic stderr: {}", stderr.trim());
-                    }
+                    debug_log_capture_streams(out, "attic");
                 }
             }
             log_retry_attempt(outcome, &op, attempt, max_attempts)
@@ -775,22 +772,19 @@ async fn push_with_retry(
                 .output()
                 .await;
 
-            // Domain-specific debug logging of stdout/stderr (preserved
-            // verbatim from the pre-migration body) — separate concern
-            // from the canonical per-attempt warn that
-            // `log_retry_attempt` owns.
+            // Domain-specific debug observability. The non-success
+            // streams-tee dispatch flows through the canonical
+            // [`debug_log_capture_streams`] primitive — same shape as
+            // `attic_command_with_retry`'s migrated dispatch above, so
+            // the `<tool> stdout/stderr: <trimmed>` message format is
+            // pinned by one test in `cli/src/retry.rs` across both
+            // retry-driven CI surfaces. The success arm is
+            // domain-specific (per-call-site context).
             if let Ok(out) = outcome.as_ref() {
                 if out.status.success() {
                     debug!("Push successful for {}:{}", registry, tag);
                 } else {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    if !stdout.trim().is_empty() {
-                        debug!("skopeo stdout: {}", stdout.trim());
-                    }
-                    if !stderr.trim().is_empty() {
-                        debug!("skopeo stderr: {}", stderr.trim());
-                    }
+                    debug_log_capture_streams(out, "skopeo");
                 }
             }
             log_retry_attempt(outcome, &op, attempt, max_attempts)
