@@ -3,9 +3,11 @@
 //! Replaces web-build.nix::mkWebLocalApps.
 //! Builds a Docker image via Nix, loads it, and runs it locally.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::process::Command;
 use tracing::info;
+
+use crate::nix::build_flake_attr;
 
 /// Build a Nix Docker image and run it locally.
 pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&str>) -> Result<()> {
@@ -25,23 +27,16 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
         return Ok(());
     }
 
-    // Build the image via Nix
+    // Build the image via Nix through the canonical `build_flake_attr`
+    // primitive — typed `(BuildFailed | EmptyStorePath | ExecFailed)`
+    // discrimination, structured `(exit_code, stderr)` extraction,
+    // canonical UTF-8-lossy-trim of the success-stdout. The typed
+    // [`crate::error::NixBuildError`] is recoverable across the anyhow
+    // boundary via `err.downcast_ref::<NixBuildError>()`.
     info!("Building .#{}...", flake_attr);
-    let output = tokio::process::Command::new("nix")
-        .args(["build", &format!(".#{}", flake_attr), "--no-link", "--print-out-paths", "--impure"])
-        .output()
-        .await
-        .context("Failed to run nix build")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("nix build .#{} failed: {}", flake_attr, stderr.trim());
-    }
-
-    let image_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if image_path.is_empty() {
-        bail!("nix build returned empty path for .#{}", flake_attr);
-    }
+    let image_path = build_flake_attr(&format!(".#{}", flake_attr))
+        .await?
+        .store_path;
 
     // Load the image into Docker
     info!("Loading image into Docker...");
@@ -55,12 +50,8 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
     }
 
     // Stop and remove any existing container with the same name
-    let _ = Command::new("docker")
-        .args(["stop", name])
-        .output();
-    let _ = Command::new("docker")
-        .args(["rm", name])
-        .output();
+    let _ = Command::new("docker").args(["stop", name]).output();
+    let _ = Command::new("docker").args(["rm", name]).output();
 
     // Run the container
     info!("Starting container {} on port {}...", name, port);

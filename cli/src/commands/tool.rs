@@ -4,13 +4,14 @@
 //! standalone tool repos (Rust and Zig).
 //! Replaces substrate's release-helpers.nix and rust-tool-release.nix.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
-use crate::version;
 use crate::git;
+use crate::nix::build_flake_attr_in;
+use crate::version;
 
 /// Release a tool: read version, verify clean tree, build targets, tag, push, create GitHub release.
 pub async fn release(
@@ -55,28 +56,14 @@ pub async fn release(
         let flake_attr = format!(".#{}-{}", name, target);
         info!("Building {}...", flake_attr);
 
-        let output = tokio::process::Command::new("nix")
-            .args([
-                "build",
-                &flake_attr,
-                "--no-link",
-                "--print-out-paths",
-                "--impure",
-            ])
-            .current_dir(dir)
-            .output()
-            .await
-            .with_context(|| format!("Failed to build {}", flake_attr))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Build failed for {}: {}", flake_attr, stderr.trim());
-        }
-
-        let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if store_path.is_empty() {
-            bail!("Build returned empty path for {}", flake_attr);
-        }
+        // Sub-flake build under the working directory routed through the
+        // canonical [`build_flake_attr_in`] primitive — typed
+        // `NixBuildError` discrimination, structured `(exit_code, stderr)`
+        // extraction. Recoverable across the anyhow boundary via
+        // `err.downcast_ref::<NixBuildError>()`.
+        let store_path = build_flake_attr_in(&flake_attr, Some(dir))
+            .await?
+            .store_path;
 
         // Copy binary to temp dir with descriptive name
         let binary_name = format!("{}-{}", name, target);
@@ -99,7 +86,11 @@ pub async fn release(
 
     // 5. Dry run check
     if dry_run {
-        info!("Dry run — would create tag {} and GitHub release with {} artifacts", tag, artifacts.len());
+        info!(
+            "Dry run — would create tag {} and GitHub release with {} artifacts",
+            tag,
+            artifacts.len()
+        );
         for a in &artifacts {
             info!("  {}", a);
         }
@@ -139,7 +130,12 @@ pub async fn release(
         bail!("GitHub release creation failed for {}", tag);
     }
 
-    info!("Released {} {} with {} artifacts", name, ver, artifacts.len());
+    info!(
+        "Released {} {} with {} artifacts",
+        name,
+        ver,
+        artifacts.len()
+    );
     Ok(())
 }
 
@@ -291,7 +287,9 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
         bail!("nix build failed on {}: {}", platform, stderr.trim());
     }
 
-    let store_path = String::from_utf8_lossy(&build_output.stdout).trim().to_string();
+    let store_path = String::from_utf8_lossy(&build_output.stdout)
+        .trim()
+        .to_string();
     info!("  -> {}", store_path);
 
     // Step 2: Run tests (language-specific; "nix" = build-only, no test runner)

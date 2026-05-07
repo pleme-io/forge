@@ -4,6 +4,7 @@
 //! running crate2nix, and flake operations.
 
 use anyhow::{Context, Result};
+use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, info};
@@ -28,6 +29,12 @@ pub struct NixBuildResult {
 /// flake reference) attached to any returned `NixBuildError` so failure
 /// records carry the offending input by construction.
 ///
+/// `working_dir` is the directory the nix process is spawned in. `None`
+/// keeps the parent process's CWD — the canonical shape for root-flake
+/// builds. `Some(dir)` is the canonical shape for sub-flake builds where
+/// the flake reference is a bare `.#attr` resolved relative to a
+/// non-default directory (e.g. a tool-release flake under a sub-repo).
+///
 /// Returns typed errors:
 /// - [`NixBuildError::ExecFailed`] when `nix` cannot be spawned.
 /// - [`NixBuildError::BuildFailed`] when nix exits non-zero. `exit_code`
@@ -41,15 +48,16 @@ async fn run_nix_build_typed(
     nix_bin: &str,
     args: &[&str],
     label: &str,
+    working_dir: Option<&Path>,
 ) -> Result<String, NixBuildError> {
     debug!("{} {}", nix_bin, args.join(" "));
 
-    let captured = Command::new(nix_bin)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
+    let mut cmd = Command::new(nix_bin);
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    let captured = cmd.output().await;
 
     // Spawn-vs-op dispatch flows through the canonical
     // [`classify_capture_query`] primitive — query-shape sibling of
@@ -83,7 +91,7 @@ async fn run_nix_build_typed(
     Ok(store_path)
 }
 
-/// Build a Nix flake attribute and return the store path
+/// Build a Nix flake attribute and return the store path.
 ///
 /// # Arguments
 ///
@@ -102,9 +110,64 @@ async fn run_nix_build_typed(
 /// println!("Built at: {}", result.store_path);
 /// ```
 pub async fn build_flake_attr(flake_attr: &str) -> Result<NixBuildResult> {
+    build_flake_attr_in(flake_attr, None).await
+}
+
+/// Build a Nix flake attribute, optionally relative to a working directory,
+/// and return the store path.
+///
+/// Lifts the verbatim 13-line pattern
+/// ```text
+/// let output = tokio::process::Command::new("nix")
+///     .args(["build", &flake_attr, "--no-link", "--print-out-paths", "--impure"])
+///     .current_dir(dir)              // optional
+///     .output().await
+///     .with_context(|| format!("Failed to build {}", flake_attr))?;
+/// if !output.status.success() {
+///     let stderr = String::from_utf8_lossy(&output.stderr);
+///     bail!("nix build {} failed: {}", flake_attr, stderr.trim());
+/// }
+/// let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+/// if store_path.is_empty() {
+///     bail!("nix build returned empty path for {}", flake_attr);
+/// }
+/// ```
+/// that three command-module sites in forge carry verbatim modulo per-site
+/// working_dir: `commands/local.rs::up` (no working_dir),
+/// `commands/image_release.rs::build_nix_image` (working_dir = `&str` arg),
+/// `commands/tool.rs::release` (working_dir = `&Path` arg). Three
+/// identically-shaped bodies past the three-times threshold (THEORY §VI.1)
+/// — this function is the law-redeeming consolidation for the "build a
+/// flake attribute, return the store path, fail typed on every failure
+/// shape" surface in forge.
+///
+/// `working_dir` is the directory the nix process is spawned in. `None`
+/// keeps the parent process's CWD (the canonical shape for root-flake
+/// builds — `commands/local.rs::up` and the existing
+/// [`build_flake_attr`] callers). `Some(dir)` is the canonical shape for
+/// builds against a sub-repo's flake — `commands/image_release.rs` and
+/// `commands/tool.rs` both pass an explicit working directory.
+///
+/// # Errors
+///
+/// Returns an error if the nix build command fails. The underlying
+/// [`NixBuildError`] is preserved across the anyhow boundary and can be
+/// recovered with `err.downcast_ref::<NixBuildError>()` — the typed
+/// `(BuildFailed | EmptyStorePath | ExecFailed | FlakeNotFound |
+/// CargoNixMissing)` discrimination is structural to the typed-error
+/// family and survives the anyhow envelope. Pre-migration the three
+/// inline call sites fused stderr into a free-form `bail!` string, so a
+/// downstream attestation / telemetry consumer that wanted the
+/// `(exit_code, stderr)` tuple had to re-parse the message; post-
+/// migration the tuple is recoverable by construction.
+pub async fn build_flake_attr_in(
+    flake_attr: &str,
+    working_dir: Option<&Path>,
+) -> Result<NixBuildResult> {
     debug!("Building Nix flake attribute: {}", flake_attr);
 
     // --impure required for path inputs like substrate in the root flake
+    // and the sub-flake builds the migrated sites drive.
     let nix_bin = get_tool_path("NIX_BIN", "nix");
     let store_path = run_nix_build_typed(
         &nix_bin,
@@ -116,6 +179,7 @@ pub async fn build_flake_attr(flake_attr: &str) -> Result<NixBuildResult> {
             "--impure",
         ],
         flake_attr,
+        working_dir,
     )
     .await?;
 
@@ -190,6 +254,7 @@ pub async fn build_docker_image_from_dir(
         &nix_bin,
         &["build", &flake_ref, "--no-link", "--print-out-paths"],
         &flake_ref,
+        None,
     )
     .await?;
 
@@ -329,6 +394,7 @@ mod tests {
             "/nonexistent/path/to/nix-binary-that-does-not-exist",
             &["build", ".#x"],
             ".#x",
+            None,
         )
         .await;
         let err = result.expect_err("missing nix binary must fail");
@@ -347,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_nix_build_typed_build_failed_carries_structured_fields() {
         let (_dir, shim) = make_nix_shim("#!/bin/sh\necho 'attribute foo missing' 1>&2\nexit 7\n");
-        let result = run_nix_build_typed(&shim, &["build", ".#thing"], ".#thing").await;
+        let result = run_nix_build_typed(&shim, &["build", ".#thing"], ".#thing", None).await;
         let err = result.expect_err("nonzero exit must fail");
         match err {
             NixBuildError::BuildFailed {
@@ -372,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_nix_build_typed_empty_store_path() {
         let (_dir, shim) = make_nix_shim("#!/bin/sh\nexit 0\n");
-        let result = run_nix_build_typed(&shim, &["build", ".#empty"], ".#empty").await;
+        let result = run_nix_build_typed(&shim, &["build", ".#empty"], ".#empty", None).await;
         let err = result.expect_err("empty stdout must fail");
         match err {
             NixBuildError::EmptyStorePath { flake_attr } => {
@@ -387,9 +453,59 @@ mod tests {
     #[tokio::test]
     async fn test_run_nix_build_typed_success_returns_store_path() {
         let (_dir, shim) = make_nix_shim("#!/bin/sh\necho '/nix/store/abc123-out'\nexit 0\n");
-        let store_path = run_nix_build_typed(&shim, &["build", ".#ok"], ".#ok")
+        let store_path = run_nix_build_typed(&shim, &["build", ".#ok"], ".#ok", None)
             .await
             .expect("success path");
         assert_eq!(store_path, "/nix/store/abc123-out");
+    }
+
+    /// `working_dir = Some(dir)` must spawn the nix process inside `dir`.
+    /// Pinned with a shim that prints its current working directory: the
+    /// trimmed stdout is the path the shim observed, which must equal the
+    /// directory the caller passed. Pre-migration, the three command-
+    /// module sites that need a working directory drove `current_dir` on
+    /// `tokio::process::Command` directly inline; post-migration the
+    /// canonical primitive owns the wiring. A future regression that
+    /// silently dropped the `current_dir` setter (e.g. via a refactor
+    /// that moved the builder chain) would leave sub-flake builds
+    /// resolving the wrong `flake.nix` — the canonical "wrong-tree" silent
+    /// failure shape this test pins out.
+    #[tokio::test]
+    async fn test_run_nix_build_typed_honors_working_dir() {
+        let (dir, shim) = make_nix_shim("#!/bin/sh\npwd\nexit 0\n");
+        let work = tempfile::tempdir().expect("temp dir");
+        let work_canonical = std::fs::canonicalize(work.path()).expect("canonicalize work");
+        let store_path = run_nix_build_typed(&shim, &["build", ".#ok"], ".#ok", Some(work.path()))
+            .await
+            .expect("success path");
+        let observed = std::fs::canonicalize(&store_path).expect("canonicalize observed");
+        assert_eq!(
+            observed, work_canonical,
+            "shim's observed CWD must equal the working_dir passed to run_nix_build_typed"
+        );
+        drop(dir);
+    }
+
+    /// `working_dir = Some(missing_dir)` must surface a spawn-failure
+    /// (`NixBuildError::ExecFailed`) with the offending label intact —
+    /// the same typed contract `working_dir = None` provides. Pinned so a
+    /// future regression that silently logged-and-swallowed the
+    /// `current_dir` error (e.g. via a `.unwrap_or_default()` on the path)
+    /// would surface here, not as a confusing "nix succeeded with empty
+    /// stdout" downstream.
+    #[tokio::test]
+    async fn test_run_nix_build_typed_missing_working_dir_routes_to_exec_failed() {
+        let (_dir, shim) = make_nix_shim("#!/bin/sh\necho '/nix/store/x'\nexit 0\n");
+        let missing = std::path::Path::new(
+            "/this/dir/does/not/exist-deliberately-for-the-nix-build-typed-test",
+        );
+        let result = run_nix_build_typed(&shim, &["build", ".#x"], ".#x", Some(missing)).await;
+        let err = result.expect_err("missing working_dir must fail");
+        match err {
+            NixBuildError::ExecFailed { flake_attr, .. } => {
+                assert_eq!(flake_attr, ".#x");
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
     }
 }
