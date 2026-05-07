@@ -4,11 +4,13 @@
 //! Builds (or uses pre-built) images for amd64/arm64, pushes via skopeo,
 //! and creates a multi-arch manifest index.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
+use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
 use crate::git;
+use crate::nix::build_flake_attr_in;
 use crate::tools::get_tool_path;
 
 /// Release a multi-arch OCI image.
@@ -130,32 +132,17 @@ pub async fn execute(
 
 // --- Helpers ---
 
+/// Build a sub-flake attribute inside `working_dir` and return the resulting
+/// store path. Thin wrapper that prepends the canonical `.#` prefix to the
+/// caller-supplied `flake_attr` and delegates to the canonical
+/// [`build_flake_attr_in`] primitive — the typed `NixBuildError`
+/// `(BuildFailed | EmptyStorePath | ExecFailed)` discrimination is
+/// recoverable across the anyhow boundary.
 async fn build_nix_image(flake_attr: &str, working_dir: &str) -> Result<String> {
     info!("Building .#{}...", flake_attr);
-    let output = tokio::process::Command::new("nix")
-        .args([
-            "build",
-            &format!(".#{}", flake_attr),
-            "--no-link",
-            "--print-out-paths",
-            "--impure",
-        ])
-        .current_dir(working_dir)
-        .output()
-        .await
-        .with_context(|| format!("Failed to build .#{}", flake_attr))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("nix build .#{} failed: {}", flake_attr, stderr.trim());
-    }
-
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        bail!("nix build returned empty path for .#{}", flake_attr);
-    }
-
-    Ok(path)
+    let result =
+        build_flake_attr_in(&format!(".#{}", flake_attr), Some(Path::new(working_dir))).await?;
+    Ok(result.store_path)
 }
 
 fn push_image(skopeo: &str, image_path: &str, registry: &str, tag: &str) -> Result<()> {
