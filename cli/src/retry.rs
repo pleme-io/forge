@@ -776,6 +776,95 @@ pub fn log_retry_attempt(
     outcome
 }
 
+/// Format captured stdout/stderr of an external-command [`std::process::Output`]
+/// as `<tool>`-prefixed debug-level messages, suitable for tee'ing into
+/// `tracing::debug!`. Pure function — no I/O, no side effects, no tracing
+/// subscriber assumed — so callers can assert the exact message format
+/// directly instead of via a tracing-subscriber harness.
+///
+/// Empty (after trim) stdout / stderr streams produce no message. The
+/// trim discipline — UTF-8-lossy decode + trim of leading/trailing
+/// whitespace, internal whitespace preserved — matches
+/// [`CapturedFailure::from_output`]'s so the debug surface aligns with
+/// the typed-error surface across every retry-driven external-CLI
+/// producer site in forge. A regression that drifted between the two
+/// disciplines (e.g., a debug-tee that did not trim while the typed
+/// `*::PushFailed.stderr` field did) would silently emit divergent
+/// messages for the same captured failure across the warn / debug
+/// surfaces.
+///
+/// # Output ordering invariant
+///
+/// `stdout` precedes `stderr` in the returned vector. The two pre-
+/// migration call sites (`commands/github_runner_ci.rs::
+/// attic_command_with_retry` and `::push_with_retry`) emit stdout-then-
+/// stderr; pinning the order here keeps log replay deterministic across
+/// the migration.
+pub fn format_capture_streams(out: &std::process::Output, tool: &str) -> Vec<String> {
+    let mut messages = Vec::new();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout_trimmed = stdout.trim();
+    if !stdout_trimmed.is_empty() {
+        messages.push(format!("{} stdout: {}", tool, stdout_trimmed));
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr_trimmed = stderr.trim();
+    if !stderr_trimmed.is_empty() {
+        messages.push(format!("{} stderr: {}", tool, stderr_trimmed));
+    }
+    messages
+}
+
+/// Tee captured stdout / stderr of an external-command
+/// [`std::process::Output`] at `tracing::debug` level under a `<tool>`
+/// prefix. Sibling of [`log_retry_attempt`] in the canonical retry
+/// primitive set: `log_retry_attempt` owns the per-attempt warn-on-
+/// failure dispatch (level=warn, suppressed on the final attempt); this
+/// owns the per-attempt stream-tee debug surface (level=debug, on every
+/// attempt — there is no "retry-shaped" suppression for observability).
+///
+/// Lifts the verbatim six-line pattern
+/// ```text
+/// let stdout = String::from_utf8_lossy(&out.stdout);
+/// let stderr = String::from_utf8_lossy(&out.stderr);
+/// if !stdout.trim().is_empty() {
+///     debug!("<tool> stdout: {}", stdout.trim());
+/// }
+/// if !stderr.trim().is_empty() {
+///     debug!("<tool> stderr: {}", stderr.trim());
+/// }
+/// ```
+/// that two retry-driven external-CLI sites in forge carry verbatim modulo
+/// per-site tool name: `commands/github_runner_ci.rs::
+/// attic_command_with_retry` (tool = "attic") and `::push_with_retry`
+/// (tool = "skopeo"). Two identically-shaped bodies past the duplication
+/// threshold the forge command-module surface enforces (≥2; PRIME
+/// DIRECTIVE) — this primitive is the law-redeeming consolidation for
+/// the per-attempt debug-tee dispatch shape.
+///
+/// Routes through [`format_capture_streams`] so the message format
+/// (`"<tool> stdout: <trimmed>"` / `"<tool> stderr: <trimmed>"`) is
+/// pinned by a pure unit test on the formatter, not by an integration
+/// test that has to spin up a tracing-test subscriber. Future regressions
+/// on the format surface here first.
+///
+/// # When to call
+///
+/// On the non-success `Ok(out)` arm of an external-command outcome
+/// inside a retry-loop spawn closure, AFTER the closure has consumed the
+/// captured `Output` and BEFORE the closure returns the outcome to
+/// [`retry_command`] / [`log_retry_attempt`]. Spawn-failures (`Err(io::
+/// Error)` — binary not on PATH) are NOT routed through this primitive;
+/// the spawn-error message is consumed by
+/// [`CommandAttemptFailure::from_capture`]'s `stdout` field, which the
+/// post-loop typed-error dispatch (`classify_attempt_failure`) routes to
+/// the `*::ExecFailed.message` field.
+pub fn debug_log_capture_streams(out: &std::process::Output, tool: &str) {
+    for message in format_capture_streams(out, tool) {
+        tracing::debug!("{}", message);
+    }
+}
+
 /// Dispatch a post-[`retry_command`] [`CommandAttemptFailure`] to the typed
 /// family-error variant whose structural shape matches the captured failure.
 /// Routes through the canonical [`CommandAttemptFailure::is_spawn_failure`]
@@ -2646,5 +2735,142 @@ mod tests {
         assert_eq!(echoed.exit_code, Some(42));
         assert_eq!(echoed.stderr, "verbatim-stderr");
         assert_eq!(echoed.stdout, "verbatim-stdout");
+    }
+
+    /// `format_capture_streams` emits `<tool> stdout` then `<tool> stderr`
+    /// (in that order) when both streams are non-empty after trim. The
+    /// stdout-then-stderr order is the canonical pre-migration order; both
+    /// retry-driven CI sites this primitive consolidates emit stdout first.
+    /// Pinning the order keeps log replay deterministic across the
+    /// migration.
+    #[test]
+    fn test_format_capture_streams_emits_stdout_then_stderr() {
+        let out = synth_output(false, b"raw stdout line", b"raw stderr line");
+        let messages = format_capture_streams(&out, "attic");
+        assert_eq!(
+            messages,
+            vec![
+                "attic stdout: raw stdout line".to_string(),
+                "attic stderr: raw stderr line".to_string(),
+            ],
+        );
+    }
+
+    /// Empty (after trim) stdout / stderr produce no message — same
+    /// suppression discipline the two pre-migration sites carried inline
+    /// (`if !stdout.trim().is_empty() { debug!(...) }`). Pre-migration
+    /// regression: a tool that emits only whitespace on stderr (e.g., a
+    /// trailing newline from a successful no-op) would have produced an
+    /// empty `debug!` line; pinning the suppression at the formatter
+    /// boundary closes that drift.
+    #[test]
+    fn test_format_capture_streams_suppresses_empty_streams() {
+        // Both empty → no messages.
+        let out = synth_output(false, b"", b"");
+        assert!(format_capture_streams(&out, "skopeo").is_empty());
+        // Whitespace-only → still suppressed (trim discipline matches
+        // CapturedFailure::from_output).
+        let out = synth_output(false, b"  \n\t", b"\r\n   \n");
+        assert!(format_capture_streams(&out, "skopeo").is_empty());
+        // Only stdout populated → only stdout message.
+        let out = synth_output(false, b"hello", b"");
+        assert_eq!(
+            format_capture_streams(&out, "skopeo"),
+            vec!["skopeo stdout: hello".to_string()],
+        );
+        // Only stderr populated → only stderr message.
+        let out = synth_output(false, b"", b"oops");
+        assert_eq!(
+            format_capture_streams(&out, "skopeo"),
+            vec!["skopeo stderr: oops".to_string()],
+        );
+    }
+
+    /// Leading and trailing whitespace are trimmed — internal whitespace
+    /// is preserved so multi-line tool diagnostics survive the round-trip
+    /// into the debug log. Same discipline `CapturedFailure::from_output`
+    /// applies to the typed-error stderr field; pinning both surfaces on
+    /// the same trim contract means a tool's captured failure looks
+    /// structurally identical at the warn (typed-error) and debug
+    /// (stream-tee) surfaces.
+    #[test]
+    fn test_format_capture_streams_trims_leading_trailing_whitespace() {
+        let out = synth_output(
+            false,
+            b"  outer-leading\nline two\nline three\n  ",
+            b"\n  503 Service Unavailable\n",
+        );
+        let messages = format_capture_streams(&out, "attic");
+        assert_eq!(
+            messages,
+            vec![
+                "attic stdout: outer-leading\nline two\nline three".to_string(),
+                "attic stderr: 503 Service Unavailable".to_string(),
+            ],
+            "leading/trailing trim only; internal whitespace (\\n between lines) preserved verbatim",
+        );
+    }
+
+    /// UTF-8-lossy decode survives invalid bytes — same discipline
+    /// `CapturedFailure::from_output` applies. A future regression that
+    /// switched to strict UTF-8 decode would silently drop the message
+    /// on any invalid-byte stderr (e.g., a tool emitting a binary
+    /// header). Pinning the lossy decode catches that here.
+    #[test]
+    fn test_format_capture_streams_lossy_decode_survives_invalid_bytes() {
+        // Invalid UTF-8 prefix + valid bytes; trim should leave the
+        // replacement-char prefix intact (it's not whitespace).
+        let out = synth_output(false, b"", &[0xFF, 0xFE, b' ', b'h', b'i']);
+        let messages = format_capture_streams(&out, "tool");
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0].starts_with("tool stderr: "),
+            "lossy decode preserves the message under the canonical prefix: {:?}",
+            messages[0]
+        );
+        assert!(
+            messages[0].contains("hi"),
+            "valid bytes after the invalid prefix must survive: {:?}",
+            messages[0]
+        );
+    }
+
+    /// Tool name flows verbatim into the message prefix. The two pre-
+    /// migration sites use distinct tool names (`"attic"` and
+    /// `"skopeo"`); pinning that the formatter never normalizes or
+    /// case-folds the tool string means a future site can use any
+    /// idiomatic tool label (e.g., `"git remote"`, `"regctl"`,
+    /// `"kubectl rollout"`) without the formatter mangling it.
+    #[test]
+    fn test_format_capture_streams_tool_name_is_verbatim() {
+        let out = synth_output(false, b"x", b"y");
+        for tool in ["attic", "skopeo", "git remote", "regctl", "kubectl rollout"] {
+            let messages = format_capture_streams(&out, tool);
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[0], format!("{} stdout: x", tool));
+            assert_eq!(messages[1], format!("{} stderr: y", tool));
+        }
+    }
+
+    /// `debug_log_capture_streams` is a side-effecting wrapper around
+    /// `format_capture_streams`. The pure formatter pins the message
+    /// format; this end-to-end probe pins that the wrapper does not
+    /// panic on any of the structural shapes the formatter handles
+    /// (both populated, both empty, only stdout, only stderr,
+    /// invalid-UTF-8 stderr). A future regression that reshaped the
+    /// wrapper (e.g., panicking on empty streams instead of suppressing)
+    /// surfaces here, not in production via a CI run that suddenly
+    /// crashes mid-retry.
+    #[test]
+    fn test_debug_log_capture_streams_does_not_panic_on_any_shape() {
+        for stdout in [&b""[..], b"  \n\t", b"hello", b"line1\nline2"] {
+            for stderr in [&b""[..], b"\r\n   ", b"oops", b"503 Service Unavailable\n"] {
+                let out = synth_output(false, stdout, stderr);
+                debug_log_capture_streams(&out, "tool");
+            }
+        }
+        // Invalid UTF-8 in stderr — must not panic.
+        let out = synth_output(false, b"", &[0xFF, 0xFE, b'x']);
+        debug_log_capture_streams(&out, "tool");
     }
 }
