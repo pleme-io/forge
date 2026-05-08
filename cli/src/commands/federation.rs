@@ -14,8 +14,9 @@ use colored::Colorize;
 use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
-use std::process::Stdio;
 use tokio::process::Command;
+
+use crate::retry::run_inherited_status;
 
 use crate::config::DeployConfig;
 use crate::path_builder::PathBuilder;
@@ -441,17 +442,11 @@ pub async fn update_federation(
         bail!("Federation directory not found at: {}", federation_path);
     }
 
-    let git_add_status = Command::new("git")
-        .args(&["add", &federation_path])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut git_add_cmd = Command::new("git");
+    git_add_cmd.args(&["add", &federation_path]);
+    run_inherited_status(git_add_cmd, "git add")
         .await
-        .context("Failed to execute git add for federation files")?;
-
-    if !git_add_status.success() {
-        bail!("Failed to stage federation files at: {}", federation_path);
-    }
+        .with_context(|| format!("Failed to stage federation files at: {}", federation_path))?;
 
     // Verify hive-router supergraph exists before staging
     if !hive_router_full_path.exists() {
@@ -459,38 +454,30 @@ pub async fn update_federation(
     }
 
     // Also stage the hive-router supergraph copy
-    let git_add_router_status = Command::new("git")
-        .args(&["add", &hive_router_path])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut git_add_router_cmd = Command::new("git");
+    git_add_router_cmd.args(&["add", &hive_router_path]);
+    run_inherited_status(git_add_router_cmd, "git add")
         .await
-        .context("Failed to execute git add for hive-router supergraph")?;
-
-    if !git_add_router_status.success() {
-        bail!(
-            "Failed to stage hive-router supergraph at: {}",
-            hive_router_path
-        );
-    }
+        .with_context(|| {
+            format!(
+                "Failed to stage hive-router supergraph at: {}",
+                hive_router_path
+            )
+        })?;
 
     // Also stage the hive-router deployment (contains updated supergraph hash annotation)
     let router_deployment_rel_path = paths.to_relative_string(&router_deployment_path);
 
-    let git_add_deployment_status = Command::new("git")
-        .args(&["add", &router_deployment_rel_path])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut git_add_deployment_cmd = Command::new("git");
+    git_add_deployment_cmd.args(&["add", &router_deployment_rel_path]);
+    run_inherited_status(git_add_deployment_cmd, "git add")
         .await
-        .context("Failed to execute git add for hive-router deployment")?;
-
-    if !git_add_deployment_status.success() {
-        bail!(
-            "Failed to stage hive-router deployment at: {}",
-            router_deployment_rel_path
-        );
-    }
+        .with_context(|| {
+            format!(
+                "Failed to stage hive-router deployment at: {}",
+                router_deployment_rel_path
+            )
+        })?;
 
     // Check if there are changes to commit
     let status = Command::new("git")
@@ -505,30 +492,18 @@ pub async fn update_federation(
             deploy_config.product.name, service
         );
 
-        let commit_status = Command::new("git")
-            .args(&["commit", "-m", &commit_msg])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
+        let mut commit_cmd = Command::new("git");
+        commit_cmd.args(&["commit", "-m", &commit_msg]);
+        run_inherited_status(commit_cmd, "git commit")
             .await
-            .context("Failed to execute git commit")?;
-
-        if !commit_status.success() {
-            bail!("Git commit failed for supergraph changes");
-        }
+            .context("Git commit failed for supergraph changes")?;
 
         println!("📤 Pushing to remote...");
-        let push_status = Command::new("git")
-            .args(&["push", "origin", "main"])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
+        let mut push_cmd = Command::new("git");
+        push_cmd.args(&["push", "origin", "main"]);
+        run_inherited_status(push_cmd, "git push origin main")
             .await
-            .context("Failed to execute git push")?;
-
-        if !push_status.success() {
-            bail!("Git push failed for supergraph changes");
-        }
+            .context("Git push failed for supergraph changes")?;
 
         println!("✅ {}", "Supergraph changes pushed to git".green());
     } else {

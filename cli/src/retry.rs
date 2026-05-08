@@ -3135,4 +3135,74 @@ mod tests {
             "primitive must overwrite caller-supplied piped stdio and complete normally"
         );
     }
+
+    /// `run_inherited_status`'s `anyhow::Error` shape composes cleanly with a
+    /// caller-supplied `.with_context(|| ...)` wrap so the operator sees BOTH
+    /// the domain narrative AND the primitive's structural record (op label
+    /// + exit code) at the same failure event. Pinning this is load-bearing
+    /// for every migrated call site that carries domain context — the five
+    /// `commands/federation.rs` git-add / git-commit / git-push sites
+    /// (commit migrating five status-only sites) wrap the primitive with
+    /// `.with_context(|| format!("Failed to stage federation files at:
+    /// {path}"))` and rely on the primitive's `anyhow::bail!("{op} failed
+    /// (exit {N})")` becoming the inner cause that anyhow's chain walks
+    /// from. A future regression that returned a flat `String` (or
+    /// swallowed the inner cause via `.map_err(|_| ...)` instead of
+    /// passing through anyhow's chain) would silently break this surface:
+    /// the operator log would carry the domain narrative but lose the
+    /// exit code that distinguishes "git add exited 128 (no such repo)"
+    /// from "git add exited 1 (path conflict)" — a regression that is
+    /// invisible at the call site but load-bearing on the operator
+    /// triage surface (THEORY §V.4 Phase 1 attestation-record discipline).
+    #[tokio::test]
+    async fn test_run_inherited_status_chains_with_caller_context_on_nonzero_exit() {
+        use anyhow::Context;
+        let (_dir, shim) =
+            crate::test_support::make_executable_shim("interactive-cli", "#!/bin/sh\nexit 7\n");
+        let cmd = tokio::process::Command::new(&shim);
+        let err = run_inherited_status(cmd, "git add")
+            .await
+            .with_context(|| {
+                "Failed to stage federation files at: products/foo/federation".to_string()
+            })
+            .expect_err("nonzero exit must fail");
+
+        // The outer Display surface (default) carries the caller's domain
+        // context — the human narrative the operator-log consumer reads first.
+        let outer = format!("{}", err);
+        assert!(
+            outer.contains("Failed to stage federation files at: products/foo/federation"),
+            "outer Display must carry caller-supplied with_context wrap, got: {outer}"
+        );
+
+        // The full chain (walked by `anyhow::Error::chain()`, the surface a
+        // structured-log consumer parses) must carry BOTH layers: the outer
+        // domain narrative AND the inner structural record (op + exit code).
+        // The alternate-Display form (`{:#}`) flattens the chain into a
+        // single string with `: ` separators — which is the canonical shape
+        // the operator-monitoring consumer reads when an attestation record
+        // is replayed.
+        let chained = format!("{:#}", err);
+        assert!(
+            chained.contains("Failed to stage federation files at: products/foo/federation"),
+            "chain must carry outer domain narrative, got: {chained}"
+        );
+        assert!(
+            chained.contains("git add failed (exit 7)"),
+            "chain must carry primitive's structural record (op + exit code), got: {chained}"
+        );
+
+        // The chain has at least two distinct layers: the outer with_context
+        // wrap and the inner anyhow::bail! the primitive emits. Pinning the
+        // count rules out a future regression that flattened the two layers
+        // into one (e.g. by formatting the inner cause into the outer
+        // string at construction time).
+        let layers: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+        assert!(
+            layers.len() >= 2,
+            "anyhow chain must preserve at least the outer + primitive layers, got {} layer(s): {:?}",
+            layers.len(),
+            layers
+        );
+    }
 }
