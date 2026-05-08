@@ -13,80 +13,40 @@ use tokio::process::Command;
 /// Run Rust unit tests
 pub async fn rust_test(service: String) -> Result<()> {
     println!("🧪 Running unit tests for {}...", service.cyan());
-    let status = Command::new("cargo")
-        .args(&["test", "--lib", "--bins"])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to run tests")?;
-
-    if !status.success() {
-        bail!("Tests failed");
-    }
-
-    Ok(())
+    let mut cmd = Command::new("cargo");
+    cmd.args(&["test", "--lib", "--bins"]);
+    crate::retry::run_inherited_status(cmd, "cargo test").await
 }
 
 /// Run Rust clippy linter
 pub async fn rust_lint(service: String) -> Result<()> {
     println!("🔍 Running clippy linter for {}...", service.cyan());
-    let status = Command::new("cargo")
-        .args(&[
-            "clippy",
-            "--all-targets",
-            "--all-features",
-            "--",
-            "-D",
-            "warnings",
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to run clippy")?;
-
-    if !status.success() {
-        bail!("Linting failed");
-    }
-
-    Ok(())
+    let mut cmd = Command::new("cargo");
+    cmd.args(&[
+        "clippy",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings",
+    ]);
+    crate::retry::run_inherited_status(cmd, "cargo clippy").await
 }
 
 /// Format Rust code with rustfmt
 pub async fn rust_fmt(service: String) -> Result<()> {
     println!("✨ Formatting code for {}...", service.cyan());
-    let status = Command::new("cargo")
-        .args(&["fmt", "--all"])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to format code")?;
-
-    if !status.success() {
-        bail!("Formatting failed");
-    }
-
-    Ok(())
+    let mut cmd = Command::new("cargo");
+    cmd.args(&["fmt", "--all"]);
+    crate::retry::run_inherited_status(cmd, "cargo fmt").await
 }
 
 /// Check Rust code formatting
 pub async fn rust_fmt_check(service: String) -> Result<()> {
     println!("🔍 Checking code formatting for {}...", service.cyan());
-    let status = Command::new("cargo")
-        .args(&["fmt", "--all", "--", "--check"])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to check formatting")?;
-
-    if !status.success() {
-        bail!("Code is not formatted correctly");
-    }
-
-    Ok(())
+    let mut cmd = Command::new("cargo");
+    cmd.args(&["fmt", "--all", "--", "--check"]);
+    crate::retry::run_inherited_status(cmd, "cargo fmt --check").await
 }
 
 /// Extract GraphQL schema from Rust service
@@ -100,18 +60,10 @@ pub async fn rust_extract_schema(service: String) -> Result<()> {
     for bin_name in &bin_names {
         let bin_path = format!("src/bin/{}.rs", bin_name);
         if Path::new(&bin_path).exists() {
-            let status = Command::new("cargo")
-                .args(&["run", "--bin", bin_name])
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status()
-                .await
-                .context("Failed to extract schema")?;
-
-            if !status.success() {
-                bail!("Schema extraction failed");
-            }
-
+            let mut cmd = Command::new("cargo");
+            cmd.args(&["run", "--bin", bin_name]);
+            crate::retry::run_inherited_status(cmd, &format!("cargo run --bin {}", bin_name))
+                .await?;
             found = true;
             break;
         }

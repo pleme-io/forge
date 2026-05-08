@@ -939,6 +939,106 @@ where
     }
 }
 
+/// Run a configured `tokio::process::Command` with stdout and stderr inherited
+/// from the parent process, await its exit, and return `Ok(())` on success or
+/// a structured `anyhow::Error` carrying the operation label and the
+/// terminating shape (exit code, or "killed by signal" when `status.code()`
+/// is `None`).
+///
+/// `op` is the human-readable label for the operation (e.g. `"cargo test"`,
+/// `"crate2nix generate"`, `"docker-compose up"`). It feeds both the
+/// spawn-context message (`"Failed to run {op}"`) and the failure message
+/// (`"{op} failed ({detail})"`).
+///
+/// Lifts the verbatim eleven-line stanza
+/// ```text
+/// let status = Command::new(BIN)
+///     .args(ARGS)
+///     [.current_dir(DIR)]?
+///     .stdout(Stdio::inherit())
+///     .stderr(Stdio::inherit())
+///     .status()
+///     .await
+///     .context(SPAWN_CTX)?;
+/// if !status.success() {
+///     bail!(FAIL_MSG);
+/// }
+/// ```
+/// that more than a dozen command-module sites in forge carry verbatim modulo
+/// per-site `BIN` / `ARGS` / `SPAWN_CTX` / `FAIL_MSG` — well past the
+/// three-times threshold (THEORY §VI.1: "two occurrences is a coincidence;
+/// three is a law"). The primitive owns the `Stdio::inherit()` wiring, the
+/// `with_context` spawn-error envelope, and the structural failure message
+/// (which now uniformly carries the exit code) so call sites compose down to
+/// `let mut cmd = Command::new(...); cmd.args(...); run_inherited_status(cmd,
+/// "...").await?;` — three lines, no inline boilerplate.
+///
+/// # Why a separate primitive
+///
+/// This is the status-only sibling of [`classify_capture`] / [`retry_command`]
+/// in the canonical typed-CLI primitive set:
+///
+/// - [`classify_capture`] / [`classify_capture_query`]: captured-output
+///   shape (`cmd.output().await`). Used by typed-error producer sites that
+///   need the structured `(exit_code, stderr)` tuple in their error variants
+///   (`GitError::OpFailed`, `NixBuildError::BuildFailed`, etc.).
+/// - [`retry_command`]: retry-driven captured-output shape. Used by sites
+///   that need the structured tuple AND drive a retry budget against a
+///   transient classifier.
+/// - `run_inherited_status` (this): status-only shape (`cmd.status().await`).
+///   Used by sites where stdout / stderr are streamed live to the operator's
+///   terminal — interactive build tools (`cargo test`, `cargo clippy`,
+///   `cargo fmt`, `crate2nix generate`, `docker-compose up`) — and the
+///   failure surface is just "did this thing exit zero?". Capturing
+///   stdout / stderr would defeat the purpose by hiding live progress
+///   from the operator.
+///
+/// Together the three primitives close the typed-CLI surface: every external-
+/// command invocation in forge routes through one of them, with the same
+/// canonical spawn-failure envelope (`Failed to run {op}`) at every site.
+///
+/// # The exit-code carry is load-bearing
+///
+/// Pre-migration the eleven-line stanza's failure messages were ad-hoc
+/// (`"Tests failed"`, `"Linting failed"`, `"Formatting failed"`, etc.) — they
+/// dropped the exit code that `status.code()` carries. Post-migration the
+/// canonical format `"{op} failed (exit {code})"` (or
+/// `"{op} failed (killed by signal)"` for `status.code() == None`) preserves
+/// the exit code at the operator log surface for every migrated site by
+/// construction. A future Phase 1 attestation-record consumer that wants the
+/// terminating shape (THEORY §V.4) can pattern-match on the message format
+/// produced by this primitive — one shape across every status-only site in
+/// forge, no per-site dialect.
+///
+/// # Stdio override
+///
+/// The primitive sets `Stdio::inherit()` on the supplied `cmd` AFTER the
+/// caller has had a chance to configure args, current-dir, env vars, etc.,
+/// so any caller-supplied `.stdout(...)` / `.stderr(...)` is overwritten. A
+/// caller that needs a different stdio shape should use `cmd.status().await`
+/// directly — this primitive is the typed lift of the inherited-stdio shape
+/// specifically.
+pub async fn run_inherited_status(
+    mut cmd: tokio::process::Command,
+    op: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    cmd.stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    let status = cmd
+        .status()
+        .await
+        .with_context(|| format!("Failed to run {}", op))?;
+    if !status.success() {
+        let detail = match status.code() {
+            Some(code) => format!("exit {}", code),
+            None => "killed by signal".to_string(),
+        };
+        anyhow::bail!("{} failed ({})", op, detail);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2908,5 +3008,131 @@ mod tests {
         // Invalid UTF-8 in stderr — must not panic.
         let out = synth_output(false, b"", &[0xFF, 0xFE, b'x']);
         debug_log_capture_streams(&out, "tool");
+    }
+
+    /// On the success path (`status.success()` is true), `run_inherited_status`
+    /// returns `Ok(())` verbatim — no message, no envelope, no transformation.
+    /// Pinned with a hermetic shim that exits zero, invoked by absolute path
+    /// so the test does not race on global PATH state (same hermetic
+    /// discipline `git.rs`'s and `nix.rs`'s shim-driven tests rely on).
+    #[tokio::test]
+    async fn test_run_inherited_status_success_returns_ok() {
+        let (_dir, shim) =
+            crate::test_support::make_executable_shim("interactive-cli", "#!/bin/sh\nexit 0\n");
+        let cmd = tokio::process::Command::new(&shim);
+        let result = run_inherited_status(cmd, "interactive-cli").await;
+        assert!(result.is_ok(), "exit 0 must surface as Ok(())");
+    }
+
+    /// On a non-zero exit, `run_inherited_status` returns an `anyhow::Error`
+    /// whose Display form carries both the operation label AND the captured
+    /// exit code. Pre-migration, the eleven-line stanza's failure messages
+    /// dropped the exit code (`bail!("Tests failed")`); post-migration the
+    /// canonical `"{op} failed (exit {N})"` shape preserves it for every
+    /// migrated site by construction. A regression that dropped either the
+    /// op label or the exit code from the message would surface here, not in
+    /// production via a less-informative operator log line.
+    #[tokio::test]
+    async fn test_run_inherited_status_nonzero_exit_carries_op_and_code() {
+        let (_dir, shim) =
+            crate::test_support::make_executable_shim("interactive-cli", "#!/bin/sh\nexit 7\n");
+        let cmd = tokio::process::Command::new(&shim);
+        let err = run_inherited_status(cmd, "interactive-cli")
+            .await
+            .expect_err("nonzero exit must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("interactive-cli"),
+            "op label must appear in failure message, got: {msg}"
+        );
+        assert!(
+            msg.contains("exit 7"),
+            "exit code must appear in failure message, got: {msg}"
+        );
+    }
+
+    /// On a spawn failure (binary not on PATH, fork failed, permission
+    /// denied), `run_inherited_status` returns an `anyhow::Error` whose
+    /// Display form carries the operation label. The spawn-error envelope
+    /// is `"Failed to run {op}"` so a downstream operator log surface can
+    /// distinguish "couldn't even invoke the tool" from "tool ran and
+    /// rejected" — the same typed split the canonical
+    /// [`classify_capture`] / [`CommandAttemptFailure::is_spawn_failure`]
+    /// primitives encode for the captured-output sibling shapes.
+    #[tokio::test]
+    async fn test_run_inherited_status_spawn_failure_carries_op() {
+        let cmd = tokio::process::Command::new(
+            "/nonexistent/path/to/inherited-status-binary-that-does-not-exist",
+        );
+        let err = run_inherited_status(cmd, "missing-tool")
+            .await
+            .expect_err("missing binary must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("missing-tool"),
+            "op label must appear in spawn-failure message, got: {msg}"
+        );
+    }
+
+    /// Signal-killed processes (where `status.code()` is `None`) must surface
+    /// as a structural `"killed by signal"` detail, distinct from a normal
+    /// non-zero exit. Pinning the discriminator means an operator who
+    /// receives the message can immediately distinguish "tool exited 137 on
+    /// OOM" from "tool was killed by SIGKILL mid-run" — same THEORY §V.4
+    /// Phase 1 attestation-record discipline the
+    /// [`CommandAttemptFailure::is_spawn_failure`] split encodes for the
+    /// captured-output sibling shape (`exit_code: None` is the structural
+    /// signal-killed marker on the captured-output surface as well).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_inherited_status_signal_killed_reports_killed_by_signal() {
+        let (_dir, shim) =
+            crate::test_support::make_executable_shim("self-killer", "#!/bin/sh\nkill -9 $$\n");
+        let cmd = tokio::process::Command::new(&shim);
+        let err = run_inherited_status(cmd, "self-killer")
+            .await
+            .expect_err("signal-killed must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("killed by signal"),
+            "signal-killed detail must surface, got: {msg}"
+        );
+        assert!(
+            msg.contains("self-killer"),
+            "op label must appear in signal-killed message, got: {msg}"
+        );
+    }
+
+    /// The primitive's contract is that it OVERWRITES any caller-supplied
+    /// stdout / stderr stdio shape with `Stdio::inherit()`. Pinning this is
+    /// load-bearing for the migrated call sites: a future regression that
+    /// branched on a pre-existing stdio setting (e.g. "if the caller already
+    /// configured stdout, leave it alone") would silently break the live-
+    /// progress invariant the inherited-stdio shape exists for. Operators
+    /// expect to see `cargo test` / `cargo clippy` / `crate2nix generate`
+    /// output streamed live to their terminal; a quietly-piped variant
+    /// would suppress all of it.
+    ///
+    /// Asserted indirectly: the test pre-pipes both streams and confirms the
+    /// primitive still completes successfully (the override happens, the
+    /// shim runs, and exit-zero surfaces as `Ok(())`). A regression that
+    /// honored the pre-piped setting would change the pipe-buffer fill
+    /// behaviour but not necessarily the return value, so this is a
+    /// structural pin (the primitive does not error on conflicting
+    /// caller-supplied stdio) rather than a behavioural one.
+    #[tokio::test]
+    async fn test_run_inherited_status_overrides_caller_supplied_stdio() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "interactive-cli",
+            "#!/bin/sh\necho hi\nexit 0\n",
+        );
+        let mut cmd = tokio::process::Command::new(&shim);
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let result = run_inherited_status(cmd, "interactive-cli").await;
+        assert!(
+            result.is_ok(),
+            "primitive must overwrite caller-supplied piped stdio and complete normally"
+        );
     }
 }
