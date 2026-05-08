@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::infrastructure::registry::RegistryRef;
 use crate::repo::get_tool_path;
-use crate::retry::{retry_command, RetryPolicy};
+use crate::retry::{log_retry_attempt, retry_command, RetryPolicy};
 
 /// Get git SHA for tagging - Single source of truth
 ///
@@ -373,6 +373,7 @@ pub async fn push_with_retry(
 
     let result = retry_command(&policy, &op, |attempt| {
         let organization = organization.clone();
+        let op = op.clone();
         async move {
             let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
             let outcome = Command::new(&skopeo)
@@ -388,15 +389,7 @@ pub async fn push_with_retry(
                 .stderr(Stdio::piped())
                 .output()
                 .await;
-            if outcome
-                .as_ref()
-                .map(|o| !o.status.success())
-                .unwrap_or(true)
-                && attempt < max_attempts
-            {
-                warn!("Push attempt {} failed, retrying...", attempt);
-            }
-            outcome
+            log_retry_attempt(outcome, &op, attempt, max_attempts)
         }
     })
     .await;
