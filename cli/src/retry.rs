@@ -2565,6 +2565,42 @@ mod tests {
         assert_eq!(captured.stderr, b"i/o timeout\n");
     }
 
+    /// Op-failure with `Stdio::null()`-discarded stdout — `log_retry_attempt`
+    /// must NOT depend on stdout being non-empty. `commands/push.rs::
+    /// push_with_retry` (the fifth retry-driven call site that consumes this
+    /// helper) routes skopeo with `stdout(Stdio::null())` so the captured
+    /// `Output.stdout` is always `b""` regardless of what skopeo would have
+    /// emitted; the failure-detection predicate (`!o.status.success()`)
+    /// fires entirely off the exit code. A future "optimization" that
+    /// started inspecting stdout to gate the warn (e.g., suppressing the
+    /// retry log when stdout is empty) would silently break that site:
+    /// every transient failure there would emit no warn, and the operator
+    /// would lose mid-loop visibility on a five-attempt push storm.
+    /// Pinning the stdout-independence property at the primitive level means
+    /// the regression surfaces here first.
+    #[test]
+    fn test_log_retry_attempt_op_failure_with_empty_stdout_returns_outcome_verbatim() {
+        // synth_output(success=false, stdout=b"" — the Stdio::null() shape —,
+        // stderr=non-empty transient). The "another attempt remains" branch
+        // must still fire (attempt < max_attempts), and the outcome must
+        // pass through verbatim for the downstream retry-loop's classifier.
+        let out = synth_output(false, b"", b"503 Service Unavailable\n");
+        let result = log_retry_attempt(Ok(out), "push ghcr.io/o/p:tag", 1, 5);
+        let captured = result.expect("op-failure with empty stdout must pass Ok(Output) through");
+        assert!(
+            !captured.status.success(),
+            "non-success status must survive verbatim"
+        );
+        assert!(
+            captured.stdout.is_empty(),
+            "Stdio::null()-discarded stdout must remain empty post-passthrough"
+        );
+        assert_eq!(
+            captured.stderr, b"503 Service Unavailable\n",
+            "stderr must survive verbatim — the canonical transient classifier reads it"
+        );
+    }
+
     /// Spawn-failure on a non-final attempt — `log_retry_attempt` returns
     /// the captured `Err(io::Error)` verbatim. The error kind, message, and
     /// the underlying error chain MUST flow through unchanged so the
