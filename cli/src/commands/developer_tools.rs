@@ -85,32 +85,16 @@ pub async fn rust_update_cargo_nix(service: String) -> Result<()> {
 
     // Update Cargo.lock
     println!("Updating Cargo.lock...");
-    let status = Command::new("cargo")
-        .arg("update")
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to update Cargo.lock")?;
-
-    if !status.success() {
-        bail!("Cargo update failed");
-    }
+    let mut cmd = Command::new("cargo");
+    cmd.arg("update");
+    crate::retry::run_inherited_status(cmd, "cargo update").await?;
 
     // Generate Cargo.nix
     println!();
     println!("Generating Cargo.nix...");
-    let status = Command::new("nix")
-        .args(&["run", "nixpkgs#crate2nix", "--", "generate"])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to generate Cargo.nix")?;
-
-    if !status.success() {
-        bail!("Cargo.nix generation failed");
-    }
+    let mut cmd = Command::new("nix");
+    cmd.args(&["run", "nixpkgs#crate2nix", "--", "generate"]);
+    crate::retry::run_inherited_status(cmd, "crate2nix generate").await?;
 
     println!();
     println!("✅ {}", "Cargo.nix updated!".green());
@@ -212,17 +196,9 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         "Generating new Cargo.lock".bold(),
         "(cargo generate-lockfile)".dimmed()
     );
-    let status = Command::new("cargo")
-        .arg("generate-lockfile")
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to run cargo generate-lockfile")?;
-
-    if !status.success() {
-        bail!("❌ cargo generate-lockfile failed");
-    }
+    let mut cmd = Command::new("cargo");
+    cmd.arg("generate-lockfile");
+    crate::retry::run_inherited_status(cmd, "cargo generate-lockfile").await?;
     println!("   ✅ Cargo.lock generated");
     println!();
 
@@ -232,26 +208,18 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         "Generating Cargo.nix".bold(),
         "(crate2nix generate)".dimmed()
     );
-    let status = Command::new("nix")
-        .args(&[
-            "run",
-            "nixpkgs#crate2nix",
-            "--",
-            "generate",
-            "-f",
-            "Cargo.toml",
-            "-o",
-            "Cargo.nix",
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to run crate2nix generate")?;
-
-    if !status.success() {
-        bail!("❌ crate2nix generate failed");
-    }
+    let mut cmd = Command::new("nix");
+    cmd.args(&[
+        "run",
+        "nixpkgs#crate2nix",
+        "--",
+        "generate",
+        "-f",
+        "Cargo.toml",
+        "-o",
+        "Cargo.nix",
+    ]);
+    crate::retry::run_inherited_status(cmd, "crate2nix generate").await?;
     println!("   ✅ Cargo.nix generated");
     println!();
 
@@ -312,17 +280,9 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         "Updating dependencies".bold(),
         "(cargo update)".dimmed()
     );
-    let status = Command::new("cargo")
-        .arg("update")
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to run cargo update")?;
-
-    if !status.success() {
-        bail!("❌ cargo update failed");
-    }
+    let mut cmd = Command::new("cargo");
+    cmd.arg("update");
+    crate::retry::run_inherited_status(cmd, "cargo update").await?;
     println!("   ✅ Dependencies updated");
     println!();
 
@@ -332,26 +292,18 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         "Generating Cargo.nix".bold(),
         "(crate2nix generate)".dimmed()
     );
-    let status = Command::new("nix")
-        .args(&[
-            "run",
-            "nixpkgs#crate2nix",
-            "--",
-            "generate",
-            "-f",
-            "Cargo.toml",
-            "-o",
-            "Cargo.nix",
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to run crate2nix generate")?;
-
-    if !status.success() {
-        bail!("❌ crate2nix generate failed");
-    }
+    let mut cmd = Command::new("nix");
+    cmd.args(&[
+        "run",
+        "nixpkgs#crate2nix",
+        "--",
+        "generate",
+        "-f",
+        "Cargo.toml",
+        "-o",
+        "Cargo.nix",
+    ]);
+    crate::retry::run_inherited_status(cmd, "crate2nix generate").await?;
     println!("   ✅ Cargo.nix generated");
     println!();
 

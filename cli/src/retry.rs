@@ -3205,4 +3205,50 @@ mod tests {
             layers
         );
     }
+
+    /// `run_inherited_status` must NOT alter any caller-supplied
+    /// `current_dir` on the `Command`. Interactive build-tool sites in
+    /// forge (`cargo generate-lockfile`, `crate2nix generate`,
+    /// `docker-compose up`) routinely run in a workspace-root or service-
+    /// dir working directory configured by the caller (either via
+    /// `cmd.current_dir(...)` or `env::set_current_dir(...)` upstream).
+    /// The primitive's internal-implementation contract is that it touches
+    /// only `.stdout(Stdio::inherit())` / `.stderr(Stdio::inherit())` and
+    /// then awaits `.status()`; every other `Command` setting the caller
+    /// configured (current_dir, env, args, kill_on_drop, uid/gid, etc.)
+    /// flows through unchanged. A future regression that rebuilt the
+    /// `Command` inside the primitive — or that cloned it via a code path
+    /// that dropped non-stdio settings — would silently change which
+    /// directory those interactive tools execute in, breaking call sites
+    /// without any per-site change. This test pins the contract for
+    /// `current_dir` specifically (the load-bearing setting for
+    /// `commands/developer_tools.rs::rust_update_cargo_nix` /
+    /// `rust_regenerate` / `rust_cargo_update`, where the `Cargo.nix`
+    /// regeneration toolchain must run in the workspace root). The
+    /// hermetic shim writes a marker file at `./marker` (relative to the
+    /// shim's own working directory) and the assertion confirms the
+    /// marker lands in the caller-supplied tempdir, not in the test
+    /// runner's cwd.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_inherited_status_preserves_caller_supplied_current_dir() {
+        let workdir = tempfile::tempdir().expect("workdir tempdir");
+        let (_shimdir, shim) = crate::test_support::make_executable_shim(
+            "marker-writer",
+            "#!/bin/sh\ntouch ./marker\n",
+        );
+        let mut cmd = tokio::process::Command::new(&shim);
+        cmd.current_dir(workdir.path());
+        let result = run_inherited_status(cmd, "marker-writer").await;
+        assert!(
+            result.is_ok(),
+            "primitive must succeed when shim exits zero: {result:?}"
+        );
+        let marker = workdir.path().join("marker");
+        assert!(
+            marker.exists(),
+            "marker must be written in caller-supplied current_dir; expected at: {}",
+            marker.display()
+        );
+    }
 }
