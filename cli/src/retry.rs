@@ -3205,4 +3205,78 @@ mod tests {
             layers
         );
     }
+
+    /// `run_inherited_status`'s SPAWN-FAILURE path (binary not on PATH, fork
+    /// failed, permission denied) must compose with a caller-supplied
+    /// `.with_context(|| ...)` wrap exactly the same way the non-zero-exit
+    /// path does. The two paths are distinct codepaths inside the primitive
+    /// (the spawn-failure path goes through `.with_context(|| format!("Failed
+    /// to run {}", op))?` at the `cmd.status().await` line; the non-zero-exit
+    /// path goes through `anyhow::bail!("{} failed ({})", op, detail)`), so
+    /// the chain-composition contract has to be pinned on BOTH codepaths
+    /// independently. The non-zero-exit case is covered by
+    /// `test_run_inherited_status_chains_with_caller_context_on_nonzero_exit`
+    /// above; this test covers the spawn-failure case.
+    ///
+    /// Load-bearing for every migrated caller that surfaces a PATH hint or
+    /// a "ensure {tool} is in PATH" narrative in its `.with_context` wrap
+    /// (e.g. `commands/web_service.rs::web_regenerate`'s pleme-linker /
+    /// crate2nix sites surface `"pleme-linker regen failed - ensure
+    /// pleme-linker is in PATH"` and `"crate2nix generate failed for Hanabi
+    /// - ensure crate2nix is in PATH"`). On the spawn-failure codepath
+    /// these PATH hints are the most operator-relevant narrative — the tool
+    /// is genuinely missing from PATH and the operator needs to know to
+    /// install / re-enter the Nix shell. A future regression that swallowed
+    /// the caller's spawn-path context via `.map_err(|_| ...)` instead of
+    /// passing through anyhow's chain would silently break this surface.
+    #[tokio::test]
+    async fn test_run_inherited_status_chains_with_caller_context_on_spawn_failure() {
+        use anyhow::Context;
+        let cmd = tokio::process::Command::new(
+            "/nonexistent/path/to/inherited-status-binary-that-does-not-exist",
+        );
+        let err = run_inherited_status(cmd, "pleme-linker regen")
+            .await
+            .context("pleme-linker regen failed - ensure pleme-linker is in PATH")
+            .expect_err("missing binary must fail");
+
+        // The outer Display surface carries the caller's PATH hint — the
+        // narrative the operator-log consumer reads first.
+        let outer = format!("{}", err);
+        assert!(
+            outer.contains("pleme-linker regen failed - ensure pleme-linker is in PATH"),
+            "outer Display must carry caller-supplied with_context wrap on spawn-failure, got: {outer}"
+        );
+
+        // The full chain (alternate-Display) must carry BOTH the outer PATH
+        // hint AND the primitive's `Failed to run {op}` spawn-envelope. The
+        // spawn-envelope is structurally distinct from the non-zero-exit
+        // shape (no exit code, no "killed by signal"), so an operator who
+        // sees the chain can immediately distinguish "tool not on PATH"
+        // from "tool ran and exited 1".
+        let chained = format!("{:#}", err);
+        assert!(
+            chained.contains("pleme-linker regen failed - ensure pleme-linker is in PATH"),
+            "chain must carry outer PATH hint on spawn-failure, got: {chained}"
+        );
+        assert!(
+            chained.contains("Failed to run pleme-linker regen"),
+            "chain must carry primitive's spawn envelope (op label), got: {chained}"
+        );
+
+        // Pin the chain depth: outer with_context wrap + primitive's
+        // with_context spawn envelope + the underlying io::Error from
+        // tokio::process — at least three layers. A future regression that
+        // flattened the spawn envelope into the io::Error string at
+        // construction time (e.g. `format!("Failed to run {}: {}", op,
+        // io_err)` instead of `.with_context(|| format!("Failed to run
+        // {}", op))?`) would collapse this to two layers.
+        let layers: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+        assert!(
+            layers.len() >= 3,
+            "anyhow chain on spawn-failure must preserve outer + primitive envelope + io::Error layers, got {} layer(s): {:?}",
+            layers.len(),
+            layers
+        );
+    }
 }

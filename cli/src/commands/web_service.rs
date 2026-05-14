@@ -8,11 +8,12 @@
 //! Frontend deps are managed by pleme-linker, Hanabi uses crate2nix.
 
 use std::path::Path;
-use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use tokio::process::Command;
+
+use crate::retry::run_inherited_status;
 
 /// Regenerate deps.nix for web frontend + Cargo.nix for Hanabi (shared BFF)
 ///
@@ -73,24 +74,18 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
         "(pleme-linker regen)".dimmed()
     );
 
-    let status = Command::new("pleme-linker")
-        .args(&[
-            "regen",
-            "--project-root",
-            service_dir.to_str().unwrap(),
-            "--crate2nix",
-            "crate2nix", // crate2nix is in PATH from Nix wrapper
-        ])
-        .current_dir(&repo_root)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut cmd = Command::new("pleme-linker");
+    cmd.args(&[
+        "regen",
+        "--project-root",
+        service_dir.to_str().unwrap(),
+        "--crate2nix",
+        "crate2nix", // crate2nix is in PATH from Nix wrapper
+    ])
+    .current_dir(&repo_root);
+    run_inherited_status(cmd, "pleme-linker regen")
         .await
-        .context("Failed to run pleme-linker regen - ensure pleme-linker is in PATH")?;
-
-    if !status.success() {
-        bail!("❌ pleme-linker regen failed");
-    }
+        .context("pleme-linker regen failed - ensure pleme-linker is in PATH")?;
     println!("   ✅ Frontend deps.nix regenerated");
     println!();
 
@@ -102,18 +97,11 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
         "(crate2nix generate)".dimmed()
     );
 
-    let status = Command::new("crate2nix")
-        .arg("generate")
-        .current_dir(&hanabi_dir)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut cmd = Command::new("crate2nix");
+    cmd.arg("generate").current_dir(&hanabi_dir);
+    run_inherited_status(cmd, "crate2nix generate")
         .await
-        .context("Failed to run crate2nix generate - ensure crate2nix is in PATH")?;
-
-    if !status.success() {
-        bail!("❌ crate2nix generate failed for Hanabi");
-    }
+        .context("crate2nix generate failed for Hanabi - ensure crate2nix is in PATH")?;
     println!("   ✅ Hanabi Cargo.nix regenerated");
     println!();
 
@@ -176,18 +164,11 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
         "(cargo update)".dimmed()
     );
 
-    let status = Command::new("cargo")
-        .arg("update")
-        .current_dir(&hanabi_dir)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut cmd = Command::new("cargo");
+    cmd.arg("update").current_dir(&hanabi_dir);
+    run_inherited_status(cmd, "cargo update")
         .await
-        .context("Failed to run cargo update")?;
-
-    if !status.success() {
-        bail!("❌ cargo update failed");
-    }
+        .context("cargo update failed for Hanabi")?;
     println!("   ✅ Dependencies updated");
     println!();
 
@@ -199,18 +180,11 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
         "(crate2nix generate)".dimmed()
     );
 
-    let status = Command::new("crate2nix")
-        .arg("generate")
-        .current_dir(&hanabi_dir)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut cmd = Command::new("crate2nix");
+    cmd.arg("generate").current_dir(&hanabi_dir);
+    run_inherited_status(cmd, "crate2nix generate")
         .await
-        .context("Failed to run crate2nix generate - ensure crate2nix is in PATH")?;
-
-    if !status.success() {
-        bail!("❌ crate2nix generate failed");
-    }
+        .context("crate2nix generate failed - ensure crate2nix is in PATH")?;
     println!("   ✅ Cargo.nix regenerated");
     println!();
 
