@@ -3267,4 +3267,53 @@ mod tests {
             layers
         );
     }
+
+    /// A caller-supplied `.current_dir(...)` on the `tokio::process::Command`
+    /// is preserved through `run_inherited_status` — the primitive only
+    /// rewrites stdout / stderr and must leave every other field
+    /// (current_dir, env, args, kill_on_drop, ...) untouched. Pinning this
+    /// is load-bearing for the `commands/web_service.rs` migration: all four
+    /// migrated sites (`pleme-linker regen` rooted at `repo_root`, `crate2nix
+    /// generate` and `cargo update` rooted at the Hanabi platform package
+    /// dir) drive their working directory via `cmd.current_dir(&path)`
+    /// directly on the per-cmd `Command` rather than `env::set_current_dir`
+    /// (which would mutate the forge process's cwd for every concurrent
+    /// task). A future regression that added `cmd.current_dir(".")` or
+    /// `cmd.current_dir(std::env::current_dir().unwrap())` inside the
+    /// primitive would silently route every migrated site's command into
+    /// forge's cwd rather than the Hanabi dir — a Cargo.lock at the wrong
+    /// workspace, a deps.nix at the wrong frontend, no compile error, no
+    /// test failure on the existing chain pins. This test catches that
+    /// regression by construction: the probe shell exits 0 IFF its cwd
+    /// contains the unique marker file written into the caller-supplied
+    /// dir, so a primitive that resets current_dir fails the probe with
+    /// `test -f` exit 1.
+    ///
+    /// Pre-this-test, every call site that drove cwd via cmd.current_dir
+    /// was relying on an unpinned implementation detail of the primitive.
+    /// Post-this-test, current_dir survival is part of the primitive's
+    /// public typed contract — same way the chain-with-caller-context tests
+    /// pinned the anyhow-composition contract for the federation /
+    /// developer_tools migrations.
+    #[tokio::test]
+    async fn test_run_inherited_status_preserves_caller_supplied_current_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Unique marker name keeps the test hermetic regardless of what
+        // happens to live in the test runner's cwd. If the primitive
+        // rewrote current_dir, /bin/sh would run in some other directory
+        // and `test -f` would fail with exit 1 — Err, not Ok.
+        let marker_name = "forge_current_dir_marker_a1b2c3d4e5f6";
+        std::fs::write(dir.path().join(marker_name), b"").expect("write marker");
+
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!("test -f {}", marker_name))
+            .current_dir(dir.path());
+        let result = run_inherited_status(cmd, "current-dir-probe").await;
+        assert!(
+            result.is_ok(),
+            "primitive must preserve caller-supplied current_dir on the Command; got: {:?}",
+            result.err().map(|e| format!("{:#}", e))
+        );
+    }
 }
