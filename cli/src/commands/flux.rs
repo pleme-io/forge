@@ -292,24 +292,18 @@ pub async fn reconcile(namespace: String) -> Result<()> {
 async fn reconcile_source() -> Result<()> {
     println!("   🔄 Reconciling git source...");
 
-    let status = Command::new("flux")
-        .args([
-            "reconcile",
-            "source",
-            "git",
-            "flux-system",
-            "-n",
-            "flux-system",
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut cmd = Command::new("flux");
+    cmd.args([
+        "reconcile",
+        "source",
+        "git",
+        "flux-system",
+        "-n",
+        "flux-system",
+    ]);
+    crate::retry::run_inherited_status(cmd, "flux reconcile source git")
         .await
-        .context("Failed to run flux reconcile source git")?;
-
-    if !status.success() {
-        bail!("Flux source reconcile failed");
-    }
+        .context("Failed to reconcile FluxCD git source")?;
 
     println!("   ✅ Git source reconciled");
     Ok(())
@@ -423,23 +417,17 @@ async fn reconcile_product_chain(namespace: &str) -> Result<()> {
 async fn reconcile_kustomization() -> Result<()> {
     println!("   🔄 Reconciling kustomization...");
 
-    let status = Command::new("flux")
-        .args([
-            "reconcile",
-            "kustomization",
-            "flux-system",
-            "-n",
-            "flux-system",
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut cmd = Command::new("flux");
+    cmd.args([
+        "reconcile",
+        "kustomization",
+        "flux-system",
+        "-n",
+        "flux-system",
+    ]);
+    crate::retry::run_inherited_status(cmd, "flux reconcile kustomization flux-system")
         .await
-        .context("Failed to run flux reconcile kustomization")?;
-
-    if !status.success() {
-        bail!("Flux kustomization reconcile failed");
-    }
+        .context("Failed to reconcile root FluxCD kustomization")?;
 
     println!("   ✅ Kustomization reconciled");
     Ok(())

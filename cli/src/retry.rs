@@ -3316,4 +3316,53 @@ mod tests {
             result.err().map(|e| format!("{:#}", e))
         );
     }
+
+    /// A caller-supplied `.env(KEY, VAL)` on the `tokio::process::Command`
+    /// survives the primitive's stdio override — same contract as
+    /// current_dir survival, but on the env-var slot. Pinning env survival
+    /// is the third leg of the field-survival contract (alongside the
+    /// stdio-override and current_dir-preservation tests). Several already-
+    /// migrated and prospective-migration sites set env vars on the
+    /// per-cmd Command rather than the process-wide environment:
+    /// `commands/rust_service.rs` AMD64/ARM64 build sites set `GIT_SHA`,
+    /// `ATTIC_TOKEN`, `ATTIC_CACHE`, `ATTIC_SERVER` via
+    /// `cmd.env(...)` so each parallel build carries its own attestation
+    /// input bindings (Bazel / BuildKit per-spawn env shape — env is a
+    /// typed field on the spawn request, not a side-effect of
+    /// process-wide setenv). A future regression that added
+    /// `cmd.env_clear()` or `cmd.env_remove(...)` inside the primitive
+    /// (plausibly as a "make spawn-failure messages more hermetic by
+    /// stripping inherited env" change) would silently route every
+    /// migrated build site into an env-less subprocess — the build
+    /// would fail with a confusing "ATTIC_TOKEN not set" or run with the
+    /// wrong GIT_SHA, with no compile error and no failure on the
+    /// stdio/current_dir/chain pins. This test catches that regression
+    /// by construction: the probe shell exits 0 IFF the caller-supplied
+    /// env var is visible to it, so a primitive that cleared or
+    /// rewrote env fails the probe with `test "$VAR" = ...` exit 1.
+    ///
+    /// Pre-this-test, every call site that drove env via cmd.env was
+    /// relying on an unpinned implementation detail. Post-this-test,
+    /// env survival is part of the primitive's public typed contract —
+    /// same way the current_dir-preservation test pinned the per-cmd
+    /// cwd-survival contract for the web_service.rs migration.
+    #[tokio::test]
+    async fn test_run_inherited_status_preserves_caller_supplied_env_var() {
+        // Unique key keeps the test hermetic regardless of what the test
+        // runner's own environment happens to carry; unique value avoids
+        // any accidental coincidence with an inherited setting.
+        let probe_key = "FORGE_RETRY_ENV_PROBE_K7M3";
+        let probe_val = "expected-survival-marker-9z8y7x";
+
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!("test \"${}\" = \"{}\"", probe_key, probe_val))
+            .env(probe_key, probe_val);
+        let result = run_inherited_status(cmd, "env-survival-probe").await;
+        assert!(
+            result.is_ok(),
+            "primitive must preserve caller-supplied env() bindings on the Command; got: {:?}",
+            result.err().map(|e| format!("{:#}", e))
+        );
+    }
 }
