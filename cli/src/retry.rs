@@ -3205,4 +3205,66 @@ mod tests {
             layers
         );
     }
+
+    /// Symmetric sibling of the non-zero-exit chain test: a caller-supplied
+    /// `.with_context(|| ...)` wrap composes cleanly with the primitive's
+    /// SPAWN-failure branch as well. Pinning this is load-bearing for the
+    /// migrated `commands/developer_tools.rs` sites — `rust_dev`'s
+    /// `docker-compose up` carries `.context("Failed to start
+    /// docker-compose")`, `rust_dev_down`'s `docker-compose down` carries
+    /// `.context("Failed to stop docker-compose")`, and `rust_dev`'s
+    /// `cargo run` carries `.context("Failed to start cargo run")`. On a
+    /// development workstation that lacks `docker-compose` on PATH (a real
+    /// failure mode — the binary is bundled by the dev-shell, not by
+    /// substrate), the spawn-failure branch fires and the operator log
+    /// must surface BOTH the domain narrative ("Failed to start
+    /// docker-compose") AND the primitive's structural envelope ("Failed
+    /// to run docker-compose up") so the operator can distinguish "the
+    /// dev shell didn't include docker-compose" from "docker-compose
+    /// rejected the compose file." Pre-migration, the inline
+    /// `.context("Failed to start docker-compose")?` was the ONLY layer
+    /// (the bail message was suppressed by the `?` on the upstream Err),
+    /// so the structural envelope was absent; post-migration it gains by
+    /// construction. A future regression that returned a flat `String` (or
+    /// swallowed the inner spawn cause via `.map_err(|_| ...)` instead of
+    /// passing through anyhow's chain) would silently break this — the
+    /// operator log would carry the domain narrative but lose the
+    /// "Failed to run {op}" structural marker that distinguishes the
+    /// spawn-failure path from the non-zero-exit path on the operator
+    /// triage surface (THEORY §V.4 Phase 1 attestation-record discipline).
+    #[tokio::test]
+    async fn test_run_inherited_status_chains_with_caller_context_on_spawn_failure() {
+        use anyhow::Context;
+        let cmd = tokio::process::Command::new(
+            "/nonexistent/path/to/inherited-status-binary-that-does-not-exist",
+        );
+        let err = run_inherited_status(cmd, "docker-compose up")
+            .await
+            .with_context(|| "Failed to start docker-compose".to_string())
+            .expect_err("missing binary must fail");
+
+        let outer = format!("{}", err);
+        assert!(
+            outer.contains("Failed to start docker-compose"),
+            "outer Display must carry caller-supplied with_context wrap, got: {outer}"
+        );
+
+        let chained = format!("{:#}", err);
+        assert!(
+            chained.contains("Failed to start docker-compose"),
+            "chain must carry outer domain narrative, got: {chained}"
+        );
+        assert!(
+            chained.contains("Failed to run docker-compose up"),
+            "chain must carry primitive's spawn-failure envelope (op label), got: {chained}"
+        );
+
+        let layers: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+        assert!(
+            layers.len() >= 2,
+            "anyhow chain must preserve at least the outer + primitive layers on spawn-failure, got {} layer(s): {:?}",
+            layers.len(),
+            layers
+        );
+    }
 }
