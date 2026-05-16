@@ -166,16 +166,16 @@ pub async fn update_kustomization(
     if commit {
         info!("📤 Committing and pushing kustomization changes...");
 
-        // Git add
-        let add_status = Command::new("git")
-            .args(&["add", kustomization_path])
-            .status()
+        // Git add — route through `retry::run_inherited_status` so non-zero
+        // exits bail with the structural `(op, exit_code)` record. The bail
+        // closes the chain at the staging boundary so a failed `git add`
+        // cannot silently proceed to the `git commit` + `git push` steps
+        // downstream against an unstaged kustomization.yaml.
+        let mut add_cmd = Command::new("git");
+        add_cmd.args(["add", kustomization_path]);
+        crate::retry::run_inherited_status(add_cmd, "git add")
             .await
             .context("Failed to stage kustomization.yaml")?;
-
-        if !add_status.success() {
-            anyhow::bail!("Failed to stage kustomization.yaml");
-        }
 
         // Extract service name from path for commit message
         let service_name = path
@@ -184,7 +184,12 @@ pub async fn update_kustomization(
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
-        // Git commit
+        // Git commit. Intentionally retains the bare `.status()` + warn-on-
+        // non-zero shape: `git commit` with nothing to commit returns
+        // non-zero, and the kustomization-update path treats that as a
+        // benign no-op (re-run against an already-updated file). Migrating
+        // this site to `run_inherited_status` would change semantics — it
+        // would bail, breaking idempotent re-runs.
         let commit_msg = format!("deploy: update {} to {}", service_name, new_tag);
         let commit_status = Command::new("git")
             .args(&["commit", "-m", &commit_msg])
@@ -198,18 +203,16 @@ pub async fn update_kustomization(
             warn!("Git commit returned non-zero (may be no changes)");
         }
 
-        // Git push
-        let push_status = Command::new("git")
-            .args(&["push", "origin", "main"])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
+        // Git push — route through `retry::run_inherited_status` so a
+        // denied push (auth, branch protection, conflict) bails loudly with
+        // the structural record rather than silently returning Ok and
+        // letting the caller proceed to "Kustomization committed and
+        // pushed" against an unpushed branch.
+        let mut push_cmd = Command::new("git");
+        push_cmd.args(["push", "origin", "main"]);
+        crate::retry::run_inherited_status(push_cmd, "git push")
             .await
-            .context("Failed to push to git")?;
-
-        if !push_status.success() {
-            anyhow::bail!("Failed to push kustomization changes to git");
-        }
+            .context("Failed to push kustomization changes to git")?;
 
         info!("   ✅ Kustomization committed and pushed");
     }
