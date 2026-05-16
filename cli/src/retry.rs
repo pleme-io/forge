@@ -3365,4 +3365,68 @@ mod tests {
             result.err().map(|e| format!("{:#}", e))
         );
     }
+
+    /// A caller-supplied `.args(...)` sequence on the
+    /// `tokio::process::Command` survives the primitive's stdio override
+    /// unchanged — the primitive must neither prepend, append, reorder,
+    /// drop, nor mutate any element of the argv list. Pinning args
+    /// survival is the fourth leg of the field-survival contract trio,
+    /// alongside the stdio-override
+    /// (`test_run_inherited_status_overrides_caller_supplied_stdio`),
+    /// current_dir-preservation
+    /// (`test_run_inherited_status_preserves_caller_supplied_current_dir`),
+    /// and env-preservation
+    /// (`test_run_inherited_status_preserves_caller_supplied_env_var`)
+    /// pins. Every migrated site drives the operation it represents
+    /// through `cmd.args([...])` and trusts the primitive not to
+    /// interpose: a future regression that inserted a "wrapper" subcommand
+    /// (`["sandboxed", ...original_args]`), stripped a flag, or shifted
+    /// argv[0] would silently change every migrated site's semantics with
+    /// no compile error and no failure on the stdio / current_dir / env /
+    /// chain pins. The `commands/rust_service.rs` single-repo deploy path
+    /// makes the dependency literal — three sites
+    /// (`git add <manifest>`, `git commit -m <msg>`, `git push origin
+    /// <branch>`) drive entirely through `.args(...)` with no
+    /// current_dir, no env, no kill_on_drop, so argv fidelity is the
+    /// only survival contract those three rely on. A primitive that
+    /// rewrote argv would push to the wrong branch (`git push origin
+    /// HEAD~1`) or commit with the wrong message — silently incorrect
+    /// deploys, not loud failures.
+    ///
+    /// The probe encodes a content-addressable argv shape: a uniquely-
+    /// labelled marker arg (`forge-args-survival-probe-c4d7e9f1`) and a
+    /// uniquely-labelled value arg (`expected-args-marker-q8w7e6r5`),
+    /// passed positionally so the shell receives `$1` = marker and `$2`
+    /// = value. The test passes IFF both reach the subprocess in the
+    /// exact slots the caller set. A primitive that prepended an
+    /// argument would shift the marker to `$2`, fail the equality check,
+    /// and surface the regression here rather than silently in a
+    /// production `git push` shifted onto the wrong branch.
+    #[tokio::test]
+    async fn test_run_inherited_status_preserves_caller_supplied_args() {
+        // Unique marker + value strings keep the test hermetic — no
+        // chance of accidental coincidence with anything else the test
+        // runner might have set or with /bin/sh's builtins.
+        let marker = "forge-args-survival-probe-c4d7e9f1";
+        let value = "expected-args-marker-q8w7e6r5";
+
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        // -c <script> "$0" "$1" "$2" — /bin/sh -c uses the first positional
+        // as $0, so we feed "probe" as a throwaway $0 and our marker/value
+        // arrive at $1/$2 inside the script.
+        cmd.args([
+            "-c",
+            "test \"$1\" = \"forge-args-survival-probe-c4d7e9f1\" && \
+             test \"$2\" = \"expected-args-marker-q8w7e6r5\"",
+            "probe",
+            marker,
+            value,
+        ]);
+        let result = run_inherited_status(cmd, "args-survival-probe").await;
+        assert!(
+            result.is_ok(),
+            "primitive must preserve caller-supplied .args() argv on the Command; got: {:?}",
+            result.err().map(|e| format!("{:#}", e))
+        );
+    }
 }
