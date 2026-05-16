@@ -1885,30 +1885,27 @@ pub async fn deploy_rust_service_with_tag(
             git_branch,
         )?;
     } else {
-        // Single-repo: git operations in current repo
-        Command::new("git")
-            .args(&["add", &manifest])
-            .status()
+        // Single-repo: git operations in current repo. Each site routes
+        // through `retry::run_inherited_status` so non-zero exits bail
+        // with the structural `(op, exit_code)` record — symmetric with
+        // the multi-repo `git::commit_and_push_in` path's bail-on-
+        // non-zero semantics (which the prior shape silently dropped).
+        let mut add_cmd = Command::new("git");
+        add_cmd.args(["add", &manifest]);
+        crate::retry::run_inherited_status(add_cmd, "git add")
             .await
             .context("Failed to stage manifest")?;
 
-        Command::new("git")
-            .args(&[
-                "commit",
-                "-m",
-                &format!("Deploy {} {}", service, tag_suffix),
-            ])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
+        let commit_msg = format!("Deploy {} {}", service, tag_suffix);
+        let mut commit_cmd = Command::new("git");
+        commit_cmd.args(["commit", "-m", &commit_msg]);
+        crate::retry::run_inherited_status(commit_cmd, "git commit")
             .await
             .context("Failed to commit manifest")?;
 
-        Command::new("git")
-            .args(&["push", "origin", git_branch])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
+        let mut push_cmd = Command::new("git");
+        push_cmd.args(["push", "origin", git_branch]);
+        crate::retry::run_inherited_status(push_cmd, "git push")
             .await
             .context("Failed to push manifest")?;
     }
