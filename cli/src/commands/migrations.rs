@@ -402,11 +402,9 @@ spec:
 
     // Apply the job
     println!("📄 Applying {} migration job: {}", db_label, job_name);
-    Command::new("kubectl")
-        .args(&["apply", "-f", &temp_file])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut apply_cmd = Command::new("kubectl");
+    apply_cmd.args(["apply", "-f", &temp_file]);
+    crate::retry::run_inherited_status(apply_cmd, "kubectl apply")
         .await
         .context("Failed to apply migration job")?;
 
@@ -785,25 +783,19 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     }
 
     // Verify new status
-    let verify = Command::new("kubectl")
-        .args(&[
-            "get",
-            "databasemigration",
-            service,
-            "-n",
-            namespace,
-            "-o",
-            "wide",
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut verify_cmd = Command::new("kubectl");
+    verify_cmd.args([
+        "get",
+        "databasemigration",
+        service,
+        "-n",
+        namespace,
+        "-o",
+        "wide",
+    ]);
+    crate::retry::run_inherited_status(verify_cmd, "kubectl get databasemigration")
         .await
         .context("Failed to verify DatabaseMigration status")?;
-
-    if !verify.success() {
-        bail!("Failed to verify DatabaseMigration status");
-    }
 
     println!();
     println!(
