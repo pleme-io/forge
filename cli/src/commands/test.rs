@@ -211,18 +211,12 @@ async fn run_rust_tests(service: &str, service_dir: &str, test_type: TestType) -
             service.bright_cyan()
         );
 
-        let status = Command::new("cargo")
-            .args(["test", "--lib", "--bins"])
-            .current_dir(service_dir)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
+        let mut cmd = Command::new("cargo");
+        cmd.args(["test", "--lib", "--bins"])
+            .current_dir(service_dir);
+        crate::retry::run_inherited_status(cmd, "cargo test --lib --bins")
             .await
             .context("Failed to run cargo test")?;
-
-        if !status.success() {
-            bail!("Rust unit tests failed");
-        }
 
         println!("  {} Rust unit tests passed", "✅".bright_green());
     }
@@ -234,18 +228,11 @@ async fn run_rust_tests(service: &str, service_dir: &str, test_type: TestType) -
             service.bright_cyan()
         );
 
-        let status = Command::new("cargo")
-            .args(["test", "--test", "*"])
-            .current_dir(service_dir)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
+        let mut cmd = Command::new("cargo");
+        cmd.args(["test", "--test", "*"]).current_dir(service_dir);
+        crate::retry::run_inherited_status(cmd, "cargo test --test *")
             .await
             .context("Failed to run cargo integration tests")?;
-
-        if !status.success() {
-            bail!("Rust integration tests failed");
-        }
 
         println!("  {} Rust integration tests passed", "✅".bright_green());
     }
