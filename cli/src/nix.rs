@@ -274,32 +274,21 @@ pub async fn build_docker_image_from_dir(
 ///
 /// # Errors
 ///
-/// Returns an error if crate2nix is not found or fails to generate.
+/// Returns an error if crate2nix is not found or fails to generate. Routes
+/// the bail-on-non-zero-exit shape through `retry::run_inherited_status`
+/// so the (op, exit_code) tuple is carried into the anyhow chain by
+/// construction — pre-migration the bail dropped the exit code into the
+/// `Option<i32>::fmt(Debug)` rendering (`"with exit code: Some(N)"`),
+/// indistinguishable from "killed by signal" (`"with exit code: None"`)
+/// at the operator log surface.
 pub async fn run_crate2nix(crate2nix_path: &str) -> Result<()> {
     info!("🔄 Running crate2nix generate...");
 
-    let output = Command::new(crate2nix_path)
-        .args(["generate"])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut cmd = Command::new(crate2nix_path);
+    cmd.args(["generate"]);
+    crate::retry::run_inherited_status(cmd, "crate2nix generate")
         .await
-        .with_context(|| {
-            format!(
-                "Failed to run crate2nix.\n\n  \
-                 Path: {}\n  \
-                 Is crate2nix installed?\n\n  \
-                 Install with: nix run nixpkgs#crate2nix -- generate",
-                crate2nix_path
-            )
-        })?;
-
-    if !output.success() {
-        anyhow::bail!(
-            "crate2nix generate failed with exit code: {:?}",
-            output.code()
-        );
-    }
+        .context("Failed to regenerate Cargo.nix")?;
 
     Ok(())
 }
@@ -312,28 +301,19 @@ pub async fn run_crate2nix(crate2nix_path: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error if cargo is not found or update fails.
+/// Returns an error if cargo is not found or update fails. Routes the
+/// bail-on-non-zero-exit shape through `retry::run_inherited_status` so
+/// the (op, exit_code) tuple is carried into the anyhow chain by
+/// construction — same canonical record-shape every other migrated
+/// status-only inherited-stdio site in forge consumes.
 pub async fn run_cargo_update(cargo_path: &str) -> Result<()> {
     info!("📦 Updating Cargo.lock...");
 
-    let output = Command::new(cargo_path)
-        .args(["update"])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    let mut cmd = Command::new(cargo_path);
+    cmd.args(["update"]);
+    crate::retry::run_inherited_status(cmd, "cargo update")
         .await
-        .with_context(|| {
-            format!(
-                "Failed to run cargo update.\n\n  \
-                 Path: {}\n  \
-                 Is cargo installed?",
-                cargo_path
-            )
-        })?;
-
-    if !output.success() {
-        anyhow::bail!("cargo update failed with exit code: {:?}", output.code());
-    }
+        .context("Failed to update Cargo.lock")?;
 
     Ok(())
 }
@@ -493,6 +473,56 @@ mod tests {
     /// `current_dir` error (e.g. via a `.unwrap_or_default()` on the path)
     /// would surface here, not as a confusing "nix succeeded with empty
     /// stdout" downstream.
+    #[tokio::test]
+    async fn test_run_crate2nix_nonzero_exit_carries_structural_record() {
+        // Shim under the basename `crate2nix` so the producer's
+        // `Command::new(crate2nix_path)` sees a binary that exits with
+        // a deterministic non-zero code. The migration routes the
+        // bail-on-non-zero-exit shape through `retry::run_inherited_
+        // status`, which emits `"{op} failed (exit N)"` as the
+        // canonical structural record. Pre-migration the bail string
+        // was `"crate2nix generate failed with exit code: Some(N)"`
+        // (the `Option<i32>::fmt(Debug)` rendering), so the post-
+        // migration canonical-record assertion fails-before-passes-
+        // after by construction.
+        let (_dir, shim) = make_executable_shim("crate2nix", "#!/bin/sh\nexit 9\n");
+        let err = run_crate2nix(&shim)
+            .await
+            .expect_err("nonzero exit must fail");
+        let chain = format!("{:?}", err);
+        assert!(
+            chain.contains("crate2nix generate failed (exit 9)"),
+            "must carry canonical (op, exit_code) record; got: {chain}"
+        );
+        assert!(
+            chain.contains("Failed to regenerate Cargo.nix"),
+            "must carry outer caller-narrative; got: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_cargo_update_nonzero_exit_carries_structural_record() {
+        // Symmetric pin for `run_cargo_update` — same migration shape,
+        // same canonical record-format, same fails-before-passes-after
+        // discipline. Pre-migration the bail was
+        // `"cargo update failed with exit code: Some(N)"`; post-
+        // migration the canonical `"cargo update failed (exit N)"`
+        // record carries the exit code into the chain.
+        let (_dir, shim) = make_executable_shim("cargo", "#!/bin/sh\nexit 13\n");
+        let err = run_cargo_update(&shim)
+            .await
+            .expect_err("nonzero exit must fail");
+        let chain = format!("{:?}", err);
+        assert!(
+            chain.contains("cargo update failed (exit 13)"),
+            "must carry canonical (op, exit_code) record; got: {chain}"
+        );
+        assert!(
+            chain.contains("Failed to update Cargo.lock"),
+            "must carry outer caller-narrative; got: {chain}"
+        );
+    }
+
     #[tokio::test]
     async fn test_run_nix_build_typed_missing_working_dir_routes_to_exec_failed() {
         let (_dir, shim) = make_nix_shim("#!/bin/sh\necho '/nix/store/x'\nexit 0\n");
