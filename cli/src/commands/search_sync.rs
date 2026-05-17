@@ -95,23 +95,10 @@ async fn run_sync_direct(config_path: &Path, config: &NovaSearchConfig) -> Resul
 
     let timeout_duration = Duration::from_secs(config.timeout_secs);
 
-    let result = timeout(timeout_duration, async {
-        let output = cmd
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .await
-            .context("Failed to execute novasearchctl")?;
-
-        if !output.success() {
-            bail!(
-                "novasearchctl sync failed with exit code: {:?}",
-                output.code()
-            );
-        }
-
-        Ok(())
-    })
+    let result = timeout(
+        timeout_duration,
+        crate::retry::run_inherited_status(cmd, "novasearchctl sync"),
+    )
     .await;
 
     match result {
@@ -221,21 +208,13 @@ async fn run_sync_via_kubectl(
 
     let timeout_duration = Duration::from_secs(config.timeout_secs);
 
-    let result = timeout(timeout_duration, async {
-        let output = Command::new("kubectl")
-            .args(&exec_args)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .await
-            .context("Failed to execute kubectl exec")?;
+    let mut exec_cmd = Command::new("kubectl");
+    exec_cmd.args(&exec_args);
 
-        if !output.success() {
-            bail!("kubectl exec novasearchctl sync failed");
-        }
-
-        Ok(())
-    })
+    let result = timeout(
+        timeout_duration,
+        crate::retry::run_inherited_status(exec_cmd, "kubectl exec novasearchctl sync"),
+    )
     .await;
 
     // Clean up: remove config from pod
