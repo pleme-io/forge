@@ -9,7 +9,7 @@ use tokio::process::Command;
 use tracing::info;
 
 use crate::error::GitError;
-use crate::retry::classify_capture_query;
+use crate::retry::{classify_capture, classify_capture_query};
 
 /// Client for git operations
 pub struct GitClient {
@@ -116,8 +116,30 @@ impl GitClient {
         )
     }
 
-    /// Check if working tree is clean
-    pub async fn is_clean(&self) -> Result<bool> {
+    /// Check if working tree is clean.
+    ///
+    /// Spawn-vs-op dispatch flows through the canonical
+    /// [`classify_capture`] primitive — same shape `git.rs::git_capture`
+    /// and `git.rs::git_capture_remote` already drive. Pre-this-migration
+    /// this site did `cmd.output().await.context()? + return
+    /// Ok(output.stdout.is_empty())` and ignored `output.status` entirely,
+    /// so `git status --porcelain` exiting non-zero (the canonical "not a
+    /// git repository" case is exit 128 with empty stdout, but permission-
+    /// denied, signal-kill, and corrupt-index all share the same
+    /// "non-zero exit + empty stdout" shape) routed silently to
+    /// `Ok(true)` — i.e. "the tree is clean, proceed to skip the commit."
+    /// The bootstrap publish path's lone caller
+    /// (`commands/bootstrap.rs::publish_bootstrap_release` —
+    /// `if git.is_clean().await? { info!("No changes to commit"); }`)
+    /// then printed the no-change branch verbatim and the entire publish
+    /// happily declared "✅ Bootstrap release complete!" without staging
+    /// or pushing anything. Post-migration spawn failures route to
+    /// `GitError::ExecFailed` and non-zero exits route to
+    /// `GitError::OpFailed` carrying the structural
+    /// `(exit_code, stderr)` tuple — the bootstrap caller's `?` operator
+    /// surfaces the typed error verbatim instead of folding it into a
+    /// silent skip.
+    pub async fn is_clean(&self) -> Result<bool, GitError> {
         let mut cmd = Command::new("git");
         cmd.args(["status", "--porcelain"]);
 
@@ -125,7 +147,18 @@ impl GitClient {
             cmd.current_dir(dir);
         }
 
-        let output = cmd.output().await.context("Failed to run git status")?;
+        let output = classify_capture(
+            cmd.output().await,
+            |e| GitError::ExecFailed {
+                op: "status --porcelain".to_string(),
+                message: e.to_string(),
+            },
+            |cf| GitError::OpFailed {
+                op: "status --porcelain".to_string(),
+                exit_code: cf.exit_code,
+                stderr: cf.stderr,
+            },
+        )?;
 
         Ok(output.stdout.is_empty())
     }
@@ -257,6 +290,59 @@ mod tests {
         if let Ok(sha) = client.get_sha().await {
             assert!(!sha.is_empty());
             assert!(sha.len() >= 7); // Short SHA is at least 7 chars
+        }
+    }
+
+    /// Pre-migration, `is_clean` ignored `output.status` and returned
+    /// `Ok(output.stdout.is_empty())` for every spawn-succeeded
+    /// invocation — including `git status --porcelain` exiting 128
+    /// against a non-git directory, which prints stderr `fatal: not a
+    /// git repository` and an empty stdout. The bootstrap publish path
+    /// (`commands/bootstrap.rs:569`) folded that into `if
+    /// git.is_clean().await? { info!("No changes to commit"); }` and
+    /// silently skipped the kustomization commit + push entirely. This
+    /// test pins the post-migration contract: a non-zero git exit
+    /// surfaces a typed `GitError::OpFailed` carrying the
+    /// `(exit_code, stderr)` tuple — never the silent `Ok(true)` the
+    /// pre-migration body produced. The bootstrap caller's `?` operator
+    /// now surfaces the failure verbatim instead of folding into the
+    /// no-change branch.
+    #[tokio::test]
+    async fn test_is_clean_non_zero_exit_surfaces_typed_op_failed() {
+        // `tempfile::tempdir()` creates a fresh directory under
+        // `$TMPDIR` (typically `/tmp/...`) with no `.git` ancestor on
+        // any reasonable host or CI runner. `git status --porcelain`
+        // run against such a directory walks up to the filesystem root
+        // without finding a repo and exits 128 with stderr
+        // "fatal: not a git repository". The shape this test pins is
+        // the canonical bug scenario the pre-migration body papered
+        // over — empty stdout + non-zero exit + non-empty stderr.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = GitClient::in_dir(dir.path().to_string_lossy().to_string());
+        let err = client.is_clean().await.expect_err(
+            "is_clean against a non-git directory must surface a typed error, \
+             never the silent Ok(true) the pre-migration body produced",
+        );
+        match err {
+            GitError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "status --porcelain");
+                assert_eq!(
+                    exit_code,
+                    Some(128),
+                    "git's not-a-git-repository exit code must travel through"
+                );
+                assert!(
+                    stderr.contains("not a git repository"),
+                    "stderr must carry git's diagnostic verbatim, got: {stderr:?}"
+                );
+            }
+            other => {
+                panic!("expected GitError::OpFailed carrying (exit_code, stderr), got: {other:?}")
+            }
         }
     }
 }
