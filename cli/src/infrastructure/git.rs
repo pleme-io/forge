@@ -131,6 +131,14 @@ impl GitClient {
     }
 
     /// Stage files for commit
+    ///
+    /// Routes through the canonical [`crate::retry::run_inherited_status`]
+    /// primitive — same shape as the thirty-plus prior status-only sites
+    /// migrated across the forge command surface. Spawn failures and
+    /// non-zero exits both surface a two-layer anyhow chain (outer
+    /// caller-narrative + inner `git add failed (exit N)` structural
+    /// record), carrying the exit code that the pre-migration
+    /// `bail!("git add failed")` dropped.
     pub async fn add(&self, paths: &[&str]) -> Result<()> {
         let mut cmd = Command::new("git");
         cmd.arg("add");
@@ -140,16 +148,19 @@ impl GitClient {
             cmd.current_dir(dir);
         }
 
-        let status = cmd.status().await.context("Failed to run git add")?;
-
-        if !status.success() {
-            anyhow::bail!("git add failed");
-        }
-
-        Ok(())
+        crate::retry::run_inherited_status(cmd, "git add")
+            .await
+            .context("Failed to stage files for commit")
     }
 
     /// Create a commit
+    ///
+    /// Routes through [`crate::retry::run_inherited_status`]. Bootstrap's
+    /// `is_clean()` guard upstream prevents the "nothing to commit"
+    /// non-zero-exit shape from reaching here, so bail-on-non-zero is the
+    /// correct semantic at this site (mirror of the carve-out at
+    /// `commands/push.rs:194-204` which keeps warn-on-failure because its
+    /// caller does NOT pre-check is_clean).
     pub async fn commit(&self, message: &str) -> Result<()> {
         let mut cmd = Command::new("git");
         cmd.args(["commit", "-m", message]);
@@ -158,16 +169,18 @@ impl GitClient {
             cmd.current_dir(dir);
         }
 
-        let status = cmd.status().await.context("Failed to run git commit")?;
-
-        if !status.success() {
-            anyhow::bail!("git commit failed");
-        }
-
-        Ok(())
+        crate::retry::run_inherited_status(cmd, "git commit")
+            .await
+            .context("Failed to commit staged changes")
     }
 
     /// Push to remote
+    ///
+    /// Routes through [`crate::retry::run_inherited_status`]. A denied
+    /// push (auth, branch protection, conflict) now surfaces with the
+    /// exit code carried in the structural record, restoring symmetry
+    /// with the sibling GitOps publish path migrated in fe3b1bc
+    /// (`commands/push.rs::update_kustomization`).
     pub async fn push(&self) -> Result<()> {
         let mut cmd = Command::new("git");
         cmd.arg("push");
@@ -176,13 +189,9 @@ impl GitClient {
             cmd.current_dir(dir);
         }
 
-        let status = cmd.status().await.context("Failed to run git push")?;
-
-        if !status.success() {
-            anyhow::bail!("git push failed");
-        }
-
-        Ok(())
+        crate::retry::run_inherited_status(cmd, "git push")
+            .await
+            .context("Failed to push commits to remote")
     }
 
     /// Get current branch name
