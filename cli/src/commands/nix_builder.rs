@@ -6,10 +6,10 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
-use tokio::process::Command as TokioCommand;
 use tracing::{info, warn};
 
 use crate::commands::push;
+use crate::infrastructure::git::{CommitPushOutcome, GitClient};
 
 /// Verify nix-builder service is accessible
 pub async fn verify(
@@ -273,7 +273,21 @@ pub async fn release(
 
     // Step 8: Commit and push
     info!("━━━ Step 7/7: Commit and Push ━━━");
-    commit_and_push_release(&modified_files, &new_tag).await?;
+    info!("📤 Committing release changes...");
+    let commit_msg = format!(
+        "chore(release): Update nix-builder to {}\n\nUpdated target clusters",
+        new_tag
+    );
+    let file_refs: Vec<&str> = modified_files.iter().map(String::as_str).collect();
+    match GitClient::new()
+        .stage_commit_push_release(&file_refs, &commit_msg, "main")
+        .await?
+    {
+        CommitPushOutcome::Pushed => info!("   ✅ Changes committed and pushed"),
+        CommitPushOutcome::NoChangesStaged => {
+            info!("   No changes to commit (already at this version)")
+        }
+    }
 
     println!();
     info!("╔════════════════════════════════════════════════════════════╗");
@@ -482,69 +496,5 @@ async fn update_builder_pool_builder_image(
         .context("Failed to write builder-pool.yaml")?;
 
     info!("   ✅ Builder pool updated");
-    Ok(())
-}
-
-/// Commit and push release changes for all modified files
-async fn commit_and_push_release(files: &[String], new_tag: &str) -> Result<()> {
-    info!("📤 Committing release changes...");
-
-    // Git add all files
-    let mut add_args = vec!["add".to_string()];
-    add_args.extend(files.iter().cloned());
-
-    let add_status = TokioCommand::new("git")
-        .args(&add_args)
-        .status()
-        .await
-        .context("Failed to stage files")?;
-
-    if !add_status.success() {
-        anyhow::bail!("Failed to stage release files");
-    }
-
-    // Check if there are changes to commit
-    let diff_check = TokioCommand::new("git")
-        .args(&["diff", "--cached", "--quiet"])
-        .status()
-        .await
-        .context("Failed to check for changes")?;
-
-    if diff_check.success() {
-        info!("   No changes to commit (already at this version)");
-        return Ok(());
-    }
-
-    // Commit
-    let commit_msg = format!(
-        "chore(release): Update nix-builder to {}\n\nUpdated target clusters",
-        new_tag
-    );
-
-    let commit_status = TokioCommand::new("git")
-        .args(&["commit", "-m", &commit_msg])
-        .status()
-        .await
-        .context("Failed to commit")?;
-
-    if !commit_status.success() {
-        anyhow::bail!("Failed to commit release changes");
-    }
-
-    info!("   ✅ Changes committed");
-
-    // Push
-    info!("   Pushing to remote...");
-    let push_status = TokioCommand::new("git")
-        .args(&["push", "origin", "main"])
-        .status()
-        .await
-        .context("Failed to push")?;
-
-    if !push_status.success() {
-        anyhow::bail!("Failed to push release to git");
-    }
-
-    info!("   ✅ Pushed to main");
     Ok(())
 }
