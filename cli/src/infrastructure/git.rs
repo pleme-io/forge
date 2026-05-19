@@ -19,6 +19,31 @@ use tokio::process::Command;
 use crate::error::GitError;
 use crate::retry::classify_capture;
 
+/// Outcome of [`GitClient::stage_commit_push_release`].
+///
+/// `Pushed` means the index was dirty after `git add`, a commit was
+/// recorded, and `git push` succeeded. `NoChangesStaged` means the
+/// `git add` left the index byte-identical to `HEAD` — the file set
+/// being released was already at the declared content (typical when
+/// re-running a release at the same SHA after a FluxCD reconcile
+/// already landed it) — so the commit and push are correctly skipped.
+///
+/// The enum is the typed alternative to the pre-migration
+/// `commit_and_push_release` helpers that bailed on
+/// `git diff --cached --quiet` returning success and otherwise
+/// fell through to commit + push; pattern-matching on the typed
+/// outcome gives callers a structural signal for "skipped because
+/// idempotent" without parsing a log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitPushOutcome {
+    /// `git add` left the index dirty; a commit was recorded and
+    /// `git push origin <branch>` succeeded.
+    Pushed,
+    /// `git add` left the index byte-identical to `HEAD`; no commit
+    /// or push was attempted. Idempotent re-release path.
+    NoChangesStaged,
+}
+
 /// Client for git operations
 pub struct GitClient {
     /// Working directory for git commands
@@ -154,11 +179,342 @@ impl GitClient {
             .await
             .context("Failed to push commits to remote")
     }
+
+    /// Push HEAD to an explicit `(remote, branch)` endpoint.
+    ///
+    /// Sibling of [`Self::push`] that targets an explicit
+    /// `git push <remote> <branch>` invocation. Used by release flows
+    /// that always publish to a well-known endpoint (the kenshi /
+    /// kenshi-agent / nix-builder release flows that this module's
+    /// [`Self::stage_commit_push_release`] primitive lifts).
+    /// Routes through [`crate::retry::run_inherited_status`] so the
+    /// failure record carries the exit code that the pre-migration
+    /// `bail!("Failed to push release to git")` sites dropped.
+    pub async fn push_to(&self, remote: &str, branch: &str) -> Result<()> {
+        let mut cmd = Command::new("git");
+        cmd.args(["push", remote, branch]);
+
+        if let Some(ref dir) = self.working_dir {
+            cmd.current_dir(dir);
+        }
+
+        crate::retry::run_inherited_status(cmd, "git push")
+            .await
+            .context("Failed to push commits to remote")
+    }
+
+    /// Return `true` iff `git diff --cached --name-only` reports any
+    /// path with staged changes — i.e. a subsequent `git commit` would
+    /// produce a non-empty commit.
+    ///
+    /// Sibling of [`Self::is_clean`] (which inspects the working tree
+    /// via `git status --porcelain`). The index-side predicate is the
+    /// load-bearing precondition for [`Self::stage_commit_push_release`]'s
+    /// skip-on-idempotent shape: after `git add <files>`, an empty
+    /// staged diff means the files were already at their declared
+    /// content and the commit + push must be skipped to preserve the
+    /// idempotent-re-release contract that downstream FluxCD
+    /// reconciliation depends on.
+    ///
+    /// Spawn-vs-op dispatch flows through the canonical
+    /// [`classify_capture`] primitive — same shape as
+    /// [`Self::is_clean`]. A non-zero git exit (the "not a git
+    /// repository" / "corrupt index" family) routes to
+    /// `GitError::OpFailed` carrying the structural
+    /// `(exit_code, stderr)` tuple instead of folding into a silent
+    /// `Ok(false)` the way a pre-migration body that ignored
+    /// `output.status` would have done.
+    pub async fn has_staged_changes(&self) -> Result<bool, GitError> {
+        let mut cmd = Command::new("git");
+        cmd.args(["diff", "--cached", "--name-only"]);
+
+        if let Some(ref dir) = self.working_dir {
+            cmd.current_dir(dir);
+        }
+
+        let output = classify_capture(
+            cmd.output().await,
+            |e| GitError::ExecFailed {
+                op: "diff --cached --name-only".to_string(),
+                message: e.to_string(),
+            },
+            |cf| GitError::OpFailed {
+                op: "diff --cached --name-only".to_string(),
+                exit_code: cf.exit_code,
+                stderr: cf.stderr,
+            },
+        )?;
+
+        Ok(!output.stdout.is_empty())
+    }
+
+    /// Stage `files`, then — if anything was actually staged — commit
+    /// with `commit_message` and push to `origin/<branch>`. Idempotent
+    /// re-release path: when `git add` leaves the index byte-identical
+    /// to `HEAD`, return [`CommitPushOutcome::NoChangesStaged`]
+    /// WITHOUT committing or pushing.
+    ///
+    /// # Why this primitive
+    ///
+    /// Three identical async helpers — `commit_and_push_release` in
+    /// `commands/kenshi.rs`, `commands/kenshi_agent.rs`, and
+    /// `commands/nix_builder.rs` — each spelled out the same
+    /// four-step sequence verbatim, modulo the commit message format
+    /// and the file-slice element type (`&[&str]` vs `&[String]`):
+    ///
+    /// 1. `git add <files>`
+    /// 2. `git diff --cached --quiet` → bail-skip if clean
+    /// 3. `git commit -m <message>`
+    /// 4. `git push origin main`
+    ///
+    /// Each step was a hand-rolled `TokioCommand::new("git").args(…)
+    /// .status().await.context(…)?` block with an `if
+    /// !status.success() { bail!(…) }` envelope — exactly the
+    /// eleven-line stanza that [`crate::retry::run_inherited_status`]
+    /// was carved out to retire. Three occurrences is THEORY §VI.1's
+    /// three-is-a-law trigger; this primitive is the law-redeeming
+    /// extraction.
+    ///
+    /// Post-migration every step routes through the canonical typed
+    /// primitive: [`Self::add`] / [`Self::commit`] / [`Self::push_to`]
+    /// for the inherited-stdio user-facing ops, [`Self::has_staged_changes`]
+    /// for the index predicate. A future Phase 1 attestation-record
+    /// consumer (THEORY §V.4) that wants to seal each release commit
+    /// pattern-matches on [`CommitPushOutcome::Pushed`] in one place
+    /// instead of three.
+    pub async fn stage_commit_push_release(
+        &self,
+        files: &[&str],
+        commit_message: &str,
+        branch: &str,
+    ) -> Result<CommitPushOutcome> {
+        self.add(files).await?;
+        if !self.has_staged_changes().await? {
+            return Ok(CommitPushOutcome::NoChangesStaged);
+        }
+        self.commit(commit_message).await?;
+        self.push_to("origin", branch).await?;
+        Ok(CommitPushOutcome::Pushed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::process::Command as SyncCommand;
+
+    /// Initialize a hermetic git repo with one committed file under
+    /// `dir`, configured with a stable identity so `git commit` works
+    /// without depending on the host's global config. Returns the dir
+    /// path as a `String` for `GitClient::in_dir`.
+    fn init_repo_with_one_commit(dir: &Path) {
+        let run = |args: &[&str]| {
+            let status = SyncCommand::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git spawn");
+            assert!(status.success(), "git {args:?} failed in {dir:?}");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "forge-test@example.invalid"]);
+        run(&["config", "user.name", "forge-test"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
+        run(&["add", "seed.txt"]);
+        run(&["commit", "-q", "-m", "seed"]);
+    }
+
+    /// Configure `dir` to push to a fresh bare repo at `bare_dir` as
+    /// the `origin` remote. The bare-repo target is what makes
+    /// `git push origin <branch>` succeed hermetically — no network,
+    /// no upstream server, just two local directories.
+    fn add_bare_origin(dir: &Path, bare_dir: &Path) {
+        let init = SyncCommand::new("git")
+            .args(["init", "-q", "--bare"])
+            .current_dir(bare_dir)
+            .status()
+            .expect("git init --bare");
+        assert!(init.success());
+        let add = SyncCommand::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                bare_dir.to_str().expect("bare path utf-8"),
+            ])
+            .current_dir(dir)
+            .status()
+            .expect("git remote add");
+        assert!(add.success());
+    }
+
+    /// On a freshly-seeded repo with no `git add` since the last
+    /// commit, the index is byte-identical to `HEAD` and
+    /// `has_staged_changes` MUST return `false`. Pins the predicate's
+    /// happy-path quiescent behavior — the precondition for
+    /// `stage_commit_push_release` returning `NoChangesStaged`.
+    #[tokio::test]
+    async fn test_has_staged_changes_returns_false_on_clean_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_repo_with_one_commit(dir.path());
+        let client = GitClient::in_dir(dir.path().to_string_lossy().to_string());
+        let staged = client
+            .has_staged_changes()
+            .await
+            .expect("predicate must succeed");
+        assert!(
+            !staged,
+            "clean index must report no staged changes; got staged=true"
+        );
+    }
+
+    /// After staging a new file, the index diverges from `HEAD` and
+    /// `has_staged_changes` MUST return `true`. Pins the predicate's
+    /// dirty-path behavior — the precondition for
+    /// `stage_commit_push_release` falling through to commit + push.
+    #[tokio::test]
+    async fn test_has_staged_changes_returns_true_when_index_dirty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_repo_with_one_commit(dir.path());
+        std::fs::write(dir.path().join("staged.txt"), "fresh\n").unwrap();
+        let add = SyncCommand::new("git")
+            .args(["add", "staged.txt"])
+            .current_dir(dir.path())
+            .status()
+            .expect("git add");
+        assert!(add.success());
+        let client = GitClient::in_dir(dir.path().to_string_lossy().to_string());
+        let staged = client
+            .has_staged_changes()
+            .await
+            .expect("predicate must succeed");
+        assert!(
+            staged,
+            "dirty index must report staged changes; got staged=false"
+        );
+    }
+
+    /// `has_staged_changes` against a non-git directory MUST surface
+    /// a typed `GitError::OpFailed` carrying the structural
+    /// `(exit_code, stderr)` tuple — never the silent `Ok(false)` a
+    /// pre-migration body that ignored `output.status` would have
+    /// produced. The structural pin is the typed split (OpFailed,
+    /// NOT ExecFailed — git DID spawn, it just rejected the
+    /// invocation) carrying a non-zero exit and non-empty stderr;
+    /// the specific exit-code value and diagnostic text vary across
+    /// git versions (some surface "not a git repository" with exit
+    /// 128, others fall through to `git diff --no-index` and reject
+    /// `--cached` with a usage error and a different exit code) and
+    /// pinning either would couple the test to git's release-train
+    /// rather than to the typed-CLI contract this primitive carves
+    /// out. Sibling of
+    /// `test_is_clean_non_zero_exit_surfaces_typed_op_failed` above.
+    #[tokio::test]
+    async fn test_has_staged_changes_non_zero_exit_surfaces_typed_op_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = GitClient::in_dir(dir.path().to_string_lossy().to_string());
+        let err = client
+            .has_staged_changes()
+            .await
+            .expect_err("non-git directory must surface typed error");
+        match err {
+            GitError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "diff --cached --name-only");
+                let code = exit_code.expect("non-zero exit must travel through");
+                assert!(
+                    code != 0,
+                    "non-git directory must surface a non-zero exit code; got {code}"
+                );
+                assert!(
+                    !stderr.is_empty(),
+                    "stderr must carry git's diagnostic (any form); got empty stderr"
+                );
+            }
+            other => panic!("expected GitError::OpFailed, got: {other:?}"),
+        }
+    }
+
+    /// `stage_commit_push_release` invoked against a file set whose
+    /// content already matches `HEAD` MUST return
+    /// `CommitPushOutcome::NoChangesStaged` and MUST NOT attempt the
+    /// commit or push. Pins the idempotent-re-release contract: a
+    /// re-run of a release at the same SHA does not produce an
+    /// orphaned empty commit and does not contact the (in-test:
+    /// absent) remote.
+    ///
+    /// We assert the "did not push" half structurally: the test repo
+    /// has NO `origin` remote configured, so a fall-through to
+    /// `push_to("origin", "main")` would fail with `GitError::OpFailed`
+    /// or `RemoteOpFailed` and the test would surface that error.
+    /// A clean `Ok(NoChangesStaged)` proves the skip happened before
+    /// any push spawn.
+    #[tokio::test]
+    async fn test_stage_commit_push_release_skips_on_clean_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_repo_with_one_commit(dir.path());
+        let client = GitClient::in_dir(dir.path().to_string_lossy().to_string());
+        let outcome = client
+            .stage_commit_push_release(&["seed.txt"], "should-not-commit", "main")
+            .await
+            .expect("re-adding already-committed file must succeed with NoChangesStaged");
+        assert_eq!(
+            outcome,
+            CommitPushOutcome::NoChangesStaged,
+            "re-staging an already-committed file must skip commit + push"
+        );
+    }
+
+    /// `stage_commit_push_release` invoked with a dirty index MUST
+    /// commit and push, returning `CommitPushOutcome::Pushed`. Uses
+    /// a bare local repo as the `origin` remote so the push succeeds
+    /// hermetically. Pins the happy-path sequence: add → commit →
+    /// push, with the typed outcome surfacing the terminal step.
+    #[tokio::test]
+    async fn test_stage_commit_push_release_returns_pushed_on_dirty_index() {
+        let work = tempfile::tempdir().expect("work tempdir");
+        let bare = tempfile::tempdir().expect("bare tempdir");
+        init_repo_with_one_commit(work.path());
+        add_bare_origin(work.path(), bare.path());
+        std::fs::write(work.path().join("change.txt"), "delta\n").unwrap();
+        let client = GitClient::in_dir(work.path().to_string_lossy().to_string());
+        let outcome = client
+            .stage_commit_push_release(&["change.txt"], "test: release", "main")
+            .await
+            .expect("happy-path stage+commit+push must succeed");
+        assert_eq!(
+            outcome,
+            CommitPushOutcome::Pushed,
+            "dirty index must drive through to commit + push"
+        );
+    }
+
+    /// `CommitPushOutcome::Pushed` and `NoChangesStaged` MUST be
+    /// distinct variants — pattern-match exhaustively. Pins the
+    /// typed-discriminator contract: callers MUST handle both
+    /// outcomes (logging "pushed" vs "no-op"), and a future drift
+    /// that fused the two into a bool would lose the structural
+    /// signal this primitive carves out.
+    #[test]
+    fn test_commit_push_outcome_variants_are_distinct() {
+        assert_ne!(
+            CommitPushOutcome::Pushed,
+            CommitPushOutcome::NoChangesStaged
+        );
+        fn classify(o: CommitPushOutcome) -> &'static str {
+            match o {
+                CommitPushOutcome::Pushed => "pushed",
+                CommitPushOutcome::NoChangesStaged => "skipped",
+            }
+        }
+        assert_eq!(classify(CommitPushOutcome::Pushed), "pushed");
+        assert_eq!(classify(CommitPushOutcome::NoChangesStaged), "skipped");
+    }
 
     /// Pre-migration, `is_clean` ignored `output.status` and returned
     /// `Ok(output.stdout.is_empty())` for every spawn-succeeded
