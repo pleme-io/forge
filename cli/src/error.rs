@@ -124,18 +124,6 @@ pub enum RegistryError {
 /// without parsing log output.
 #[derive(Error, Debug)]
 pub enum GitError {
-    #[error("Not a git repository")]
-    NotARepository,
-
-    #[error("Failed to get git SHA: {0}")]
-    ShaFailed(String),
-
-    #[error("Git command failed: {command}")]
-    CommandFailed { command: String },
-
-    #[error("Uncommitted changes detected")]
-    DirtyWorkingTree,
-
     #[error("Failed to spawn git for {op}: {message}")]
     ExecFailed { op: String, message: String },
 
@@ -647,24 +635,6 @@ mod tests {
     }
 
     #[test]
-    fn test_git_error_variants() {
-        assert!(GitError::NotARepository
-            .to_string()
-            .contains("git repository"));
-        assert!(GitError::ShaFailed("bad ref".into())
-            .to_string()
-            .contains("bad ref"));
-        assert!(GitError::CommandFailed {
-            command: "push".into()
-        }
-        .to_string()
-        .contains("push"));
-        assert!(GitError::DirtyWorkingTree
-            .to_string()
-            .contains("Uncommitted"));
-    }
-
-    #[test]
     fn test_git_error_exec_failed_display() {
         let err = GitError::ExecFailed {
             op: "rev-parse".into(),
@@ -720,10 +690,6 @@ mod tests {
     fn test_git_error_failure_split_is_typed() {
         fn classify(e: &GitError) -> &'static str {
             match e {
-                GitError::NotARepository => "not_a_repo",
-                GitError::ShaFailed(_) => "sha",
-                GitError::CommandFailed { .. } => "command",
-                GitError::DirtyWorkingTree => "dirty",
                 GitError::ExecFailed { .. } => "exec",
                 GitError::OpFailed { .. } => "op",
                 GitError::RemoteOpFailed { .. } => "remote_op",
@@ -1172,7 +1138,11 @@ mod tests {
 
     #[test]
     fn test_all_deploy_error_from_conversions() {
-        let _: DeployError = GitError::NotARepository.into();
+        let _: DeployError = GitError::ExecFailed {
+            op: "x".into(),
+            message: "m".into(),
+        }
+        .into();
         let _: DeployError = NixBuildError::CargoNixMissing.into();
         let _: DeployError = KubernetesError::RolloutTimeout { timeout_secs: 1 }.into();
         let _: DeployError = ConfigError::MissingField { field: "x".into() }.into();
@@ -1349,7 +1319,11 @@ mod tests {
 
     #[test]
     fn test_deploy_error_display_wraps_inner() {
-        let err: DeployError = GitError::NotARepository.into();
+        let err: DeployError = GitError::ExecFailed {
+            op: "x".into(),
+            message: "m".into(),
+        }
+        .into();
         assert!(err.to_string().contains("Git error"));
 
         let err: DeployError = ConfigError::MissingField { field: "x".into() }.into();

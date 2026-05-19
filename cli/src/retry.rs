@@ -429,11 +429,12 @@ where
 /// The op-failure closure receives the canonical [`CapturedFailure`]
 /// (UTF-8-lossy-trimmed stderr + extracted exit_code) — same as
 /// [`classify_capture`] — so a site that DOES want the structural-record
-/// tuple in its op-failure variant (`GitError::ShaFailed` carrying the
-/// stderr) destructures `cf.exit_code` and `cf.stderr` by name, and a
-/// site that does NOT want them (`RegistryError::RemoteImageNotFound`
-/// carrying only `(registry, tag)` because the precondition meaning is
-/// "the queried tag isn't there") simply ignores `cf` with `|_cf| ...`.
+/// tuple in its op-failure variant (`GitError::OpFailed` carrying the
+/// `(exit_code, stderr)` pair) destructures `cf.exit_code` and
+/// `cf.stderr` by name, and a site that does NOT want them
+/// (`RegistryError::RemoteImageNotFound` carrying only `(registry, tag)`
+/// because the precondition meaning is "the queried tag isn't there")
+/// simply ignores `cf` with `|_cf| ...`.
 /// Either choice keeps the typed-error producer surface uniform across
 /// the four already-migrated families (Registry, Nix, Attic, Git) and
 /// the canonical retry primitives.
@@ -2486,12 +2487,12 @@ mod tests {
     /// which receives the canonical [`CapturedFailure`] carrying the
     /// extracted `(exit_code, stderr)` tuple — UTF-8-lossy-decoded and
     /// trimmed. A query-shape site that wants the structural tuple
-    /// (e.g. `GitError::ShaFailed` carrying the stderr) destructures
-    /// `cf.exit_code` and `cf.stderr` by name; a site that wants only
-    /// the precondition meaning (e.g. `RegistryError::RemoteImageNotFound`
-    /// carrying just the (registry, tag) tuple — "the queried thing
-    /// isn't there") ignores `cf` with `|_cf| ...`. Both shapes are
-    /// in-tree consumers of this primitive.
+    /// (e.g. `GitError::OpFailed` carrying the `(exit_code, stderr)`
+    /// pair) destructures `cf.exit_code` and `cf.stderr` by name; a site
+    /// that wants only the precondition meaning (e.g.
+    /// `RegistryError::RemoteImageNotFound` carrying just the (registry,
+    /// tag) tuple — "the queried thing isn't there") ignores `cf` with
+    /// `|_cf| ...`. Both shapes are in-tree consumers of this primitive.
     #[test]
     fn test_classify_capture_query_op_failure_routes_to_on_op_with_captured_failure() {
         let out = synth_output(false, b"", b"  fatal: not a git repository  \n");
@@ -2529,8 +2530,8 @@ mod tests {
     /// this guard a future regression that conflated op-failure with
     /// spawn-failure (e.g. synthesizing an empty `CapturedFailure` from
     /// an `Err(io::Error)` and routing through `on_op`) would silently
-    /// turn every "git not on PATH" failure into a `ShaFailed("")`
-    /// record, drift-prone against the canonical
+    /// turn every "git not on PATH" failure into an `OpFailed` record
+    /// with empty stderr, drift-prone against the canonical
     /// [`CommandAttemptFailure::is_spawn_failure`] post-loop predicate.
     #[test]
     fn test_classify_capture_query_arms_are_disjoint() {
