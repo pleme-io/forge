@@ -33,10 +33,18 @@
 //!   bound to a local `_dir` binding for the duration of the test. The
 //!   shape `(TempDir, String)` makes this binding-or-leak choice
 //!   explicit at every call site.
+//!
+//! The module also hosts the canonical **hermetic git fixture** —
+//! [`init_repo_with_one_commit`] + [`add_bare_origin`] — that the three
+//! release-commit test modules (`infrastructure/git.rs`,
+//! `commands/release_commit.rs`, `commands/product_release.rs`) each
+//! re-spelled verbatim. Same three-times-rule law-redeeming carve-out
+//! as `make_executable_shim`, applied to the git fixture surface.
 
 #![cfg(test)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command as SyncCommand;
 
 /// Write an executable shim script to a fresh tempdir under `name`,
 /// chmod it 0o755 (Unix), and return the `(TempDir, absolute path)` pair.
@@ -73,6 +81,119 @@ pub fn make_executable_shim(name: &str, body: &str) -> (tempfile::TempDir, Strin
     }
     let path = shim.display().to_string();
     (dir, path)
+}
+
+/// Initialize a hermetic git repo with one committed file under `dir`.
+///
+/// Runs `git init -q -b main`, configures a stable identity
+/// (`user.email`, `user.name`) and disables commit signing
+/// (`commit.gpgsign=false`), then writes a `seed.txt` fixture, stages
+/// it, and commits with the message `"seed"`. The branch is `main` —
+/// matches the branch every release-commit path in forge targets — so
+/// a subsequent `add_bare_origin` + `git push origin main` round-trip
+/// resolves against a real ref without dangling-HEAD ambiguity.
+///
+/// # Why centralized
+///
+/// Three test modules — `cli/src/infrastructure/git.rs`,
+/// `cli/src/commands/release_commit.rs`, and
+/// `cli/src/commands/product_release.rs` — each re-spelled this exact
+/// thirteen-line stanza VERBATIM. Three identically-shaped copies past
+/// THEORY §VI.1's three-is-a-law threshold; this helper is the
+/// law-redeeming carve-out. A future fourth release-commit test (the
+/// shape this fixture exists to drive — a typed commit-and-push
+/// primitive that needs a real git working tree against a real bare
+/// origin) inherits the canonical fixture for free.
+///
+/// # Why `commit.gpgsign=false`
+///
+/// The managed remote-execution environment forge runs in carries
+/// `commit.gpgsign=true` in the host's global gitconfig, with a custom
+/// signing program. Disabling signing locally on the test work-tree
+/// keeps the seed commit hermetic against the host config so the
+/// fixture spins up identically whether the test runs locally, on CI,
+/// or in the managed remote sandbox.
+///
+/// # Panics
+///
+/// Panics on any failed git spawn or non-zero exit — a fixture-setup
+/// failure should fail the test loudly before the function under test
+/// fires, not be deferred into a confusing downstream "git rejected
+/// the operation" diagnostic. Same loud-failure discipline as
+/// [`make_executable_shim`]'s `expect("write shim")`.
+pub fn init_repo_with_one_commit(dir: &Path) {
+    let run = |args: &[&str]| {
+        let status = SyncCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git spawn");
+        assert!(status.success(), "git {args:?} failed in {dir:?}");
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "forge-test@example.invalid"]);
+    run(&["config", "user.name", "forge-test"]);
+    run(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("seed.txt"), "seed\n").expect("write seed.txt");
+    run(&["add", "seed.txt"]);
+    run(&["commit", "-q", "-m", "seed"]);
+}
+
+/// Initialize a fresh bare git repo at `bare_dir` and add it as
+/// `origin` on the work-tree at `work_dir`.
+///
+/// Runs `git init -q --bare --initial-branch=main` on `bare_dir` so
+/// the bare's HEAD resolves to `main` (the branch every release-commit
+/// path in forge targets) — without `--initial-branch=main` the
+/// bare's HEAD would default to `master` on some git versions and a
+/// subsequent `git clone <bare>` would resolve HEAD against a dangling
+/// ref, surfacing as an empty probe-clone in the round-trip tests this
+/// fixture drives.
+///
+/// Then runs `git remote add origin <bare>` on `work_dir` so a
+/// subsequent `git push origin main` lands the work-tree's commits on
+/// the bare without contacting any network endpoint.
+///
+/// # Why centralized
+///
+/// Three test modules carried near-identical copies of this fixture
+/// with the `--initial-branch=main` flag drifting in two of three
+/// (THEORY §VI.1: "two occurrences is a coincidence; three is a
+/// law"). The pre-lift `cli/src/infrastructure/git.rs` copy omitted
+/// the flag — papered over by the fact that its sole call site
+/// asserted only on `CommitPushOutcome` and never probe-cloned. The
+/// other two carried the corrected form. Centralizing here pins the
+/// correct form once and prevents a future drift onto either spelling.
+///
+/// # Panics
+///
+/// Panics on any failed git spawn or non-zero exit — fixture-setup
+/// failure is loud rather than deferred into a downstream "remote
+/// rejected" diagnostic.
+pub fn add_bare_origin(work_dir: &Path, bare_dir: &Path) {
+    let init = SyncCommand::new("git")
+        .args(["init", "-q", "--bare", "--initial-branch=main"])
+        .current_dir(bare_dir)
+        .status()
+        .expect("git init --bare spawn");
+    assert!(
+        init.success(),
+        "git init --bare must succeed in {bare_dir:?}"
+    );
+    let add = SyncCommand::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            bare_dir.to_str().expect("bare path utf-8"),
+        ])
+        .current_dir(work_dir)
+        .status()
+        .expect("git remote add spawn");
+    assert!(
+        add.success(),
+        "git remote add origin must succeed in {work_dir:?}"
+    );
 }
 
 #[cfg(test)]
@@ -195,6 +316,121 @@ mod tests {
         assert!(
             !std::path::Path::new(&path).exists(),
             "shim must be unlinked after TempDir drops, but still exists at: {path}"
+        );
+    }
+
+    /// `init_repo_with_one_commit` leaves the work-tree on `main`
+    /// with the seed commit at `HEAD` and `git status --porcelain`
+    /// reporting a clean tree. Pins the post-condition every
+    /// downstream release-commit test consumes: the fixture's
+    /// `HEAD` is a real commit on `main`, not a dangling ref or an
+    /// orphaned root. A future drift that initialized the repo on
+    /// `master` (the system default on some git versions, the trap
+    /// the `-b main` flag exists to dodge) would surface here as a
+    /// branch-name mismatch instead of a confusing "remote
+    /// rejected" downstream when the work-tree's `main` push hits
+    /// the bare's `master` HEAD.
+    #[test]
+    fn test_init_repo_with_one_commit_leaves_clean_tree_on_main() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_repo_with_one_commit(dir.path());
+
+        let branch = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git rev-parse spawn");
+        assert!(branch.status.success(), "git rev-parse must succeed");
+        assert_eq!(
+            String::from_utf8_lossy(&branch.stdout).trim(),
+            "main",
+            "fixture must initialize on `main`, not `master`"
+        );
+
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git status spawn");
+        assert!(status.status.success(), "git status must succeed");
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout).trim(),
+            "",
+            "post-fixture work-tree must be clean"
+        );
+
+        let subject = Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git log spawn");
+        assert!(subject.status.success(), "git log must succeed");
+        assert_eq!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            "seed",
+            "seed commit subject must be canonical"
+        );
+    }
+
+    /// `add_bare_origin` configures `origin` such that a subsequent
+    /// `git push origin main` on the work-tree lands the commit on
+    /// the bare repo, and a probe `git clone <bare>` resolves HEAD
+    /// against a real ref on `main`. Pins the end-to-end round-trip
+    /// every typed-commit-and-push test (`commit_artifact_tags`,
+    /// `commit_cluster_overlay_release`,
+    /// `stage_commit_push_release`) drives through this fixture.
+    ///
+    /// A future drift that dropped the `--initial-branch=main` flag
+    /// on `git init --bare` (the regression the pre-lift
+    /// `infrastructure/git.rs` copy carried) would surface here as
+    /// the probe-clone's `git log` failing or returning an empty
+    /// subject — not as a confusing downstream typed-error test
+    /// failure with an "everything looks fine" appearance.
+    #[test]
+    fn test_add_bare_origin_round_trips_push_then_clone() {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let work = parent.path().join("work");
+        let bare = parent.path().join("origin.git");
+        std::fs::create_dir(&work).expect("mkdir work");
+        std::fs::create_dir(&bare).expect("mkdir bare");
+        init_repo_with_one_commit(&work);
+        add_bare_origin(&work, &bare);
+
+        let push = Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&work)
+            .status()
+            .expect("git push spawn");
+        assert!(push.success(), "push to fixture's bare origin must succeed");
+
+        let probe = parent.path().join("probe");
+        let clone = Command::new("git")
+            .args([
+                "clone",
+                bare.to_str().expect("bare utf-8"),
+                probe.to_str().expect("probe utf-8"),
+            ])
+            .status()
+            .expect("git clone spawn");
+        assert!(
+            clone.success(),
+            "probe clone of fixture's bare must succeed; \
+             --initial-branch=main drift would surface here"
+        );
+
+        let subject = Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(&probe)
+            .output()
+            .expect("git log spawn");
+        assert!(
+            subject.status.success(),
+            "probe-clone git log must succeed against a real ref"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            "seed",
+            "probe-clone must resolve HEAD to the seed commit on main"
         );
     }
 }
