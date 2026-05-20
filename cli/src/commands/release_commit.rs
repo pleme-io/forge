@@ -86,57 +86,8 @@ pub async fn commit_cluster_overlay_release(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use crate::test_support::{add_bare_origin, init_repo_with_one_commit};
     use std::process::Command as SyncCommand;
-
-    /// Initialize a hermetic git repo with one committed file under
-    /// `dir`, configured with a stable identity + signing disabled so
-    /// `git commit` works on a managed remote-execution host whose
-    /// global `commit.gpgsign=true` would otherwise trip the seed
-    /// commit. Mirror of the canonical fixture used by
-    /// `infrastructure/git.rs` and `commands/product_release.rs` tests.
-    fn init_repo_with_one_commit(dir: &Path) {
-        let run = |args: &[&str]| {
-            let status = SyncCommand::new("git")
-                .args(args)
-                .current_dir(dir)
-                .status()
-                .expect("git spawn");
-            assert!(status.success(), "git {args:?} failed in {dir:?}");
-        };
-        run(&["init", "-q", "-b", "main"]);
-        run(&["config", "user.email", "forge-test@example.invalid"]);
-        run(&["config", "user.name", "forge-test"]);
-        run(&["config", "commit.gpgsign", "false"]);
-        std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
-        run(&["add", "seed.txt"]);
-        run(&["commit", "-q", "-m", "seed"]);
-    }
-
-    /// Configure `dir` to push to a fresh bare repo at `bare_dir` as
-    /// the `origin` remote. `--initial-branch=main` keeps the bare's
-    /// HEAD aligned with the work-tree's `main` branch so a subsequent
-    /// `git clone <bare>` resolves HEAD against a real ref instead of
-    /// a dangling `master` (some git versions' system default).
-    fn add_bare_origin(dir: &Path, bare_dir: &Path) {
-        let init = SyncCommand::new("git")
-            .args(["init", "-q", "--bare", "--initial-branch=main"])
-            .current_dir(bare_dir)
-            .status()
-            .expect("git init --bare");
-        assert!(init.success());
-        let add = SyncCommand::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                bare_dir.to_str().expect("bare path utf-8"),
-            ])
-            .current_dir(dir)
-            .status()
-            .expect("git remote add");
-        assert!(add.success());
-    }
 
     /// The pure commit-subject helper MUST produce the canonical
     /// `"chore(release): Update <component> to <new_tag>\n\nUpdated

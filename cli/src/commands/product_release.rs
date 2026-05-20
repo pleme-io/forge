@@ -835,59 +835,8 @@ pub async fn product_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{add_bare_origin, init_repo_with_one_commit};
     use std::process::Command as SyncCommand;
-
-    /// Initialize a hermetic git repo with one committed file under
-    /// `dir`, configured with a stable identity so `git commit` works
-    /// without depending on the host's global config. Mirrors the
-    /// shape used by `infrastructure/git.rs`'s
-    /// `init_repo_with_one_commit` test helper — the canonical
-    /// hermetic-git fixture across forge's typed-CLI tests.
-    fn init_repo_with_one_commit(dir: &std::path::Path) {
-        let run = |args: &[&str]| {
-            let status = SyncCommand::new("git")
-                .args(args)
-                .current_dir(dir)
-                .status()
-                .expect("git spawn");
-            assert!(status.success(), "git {args:?} failed in {dir:?}");
-        };
-        run(&["init", "-q", "-b", "main"]);
-        run(&["config", "user.email", "forge-test@example.invalid"]);
-        run(&["config", "user.name", "forge-test"]);
-        run(&["config", "commit.gpgsign", "false"]);
-        std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
-        run(&["add", "seed.txt"]);
-        run(&["commit", "-q", "-m", "seed"]);
-    }
-
-    /// Configure `dir` to push to a fresh bare repo at `bare_dir` as
-    /// the `origin` remote. The bare-repo target is what makes
-    /// `git push origin main` succeed hermetically — no network, no
-    /// upstream server, just two local directories.
-    fn add_bare_origin(dir: &std::path::Path, bare_dir: &std::path::Path) {
-        // `--initial-branch=main` aligns the bare repo's HEAD with the
-        // work-tree's `main` branch so a subsequent `git clone <bare>`
-        // resolves HEAD against a real ref instead of a dangling
-        // `master` (the system default on some git versions).
-        let init = SyncCommand::new("git")
-            .args(["init", "-q", "--bare", "--initial-branch=main"])
-            .current_dir(bare_dir)
-            .status()
-            .expect("git init --bare");
-        assert!(init.success());
-        let add = SyncCommand::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                bare_dir.to_str().expect("bare path utf-8"),
-            ])
-            .current_dir(dir)
-            .status()
-            .expect("git remote add");
-        assert!(add.success());
-    }
 
     /// `commit_artifact_tags` MUST use the canonical commit-subject
     /// format `"chore: update artifact tags to <sha>"` and MUST land
