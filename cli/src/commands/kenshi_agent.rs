@@ -8,7 +8,7 @@ use std::path::Path;
 use tracing::info;
 
 use crate::commands::push;
-use crate::infrastructure::git::{CommitPushOutcome, GitClient};
+use crate::commands::release_commit::commit_cluster_overlay_release;
 
 /// Release kenshi-agent: push image and update K8s manifests for all clusters
 ///
@@ -81,28 +81,18 @@ pub async fn release(
     // Step 7: Commit and push
     info!("━━━ Step 6/6: Commit and Push ━━━");
     info!("📤 Committing release changes...");
-    let commit_msg = format!(
-        "chore(release): Update kenshi-agent to {}\n\nUpdated target clusters",
-        new_tag
-    );
-    match GitClient::new()
-        .stage_commit_push_release(
-            &[
-                &primary_kustomization,
-                &secondary_kustomization,
-                &primary_builder_pool,
-                &secondary_builder_pool,
-            ],
-            &commit_msg,
-            "main",
-        )
-        .await?
-    {
-        CommitPushOutcome::Pushed => info!("   ✅ Changes committed and pushed"),
-        CommitPushOutcome::NoChangesStaged => {
-            info!("   No changes to commit (already at this version)")
-        }
-    }
+    commit_cluster_overlay_release(
+        None,
+        "kenshi-agent",
+        &new_tag,
+        &[
+            &primary_kustomization,
+            &secondary_kustomization,
+            &primary_builder_pool,
+            &secondary_builder_pool,
+        ],
+    )
+    .await?;
 
     println!();
     info!("╔════════════════════════════════════════════════════════════╗");

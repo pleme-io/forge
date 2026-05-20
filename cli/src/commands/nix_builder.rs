@@ -9,7 +9,7 @@ use std::process::Command;
 use tracing::{info, warn};
 
 use crate::commands::push;
-use crate::infrastructure::git::{CommitPushOutcome, GitClient};
+use crate::commands::release_commit::commit_cluster_overlay_release;
 
 /// Verify nix-builder service is accessible
 pub async fn verify(
@@ -274,20 +274,8 @@ pub async fn release(
     // Step 8: Commit and push
     info!("━━━ Step 7/7: Commit and Push ━━━");
     info!("📤 Committing release changes...");
-    let commit_msg = format!(
-        "chore(release): Update nix-builder to {}\n\nUpdated target clusters",
-        new_tag
-    );
     let file_refs: Vec<&str> = modified_files.iter().map(String::as_str).collect();
-    match GitClient::new()
-        .stage_commit_push_release(&file_refs, &commit_msg, "main")
-        .await?
-    {
-        CommitPushOutcome::Pushed => info!("   ✅ Changes committed and pushed"),
-        CommitPushOutcome::NoChangesStaged => {
-            info!("   No changes to commit (already at this version)")
-        }
-    }
+    commit_cluster_overlay_release(None, "nix-builder", &new_tag, &file_refs).await?;
 
     println!();
     info!("╔════════════════════════════════════════════════════════════╗");
