@@ -19,15 +19,12 @@ use tokio::process::Command;
 #[cfg(feature = "attestation")]
 use crate::commands::attestation;
 use crate::config::DeployConfig;
+use crate::infrastructure::git::{CommitPushOutcome, GitClient};
 
 /// Run a forge subcommand by re-invoking the current binary.
 pub(crate) async fn run_forge_subcommand(args: &[&str]) -> Result<()> {
     let exe = std::env::current_exe().context("Failed to get current executable path")?;
-    println!(
-        "   {} forge {}",
-        ">>".dimmed(),
-        args.join(" ").dimmed()
-    );
+    println!("   {} forge {}", ">>".dimmed(), args.join(" ").dimmed());
 
     let status = Command::new(exe)
         .args(args)
@@ -49,7 +46,12 @@ pub(crate) async fn run_forge_subcommand(args: &[&str]) -> Result<()> {
 ///
 /// - Standalone repos (product = repo root): `nix run .#release:{service} -- {extra_args}`
 /// - Monorepo (product under pkgs/products): `nix run .#release:{product}:{service} -- {extra_args}`
-async fn run_nix_release_app(product: &str, service: &str, standalone: bool, extra_args: &[&str]) -> Result<()> {
+async fn run_nix_release_app(
+    product: &str,
+    service: &str,
+    standalone: bool,
+    extra_args: &[&str],
+) -> Result<()> {
     let app = if standalone {
         format!(".#release:{}", service)
     } else {
@@ -77,7 +79,11 @@ async fn run_nix_release_app(product: &str, service: &str, standalone: bool, ext
 }
 
 /// Run a kubectl health check for a deployment.
-pub(crate) async fn run_health_check(deployment: &str, namespace: &str, timeout_secs: u64) -> Result<()> {
+pub(crate) async fn run_health_check(
+    deployment: &str,
+    namespace: &str,
+    timeout_secs: u64,
+) -> Result<()> {
     println!(
         "   {} Checking deployment {} in {}...",
         ">>".dimmed(),
@@ -217,7 +223,8 @@ async fn write_artifact_tags(
     let mut modified_files = Vec::new();
 
     for svc in services {
-        let product_dir = crate::config::resolve_product_dir(std::path::Path::new(repo_root), product);
+        let product_dir =
+            crate::config::resolve_product_dir(std::path::Path::new(repo_root), product);
         let service_dir = product_dir.join(&svc.path);
 
         let json_path = crate::config::resolve_artifact_json_path(&product_dir, &svc.name);
@@ -237,8 +244,8 @@ async fn write_artifact_tags(
             attestation: attestation_info.cloned(),
         };
 
-        let json = serde_json::to_string_pretty(&artifact)
-            .context("Failed to serialize artifact info")?;
+        let json =
+            serde_json::to_string_pretty(&artifact).context("Failed to serialize artifact info")?;
         std::fs::write(&json_path, format!("{}\n", json))
             .with_context(|| format!("Failed to write {}", json_path.display()))?;
 
@@ -251,31 +258,67 @@ async fn write_artifact_tags(
     }
 
     if !modified_files.is_empty() {
-        for file in &modified_files {
-            Command::new("git")
-                .args(["add", file])
-                .status()
-                .await
-                .context("Failed to git add")?;
+        match commit_artifact_tags(None, &modified_files, git_sha).await? {
+            CommitPushOutcome::Pushed => {
+                println!("   {} Artifact tags committed and pushed", "OK".green());
+            }
+            CommitPushOutcome::NoChangesStaged => {
+                println!(
+                    "   {} Artifact tags already at SHA {} — nothing to commit",
+                    "OK".green(),
+                    git_sha
+                );
+            }
         }
-
-        let commit_msg = format!("chore: update artifact tags to {}", git_sha);
-        Command::new("git")
-            .args(["commit", "-m", &commit_msg])
-            .status()
-            .await
-            .context("Failed to git commit artifact tags")?;
-
-        Command::new("git")
-            .args(["push", "origin", "main"])
-            .status()
-            .await
-            .context("Failed to git push artifact tags")?;
-
-        println!("   {} Artifact tags committed and pushed", "OK".green());
     }
 
     Ok(())
+}
+
+/// Commit modified artifact-tag files and push to `origin/main` through
+/// the canonical [`GitClient::stage_commit_push_release`] primitive
+/// (the same shape every other release flow in forge —
+/// `commands/kenshi.rs`, `commands/kenshi_agent.rs`,
+/// `commands/nix_builder.rs` — drives, lifted in commit 32a8083). Returns
+/// the typed [`CommitPushOutcome`] so the caller distinguishes the
+/// idempotent re-release path (`NoChangesStaged`) from the actual-push
+/// path (`Pushed`).
+///
+/// # Why this lift
+///
+/// Pre-this-commit the call site at [`write_artifact_tags`] carried three
+/// inline `Command::new("git").args([...]).status().await.context(...)?`
+/// invocations — for `git add`, `git commit`, `git push` — each WITHOUT
+/// the `if !status.success() { bail!() }` envelope. Every step silently
+/// swallowed non-zero git exits: a push rejected as non-fast-forward, an
+/// auth denial, a remote unreachable — all routed to `Ok(())` and the
+/// function then printed "✅ Artifact tags committed and pushed"
+/// regardless of whether anything had actually been committed or pushed.
+/// Post-migration every step routes through the canonical typed
+/// primitive — `GitClient::add` / `commit` / `push_to`, all wrapped in
+/// `run_inherited_status` which bails on non-zero exit by construction —
+/// and the structural-skip path (`NoChangesStaged`, when `git add` leaves
+/// the index byte-identical to `HEAD`) surfaces as a typed
+/// discriminator instead of fall-through behavior.
+///
+/// `workdir` is `None` in production (`GitClient::new()` resolves git
+/// commands against the current process cwd, which is the repo root by
+/// invariant); tests pass `Some(temp_dir)` to drive the helper against
+/// a hermetic bare-repo pair.
+async fn commit_artifact_tags(
+    workdir: Option<&str>,
+    modified_files: &[String],
+    git_sha: &str,
+) -> Result<CommitPushOutcome> {
+    let file_refs: Vec<&str> = modified_files.iter().map(String::as_str).collect();
+    let commit_msg = format!("chore: update artifact tags to {}", git_sha);
+    let client = match workdir {
+        Some(dir) => GitClient::in_dir(dir.to_string()),
+        None => GitClient::new(),
+    };
+    client
+        .stage_commit_push_release(&file_refs, &commit_msg, "main")
+        .await
 }
 
 /// Product-level release orchestration.
@@ -346,7 +389,8 @@ pub async fn product_release(
 
     if !effective_skip_gates && product_config.prerelease {
         println!("{}", "Phase 0: Pre-release gates".bold());
-        let product_dir = crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
+        let product_dir =
+            crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
         let product_dir_str = product_dir.to_string_lossy().to_string();
 
         run_forge_subcommand(&["prerelease", "--working-dir", &product_dir_str]).await?;
@@ -378,8 +422,9 @@ pub async fn product_release(
 
     // Standalone detection: if deploy.yaml is at repo root and names this product,
     // nix apps use `release:{service}` (no product prefix).
-    let is_standalone = crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product)
-        == std::path::Path::new(&repo_root);
+    let is_standalone =
+        crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product)
+            == std::path::Path::new(&repo_root);
 
     for svc in &product_config.services {
         let svc_release =
@@ -392,7 +437,9 @@ pub async fn product_release(
                 DeployConfig::load_service_registry_url(&product, &svc.path, &repo_root)?;
 
             // Try to push prebuilt image (built during E2E in Phase 0)
-            let has_local = check_local_image_exists(&local_image).await.unwrap_or(false);
+            let has_local = check_local_image_exists(&local_image)
+                .await
+                .unwrap_or(false);
 
             if has_local && !skip_gates {
                 println!(
@@ -568,22 +615,29 @@ pub async fn product_release(
 
     #[cfg(not(feature = "attestation"))]
     let attestation_info: Option<crate::config::AttestationInfoRecord> = {
-        println!("{}", "Phase 1.5: Attestation skipped (feature disabled)".dimmed());
+        println!(
+            "{}",
+            "Phase 1.5: Attestation skipped (feature disabled)".dimmed()
+        );
         println!();
         None
     };
 
     // ─── Phase 2: Deploy per environment ────────────────────────────────────
     if build_only {
-        println!(
-            "{}",
-            "Phase 2: Skipping deploy (--build-only)".dimmed()
-        );
+        println!("{}", "Phase 2: Skipping deploy (--build-only)".dimmed());
         println!();
 
         // Jump straight to Phase 3: persist artifact tags
         println!("{}", "Phase 3: Persist artifact tags".bold());
-        write_artifact_tags(&product, &product_config.services, &repo_root, &git_sha, attestation_info.as_ref()).await?;
+        write_artifact_tags(
+            &product,
+            &product_config.services,
+            &repo_root,
+            &git_sha,
+            attestation_info.as_ref(),
+        )
+        .await?;
         println!();
 
         println!(
@@ -656,7 +710,8 @@ pub async fn product_release(
             let registry_url =
                 DeployConfig::load_service_registry_url(&product, &svc.path, &repo_root)?;
 
-            let product_dir = crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
+            let product_dir =
+                crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
             let service_dir = product_dir.join(&svc.path).to_string_lossy().to_string();
 
             // Always call orchestrate-release directly (not via nix run) to avoid
@@ -691,10 +746,7 @@ pub async fn product_release(
             // Health check after deploying each service
             if let Some(hc) = &svc.health_check {
                 let namespace = DeployConfig::load_service_namespace(
-                    &product,
-                    &svc.path,
-                    &repo_root,
-                    env_name,
+                    &product, &svc.path, &repo_root, env_name,
                 )?;
                 run_health_check(&hc.deployment, &namespace, hc.timeout_secs).await?;
             }
@@ -708,19 +760,29 @@ pub async fn product_release(
 
     // ─── Phase 3: Write artifact tags ───────────────────────────────────────
     println!("{}", "Phase 3: Persist artifact tags".bold());
-    let att_record = attestation_info.as_ref().map(|info| crate::config::AttestationInfoRecord {
-        signature: info.signature.clone(),
-        certification_hash: info.certification_hash.clone(),
-        compliance_hash: info.compliance_hash.clone(),
-        certified: info.certified,
-    });
-    write_artifact_tags(&product, &product_config.services, &repo_root, &git_sha, att_record.as_ref()).await?;
+    let att_record = attestation_info
+        .as_ref()
+        .map(|info| crate::config::AttestationInfoRecord {
+            signature: info.signature.clone(),
+            certification_hash: info.certification_hash.clone(),
+            compliance_hash: info.compliance_hash.clone(),
+            certified: info.certified,
+        });
+    write_artifact_tags(
+        &product,
+        &product_config.services,
+        &repo_root,
+        &git_sha,
+        att_record.as_ref(),
+    )
+    .await?;
     println!();
 
     // ─── Phase 4: Dashboard sync ────────────────────────────────────────────
     if !skip_dashboards && product_config.dashboards {
         println!("{}", "Phase 4: Dashboard sync".bold());
-        let product_dir = crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
+        let product_dir =
+            crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
         let product_dir_str = product_dir.to_string_lossy().to_string();
         run_forge_subcommand(&["dashboards", "--working-dir", &product_dir_str]).await?;
         println!();
@@ -768,4 +830,198 @@ pub async fn product_release(
     println!("{}", "=".repeat(60).bright_green());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as SyncCommand;
+
+    /// Initialize a hermetic git repo with one committed file under
+    /// `dir`, configured with a stable identity so `git commit` works
+    /// without depending on the host's global config. Mirrors the
+    /// shape used by `infrastructure/git.rs`'s
+    /// `init_repo_with_one_commit` test helper — the canonical
+    /// hermetic-git fixture across forge's typed-CLI tests.
+    fn init_repo_with_one_commit(dir: &std::path::Path) {
+        let run = |args: &[&str]| {
+            let status = SyncCommand::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git spawn");
+            assert!(status.success(), "git {args:?} failed in {dir:?}");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "forge-test@example.invalid"]);
+        run(&["config", "user.name", "forge-test"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
+        run(&["add", "seed.txt"]);
+        run(&["commit", "-q", "-m", "seed"]);
+    }
+
+    /// Configure `dir` to push to a fresh bare repo at `bare_dir` as
+    /// the `origin` remote. The bare-repo target is what makes
+    /// `git push origin main` succeed hermetically — no network, no
+    /// upstream server, just two local directories.
+    fn add_bare_origin(dir: &std::path::Path, bare_dir: &std::path::Path) {
+        // `--initial-branch=main` aligns the bare repo's HEAD with the
+        // work-tree's `main` branch so a subsequent `git clone <bare>`
+        // resolves HEAD against a real ref instead of a dangling
+        // `master` (the system default on some git versions).
+        let init = SyncCommand::new("git")
+            .args(["init", "-q", "--bare", "--initial-branch=main"])
+            .current_dir(bare_dir)
+            .status()
+            .expect("git init --bare");
+        assert!(init.success());
+        let add = SyncCommand::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                bare_dir.to_str().expect("bare path utf-8"),
+            ])
+            .current_dir(dir)
+            .status()
+            .expect("git remote add");
+        assert!(add.success());
+    }
+
+    /// `commit_artifact_tags` MUST use the canonical commit-subject
+    /// format `"chore: update artifact tags to <sha>"` and MUST land
+    /// that subject on origin/main via the underlying primitive's
+    /// push step. Pins the commit-message contract that downstream
+    /// `git log --grep='chore: update artifact tags'` audit queries
+    /// rely on; pinning the format at the helper boundary means a
+    /// future drift cannot change the audit-grep target silently.
+    #[tokio::test]
+    async fn test_commit_artifact_tags_uses_canonical_commit_subject_format() {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let work = parent.path().join("work");
+        let bare = parent.path().join("origin.git");
+        std::fs::create_dir(&work).expect("mkdir work");
+        std::fs::create_dir(&bare).expect("mkdir bare");
+        init_repo_with_one_commit(&work);
+        add_bare_origin(&work, &bare);
+        std::fs::write(work.join("svc.artifact.json"), "{}\n").unwrap();
+
+        let outcome = commit_artifact_tags(
+            Some(&work.to_string_lossy()),
+            &["svc.artifact.json".to_string()],
+            "deadbeef1234",
+        )
+        .await
+        .expect("happy-path commit_artifact_tags must succeed");
+        assert_eq!(outcome, CommitPushOutcome::Pushed);
+
+        // `git clone <bare> <probe>` requires `<probe>` to not exist (or
+        // to be empty); git creates the directory. Picking a path inside
+        // the parent tempdir keeps cleanup automatic.
+        let probe = parent.path().join("probe");
+        let clone = SyncCommand::new("git")
+            .args([
+                "clone",
+                bare.to_str().expect("bare utf-8"),
+                probe.to_str().expect("probe utf-8"),
+            ])
+            .status()
+            .expect("git clone");
+        assert!(clone.success(), "probe clone must succeed");
+        let subject_out = SyncCommand::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(&probe)
+            .output()
+            .expect("git log");
+        let subject = String::from_utf8_lossy(&subject_out.stdout)
+            .trim()
+            .to_string();
+        assert_eq!(
+            subject, "chore: update artifact tags to deadbeef1234",
+            "commit subject must match the canonical artifact-tag format"
+        );
+    }
+
+    /// `commit_artifact_tags` invoked against files whose content
+    /// already matches `HEAD` MUST return
+    /// `CommitPushOutcome::NoChangesStaged` and MUST NOT attempt a
+    /// commit or push. Pins the idempotent-re-release contract for
+    /// the artifact-tag commit path: re-running a release at the
+    /// same SHA does not produce an orphaned empty commit and does
+    /// not contact the (in-test: absent) remote.
+    ///
+    /// We assert the "did not push" half structurally: the test repo
+    /// has NO `origin` remote configured, so a fall-through to the
+    /// primitive's `push_to("origin", "main")` step would fail with
+    /// `GitError::OpFailed` or `RemoteOpFailed` and the test would
+    /// surface that error. A clean `Ok(NoChangesStaged)` proves the
+    /// skip happened before any push spawn.
+    #[tokio::test]
+    async fn test_commit_artifact_tags_returns_no_changes_on_idempotent_re_release() {
+        let work = tempfile::tempdir().expect("work tempdir");
+        init_repo_with_one_commit(work.path());
+        let outcome = commit_artifact_tags(
+            Some(&work.path().to_string_lossy()),
+            &["seed.txt".to_string()],
+            "abc1234",
+        )
+        .await
+        .expect("re-staging an already-committed file must succeed");
+        assert_eq!(
+            outcome,
+            CommitPushOutcome::NoChangesStaged,
+            "re-staging unchanged file must skip commit + push"
+        );
+    }
+
+    /// `commit_artifact_tags` MUST surface a typed error when the
+    /// push step fails — the exact regression the pre-lift inline
+    /// `Command::new("git").args([...]).status().await.context(...)?`
+    /// sequence at `write_artifact_tags` silently swallowed.
+    ///
+    /// Pre-lift each step dropped its success check, so a push
+    /// rejected as non-fast-forward / auth-denied / remote-unreachable
+    /// silently routed to `Ok(())` and the function declared
+    /// "✅ Artifact tags committed and pushed" verbatim regardless.
+    /// Post-lift the canonical primitive's per-step
+    /// `run_inherited_status` envelope bails on non-zero exit and the
+    /// error surfaces verbatim at the caller's `?` operator.
+    ///
+    /// The fixture configures `origin` to point to a non-existent
+    /// path so the push step fails deterministically — same shape as
+    /// every transient-push failure that escapes the retry budget in
+    /// production. The post-lift contract is: a failed push must
+    /// surface a typed `Err`, never an `Ok(Pushed)`.
+    #[tokio::test]
+    async fn test_commit_artifact_tags_surfaces_push_failure() {
+        let work = tempfile::tempdir().expect("work tempdir");
+        init_repo_with_one_commit(work.path());
+        let bogus = work.path().join("bogus-origin.does-not-exist");
+        let add = SyncCommand::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                bogus.to_str().expect("bogus path utf-8"),
+            ])
+            .current_dir(work.path())
+            .status()
+            .expect("git remote add");
+        assert!(add.success(), "git remote add must succeed");
+        std::fs::write(work.path().join("svc.artifact.json"), "{}\n").unwrap();
+
+        let result = commit_artifact_tags(
+            Some(&work.path().to_string_lossy()),
+            &["svc.artifact.json".to_string()],
+            "deadbeef1234",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "push to a non-existent remote MUST surface a typed error, \
+             never the silent Ok(Pushed) the pre-lift inline sequence produced; \
+             got: {result:?}"
+        );
+    }
 }
