@@ -47,12 +47,7 @@ impl ProfileDef {
 
     fn photo_urls(&self) -> Vec<String> {
         (1..=PHOTOS_PER_PROFILE)
-            .map(|n| {
-                format!(
-                    "https://picsum.photos/seed/{}_{}/400/600",
-                    self.username, n
-                )
-            })
+            .map(|n| format!("https://picsum.photos/seed/{}_{}/400/600", self.username, n))
             .collect()
     }
 }
@@ -63,28 +58,62 @@ struct EnvConfig {
 }
 
 /// Build EnvConfig from a product config and environment name.
-fn env_config_from_product(
-    product: &crate::config::ProductConfig,
-    env: &str,
-) -> Result<EnvConfig> {
+fn env_config_from_product(product: &crate::config::ProductConfig, env: &str) -> Result<EnvConfig> {
     Ok(EnvConfig {
         namespace: product.namespace_for_env(env),
     })
 }
 
-/// Execute kubectl command and return output
-fn kubectl(args: &[&str]) -> Result<String> {
-    let output = Command::new("kubectl")
-        .args(args)
-        .output()
-        .context("Failed to execute kubectl")?;
+/// Execute an external CLI and return its trimmed stdout.
+///
+/// Sync sibling of `commands/attestation.rs::run_command_output`
+/// (commit edbc2e6). Both functions carry the same "spawn a CLI,
+/// return its trimmed stdout, anyhow-bail on every failure shape"
+/// body; the async one drives `tokio::process::Command` against
+/// `git` to produce attestation source records, this sync one
+/// drives `std::process::Command` against `kubectl` to discover
+/// the CNPG primary pod. Pre-this-commit the sync sibling fused
+/// the structural-record tuple `(exit_code, stderr)` into a
+/// `bail!("kubectl failed: {}", stderr)` string that dropped the
+/// exit code entirely; the async sibling already routed through
+/// `classify_capture_query` (edbc2e6) with the canonical mapper-
+/// pair shape every typed-error producer site in forge encodes.
+/// This commit closes the carve-out on the sync surface: both
+/// siblings now flow through the same
+/// [`crate::retry::classify_capture_query`] primitive, with the
+/// `io::Result<std::process::Output>` post-spawn shape acting as
+/// the sync/async-agnostic join — `std::process::Command::output()`
+/// and `tokio::process::Command::output().await` produce
+/// identically-typed results, so the classifier and the mapper
+/// closures are shared by construction (THEORY §VI.1 three-times-
+/// rule consolidation across the sync/async spawn surfaces).
+fn run_command_output(cmd: &str, args: &[&str]) -> Result<String> {
+    let captured = Command::new(cmd).args(args).output();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("kubectl failed: {}", stderr);
-    }
+    // Owned copies for the typed mapper closures — `classify_capture_query`
+    // takes `FnOnce` on each arm so each closure consumes its captures by
+    // move. Two clones (one per arm) keep both mappers structurally
+    // independent — same shape every sibling `from_capture`-flavored
+    // consumer in `cli/src/retry.rs`, `cli/src/error.rs`, and
+    // `commands/attestation.rs::run_command_output` already encodes.
+    let spawn_cmd = cmd.to_string();
+    let spawn_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let op_cmd = spawn_cmd.clone();
+    let op_args = spawn_args.clone();
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    crate::retry::classify_capture_query(
+        captured,
+        move |e| anyhow::anyhow!("Failed to spawn {} {:?}: {}", spawn_cmd, spawn_args, e),
+        move |cf| {
+            anyhow::anyhow!(
+                "{} {:?} failed (exit {:?}): {}",
+                op_cmd,
+                op_args,
+                cf.exit_code,
+                cf.stderr
+            )
+        },
+    )
 }
 
 /// Execute SQL via kubectl exec into CNPG primary pod
@@ -134,16 +163,19 @@ fn exec_psql(namespace: &str, pod: &str, db_name: &str, sql: &str) -> Result<Str
 /// Find the primary CNPG postgres pod
 fn find_primary_pod(namespace: &str, postgres_cluster: &str) -> Result<String> {
     let label = format!("cnpg.io/cluster={},role=primary", postgres_cluster);
-    kubectl(&[
-        "get",
-        "pod",
-        "-n",
-        namespace,
-        "-l",
-        &label,
-        "-o",
-        "jsonpath={.items[0].metadata.name}",
-    ])
+    run_command_output(
+        "kubectl",
+        &[
+            "get",
+            "pod",
+            "-n",
+            namespace,
+            "-l",
+            &label,
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        ],
+    )
     .context("Failed to find primary postgres pod")
 }
 
@@ -253,8 +285,8 @@ fn load_profiles(working_dir: &Path) -> Result<Vec<ProfileDef>> {
     let toml_path = working_dir.join("seed/profiles.toml");
     let content = std::fs::read_to_string(&toml_path)
         .with_context(|| format!("Failed to read {}", toml_path.display()))?;
-    let file: ProfilesFile =
-        toml::from_str(&content).with_context(|| format!("Failed to parse {}", toml_path.display()))?;
+    let file: ProfilesFile = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", toml_path.display()))?;
     Ok(file.profiles)
 }
 
@@ -313,10 +345,7 @@ pub async fn unseed(working_dir: &Path, env: &str, dry_run: bool) -> Result<()> 
     let postgres_cluster = product.postgres_cluster();
     let db_name = product.db_name().to_string();
 
-    println!(
-        "Removing seeded test profiles from {}",
-        env_cfg.namespace
-    );
+    println!("Removing seeded test profiles from {}", env_cfg.namespace);
     println!();
 
     let sql = generate_unseed_sql(&email_domain);
@@ -343,4 +372,94 @@ pub async fn unseed(working_dir: &Path, env: &str, dry_run: bool) -> Result<()> 
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::make_executable_shim;
+
+    /// `run_command_output` on a successful spawn returns the trimmed
+    /// stdout — pins the success-path floor `find_primary_pod` relies
+    /// on. The pre-migration body re-derived the
+    /// `String::from_utf8_lossy(...).trim().to_string()` incantation
+    /// inline; the new `classify_capture_query`-routed shape keeps the
+    /// trim discipline at the canonical primitive so a future
+    /// regression that dropped the trim would fail this test before
+    /// any downstream `find_primary_pod` caller saw a stray-newline-
+    /// bearing pod name flow into `exec_psql`'s `kubectl exec -n NS
+    /// POD` invocation (where a trailing `\n` on the pod name
+    /// surfaces as a confusing "pod not found" diagnostic).
+    #[test]
+    fn test_run_command_output_success_returns_trimmed_stdout() {
+        let (_dir, shim) =
+            make_executable_shim("echo-shim", "#!/bin/sh\necho '  primary-pod-0  '\n");
+        let out = run_command_output(&shim, &[]).expect("shim must succeed");
+        assert_eq!(
+            out, "primary-pod-0",
+            "trim must strip both leading/trailing ws"
+        );
+    }
+
+    /// `run_command_output` on a non-zero exit surfaces the structural-
+    /// record tuple in the error message: the operation label (`cmd` +
+    /// `args` debug rendering), the exit code, and the trimmed stderr.
+    /// Pre-migration the bail string was `kubectl failed: {stderr}` —
+    /// it dropped the exit code AND the args entirely, so a future
+    /// telemetry consumer that wanted to recover the offending
+    /// `(cmd, args, exit_code, stderr)` tuple from a failed
+    /// `find_primary_pod` step (the shape THEORY §V.4 Phase 1
+    /// attestation records pattern-match on) had to scrape it back
+    /// out of the host's process accounting. A future regression that
+    /// re-dropped the exit code would fail this test rather than
+    /// silently degrade the Phase 1 record shape.
+    #[test]
+    fn test_run_command_output_op_failure_carries_structural_tuple() {
+        let (_dir, shim) = make_executable_shim(
+            "fail-shim",
+            "#!/bin/sh\necho 'no matching pod' 1>&2\nexit 11\n",
+        );
+        let err = run_command_output(&shim, &["get", "pod"]).expect_err("nonzero exit must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("(exit Some(11))"),
+            "msg must carry exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("no matching pod"),
+            "msg must carry trimmed stderr, got: {msg}"
+        );
+        assert!(
+            msg.contains("\"get\"") && msg.contains("\"pod\""),
+            "msg must carry args debug rendering, got: {msg}"
+        );
+    }
+
+    /// `run_command_output` on a spawn failure (binary not on PATH /
+    /// nonexistent absolute path) surfaces the canonical
+    /// `Failed to spawn {cmd} {args:?}: {io_error}` envelope. Pins the
+    /// spawn-vs-op discriminator the canonical primitive guarantees at
+    /// the typed-error producer surface — pre-migration the `with_context`
+    /// envelope fused the spawn arm into `"Failed to execute kubectl"`
+    /// that dropped the offending args entirely, so a future test that
+    /// wanted to recover the requested-but-unfound CLI binary's invocation
+    /// shape had to re-derive it from the `io::Error::Display`. A future
+    /// regression that re-fused the spawn arm into the op arm would
+    /// fail this test rather than silently collapse the
+    /// `classify_capture` (b75a273) spawn-vs-op invariant.
+    #[test]
+    fn test_run_command_output_spawn_failure_carries_op_label() {
+        let missing = "/nonexistent/forge-test-shim-must-not-exist";
+        let err = run_command_output(missing, &["arg-a"])
+            .expect_err("spawn against nonexistent path must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Failed to spawn"),
+            "msg must carry spawn-arm envelope, got: {msg}"
+        );
+        assert!(
+            msg.contains(missing),
+            "msg must carry the offending cmd path, got: {msg}"
+        );
+    }
 }
