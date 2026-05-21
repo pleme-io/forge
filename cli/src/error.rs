@@ -144,6 +144,79 @@ pub enum GitError {
     },
 }
 
+impl GitError {
+    /// Map an `io::Result<Output>` capture into a typed `(Output, GitError)`
+    /// outcome under the canonical
+    /// `(ExecFailed { op, message }, OpFailed { op, exit_code, stderr })`
+    /// mapping pair.
+    ///
+    /// Lifts the verbatim three-times pattern
+    /// ```text
+    /// classify_capture(
+    ///     cmd.output()<.await>,
+    ///     |e|  GitError::ExecFailed { op: <X>.to_string(), message: e.to_string() },
+    ///     |cf| GitError::OpFailed   { op: <X>.to_string(), exit_code: cf.exit_code, stderr: cf.stderr },
+    /// )
+    /// ```
+    /// that three sites in forge carry verbatim modulo the per-site `op`
+    /// label: `cli/src/git.rs::git_capture` (sync — synchronous SHA /
+    /// repo-root discovery), `cli/src/infrastructure/git.rs::GitClient::is_clean`
+    /// (async — working-tree predicate), and `cli/src/infrastructure/git.rs::
+    /// GitClient::has_staged_changes` (async — index predicate). Three
+    /// identically-shaped blocks past the three-times-rule threshold
+    /// (THEORY §VI.1: "two occurrences is a coincidence; three is a law");
+    /// this constructor is the law-redeeming carve-out.
+    ///
+    /// `op` is the human-readable label attached to either typed variant
+    /// — `"rev-parse"`, `"status --porcelain"`, `"diff --cached --name-only"`,
+    /// etc. It is what discriminates "git couldn't spawn" (`ExecFailed`)
+    /// from "git ran but exited non-zero" (`OpFailed`) at telemetry / Phase 1
+    /// attestation surfaces (THEORY §V.4) without parsing the typed-error
+    /// `Display` string.
+    ///
+    /// On success returns the captured [`std::process::Output`] verbatim —
+    /// callers that only need stdout extract it with `.stdout`. On spawn
+    /// failure (`Err(io::Error)` — git not on PATH) produces `ExecFailed`
+    /// carrying the I/O error's `Display`. On non-zero exit produces
+    /// `OpFailed` carrying the `(exit_code, stderr)` tuple
+    /// [`crate::retry::CapturedFailure::from_output`] extracts.
+    ///
+    /// Works against both sync (`std::process::Command::output()`) and
+    /// async (`tokio::process::Command::output().await`) capture sites —
+    /// both surface the same `std::io::Result<std::process::Output>`
+    /// shape — so one primitive covers the synchronous discovery surface
+    /// (`git.rs`) and the asynchronous mutation surface (`infrastructure/git.rs`)
+    /// together. Mirror of [`crate::retry::CommandAttemptFailure::from_capture`]
+    /// for the typed-error producer family.
+    ///
+    /// The companion `RemoteOpFailed` variant (which carries the extra
+    /// `(remote, branch)` tuple) is NOT covered by this primitive — it
+    /// only fires from one site (`git.rs::git_capture_remote`) and lifting
+    /// it would invent a second-rate primitive ahead of the law. When a
+    /// third remote-op site appears, the `from_capture_remote` sibling
+    /// can join here; until then, that site keeps its inlined
+    /// `classify_capture` form.
+    pub fn from_capture(
+        captured: std::io::Result<std::process::Output>,
+        op: impl Into<String>,
+    ) -> std::result::Result<std::process::Output, GitError> {
+        let op_str = op.into();
+        let exec_op = op_str.clone();
+        crate::retry::classify_capture(
+            captured,
+            move |e| GitError::ExecFailed {
+                op: exec_op,
+                message: e.to_string(),
+            },
+            move |cf| GitError::OpFailed {
+                op: op_str,
+                exit_code: cf.exit_code,
+                stderr: cf.stderr,
+            },
+        )
+    }
+}
+
 /// Nix build errors
 ///
 /// Each variant carries the offending flake attribute (or full flake
@@ -777,6 +850,137 @@ mod tests {
             }
             _ => panic!("expected OpFailed"),
         }
+    }
+
+    /// Helper: synthesize a `std::process::Output` with the given exit
+    /// status, stdout, and stderr. Lets the `GitError::from_capture`
+    /// tests pin the typed conversion without driving a real subprocess.
+    /// Mirror of `retry::tests::synth_output` — `ExitStatus` has no
+    /// public constructor, so we fork `true` / `false` (POSIX coreutils)
+    /// to produce a real one. Both binaries ship on every host the
+    /// forge test runner reaches.
+    fn synth_output_for_git(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+        let bin = if success { "true" } else { "false" };
+        let status = std::process::Command::new(bin)
+            .status()
+            .expect("host must provide /usr/bin/true and /usr/bin/false for the test runner");
+        std::process::Output {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    /// `GitError::from_capture` on a successful capture returns the
+    /// captured `Output` verbatim — callers extract `.stdout` /
+    /// `.stderr` from it. Pins the success-path contract every
+    /// migrated site relies on (`git_capture` returns `output.stdout`;
+    /// `is_clean` / `has_staged_changes` inspect
+    /// `output.stdout.is_empty()`).
+    #[test]
+    fn test_git_error_from_capture_success_returns_output() {
+        let out = synth_output_for_git(true, b"refs/heads/main\n", b"");
+        let result = GitError::from_capture(Ok(out), "rev-parse");
+        let captured = result.expect("success must return Output");
+        assert!(captured.status.success());
+        assert_eq!(captured.stdout, b"refs/heads/main\n");
+    }
+
+    /// `GitError::from_capture` on a spawn failure (`Err(io::Error)` —
+    /// git binary not on PATH, fork failed, etc.) produces
+    /// `GitError::ExecFailed` carrying the caller-supplied `op` and the
+    /// I/O error's `Display`. Pins the spawn-vs-op discriminator at
+    /// the typed-error surface — telemetry / Phase 1 attestation
+    /// records (THEORY §V.4) pattern-match on `ExecFailed` to mean
+    /// "could not run git at all" without parsing strings.
+    #[test]
+    fn test_git_error_from_capture_spawn_failure_routes_to_exec_failed() {
+        let spawn_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let captured: std::io::Result<std::process::Output> = Err(spawn_err);
+        let err = GitError::from_capture(captured, "rev-parse")
+            .expect_err("spawn failure must surface a typed error");
+        match err {
+            GitError::ExecFailed { op, message } => {
+                assert_eq!(op, "rev-parse");
+                assert!(
+                    message.contains("no such file"),
+                    "exec message must carry the io::Error display, got: {message:?}"
+                );
+            }
+            other => panic!("expected GitError::ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// `GitError::from_capture` on a non-zero exit (`Ok(out)` where
+    /// `out.status.success() == false`) produces `GitError::OpFailed`
+    /// carrying the `(op, exit_code, stderr)` triple — the structural
+    /// record retry classifiers and attestation chains consume without
+    /// parsing the typed-error `Display` string. `false` exits with
+    /// code 1 on every Unix the forge test runner reaches; we pin only
+    /// that the exit code is present and non-zero, and that stderr is
+    /// carried through verbatim (UTF-8-lossy-then-trim — same shape
+    /// `CapturedFailure::from_output` extracts).
+    #[test]
+    fn test_git_error_from_capture_op_failure_carries_structural_tuple() {
+        let out = synth_output_for_git(
+            false,
+            b"",
+            b"  fatal: not a git repository (or any of the parent directories): .git\n",
+        );
+        let err = GitError::from_capture(Ok(out), "status --porcelain")
+            .expect_err("non-zero exit must surface a typed error");
+        match err {
+            GitError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "status --porcelain");
+                let code = exit_code.expect("non-zero exit must carry a code");
+                assert_ne!(code, 0, "non-zero exit code must travel through");
+                assert!(
+                    stderr.contains("not a git repository"),
+                    "stderr must carry git's diagnostic verbatim, got: {stderr:?}"
+                );
+                // CapturedFailure trims trailing whitespace — pin that.
+                assert!(
+                    !stderr.ends_with('\n'),
+                    "stderr must be trimmed; got trailing newline in: {stderr:?}"
+                );
+            }
+            other => panic!("expected GitError::OpFailed, got: {other:?}"),
+        }
+    }
+
+    /// `from_capture` takes `op: impl Into<String>` — both `&str` and
+    /// `String` callers (forge has both) must compile and produce the
+    /// same typed error. Pins the ergonomic contract every migrated
+    /// site relies on (`git_capture` passes `&str`; future async sites
+    /// driving an owned `op` string pass `String` directly without
+    /// `.to_string()`).
+    #[test]
+    fn test_git_error_from_capture_accepts_str_and_string_op() {
+        let spawn_err = std::io::Error::new(std::io::ErrorKind::NotFound, "x");
+
+        let captured: std::io::Result<std::process::Output> = Err(spawn_err);
+        let err_str = GitError::from_capture(captured, "rev-parse")
+            .expect_err("spawn failure must surface a typed error");
+        let op_from_str = match &err_str {
+            GitError::ExecFailed { op, .. } => op.clone(),
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        };
+
+        let captured: std::io::Result<std::process::Output> =
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "y"));
+        let err_string = GitError::from_capture(captured, String::from("rev-parse"))
+            .expect_err("spawn failure must surface a typed error");
+        let op_from_string = match &err_string {
+            GitError::ExecFailed { op, .. } => op.clone(),
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        };
+
+        assert_eq!(op_from_str, op_from_string);
+        assert_eq!(op_from_str, "rev-parse");
     }
 
     #[test]

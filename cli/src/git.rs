@@ -17,17 +17,15 @@ use crate::retry::classify_capture;
 /// `run_nix_build_typed` and `attic.rs`'s `run_attic_capture`.
 ///
 /// Spawn-vs-op dispatch flows through the canonical
-/// [`crate::retry::classify_capture`] primitive: spawn failures
+/// [`GitError::from_capture`] primitive: spawn failures
 /// (`Err(io::Error)` — git not on PATH) route to `GitError::ExecFailed`;
 /// non-zero exits route to `GitError::OpFailed` carrying the structural
 /// `(exit_code, stderr)` tuple [`crate::retry::CapturedFailure`]
-/// extracts. The two-step
-/// `cmd.output().map_err(|e| ExecFailed{...})?; if let Some(cf) =
-/// CapturedFailure::from_output_if_failed(&out) { return Err(OpFailed{...}) }`
-/// pattern this site previously inlined now lives in one place
-/// alongside three sibling typed-error producer sites
-/// (`git_capture_remote`, `nix.rs::run_nix_build_typed`,
-/// `infrastructure/registry.rs::create_manifest_index`).
+/// extracts. The mapper-pair this site previously inlined now lives
+/// once on `GitError::from_capture` alongside the async predicate
+/// sites (`infrastructure/git.rs::GitClient::is_clean`,
+/// `GitClient::has_staged_changes`) that carried the verbatim same
+/// shape.
 fn git_capture(
     bin: &str,
     args: &[&str],
@@ -39,18 +37,7 @@ fn git_capture(
     if let Some(w) = workdir {
         cmd.current_dir(w);
     }
-    let output = classify_capture(
-        cmd.output(),
-        |e| GitError::ExecFailed {
-            op: op.to_string(),
-            message: e.to_string(),
-        },
-        |cf| GitError::OpFailed {
-            op: op.to_string(),
-            exit_code: cf.exit_code,
-            stderr: cf.stderr,
-        },
-    )?;
+    let output = GitError::from_capture(cmd.output(), op)?;
     Ok(output.stdout)
 }
 

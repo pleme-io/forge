@@ -17,7 +17,6 @@ use anyhow::{Context, Result};
 use tokio::process::Command;
 
 use crate::error::GitError;
-use crate::retry::classify_capture;
 
 /// Outcome of [`GitClient::stage_commit_push_release`].
 ///
@@ -72,16 +71,16 @@ impl GitClient {
     /// Check if working tree is clean.
     ///
     /// Spawn-vs-op dispatch flows through the canonical
-    /// [`classify_capture`] primitive — same shape `git.rs::git_capture`
-    /// and `git.rs::git_capture_remote` already drive. Pre-this-migration
-    /// this site did `cmd.output().await.context()? + return
-    /// Ok(output.stdout.is_empty())` and ignored `output.status` entirely,
-    /// so `git status --porcelain` exiting non-zero (the canonical "not a
-    /// git repository" case is exit 128 with empty stdout, but permission-
-    /// denied, signal-kill, and corrupt-index all share the same
-    /// "non-zero exit + empty stdout" shape) routed silently to
-    /// `Ok(true)` — i.e. "the tree is clean, proceed to skip the commit."
-    /// The bootstrap publish path's lone caller
+    /// [`GitError::from_capture`] primitive — same shape
+    /// `git.rs::git_capture` and `has_staged_changes` drive.
+    /// Pre-this-migration this site did `cmd.output().await.context()? +
+    /// return Ok(output.stdout.is_empty())` and ignored `output.status`
+    /// entirely, so `git status --porcelain` exiting non-zero (the
+    /// canonical "not a git repository" case is exit 128 with empty
+    /// stdout, but permission-denied, signal-kill, and corrupt-index all
+    /// share the same "non-zero exit + empty stdout" shape) routed
+    /// silently to `Ok(true)` — i.e. "the tree is clean, proceed to
+    /// skip the commit." The bootstrap publish path's lone caller
     /// (`commands/bootstrap.rs::publish_bootstrap_release` —
     /// `if git.is_clean().await? { info!("No changes to commit"); }`)
     /// then printed the no-change branch verbatim and the entire publish
@@ -100,18 +99,7 @@ impl GitClient {
             cmd.current_dir(dir);
         }
 
-        let output = classify_capture(
-            cmd.output().await,
-            |e| GitError::ExecFailed {
-                op: "status --porcelain".to_string(),
-                message: e.to_string(),
-            },
-            |cf| GitError::OpFailed {
-                op: "status --porcelain".to_string(),
-                exit_code: cf.exit_code,
-                stderr: cf.stderr,
-            },
-        )?;
+        let output = GitError::from_capture(cmd.output().await, "status --porcelain")?;
 
         Ok(output.stdout.is_empty())
     }
@@ -217,7 +205,7 @@ impl GitClient {
     /// reconciliation depends on.
     ///
     /// Spawn-vs-op dispatch flows through the canonical
-    /// [`classify_capture`] primitive — same shape as
+    /// [`GitError::from_capture`] primitive — same shape as
     /// [`Self::is_clean`]. A non-zero git exit (the "not a git
     /// repository" / "corrupt index" family) routes to
     /// `GitError::OpFailed` carrying the structural
@@ -232,18 +220,7 @@ impl GitClient {
             cmd.current_dir(dir);
         }
 
-        let output = classify_capture(
-            cmd.output().await,
-            |e| GitError::ExecFailed {
-                op: "diff --cached --name-only".to_string(),
-                message: e.to_string(),
-            },
-            |cf| GitError::OpFailed {
-                op: "diff --cached --name-only".to_string(),
-                exit_code: cf.exit_code,
-                stderr: cf.stderr,
-            },
-        )?;
+        let output = GitError::from_capture(cmd.output().await, "diff --cached --name-only")?;
 
         Ok(!output.stdout.is_empty())
     }
