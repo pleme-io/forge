@@ -23,9 +23,9 @@ use std::path::Path;
 use tokio::process::Command;
 
 use tameshi::certification::{
-    BuildAttestation, ChartAttestation, CertificationPolicy, DeploymentAttestation,
-    ImageAttestation, ProductCertification, SourceAttestation,
-    relaxed_staging_policy, strict_production_policy,
+    relaxed_staging_policy, strict_production_policy, BuildAttestation, CertificationPolicy,
+    ChartAttestation, DeploymentAttestation, ImageAttestation, ProductCertification,
+    SourceAttestation,
 };
 use tameshi::ci;
 use tameshi::compliance::dimensions::{ComplianceAttestation, ComplianceDimension, DimensionType};
@@ -58,24 +58,25 @@ pub async fn compute_source_attestation(
     git_sha: &str,
 ) -> Result<SourceAttestation> {
     // Get repository URL
-    let repo_url = run_git_output(repo_root, &["remote", "get-url", "origin"])
+    let repo_url = run_command_output(repo_root, "git", &["remote", "get-url", "origin"])
         .await
         .unwrap_or_else(|_| "unknown".to_string());
 
     // Get current ref
-    let git_ref = run_git_output(repo_root, &["symbolic-ref", "--short", "HEAD"])
+    let git_ref = run_command_output(repo_root, "git", &["symbolic-ref", "--short", "HEAD"])
         .await
         .unwrap_or_else(|_| "refs/heads/main".to_string());
     let git_ref = format!("refs/heads/{}", git_ref);
 
     // Check if commit is signed
-    let commit_signed = run_git_output(repo_root, &["log", "-1", "--format=%G?", git_sha])
-        .await
-        .map(|s| s.trim() == "G" || s.trim() == "U")
-        .unwrap_or(false);
+    let commit_signed =
+        run_command_output(repo_root, "git", &["log", "-1", "--format=%G?", git_sha])
+            .await
+            .map(|s| s.trim() == "G" || s.trim() == "U")
+            .unwrap_or(false);
 
     // Compute tree hash: blake3 of `git ls-tree -r HEAD`
-    let tree_listing = run_git_output(repo_root, &["ls-tree", "-r", "HEAD"])
+    let tree_listing = run_command_output(repo_root, "git", &["ls-tree", "-r", "HEAD"])
         .await
         .unwrap_or_default();
     let tree_hash = Blake3Hash::digest(tree_listing.as_bytes());
@@ -115,7 +116,11 @@ pub async fn compute_build_attestation(
     let derivation = run_command_output(
         repo_root,
         "nix",
-        &["path-info", "--derivation", &format!(".#release:{}", service)],
+        &[
+            "path-info",
+            "--derivation",
+            &format!(".#release:{}", service),
+        ],
     )
     .await
     .unwrap_or_else(|_| format!("/nix/store/unknown-{}.drv", service));
@@ -124,7 +129,12 @@ pub async fn compute_build_attestation(
     let closure_info = run_command_output(
         repo_root,
         "nix",
-        &["path-info", "--recursive", "--json", &format!(".#release:{}", service)],
+        &[
+            "path-info",
+            "--recursive",
+            "--json",
+            &format!(".#release:{}", service),
+        ],
     )
     .await
     .unwrap_or_default();
@@ -141,7 +151,7 @@ pub async fn compute_build_attestation(
         &derivation,
         closure_hash,
         SlsaLevel::L3, // Nix builds are hermetic and reproducible
-        false,          // Reproducibility not yet verified
+        false,         // Reproducibility not yet verified
         sbom_hash,
         vuln_scan_hash,
         0, // CVE count: populated when scan tooling integrated
@@ -151,26 +161,25 @@ pub async fn compute_build_attestation(
 }
 
 /// Compute image attestation after pushing to the registry.
-pub async fn compute_image_attestation(
-    image_ref: &str,
-    tag: &str,
-) -> Result<ImageAttestation> {
+pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<ImageAttestation> {
     // Get OCI manifest digest via skopeo
     let full_ref = format!("docker://{}:{}", image_ref, tag);
-    let manifest_json = run_command_output(
-        Path::new("."),
-        "skopeo",
-        &["inspect", "--raw", &full_ref],
-    )
-    .await
-    .unwrap_or_default();
+    let manifest_json =
+        run_command_output(Path::new("."), "skopeo", &["inspect", "--raw", &full_ref])
+            .await
+            .unwrap_or_default();
     let manifest_hash = Blake3Hash::digest(manifest_json.as_bytes());
 
     // Check for cosign signature (best-effort)
     let cosign_verified = run_command_output(
         Path::new("."),
         "cosign",
-        &["verify", &format!("{}:{}", image_ref, tag), "--output", "text"],
+        &[
+            "verify",
+            &format!("{}:{}", image_ref, tag),
+            "--output",
+            "text",
+        ],
     )
     .await
     .is_ok();
@@ -211,10 +220,10 @@ pub async fn compute_chart_attestation(
         chart_name,
         chart_version,
         chart_hash,
-        false,    // Provenance: not yet implemented
-        vec![],   // Dependency hashes: populated when chart deps are tracked
-        true,     // Linter: assume passed if forge got this far
-        true,     // Policy: assume passed
+        false,  // Provenance: not yet implemented
+        vec![], // Dependency hashes: populated when chart deps are tracked
+        true,   // Linter: assume passed if forge got this far
+        true,   // Policy: assume passed
         registry_ref,
     ))
 }
@@ -358,9 +367,7 @@ async fn analyze_flake_lock(path: &Path) -> (usize, bool) {
                 // Root node doesn't need a locked revision
                 if node.get("inputs").is_some() && node.get("locked").is_none() {
                     // This is a leaf node without a lock — only root is OK
-                    node.get("inputs")
-                        .and_then(|i| i.as_object())
-                        .is_some()
+                    node.get("inputs").and_then(|i| i.as_object()).is_some()
                 } else {
                     true
                 }
@@ -396,50 +403,149 @@ async fn hash_directory(dir: &Path) -> Result<Blake3Hash> {
     Ok(Blake3Hash::digest(&hasher_data))
 }
 
-/// Run a git command and capture stdout.
-async fn run_git_output(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run git {:?}", args))?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Run a command and capture stdout.
+/// Run a command in `cwd` and return its trimmed stdout, or a typed
+/// anyhow error carrying the structural-record tuple.
+///
+/// Spawn-vs-op dispatch flows through the canonical
+/// [`crate::retry::classify_capture_query`] primitive — same shape as
+/// `nix.rs::run_nix_build_typed` and
+/// `infrastructure/registry.rs::RegistryClient::verify_tag_exists`.
+/// Spawn failures (CLI binary not on PATH) produce
+/// `"Failed to spawn {cmd} {args:?}: {io_error}"`; non-zero exits
+/// produce `"{cmd} {args:?} failed (exit {code:?}): {trimmed_stderr}"`
+/// — the structural-record tuple THEORY §V.4 Phase 1 attestation
+/// records consume. Pre-migration the spawn-failure path fused into a
+/// `with_context` string that dropped the captured `io::Error::Display`;
+/// the op-failure path fused (exit_code, stderr) into a single bail
+/// string that dropped the exit code entirely. The canonical primitive
+/// preserves both shapes by construction: `CapturedFailure::from_output`
+/// extracts the `(exit_code, stderr)` tuple with the same
+/// UTF-8-lossy-then-trim discipline every typed-error family in
+/// `cli/src/error.rs` already shares.
+///
+/// Sibling of the now-deleted `run_git_output`: the pre-migration
+/// surface carried two functions whose bodies were byte-identical
+/// modulo `cmd = "git"`. Three-times-rule (THEORY §VI.1) was already
+/// satisfied by the two-of-two `attestation.rs` siblings plus the
+/// structurally identical `commands/seed.rs::kubectl` sync sibling;
+/// this commit closes the carve-out on the async surface and inlines
+/// `run_command_output(cwd, "git", args)` at every prior
+/// `run_git_output(cwd, args)` call site.
 async fn run_command_output(cwd: &Path, cmd: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(cmd)
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run {} {:?}", cmd, args))?;
+    let captured = Command::new(cmd).current_dir(cwd).args(args).output().await;
 
-    if !output.status.success() {
-        anyhow::bail!(
-            "{} {:?} failed: {}",
-            cmd,
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    // Owned copies for the typed mapper closures — the borrowed-`&str`
+    // call-site lifetimes don't outlive the closure values themselves,
+    // and `classify_capture_query` takes `FnOnce` on each arm so each
+    // closure consumes its captures by move. Two clones (one per arm)
+    // keep both mappers structurally independent — same shape every
+    // sibling `from_capture`-flavored consumer in `cli/src/retry.rs`
+    // and `cli/src/error.rs` already encodes.
+    let spawn_cmd = cmd.to_string();
+    let spawn_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let op_cmd = spawn_cmd.clone();
+    let op_args = spawn_args.clone();
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    crate::retry::classify_capture_query(
+        captured,
+        move |e| anyhow::anyhow!("Failed to spawn {} {:?}: {}", spawn_cmd, spawn_args, e),
+        move |cf| {
+            anyhow::anyhow!(
+                "{} {:?} failed (exit {:?}): {}",
+                op_cmd,
+                op_args,
+                cf.exit_code,
+                cf.stderr
+            )
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::make_executable_shim;
+
+    /// `run_command_output` on a successful spawn returns the trimmed
+    /// stdout — pins the success-path floor every attestation phase
+    /// (`compute_source_attestation`, `compute_build_attestation`,
+    /// `compute_image_attestation`) relies on. The pre-migration body
+    /// fused into a `with_context` envelope on the spawn arm; the new
+    /// `classify_capture_query`-routed shape keeps the trim discipline
+    /// at the canonical primitive so a future regression that dropped
+    /// the trim would fail this test before any downstream attestation
+    /// caller saw a stray-newline-bearing repo URL or git ref.
+    #[tokio::test]
+    async fn test_run_command_output_success_returns_trimmed_stdout() {
+        let (_dir, shim) = make_executable_shim("echo-shim", "#!/bin/sh\necho '  deadbeef  '\n");
+        let cwd = std::env::current_dir().expect("cwd");
+        let out = run_command_output(&cwd, &shim, &[])
+            .await
+            .expect("shim must succeed");
+        assert_eq!(out, "deadbeef", "trim must strip both leading/trailing ws");
+    }
+
+    /// `run_command_output` on a non-zero exit surfaces the structural-
+    /// record tuple in the error message: the operation label (`cmd` +
+    /// `args` debug rendering), the exit code, and the trimmed stderr.
+    /// Pre-migration the bail string dropped the exit code entirely
+    /// (the `bail!("{} {:?} failed: {}", cmd, args, stderr)` body fused
+    /// stderr but never carried `(exit N)`), so a future regression
+    /// that re-dropped the exit code would fail this test rather than
+    /// silently degrade the THEORY §V.4 Phase 1 attestation-record
+    /// shape the canonical primitive guarantees.
+    #[tokio::test]
+    async fn test_run_command_output_op_failure_carries_structural_tuple() {
+        let (_dir, shim) = make_executable_shim(
+            "fail-shim",
+            "#!/bin/sh\necho 'fatal: bad ref' 1>&2\nexit 7\n",
+        );
+        let cwd = std::env::current_dir().expect("cwd");
+        let err = run_command_output(&cwd, &shim, &["arg-a", "arg-b"])
+            .await
+            .expect_err("nonzero exit must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("(exit Some(7))"),
+            "op-failure must carry the exit code in the structural shape, got: {msg}"
+        );
+        assert!(
+            msg.contains("fatal: bad ref"),
+            "op-failure must carry trimmed stderr verbatim, got: {msg}"
+        );
+        assert!(
+            msg.contains("arg-a") && msg.contains("arg-b"),
+            "op-failure must carry the args :? rendering, got: {msg}"
+        );
+    }
+
+    /// `run_command_output` on a spawn failure (binary not on PATH /
+    /// absent absolute path) surfaces the `Failed to spawn` envelope
+    /// with the underlying `io::Error::Display` — the spawn-vs-op
+    /// discriminator THEORY §V.4 attestation telemetry pattern-matches
+    /// on at the parse layer (and which a future typed consumer can
+    /// recover structurally by dropping the anyhow envelope and going
+    /// through `classify_capture_query` directly).
+    #[tokio::test]
+    async fn test_run_command_output_spawn_failure_carries_op_label() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let err = run_command_output(
+            &cwd,
+            "/nonexistent/path/to/forge-attestation-test-binary",
+            &["a"],
+        )
+        .await
+        .expect_err("missing binary must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Failed to spawn"),
+            "spawn failure must carry the canonical envelope, got: {msg}"
+        );
+        assert!(
+            msg.contains("/nonexistent/path/to/forge-attestation-test-binary"),
+            "spawn failure must carry the cmd path, got: {msg}"
+        );
+    }
 
     #[test]
     fn select_policy_staging() {
