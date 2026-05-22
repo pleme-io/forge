@@ -456,6 +456,98 @@ where
     }
 }
 
+/// Anyhow-shaped sibling of [`classify_capture_query`]: routes the same
+/// three structural shapes (success / spawn-failure / op-failure) into the
+/// canonical anyhow envelope used by command-module helpers whose public
+/// surface returns `anyhow::Result<T>` and where a domain-specific error
+/// enum (`RegistryError`, `AtticError`, `GitError`, `NixBuildError`) does
+/// not yet exist.
+///
+/// Lifts the verbatim seven-line mapper-pair body
+/// ```text
+/// let spawn_cmd = cmd.to_string();
+/// let spawn_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+/// let op_cmd = spawn_cmd.clone();
+/// let op_args = spawn_args.clone();
+/// classify_capture_query(
+///     captured,
+///     move |e| anyhow::anyhow!("Failed to spawn {} {:?}: {}", spawn_cmd, spawn_args, e),
+///     move |cf| anyhow::anyhow!("{} {:?} failed (exit {:?}): {}", op_cmd, op_args, cf.exit_code, cf.stderr),
+/// )
+/// ```
+/// that two command-module sites in forge carry verbatim modulo sync/async
+/// at the spawn surface: `commands/seed.rs::run_command_output` (sync,
+/// `std::process::Command` → `kubectl get pod` for CNPG primary discovery)
+/// and `commands/attestation.rs::run_command_output` (async,
+/// `tokio::process::Command` → `git remote get-url origin` / `git
+/// symbolic-ref` / `git ls-tree` / `nix path-info` / `skopeo inspect` for
+/// Phase 1 attestation source/build/image records). Two identically-shaped
+/// bodies past the duplication threshold the forge command-module surface
+/// enforces (≥2; PRIME DIRECTIVE) — this primitive is the law-redeeming
+/// consolidation for the "anyhow envelope over a queried external CLI"
+/// shape, sibling of [`classify_capture_query`] (the canonical typed-error
+/// query-shape primitive) and [`classify_capture`] (the canonical
+/// typed-error op-shape primitive).
+///
+/// # Sync/async-agnostic by construction
+///
+/// `std::io::Result<std::process::Output>` is the shape both
+/// `std::process::Command::output()` and
+/// `tokio::process::Command::output().await` produce — the classifier and
+/// the mapper closures consume the post-spawn shape, not the spawn surface
+/// itself. Sync callers (`commands/seed.rs`) and async callers
+/// (`commands/attestation.rs`) flow through one canonical primitive with
+/// identical message shapes by construction.
+///
+/// # Message format
+///
+/// - Spawn-failure: `"Failed to spawn {cmd} {args:?}: {io_error}"` —
+///   carries the offending CLI binary path and the requested argv slice
+///   in the `Debug` rendering. Pre-migration the spawn-failure path fused
+///   into `with_context("Failed to execute {cmd}")` envelopes at both
+///   sites that dropped the captured `io::Error::Display` and the args
+///   entirely.
+/// - Op-failure: `"{cmd} {args:?} failed (exit {exit_code:?}): {stderr}"`
+///   — carries the structural-record tuple THEORY §V.4 Phase 1
+///   attestation records pattern-match on (operation label, exit code,
+///   trimmed UTF-8-lossy stderr). Pre-migration the op-failure path at
+///   both sites fused the tuple into a single `bail!("kubectl failed:
+///   {}", stderr)` / `bail!("{} {:?} failed: {}", cmd, args, stderr)`
+///   string that dropped the exit code.
+///
+/// # The owned-copies pattern is load-bearing
+///
+/// `classify_capture_query` takes `FnOnce` on each arm so each closure
+/// consumes its captures by move. The `to_string` + `Vec<String>` owned
+/// copies decouple the closure lifetimes from the caller-supplied
+/// `&str` / `&[&str]` borrows — pinning the discipline at this primitive
+/// means every consumer that produces an anyhow error from a captured
+/// external-CLI invocation routes through one ownership shape, not two
+/// hand-rolled copies of it.
+pub fn classify_capture_query_anyhow(
+    captured: std::io::Result<std::process::Output>,
+    cmd: &str,
+    args: &[&str],
+) -> anyhow::Result<String> {
+    let spawn_cmd = cmd.to_string();
+    let spawn_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let op_cmd = spawn_cmd.clone();
+    let op_args = spawn_args.clone();
+    classify_capture_query(
+        captured,
+        move |e| anyhow::anyhow!("Failed to spawn {} {:?}: {}", spawn_cmd, spawn_args, e),
+        move |cf| {
+            anyhow::anyhow!(
+                "{} {:?} failed (exit {:?}): {}",
+                op_cmd,
+                op_args,
+                cf.exit_code,
+                cf.stderr
+            )
+        },
+    )
+}
+
 /// Captured output of a single failed external-command attempt.
 ///
 /// Typed error shape for ad-hoc retry call sites (`commands/push.rs`,
@@ -2611,6 +2703,124 @@ mod tests {
         );
         assert_eq!(spawn_fired.load(Ordering::SeqCst), 0);
         assert_eq!(op_fired.load(Ordering::SeqCst), 0);
+    }
+
+    /// `classify_capture_query_anyhow` on a successful spawn returns the
+    /// trimmed UTF-8-lossy stdout — same trim discipline
+    /// `classify_capture_query` already pins. Both anyhow consumers
+    /// (`commands/seed.rs::run_command_output` and
+    /// `commands/attestation.rs::run_command_output`) feed the returned
+    /// string into downstream pod-discovery and attestation-record paths
+    /// where a leaked trailing `\n` surfaces as a confusing "pod not
+    /// found" / "git ref invalid" diagnostic; pinning the trim at this
+    /// primitive guarantees neither consumer can drift onto a
+    /// `from_utf8_lossy(&out.stdout).to_string()` shape.
+    #[test]
+    fn test_classify_capture_query_anyhow_success_returns_trimmed_stdout() {
+        let out = synth_output(true, b"  primary-pod-0  ", b"");
+        let result = classify_capture_query_anyhow(Ok(out), "kubectl", &["get", "pod"]);
+        let stdout = result.expect("zero-exit must return Ok(trimmed)");
+        assert_eq!(
+            stdout, "primary-pod-0",
+            "trim must strip both leading/trailing ws"
+        );
+    }
+
+    /// `classify_capture_query_anyhow` on a non-zero exit surfaces the
+    /// canonical `"{cmd} {args:?} failed (exit {code:?}): {stderr}"`
+    /// envelope. Pins the structural-record tuple (operation label, exit
+    /// code, trimmed stderr) at the primitive — both the seed and the
+    /// attestation consumers' tests assert the same shape against the
+    /// primitive's output, so a future regression at the primitive would
+    /// fail this test BEFORE the consumer-side asserts surface it.
+    #[test]
+    fn test_classify_capture_query_anyhow_op_failure_carries_structural_tuple() {
+        let out = synth_output(false, b"", b"  fatal: bad ref  \n");
+        let err = classify_capture_query_anyhow(Ok(out), "git", &["log", "-1"])
+            .expect_err("non-zero exit must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("git"),
+            "msg must carry the cmd label, got: {msg}"
+        );
+        assert!(
+            msg.contains("\"log\"") && msg.contains("\"-1\""),
+            "msg must carry args :? rendering, got: {msg}"
+        );
+        // `false` exits with code 1 on every Unix the test runner ships on;
+        // pin only that the exit code surfaces in `(exit Some(_))` form.
+        assert!(
+            msg.contains("(exit Some("),
+            "msg must carry the exit code in the canonical shape, got: {msg}"
+        );
+        assert!(
+            msg.contains("fatal: bad ref"),
+            "msg must carry trimmed stderr, got: {msg}"
+        );
+        // The trim discipline at the primitive must NOT leak the
+        // leading/trailing whitespace from the synthesized stderr — pin
+        // both directions explicitly so a future regression that swapped
+        // `.trim()` for `.trim_end()` (or dropped the trim entirely) fails
+        // here.
+        assert!(
+            !msg.contains("  fatal:"),
+            "leading whitespace must be stripped from stderr, got: {msg}"
+        );
+    }
+
+    /// `classify_capture_query_anyhow` on a spawn failure (binary not on
+    /// PATH / fork failed) surfaces the canonical
+    /// `"Failed to spawn {cmd} {args:?}: {io_error}"` envelope. Pins the
+    /// spawn-vs-op discriminator that both anyhow consumers rely on at the
+    /// canonical primitive — pre-migration the spawn arm fused into a
+    /// `with_context("Failed to execute kubectl")` envelope that dropped
+    /// the captured `io::Error::Display` and the args entirely. A future
+    /// regression that re-fused the spawn arm into the op arm would fail
+    /// this test rather than silently collapse the
+    /// `classify_capture` (b75a273) spawn-vs-op invariant.
+    #[test]
+    fn test_classify_capture_query_anyhow_spawn_failure_carries_op_label() {
+        let captured: std::io::Result<std::process::Output> = Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file or directory",
+        ));
+        let err = classify_capture_query_anyhow(captured, "kubectl", &["get", "pod"])
+            .expect_err("spawn failure must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.starts_with("Failed to spawn"),
+            "spawn-arm envelope must lead the message, got: {msg}"
+        );
+        assert!(
+            msg.contains("kubectl"),
+            "msg must carry the cmd label, got: {msg}"
+        );
+        assert!(
+            msg.contains("\"get\"") && msg.contains("\"pod\""),
+            "msg must carry args :? rendering, got: {msg}"
+        );
+        assert!(
+            msg.contains("no such file"),
+            "msg must carry io::Error::Display, got: {msg}"
+        );
+    }
+
+    /// Empty args slice — `args:?` renders as `[]` and the primitive must
+    /// not panic / corrupt the message format. Pins the boundary against a
+    /// future regression that special-cased empty args (e.g., dropped them
+    /// from the message entirely, breaking the `{cmd} {args:?}` shape both
+    /// consumers' `find_primary_pod` / `compute_*_attestation` callers
+    /// rely on).
+    #[test]
+    fn test_classify_capture_query_anyhow_empty_args_round_trips() {
+        let out = synth_output(false, b"", b"oops");
+        let err = classify_capture_query_anyhow(Ok(out), "true", &[])
+            .expect_err("non-zero exit must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("true []"),
+            "empty args must render as `[]` in the canonical shape, got: {msg}"
+        );
     }
 
     /// Success on a non-final attempt — `log_retry_attempt` returns the

@@ -406,58 +406,25 @@ async fn hash_directory(dir: &Path) -> Result<Blake3Hash> {
 /// Run a command in `cwd` and return its trimmed stdout, or a typed
 /// anyhow error carrying the structural-record tuple.
 ///
-/// Spawn-vs-op dispatch flows through the canonical
-/// [`crate::retry::classify_capture_query`] primitive — same shape as
-/// `nix.rs::run_nix_build_typed` and
-/// `infrastructure/registry.rs::RegistryClient::verify_tag_exists`.
-/// Spawn failures (CLI binary not on PATH) produce
-/// `"Failed to spawn {cmd} {args:?}: {io_error}"`; non-zero exits
-/// produce `"{cmd} {args:?} failed (exit {code:?}): {trimmed_stderr}"`
-/// — the structural-record tuple THEORY §V.4 Phase 1 attestation
-/// records consume. Pre-migration the spawn-failure path fused into a
-/// `with_context` string that dropped the captured `io::Error::Display`;
-/// the op-failure path fused (exit_code, stderr) into a single bail
-/// string that dropped the exit code entirely. The canonical primitive
-/// preserves both shapes by construction: `CapturedFailure::from_output`
-/// extracts the `(exit_code, stderr)` tuple with the same
-/// UTF-8-lossy-then-trim discipline every typed-error family in
-/// `cli/src/error.rs` already shares.
-///
-/// Sibling of the now-deleted `run_git_output`: the pre-migration
-/// surface carried two functions whose bodies were byte-identical
-/// modulo `cmd = "git"`. Three-times-rule (THEORY §VI.1) was already
-/// satisfied by the two-of-two `attestation.rs` siblings plus the
-/// structurally identical `commands/seed.rs::kubectl` sync sibling;
-/// this commit closes the carve-out on the async surface and inlines
-/// `run_command_output(cwd, "git", args)` at every prior
-/// `run_git_output(cwd, args)` call site.
+/// Async sibling of `commands/seed.rs::run_command_output`. Both
+/// shape-adapt for [`crate::retry::classify_capture_query_anyhow`] —
+/// the canonical "anyhow envelope over a queried external CLI"
+/// primitive — at the async (`tokio::process::Command`) and sync
+/// (`std::process::Command`) spawn surfaces respectively. The
+/// `io::Result<std::process::Output>` post-spawn shape is sync/async-
+/// agnostic, so the classifier and the mapper-pair body
+/// (`"Failed to spawn {cmd} {args:?}: {io}"` /
+/// `"{cmd} {args:?} failed (exit {code:?}): {stderr}"`) live once
+/// at the typed primitive; this shape-adapter just builds the
+/// `io::Result<Output>` from the async surface (`cwd`-anchored
+/// `tokio::process::Command::output().await`) and delegates. The
+/// `(exit_code, stderr)` tuple THEORY §V.4 Phase 1 attestation
+/// records pattern-match on is preserved by construction.
 async fn run_command_output(cwd: &Path, cmd: &str, args: &[&str]) -> Result<String> {
-    let captured = Command::new(cmd).current_dir(cwd).args(args).output().await;
-
-    // Owned copies for the typed mapper closures — the borrowed-`&str`
-    // call-site lifetimes don't outlive the closure values themselves,
-    // and `classify_capture_query` takes `FnOnce` on each arm so each
-    // closure consumes its captures by move. Two clones (one per arm)
-    // keep both mappers structurally independent — same shape every
-    // sibling `from_capture`-flavored consumer in `cli/src/retry.rs`
-    // and `cli/src/error.rs` already encodes.
-    let spawn_cmd = cmd.to_string();
-    let spawn_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let op_cmd = spawn_cmd.clone();
-    let op_args = spawn_args.clone();
-
-    crate::retry::classify_capture_query(
-        captured,
-        move |e| anyhow::anyhow!("Failed to spawn {} {:?}: {}", spawn_cmd, spawn_args, e),
-        move |cf| {
-            anyhow::anyhow!(
-                "{} {:?} failed (exit {:?}): {}",
-                op_cmd,
-                op_args,
-                cf.exit_code,
-                cf.stderr
-            )
-        },
+    crate::retry::classify_capture_query_anyhow(
+        Command::new(cmd).current_dir(cwd).args(args).output().await,
+        cmd,
+        args,
     )
 }
 
