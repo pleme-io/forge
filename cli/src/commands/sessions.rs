@@ -37,19 +37,33 @@ impl ProductConfig {
     }
 }
 
-/// Execute kubectl command and return output
+/// Execute `kubectl` with `args` and return its trimmed UTF-8-lossy stdout.
+///
+/// Third sibling of `commands/seed.rs::run_command_output` and
+/// `commands/attestation.rs::run_command_output` — all three shape-adapt
+/// for [`crate::retry::classify_capture_query_anyhow`] (the canonical
+/// "anyhow envelope over a queried external CLI" primitive). The pre-lift
+/// body fused into a `.context("Failed to execute kubectl")` envelope on
+/// the spawn arm that dropped both the offending args and the underlying
+/// `io::Error::Display`, plus an `if !output.status.success() { bail!(
+/// "kubectl failed: {}", stderr) }` op arm that dropped both the exit
+/// code AND the args entirely. Post-lift the spawn arm carries
+/// `Failed to spawn kubectl {args:?}: {io_error}` and the op arm carries
+/// `kubectl {args:?} failed (exit {code:?}): {trimmed_stderr}` — the
+/// `(cmd, args, exit_code, stderr)` structural-record tuple THEORY §V.4
+/// Phase 1 attestation telemetry pattern-matches on.
+///
+/// Third-occurrence-is-a-law consolidation (THEORY §VI.1): the prior
+/// commit (4612831) explicitly anticipated this site as one of the
+/// "future shape-adapter[s] that want[] the same anyhow envelope around
+/// a queried external CLI" siblings — `seed.rs` and `attestation.rs`
+/// were the first two, this is the third.
 fn kubectl(args: &[&str]) -> Result<String> {
-    let output = Command::new("kubectl")
-        .args(args)
-        .output()
-        .context("Failed to execute kubectl")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("kubectl failed: {}", stderr);
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    crate::retry::classify_capture_query_anyhow(
+        Command::new("kubectl").args(args).output(),
+        "kubectl",
+        args,
+    )
 }
 
 /// Get Valkey password from Kubernetes secret
