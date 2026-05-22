@@ -66,54 +66,17 @@ fn env_config_from_product(product: &crate::config::ProductConfig, env: &str) ->
 
 /// Execute an external CLI and return its trimmed stdout.
 ///
-/// Sync sibling of `commands/attestation.rs::run_command_output`
-/// (commit edbc2e6). Both functions carry the same "spawn a CLI,
-/// return its trimmed stdout, anyhow-bail on every failure shape"
-/// body; the async one drives `tokio::process::Command` against
-/// `git` to produce attestation source records, this sync one
-/// drives `std::process::Command` against `kubectl` to discover
-/// the CNPG primary pod. Pre-this-commit the sync sibling fused
-/// the structural-record tuple `(exit_code, stderr)` into a
-/// `bail!("kubectl failed: {}", stderr)` string that dropped the
-/// exit code entirely; the async sibling already routed through
-/// `classify_capture_query` (edbc2e6) with the canonical mapper-
-/// pair shape every typed-error producer site in forge encodes.
-/// This commit closes the carve-out on the sync surface: both
-/// siblings now flow through the same
-/// [`crate::retry::classify_capture_query`] primitive, with the
-/// `io::Result<std::process::Output>` post-spawn shape acting as
-/// the sync/async-agnostic join — `std::process::Command::output()`
-/// and `tokio::process::Command::output().await` produce
-/// identically-typed results, so the classifier and the mapper
-/// closures are shared by construction (THEORY §VI.1 three-times-
-/// rule consolidation across the sync/async spawn surfaces).
+/// Sync sibling of `commands/attestation.rs::run_command_output`. Both
+/// shape-adapt for [`crate::retry::classify_capture_query_anyhow`] — the
+/// canonical "anyhow envelope over a queried external CLI" primitive —
+/// at the sync (`std::process::Command`) and async
+/// (`tokio::process::Command`) spawn surfaces respectively. The
+/// `io::Result<std::process::Output>` post-spawn shape is sync/async-
+/// agnostic, so the classifier and the mapper-pair body live once at
+/// the typed primitive; both shape-adapters do nothing but build the
+/// `io::Result<Output>` from their spawn surface and delegate.
 fn run_command_output(cmd: &str, args: &[&str]) -> Result<String> {
-    let captured = Command::new(cmd).args(args).output();
-
-    // Owned copies for the typed mapper closures — `classify_capture_query`
-    // takes `FnOnce` on each arm so each closure consumes its captures by
-    // move. Two clones (one per arm) keep both mappers structurally
-    // independent — same shape every sibling `from_capture`-flavored
-    // consumer in `cli/src/retry.rs`, `cli/src/error.rs`, and
-    // `commands/attestation.rs::run_command_output` already encodes.
-    let spawn_cmd = cmd.to_string();
-    let spawn_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let op_cmd = spawn_cmd.clone();
-    let op_args = spawn_args.clone();
-
-    crate::retry::classify_capture_query(
-        captured,
-        move |e| anyhow::anyhow!("Failed to spawn {} {:?}: {}", spawn_cmd, spawn_args, e),
-        move |cf| {
-            anyhow::anyhow!(
-                "{} {:?} failed (exit {:?}): {}",
-                op_cmd,
-                op_args,
-                cf.exit_code,
-                cf.stderr
-            )
-        },
-    )
+    crate::retry::classify_capture_query_anyhow(Command::new(cmd).args(args).output(), cmd, args)
 }
 
 /// Execute SQL via kubectl exec into CNPG primary pod
