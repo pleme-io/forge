@@ -75,66 +75,35 @@ pub async fn execute(
 
         // Get ATTIC_TOKEN from environment or kubernetes secret
         // Fallback namespace can be configured via ATTIC_FALLBACK_NAMESPACE env var
-        let attic_token = std::env::var("ATTIC_TOKEN").or_else(|_| {
-            debug!("ATTIC_TOKEN not in env, trying kubectl...");
-
-            // Try github-actions namespace first
-            let token = std::process::Command::new("kubectl")
-                .args(&[
-                    "get",
-                    "secret",
+        let attic_token = std::env::var("ATTIC_TOKEN")
+            .ok()
+            .or_else(|| {
+                debug!("ATTIC_TOKEN not in env, trying kubectl...");
+                let primary = crate::infrastructure::kubectl::fetch_secret_value(
                     "attic-secrets",
-                    "-n",
                     "github-actions",
-                    "-o",
-                    "jsonpath={.data.server-token}",
-                ])
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        debug!("Found attic-secrets in github-actions namespace");
-                        String::from_utf8(o.stdout)
-                            .ok()
-                            .and_then(|s| base64::decode(s.trim()).ok())
-                            .and_then(|b| String::from_utf8(b).ok())
-                    } else {
-                        debug!("attic-secrets not found in github-actions namespace");
-                        None
-                    }
-                });
-
-            // Fall back to configured namespace (via ATTIC_FALLBACK_NAMESPACE env var)
-            token.or_else(|| {
+                    "server-token",
+                );
+                if primary.is_some() {
+                    debug!("Found attic-secrets in github-actions namespace");
+                    return primary;
+                }
+                debug!("attic-secrets not found in github-actions namespace");
                 let fallback_ns = std::env::var("ATTIC_FALLBACK_NAMESPACE").ok()?;
                 debug!("Trying {} namespace...", fallback_ns);
-                std::process::Command::new("kubectl")
-                    .args(&[
-                        "get",
-                        "secret",
-                        "attic-secrets",
-                        "-n",
-                        &fallback_ns,
-                        "-o",
-                        "jsonpath={.data.server-token}",
-                    ])
-                    .output()
-                    .ok()
-                    .and_then(|o| {
-                        if o.status.success() {
-                            debug!("Found attic-secrets in {} namespace", fallback_ns);
-                            String::from_utf8(o.stdout)
-                                .ok()
-                                .and_then(|s| base64::decode(s.trim()).ok())
-                                .and_then(|b| String::from_utf8(b).ok())
-                        } else {
-                            debug!("attic-secrets not found in {} namespace", fallback_ns);
-                            None
-                        }
-                    })
+                let fallback = crate::infrastructure::kubectl::fetch_secret_value(
+                    "attic-secrets",
+                    &fallback_ns,
+                    "server-token",
+                );
+                if fallback.is_some() {
+                    debug!("Found attic-secrets in {} namespace", fallback_ns);
+                } else {
+                    debug!("attic-secrets not found in {} namespace", fallback_ns);
+                }
+                fallback
             })
-            .ok_or_else(|| anyhow::anyhow!("ATTIC_TOKEN not found in env or kubernetes (tried github-actions namespace; set ATTIC_FALLBACK_NAMESPACE for additional namespace)"))
-        })?;
+            .ok_or_else(|| anyhow::anyhow!("ATTIC_TOKEN not found in env or kubernetes (tried github-actions namespace; set ATTIC_FALLBACK_NAMESPACE for additional namespace)"))?;
 
         // Attic server alias — configurable via ATTIC_SERVER_NAME (default: "default")
         let attic_server =

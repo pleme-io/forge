@@ -11,6 +11,7 @@
 
 pub mod attic;
 pub mod git;
+pub mod kubectl;
 pub mod registry;
 pub mod release_tracker;
 

@@ -121,28 +121,11 @@ impl RegistryCredentials {
     }
 
     fn try_kubectl_secret() -> Option<String> {
-        std::process::Command::new("kubectl")
-            .args([
-                "get",
-                "secret",
-                "github-runner-secret",
-                "-n",
-                "github-actions",
-                "-o",
-                "jsonpath={.data.GHCR_TOKEN}",
-            ])
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    String::from_utf8(o.stdout)
-                        .ok()
-                        .and_then(|s| base64::decode(s.trim()).ok())
-                        .and_then(|b| String::from_utf8(b).ok())
-                } else {
-                    None
-                }
-            })
+        crate::infrastructure::kubectl::fetch_secret_value(
+            "github-runner-secret",
+            "github-actions",
+            "GHCR_TOKEN",
+        )
     }
 }
 
