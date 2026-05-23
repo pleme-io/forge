@@ -130,31 +130,15 @@ async fn run_sync_via_kubectl(
     );
 
     // Find the search service pod
-    let pod_output = Command::new("kubectl")
-        .args([
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-l",
-            "app=novasearch",
-            "-o",
-            "jsonpath={.items[0].metadata.name}",
-        ])
-        .output()
-        .await
-        .context("Failed to get search service pod name")?;
-
-    if !pod_output.status.success() {
-        bail!("Failed to find search service pod in namespace {}", namespace);
-    }
-
-    let pod_name = String::from_utf8_lossy(&pod_output.stdout)
-        .trim()
-        .to_string();
-    if pod_name.is_empty() {
-        bail!("No search service pod found in namespace {}", namespace);
-    }
+    let pod_name =
+        crate::infrastructure::kubectl::find_first_pod_name_async(namespace, "app=novasearch")
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to find search service pod in namespace {}",
+                    namespace
+                )
+            })?;
 
     println!("  {} Found pod: {}", "→".cyan(), pod_name);
 
