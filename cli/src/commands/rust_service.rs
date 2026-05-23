@@ -568,25 +568,16 @@ pub async fn build_rust_service(
             let closure_size = paths.lines().count();
             println!("   AMD64: Found {} derivations in closure", closure_size);
 
-            // Push all derivations via stdin
-            let mut attic_push = Command::new("attic")
-                .args(&["push", &cache_target, "--stdin"])
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .context("Failed to spawn attic push for AMD64")?;
-
-            if let Some(mut stdin) = attic_push.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                stdin.write_all(amd64_path_info.stdout.as_slice()).await?;
-                drop(stdin);
-            }
-
-            let push_result = attic_push.wait().await?;
-
-            if !push_result.success() {
-                eprintln!("   ⚠️  AMD64 closure push failed (non-fatal)");
-            } else {
-                println!("   {}", "✅ AMD64 closure cached".green());
+            // Lift onto canonical typed primitive (sibling of
+            // `commands/build.rs::execute`; THEORY §VI.1 three-is-a-law
+            // — ARM64 below is the third occurrence).
+            let attic_client = crate::infrastructure::attic::AtticClient::new(cache_target.clone());
+            match attic_client
+                .push_closure_via_stdin(amd64_path_info.stdout.as_slice())
+                .await
+            {
+                Ok(()) => println!("   {}", "✅ AMD64 closure cached".green()),
+                Err(e) => eprintln!("   ⚠️  AMD64 closure push failed (non-fatal): {}", e),
             }
         }
 
@@ -606,25 +597,22 @@ pub async fn build_rust_service(
                 let closure_size = paths.lines().count();
                 println!("   ARM64: Found {} derivations in closure", closure_size);
 
-                // Push all derivations via stdin
-                let mut attic_push = Command::new("attic")
-                    .args(&["push", &cache_target, "--stdin"])
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                    .context("Failed to spawn attic push for ARM64")?;
-
-                if let Some(mut stdin) = attic_push.stdin.take() {
-                    use tokio::io::AsyncWriteExt;
-                    stdin.write_all(arm64_path_info.stdout.as_slice()).await?;
-                    drop(stdin);
-                }
-
-                let push_result = attic_push.wait().await?;
-
-                if !push_result.success() {
-                    eprintln!("   ⚠️  ARM64 closure push failed (non-fatal)");
-                } else {
-                    println!("   {}", "✅ ARM64 closure cached".green());
+                // Lift onto canonical typed primitive (third sibling of
+                // the lifted stanza family — `commands/build.rs::execute`
+                // and the AMD64 arm above are the other two; THEORY §VI.1
+                // three-is-a-law). Typed-error op-failure path carries
+                // (cache, exit_code, stderr) per THEORY §V.4 Phase 1
+                // attestation record shape.
+                let attic_client =
+                    crate::infrastructure::attic::AtticClient::new(cache_target.clone());
+                match attic_client
+                    .push_closure_via_stdin(arm64_path_info.stdout.as_slice())
+                    .await
+                {
+                    Ok(()) => println!("   {}", "✅ ARM64 closure cached".green()),
+                    Err(e) => {
+                        eprintln!("   ⚠️  ARM64 closure push failed (non-fatal): {}", e)
+                    }
                 }
             }
         }
