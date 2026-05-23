@@ -210,40 +210,32 @@ pub async fn verify_router_schema(
     let mut errors = Vec::new();
 
     // Get hive-router pod name
-    let output = Command::new("kubectl")
-        .args(&[
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-l",
-            "app=hive-router",
-            "-o",
-            "jsonpath={.items[0].metadata.name}",
-        ])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        errors.push("Failed to find hive-router pod".to_string());
-        return Ok(VerificationResult {
-            success: false,
-            expected_hash: expected_hash.to_string(),
-            actual_hash: None,
-            missing_services: vec![],
-            unexpected_services: vec![],
-            errors,
-        });
-    }
-
-    let pod_name = String::from_utf8_lossy(&output.stdout);
+    let pod_name = match crate::infrastructure::kubectl::find_first_pod_name_async(
+        namespace,
+        "app=hive-router",
+    )
+    .await
+    {
+        Some(name) => name,
+        None => {
+            errors.push("Failed to find hive-router pod".to_string());
+            return Ok(VerificationResult {
+                success: false,
+                expected_hash: expected_hash.to_string(),
+                actual_hash: None,
+                missing_services: vec![],
+                unexpected_services: vec![],
+                errors,
+            });
+        }
+    };
 
     // Query the router's health endpoint to get schema hash
     // Note: We'll need to expose this via the router's health check
     let output = Command::new("kubectl")
         .args(&[
             "exec",
-            pod_name.trim(),
+            &pod_name,
             "-n",
             namespace,
             "--",

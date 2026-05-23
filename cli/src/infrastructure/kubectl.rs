@@ -4,14 +4,27 @@
 //! command-module surfaces — distinct from `cli/src/k8s.rs`, which
 //! wraps the typed `kube-rs` API client.
 //!
-//! Current surface: [`fetch_secret_value`] — the canonical
-//! "fetch a base64-encoded data field from a Kubernetes Secret"
-//! primitive. Four pre-lift sites carried verbatim copies of this
-//! shape (`commands/build.rs::execute`,
-//! `commands/github_runner_ci.rs` AMD64 + fallback-namespace pair,
-//! `infrastructure/registry.rs::RegistryCredentials::try_kubectl_secret`)
-//! past THEORY §VI.1's three-is-a-law threshold; this module is the
-//! law-redeeming consolidation.
+//! Current surface:
+//!
+//! - [`fetch_secret_value`] — the canonical "fetch a base64-encoded
+//!   data field from a Kubernetes Secret" primitive. Four pre-lift
+//!   sites carried verbatim copies of this shape
+//!   (`commands/build.rs::execute`,
+//!   `commands/github_runner_ci.rs` AMD64 + fallback-namespace pair,
+//!   `infrastructure/registry.rs::RegistryCredentials::try_kubectl_secret`)
+//!   past THEORY §VI.1's three-is-a-law threshold.
+//! - [`find_first_pod_name_async`] — the canonical "fetch the name
+//!   of the first pod matching a label selector" primitive. Three
+//!   pre-lift async sites carried verbatim copies of this shape
+//!   (`commands/search_sync.rs::run_novasearch_sync`,
+//!   `commands/migrations.rs` job-name pod lookup,
+//!   `commands/supergraph_verification.rs::verify_hive_router_*`)
+//!   past THEORY §VI.1's three-is-a-law threshold.
+//!   `commands/seed.rs::find_primary_pod` carries the same shape
+//!   on a sync spawn surface but already routes through the
+//!   structural-error-tuple-preserving
+//!   `classify_capture_query_anyhow` primitive (see commit 9637380);
+//!   harmonizing the two surfaces is a future-commit concern.
 
 use crate::tools::get_tool_path;
 
@@ -100,6 +113,116 @@ pub(crate) fn fetch_secret_value_with_bin(
     let raw = String::from_utf8(output.stdout).ok()?;
     let decoded = general_purpose::STANDARD.decode(raw.trim()).ok()?;
     String::from_utf8(decoded).ok()
+}
+
+/// Canonical kubectl argv that fetches the first pod's name from a
+/// label-selector query: `kubectl get pods -n <ns> -l <selector>
+/// -o jsonpath={.items[0].metadata.name}`. Centralized so the
+/// async primitive ([`find_first_pod_name_async`]) and its
+/// `_with_bin` test sibling both build the same argv from one
+/// definition. A regression that, e.g., dropped the `-n <ns>`
+/// pair (silently broadening the search to the current-context
+/// namespace) is a one-site fix here.
+fn first_pod_name_args<'a>(namespace: &'a str, label_selector: &'a str) -> [&'a str; 8] {
+    [
+        "get",
+        "pods",
+        "-n",
+        namespace,
+        "-l",
+        label_selector,
+        "-o",
+        "jsonpath={.items[0].metadata.name}",
+    ]
+}
+
+/// Classify a `kubectl get pods … -o jsonpath={.items[0].metadata.name}`
+/// captured output into `Option<String>`. Returns `None` on non-zero
+/// exit, non-UTF8 stdout, or empty trimmed stdout (no pod matched the
+/// selector); `Some(<trimmed pod name>)` otherwise.
+fn classify_first_pod_name(output: &std::process::Output) -> Option<String> {
+    if !output.status.success() {
+        return None;
+    }
+    let name = std::str::from_utf8(&output.stdout).ok()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Find the name of the first pod matching a label selector in the
+/// given namespace via `kubectl get pods -n <ns> -l <selector>
+/// -o jsonpath={.items[0].metadata.name}`.
+///
+/// Returns `None` on any failure — kubectl not spawnable, non-zero
+/// exit (namespace missing / RBAC denied), non-UTF8 stdout, or
+/// empty stdout (no pod matched the selector). The "best-effort,
+/// fall back to None" shape matches the [`fetch_secret_value`]
+/// discipline: every pre-lift caller bailed-or-degraded on missing
+/// pod via a hand-rolled `String::from_utf8_lossy(...).trim()` +
+/// `is_empty()` chain, and consolidating onto one Option-typed
+/// primitive keeps the per-caller decision (bail, log, skip) at
+/// the caller while the discovery shape lives once at the typed
+/// surface.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let pod = find_first_pod_name_async(&namespace, "app=hive-router")
+///     .await
+///     .ok_or_else(|| anyhow::anyhow!("no hive-router pod in {namespace}"))?;
+/// ```
+///
+/// # Why async-only
+///
+/// All three pre-lift sites this primitive consolidates
+/// (`commands/search_sync.rs`, `commands/migrations.rs`,
+/// `commands/supergraph_verification.rs`) already spawn kubectl
+/// on `tokio::process::Command`. A sync sibling would push
+/// `block_on` into one of two unhappy positions — either a tokio
+/// runtime entered from a sync context (panic on re-entry), or a
+/// `spawn_blocking` indirection that defeats tokio's async-I/O
+/// surface for a kubectl call that's already correctly async.
+/// `commands/seed.rs::find_primary_pod` carries the same shape
+/// on a sync spawn surface but already routes through the
+/// structural-error-preserving `classify_capture_query_anyhow`
+/// primitive (commit 9637380) and is deliberately left out of
+/// this lift to preserve that prior structural fidelity.
+///
+/// # Binary resolution
+///
+/// `kubectl` is resolved via [`crate::tools::get_tool_path`] —
+/// the canonical `KUBECTL_BIN`-or-PATH lookup forge uses for
+/// every shell-out binary. Tests drive the underlying
+/// [`find_first_pod_name_async_with_bin`] directly with an
+/// absolute shim path to avoid global-env mutation under cargo
+/// test's parallel runner.
+pub async fn find_first_pod_name_async(namespace: &str, label_selector: &str) -> Option<String> {
+    let bin = get_tool_path("kubectl");
+    find_first_pod_name_async_with_bin(&bin, namespace, label_selector).await
+}
+
+/// Test-facing sibling of [`find_first_pod_name_async`] that takes
+/// the kubectl binary path as an explicit parameter, so hermetic
+/// shim tests can spawn the primitive against a
+/// `make_executable_shim`-produced absolute path without mutating
+/// the process-global `PATH` / `KUBECTL_BIN` env var (the
+/// parallel-runner race trap the centralized
+/// `make_executable_shim` discipline pins everywhere else in
+/// forge).
+pub(crate) async fn find_first_pod_name_async_with_bin(
+    bin: &str,
+    namespace: &str,
+    label_selector: &str,
+) -> Option<String> {
+    let output = tokio::process::Command::new(bin)
+        .args(first_pod_name_args(namespace, label_selector))
+        .output()
+        .await
+        .ok()?;
+    classify_first_pod_name(&output)
 }
 
 #[cfg(test)]
@@ -270,6 +393,148 @@ mod tests {
                 "jsonpath={.data.MY_KEY}",
             ],
             "kubectl argv must match the canonical secret-fetch shape"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // find_first_pod_name_async — the canonical pod-name discovery
+    // primitive. The hermetic-shim tests pin the contract every
+    // pre-lift site relied on: success → trimmed pod name, non-zero
+    // exit → None, empty stdout (no matching pod) → None, spawn-
+    // failure → None, and the canonical argv shape.
+    // ---------------------------------------------------------------
+
+    /// On a successful kubectl invocation,
+    /// `find_first_pod_name_async_with_bin` returns the trimmed
+    /// UTF-8 pod name from stdout. Pins the happy path the three
+    /// pre-lift sites hand-rolled via
+    /// `String::from_utf8_lossy(...).trim().to_string()`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_find_first_pod_name_async_with_bin_success_returns_trimmed_name() {
+        let (_dir, shim) = make_executable_shim(
+            "kubectl",
+            "#!/bin/sh\nprintf '%s' 'hive-router-7f9c8b6d-x2k4l'\n",
+        );
+        let got = find_first_pod_name_async_with_bin(&shim, "platform", "app=hive-router").await;
+        assert_eq!(got, Some("hive-router-7f9c8b6d-x2k4l".to_string()));
+    }
+
+    /// `find_first_pod_name_async_with_bin` strips surrounding
+    /// whitespace before returning. kubectl jsonpath output often
+    /// carries a trailing newline depending on shell/locale; pre-
+    /// lift each of the three sites had a `.trim()` call, and
+    /// centralizing it at the primitive keeps the discipline at one
+    /// site.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_find_first_pod_name_async_with_bin_strips_trailing_whitespace() {
+        let (_dir, shim) = make_executable_shim("kubectl", "#!/bin/sh\necho '  novasearch-0  '\n");
+        let got = find_first_pod_name_async_with_bin(&shim, "search", "app=novasearch").await;
+        assert_eq!(got, Some("novasearch-0".to_string()));
+    }
+
+    /// `find_first_pod_name_async_with_bin` returns `None` on a
+    /// non-zero kubectl exit — namespace missing / RBAC denied.
+    /// Pre-lift each site checked `output.status.success()` and
+    /// either bailed (search_sync, supergraph_verification) or fell
+    /// through to a degraded path (migrations). Collapsing all
+    /// op-failure shapes to `None` at the typed primitive keeps the
+    /// caller's per-site recovery decision explicit at the call
+    /// site.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_find_first_pod_name_async_with_bin_op_failure_returns_none() {
+        let (_dir, shim) = make_executable_shim(
+            "kubectl",
+            "#!/bin/sh\necho 'Error from server (Forbidden)' 1>&2\nexit 1\n",
+        );
+        let got = find_first_pod_name_async_with_bin(&shim, "ghost-ns", "app=missing").await;
+        assert!(got.is_none(), "non-zero kubectl exit must collapse to None");
+    }
+
+    /// `find_first_pod_name_async_with_bin` returns `None` when
+    /// kubectl succeeds but stdout is empty — the canonical "no pod
+    /// matched the label selector" shape. kubectl's
+    /// `jsonpath={.items[0]...}` emits empty stdout (exit 0) when
+    /// `.items` is empty, so the `success()` check alone is
+    /// insufficient. Pinning empty-stdout → `None` here closes a
+    /// gap that pre-lift sites handled inconsistently:
+    /// search_sync.rs's `pod_name.is_empty()` arm bailed;
+    /// supergraph_verification.rs had no empty check at all (so a
+    /// missing pod silently fell through into a downstream
+    /// `kubectl exec` against an empty pod name, surfacing as a
+    /// confusing "resource name may not be empty" diagnostic).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_find_first_pod_name_async_with_bin_empty_stdout_returns_none() {
+        let (_dir, shim) = make_executable_shim("kubectl", "#!/bin/sh\nexit 0\n");
+        let got = find_first_pod_name_async_with_bin(&shim, "platform", "app=nothing-here").await;
+        assert!(
+            got.is_none(),
+            "empty stdout (no matching pod) must collapse to None even on exit 0"
+        );
+    }
+
+    /// `find_first_pod_name_async_with_bin` returns `None` when
+    /// kubectl is not spawnable — binary not on PATH / nonexistent
+    /// absolute path. Mirrors the spawn-failure discipline of
+    /// [`fetch_secret_value`].
+    #[tokio::test]
+    async fn test_find_first_pod_name_async_with_bin_spawn_failure_returns_none() {
+        let missing = "/nonexistent/forge-test-shim-must-not-exist-kubectl-pod";
+        let got = find_first_pod_name_async_with_bin(missing, "ns", "app=x").await;
+        assert!(got.is_none(), "spawn against nonexistent path must be None");
+    }
+
+    /// `find_first_pod_name_async_with_bin` passes the canonical
+    /// `["get", "pods", "-n", <ns>, "-l", <selector>, "-o",
+    /// "jsonpath={.items[0].metadata.name}"]` argv to kubectl.
+    /// Pre-lift each site spelled this argv verbatim; pinning it
+    /// here makes a future regression that, e.g., dropped the
+    /// `-n <ns>` pair (silently broadening the search to the
+    /// current-context namespace) or that singularized `pods` →
+    /// `pod` inconsistently (kubectl accepts both but the canonical
+    /// idiom across forge uses `pods` at every pre-lift site of
+    /// this shape) fail this test rather than silently change
+    /// cluster-query semantics.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_find_first_pod_name_async_with_bin_passes_canonical_kubectl_args() {
+        let log_dir = tempfile::tempdir().expect("log tempdir");
+        let log_path = log_dir.path().join("argv.log");
+        let log_str = log_path.display().to_string();
+
+        // The shim writes each positional arg on its own line to argv.log,
+        // then prints the canonical pod name. `printf '%s\n'` instead of
+        // `echo` so a `-n` argument isn't swallowed as echo's
+        // "no trailing newline" flag (POSIX sh portability trap).
+        let body = format!(
+            "#!/bin/sh\n\
+             for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{}'; done\n\
+             printf '%s' 'job-runner-abc'\n",
+            log_str
+        );
+        let (_dir, shim) = make_executable_shim("kubectl", &body);
+
+        let got = find_first_pod_name_async_with_bin(&shim, "my-ns", "job-name=my-job").await;
+        assert_eq!(got, Some("job-runner-abc".to_string()));
+
+        let logged = std::fs::read_to_string(&log_path).expect("read argv log");
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "get",
+                "pods",
+                "-n",
+                "my-ns",
+                "-l",
+                "job-name=my-job",
+                "-o",
+                "jsonpath={.items[0].metadata.name}",
+            ],
+            "kubectl argv must match the canonical first-pod-name shape"
         );
     }
 }

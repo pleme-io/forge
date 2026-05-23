@@ -471,26 +471,17 @@ spec:
     } else {
         // Try to get logs
         println!("📋 Fetching {} migration logs...", db_label);
-        let pod_name = Command::new("kubectl")
-            .args(&[
-                "get",
-                "pods",
-                "-n",
-                &namespace,
-                "-l",
-                &format!("job-name={}", job_name),
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ])
-            .output()
-            .await?;
+        let pod_name = crate::infrastructure::kubectl::find_first_pod_name_async(
+            &namespace,
+            &format!("job-name={}", job_name),
+        )
+        .await;
 
         let mut logs_tail = None;
-        if !pod_name.stdout.is_empty() {
-            let pod = String::from_utf8_lossy(&pod_name.stdout);
+        if let Some(pod) = pod_name.as_deref() {
             // Get logs for display
             Command::new("kubectl")
-                .args(&["logs", pod.trim(), "-n", &namespace, "--tail=100"])
+                .args(&["logs", pod, "-n", &namespace, "--tail=100"])
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .status()
@@ -498,7 +489,7 @@ spec:
 
             // Also capture logs for event
             let logs_output = Command::new("kubectl")
-                .args(&["logs", pod.trim(), "-n", &namespace, "--tail=50"])
+                .args(&["logs", pod, "-n", &namespace, "--tail=50"])
                 .output()
                 .await
                 .ok();
