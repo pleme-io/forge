@@ -38,32 +38,16 @@ pub async fn execute(
     info!("   URL: {}", cache_url);
     info!("   Cache: {}", cache_name);
 
-    let attic_token = std::env::var("ATTIC_TOKEN").or_else(|_| {
-        // Try to fetch from kubectl
-        std::process::Command::new("kubectl")
-            .args(&[
-                "get",
-                "secret",
+    let attic_token = std::env::var("ATTIC_TOKEN")
+        .ok()
+        .or_else(|| {
+            crate::infrastructure::kubectl::fetch_secret_value(
                 "attic-secrets",
-                "-n",
                 "infrastructure",
-                "-o",
-                "jsonpath={.data.server-token}",
-            ])
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    String::from_utf8(o.stdout)
-                        .ok()
-                        .and_then(|s| base64::decode(s.trim()).ok())
-                        .and_then(|b| String::from_utf8(b).ok())
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| anyhow::anyhow!("ATTIC_TOKEN not found"))
-    })?;
+                "server-token",
+            )
+        })
+        .ok_or_else(|| anyhow::anyhow!("ATTIC_TOKEN not found"))?;
 
     // Attic server alias — configurable via ATTIC_SERVER_NAME (default: "default")
     let attic_server = std::env::var("ATTIC_SERVER_NAME").unwrap_or_else(|_| "default".to_string());
