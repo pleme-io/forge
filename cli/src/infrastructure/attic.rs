@@ -217,6 +217,114 @@ impl AtticClient {
         }
     }
 
+    /// Push a whole Nix closure to the Attic cache via
+    /// `attic push <cache_name> --stdin`.
+    ///
+    /// Spawns `attic push <cache_name> --stdin` with stdin piped (writes
+    /// `closure_bytes` then drops stdin so attic sees EOF) and
+    /// stdout/stderr piped (captured for the typed-error payload). The
+    /// byte stream is the canonical `nix path-info --recursive <path>`
+    /// stdout — one store path per line — which attic consumes as a
+    /// batch of upload jobs.
+    ///
+    /// Sibling of [`Self::push`]: same cache + token + binary
+    /// resolution, same `ExecFailed` typed variant on spawn failure.
+    /// The split between the two is the input shape:
+    /// - [`Self::push`] takes one `store_path` arg ↦
+    ///   `attic push <cache> <path>` ↦ [`AtticError::PushFailed`]
+    ///   carrying the single store path.
+    /// - [`Self::push_closure_via_stdin`] takes a byte stream ↦
+    ///   `attic push <cache> --stdin` ↦
+    ///   [`AtticError::ClosurePushFailed`] carrying no per-path field
+    ///   (the input is a stdin-fed batch, not a single CLI arg).
+    ///
+    /// Lifts the verbatim ~22-line stanza repeated three times across
+    /// `commands/build.rs::execute` (single closure push after a
+    /// successful image build) and
+    /// `commands/rust_service.rs::push_rust_service` (AMD64 + ARM64
+    /// sibling closures). Pre-lift each site spelled out the same
+    /// `Command::new("attic").args(["push", &cache, "--stdin"])` /
+    /// `.stdin(Stdio::piped()).spawn().context(...)` /
+    /// `stdin.take().write_all(...).await? + drop(stdin)` / `wait()` /
+    /// `if !status.success() { warn! } else { info! }` body. Three
+    /// occurrences past THEORY §VI.1's three-is-a-law threshold
+    /// (PRIME DIRECTIVE: duplication budget is zero) consolidate onto
+    /// this typed primitive.
+    ///
+    /// # Token forwarding
+    ///
+    /// Same shape as [`Self::push`]: when `self.token` is `Some`,
+    /// `ATTIC_TOKEN` is set on the spawned process's environment;
+    /// otherwise the env var is left unmodified (tokio inherits the
+    /// parent's env by default, so a parent-provided `ATTIC_TOKEN`
+    /// still flows through). This matches the behavior the three
+    /// pre-lift sites relied on — none of them set `ATTIC_TOKEN`
+    /// explicitly on the `attic push --stdin` invocation; they relied
+    /// on the env having been seeded earlier in the calling command.
+    ///
+    /// # Returns
+    ///
+    /// - [`AtticError::ExecFailed`] when `attic` cannot be spawned, or
+    ///   when stdin cannot be acquired from the spawned child (the
+    ///   `child.stdin.take()` returning `None` case — should be
+    ///   structurally impossible with `Stdio::piped()` but is mapped
+    ///   to `ExecFailed` for completeness).
+    /// - [`AtticError::ClosurePushFailed`] when `attic` exits non-zero,
+    ///   carrying the cache name, exit code, and trimmed UTF-8-lossy
+    ///   stderr — the structural-record tuple Phase 1 attestation
+    ///   records (THEORY §V.4) consume.
+    pub async fn push_closure_via_stdin(&self, closure_bytes: &[u8]) -> Result<(), AtticError> {
+        let attic_bin = self.resolve_attic_bin();
+        let mut cmd = Command::new(&attic_bin);
+        cmd.args(["push", &self.cache_name, "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(t) = self.token.as_deref() {
+            cmd.env("ATTIC_TOKEN", t);
+        }
+
+        let mut child = cmd.spawn().map_err(|e| AtticError::ExecFailed {
+            cache: self.cache_name.clone(),
+            message: e.to_string(),
+        })?;
+
+        // Stdio::piped() guarantees child.stdin is Some; the `take`
+        // returning None case is structurally impossible. We map it to
+        // ExecFailed so the typed surface is total.
+        let mut stdin = child.stdin.take().ok_or_else(|| AtticError::ExecFailed {
+            cache: self.cache_name.clone(),
+            message: "child stdin missing despite Stdio::piped()".to_string(),
+        })?;
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(closure_bytes)
+            .await
+            .map_err(|e| AtticError::ExecFailed {
+                cache: self.cache_name.clone(),
+                message: format!("write to attic stdin: {}", e),
+            })?;
+        drop(stdin);
+
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| AtticError::ExecFailed {
+                cache: self.cache_name.clone(),
+                message: format!("wait for attic push: {}", e),
+            })?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(AtticError::ClosurePushFailed {
+                cache: self.cache_name.clone(),
+                exit_code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            })
+        }
+    }
+
     /// Login to Attic cache.
     ///
     /// Returns typed errors:
@@ -430,6 +538,144 @@ mod tests {
                 );
             }
             other => panic!("expected LoginFailed, got: {other:?}"),
+        }
+    }
+
+    /// `push_closure_via_stdin` on a spawn failure (attic binary
+    /// missing) must surface [`AtticError::ExecFailed`] carrying the
+    /// cache name — same shape as `push`. Pins the spawn-vs-op split
+    /// at the closure-push surface so telemetry can distinguish
+    /// "attic missing" from "attic said no" without parsing strings.
+    #[tokio::test]
+    async fn test_push_closure_via_stdin_returns_exec_failed_when_attic_missing() {
+        let client = AtticClient::new("cache-closure-x")
+            .with_attic_bin("/nonexistent/path/to/attic-binary-does-not-exist");
+        let err = client
+            .push_closure_via_stdin(b"/nix/store/aaa\n")
+            .await
+            .expect_err("missing attic must fail");
+        match err {
+            AtticError::ExecFailed { cache, .. } => {
+                assert_eq!(cache, "cache-closure-x")
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// `push_closure_via_stdin` on a non-zero exit must surface
+    /// [`AtticError::ClosurePushFailed`] carrying (cache, exit_code,
+    /// captured stderr) — the structural-record tuple Phase 1
+    /// attestation records (THEORY §V.4) consume. Pre-lift each of
+    /// the three call sites (`commands/build.rs::execute` and
+    /// `commands/rust_service.rs::push_rust_service` AMD64/ARM64
+    /// arms) collapsed the op-failure path into a `warn!("⚠️  Failed
+    /// to push closure to Attic (non-fatal)")` log line that dropped
+    /// the exit code, the cache identity, AND the underlying stderr
+    /// entirely. Post-lift each site recovers the typed tuple via
+    /// the `Err(AtticError::ClosurePushFailed { .. })` destructure
+    /// even when the call-site chooses to log the failure as
+    /// non-fatal. A future regression that re-fused the fields or
+    /// dropped any of them would fail this test rather than silently
+    /// degrade the Phase 1 record shape.
+    #[tokio::test]
+    async fn test_push_closure_via_stdin_returns_closure_push_failed_with_structured_fields() {
+        let (_dir, shim) =
+            make_attic_shim("#!/bin/sh\necho 'cache write rejected' 1>&2\nexit 19\n");
+        let client = AtticClient::new("cache-closure-y").with_attic_bin(&shim);
+        let err = client
+            .push_closure_via_stdin(b"/nix/store/xxx\n/nix/store/yyy\n")
+            .await
+            .expect_err("nonzero exit must fail");
+        match err {
+            AtticError::ClosurePushFailed {
+                cache,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cache, "cache-closure-y");
+                assert_eq!(exit_code, Some(19));
+                assert!(
+                    stderr.contains("cache write rejected"),
+                    "stderr field must capture attic stderr verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected ClosurePushFailed, got: {other:?}"),
+        }
+    }
+
+    /// `push_closure_via_stdin` on the success path returns `Ok(())`.
+    /// Pins the success-path floor every lifted call site relies on:
+    /// `build.rs::execute` (after a successful image build) and
+    /// `rust_service.rs::push_rust_service` (after AMD64/ARM64
+    /// closures complete) flow through this typed surface and treat
+    /// `Ok(())` as the "✅ closure cached" log branch.
+    #[tokio::test]
+    async fn test_push_closure_via_stdin_success_path() {
+        // Shim drains stdin so the parent's write_all doesn't block on
+        // a full pipe buffer before the child exits.
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\ncat >/dev/null\nexit 0\n");
+        let client = AtticClient::new("cache-closure-ok").with_attic_bin(&shim);
+        client
+            .push_closure_via_stdin(b"/nix/store/aaa\n")
+            .await
+            .expect("success path must succeed");
+    }
+
+    /// `push_closure_via_stdin` must feed `closure_bytes` to the
+    /// spawned `attic` process's stdin verbatim. Pre-lift the bytes
+    /// were fed via the inline `stdin.take().write_all(...).await?`
+    /// stanza at each of the three call sites; the typed primitive
+    /// owns the discipline now. The shim cats stdin to stderr and
+    /// exits non-zero so the captured stderr in
+    /// `ClosurePushFailed.stderr` round-trips the observed bytes.
+    #[tokio::test]
+    async fn test_push_closure_via_stdin_feeds_bytes_to_attic_stdin() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\ncat 1>&2\nexit 23\n");
+        let client = AtticClient::new("cache-feed").with_attic_bin(&shim);
+        let err = client
+            .push_closure_via_stdin(b"/nix/store/feed-marker-zzz\n")
+            .await
+            .expect_err("nonzero exit must fail");
+        match err {
+            AtticError::ClosurePushFailed { stderr, .. } => {
+                assert!(
+                    stderr.contains("feed-marker-zzz"),
+                    "stdin bytes must reach the spawned attic process verbatim; got stderr: {stderr:?}"
+                );
+            }
+            other => panic!("expected ClosurePushFailed, got: {other:?}"),
+        }
+    }
+
+    /// `push_closure_via_stdin` must forward `self.token` to the
+    /// spawned `attic` process as the `ATTIC_TOKEN` env var — same
+    /// shape as `push`. Pre-lift the three call sites relied on
+    /// ambient env inheritance (`ATTIC_TOKEN` already in the parent's
+    /// environment); the typed primitive supports both paths
+    /// (explicit `with_token` or ambient inheritance), and this test
+    /// pins the explicit path so a future drift that drops the
+    /// `cmd.env("ATTIC_TOKEN", t)` line surfaces here rather than
+    /// silently producing an unauthenticated closure push.
+    #[tokio::test]
+    async fn test_push_closure_via_stdin_forwards_token_as_attic_token_env() {
+        let (_dir, shim) = make_attic_shim(
+            "#!/bin/sh\ncat >/dev/null\necho \"observed-token=$ATTIC_TOKEN\" 1>&2\nexit 29\n",
+        );
+        let client = AtticClient::new("cache-tok-closure")
+            .with_token("closure-sekrit-456")
+            .with_attic_bin(&shim);
+        let err = client
+            .push_closure_via_stdin(b"/nix/store/anything\n")
+            .await
+            .expect_err("nonzero exit must fail");
+        match err {
+            AtticError::ClosurePushFailed { stderr, .. } => {
+                assert!(
+                    stderr.contains("observed-token=closure-sekrit-456"),
+                    "ATTIC_TOKEN must be forwarded verbatim; got stderr: {stderr:?}"
+                );
+            }
+            other => panic!("expected ClosurePushFailed, got: {other:?}"),
         }
     }
 

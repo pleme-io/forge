@@ -361,6 +361,22 @@ pub enum AtticError {
         stderr: String,
     },
 
+    /// `attic push <cache> --stdin` failed (non-zero exit) after the
+    /// closure bytes had been fed in full. Sibling of [`Self::PushFailed`]
+    /// — the split is the input shape: `PushFailed` carries the single
+    /// `store_path` argument the `attic push <cache> <path>` shape takes;
+    /// `ClosurePushFailed` carries no per-path field because the input
+    /// is a stdin-fed batch of derivations (the canonical `nix path-info
+    /// --recursive` output shape). Same structural-record tuple downstream
+    /// telemetry / Phase 1 attestation records (THEORY §V.4) pattern-
+    /// match on: cache, exit_code, captured stderr.
+    #[error("Attic closure push to cache {cache} failed (exit {exit_code:?}): {stderr}")]
+    ClosurePushFailed {
+        cache: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+
     #[error("Attic login to {server_url} for cache {cache} failed (exit {exit_code:?}): {stderr}")]
     LoginFailed {
         cache: String,
@@ -1397,6 +1413,65 @@ mod tests {
         );
     }
 
+    /// `ClosurePushFailed` must surface (cache, exit_code, stderr) as
+    /// separate fields and render them in the canonical
+    /// `"Attic closure push to cache {cache} failed (exit {exit_code:?}):
+    /// {stderr}"` shape — never fuse them into a single `message: String`
+    /// or drop the exit code. Pinning the structural-record tuple at the
+    /// Display layer guards every consumer of the typed error (telemetry,
+    /// Phase 1 attestation records per THEORY §V.4) against a future
+    /// regression that re-fused the fields and collapsed the
+    /// pattern-matching surface.
+    #[test]
+    fn test_attic_error_closure_push_failed_display() {
+        let err = AtticError::ClosurePushFailed {
+            cache: "default:main".into(),
+            exit_code: Some(13),
+            stderr: "unauthorized: bad token".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("default:main"), "cache must appear: {msg}");
+        assert!(msg.contains("13"), "exit code must appear: {msg}");
+        assert!(
+            msg.contains("unauthorized: bad token"),
+            "stderr must appear: {msg}"
+        );
+        assert!(
+            msg.contains("closure push"),
+            "must carry the closure-push discriminator in the message: {msg}"
+        );
+    }
+
+    /// `ClosurePushFailed` must carry the structural-record tuple
+    /// `(cache, exit_code, stderr)` as separate destructurable fields,
+    /// not fused into a single message string. The stdin-fed-batch
+    /// shape is intentionally store-path-less (the input is the bytes
+    /// of `nix path-info --recursive` output, not a single path), which
+    /// is the structural difference from `PushFailed`. Pins the
+    /// destructure pattern so a future regression that re-fused the
+    /// fields would fail this test rather than silently collapse the
+    /// Phase 1 attestation record shape (THEORY §V.4).
+    #[test]
+    fn test_attic_error_closure_push_failed_carries_inputs() {
+        let err = AtticError::ClosurePushFailed {
+            cache: "default:rust-services".into(),
+            exit_code: Some(2),
+            stderr: "error: connection refused".into(),
+        };
+        match err {
+            AtticError::ClosurePushFailed {
+                cache,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cache, "default:rust-services");
+                assert_eq!(exit_code, Some(2));
+                assert!(stderr.contains("connection refused"));
+            }
+            _ => panic!("expected ClosurePushFailed"),
+        }
+    }
+
     #[test]
     fn test_attic_error_login_failed_display() {
         let err = AtticError::LoginFailed {
@@ -1426,16 +1501,22 @@ mod tests {
         assert!(msg.contains("token"));
     }
 
-    /// Exec / push / login / token-required are distinct conditions and must
-    /// not be representable by a single fused-message variant. Pinning the
-    /// discriminator lets downstream code pattern-match on the failure shape
-    /// without parsing strings — same arc as RegistryError and NixBuildError.
+    /// Exec / push / closure-push / login / token-required are distinct
+    /// conditions and must not be representable by a single fused-message
+    /// variant. Pinning the discriminator lets downstream code pattern-
+    /// match on the failure shape without parsing strings — same arc as
+    /// RegistryError and NixBuildError. The `ClosurePushFailed` /
+    /// `PushFailed` split is structural: the former carries no
+    /// `store_path` (stdin-fed batch), the latter does (CLI-arg single
+    /// path) — telemetry / Phase 1 attestation records (THEORY §V.4)
+    /// destructure the variant they care about without parsing strings.
     #[test]
     fn test_attic_error_failure_split_is_typed() {
         fn classify(e: &AtticError) -> &'static str {
             match e {
                 AtticError::ExecFailed { .. } => "exec",
                 AtticError::PushFailed { .. } => "push",
+                AtticError::ClosurePushFailed { .. } => "closure-push",
                 AtticError::LoginFailed { .. } => "login",
                 AtticError::TokenRequired { .. } => "token",
             }
@@ -1456,6 +1537,14 @@ mod tests {
                 stderr: "x".into(),
             }),
             "push"
+        );
+        assert_eq!(
+            classify(&AtticError::ClosurePushFailed {
+                cache: "c".into(),
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "closure-push"
         );
         assert_eq!(
             classify(&AtticError::LoginFailed {

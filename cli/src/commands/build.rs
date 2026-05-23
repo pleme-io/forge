@@ -66,8 +66,7 @@ pub async fn execute(
     })?;
 
     // Attic server alias — configurable via ATTIC_SERVER_NAME (default: "default")
-    let attic_server =
-        std::env::var("ATTIC_SERVER_NAME").unwrap_or_else(|_| "default".to_string());
+    let attic_server = std::env::var("ATTIC_SERVER_NAME").unwrap_or_else(|_| "default".to_string());
 
     // Login to Attic
     Command::new("attic")
@@ -182,28 +181,23 @@ pub async fn execute(
             let closure_size = paths.lines().count();
             info!("   Found {} derivations in closure", closure_size);
 
-            // Push all derivations via stdin
-            let mut attic_push = Command::new("attic")
-                .args(&["push", &cache_ref, "--stdin"])
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .context("Failed to spawn attic push")?;
-
-            if let Some(mut stdin) = attic_push.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                stdin.write_all(path_info_output.stdout.as_slice()).await?;
-                drop(stdin);
-            }
-
-            let push_result = attic_push.wait().await?;
-
-            if !push_result.success() {
-                warn!("⚠️  Failed to push closure to Attic (non-fatal)");
-            } else {
-                info!(
+            // Push all derivations via stdin onto the canonical typed
+            // primitive (third sibling of the lifted stanza family —
+            // `commands/rust_service.rs::push_rust_service` AMD64+ARM64
+            // are the other two; THEORY §VI.1 three-is-a-law).
+            // Typed-error op-failure path carries (cache, exit_code,
+            // stderr) per THEORY §V.4 Phase 1 attestation record shape.
+            let attic_client = crate::infrastructure::attic::AtticClient::new(cache_ref.clone())
+                .with_token(attic_token.clone());
+            match attic_client
+                .push_closure_via_stdin(path_info_output.stdout.as_slice())
+                .await
+            {
+                Ok(()) => info!(
                     "✅ All {} derivations cached in Attic (60-80% faster future builds)",
                     closure_size
-                );
+                ),
+                Err(e) => warn!("⚠️  Failed to push closure to Attic (non-fatal): {}", e),
             }
         }
     }
