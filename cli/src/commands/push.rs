@@ -31,28 +31,20 @@ pub async fn get_git_sha() -> Result<String> {
         }
     }
 
-    // Fallback to git rev-parse for direct CLI usage
-    let output = Command::new("git")
-        .args(&["rev-parse", "--short", "HEAD"])
-        .output()
-        .await
-        .context("Failed to execute git rev-parse - is git installed?")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "Failed to get git SHA for image tagging.\n  \
-             Git error: {}\n  \
-             Ensure you're in a git repository with committed changes.",
-            stderr.trim()
-        );
-    }
-
-    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Fallback to git rev-parse for direct CLI usage — routed through
+    // the canonical async sibling of `git::get_short_sha`. Spawn-vs-op
+    // dispatch flows through the typed `GitError` producer; the
+    // structural `(op, exit_code, stderr)` failure tuple is preserved
+    // for the anyhow boundary while the user-facing advisory ("ensure
+    // you're in a git repository with committed changes") stays in the
+    // wrapping `.context(...)` envelope.
+    let hash = crate::git::get_short_sha_async().await.context(
+        "Failed to get git SHA for image tagging. \
+         Ensure you're in a git repository with committed changes.",
+    )?;
     if hash.is_empty() {
         anyhow::bail!("Git returned empty SHA - repository may be corrupted");
     }
-
     Ok(hash)
 }
 

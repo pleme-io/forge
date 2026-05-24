@@ -358,23 +358,14 @@ async fn auto_commit_codegen_changes(web_dir: &Path) -> Result<bool> {
         );
     }
 
-    // Get the commit hash for logging
-    let rev_output = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(web_dir)
-        .output()
+    // Get the commit hash for logging — best-effort via the
+    // canonical `git::get_short_sha_async_in(workdir)` primitive.
+    // Any spawn / op-failure / empty-stdout outcome collapses to
+    // "unknown" at the caller, preserving the pre-lift cosmetic
+    // fallback.
+    let commit_hash = crate::git::get_short_sha_async_in(web_dir)
         .await
-        .ok();
-
-    let commit_hash = rev_output
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|_| "unknown".to_string());
 
     println!(
         "   {} Auto-committed codegen changes ({})",
