@@ -242,13 +242,15 @@ pub async fn update_federation(
     println!("   Services included: {}", post_check.service_count);
     println!();
 
-    // Get git SHA for metadata tracking
-    let git_sha = Command::new("git")
-        .args(&["rev-parse", "--short", "HEAD"])
-        .output()
+    // Get git SHA for metadata tracking — routed through the
+    // canonical `git::get_short_sha_async` primitive so a non-zero
+    // exit at git surfaces as `Err` instead of silently producing an
+    // empty `git_sha` field on the saved supergraph metadata (the
+    // pre-lift `.context("Failed to get git SHA")?` only caught
+    // spawn-failures, not non-zero exits).
+    let git_sha = crate::git::get_short_sha_async()
         .await
         .context("Failed to get git SHA")?;
-    let git_sha = String::from_utf8_lossy(&git_sha.stdout).trim().to_string();
 
     // Generate and save supergraph metadata for deterministic verification
     use crate::commands::supergraph_verification::SupergraphMetadata;

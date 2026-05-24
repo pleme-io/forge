@@ -153,28 +153,19 @@ pub async fn get_tag_suffix() -> Result<String> {
         }
     }
 
-    // Fallback to git rev-parse for direct CLI usage
-    let output = Command::new("git")
-        .args(&["rev-parse", "--short", "HEAD"])
-        .output()
-        .await
-        .context("Failed to execute git rev-parse - is git installed?")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Failed to get git SHA for image tagging.\n  \
-             Git error: {}\n  \
-             Ensure you're in a git repository with committed changes.",
-            stderr.trim()
-        );
-    }
-
-    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Fallback to git rev-parse for direct CLI usage — routed through
+    // the canonical async sibling of `git::get_short_sha`. See
+    // `cli/src/commands/push.rs::get_git_sha` for the corresponding
+    // lift; both consumers share the "RELEASE_GIT_SHA env first, then
+    // bare git rev-parse" priority shape but each defines its own
+    // env-var priority order locally.
+    let hash = crate::git::get_short_sha_async().await.context(
+        "Failed to get git SHA for image tagging. \
+         Ensure you're in a git repository with committed changes.",
+    )?;
     if hash.is_empty() {
         bail!("Git returned empty SHA - repository may be corrupted");
     }
-
     Ok(hash)
 }
 

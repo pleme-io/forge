@@ -124,6 +124,61 @@ pub fn get_short_sha() -> Result<String> {
     stdout_string(stdout)
 }
 
+/// Async sibling of [`git_capture`] — same `(bin, args, workdir, op)`
+/// shape, but spawns through [`tokio::process::Command`] so it composes
+/// with `async fn` callers without a `block_on` bridge. Routes through
+/// the same [`GitError::from_capture`] typed-error producer the sync
+/// sibling uses, so spawn-vs-op dispatch and the
+/// `(op, exit_code, stderr)` failure tuple [`crate::retry::CapturedFailure`]
+/// extracts at the sync surface are preserved by construction on the
+/// async surface.
+async fn git_capture_async(
+    bin: &str,
+    args: &[&str],
+    workdir: Option<&Path>,
+    op: &str,
+) -> Result<Vec<u8>, GitError> {
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(args);
+    if let Some(w) = workdir {
+        cmd.current_dir(w);
+    }
+    let output = GitError::from_capture(cmd.output().await, op)?;
+    Ok(output.stdout)
+}
+
+/// Async sibling of [`get_short_sha`] — `git rev-parse --short=7 HEAD`
+/// captured via [`tokio::process::Command`]. Same 7-character contract:
+/// `--short=7` is explicit, not `core.abbrev`-dependent, so callers
+/// that consume the SHA for image tags inherit deterministic
+/// `{arch}-<7-char-sha>` rendering across hosts whose
+/// `git config core.abbrev` differs from the default.
+pub async fn get_short_sha_async() -> Result<String> {
+    let stdout = git_capture_async(
+        "git",
+        &["rev-parse", "--short=7", "HEAD"],
+        None,
+        "rev-parse",
+    )
+    .await?;
+    stdout_string(stdout)
+}
+
+/// `workdir`-scoped sibling of [`get_short_sha_async`]. Resolves the
+/// short SHA against a specific git working tree (e.g. a frontend
+/// sub-repo whose codegen commit is owned by a different working
+/// directory than the current process's CWD).
+pub async fn get_short_sha_async_in(workdir: &Path) -> Result<String> {
+    let stdout = git_capture_async(
+        "git",
+        &["rev-parse", "--short=7", "HEAD"],
+        Some(workdir),
+        "rev-parse",
+    )
+    .await?;
+    stdout_string(stdout)
+}
+
 /// Update kustomization.yaml with new image tag
 /// This function updates the `images[].newTag` field in a Kustomize file
 pub async fn update_manifest(manifest_path: &Path, _old_tag: &str, new_tag: &str) -> Result<()> {
@@ -486,6 +541,137 @@ mod tests {
             assert!(!sha.is_empty());
             assert!(sha.len() >= 7); // Short SHA is at least 7 chars
         }
+    }
+
+    // ---------------------------------------------------------------
+    // async sibling — git_capture_async / get_short_sha_async{,_in}
+    // ---------------------------------------------------------------
+
+    /// Async `git_capture_async`: a missing binary surfaces
+    /// `GitError::ExecFailed` carrying the op label — same typed-error
+    /// producer dispatch the sync `git_capture` sibling drives, now
+    /// covered on the async surface so a future regression that, e.g.,
+    /// fused the spawn-vs-op classifier into a stringly anyhow path
+    /// fails this test rather than silently degrade the four async
+    /// callsites (`commands/push.rs::get_git_sha`,
+    /// `commands/rust_service.rs::get_tag_suffix`,
+    /// `commands/codegen_validation.rs`, `commands/federation.rs`)
+    /// that pre-this-commit each hand-rolled the
+    /// `Command::new("git").args([...]).output().await.context(...)?`
+    /// envelope verbatim.
+    #[tokio::test]
+    async fn test_git_capture_async_exec_failed_carries_op() {
+        let result = git_capture_async(
+            "/nonexistent/path/to/git-binary-that-does-not-exist",
+            &["rev-parse", "HEAD"],
+            None,
+            "rev-parse",
+        )
+        .await;
+        let err = result.expect_err("missing git binary must fail");
+        match err {
+            GitError::ExecFailed { op, .. } => {
+                assert_eq!(op, "rev-parse");
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// Async `git_capture_async`: non-zero exit produces `OpFailed`
+    /// carrying the op label, the exit code, and the captured stderr —
+    /// the structural `(op, exit_code, stderr)` tuple Phase 1
+    /// attestation records (THEORY §V.4) pattern-match on. Hermetic
+    /// against the host git via an absolute-path shim.
+    #[tokio::test]
+    async fn test_git_capture_async_op_failed_carries_structured_fields() {
+        let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'fatal: bad object' 1>&2\nexit 128\n");
+        let result = git_capture_async(&shim, &["rev-parse", "HEAD"], None, "rev-parse").await;
+        let err = result.expect_err("nonzero exit must fail");
+        match err {
+            GitError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "rev-parse");
+                assert_eq!(exit_code, Some(128));
+                assert!(
+                    stderr.contains("bad object"),
+                    "stderr field must capture the git stderr verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected OpFailed, got: {other:?}"),
+        }
+    }
+
+    /// Async happy path: `git_capture_async` returns the trimmed stdout
+    /// verbatim.
+    #[tokio::test]
+    async fn test_git_capture_async_success_returns_stdout() {
+        let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'deadbeef'\nexit 0\n");
+        let stdout = git_capture_async(&shim, &["rev-parse", "HEAD"], None, "rev-parse")
+            .await
+            .expect("must succeed");
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "deadbeef");
+    }
+
+    /// `git_capture_async` resolves the requested args inside the
+    /// supplied `workdir` — pinned via a shim that writes its CWD to a
+    /// side-channel file. Closes the only behavioral asymmetry between
+    /// `get_short_sha_async` (no workdir) and `get_short_sha_async_in`
+    /// (workdir): a regression that silently dropped the
+    /// `cmd.current_dir(w)` arm would resolve the SHA against the
+    /// process CWD instead of the supplied sub-repo and is structurally
+    /// invisible without this pin.
+    #[tokio::test]
+    async fn test_git_capture_async_honors_workdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let probe = dir.path().join("cwd.log");
+        let body = format!(
+            "#!/bin/sh\npwd > {}\necho 'deadbeef'\nexit 0\n",
+            probe.display()
+        );
+        let (_shim_dir, shim) = make_git_shim(&body);
+
+        let stdout =
+            git_capture_async(&shim, &["rev-parse", "HEAD"], Some(dir.path()), "rev-parse")
+                .await
+                .expect("must succeed");
+
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "deadbeef");
+        let recorded = std::fs::read_to_string(&probe).expect("read cwd.log");
+        // macOS may canonicalize /var → /private/var; match by suffix.
+        let recorded_trim = recorded.trim();
+        let workdir_str = dir.path().to_string_lossy();
+        assert!(
+            recorded_trim.ends_with(workdir_str.as_ref()),
+            "git child must run inside the supplied workdir; \
+             recorded cwd = {recorded_trim:?}, expected suffix = {workdir_str:?}"
+        );
+    }
+
+    /// `get_short_sha_async` end-to-end against the real `git` binary
+    /// inside a hermetic `tempfile::tempdir()` repo with a known seed
+    /// commit. Pins that the async primitive returns a 7-character
+    /// short SHA equal to the same repo's `git rev-parse --short=7
+    /// HEAD` answer — the contract the four lifted callsites
+    /// (`get_git_sha`, `get_tag_suffix`, codegen-validation,
+    /// federation) all consume.
+    #[tokio::test]
+    async fn test_get_short_sha_async_in_returns_seven_char_sha() {
+        let (_parent, _bare, work) = make_bare_origin_with_work();
+        let sha = get_short_sha_async_in(&work)
+            .await
+            .expect("get_short_sha_async_in must succeed in a seeded repo");
+        assert_eq!(
+            sha.len(),
+            7,
+            "--short=7 must yield a 7-character SHA, got: {sha:?}"
+        );
+        assert!(
+            sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "SHA must be hex, got: {sha:?}"
+        );
     }
 
     /// Stand up a bare "origin" repo and a work-tree clone of it on
