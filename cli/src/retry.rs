@@ -548,6 +548,73 @@ pub fn classify_capture_query_anyhow(
     )
 }
 
+/// Run a sync external CLI and return its trimmed UTF-8-lossy stdout
+/// under the canonical "anyhow envelope over a queried external CLI"
+/// shape — sibling of [`classify_capture_query_anyhow`] that owns the
+/// spawn surface (`std::process::Command::new(cmd).args(args).output()`)
+/// in addition to the post-spawn classifier.
+///
+/// Lifts the verbatim three-line spawn-then-delegate body
+/// ```text
+/// classify_capture_query_anyhow(
+///     std::process::Command::new(cmd).args(args).output(),
+///     cmd,
+///     args,
+/// )
+/// ```
+/// that three command-module sites in forge carry verbatim modulo the
+/// `cmd` argument: `commands/seed.rs::run_command_output` (parametric
+/// `cmd`, single call site — `kubectl get pod` for CNPG primary
+/// discovery), `commands/sessions.rs::kubectl` (`cmd` hardcoded to
+/// `"kubectl"`, three call sites — secret-fetch / `valkey-cli keys` /
+/// `valkey-cli DEL`), and `commands/local.rs::run_command_output`
+/// (parametric `cmd`, two call sites — `docker stop` / `docker rm`).
+/// Three identically-shaped bodies past THEORY §VI.1's three-is-a-law
+/// threshold (PRIME DIRECTIVE: duplication budget is zero); this
+/// primitive is the law-redeeming consolidation.
+///
+/// # Why a separate primitive, not "just call `classify_capture_query_anyhow`"
+///
+/// The post-spawn classifier ([`classify_capture_query_anyhow`])
+/// consumes an `io::Result<std::process::Output>` and cannot own the
+/// spawn step itself, because the spawn surface is intentionally split
+/// between sync (`std::process::Command::output()`) and async
+/// (`tokio::process::Command::output().await`) consumers. The three
+/// sync consumers above each spelled the spawn-then-delegate body
+/// verbatim — the wrapper had no per-site customization beyond the
+/// `cmd` argument. Consolidating onto this primitive collapses the
+/// three private `run_command_output` / `kubectl` shape-adapter
+/// helpers (and their per-site test triples) onto one canonical
+/// primitive with one test triple.
+///
+/// # Why sync-only, not also async
+///
+/// The async + cwd shape (`commands/attestation.rs::run_command_output`,
+/// the only async consumer of `classify_capture_query_anyhow` in
+/// forge) adds `.current_dir(cwd)` and runs through
+/// `tokio::process::Command` — structurally distinct from the sync
+/// no-cwd shape this primitive covers. One site is below the
+/// three-times-rule threshold; when a second async + cwd site
+/// appears, the `run_query_capture_async_in` sibling can join here.
+/// Lifting it now would invent a second-rate primitive ahead of the
+/// law.
+///
+/// # Message format
+///
+/// Inherited verbatim from [`classify_capture_query_anyhow`]:
+/// spawn-failure surfaces `"Failed to spawn {cmd} {args:?}: {io_error}"`,
+/// op-failure surfaces `"{cmd} {args:?} failed (exit {exit_code:?}):
+/// {stderr}"`. The `(cmd, args, exit_code, stderr)` structural-record
+/// tuple THEORY §V.4 Phase 1 attestation telemetry pattern-matches on
+/// is preserved by construction.
+pub fn run_query_capture_sync(cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+    classify_capture_query_anyhow(
+        std::process::Command::new(cmd).args(args).output(),
+        cmd,
+        args,
+    )
+}
+
 /// Captured output of a single failed external-command attempt.
 ///
 /// Typed error shape for ad-hoc retry call sites (`commands/push.rs`,
@@ -2820,6 +2887,103 @@ mod tests {
         assert!(
             msg.contains("true []"),
             "empty args must render as `[]` in the canonical shape, got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // run_query_capture_sync — the canonical
+    // `Command::new(cmd).args(args).output()` + `classify_capture_query_anyhow`
+    // consolidation. Drives the full spawn-then-classify pipeline against
+    // hermetic `make_executable_shim` binaries so a future regression at
+    // either the spawn surface or the classifier shape fails here rather
+    // than silently degrading the three consumer sites that pre-this-commit
+    // each carried a private wrapper:
+    // `commands/seed.rs::run_command_output`,
+    // `commands/sessions.rs::kubectl`,
+    // `commands/local.rs::run_command_output`.
+    // -----------------------------------------------------------------
+
+    /// `run_query_capture_sync` end-to-end via a hermetic shim: the
+    /// successful spawn returns the trimmed UTF-8-lossy stdout. Mirrors
+    /// the three per-site `..._success_returns_trimmed_stdout` tests
+    /// this primitive consolidates (`commands/seed.rs`,
+    /// `commands/local.rs`). The trim discipline is load-bearing
+    /// downstream — `find_primary_pod`'s returned pod name feeds into a
+    /// `kubectl exec -n NS POD` invocation where a trailing `\n` on
+    /// the pod name surfaces as a confusing "pod not found" diagnostic.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_query_capture_sync_success_returns_trimmed_stdout() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "echo-shim",
+            "#!/bin/sh\necho '  primary-pod-0  '\n",
+        );
+        let out = run_query_capture_sync(&shim, &[]).expect("shim must succeed");
+        assert_eq!(
+            out, "primary-pod-0",
+            "trim must strip both leading/trailing ws"
+        );
+    }
+
+    /// `run_query_capture_sync` on a non-zero shim exit surfaces the
+    /// structural-record tuple in the anyhow error message: the cmd
+    /// label, the `args:?` Debug rendering, the exit code, and the
+    /// trimmed stderr. Mirror of the three per-site
+    /// `..._op_failure_carries_structural_tuple` tests this primitive
+    /// consolidates. A future regression that re-dropped the exit code
+    /// or the args from the message envelope would fail this test
+    /// rather than silently degrade the THEORY §V.4 Phase 1 attestation
+    /// record shape downstream telemetry pattern-matches on.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_query_capture_sync_op_failure_carries_structural_tuple() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "fail-shim",
+            "#!/bin/sh\necho 'no matching pod' 1>&2\nexit 11\n",
+        );
+        let err =
+            run_query_capture_sync(&shim, &["get", "pod"]).expect_err("nonzero exit must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("(exit Some(11))"),
+            "msg must carry exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("no matching pod"),
+            "msg must carry trimmed stderr, got: {msg}"
+        );
+        assert!(
+            msg.contains("\"get\"") && msg.contains("\"pod\""),
+            "msg must carry args debug rendering, got: {msg}"
+        );
+    }
+
+    /// `run_query_capture_sync` on a spawn failure (binary not on PATH
+    /// / nonexistent absolute path) surfaces the canonical
+    /// `Failed to spawn {cmd} {args:?}: {io_error}` envelope. Mirror
+    /// of the three per-site `..._spawn_failure_carries_op_label`
+    /// tests this primitive consolidates. Pins the spawn-vs-op
+    /// discriminator: a future regression that re-fused the spawn arm
+    /// into the op arm would fail this test rather than silently
+    /// collapse the typed-error structural shape every consumer of
+    /// the primitive (seed / sessions / local) relies on.
+    #[test]
+    fn test_run_query_capture_sync_spawn_failure_carries_op_label() {
+        let missing = "/nonexistent/forge-test-shim-must-not-exist-run-query";
+        let err = run_query_capture_sync(missing, &["arg-a"])
+            .expect_err("spawn against nonexistent path must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.starts_with("Failed to spawn"),
+            "msg must carry spawn-arm envelope, got: {msg}"
+        );
+        assert!(
+            msg.contains(missing),
+            "msg must carry the offending cmd path, got: {msg}"
+        );
+        assert!(
+            msg.contains("\"arg-a\""),
+            "msg must carry args debug rendering, got: {msg}"
         );
     }
 
