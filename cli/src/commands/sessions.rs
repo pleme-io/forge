@@ -5,8 +5,9 @@
 
 use anyhow::{Context, Result};
 use std::io::{self, Write};
-use std::process::Command;
 use tracing::{info, warn};
+
+use crate::retry::run_query_capture_sync;
 
 /// Product configuration for session management
 struct ProductConfig {
@@ -37,47 +38,32 @@ impl ProductConfig {
     }
 }
 
-/// Execute `kubectl` with `args` and return its trimmed UTF-8-lossy stdout.
+/// Get Valkey password from Kubernetes secret.
 ///
-/// Third sibling of `commands/seed.rs::run_command_output` and
-/// `commands/attestation.rs::run_command_output` — all three shape-adapt
-/// for [`crate::retry::classify_capture_query_anyhow`] (the canonical
-/// "anyhow envelope over a queried external CLI" primitive). The pre-lift
-/// body fused into a `.context("Failed to execute kubectl")` envelope on
-/// the spawn arm that dropped both the offending args and the underlying
-/// `io::Error::Display`, plus an `if !output.status.success() { bail!(
-/// "kubectl failed: {}", stderr) }` op arm that dropped both the exit
-/// code AND the args entirely. Post-lift the spawn arm carries
-/// `Failed to spawn kubectl {args:?}: {io_error}` and the op arm carries
-/// `kubectl {args:?} failed (exit {code:?}): {trimmed_stderr}` — the
-/// `(cmd, args, exit_code, stderr)` structural-record tuple THEORY §V.4
-/// Phase 1 attestation telemetry pattern-matches on.
-///
-/// Third-occurrence-is-a-law consolidation (THEORY §VI.1): the prior
-/// commit (4612831) explicitly anticipated this site as one of the
-/// "future shape-adapter[s] that want[] the same anyhow envelope around
-/// a queried external CLI" siblings — `seed.rs` and `attestation.rs`
-/// were the first two, this is the third.
-fn kubectl(args: &[&str]) -> Result<String> {
-    crate::retry::classify_capture_query_anyhow(
-        Command::new("kubectl").args(args).output(),
-        "kubectl",
-        args,
-    )
-}
-
-/// Get Valkey password from Kubernetes secret
+/// kubectl is driven through the canonical
+/// [`crate::retry::run_query_capture_sync`] primitive — the
+/// `(cmd, args) -> Result<String>` consolidation for the sync no-cwd
+/// "spawn an external CLI, capture trimmed stdout" shape. Pre-this-
+/// commit the three call sites in this module delegated through a
+/// private `kubectl` wrapper; that wrapper was one of three identically
+/// -shaped shape-adapters (`seed.rs::run_command_output`,
+/// `local.rs::run_command_output`) past THEORY §VI.1's three-is-a-law
+/// threshold, all collapsed onto `run_query_capture_sync` in one
+/// commit.
 fn get_valkey_password(namespace: &str, secret_name: &str, key: &str) -> Result<String> {
     let jsonpath = format!("{{.data.{}}}", key);
-    let base64_password = kubectl(&[
-        "get",
-        "secret",
-        secret_name,
-        "-n",
-        namespace,
-        "-o",
-        &format!("jsonpath={}", jsonpath),
-    ])?;
+    let base64_password = run_query_capture_sync(
+        "kubectl",
+        &[
+            "get",
+            "secret",
+            secret_name,
+            "-n",
+            namespace,
+            "-o",
+            &format!("jsonpath={}", jsonpath),
+        ],
+    )?;
 
     if base64_password.is_empty() {
         anyhow::bail!(
@@ -99,19 +85,22 @@ fn get_valkey_password(namespace: &str, secret_name: &str, key: &str) -> Result<
 
 /// Count session keys in Valkey
 fn count_sessions(namespace: &str, pod: &str, password: &str) -> Result<usize> {
-    let output = kubectl(&[
-        "exec",
-        "-n",
-        namespace,
-        pod,
-        "--",
-        "valkey-cli",
-        "-a",
-        password,
-        "--no-auth-warning",
-        "keys",
-        "session:*",
-    ])?;
+    let output = run_query_capture_sync(
+        "kubectl",
+        &[
+            "exec",
+            "-n",
+            namespace,
+            pod,
+            "--",
+            "valkey-cli",
+            "-a",
+            password,
+            "--no-auth-warning",
+            "keys",
+            "session:*",
+        ],
+    )?;
 
     // Count non-empty lines
     let count = output.lines().filter(|l| !l.trim().is_empty()).count();
@@ -126,7 +115,10 @@ fn delete_sessions(namespace: &str, pod: &str, password: &str) -> Result<usize> 
         password, password
     );
 
-    let output = kubectl(&["exec", "-n", namespace, pod, "--", "sh", "-c", &script])?;
+    let output = run_query_capture_sync(
+        "kubectl",
+        &["exec", "-n", namespace, pod, "--", "sh", "-c", &script],
+    )?;
 
     // Parse output to get count of deleted keys
     // DEL returns the number of keys deleted
