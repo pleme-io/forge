@@ -598,15 +598,20 @@ fn verify_docker() -> Result<()> {
     Ok(())
 }
 
-/// Check if a Docker image exists locally
+/// Check if a Docker image exists locally.
+///
+/// Delegates to the canonical
+/// [`crate::infrastructure::docker::find_first_image_id_by_name`]
+/// primitive — sibling of `product_release.rs::check_local_image_exists`
+/// (async) and `product_release.rs::push_prebuilt_image`'s inline
+/// image-id fetch. All three pre-lift sites spelled the same
+/// `docker images -q <name>` + trim + `is_empty` body verbatim
+/// (THEORY §VI.1 three-is-a-law); the typed primitive consolidates
+/// them onto one shape. Spawn failure now collapses to `Ok(false)`
+/// (matches every caller's `.unwrap_or(false)` immediate-recovery
+/// pattern).
 fn check_image_exists(image_name: &str) -> Result<bool> {
-    let output = Command::new("docker")
-        .args(["images", "-q", image_name])
-        .output()
-        .context("Failed to check for Docker image")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(!stdout.trim().is_empty())
+    Ok(crate::infrastructure::docker::find_first_image_id_by_name(image_name).is_some())
 }
 
 /// Build a Nix image and load it into Docker

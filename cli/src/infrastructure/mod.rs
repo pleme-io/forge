@@ -10,6 +10,7 @@
 //! - Release Tracker
 
 pub mod attic;
+pub mod docker;
 pub mod git;
 pub mod kubectl;
 pub mod registry;

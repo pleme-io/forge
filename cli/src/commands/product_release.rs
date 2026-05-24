@@ -149,14 +149,18 @@ pub(crate) async fn run_health_check(
 }
 
 /// Check if a Docker image exists locally (built during E2E gates).
+///
+/// Delegates to the canonical
+/// [`crate::infrastructure::docker::find_first_image_id_by_name_async`]
+/// primitive — sibling of `e2e.rs::check_image_exists` (sync) and
+/// `push_prebuilt_image`'s inline image-id fetch. All three pre-lift
+/// sites spelled the same `docker images -q <name>` + trim +
+/// `is_empty` body verbatim (THEORY §VI.1 three-is-a-law); the typed
+/// primitive consolidates them onto one shape.
 async fn check_local_image_exists(name: &str) -> Result<bool> {
-    let output = Command::new("docker")
-        .args(["images", "-q", name])
-        .output()
+    Ok(crate::infrastructure::docker::find_first_image_id_by_name_async(name)
         .await
-        .with_context(|| format!("Failed to check for local Docker image: {}", name))?;
-
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+        .is_some())
 }
 
 /// Push a locally-built Docker image to the registry.
@@ -166,26 +170,23 @@ async fn check_local_image_exists(name: &str) -> Result<bool> {
 /// This function tags the image and pushes to the registry,
 /// avoiding a redundant Nix rebuild.
 async fn push_prebuilt_image(local_name: &str, registry: &str, deploy_tag: &str) -> Result<()> {
-    // Get the image ID (handles any tag the Nix build assigned)
-    let output = Command::new("docker")
-        .args(["images", "-q", local_name])
-        .output()
+    // Get the image ID via the canonical typed primitive — sibling of
+    // `check_local_image_exists` and `e2e.rs::check_image_exists`
+    // (THEORY §VI.1 three-is-a-law). The primitive's classifier picks
+    // the first line when multiple IDs match (the `.lines().next()`
+    // arm pre-lift commented "Use the first image ID if multiple
+    // exist") and collapses every failure shape to `None` so the
+    // caller's bail message names the specific image rather than
+    // leaking docker's stderr.
+    let image_id = crate::infrastructure::docker::find_first_image_id_by_name_async(local_name)
         .await
-        .context("Failed to get Docker image ID")?;
-
-    let image_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if image_id.is_empty() {
-        bail!("No local Docker image found for '{}'", local_name);
-    }
-
-    // Use the first image ID if multiple exist
-    let image_id = image_id.lines().next().unwrap_or(&image_id);
+        .ok_or_else(|| anyhow::anyhow!("No local Docker image found for '{}'", local_name))?;
 
     let full_tag = format!("{}:{}", registry, deploy_tag);
 
     // Tag with registry URL and SHA
     let status = Command::new("docker")
-        .args(["tag", image_id, &full_tag])
+        .args(["tag", &image_id, &full_tag])
         .status()
         .await
         .with_context(|| format!("Failed to tag image {} → {}", local_name, full_tag))?;
