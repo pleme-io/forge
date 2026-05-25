@@ -336,46 +336,91 @@ fn select_policy(environment: &str) -> CertificationPolicy {
     }
 }
 
-/// Analyze flake.lock to count inputs and check pinning.
+/// Pinning summary derived from a parsed `flake.lock`.
+///
+/// `all_inputs_pinned` is the hermeticity claim that flows into the SLSA
+/// source attestation (THEORY §V.4 Phase 1 source record, §I.1 beat 5):
+/// a flake input counts as *pinned* only when its lock node carries a
+/// content-addressed `narHash`. That hash is what makes the input
+/// byte-reproducible (THEORY §VI.1: "regenerating an artifact produces a
+/// byte-identical result given the same inputs") and content-addressable
+/// (THEORY §III.1.7 render state). An unpinned input breaks the
+/// determinism the SLSA L3 build claim rests on, so the attestation must
+/// not assert pinning when it does not hold.
+///
+/// Named fields rather than a bare `(usize, bool)` tuple so the
+/// positional meaning of the count and the pinning flag cannot be
+/// transposed at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlakeLockSummary {
+    /// Number of locked nodes in the `flake.lock` graph (root included),
+    /// the same proxy `flake_input_count` carried before.
+    input_count: usize,
+    /// True iff every non-root node carries a non-empty `narHash`.
+    all_inputs_pinned: bool,
+}
+
+impl FlakeLockSummary {
+    /// The summary for an absent / unreadable / malformed lock: zero
+    /// inputs, not pinned. Pinning defaults to `false` so a missing or
+    /// corrupt lock can never silently inflate the hermeticity claim.
+    const UNPINNED_EMPTY: Self = Self {
+        input_count: 0,
+        all_inputs_pinned: false,
+    };
+}
+
+/// Parse `flake.lock` JSON and summarize its pinning state.
+///
+/// A node is *pinned* iff its `locked` object carries a non-empty
+/// `narHash` string — the content hash CppNix/sui write for every locked
+/// input (github / git / tarball / path alike) and the one field that
+/// makes the input reproducible. The root node (the flake itself, named
+/// by the top-level `root` key, conventionally `"root"`) carries no
+/// `locked` section and is exempt. `follows` redirections are encoded in
+/// the referencing node's `inputs` as array paths, not as separate
+/// lock-less nodes, so every non-root node is expected to carry a lock;
+/// one that does not is an unpinned input and fails the claim.
+///
+/// Returns [`FlakeLockSummary::UNPINNED_EMPTY`] when the JSON is
+/// malformed or has no `nodes` object — a lock we cannot read cannot
+/// substantiate a pinning claim.
+fn summarize_flake_lock(content: &str) -> FlakeLockSummary {
+    let json: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(_) => return FlakeLockSummary::UNPINNED_EMPTY,
+    };
+    let Some(nodes) = json.get("nodes").and_then(|n| n.as_object()) else {
+        return FlakeLockSummary::UNPINNED_EMPTY;
+    };
+    let root = json.get("root").and_then(|r| r.as_str()).unwrap_or("root");
+    let all_inputs_pinned = nodes.iter().all(|(name, node)| {
+        if name == root {
+            return true;
+        }
+        node.get("locked")
+            .and_then(|l| l.get("narHash"))
+            .and_then(|h| h.as_str())
+            .is_some_and(|h| !h.is_empty())
+    });
+    FlakeLockSummary {
+        input_count: nodes.len(),
+        all_inputs_pinned,
+    }
+}
+
+/// Analyze flake.lock to count inputs and check pinning. I/O wrapper over
+/// the pure [`summarize_flake_lock`]; an absent or unreadable file yields
+/// the unpinned-empty summary.
 async fn analyze_flake_lock(path: &Path) -> (usize, bool) {
     if !path.exists() {
         return (0, false);
     }
-
-    let content = match tokio::fs::read_to_string(path).await {
-        Ok(c) => c,
-        Err(_) => return (0, false),
+    let summary = match tokio::fs::read_to_string(path).await {
+        Ok(content) => summarize_flake_lock(&content),
+        Err(_) => FlakeLockSummary::UNPINNED_EMPTY,
     };
-
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return (0, false),
-    };
-
-    let nodes = json
-        .get("nodes")
-        .and_then(|n| n.as_object())
-        .map(|m| m.len())
-        .unwrap_or(0);
-
-    // Check if all inputs have locked revisions
-    let all_pinned = json
-        .get("nodes")
-        .and_then(|n| n.as_object())
-        .map(|nodes| {
-            nodes.values().all(|node| {
-                // Root node doesn't need a locked revision
-                if node.get("inputs").is_some() && node.get("locked").is_none() {
-                    // This is a leaf node without a lock — only root is OK
-                    node.get("inputs").and_then(|i| i.as_object()).is_some()
-                } else {
-                    true
-                }
-            })
-        })
-        .unwrap_or(false);
-
-    (nodes, all_pinned)
+    (summary.input_count, summary.all_inputs_pinned)
 }
 
 /// Hash all files in a directory using blake3.
@@ -511,6 +556,127 @@ mod tests {
         assert!(
             msg.contains("/nonexistent/path/to/forge-attestation-test-binary"),
             "spawn failure must carry the cmd path, got: {msg}"
+        );
+    }
+
+    /// A well-formed v7 lock whose every non-root node carries a
+    /// `narHash` is fully pinned, and the count includes the root node.
+    #[test]
+    fn test_summarize_flake_lock_all_pinned_true() {
+        let lock = r#"{
+            "nodes": {
+                "root": { "inputs": { "nixpkgs": "nixpkgs", "flake-utils": "flake-utils" } },
+                "nixpkgs": {
+                    "locked": { "narHash": "sha256-aaa", "rev": "deadbeef", "type": "github" },
+                    "original": { "owner": "NixOS", "repo": "nixpkgs", "type": "github" }
+                },
+                "flake-utils": {
+                    "inputs": { "systems": "systems" },
+                    "locked": { "narHash": "sha256-bbb", "rev": "cafef00d", "type": "github" }
+                },
+                "systems": {
+                    "locked": { "narHash": "sha256-ccc", "rev": "1234abcd", "type": "github" }
+                }
+            },
+            "root": "root",
+            "version": 7
+        }"#;
+        let s = summarize_flake_lock(lock);
+        assert_eq!(s.input_count, 4, "count includes root + 3 dep nodes");
+        assert!(
+            s.all_inputs_pinned,
+            "every non-root node carries a narHash, so the lock is fully pinned"
+        );
+    }
+
+    /// A non-root node that carries a `locked` block WITHOUT a `narHash`
+    /// is unpinned, so the hermeticity claim must be `false`. This is the
+    /// load-bearing regression pin: the prior check returned `true` for
+    /// every node shape (a node with `inputs` and no `locked` returned
+    /// `inputs.is_object()` == true; every other node returned `true`
+    /// unconditionally), so `all_inputs_pinned` was effectively a
+    /// constant `true` whenever the lock had any nodes — silently
+    /// inflating the SLSA source attestation's pinning claim
+    /// (THEORY §V.4 Phase 1). With that buggy logic this assertion
+    /// fails; with the narHash check it passes.
+    #[test]
+    fn test_summarize_flake_lock_unpinned_node_is_false() {
+        let lock = r#"{
+            "nodes": {
+                "root": { "inputs": { "nixpkgs": "nixpkgs", "loose": "loose" } },
+                "nixpkgs": {
+                    "locked": { "narHash": "sha256-aaa", "rev": "deadbeef", "type": "github" }
+                },
+                "loose": {
+                    "locked": { "rev": "no-narhash-here", "type": "git" },
+                    "original": { "type": "git", "url": "https://example.invalid/x" }
+                }
+            },
+            "root": "root",
+            "version": 7
+        }"#;
+        let s = summarize_flake_lock(lock);
+        assert_eq!(s.input_count, 3);
+        assert!(
+            !s.all_inputs_pinned,
+            "the `loose` node has a locked block but no narHash, so the lock is not pinned"
+        );
+    }
+
+    /// A non-root node with `inputs` but no `locked` at all is unpinned —
+    /// the prior logic's exact false-positive path (it special-cased this
+    /// shape to `true`, treating any lock-less node as an honorary root).
+    #[test]
+    fn test_summarize_flake_lock_lockless_non_root_node_is_false() {
+        let lock = r#"{
+            "nodes": {
+                "root": { "inputs": { "dangling": "dangling" } },
+                "dangling": { "inputs": { "x": "x" } },
+                "x": { "locked": { "narHash": "sha256-xxx", "type": "github" } }
+            },
+            "root": "root",
+            "version": 7
+        }"#;
+        let s = summarize_flake_lock(lock);
+        assert!(
+            !s.all_inputs_pinned,
+            "a non-root node with inputs but no locked block is an unpinned input"
+        );
+    }
+
+    /// The root node is identified by the top-level `root` key, not by the
+    /// literal name "root". A custom root name must still be exempted from
+    /// the narHash requirement.
+    #[test]
+    fn test_summarize_flake_lock_respects_custom_root_name() {
+        let lock = r#"{
+            "nodes": {
+                "self": { "inputs": { "nixpkgs": "nixpkgs" } },
+                "nixpkgs": { "locked": { "narHash": "sha256-aaa", "type": "github" } }
+            },
+            "root": "self",
+            "version": 7
+        }"#;
+        let s = summarize_flake_lock(lock);
+        assert!(
+            s.all_inputs_pinned,
+            "the custom-named root carries no lock but must be exempt"
+        );
+    }
+
+    /// Malformed JSON and a JSON object with no `nodes` both yield the
+    /// unpinned-empty summary — a lock we cannot read cannot substantiate
+    /// a pinning claim, so the default is the conservative `false`.
+    #[test]
+    fn test_summarize_flake_lock_malformed_is_unpinned_empty() {
+        assert_eq!(
+            summarize_flake_lock("not json at all {{{"),
+            FlakeLockSummary::UNPINNED_EMPTY
+        );
+        assert_eq!(
+            summarize_flake_lock(r#"{"version": 7}"#),
+            FlakeLockSummary::UNPINNED_EMPTY,
+            "no nodes object means no substantiated pinning claim"
         );
     }
 
