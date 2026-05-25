@@ -175,44 +175,56 @@ impl Default for RetryPolicy {
     }
 }
 
-/// Markers in captured stderr that signal a transient network/server
-/// failure worth retrying. The list is canonical across the dialects
-/// forge's external CLIs speak: skopeo (Go's `net/http`), regctl (Go),
-/// attic (reqwest/hyper), git-over-HTTPS (curl), and the underlying
-/// HTTP servers (GHCR, attic-server). Sourced from the substring set
-/// the pre-existing `attic_command_with_retry` matched in production
-/// (b0db1da's prior context) plus the Go-stdlib timeout/EOF idioms.
+/// HTTP status codes that signal a transient/retryable failure when they
+/// appear as a *standalone* status token in captured stderr.
 ///
-/// Markers are matched as plain substrings (case-sensitive on the
-/// canonical capitalization the tools emit). Numeric codes ("500",
-/// "502", "503", "504", "429") match alongside their named forms
-/// because different tools emit one or the other; matching both is
-/// harmless.
+/// These are matched token-wise (a maximal run of ASCII-alphanumeric
+/// characters must equal the code exactly), **not** as bare substrings.
+/// A bare-substring `"500"` matcher false-positives on every diagnostic
+/// that merely happens to contain those three digits — a content digest
+/// (`sha256:…ab500cd…`), a byte count (`pushed 50234 bytes`), a port
+/// (`10.0.0.1:5000`), a duration (`504ms`), or a request id (`14290`) —
+/// converting a terminal failure (auth-denied, manifest-invalid) into a
+/// five-attempt retry storm against the registry/cache. In every dialect
+/// forge's CLIs actually emit, the status code is a standalone token:
+/// skopeo/regctl `"received unexpected HTTP status: 502"`, curl
+/// `"The requested URL returned error: 429"`, `"500 Internal Server
+/// Error"`. Token-matching keeps all of those while dropping the
+/// digits-buried-in-a-larger-token false positives.
 ///
-/// HTTP 429 (Too Many Requests, RFC 6585 §4) is the registry/cache
-/// rate-limit backoff signal — GHCR, Docker Hub, and attic-fronted
-/// CDNs return it under load with an advisory `Retry-After`. It is
-/// the *canonical* retryable failure (back off, then retry), distinct
-/// from the terminal 4xx family (400/401/403/404 — bad request, auth,
-/// not-found, where retrying cannot help). Failing fast on 429 burns
-/// the whole push/pull pipeline when a short exponential backoff
-/// (this module's `RetryPolicy::network`) would have cleared it.
+/// 5xx (500/502/503/504): upstream server faults the registry/cache CDN
+/// recovers from. 429 (Too Many Requests, RFC 6585 §4): the rate-limit
+/// backoff signal GHCR / Docker Hub / attic-fronted CDNs return under
+/// load with an advisory `Retry-After` — the one retryable 4xx (back
+/// off, then retry). The terminal 4xx family (400/401/403/404 — bad
+/// request, auth, not-found) is absent by construction: retrying cannot
+/// help, so failing fast preserves the budget.
+const TRANSIENT_HTTP_STATUS_CODES: &[&str] = &["500", "502", "503", "504", "429"];
+
+/// Named/phrase markers in captured stderr that signal a transient
+/// network/server failure worth retrying. The list is canonical across
+/// the dialects forge's external CLIs speak: skopeo (Go's `net/http`),
+/// regctl (Go), attic (reqwest/hyper), git-over-HTTPS (curl), and the
+/// underlying HTTP servers (GHCR, attic-server). Sourced from the
+/// substring set the pre-existing `attic_command_with_retry` matched in
+/// production (b0db1da's prior context) plus the Go-stdlib timeout/EOF
+/// idioms.
+///
+/// These are matched as plain substrings (case-sensitive on the
+/// canonical capitalization the tools emit) because each is a
+/// distinctive multi-word phrase or lowercase idiom with no
+/// false-positive ambiguity — unlike the bare numeric status codes,
+/// which match token-wise via [`TRANSIENT_HTTP_STATUS_CODES`].
 const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
-    // HTTP 5xx — numeric forms first (skopeo / regctl emit numeric).
-    "500",
-    "502",
-    "503",
-    "504",
     // HTTP 5xx — named forms (attic / curl emit named).
     "Internal Server Error",
     "InternalServerError",
     "Bad Gateway",
     "Service Unavailable",
     "Gateway Timeout",
-    // HTTP 429 rate limiting — numeric (curl/skopeo/regctl) and named
-    // (attic/reqwest, skopeo's "received unexpected HTTP status: 429
-    // Too Many Requests"). The one retryable 4xx: back off and retry.
-    "429",
+    // HTTP 429 rate limiting — named form (attic/reqwest, skopeo's
+    // "received unexpected HTTP status: 429 Too Many Requests"). The
+    // numeric "429" form is matched token-wise via the status-code set.
     "Too Many Requests",
     // Connection-level failures — both Go-stdlib lowercase and curl mixed-case.
     "Connection refused",
@@ -234,14 +246,22 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
 /// (auth, not-found, missing tool, manifest mismatch) that should fail
 /// fast?
 ///
-/// Returns `true` for HTTP 5xx (numeric or named), HTTP 429 rate
-/// limiting (numeric or "Too Many Requests"), connection-level errors
+/// Returns `true` for HTTP 5xx and 429 status codes (numeric forms
+/// matched as standalone tokens via [`TRANSIENT_HTTP_STATUS_CODES`],
+/// named forms — "Bad Gateway", "Too Many Requests" — via
+/// [`TRANSIENT_NETWORK_STDERR_MARKERS`]), connection-level errors
 /// (refused / reset / aborted), I/O and TLS-handshake timeouts, and EOF /
 /// unexpected-EOF (typical TCP drop mid-stream). Returns `false` for
 /// anything else — including the terminal 4xx family (400/401/403/404)
 /// and empty stderr, so a typed `ExecFailed` / `TokenRequired` /
 /// `LocalImageNotFound` whose record carries no stderr short-circuits
 /// without burning retry budget.
+///
+/// The numeric status codes match token-wise — a maximal ASCII-
+/// alphanumeric run must equal the code exactly — so a terminal
+/// failure whose diagnostic merely *contains* those digits (a content
+/// digest, a byte count, a port, a duration) is not misread as a
+/// retryable HTTP status. See [`TRANSIENT_HTTP_STATUS_CODES`].
 ///
 /// This is the typed lift of the substring-classifier the pre-existing
 /// `commands/github_runner_ci.rs::attic_command_with_retry` carried
@@ -253,9 +273,18 @@ pub fn is_transient_network_stderr(stderr: &str) -> bool {
     if stderr.is_empty() {
         return false;
     }
-    TRANSIENT_NETWORK_STDERR_MARKERS
+    if TRANSIENT_NETWORK_STDERR_MARKERS
         .iter()
         .any(|m| stderr.contains(m))
+    {
+        return true;
+    }
+    // Numeric HTTP status codes match only as a maximal ASCII-alphanumeric
+    // token, never as a bare substring — a "500" buried inside a digest,
+    // byte count, port, or duration is not an HTTP status.
+    stderr
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| TRANSIENT_HTTP_STATUS_CODES.contains(&tok))
 }
 
 /// Captured `(exit_code, stderr)` of a failed external-command attempt.
@@ -1376,6 +1405,51 @@ mod tests {
         // With an advisory Retry-After still classifies transient.
         assert!(is_transient_network_stderr(
             "429 Too Many Requests (retry-after: 30)"
+        ));
+    }
+
+    /// Numeric HTTP status codes are transient ONLY as a standalone status
+    /// token. A "500"/"502"/"503"/"504"/"429" buried inside a content
+    /// digest, a byte count, a port, a duration, or a larger id is NOT an
+    /// HTTP status and must NOT be classified transient — retrying a
+    /// terminal failure (auth-denied, manifest-invalid) whose diagnostic
+    /// merely happens to contain those digits burns the whole retry budget
+    /// against the registry/cache for nothing.
+    ///
+    /// Fail-before: the pre-tokenization bare-substring matcher tripped on
+    /// every one of these (`"ab500cd".contains("500")`, `"50234".contains(
+    /// "502")`, `"5000".contains("500")`, `"504ms".contains("504")`,
+    /// `"14290".contains("429")` all return true), silently converting each
+    /// terminal failure into a five-attempt retry storm.
+    #[test]
+    fn test_transient_classifier_numeric_status_only_matches_standalone_token() {
+        // Content digest carrying "500" between hex chars — terminal.
+        assert!(!is_transient_network_stderr(
+            "manifest blob unknown: sha256:ab500cd not present"
+        ));
+        // Byte count — "50234" is not status 502.
+        assert!(!is_transient_network_stderr(
+            "pushed 50234 bytes then denied: access forbidden"
+        ));
+        // Port — ":5000" is not status 500.
+        assert!(!is_transient_network_stderr(
+            "dial tcp 10.0.0.1:5000: requested access to the resource is denied"
+        ));
+        // Duration — "504ms" is not status 504.
+        assert!(!is_transient_network_stderr(
+            "auth check failed after 504ms: bad credentials"
+        ));
+        // Larger id containing "429" — "14290" is not status 429.
+        assert!(!is_transient_network_stderr(
+            "request id 14290 rejected: manifest unknown"
+        ));
+        // The standalone status token still matches in every real dialect.
+        assert!(is_transient_network_stderr("HTTP/1.1 503 from upstream"));
+        assert!(is_transient_network_stderr(
+            "received unexpected HTTP status: 502"
+        ));
+        assert!(is_transient_network_stderr(
+            "The requested URL returned error: 429"
         ));
     }
 
