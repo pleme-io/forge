@@ -185,8 +185,18 @@ impl Default for RetryPolicy {
 ///
 /// Markers are matched as plain substrings (case-sensitive on the
 /// canonical capitalization the tools emit). Numeric codes ("500",
-/// "502", "503", "504") match alongside their named forms because
-/// different tools emit one or the other; matching both is harmless.
+/// "502", "503", "504", "429") match alongside their named forms
+/// because different tools emit one or the other; matching both is
+/// harmless.
+///
+/// HTTP 429 (Too Many Requests, RFC 6585 §4) is the registry/cache
+/// rate-limit backoff signal — GHCR, Docker Hub, and attic-fronted
+/// CDNs return it under load with an advisory `Retry-After`. It is
+/// the *canonical* retryable failure (back off, then retry), distinct
+/// from the terminal 4xx family (400/401/403/404 — bad request, auth,
+/// not-found, where retrying cannot help). Failing fast on 429 burns
+/// the whole push/pull pipeline when a short exponential backoff
+/// (this module's `RetryPolicy::network`) would have cleared it.
 const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // HTTP 5xx — numeric forms first (skopeo / regctl emit numeric).
     "500",
@@ -199,6 +209,11 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     "Bad Gateway",
     "Service Unavailable",
     "Gateway Timeout",
+    // HTTP 429 rate limiting — numeric (curl/skopeo/regctl) and named
+    // (attic/reqwest, skopeo's "received unexpected HTTP status: 429
+    // Too Many Requests"). The one retryable 4xx: back off and retry.
+    "429",
+    "Too Many Requests",
     // Connection-level failures — both Go-stdlib lowercase and curl mixed-case.
     "Connection refused",
     "connection refused",
@@ -219,12 +234,14 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
 /// (auth, not-found, missing tool, manifest mismatch) that should fail
 /// fast?
 ///
-/// Returns `true` for HTTP 5xx (numeric or named), connection-level errors
+/// Returns `true` for HTTP 5xx (numeric or named), HTTP 429 rate
+/// limiting (numeric or "Too Many Requests"), connection-level errors
 /// (refused / reset / aborted), I/O and TLS-handshake timeouts, and EOF /
 /// unexpected-EOF (typical TCP drop mid-stream). Returns `false` for
-/// anything else — including empty stderr, so a typed `ExecFailed` /
-/// `TokenRequired` / `LocalImageNotFound` whose record carries no stderr
-/// short-circuits without burning retry budget.
+/// anything else — including the terminal 4xx family (400/401/403/404)
+/// and empty stderr, so a typed `ExecFailed` / `TokenRequired` /
+/// `LocalImageNotFound` whose record carries no stderr short-circuits
+/// without burning retry budget.
 ///
 /// This is the typed lift of the substring-classifier the pre-existing
 /// `commands/github_runner_ci.rs::attic_command_with_retry` carried
@@ -1316,13 +1333,50 @@ mod tests {
         ));
     }
 
-    /// An HTTP 4xx error code embedded in a message must NOT match the
-    /// 5xx markers. Specifically, "400 Bad Request" must not trip the
-    /// "Bad Gateway" marker (different word) or any 5xx numeric.
+    /// The terminal 4xx family must NOT match — retrying a bad request,
+    /// an auth failure, a forbidden, or a not-found cannot help, so they
+    /// must fail fast rather than burn retry budget. "400 Bad Request"
+    /// must not trip the "Bad Gateway" marker (different word) or any
+    /// 5xx numeric. 429 is deliberately EXCLUDED from this terminal set
+    /// (see `test_transient_classifier_429_rate_limit_is_retryable`).
     #[test]
     fn test_transient_classifier_4xx_does_not_match() {
         assert!(!is_transient_network_stderr("400 Bad Request"));
-        assert!(!is_transient_network_stderr("429 Too Many Requests"));
+        assert!(!is_transient_network_stderr("401 Unauthorized"));
+        assert!(!is_transient_network_stderr("403 Forbidden"));
+        assert!(!is_transient_network_stderr("404 Not Found"));
+    }
+
+    /// HTTP 429 (Too Many Requests) is the registry/cache rate-limit
+    /// backoff signal (RFC 6585 §4) and MUST be classified transient so
+    /// the shared `retry_command` / `run_with_policy` driver backs off
+    /// and retries instead of failing the push/pull immediately. Covers
+    /// the dialects forge's CLIs emit: skopeo/regctl numeric+named
+    /// ("received unexpected HTTP status: 429 Too Many Requests"), curl
+    /// numeric-only ("The requested URL returned error: 429"), and
+    /// reqwest/attic named-only. This is the load-bearing pin: a
+    /// regression that re-classified 429 as terminal (the pre-fix
+    /// behavior) would silently restore fail-fast-on-rate-limit and burn
+    /// the whole image-push pipeline under GHCR load — exactly the
+    /// failure mode this marker closes.
+    #[test]
+    fn test_transient_classifier_429_rate_limit_is_retryable() {
+        // skopeo / regctl: numeric + named in one line.
+        assert!(is_transient_network_stderr(
+            "Error: ... received unexpected HTTP status: 429 Too Many Requests"
+        ));
+        // curl (git-over-HTTPS): numeric only, no named text.
+        assert!(is_transient_network_stderr(
+            "The requested URL returned error: 429"
+        ));
+        // reqwest / attic: named only.
+        assert!(is_transient_network_stderr(
+            "HTTP status client error (Too Many Requests) for url"
+        ));
+        // With an advisory Retry-After still classifies transient.
+        assert!(is_transient_network_stderr(
+            "429 Too Many Requests (retry-after: 30)"
+        ));
     }
 
     /// `compute_delay` is a pure function of `attempt`. Pin the schedule
