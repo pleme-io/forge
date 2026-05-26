@@ -29,7 +29,7 @@ use tameshi::certification::{
 };
 use tameshi::ci;
 use tameshi::compliance::dimensions::{ComplianceAttestation, ComplianceDimension, DimensionType};
-use tameshi::compliance::slsa::SlsaLevel;
+use tameshi::compliance::slsa::{determine_slsa_level, SlsaLevel};
 use tameshi::hash::Blake3Hash;
 
 /// Attestation values suitable for injection into HelmRelease or kustomization.
@@ -107,6 +107,43 @@ pub async fn compute_source_attestation(
     ))
 }
 
+/// Derive the SLSA level for a Nix build from the evidence actually
+/// collected, rather than asserting a fixed level.
+///
+/// `compute_build_attestation` previously hardcoded [`SlsaLevel::L3`]
+/// while recording `reproducible: false` — a self-contradiction, since L3
+/// is the *reproducible*, hardened-build grade. Worse, when `nix
+/// path-info` failed the closure JSON was swallowed to empty and the
+/// derivation to the `/nix/store/unknown-*` fallback, yet the build still
+/// claimed L3: an attestation asserting hermetic provenance it never
+/// gathered. This routes the level through tameshi's own
+/// [`determine_slsa_level`] rubric over honest inputs:
+///
+/// - **provenance** exists only when the closure JSON is non-empty *and*
+///   the derivation is a real store path (not the `unknown-*` I/O-error
+///   fallback). Without it there is nothing to attest → `L0`.
+/// - forge drives the build on a hosted Nix builder inside the sandbox,
+///   so **hosted** and **hermetic** hold exactly when provenance was
+///   collected.
+/// - **reproducible** is threaded from the caller; until reproducibility
+///   is independently re-verified it is `false`, so a fully-substantiated
+///   build tops out at `L2`, never the L3 it cannot yet back.
+///
+/// Two-person review is not modelled (`false`), so `L4` is unreachable.
+/// Mirrors the `summarize_flake_lock` honesty fix: an attestation must
+/// not claim a guarantee its inputs do not substantiate.
+fn build_slsa_level(derivation: &str, closure_info: &str, reproducible: bool) -> SlsaLevel {
+    let has_provenance =
+        !closure_info.trim().is_empty() && !derivation.starts_with("/nix/store/unknown-");
+    determine_slsa_level(
+        has_provenance,
+        has_provenance,
+        has_provenance,
+        reproducible,
+        false,
+    )
+}
+
 /// Compute build attestation for a service after nix build.
 pub async fn compute_build_attestation(
     service: &str,
@@ -146,12 +183,19 @@ pub async fn compute_build_attestation(
     // Vulnerability scan: placeholder hash
     let vuln_scan_hash = Blake3Hash::digest(format!("vuln-scan-{}", service).as_bytes());
 
+    // Reproducibility is not independently re-verified yet; until it is,
+    // the build cannot honestly claim the reproducible-grade SLSA level.
+    // The level is derived from the evidence actually collected, so a
+    // build whose closure could not be materialized claims nothing.
+    let reproducible = false;
+    let slsa_level = build_slsa_level(&derivation, &closure_info, reproducible);
+
     Ok(ci::build_attestation(
         service,
         &derivation,
         closure_hash,
-        SlsaLevel::L3, // Nix builds are hermetic and reproducible
-        false,         // Reproducibility not yet verified
+        slsa_level,
+        reproducible,
         sbom_hash,
         vuln_scan_hash,
         0, // CVE count: populated when scan tooling integrated
@@ -726,5 +770,83 @@ mod tests {
         let json = serde_json::to_string_pretty(&values).unwrap();
         assert!(json.contains("enabled"));
         assert!(json.contains("blake3:sig"));
+    }
+
+    /// A build whose closure could not be materialized — `nix path-info`
+    /// failed, so the derivation is the `/nix/store/unknown-*` fallback
+    /// and the closure JSON is empty — has no provenance to attest and
+    /// must rate `L0`. Fail-before: the prior body hardcoded `L3` here
+    /// regardless of whether any closure evidence was collected, minting
+    /// a hermetic-provenance claim for a build that never produced one.
+    #[test]
+    fn test_build_slsa_level_unsubstantiated_build_is_l0() {
+        let level = build_slsa_level("/nix/store/unknown-mysvc.drv", "", false);
+        assert_eq!(
+            level,
+            SlsaLevel::L0,
+            "no closure + unknown derivation = no provenance = L0"
+        );
+    }
+
+    /// A real derivation path but an empty closure JSON (the recursive
+    /// `path-info` failed while the `--derivation` probe happened to
+    /// succeed) is still unsubstantiated: provenance requires the closure
+    /// the hermeticity claim hashes over.
+    #[test]
+    fn test_build_slsa_level_empty_closure_is_l0() {
+        let level = build_slsa_level("/nix/store/abc123-mysvc.drv", "", false);
+        assert_eq!(level, SlsaLevel::L0, "empty closure = no provenance = L0");
+    }
+
+    /// Whitespace-only closure output (a tool that emitted only a trailing
+    /// newline) is treated as empty — the `trim()` guard prevents a blank
+    /// line from inflating the provenance claim.
+    #[test]
+    fn test_build_slsa_level_whitespace_closure_is_l0() {
+        let level = build_slsa_level("/nix/store/abc123-mysvc.drv", "  \n\t ", false);
+        assert_eq!(
+            level,
+            SlsaLevel::L0,
+            "whitespace-only closure trims to empty"
+        );
+    }
+
+    /// A fully-substantiated build — real derivation, non-empty closure —
+    /// that is NOT independently re-verified for reproducibility tops out
+    /// at `L2`, the hosted+hermetic-but-not-reproducible grade. This is
+    /// the load-bearing correction: the prior code claimed `L3` (the
+    /// reproducible grade) while simultaneously recording
+    /// `reproducible: false`, a self-contradiction the attestation must
+    /// not carry.
+    #[test]
+    fn test_build_slsa_level_substantiated_nonreproducible_is_l2() {
+        let level = build_slsa_level(
+            "/nix/store/abc123-mysvc.drv",
+            r#"[{"path":"/nix/store/abc123-mysvc","narHash":"sha256-x"}]"#,
+            false,
+        );
+        assert_eq!(
+            level,
+            SlsaLevel::L2,
+            "hermetic but not reproducibility-verified = L2, not the prior false L3"
+        );
+    }
+
+    /// The level still reaches `L3` when it is honestly earned: a
+    /// substantiated build whose reproducibility HAS been verified. Pins
+    /// that the honesty fix narrows the claim to the evidence rather than
+    /// capping it below what a reproducible build deserves.
+    #[test]
+    fn test_build_slsa_level_substantiated_reproducible_is_l3() {
+        let level = build_slsa_level(
+            "/nix/store/abc123-mysvc.drv",
+            r#"[{"path":"/nix/store/abc123-mysvc","narHash":"sha256-x"}]"#,
+            true,
+        );
+        assert_eq!(
+            level,
+            SlsaLevel::L3,
+            "substantiated + reproducible-verified earns L3"
+        );
     }
 }
