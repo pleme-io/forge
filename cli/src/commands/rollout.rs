@@ -362,7 +362,11 @@ pub async fn execute(
     Ok(())
 }
 
-/// Parse timeout string (e.g., "5m", "30s", "2h") into number of iterations
+/// Parse timeout string (e.g., "5m", "30s", "2h") into number of poll
+/// iterations at the 3-second poll interval. The string grammar is the
+/// canonical [`crate::duration::parse_duration`] oracle (lifted out of
+/// this module's prior hand-rolled suffix match); an empty string keeps
+/// this CLI's historical default of 200 iterations (≈10 minutes).
 fn parse_timeout(timeout_str: &str) -> Result<u64> {
     let timeout_str = timeout_str.trim();
 
@@ -370,32 +374,8 @@ fn parse_timeout(timeout_str: &str) -> Result<u64> {
         return Ok(200); // Default
     }
 
-    // Extract number and unit
-    let (num_str, unit) = if timeout_str.ends_with('s') {
-        (timeout_str.trim_end_matches('s'), "s")
-    } else if timeout_str.ends_with('m') {
-        (timeout_str.trim_end_matches('m'), "m")
-    } else if timeout_str.ends_with('h') {
-        (timeout_str.trim_end_matches('h'), "h")
-    } else {
-        // Assume seconds if no unit
-        (timeout_str, "s")
-    };
+    let total_seconds = crate::duration::parse_duration(timeout_str)?.as_secs();
 
-    let num: u64 = num_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("Invalid timeout format: {}", timeout_str))?;
-
-    // Convert to seconds
-    let total_seconds = match unit {
-        "s" => num,
-        "m" => num * 60,
-        "h" => num * 3600,
-        _ => return Err(anyhow::anyhow!("Unknown timeout unit: {}", unit)),
-    };
-
-    // Convert to iterations (assuming 3 second interval)
-    let iterations = total_seconds / 3;
-
-    Ok(iterations.max(1)) // At least 1 iteration
+    // Convert to iterations (assuming 3 second interval); at least 1.
+    Ok((total_seconds / 3).max(1))
 }

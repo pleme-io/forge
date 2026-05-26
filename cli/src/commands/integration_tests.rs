@@ -83,24 +83,11 @@ pub struct TestResult {
     pub test_counts: Option<TestCounts>,
 }
 
-/// Parse duration string like "30s", "5m", "1h"
-pub fn parse_duration(s: &str) -> Result<Duration> {
-    let s = s.trim();
-    if s.ends_with('s') {
-        let secs: u64 = s[..s.len() - 1].parse()?;
-        Ok(Duration::from_secs(secs))
-    } else if s.ends_with('m') {
-        let mins: u64 = s[..s.len() - 1].parse()?;
-        Ok(Duration::from_secs(mins * 60))
-    } else if s.ends_with('h') {
-        let hours: u64 = s[..s.len() - 1].parse()?;
-        Ok(Duration::from_secs(hours * 3600))
-    } else {
-        // Assume seconds if no suffix
-        let secs: u64 = s.parse()?;
-        Ok(Duration::from_secs(secs))
-    }
-}
+/// Timeout-grammar parser ("30s", "5m", "1h", bare seconds), re-exported
+/// from the canonical [`crate::duration`] oracle. Kept as a module-level
+/// re-export so the existing call sites here and in `commands/test.rs`
+/// resolve unchanged after the grammar was lifted out of this module.
+pub use crate::duration::parse_duration;
 
 /// Parse test counts from test runner output
 /// Supports multiple formats: Vitest, Cargo test, Playwright, Jest
@@ -1284,40 +1271,6 @@ pub async fn execute_pre_deployment_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_duration_seconds() {
-        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
-        assert_eq!(parse_duration("0s").unwrap(), Duration::from_secs(0));
-    }
-
-    #[test]
-    fn test_parse_duration_minutes() {
-        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
-        assert_eq!(parse_duration("1m").unwrap(), Duration::from_secs(60));
-    }
-
-    #[test]
-    fn test_parse_duration_hours() {
-        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
-        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
-    }
-
-    #[test]
-    fn test_parse_duration_no_suffix_assumes_seconds() {
-        assert_eq!(parse_duration("120").unwrap(), Duration::from_secs(120));
-    }
-
-    #[test]
-    fn test_parse_duration_whitespace_trimmed() {
-        assert_eq!(parse_duration(" 30s ").unwrap(), Duration::from_secs(30));
-    }
-
-    #[test]
-    fn test_parse_duration_invalid() {
-        assert!(parse_duration("abc").is_err());
-        assert!(parse_duration("").is_err());
-    }
 
     #[test]
     fn test_test_counts_total() {

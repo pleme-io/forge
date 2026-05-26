@@ -235,6 +235,26 @@ impl PreDeploymentTestsConfig {
                     service_name
                 );
             }
+            // Reject a malformed timeout at config-load rather than letting
+            // the test-execution path silently swallow it to a default
+            // (the prior `parse_duration(..).unwrap_or(300s)` hole). The
+            // grammar is the canonical `crate::duration` oracle.
+            let timeout = crate::duration::parse_duration(&suite.timeout).with_context(|| {
+                format!(
+                    "Pre-deployment test suite '{}' has an invalid timeout '{}' for '{}'",
+                    suite.name, suite.timeout, service_name
+                )
+            })?;
+            // A zero timeout fires immediately and fails every suite; reject
+            // it for the same reason `deployment_wait_timeout_secs` must be
+            // > 0.
+            if timeout.is_zero() {
+                bail!(
+                    "Pre-deployment test suite '{}' timeout must be greater than 0 for '{}'",
+                    suite.name,
+                    service_name
+                );
+            }
         }
 
         // Validate on_failure action
@@ -627,6 +647,67 @@ mod tests {
             on_failure: PreDeploymentTestOnFailure::default(),
         };
         assert!(config.validate("svc").is_err());
+    }
+
+    #[test]
+    fn test_pre_deployment_tests_validate_malformed_timeout_fails() {
+        let config = PreDeploymentTestsConfig {
+            enabled: true,
+            test_suites: vec![PreDeploymentTestSuite {
+                name: "unit".to_string(),
+                description: "d".to_string(),
+                command: "npm test".to_string(),
+                working_dir: ".".to_string(),
+                timeout: "5min".to_string(), // unit typo → magnitude "5mi"
+                retry_on_failure: false,
+                max_retries: 0,
+            }],
+            execution: PreDeploymentTestExecution::default(),
+            on_failure: PreDeploymentTestOnFailure::default(),
+        };
+        let err = config.validate("svc").unwrap_err().to_string();
+        assert!(
+            err.contains("5min") && err.contains("unit"),
+            "error must name the offending suite and value: {err}"
+        );
+    }
+
+    #[test]
+    fn test_pre_deployment_tests_validate_zero_timeout_fails() {
+        let config = PreDeploymentTestsConfig {
+            enabled: true,
+            test_suites: vec![PreDeploymentTestSuite {
+                name: "unit".to_string(),
+                description: "d".to_string(),
+                command: "npm test".to_string(),
+                working_dir: ".".to_string(),
+                timeout: "0s".to_string(),
+                retry_on_failure: false,
+                max_retries: 0,
+            }],
+            execution: PreDeploymentTestExecution::default(),
+            on_failure: PreDeploymentTestOnFailure::default(),
+        };
+        assert!(config.validate("svc").is_err());
+    }
+
+    #[test]
+    fn test_pre_deployment_tests_validate_wellformed_timeout_passes() {
+        let config = PreDeploymentTestsConfig {
+            enabled: true,
+            test_suites: vec![PreDeploymentTestSuite {
+                name: "unit".to_string(),
+                description: "d".to_string(),
+                command: "npm test".to_string(),
+                working_dir: ".".to_string(),
+                timeout: "5m".to_string(),
+                retry_on_failure: false,
+                max_retries: 0,
+            }],
+            execution: PreDeploymentTestExecution::default(),
+            on_failure: PreDeploymentTestOnFailure::default(),
+        };
+        assert!(config.validate("svc").is_ok());
     }
 
     #[test]

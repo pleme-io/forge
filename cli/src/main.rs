@@ -7,6 +7,7 @@ mod commands;
 mod config;
 
 // Shared utilities
+mod duration;
 mod version;
 
 // Legacy modules (to be migrated)
