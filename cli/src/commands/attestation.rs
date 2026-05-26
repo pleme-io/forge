@@ -272,6 +272,56 @@ pub async fn compute_chart_attestation(
     ))
 }
 
+/// Derive the product-level SLSA-provenance compliance dimension from the
+/// build attestations actually collected, rather than asserting a fixed
+/// `"SLSA L3 via Nix hermetic build"` claim.
+///
+/// This is the same honesty fix as [`build_slsa_level`], one layer up:
+/// `compute_build_attestation` now rates each build's `slsa_level` from
+/// the evidence it gathered (L0 / L2 / L3), but the compliance dimension
+/// composed into the certification still hardcoded `passed: true` and an
+/// `"SLSA L3"` summary regardless. A product is only as
+/// hermetically-provenanced as its *weakest* build, so the effective level
+/// is the **minimum** [`SlsaLevel`] across `builds`; a product with no
+/// builds has no provenance to attest (`L0`). The dimension passes iff that
+/// effective level meets `policy.min_slsa_level` — the same floor
+/// `evaluate_build` enforces per build — so the compliance claim cannot
+/// assert a grade the builds do not substantiate (THEORY §V.2: attestation
+/// is evidence, not a wish).
+fn slsa_compliance_dimension(
+    builds: &[BuildAttestation],
+    policy: &CertificationPolicy,
+) -> ComplianceDimension {
+    let effective = builds
+        .iter()
+        .map(|b| b.slsa_level.clone())
+        .min()
+        .unwrap_or(SlsaLevel::L0);
+    let passed = effective >= policy.min_slsa_level;
+    let summary = if builds.is_empty() {
+        format!(
+            "no builds attested; SLSA provenance unsubstantiated (< required {})",
+            policy.min_slsa_level
+        )
+    } else {
+        format!(
+            "{} (min across {} build(s)) {} required {}",
+            effective,
+            builds.len(),
+            if passed { ">=" } else { "<" },
+            policy.min_slsa_level
+        )
+    };
+    ComplianceDimension {
+        dimension_type: DimensionType::SlsaProvenance,
+        hash: Blake3Hash::digest(summary.as_bytes()),
+        passed,
+        summary,
+        assessed_at: chrono::Utc::now(),
+        required: true,
+    }
+}
+
 /// Compose all attestations into a product certification.
 pub fn compose_product_certification(
     product: &str,
@@ -299,21 +349,16 @@ pub fn compose_product_certification(
         all_healthy: false,
     };
 
+    let slsa_dimension = slsa_compliance_dimension(&builds, &policy);
+    let all_passed = slsa_dimension.passed;
     let compliance = ComplianceAttestation {
         environment: environment.to_string(),
         artifact: product.to_string(),
-        dimensions: vec![ComplianceDimension {
-            dimension_type: DimensionType::SlsaProvenance,
-            hash: Blake3Hash::digest(b"slsa-provenance"),
-            passed: true,
-            summary: "SLSA L3 via Nix hermetic build".to_string(),
-            assessed_at: chrono::Utc::now(),
-            required: true,
-        }],
+        dimensions: vec![slsa_dimension],
         compliance_hash: Blake3Hash::digest(b"initial-compliance"),
         computed_at: chrono::Utc::now(),
         policy_name: policy.name.clone(),
-        all_passed: true,
+        all_passed,
     };
 
     let cert = ProductCertification::builder(product, environment, cluster)
@@ -847,6 +892,121 @@ mod tests {
             level,
             SlsaLevel::L3,
             "substantiated + reproducible-verified earns L3"
+        );
+    }
+
+    /// Build a `BuildAttestation` carrying a chosen SLSA level; the other
+    /// fields are irrelevant to `slsa_compliance_dimension`.
+    fn build_at(service: &str, level: SlsaLevel) -> BuildAttestation {
+        let h = Blake3Hash::digest(service.as_bytes());
+        ci::build_attestation(
+            service,
+            &format!("/nix/store/abc-{service}.drv"),
+            h.clone(),
+            level,
+            false,
+            h.clone(),
+            h,
+            0,
+            0,
+            "nix-build@forge",
+        )
+    }
+
+    /// A product with no build attestations has no provenance to attest, so
+    /// the SLSA-provenance dimension rates `L0` and fails any policy with a
+    /// non-`L0` floor. Fail-before: the prior body hardcoded `passed: true`
+    /// and an `"SLSA L3"` summary regardless of whether any build existed.
+    #[test]
+    fn test_slsa_compliance_dimension_no_builds_is_unsubstantiated() {
+        let dim = slsa_compliance_dimension(&[], &relaxed_staging_policy());
+        assert!(
+            !dim.passed,
+            "no builds = no provenance = L0 < staging floor L2"
+        );
+        assert!(
+            dim.summary.contains("unsubstantiated"),
+            "summary must name the missing provenance, got: {}",
+            dim.summary
+        );
+    }
+
+    /// A product whose builds all meet the staging floor passes, and the
+    /// summary reports the honest effective (minimum) level — not the
+    /// hardcoded `"SLSA L3"` the prior body always emitted.
+    #[test]
+    fn test_slsa_compliance_dimension_meets_floor_passes() {
+        let builds = [
+            build_at("backend", SlsaLevel::L3),
+            build_at("web", SlsaLevel::L2),
+        ];
+        let dim = slsa_compliance_dimension(&builds, &relaxed_staging_policy());
+        assert!(dim.passed, "min L2 >= staging floor L2");
+        assert!(
+            dim.summary.contains("SLSA L2") && dim.summary.contains(">="),
+            "summary must report the effective (min) level L2, got: {}",
+            dim.summary
+        );
+    }
+
+    /// The load-bearing correction: a product containing an `L2` build under
+    /// a policy requiring `L3` must FAIL the SLSA-provenance dimension. The
+    /// prior body asserted `passed: true` and `"SLSA L3 via Nix hermetic
+    /// build"` here — a false compliance record claiming a grade the weakest
+    /// build does not substantiate. The product is only as
+    /// hermetically-provenanced as its weakest component.
+    #[test]
+    fn test_slsa_compliance_dimension_weakest_build_below_floor_fails() {
+        let builds = [
+            build_at("backend", SlsaLevel::L3),
+            build_at("web", SlsaLevel::L2),
+        ];
+        let dim = slsa_compliance_dimension(&builds, &strict_production_policy());
+        assert!(
+            !dim.passed,
+            "min across builds is L2 < production floor L3, so the dimension must fail"
+        );
+        assert!(
+            dim.summary.contains("SLSA L2") && dim.summary.contains('<'),
+            "summary must report the failing effective level L2 < required L3, got: {}",
+            dim.summary
+        );
+    }
+
+    /// `compose_product_certification` threads the dimension's `passed` into
+    /// `all_passed`: a single substantiated build meeting the floor yields a
+    /// passing compliance attestation carrying the honest summary.
+    #[test]
+    fn test_compose_propagates_honest_compliance() {
+        let source = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source,
+            vec![build_at("backend", SlsaLevel::L2)],
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+        assert!(
+            cert.compliance.all_passed,
+            "L2 meets the staging floor, so compliance passes"
+        );
+        let dim = &cert.compliance.dimensions[0];
+        assert!(
+            dim.passed && dim.summary.contains("SLSA L2"),
+            "the composed dimension carries the honest effective level, got: {}",
+            dim.summary
         );
     }
 }
