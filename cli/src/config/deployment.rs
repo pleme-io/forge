@@ -246,15 +246,15 @@ impl PreDeploymentTestsConfig {
                 )
             })?;
             // A zero timeout fires immediately and fails every suite; reject
-            // it for the same reason `deployment_wait_timeout_secs` must be
-            // > 0.
-            if timeout.is_zero() {
-                bail!(
-                    "Pre-deployment test suite '{}' timeout must be greater than 0 for '{}'",
-                    suite.name,
-                    service_name
-                );
-            }
+            // it through the same canonical `crate::duration` oracle that
+            // guards every other forge timeout field.
+            crate::duration::reject_zero_timeout(
+                timeout,
+                &format!(
+                    "Pre-deployment test suite '{}' timeout for '{}'",
+                    suite.name, service_name
+                ),
+            )?;
         }
 
         // Validate on_failure action
@@ -369,10 +369,18 @@ impl DeploymentConfig {
             }
         }
 
-        // Validate timeouts are reasonable
-        if self.deployment_wait_timeout_secs == 0 {
-            bail!("deployment_wait_timeout_secs must be greater than 0");
-        }
+        // Validate timeouts are reasonable. Both magnitude fields route
+        // through the canonical `crate::duration` oracle — including
+        // `nix_connect_timeout_secs`, which previously had no zero-guard, so
+        // a zero connect timeout reached the `nix` invocation unchecked.
+        crate::duration::reject_zero_timeout(
+            std::time::Duration::from_secs(self.deployment_wait_timeout_secs),
+            "deployment_wait_timeout_secs",
+        )?;
+        crate::duration::reject_zero_timeout(
+            std::time::Duration::from_secs(self.nix_connect_timeout_secs),
+            "nix_connect_timeout_secs",
+        )?;
 
         if self.deployment_wait_timeout_secs > 3600 {
             eprintln!(
@@ -557,6 +565,20 @@ mod tests {
         let mut config = DeploymentConfig::default();
         config.deployment_wait_timeout_secs = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_deployment_config_validate_zero_nix_connect_timeout() {
+        // Before the magnitude oracle wired this field, a zero
+        // nix_connect_timeout_secs validated clean and reached the `nix`
+        // invocation; now it is rejected at config-load like every peer.
+        let mut config = DeploymentConfig::default();
+        config.nix_connect_timeout_secs = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("nix_connect_timeout_secs"),
+            "error must name the offending field: {err}"
+        );
     }
 
     #[test]

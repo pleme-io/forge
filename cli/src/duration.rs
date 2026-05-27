@@ -62,6 +62,32 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(value.saturating_mul(unit_secs)))
 }
 
+/// Reject a zero-length timeout, naming the offending field.
+///
+/// [`parse_duration`] (the grammar oracle) deliberately treats `"0s"` as a
+/// well-formed zero — grammar and magnitude are separate concerns, and a
+/// caller is free to want a zero. The callers that *forbid* zero each
+/// re-derived their own guard: a pre-deployment test timeout that fires
+/// immediately fails every suite (`config::deployment` suite path,
+/// `if d.is_zero()`); a deploy-wait of zero is a misconfiguration
+/// (`deployment_wait_timeout_secs == 0`); a federation test timeout of zero
+/// likewise (`timeout_seconds == 0`). Three guards past the duplication
+/// threshold (THEORY §VI.1) — plus one silent *gap*:
+/// `nix_connect_timeout_secs` had no check, so a zero connect timeout
+/// reached the `nix` invocation. This is the single oracle they collapse
+/// onto: the magnitude-layer peer of [`parse_duration`]'s grammar layer.
+///
+/// On a non-zero `d`, returns it unchanged so a caller can bind the
+/// validated [`Duration`] in one expression. On zero, errors naming
+/// `label` so a `deploy.yaml` author sees which field forge refused —
+/// the same fail-at-load fidelity [`parse_duration`] gives the grammar.
+pub fn reject_zero_timeout(d: Duration, label: &str) -> Result<Duration> {
+    if d.is_zero() {
+        bail!("{label} must be greater than 0 seconds");
+    }
+    Ok(d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +158,44 @@ mod tests {
         assert_eq!(
             parse_duration(&huge).unwrap(),
             Duration::from_secs(u64::MAX)
+        );
+    }
+
+    /// A zero duration is rejected by the magnitude oracle, regardless of
+    /// whether it arrived from the grammar (`"0s"`) or a `u64`-seconds
+    /// config field (`Duration::from_secs(0)`).
+    #[test]
+    fn reject_zero_timeout_rejects_zero() {
+        assert!(reject_zero_timeout(Duration::ZERO, "field").is_err());
+        assert!(reject_zero_timeout(Duration::from_secs(0), "field").is_err());
+        assert!(reject_zero_timeout(parse_duration("0s").unwrap(), "field").is_err());
+    }
+
+    /// Any positive duration passes through unchanged, so a caller can bind
+    /// the validated value in one expression.
+    #[test]
+    fn reject_zero_timeout_passes_nonzero_through() {
+        assert_eq!(
+            reject_zero_timeout(Duration::from_secs(30), "field").unwrap(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            reject_zero_timeout(parse_duration("5m").unwrap(), "field").unwrap(),
+            Duration::from_secs(300)
+        );
+    }
+
+    /// The error names the offending field so a `deploy.yaml` author sees
+    /// which timeout forge refused — the magnitude-layer peer of
+    /// [`error_names_offending_input`].
+    #[test]
+    fn reject_zero_timeout_error_names_field() {
+        let msg = reject_zero_timeout(Duration::ZERO, "nix_connect_timeout_secs")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("nix_connect_timeout_secs"),
+            "error must echo the field label: {msg}"
         );
     }
 }

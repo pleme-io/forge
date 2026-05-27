@@ -309,13 +309,13 @@ impl ServiceFederationTestsConfig {
             );
         }
 
-        // Validate timeout is reasonable
-        if self.timeout_seconds == 0 {
-            bail!(
-                "Federation test timeout must be greater than 0 for service '{}'",
-                service_name
-            );
-        }
+        // Validate timeout is reasonable. The zero-rejection routes through
+        // the canonical `crate::duration` magnitude oracle so this field
+        // cannot drift on what "a valid timeout" means.
+        crate::duration::reject_zero_timeout(
+            std::time::Duration::from_secs(self.timeout_seconds),
+            &format!("Federation test timeout for service '{service_name}'"),
+        )?;
 
         if self.timeout_seconds > 3600 {
             eprintln!(
