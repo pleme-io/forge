@@ -8,6 +8,7 @@ mod config;
 
 // Shared utilities
 mod duration;
+mod store_path;
 mod version;
 
 // Legacy modules (to be migrated)

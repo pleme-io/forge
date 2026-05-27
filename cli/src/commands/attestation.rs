@@ -120,8 +120,15 @@ pub async fn compute_source_attestation(
 /// [`determine_slsa_level`] rubric over honest inputs:
 ///
 /// - **provenance** exists only when the closure JSON is non-empty *and*
-///   the derivation is a real store path (not the `unknown-*` I/O-error
-///   fallback). Without it there is nothing to attest → `L0`.
+///   the derivation parses as a well-formed, content-addressed Nix store
+///   *derivation* path via [`crate::store_path::StorePath`]. The prior gate
+///   asked the negative question `!derivation.starts_with("/nix/store/
+///   unknown-")`, recognising only the one `unknown-*` I/O-error sentinel
+///   and silently treating an empty, relative, or otherwise malformed
+///   derivation as if it carried provenance. The positive grammar accepts
+///   a derivation iff its 32-char base-32 content hash — the hermetic
+///   fingerprint the provenance claim rests on — is actually present.
+///   Without provenance there is nothing to attest → `L0`.
 /// - forge drives the build on a hosted Nix builder inside the sandbox,
 ///   so **hosted** and **hermetic** hold exactly when provenance was
 ///   collected.
@@ -133,8 +140,10 @@ pub async fn compute_source_attestation(
 /// Mirrors the `summarize_flake_lock` honesty fix: an attestation must
 /// not claim a guarantee its inputs do not substantiate.
 fn build_slsa_level(derivation: &str, closure_info: &str, reproducible: bool) -> SlsaLevel {
-    let has_provenance =
-        !closure_info.trim().is_empty() && !derivation.starts_with("/nix/store/unknown-");
+    let derivation_is_real = crate::store_path::StorePath::parse(derivation)
+        .map(|p| p.is_derivation())
+        .unwrap_or(false);
+    let has_provenance = !closure_info.trim().is_empty() && derivation_is_real;
     determine_slsa_level(
         has_provenance,
         has_provenance,
@@ -865,8 +874,11 @@ mod tests {
     /// not carry.
     #[test]
     fn test_build_slsa_level_substantiated_nonreproducible_is_l2() {
+        // A realistic 32-char Nix base-32 derivation hash (the alphabet
+        // itself is exactly 32 valid symbols) so the derivation parses as a
+        // well-formed store path under the positive provenance grammar.
         let level = build_slsa_level(
-            "/nix/store/abc123-mysvc.drv",
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-mysvc.drv",
             r#"[{"path":"/nix/store/abc123-mysvc","narHash":"sha256-x"}]"#,
             false,
         );
@@ -884,7 +896,7 @@ mod tests {
     #[test]
     fn test_build_slsa_level_substantiated_reproducible_is_l3() {
         let level = build_slsa_level(
-            "/nix/store/abc123-mysvc.drv",
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-mysvc.drv",
             r#"[{"path":"/nix/store/abc123-mysvc","narHash":"sha256-x"}]"#,
             true,
         );
@@ -892,6 +904,40 @@ mod tests {
             level,
             SlsaLevel::L3,
             "substantiated + reproducible-verified earns L3"
+        );
+    }
+
+    /// Closing the gap the negative-sentinel gate left open: a derivation
+    /// that is malformed but does NOT match the one `/nix/store/unknown-`
+    /// sentinel — an empty string, a relative path, or a build *output*
+    /// path mistakenly fed where the `.drv` belongs — must rate `L0` even
+    /// when a non-empty closure was collected, because provenance requires
+    /// a real content-addressed derivation. Fail-before: the prior
+    /// `!derivation.starts_with("/nix/store/unknown-")` check returned
+    /// `true` for every one of these (none start with the sentinel), so a
+    /// non-empty closure alongside a bogus derivation minted `L2`.
+    #[test]
+    fn test_build_slsa_level_malformed_non_sentinel_derivation_is_l0() {
+        let closure = r#"[{"path":"/nix/store/abc","narHash":"sha256-x"}]"#;
+        // Empty derivation (a `nix path-info --derivation` that exited zero
+        // with no stdout) — does not start with the sentinel.
+        assert_eq!(build_slsa_level("", closure, false), SlsaLevel::L0);
+        // A relative, non-store path.
+        assert_eq!(
+            build_slsa_level("result/mysvc.drv", closure, false),
+            SlsaLevel::L0
+        );
+        // A well-formed store *output* path (no `.drv`) where the
+        // derivation was expected: provenance for the build graph wasn't
+        // collected, so it cannot earn an L2 hermetic-provenance grade.
+        assert_eq!(
+            build_slsa_level(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-mysvc",
+                closure,
+                true
+            ),
+            SlsaLevel::L0,
+            "an output path is not a derivation; no build-graph provenance"
         );
     }
 
