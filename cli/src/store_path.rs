@@ -168,10 +168,10 @@ impl StorePath {
     }
 
     /// The 32-char content hash component — the hermetic fingerprint this
-    /// type exists to expose. `allow(dead_code)`: surfaced for the
-    /// content-addressed consumers (closure de-dup, attestation hashing)
-    /// the module docstring names; not yet wired at a call site.
-    #[allow(dead_code)]
+    /// type exists to expose. Consumed by [`canonical_closure_fingerprint`]
+    /// to reduce a build closure to the content-addressed identity of its
+    /// store objects, independent of the volatile metadata `nix path-info`
+    /// interleaves with each path.
     pub fn hash(&self) -> &str {
         &self.full[STORE_PREFIX.len()..STORE_PREFIX.len() + HASH_LEN]
     }
@@ -194,6 +194,58 @@ impl std::fmt::Display for StorePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.full)
     }
+}
+
+/// Extract the validated Nix store paths from a `nix path-info --recursive
+/// --json` closure document, in document order.
+///
+/// `nix path-info --json` has emitted two shapes across nix versions: a
+/// JSON array of objects each carrying a `"path"` field (older), and a JSON
+/// object keyed by the store path (newer). Both are accepted. An entry
+/// whose path does not parse as a [`StorePath`] is skipped — the document
+/// may carry a non-store entry or be truncated by a partial `path-info`
+/// failure, and a fingerprint built from the paths that *are* well-formed
+/// is more honest than one taken over the malformed text. A document that
+/// is not valid JSON yields no paths.
+pub fn parse_closure_paths(closure_info: &str) -> Vec<StorePath> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(closure_info) else {
+        return Vec::new();
+    };
+    let candidates: Vec<&str> = match &value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.get("path").and_then(serde_json::Value::as_str))
+            .collect(),
+        serde_json::Value::Object(map) => map.keys().map(String::as_str).collect(),
+        _ => Vec::new(),
+    };
+    candidates
+        .into_iter()
+        .filter_map(|s| StorePath::parse(s).ok())
+        .collect()
+}
+
+/// Canonical, order- and metadata-independent fingerprint of a Nix build
+/// closure, derived from the *content hashes* of its store paths.
+///
+/// `nix path-info --recursive --json` interleaves the content-addressed
+/// identity of each store object with volatile metadata —
+/// `registrationTime`, `signatures`, `ultimate`, `narSize`, and a path
+/// ordering that is not guaranteed stable across nix versions. Hashing the
+/// raw document therefore yields a closure fingerprint that drifts run to
+/// run even when the closure is byte-identical, defeating the very
+/// reproducibility the closure hash exists to attest (THEORY §VI.1:
+/// regenerating an artifact from the same inputs must produce a
+/// byte-identical result). This reduces the closure to the *set* of its
+/// 32-char base-32 content hashes — the hermetic fingerprints
+/// [`StorePath::hash`] exposes — deduplicated and lexically sorted, joined
+/// one per line. Two builds with the same closure content produce the same
+/// fingerprint regardless of metadata or emission order; a closure with no
+/// parseable store paths fingerprints to the empty string.
+pub fn canonical_closure_fingerprint(closure_info: &str) -> String {
+    let paths = parse_closure_paths(closure_info);
+    let hashes: std::collections::BTreeSet<&str> = paths.iter().map(StorePath::hash).collect();
+    hashes.into_iter().collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]
@@ -301,6 +353,95 @@ mod tests {
         assert!(
             err.to_string().contains("unknown-mysvc.drv"),
             "error must name the offending input; got: {err}"
+        );
+    }
+
+    /// A second valid 32-char Nix base-32 hash (a permutation of the
+    /// alphabet) so closure fixtures can carry two *distinct* store-object
+    /// identities and exercise sorting / de-dup.
+    const H2: &str = "zyxwvsrqpnmlkjihgfdcba9876543210";
+
+    #[test]
+    fn test_parse_closure_paths_array_shape() {
+        // Older nix: a JSON array of objects each carrying a `path` field.
+        // A non-store entry and a non-object element are both skipped.
+        let doc = format!(
+            r#"[{{"path":"/nix/store/{H}-a","narHash":"sha256-x"}},
+                {{"path":"/nix/store/{H2}-b.drv","registrationTime":1700000000}},
+                {{"path":"not-a-store-path"}},
+                "stray-string"]"#
+        );
+        let paths = parse_closure_paths(&doc);
+        assert_eq!(paths.len(), 2, "only the two well-formed store paths parse");
+        assert_eq!(paths[0].name(), "a");
+        assert_eq!(paths[1].name(), "b.drv");
+    }
+
+    #[test]
+    fn test_parse_closure_paths_object_shape() {
+        // Newer nix: a JSON object keyed by the store path.
+        let doc = format!(
+            r#"{{"/nix/store/{H}-a": {{"narHash":"sha256-x"}},
+                "/nix/store/{H2}-b": {{"narHash":"sha256-y"}}}}"#
+        );
+        let paths = parse_closure_paths(&doc);
+        assert_eq!(paths.len(), 2, "both map keys parse as store paths");
+        // The map keys are the store-object identities; the fingerprint is
+        // their sorted content hashes regardless of map iteration order.
+        assert_eq!(canonical_closure_fingerprint(&doc), format!("{H}\n{H2}"));
+    }
+
+    #[test]
+    fn test_canonical_closure_fingerprint_is_stable_where_raw_bytes_drift() {
+        // Two documents describing the SAME closure content, differing only
+        // in path emission order and volatile metadata (registrationTime).
+        let doc1 = format!(
+            r#"[{{"path":"/nix/store/{H}-a","registrationTime":111}},
+                {{"path":"/nix/store/{H2}-b","registrationTime":111}}]"#
+        );
+        let doc2 = format!(
+            r#"[{{"path":"/nix/store/{H2}-b","registrationTime":999}},
+                {{"path":"/nix/store/{H}-a","registrationTime":999}}]"#
+        );
+        // The canonical fingerprint cancels both order and metadata: it is
+        // the sorted set of content hashes only.
+        assert_eq!(
+            canonical_closure_fingerprint(&doc1),
+            canonical_closure_fingerprint(&doc2),
+            "fingerprint must be order- and metadata-independent"
+        );
+        // The fingerprint is the lexically-sorted unique hashes joined by
+        // newline; H < H2 lexically ('0' < 'z').
+        assert_eq!(canonical_closure_fingerprint(&doc1), format!("{H}\n{H2}"));
+        // Contrast: the prior raw-byte scheme hashed the document text, and
+        // these two equivalent closures are NOT byte-equal — the drift this
+        // canonicalization closes.
+        assert_ne!(
+            doc1, doc2,
+            "raw documents differ where the closure does not"
+        );
+    }
+
+    #[test]
+    fn test_canonical_closure_fingerprint_dedups_repeated_paths() {
+        // A recursive closure may list the same store object more than once
+        // (it is referenced by several parents); the fingerprint is a set.
+        let doc = format!(
+            r#"[{{"path":"/nix/store/{H}-a"}},
+                {{"path":"/nix/store/{H}-a"}},
+                {{"path":"/nix/store/{H2}-b"}}]"#
+        );
+        assert_eq!(canonical_closure_fingerprint(&doc), format!("{H}\n{H2}"));
+    }
+
+    #[test]
+    fn test_canonical_closure_fingerprint_empty_for_unparseable() {
+        assert_eq!(canonical_closure_fingerprint(""), "");
+        assert_eq!(canonical_closure_fingerprint("not json at all"), "");
+        // Valid JSON, but no entry is a well-formed store path.
+        assert_eq!(
+            canonical_closure_fingerprint(r#"[{"path":"/nix/store/short"}]"#),
+            ""
         );
     }
 }

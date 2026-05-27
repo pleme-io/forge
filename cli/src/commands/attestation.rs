@@ -184,7 +184,14 @@ pub async fn compute_build_attestation(
     )
     .await
     .unwrap_or_default();
-    let closure_hash = Blake3Hash::digest(closure_info.as_bytes());
+    // Hash the closure's canonical content-addressed fingerprint — the
+    // sorted, deduplicated set of store-object content hashes — rather than
+    // the raw `path-info` document, whose `registrationTime`, signatures,
+    // and path ordering drift run-to-run for a byte-identical closure and
+    // would otherwise make this hermeticity hash irreproducible.
+    let closure_hash = Blake3Hash::digest(
+        crate::store_path::canonical_closure_fingerprint(&closure_info).as_bytes(),
+    );
 
     // SBOM: compute hash of nix store closure (placeholder until syft integration)
     let sbom_hash = Blake3Hash::digest(format!("sbom-{}", service).as_bytes());
@@ -938,6 +945,48 @@ mod tests {
             ),
             SlsaLevel::L0,
             "an output path is not a derivation; no build-graph provenance"
+        );
+    }
+
+    /// The build attestation's closure hash must be reproducible: two `nix
+    /// path-info --recursive --json` documents describing the *same* closure
+    /// content — differing only in path emission order and volatile
+    /// metadata (`registrationTime`) — must hash identically.
+    /// `compute_build_attestation` now digests the closure's canonical
+    /// content-addressed fingerprint
+    /// ([`crate::store_path::canonical_closure_fingerprint`]) rather than
+    /// the raw document, so the metadata drift cancels. Fail-before: the
+    /// prior `Blake3Hash::digest(closure_info.as_bytes())` hashed the raw
+    /// text, so the two equivalent closures produced DIFFERENT closure
+    /// hashes — the contrast assertion against the raw-byte digest makes the
+    /// closed gap explicit.
+    #[test]
+    fn test_closure_hash_reproducible_across_metadata_and_order() {
+        let h_a = "0123456789abcdfghijklmnpqrsvwxyz";
+        let h_b = "zyxwvsrqpnmlkjihgfdcba9876543210";
+        let doc1 = format!(
+            r#"[{{"path":"/nix/store/{h_a}-a","registrationTime":111}},
+                {{"path":"/nix/store/{h_b}-b","registrationTime":111}}]"#
+        );
+        let doc2 = format!(
+            r#"[{{"path":"/nix/store/{h_b}-b","registrationTime":999}},
+                {{"path":"/nix/store/{h_a}-a","registrationTime":999}}]"#
+        );
+        let canon = |d: &str| {
+            Blake3Hash::digest(crate::store_path::canonical_closure_fingerprint(d).as_bytes())
+                .to_hex()
+        };
+        assert_eq!(
+            canon(&doc1),
+            canon(&doc2),
+            "canonical closure hash must be order- and metadata-independent"
+        );
+        // The prior raw-byte scheme conflated metadata/order into the hash,
+        // so the same closure hashed differently — the bug this closes.
+        assert_ne!(
+            Blake3Hash::digest(doc1.as_bytes()).to_hex(),
+            Blake3Hash::digest(doc2.as_bytes()).to_hex(),
+            "raw-byte hashing (the prior scheme) drifts with metadata/order"
         );
     }
 
