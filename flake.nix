@@ -68,7 +68,13 @@
 
         # ── forge-provision (Linux only) ─────────────────────────────
         forgeProvision = if isLinux then
-          (import ./provision/forge-provision/Cargo.nix { inherit pkgs; }).rootCrate.build
+          let
+            lockfileBuilder = import "${substrate}/lib/build/rust/lockfile-builder.nix" { inherit pkgs; };
+            plemeCrateOverrides = import "${substrate}/lib/build/rust/pleme-crate-overrides.nix";
+          in (lockfileBuilder.mkProject {
+            src = ./provision/forge-provision;
+            defaultCrateOverrides = pkgs.defaultCrateOverrides // plemeCrateOverrides;
+          }).rootCrate.build
         else null;
 
         # ── forge-provision image (Linux only) ───────────────────────
