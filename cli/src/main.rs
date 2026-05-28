@@ -8,6 +8,7 @@ mod config;
 
 // Shared utilities
 mod duration;
+mod oci_manifest;
 mod store_path;
 mod tree_listing;
 mod version;

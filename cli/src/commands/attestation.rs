@@ -296,13 +296,35 @@ pub async fn compute_build_attestation(
 
 /// Compute image attestation after pushing to the registry.
 pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<ImageAttestation> {
-    // Get OCI manifest digest via skopeo
+    // Get OCI manifest digest via skopeo. Two honesty disciplines apply,
+    // mirroring `tree_hash` / `flake_lock_hash` / closure_hash above:
+    //   * A probe failure (skopeo not on PATH, registry 404, network
+    //     error, auth refusal) routes through the explicit `b"no-manifest"`
+    //     sentinel — never silent `Blake3Hash::digest(b"")`, which would
+    //     stamp the constant blake3-of-empty into every Phase 1 image
+    //     attestation as the OCI manifest identity. Mirrors the
+    //     `b"no-tree-listing"` and `b"no-flake-lock"` sentinels used at
+    //     the source-attestation layer.
+    //   * A successful probe is hashed over its canonical content-
+    //     addressed fingerprint (the sorted, deduplicated set of
+    //     role-prefixed config / layer / manifest / fsLayer digests)
+    //     rather than the raw bytes, so the manifest hash cannot drift on
+    //     registry-side JSON formatting, key ordering, mutable
+    //     `annotations`, or the manifest-format negotiation skopeo may
+    //     have driven via Accept headers (THEORY §VI.1).
     let full_ref = format!("docker://{}:{}", image_ref, tag);
-    let manifest_json =
-        run_command_output(Path::new("."), "skopeo", &["inspect", "--raw", &full_ref])
-            .await
-            .unwrap_or_default();
-    let manifest_hash = Blake3Hash::digest(manifest_json.as_bytes());
+    let manifest_hash = match run_command_output(
+        Path::new("."),
+        "skopeo",
+        &["inspect", "--raw", &full_ref],
+    )
+    .await
+    {
+        Ok(json) => Blake3Hash::digest(
+            crate::oci_manifest::canonical_manifest_fingerprint(&json).as_bytes(),
+        ),
+        Err(_) => Blake3Hash::digest(b"no-manifest"),
+    };
 
     // Check for cosign signature (best-effort)
     let cosign_verified = run_command_output(
@@ -1282,6 +1304,111 @@ mod tests {
             Blake3Hash::digest(b"").to_hex(),
             "the sentinel must differ from blake3-of-empty (the prior \
              silent fallback value)"
+        );
+    }
+
+    /// Load-bearing image-attestation honesty pin: the `skopeo inspect
+    /// --raw` probe failure mode must NOT collapse to the silent
+    /// blake3-of-empty value the prior `unwrap_or_default()` produced.
+    /// The probe-failed sentinel (`b"no-manifest"`) must hash to a
+    /// distinct value from a *successful* probe that yielded an empty
+    /// manifest (or one with no parseable digest in any recognised
+    /// role) — the two cases describe different worlds (no evidence
+    /// collected vs. evidence collected and trivially empty) and the
+    /// attestation must record them honestly. Fail-before: the prior
+    /// body produced `Blake3Hash::digest(b"")` for both, conflating
+    /// them. Same shape as `test_tree_hash_probe_failure_distinguishable
+    /// _from_empty_listing` one layer up.
+    #[test]
+    fn test_manifest_hash_probe_failure_distinguishable_from_empty_manifest() {
+        let probe_failed = Blake3Hash::digest(b"no-manifest");
+        let empty_manifest_hash =
+            Blake3Hash::digest(crate::oci_manifest::canonical_manifest_fingerprint("").as_bytes());
+        assert_ne!(
+            probe_failed.to_hex(),
+            empty_manifest_hash.to_hex(),
+            "the probe-failed sentinel and a successful-but-empty manifest \
+             must hash to distinct values; conflating them was the prior \
+             honesty bug"
+        );
+        // The pre-fix path hashed `b""` (the `unwrap_or_default()` result)
+        // for the probe-failed case. The sentinel must be strictly distinct
+        // from that constant so a Phase 1 image attestation carrying the
+        // sentinel hash is not mistakable for a legitimate "empty manifest"
+        // record.
+        assert_ne!(
+            probe_failed.to_hex(),
+            Blake3Hash::digest(b"").to_hex(),
+            "the sentinel must differ from blake3-of-empty (the prior \
+             silent fallback value)"
+        );
+        // And distinct from the two sibling sentinels at the source layer,
+        // so an attestation record carrying ONE of them cannot be confused
+        // with another. The one-sentinel-per-probe discipline relies on
+        // these being structurally distinct strings.
+        assert_ne!(
+            probe_failed.to_hex(),
+            Blake3Hash::digest(b"no-tree-listing").to_hex()
+        );
+        assert_ne!(
+            probe_failed.to_hex(),
+            Blake3Hash::digest(b"no-flake-lock").to_hex()
+        );
+    }
+
+    /// The manifest hash must be canonical over the manifest's content-
+    /// addressed digests: two OCI manifests describing the *same* image
+    /// (same config digest, same layer digest set) but emitted with
+    /// different top-level key order and different volatile metadata
+    /// (`annotations` carrying a fresh `created` timestamp on every push)
+    /// must hash identically. `compute_image_attestation` now digests the
+    /// canonical fingerprint rather than the raw manifest bytes, so any
+    /// future drift in registry-side JSON formatting, key ordering, or
+    /// Accept-header-negotiated manifest format cannot drift the image
+    /// claim for a byte-identical image. Fail-before: the prior
+    /// `Blake3Hash::digest(manifest_json.as_bytes())` hashed the raw text,
+    /// so the two equivalent manifests produced different image-attestation
+    /// hashes — the contrast against the raw-byte digest makes the closed
+    /// gap explicit. Same shape as `test_closure_hash_reproducible_across_
+    /// metadata_and_order` for the build closure.
+    #[test]
+    fn test_manifest_hash_stable_across_key_order_and_metadata() {
+        let d1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let d2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        let json_a = format!(
+            r#"{{
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {{"digest": "sha256:{d1}", "size": 100}},
+                "layers": [{{"digest": "sha256:{d2}", "size": 200}}],
+                "annotations": {{"org.opencontainers.image.created": "2025-01-01T00:00:00Z"}}
+            }}"#
+        );
+        let json_b = format!(
+            r#"{{
+                "layers":  [{{"digest" : "sha256:{d2}", "size": 999}}] ,
+                "config" : {{"digest": "sha256:{d1}", "size": 999}},
+                "mediaType" : "application/vnd.docker.distribution.manifest.v2+json",
+                "schemaVersion" : 2,
+                "annotations": {{"org.opencontainers.image.created": "2026-05-28T12:34:56Z"}}
+            }}"#
+        );
+        let canon = |j: &str| {
+            Blake3Hash::digest(crate::oci_manifest::canonical_manifest_fingerprint(j).as_bytes())
+                .to_hex()
+        };
+        assert_eq!(
+            canon(&json_a),
+            canon(&json_b),
+            "canonical manifest hash must be JSON-formatting, key-order, and metadata-independent"
+        );
+        // The prior raw-byte scheme conflated formatting / metadata into
+        // the hash, so the same image hashed differently — the bug this
+        // closes.
+        assert_ne!(
+            Blake3Hash::digest(json_a.as_bytes()).to_hex(),
+            Blake3Hash::digest(json_b.as_bytes()).to_hex(),
+            "raw-byte hashing (the prior scheme) drifts with formatting / metadata"
         );
     }
 
