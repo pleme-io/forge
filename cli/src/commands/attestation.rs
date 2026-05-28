@@ -91,11 +91,25 @@ pub async fn compute_source_attestation(
             .map(|s| s.trim() == "G" || s.trim() == "U")
             .unwrap_or(false);
 
-    // Compute tree hash: blake3 of `git ls-tree -r HEAD`
-    let tree_listing = run_command_output(repo_root, "git", &["ls-tree", "-r", "HEAD"])
-        .await
-        .unwrap_or_default();
-    let tree_hash = Blake3Hash::digest(tree_listing.as_bytes());
+    // Compute tree hash from `git ls-tree -r HEAD`. Two honesty
+    // disciplines apply, mirroring `flake_lock_hash` above:
+    //   * A probe failure (no git on PATH, no HEAD, I/O error) routes
+    //     through the explicit `b"no-tree-listing"` sentinel — never
+    //     silent `Blake3Hash::digest(b"")`, which would stamp the
+    //     constant blake3-of-empty into every Phase 1 source
+    //     attestation as the source-tree identity. Mirrors the
+    //     `b"no-flake-lock"` sentinel used for the absent-flake case.
+    //   * A successful probe is hashed over its canonical
+    //     content-addressed fingerprint (the sorted, deduplicated set
+    //     of validated `(mode, type, hash, path)` entries) rather than
+    //     the raw bytes, so the tree hash cannot drift on git output
+    //     formatting alone for a byte-identical tree (THEORY §VI.1).
+    let tree_hash = match run_command_output(repo_root, "git", &["ls-tree", "-r", "HEAD"]).await {
+        Ok(listing) => {
+            Blake3Hash::digest(crate::tree_listing::canonical_tree_fingerprint(&listing).as_bytes())
+        }
+        Err(_) => Blake3Hash::digest(b"no-tree-listing"),
+    };
 
     // Compute flake.lock hash
     let flake_lock_path = repo_root.join("flake.lock");
@@ -1233,6 +1247,76 @@ mod tests {
             dim.passed && dim.summary.contains("SLSA L2"),
             "the composed dimension carries the honest effective level, got: {}",
             dim.summary
+        );
+    }
+
+    /// Load-bearing source-attestation honesty pin: the `git ls-tree`
+    /// probe failure mode must NOT collapse to the silent blake3-of-
+    /// empty value the prior `unwrap_or_default()` produced. The
+    /// probe-failed sentinel (`b"no-tree-listing"`) must hash to a
+    /// distinct value from a *successful* probe that yielded an empty
+    /// tree (or a listing with no parseable entries) — the two cases
+    /// describe different worlds (no evidence collected vs. evidence
+    /// collected and trivially empty) and the attestation must record
+    /// them honestly. Fail-before: the prior body produced
+    /// `Blake3Hash::digest(b"")` for both, conflating them.
+    #[test]
+    fn test_tree_hash_probe_failure_distinguishable_from_empty_listing() {
+        let probe_failed = Blake3Hash::digest(b"no-tree-listing");
+        let empty_listing_hash =
+            Blake3Hash::digest(crate::tree_listing::canonical_tree_fingerprint("").as_bytes());
+        assert_ne!(
+            probe_failed.to_hex(),
+            empty_listing_hash.to_hex(),
+            "the probe-failed sentinel and a successful-but-empty listing \
+             must hash to distinct values; conflating them was the prior \
+             honesty bug"
+        );
+        // The pre-fix path hashed `b""` (the `unwrap_or_default()`
+        // result) for the probe-failed case. The sentinel must be
+        // strictly distinct from that constant so a Phase 1 attestation
+        // record carrying the sentinel hash is not mistakable for a
+        // legitimate "empty tree" record.
+        assert_ne!(
+            probe_failed.to_hex(),
+            Blake3Hash::digest(b"").to_hex(),
+            "the sentinel must differ from blake3-of-empty (the prior \
+             silent fallback value)"
+        );
+    }
+
+    /// The tree hash must be canonical over the listing content: two
+    /// `git ls-tree` outputs naming the *same* tree (same set of
+    /// `(mode, type, hash, path)` entries) in different orders must
+    /// hash identically. `compute_source_attestation` now digests the
+    /// canonical fingerprint rather than the raw `ls-tree` bytes, so
+    /// any future formatting drift in git's output cannot drift the
+    /// source-tree claim for a byte-identical tree. Fail-before: the
+    /// prior `Blake3Hash::digest(tree_listing.as_bytes())` hashed the
+    /// raw text, so the two equivalent listings produced different
+    /// source-tree hashes — the contrast against the raw-byte digest
+    /// makes the closed gap explicit.
+    #[test]
+    fn test_tree_hash_stable_across_listing_order() {
+        let h1 = "0123456789abcdef0123456789abcdef01234567";
+        let h2 = "fedcba9876543210fedcba9876543210fedcba98";
+        let listing1 = format!("100644 blob {h1}\ta\n100644 blob {h2}\tb\n");
+        let listing2 = format!("100644 blob {h2}\tb\n100644 blob {h1}\ta\n");
+        let canon = |l: &str| {
+            Blake3Hash::digest(crate::tree_listing::canonical_tree_fingerprint(l).as_bytes())
+                .to_hex()
+        };
+        assert_eq!(
+            canon(&listing1),
+            canon(&listing2),
+            "canonical tree hash must be order-independent"
+        );
+        // The prior raw-byte scheme would conflate emission order into
+        // the hash — the bug this closes.
+        assert_ne!(
+            Blake3Hash::digest(listing1.as_bytes()).to_hex(),
+            Blake3Hash::digest(listing2.as_bytes()).to_hex(),
+            "raw-byte hashing (the prior scheme) drifts with listing order"
         );
     }
 }
