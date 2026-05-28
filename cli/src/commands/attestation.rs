@@ -62,11 +62,27 @@ pub async fn compute_source_attestation(
         .await
         .unwrap_or_else(|_| "unknown".to_string());
 
-    // Get current ref
-    let git_ref = run_command_output(repo_root, "git", &["symbolic-ref", "--short", "HEAD"])
+    // Get current ref: prefer a branch HEAD via `symbolic-ref`, fall back
+    // to an exact tag match on HEAD, then to the SHA itself when HEAD is
+    // detached at no named ref (the GitHub-Actions default checkout
+    // state). `git describe --exact-match --tags` is only spawned when the
+    // branch probe failed — common case is a branch HEAD and we keep one
+    // git invocation.
+    let branch_probe = run_command_output(repo_root, "git", &["symbolic-ref", "--short", "HEAD"])
         .await
-        .unwrap_or_else(|_| "refs/heads/main".to_string());
-    let git_ref = format!("refs/heads/{}", git_ref);
+        .ok();
+    let tag_probe = if branch_probe.is_none() {
+        run_command_output(
+            repo_root,
+            "git",
+            &["describe", "--exact-match", "--tags", "HEAD"],
+        )
+        .await
+        .ok()
+    } else {
+        None
+    };
+    let git_ref = resolve_source_ref(branch_probe.as_deref(), tag_probe.as_deref(), git_sha);
 
     // Check if commit is signed
     let commit_signed =
@@ -105,6 +121,50 @@ pub async fn compute_source_attestation(
         flake_input_count,
         all_inputs_pinned,
     ))
+}
+
+/// Resolve the symbolic ref the working tree's HEAD points at into the
+/// refspec string the SLSA source attestation's `git_ref` field carries.
+///
+/// Pure function over the two git probe results so each fallback arm is
+/// unit-testable without spawning git. The probe ladder mirrors how a
+/// supply-chain verifier reads a source provenance record: prefer a named
+/// branch (`refs/heads/<name>`), accept an exact tag match
+/// (`refs/tags/<name>`) on a detached-HEAD tag checkout, and as the
+/// honest last resort record the bare commit SHA — never silently
+/// synthesize a branch name the build did not actually come from.
+///
+/// The pre-fix path swallowed `symbolic-ref` failure to the literal string
+/// `"refs/heads/main"` and then wrapped it with `format!("refs/heads/{}",
+/// _)`, producing the malformed `"refs/heads/refs/heads/main"` on every
+/// detached HEAD (the GitHub-Actions default checkout state) and on every
+/// tag checkout. Both arms are dishonest twice over: a Phase 1 source
+/// attestation (THEORY §V.4) cannot truthfully claim the build came from
+/// `refs/heads/main` when it does not know the ref, and the doubled
+/// prefix is not a parseable refname for any consumer to recover from.
+///
+/// `branch` is the trimmed stdout of `git symbolic-ref --short HEAD`
+/// (e.g. `"main"`, `"feature/foo-bar"`); `None` or whitespace-only marks
+/// the probe as failed. `tag` is the trimmed stdout of `git describe
+/// --exact-match --tags HEAD` (e.g. `"v1.0.0"`); same emptiness rule.
+/// `sha` is the commit SHA the caller already resolved — it never falls
+/// back to a synthetic ref. The branch arm wins over the tag arm when
+/// both probe successfully (a tagged commit on a branch HEAD is most
+/// semantically described by the branch the operator is on).
+fn resolve_source_ref(branch: Option<&str>, tag: Option<&str>, sha: &str) -> String {
+    if let Some(b) = branch {
+        let b = b.trim();
+        if !b.is_empty() {
+            return format!("refs/heads/{b}");
+        }
+    }
+    if let Some(t) = tag {
+        let t = t.trim();
+        if !t.is_empty() {
+            return format!("refs/tags/{t}");
+        }
+    }
+    sha.trim().to_string()
 }
 
 /// Derive the SLSA level for a Nix build from the evidence actually
@@ -831,6 +891,77 @@ mod tests {
         let json = serde_json::to_string_pretty(&values).unwrap();
         assert!(json.contains("enabled"));
         assert!(json.contains("blake3:sig"));
+    }
+
+    /// A successful `git symbolic-ref --short HEAD` probe renders the
+    /// canonical `refs/heads/<name>` refspec. The trim is load-bearing —
+    /// `run_command_output` already trims, but the pure resolver is
+    /// independently tested against raw shim output that may carry a
+    /// trailing newline.
+    #[test]
+    fn test_resolve_source_ref_branch_wins() {
+        assert_eq!(
+            resolve_source_ref(Some("main"), None, "deadbeef"),
+            "refs/heads/main"
+        );
+        // Branch names with slashes are full refnames — the format must
+        // not re-split them.
+        assert_eq!(
+            resolve_source_ref(Some("feature/foo-bar"), None, "deadbeef"),
+            "refs/heads/feature/foo-bar"
+        );
+        // A whitespace-only branch probe is treated as failed; the SHA
+        // wins (no tag probe in this fixture).
+        assert_eq!(
+            resolve_source_ref(Some("  \n"), None, "deadbeef"),
+            "deadbeef"
+        );
+    }
+
+    /// When the branch probe failed (detached HEAD) but HEAD is at an
+    /// exact tag, the resolver records the tag as `refs/tags/<name>` —
+    /// the honest provenance refspec for a tag-checkout build.
+    #[test]
+    fn test_resolve_source_ref_tag_when_branch_absent() {
+        assert_eq!(
+            resolve_source_ref(None, Some("v1.0.0"), "deadbeef"),
+            "refs/tags/v1.0.0"
+        );
+        // The branch arm wins over the tag arm when both probe — the
+        // branch the operator is on is the more semantically informative
+        // refspec for the build's source.
+        assert_eq!(
+            resolve_source_ref(Some("main"), Some("v1.0.0"), "deadbeef"),
+            "refs/heads/main"
+        );
+    }
+
+    /// The load-bearing fail-before/pass-after pin: with the branch
+    /// probe failed AND no exact tag at HEAD — the detached-HEAD
+    /// no-tag state that is the default GitHub-Actions checkout — the
+    /// resolver records the bare commit SHA. Pre-fix the call site
+    /// stamped `refs/heads/refs/heads/main` (the `unwrap_or_else(|_|
+    /// "refs/heads/main")` swallow re-prefixed by `format!("refs/heads/
+    /// {}", _)`): a dishonest claim *and* a malformed refname. The
+    /// honest fallback is the SHA the build was actually produced from.
+    #[test]
+    fn test_resolve_source_ref_detached_head_falls_back_to_sha() {
+        let sha = "deadbeefcafef00d1234567890abcdef00000000";
+        assert_eq!(resolve_source_ref(None, None, sha), sha);
+        // Whitespace probes are treated as failed, and the SHA trims —
+        // a stray newline from the caller cannot leak into the refspec.
+        assert_eq!(
+            resolve_source_ref(Some("  "), Some("\n"), &format!("{sha}\n")),
+            sha
+        );
+        // The pre-fix synthesis is explicitly NOT produced by the new
+        // resolver; the malformed `refs/heads/refs/heads/main` shape is
+        // unreachable by construction.
+        assert_ne!(
+            resolve_source_ref(None, None, sha),
+            "refs/heads/refs/heads/main"
+        );
+        assert_ne!(resolve_source_ref(None, None, sha), "refs/heads/main");
     }
 
     /// A build whose closure could not be materialized — `nix path-info`
