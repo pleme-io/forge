@@ -326,19 +326,42 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
         Err(_) => Blake3Hash::digest(b"no-manifest"),
     };
 
-    // Check for cosign signature (best-effort)
-    let cosign_verified = run_command_output(
-        Path::new("."),
-        "cosign",
-        &[
-            "verify",
-            &format!("{}:{}", image_ref, tag),
-            "--output",
-            "text",
-        ],
-    )
-    .await
-    .is_ok();
+    // Probe cosign for an image-signature receipt. Three operational
+    // worlds, all conflated by the prior `is_ok()` fold: probe-absent
+    // (cosign not on PATH), verify-failed (cosign returned non-zero),
+    // verified-with-payload (cosign returned exit 0 with a structured
+    // `SimpleContainerImage` envelope). The typed primitive
+    // `cosign::CosignVerifyOutcome` preserves the four-arm distinction
+    // (Verified / Unverified / VerifyFailed / ProbeAbsent), and the
+    // call site routes through `classify_capture_query` so the
+    // spawn-vs-op discriminator survives at the type level rather than
+    // being recovered by string-parsing an anyhow envelope. The Phase
+    // 1 `cosign_verified` bool is computed by
+    // `CosignVerifyOutcome::is_verified` over the typed shape — the
+    // empty-array case (`[]`, exit 0) that the prior fold incorrectly
+    // reported `true` for now collapses to `Unverified`. The signer
+    // identity recovered from the receipt populates the
+    // `ImageAttestation::signer_identity` field, which previously
+    // hardcoded `None` because the boolean fold had nowhere to recover
+    // it from (THEORY §V.4 Phase 1: every claim a typed primitive can
+    // populate must be populated honestly, not stubbed).
+    let cosign_image_ref = format!("{}:{}", image_ref, tag);
+    let cosign_captured = Command::new("cosign")
+        .current_dir(Path::new("."))
+        .args(["verify", &cosign_image_ref, "--output", "json"])
+        .output()
+        .await;
+    let cosign_outcome =
+        match crate::retry::classify_capture_query::<crate::cosign::CosignVerifyOutcome, _, _>(
+            cosign_captured,
+            |_io_err| crate::cosign::CosignVerifyOutcome::ProbeAbsent,
+            |_captured| crate::cosign::CosignVerifyOutcome::VerifyFailed,
+        ) {
+            Ok(stdout) => crate::cosign::parse_verify_output(&stdout),
+            Err(outcome) => outcome,
+        };
+    let cosign_verified = cosign_outcome.is_verified();
+    let signer_identity = cosign_outcome.signer_identity().map(String::from);
 
     // Image SBOM and vuln scan: placeholder hashes
     let sbom_hash = Blake3Hash::digest(format!("image-sbom-{}", tag).as_bytes());
@@ -350,7 +373,7 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
         "amd64",
         manifest_hash,
         cosign_verified,
-        None,
+        signer_identity,
         vuln_scan_hash,
         0,
         0,
@@ -1444,6 +1467,92 @@ mod tests {
             Blake3Hash::digest(listing1.as_bytes()).to_hex(),
             Blake3Hash::digest(listing2.as_bytes()).to_hex(),
             "raw-byte hashing (the prior scheme) drifts with listing order"
+        );
+    }
+
+    /// **Load-bearing cosign-honesty pin (fail-before/pass-after).**
+    /// The prior `compute_image_attestation` body folded the cosign
+    /// probe through `run_command_output(...).await.is_ok()` — true
+    /// whenever the spawn succeeded AND the exit was 0, regardless of
+    /// whether cosign actually emitted a signature receipt. The empty
+    /// JSON array `[]` (what cosign returns when the upstream registry
+    /// stripped sigstore receipts, exit 0) thus caused the Phase 1
+    /// image attestation to claim `cosign_verified: true` against
+    /// zero collected evidence — a false Phase 1 record a Phase 2
+    /// signature composes over (THEORY §V.4). The typed primitive
+    /// now collapses the empty-bag case to
+    /// [`crate::cosign::CosignVerifyOutcome::Unverified`], whose
+    /// `is_verified()` returns `false`. The pre-fix `is_ok()` fold
+    /// against the same exit-0 stdout would assert this test backwards.
+    #[test]
+    fn test_cosign_empty_bag_does_not_claim_verification() {
+        // The shape `compute_image_attestation` now writes into
+        // `cosign_verified`: parse the exit-0 stdout, ask the typed
+        // outcome whether it's verified, populate the bool. The
+        // pre-fix `is_ok()` would have been `true` here because the
+        // probe spawned successfully and exited 0.
+        let outcome = crate::cosign::parse_verify_output("[]");
+        assert!(
+            !outcome.is_verified(),
+            "an empty cosign payload must not assert cosign_verified=true; \
+             the pre-fix is_ok() fold inflated this claim against zero evidence"
+        );
+        assert_eq!(outcome.signer_identity(), None);
+        assert_eq!(outcome, crate::cosign::CosignVerifyOutcome::Unverified);
+    }
+
+    /// The spawn-vs-op discriminator survives at the type level:
+    /// probe-absent (cosign not on PATH) and verify-failed (cosign
+    /// returned non-zero) collapse to distinct typed arms, where the
+    /// prior `is_ok()` fold mapped both to `false` and lost the
+    /// distinction. A downstream verifier that wants to escalate
+    /// "absent probe" differently from "explicit negative" can now
+    /// recover the distinction structurally rather than by parsing an
+    /// anyhow envelope. Both still report `is_verified() == false` so
+    /// the Phase 1 `cosign_verified` bool is honest in both cases.
+    #[test]
+    fn test_cosign_spawn_vs_op_failures_are_distinct_arms() {
+        let absent = crate::cosign::CosignVerifyOutcome::ProbeAbsent;
+        let failed = crate::cosign::CosignVerifyOutcome::VerifyFailed;
+        assert_ne!(
+            absent, failed,
+            "ProbeAbsent and VerifyFailed must be structurally distinct \
+             arms — the prior is_ok() fold mapped both to `false` and lost \
+             the discriminator the Phase 1 attestation needs"
+        );
+        assert!(!absent.is_verified());
+        assert!(!failed.is_verified());
+    }
+
+    /// The `signer_identity` field on `ImageAttestation` is now
+    /// populated from the cosign receipt rather than hardcoded
+    /// `None`. A verified probe with a keyless Fulcio Subject
+    /// surfaces the principal identity into the Phase 1 record so a
+    /// downstream verifier can cross-check WHO signed the image,
+    /// not merely that SOMETHING did. Pin the end-to-end shape:
+    /// parsed receipt → typed outcome → string the call site passes
+    /// into `ci::image_attestation`'s `signer_identity` parameter.
+    #[test]
+    fn test_cosign_signer_identity_flows_into_attestation() {
+        let stdout = r#"[
+            {
+                "critical": {
+                    "image": {"docker-manifest-digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+                },
+                "optional": {"Subject": "ci@pleme-io.example"}
+            }
+        ]"#;
+        let outcome = crate::cosign::parse_verify_output(stdout);
+        assert!(outcome.is_verified());
+        // This is exactly the expression `compute_image_attestation`
+        // now passes for `signer_identity` — the prior code passed
+        // `None` here unconditionally, losing the parsed principal.
+        let passed_to_attestation = outcome.signer_identity().map(String::from);
+        assert_eq!(
+            passed_to_attestation.as_deref(),
+            Some("ci@pleme-io.example"),
+            "the signer identity parsed from the cosign receipt must flow \
+             into ImageAttestation::signer_identity, not be dropped to None"
         );
     }
 }
