@@ -7,6 +7,7 @@ mod commands;
 mod config;
 
 // Shared utilities
+mod cosign;
 mod duration;
 mod oci_manifest;
 mod store_path;
