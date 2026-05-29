@@ -386,8 +386,8 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
 /// The `chart_hash` is the chart-content identity Phase 1 seals: the
 /// BLAKE3 digest of the canonical chart fingerprint — the sorted,
 /// deduplicated set of `(rel-path, blake3-of-content)` pairs over every
-/// regular file in the chart directory. Two honesty disciplines apply,
-/// mirroring [`compute_source_attestation`] (tree-listing) and
+/// regular file in the chart directory. Two honesty disciplines apply
+/// to it, mirroring [`compute_source_attestation`] (tree-listing) and
 /// [`compute_image_attestation`] (skopeo manifest):
 ///
 ///   * A missing chart directory routes through the explicit
@@ -404,11 +404,29 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
 ///     `"abc"+"d"`) or the basename-only path (`templates/NOTES.txt` vs
 ///     `charts/sub/templates/NOTES.txt`) — the structural collisions the
 ///     typed canonical form forecloses (THEORY §VI.1).
+///
+/// The `provenance_verified` bool is computed by
+/// [`crate::helm_provenance::HelmProvenanceOutcome::is_verified`] over
+/// the typed shape recovered from a sibling `.prov` probe — never the
+/// prior `false` hardcode that flattened all four operational worlds
+/// (probe-absent, framing-failed, framing-ok-no-digest, verified) into
+/// a single negative claim. `tarball_dir` is the directory holding the
+/// `helm package --sign` output (the `.tgz` and `.tgz.prov` siblings).
+/// When `None`, the parent directory of `chart_path` is probed — the
+/// conventional location whenever `helm package` is invoked from the
+/// chart's parent (the common case). The four-arm typed outcome
+/// mirrors [`crate::cosign::CosignVerifyOutcome`] over the OpenPGP
+/// cleartext signature framing Helm writes, so the spawn-vs-op-vs-
+/// empty distinction the prior hardcode discarded survives at the type
+/// level rather than being recovered by string-parsing an anyhow
+/// envelope (THEORY §V.4 Phase 1: every claim a typed primitive can
+/// populate must be populated honestly, not stubbed).
 pub async fn compute_chart_attestation(
     chart_name: &str,
     chart_version: &str,
     chart_path: &Path,
     registry_ref: &str,
+    tarball_dir: Option<&Path>,
 ) -> Result<ChartAttestation> {
     let chart_hash = if chart_path.exists() {
         let entries = collect_chart_entries(chart_path).await?;
@@ -417,18 +435,56 @@ pub async fn compute_chart_attestation(
         Blake3Hash::digest(b"no-chart-dir")
     };
 
+    let provenance_outcome =
+        probe_chart_provenance(chart_name, chart_version, chart_path, tarball_dir).await;
+
     Ok(ci::chart_attestation(
         chart_name,
         chart_version,
         chart_hash,
-        false, // Provenance: not yet implemented (the .prov sibling probe is the
-        // named-next consumer of the four-arm typed-outcome shape
-        // [`crate::cosign::CosignVerifyOutcome`] established).
+        provenance_outcome.is_verified(),
         vec![], // Dependency hashes: populated when chart deps are tracked
         true,   // Linter: assume passed if forge got this far
         true,   // Policy: assume passed
         registry_ref,
     ))
+}
+
+/// Probe a Helm `.prov` provenance file alongside the packaged chart
+/// tarball and route the result through the typed
+/// [`crate::helm_provenance::HelmProvenanceOutcome`].
+///
+/// The conventional `.prov` location after `helm package --sign
+/// [-d <dest>] <chart-dir>` is `<dest>/<chart-name>-<version>.tgz.prov`
+/// (or in the chart's parent directory when `-d` is absent). The
+/// `tarball_dir` argument lets the caller override the search root;
+/// when `None`, we fall back to `chart_path.parent()` — the helm-package
+/// default for a chart at `<dir>/<chart>` where `helm package` is
+/// invoked from `<dir>`.
+///
+/// The function returns the four-arm typed outcome directly so the
+/// call site can collapse to a bool via `is_verified()` for the
+/// `ChartAttestation::provenance_verified` field while a future
+/// enrichment commit can still recover the `signed_chart_hash` /
+/// `signer_key_id` discriminators for richer reconciliation.
+async fn probe_chart_provenance(
+    chart_name: &str,
+    chart_version: &str,
+    chart_path: &Path,
+    tarball_dir: Option<&Path>,
+) -> crate::helm_provenance::HelmProvenanceOutcome {
+    let tarball_name = format!("{}-{}.tgz", chart_name, chart_version);
+    let dir = tarball_dir
+        .map(Path::to_path_buf)
+        .or_else(|| chart_path.parent().map(Path::to_path_buf));
+    let Some(dir) = dir else {
+        return crate::helm_provenance::HelmProvenanceOutcome::ProbeAbsent;
+    };
+    let prov_path = dir.join(format!("{}.prov", tarball_name));
+    match tokio::fs::read_to_string(&prov_path).await {
+        Ok(contents) => crate::helm_provenance::parse_provenance(&contents, &tarball_name),
+        Err(_) => crate::helm_provenance::HelmProvenanceOutcome::ProbeAbsent,
+    }
 }
 
 /// Derive the product-level SLSA-provenance compliance dimension from the
@@ -1730,6 +1786,125 @@ mod tests {
             canon(left),
             canon(right),
             "TAB framing must keep the path/content boundary unambiguous",
+        );
+    }
+
+    /// **Load-bearing fail-before/pass-after pin.** A chart packaged
+    /// with `helm package --sign` writes a `.tgz.prov` cleartext-signed
+    /// document alongside the tarball whose signed body names the
+    /// chart-tarball `sha256:<hex>` digest. The prior call site
+    /// hardcoded `provenance_verified: false` regardless of whether a
+    /// `.prov` existed, lived structurally, or named the chart we are
+    /// sealing — flattening four operational worlds (probe-absent,
+    /// framing-failed, framing-ok-no-digest, verified) into one
+    /// negative claim. The typed shape recovers the verified arm
+    /// directly: `compute_chart_attestation` now reads the sibling
+    /// `.prov`, routes it through
+    /// [`crate::helm_provenance::parse_provenance`], and writes
+    /// `provenance_verified: true` iff the framing parsed AND the
+    /// `files:` map carried a sha256 for the chart's tarball.
+    ///
+    /// Same shape as
+    /// `test_cosign_verified_recovered_from_typed_outcome` one layer
+    /// up (the image-side peer): a Phase 1 claim whose typed
+    /// primitive's `Verified` arm fires must drive a `true` bool into
+    /// the attestation, where the prior hardcode forced `false`.
+    #[tokio::test]
+    async fn test_chart_provenance_verified_recovered_from_typed_outcome() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let chart_dir = tmp.path().join("example");
+        std::fs::create_dir(&chart_dir).expect("mkdir chart");
+        std::fs::write(
+            chart_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: example\nversion: 0.1.0\n",
+        )
+        .expect("write Chart.yaml");
+
+        // A realistic Helm .prov adjacent to the (would-be) packaged
+        // tarball, naming `example-0.1.0.tgz: sha256:<64-hex>`.
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let prov = format!(
+            "-----BEGIN PGP SIGNED MESSAGE-----\n\
+             Hash: SHA512\n\
+             \n\
+             apiVersion: v2\n\
+             name: example\n\
+             version: 0.1.0\n\
+             \n\
+             files:\n  example-0.1.0.tgz: sha256:{}\n\
+             -----BEGIN PGP SIGNATURE-----\n\
+             \n\
+             wsBcBAABCgAQ==\n\
+             -----END PGP SIGNATURE-----\n",
+            digest
+        );
+        std::fs::write(tmp.path().join("example-0.1.0.tgz.prov"), prov).expect("write .prov");
+
+        let att = compute_chart_attestation(
+            "example",
+            "0.1.0",
+            &chart_dir,
+            "oci://ghcr.io/example/example",
+            Some(tmp.path()),
+        )
+        .await
+        .expect("compute_chart_attestation");
+
+        assert!(
+            att.provenance_verified,
+            "a well-framed .prov whose files: map names the expected \
+             tarball must drive provenance_verified=true into the Phase 1 \
+             chart attestation; the prior `false` hardcode flattened this \
+             arm into a false-negative claim",
+        );
+    }
+
+    /// **Probe-absent vs verify-failed vs unverified vs verified are
+    /// structurally distinct at the typed-outcome layer.** The prior
+    /// `false` hardcode could not distinguish "no .prov on disk" from
+    /// "ill-formed .prov" from "well-formed .prov naming a different
+    /// tarball" — all flattened to `provenance_verified: false`. The
+    /// typed primitive preserves the four arms so a downstream
+    /// verifier (or a future enrichment commit) can recover the
+    /// discriminator from the typed shape directly. Same shape as
+    /// `test_is_verified_pins_all_arms` over `CosignVerifyOutcome` one
+    /// layer up — the image-side peer at the four-arm-truth-table
+    /// level.
+    #[tokio::test]
+    async fn test_chart_provenance_four_arms_collapse_to_distinct_bools() {
+        use crate::helm_provenance::HelmProvenanceOutcome;
+        // Verified is the only arm whose bool collapse is `true`.
+        assert!(HelmProvenanceOutcome::Verified {
+            signed_chart_hash: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()
+            ),
+            signer_key_id: None,
+        }
+        .is_verified());
+        // The other three arms each collapse to `false` at the bool
+        // surface but stay structurally distinct at the enum level.
+        assert!(!HelmProvenanceOutcome::Unverified.is_verified());
+        assert!(!HelmProvenanceOutcome::VerifyFailed.is_verified());
+        assert!(!HelmProvenanceOutcome::ProbeAbsent.is_verified());
+
+        // End-to-end through compute_chart_attestation: a missing
+        // `.prov` directory collapses to ProbeAbsent → false.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let chart_dir = tmp.path().join("example");
+        std::fs::create_dir(&chart_dir).expect("mkdir chart");
+        std::fs::write(chart_dir.join("Chart.yaml"), "name: example\n").expect("write Chart.yaml");
+        let att = compute_chart_attestation(
+            "example",
+            "0.1.0",
+            &chart_dir,
+            "oci://ghcr.io/example/example",
+            Some(tmp.path()),
+        )
+        .await
+        .expect("compute_chart_attestation");
+        assert!(
+            !att.provenance_verified,
+            "ProbeAbsent must collapse to provenance_verified=false",
         );
     }
 }

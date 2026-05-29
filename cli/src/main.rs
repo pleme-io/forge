@@ -10,6 +10,7 @@ mod config;
 mod chart_listing;
 mod cosign;
 mod duration;
+mod helm_provenance;
 mod oci_manifest;
 mod store_path;
 mod tree_listing;
@@ -38,7 +39,10 @@ mod ui;
 #[cfg(test)]
 mod test_support;
 
-use cli::{BootstrapCommands, Cli, Commands, GemCommands, HelmCommands, InfraCommands, LocalCommands, PangeaCommands, PangeaInfraCommands, ToolCommands, TypescriptCommands};
+use cli::{
+    BootstrapCommands, Cli, Commands, GemCommands, HelmCommands, InfraCommands, LocalCommands,
+    PangeaCommands, PangeaInfraCommands, ToolCommands, TypescriptCommands,
+};
 use commands::{
     bootstrap, build, comprehensive_release, deploy, federation, github_runner_ci,
     integration_tests, kenshi, kenshi_agent, migrations, nix_builder, pangea, pangea_infra, push,
@@ -638,7 +642,12 @@ async fn main() -> Result<()> {
             PangeaCommands::RegenerateCompiler => {
                 pangea::regenerate_compiler().await?;
             }
-            PangeaCommands::SpecGen { provider_dir, resource, force, dry_run } => {
+            PangeaCommands::SpecGen {
+                provider_dir,
+                resource,
+                force,
+                dry_run,
+            } => {
                 pangea::spec_gen(&provider_dir, resource.as_deref(), force, dry_run)?;
             }
         },
@@ -681,14 +690,8 @@ async fn main() -> Result<()> {
             with_data,
             reason,
         } => {
-            commands::migration_new::execute(
-                working_dir,
-                name,
-                classification,
-                with_data,
-                reason,
-            )
-            .await?;
+            commands::migration_new::execute(working_dir, name, classification, with_data, reason)
+                .await?;
         }
         Commands::Codegen {
             working_dir,
@@ -741,12 +744,9 @@ async fn main() -> Result<()> {
             use std::path::Path;
 
             let base_dir = Path::new(&working_dir);
-            let result = commands::rebac_validation::execute_with_options(
-                base_dir,
-                quiet,
-                check_redis,
-            )
-            .await?;
+            let result =
+                commands::rebac_validation::execute_with_options(base_dir, quiet, check_redis)
+                    .await?;
 
             if !result.all_passed() {
                 anyhow::bail!(
@@ -784,12 +784,7 @@ async fn main() -> Result<()> {
             skip_frontend,
             force,
         } => {
-            commands::e2e::prepare_e2e_images(
-                repo_root,
-                skip_backend,
-                skip_frontend,
-                force,
-            )?;
+            commands::e2e::prepare_e2e_images(repo_root, skip_backend, skip_frontend, force)?;
         }
         Commands::E2eRun {
             repo_root,
@@ -826,13 +821,7 @@ async fn main() -> Result<()> {
             report,
             report_path,
         } => {
-            commands::e2e::run_unit_tests(
-                repo_root,
-                filter,
-                skip_frontend,
-                report,
-                report_path,
-            )?;
+            commands::e2e::run_unit_tests(repo_root, filter, skip_frontend, report, report_path)?;
         }
         Commands::TestIntegration { repo_root, filter } => {
             commands::e2e::run_integration_tests(repo_root, filter)?;
@@ -889,8 +878,16 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Helm { command } => match command {
-            HelmCommands::Lint { chart_dir, lib_chart_dir, lib_chart_name } => {
-                commands::helm::lint_with_lib(&chart_dir, lib_chart_dir.as_deref(), &lib_chart_name)?;
+            HelmCommands::Lint {
+                chart_dir,
+                lib_chart_dir,
+                lib_chart_name,
+            } => {
+                commands::helm::lint_with_lib(
+                    &chart_dir,
+                    lib_chart_dir.as_deref(),
+                    &lib_chart_name,
+                )?;
             }
             HelmCommands::Package {
                 chart_dir,
@@ -910,7 +907,14 @@ async fn main() -> Result<()> {
                 commit,
                 watch,
             } => {
-                commands::helm::deploy(&service, &image_tag, &k8s_repo, &environment, commit, watch)?;
+                commands::helm::deploy(
+                    &service,
+                    &image_tag,
+                    &k8s_repo,
+                    &environment,
+                    commit,
+                    watch,
+                )?;
             }
             HelmCommands::Release {
                 chart_dir,
@@ -919,7 +923,13 @@ async fn main() -> Result<()> {
                 lib_chart_dir,
                 lib_chart_name,
             } => {
-                commands::helm::release_with_lib(&chart_dir, &registry, version.as_deref(), lib_chart_dir.as_deref(), &lib_chart_name)?;
+                commands::helm::release_with_lib(
+                    &chart_dir,
+                    &registry,
+                    version.as_deref(),
+                    lib_chart_dir.as_deref(),
+                    &lib_chart_name,
+                )?;
             }
             HelmCommands::Template {
                 chart_dir,
@@ -934,7 +944,8 @@ async fn main() -> Result<()> {
                 level,
                 no_commit,
             } => {
-                let (old, new) = commands::helm::bump(&charts_dir, &lib_chart_name, &level, !no_commit)?;
+                let (old, new) =
+                    commands::helm::bump(&charts_dir, &lib_chart_name, &level, !no_commit)?;
                 println!("{} → {}", old, new);
             }
             HelmCommands::LintAll {
@@ -950,7 +961,12 @@ async fn main() -> Result<()> {
                 lib_chart_name,
                 registry,
             } => {
-                commands::helm::release_all(&charts_dir, lib_chart_dir.as_deref(), &lib_chart_name, &registry)?;
+                commands::helm::release_all(
+                    &charts_dir,
+                    lib_chart_dir.as_deref(),
+                    &lib_chart_name,
+                    &registry,
+                )?;
             }
         },
         Commands::Tool { command } => match command {
@@ -1016,10 +1032,7 @@ async fn main() -> Result<()> {
             } => {
                 commands::local::up(&name, &flake_attr, port, compose_file.as_deref()).await?;
             }
-            LocalCommands::Down {
-                name,
-                compose_file,
-            } => {
+            LocalCommands::Down { name, compose_file } => {
                 commands::local::down(&name, compose_file.as_deref())?;
             }
         },
