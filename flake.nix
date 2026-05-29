@@ -58,6 +58,12 @@
         forgeCli = substrateLib.mkCrate2nixTool {
           toolName = "forge";
           src = ./cli;
+          # Use the legacy crate2nix-generated Cargo.nix path — this
+          # repo ships cli/Cargo.nix but not Cargo.build-spec.json.
+          # The newer lockfile-builder path (default substrate@9556488)
+          # demands the build-spec; flipping to false keeps forge
+          # building until the build-spec is generated via `gen build .`.
+          useLockfileBuilder = false;
           crateOverrides = {
             forge = oldAttrs: {
               nativeBuildInputs = (oldAttrs.nativeBuildInputs or [])
