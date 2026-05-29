@@ -7,6 +7,7 @@ mod commands;
 mod config;
 
 // Shared utilities
+mod chart_listing;
 mod cosign;
 mod duration;
 mod oci_manifest;

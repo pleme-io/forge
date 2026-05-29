@@ -382,24 +382,48 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
 }
 
 /// Compute chart attestation for a Helm chart.
+///
+/// The `chart_hash` is the chart-content identity Phase 1 seals: the
+/// BLAKE3 digest of the canonical chart fingerprint — the sorted,
+/// deduplicated set of `(rel-path, blake3-of-content)` pairs over every
+/// regular file in the chart directory. Two honesty disciplines apply,
+/// mirroring [`compute_source_attestation`] (tree-listing) and
+/// [`compute_image_attestation`] (skopeo manifest):
+///
+///   * A missing chart directory routes through the explicit
+///     `b"no-chart-dir"` sentinel — never the prior silent fallback
+///     `Blake3Hash::digest(format!("chart-{name}", ...))`, which stamped
+///     a deterministic constant-but-name-derived hash into every Phase 1
+///     chart record as the chart-content identity even when no chart had
+///     been collected on disk, false by construction (THEORY §V.4).
+///   * A successful walk is hashed over the canonical fingerprint
+///     (boundary-framed by TAB, content-addressed per file, path-aware
+///     over the full repo-relative path) rather than the prior
+///     raw-byte concatenation of `(basename, content)` chunks, which
+///     could collide on either the path/content boundary (`"ab"+"cd"` vs
+///     `"abc"+"d"`) or the basename-only path (`templates/NOTES.txt` vs
+///     `charts/sub/templates/NOTES.txt`) — the structural collisions the
+///     typed canonical form forecloses (THEORY §VI.1).
 pub async fn compute_chart_attestation(
     chart_name: &str,
     chart_version: &str,
     chart_path: &Path,
     registry_ref: &str,
 ) -> Result<ChartAttestation> {
-    // Hash the chart directory contents
     let chart_hash = if chart_path.exists() {
-        hash_directory(chart_path).await?
+        let entries = collect_chart_entries(chart_path).await?;
+        Blake3Hash::digest(crate::chart_listing::canonical_chart_fingerprint(entries).as_bytes())
     } else {
-        Blake3Hash::digest(format!("chart-{}", chart_name).as_bytes())
+        Blake3Hash::digest(b"no-chart-dir")
     };
 
     Ok(ci::chart_attestation(
         chart_name,
         chart_version,
         chart_hash,
-        false,  // Provenance: not yet implemented
+        false, // Provenance: not yet implemented (the .prov sibling probe is the
+        // named-next consumer of the four-arm typed-outcome shape
+        // [`crate::cosign::CosignVerifyOutcome`] established).
         vec![], // Dependency hashes: populated when chart deps are tracked
         true,   // Linter: assume passed if forge got this far
         true,   // Policy: assume passed
@@ -647,29 +671,51 @@ async fn analyze_flake_lock(path: &Path) -> (usize, bool) {
     (summary.input_count, summary.all_inputs_pinned)
 }
 
-/// Hash all files in a directory using blake3.
-async fn hash_directory(dir: &Path) -> Result<Blake3Hash> {
-    let mut hasher_data = Vec::new();
-
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .with_context(|| format!("Failed to read directory: {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
-
-    for entry in entries {
-        let path = entry.path();
-        if path.is_file() {
-            let content = tokio::fs::read(&path).await?;
-            hasher_data.extend_from_slice(path.file_name().unwrap().as_encoded_bytes());
-            hasher_data.extend_from_slice(&content);
-        } else if path.is_dir() {
-            let sub_hash = Box::pin(hash_directory(&path)).await?;
-            hasher_data.extend_from_slice(&sub_hash.0);
-        }
+/// Walk a chart directory recursively and collect every regular file's
+/// [`crate::chart_listing::ChartEntry`] — the typed input to
+/// [`crate::chart_listing::canonical_chart_fingerprint`].
+///
+/// The walk is sync (`std::fs::read_dir`) at the directory traversal layer
+/// and async (`tokio::fs::read`) at the per-file content read, so the
+/// recursion fits an ordinary `fn` (no `Box::pin` ladder). Symlinks and
+/// non-file / non-directory entries are skipped — chart content on disk
+/// is a directory of regular files; anything else is not chart
+/// content. Paths are normalised to forward slashes for canonical-form
+/// portability across the (rare in practice but possible) case of a
+/// Windows host building a chart.
+async fn collect_chart_entries(root: &Path) -> Result<Vec<crate::chart_listing::ChartEntry>> {
+    let mut paths = Vec::new();
+    collect_chart_file_paths(root, &mut paths)?;
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let content = tokio::fs::read(&path)
+            .await
+            .with_context(|| format!("Failed to read chart file: {}", path.display()))?;
+        out.push(crate::chart_listing::ChartEntry::new(rel, &content));
     }
+    Ok(out)
+}
 
-    Ok(Blake3Hash::digest(&hasher_data))
+fn collect_chart_file_paths(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("Failed to read chart subdir: {}", dir.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        if file_type.is_file() {
+            out.push(path);
+        } else if file_type.is_dir() {
+            collect_chart_file_paths(&path, out)?;
+        }
+        // Symlinks, devices, sockets — skipped. Not chart content.
+    }
+    Ok(())
 }
 
 /// Run a command in `cwd` and return its trimmed stdout, or a typed
@@ -1553,6 +1599,137 @@ mod tests {
             Some("ci@pleme-io.example"),
             "the signer identity parsed from the cosign receipt must flow \
              into ImageAttestation::signer_identity, not be dropped to None"
+        );
+    }
+
+    /// Load-bearing chart-attestation honesty pin: the missing
+    /// chart-directory case must NOT collapse to the silent
+    /// `Blake3Hash::digest(format!("chart-{name}", ...))` fallback the
+    /// prior body produced. The missing-dir sentinel (`b"no-chart-dir"`)
+    /// must hash to a value distinct from every name-derived
+    /// chart-placeholder hash AND from every sibling probe-failed
+    /// sentinel at the source / build / image layers, so a Phase 1
+    /// chart record carrying the sentinel hash cannot be confused with
+    /// a legitimate chart-content claim or with a different probe's
+    /// failure mode. Fail-before: the prior body emitted
+    /// `Blake3Hash::digest(b"chart-mysvc")` for chart `mysvc` even when
+    /// no chart had ever been collected on disk, conflating "no
+    /// evidence collected" with "chart `mysvc` has this content."
+    /// Same shape as `test_tree_hash_probe_failure_distinguishable_
+    /// from_empty_listing` and
+    /// `test_manifest_hash_probe_failure_distinguishable_from_empty_
+    /// manifest` two layers up.
+    #[test]
+    fn test_chart_hash_probe_failure_distinguishable_from_empty_chart() {
+        let missing_dir = Blake3Hash::digest(b"no-chart-dir");
+        let empty_chart_hash = Blake3Hash::digest(
+            crate::chart_listing::canonical_chart_fingerprint(std::iter::empty()).as_bytes(),
+        );
+        assert_ne!(
+            missing_dir.to_hex(),
+            empty_chart_hash.to_hex(),
+            "the missing-dir sentinel and a successful-but-empty chart \
+             walk must hash to distinct values; conflating them was the \
+             prior honesty bug",
+        );
+        // The pre-fix path emitted `Blake3Hash::digest(format!(
+        // "chart-{chart_name}", ...))` for the missing-dir case,
+        // shadowing the no-evidence record with a deterministic
+        // name-derived hash. The sentinel must be strictly distinct
+        // from every such name-keyed placeholder so a Phase 1 chart
+        // record carrying the sentinel hash cannot be mistaken for a
+        // legitimate chart-content claim under any plausible chart
+        // name.
+        for name in ["mysvc", "foo", "bar-baz", ""] {
+            assert_ne!(
+                missing_dir.to_hex(),
+                Blake3Hash::digest(format!("chart-{name}").as_bytes()).to_hex(),
+                "the sentinel must differ from the prior name-derived \
+                 fallback for any chart name (here: {name:?})",
+            );
+        }
+        // And distinct from the sibling sentinels at the source / build /
+        // image layers, so an attestation record carrying ONE of them
+        // cannot be confused with another. The one-sentinel-per-probe
+        // discipline relies on these being structurally distinct strings.
+        for sibling in [
+            b"no-tree-listing".as_slice(),
+            b"no-flake-lock".as_slice(),
+            b"no-manifest".as_slice(),
+            b"".as_slice(),
+        ] {
+            assert_ne!(
+                missing_dir.to_hex(),
+                Blake3Hash::digest(sibling).to_hex(),
+                "the chart-dir sentinel must differ from sibling \
+                 probe-failure sentinels and from blake3-of-empty",
+            );
+        }
+    }
+
+    /// The chart hash must be canonical over the chart's per-file
+    /// content-addressed identities: two chart layouts whose per-file
+    /// `(path, content)` pairs coincide but whose filesystem ordering /
+    /// dedup-shape differs must hash identically. `compute_chart_
+    /// attestation` now digests the canonical fingerprint
+    /// ([`crate::chart_listing::canonical_chart_fingerprint`]) rather
+    /// than the raw-byte `(basename, content)` concatenation, so any
+    /// future drift in filesystem iteration order cannot drift the
+    /// chart claim for a byte-identical chart, and basename-collision
+    /// failure modes the prior `hash_directory` carried cannot recur.
+    /// Fail-before: the prior raw-byte scheme conflated filesystem
+    /// ordering AND lost the path-vs-basename distinction at the
+    /// canonical primitive, so two structurally distinct chart layouts
+    /// could collapse to the same chart-content hash. Same shape as
+    /// `test_manifest_hash_stable_across_key_order_and_metadata` and
+    /// `test_tree_hash_stable_across_listing_order` two layers up.
+    #[test]
+    fn test_chart_hash_stable_and_collision_resistant() {
+        use crate::chart_listing::{canonical_chart_fingerprint, ChartEntry};
+        let canon = |entries: Vec<ChartEntry>| {
+            Blake3Hash::digest(canonical_chart_fingerprint(entries).as_bytes()).to_hex()
+        };
+        let e = |p: &str, c: &[u8]| ChartEntry::new(p.to_string(), c);
+
+        // Order-independence: two iteration orders over the same
+        // `(path, content)` set hash identically — the load-bearing
+        // canonical-form property.
+        let forward = vec![
+            e("Chart.yaml", b"name: foo\n"),
+            e("templates/svc.yaml", b"kind: Service\n"),
+            e("values.yaml", b"replicas: 3\n"),
+        ];
+        let reversed: Vec<ChartEntry> = forward.iter().rev().cloned().collect();
+        assert_eq!(
+            canon(forward),
+            canon(reversed),
+            "canonical chart hash must be order-independent",
+        );
+
+        // Basename-collision resistance: a `NOTES.txt` in the parent
+        // chart's `templates/` and a `NOTES.txt` in a subchart's
+        // `templates/` are different chart content; the prior
+        // `hash_directory` hashed only `path.file_name()` and could
+        // collapse them.
+        let parent_only = vec![e("templates/NOTES.txt", b"hello\n")];
+        let subchart_only = vec![e("charts/sub/templates/NOTES.txt", b"hello\n")];
+        assert_ne!(
+            canon(parent_only),
+            canon(subchart_only),
+            "basename-only paths must produce distinct chart hashes — \
+             the basename-collision failure the canonical form forecloses",
+        );
+
+        // Path/content boundary safety: ("ab","cd") must not collide
+        // with ("abc","d") — the prior raw-byte
+        // `extend_from_slice(filename) + extend_from_slice(content)`
+        // shape reduced both to b"abcd", a structural collision.
+        let left = vec![e("ab", b"cd")];
+        let right = vec![e("abc", b"d")];
+        assert_ne!(
+            canon(left),
+            canon(right),
+            "TAB framing must keep the path/content boundary unambiguous",
         );
     }
 }
