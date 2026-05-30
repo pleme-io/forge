@@ -267,11 +267,27 @@ pub async fn compute_build_attestation(
         crate::store_path::canonical_closure_fingerprint(&closure_info).as_bytes(),
     );
 
-    // SBOM: compute hash of nix store closure (placeholder until syft integration)
-    let sbom_hash = Blake3Hash::digest(format!("sbom-{}", service).as_bytes());
-
-    // Vulnerability scan: placeholder hash
-    let vuln_scan_hash = Blake3Hash::digest(format!("vuln-scan-{}", service).as_bytes());
+    // SBOM and vulnerability-scan claims for the build artifact route
+    // through the typed `crate::security_scan` probe outcomes. No syft /
+    // grype probe layer is integrated yet, so both currently take the
+    // `Absent` arm — the attestation field collapses to the explicit
+    // `Blake3Hash::digest(b"no-sbom")` / `Blake3Hash::digest(
+    // b"no-vuln-scan")` sentinels, and the CVE counts collapse to
+    // `(0, 0)` honestly ("no evidence collected", never "real scan
+    // found zero"). The prior `Blake3Hash::digest(format!("sbom-{}",
+    // service))` / `format!("vuln-scan-{}", service)` per-service
+    // constants stamped a deterministic-but-name-derived hash into
+    // every Phase 1 build record as SBOM / vuln-scan evidence even
+    // when no probe layer existed, false by construction (THEORY §V.2:
+    // attestation is cryptographic evidence, not a wish). When a syft
+    // / grype probe is wired in, only the typed-outcome constructor
+    // changes (Absent → Collected { hash, ... }); the call-site shape
+    // and the triple-from-one-source discipline survive — mirrors the
+    // cosign / helm-provenance / oci-architecture typed-outcome arcs.
+    let sbom_outcome = crate::security_scan::SbomProbeOutcome::Absent;
+    let vuln_scan_outcome = crate::security_scan::VulnScanProbeOutcome::Absent;
+    let sbom_hash = sbom_outcome.to_attestation_hash();
+    let (vuln_scan_hash, cve_count, critical_high_cves) = vuln_scan_outcome.to_attestation_fields();
 
     // Reproducibility is not independently re-verified yet; until it is,
     // the build cannot honestly claim the reproducible-grade SLSA level.
@@ -288,8 +304,8 @@ pub async fn compute_build_attestation(
         reproducible,
         sbom_hash,
         vuln_scan_hash,
-        0, // CVE count: populated when scan tooling integrated
-        0, // Critical/high CVEs
+        cve_count,
+        critical_high_cves,
         "nix-build@forge",
     ))
 }
@@ -380,9 +396,26 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     let cosign_verified = cosign_outcome.is_verified();
     let signer_identity = cosign_outcome.signer_identity().map(String::from);
 
-    // Image SBOM and vuln scan: placeholder hashes
-    let sbom_hash = Blake3Hash::digest(format!("image-sbom-{}", tag).as_bytes());
-    let vuln_scan_hash = Blake3Hash::digest(format!("image-vuln-{}", tag).as_bytes());
+    // Image SBOM and vuln-scan claims route through the same typed
+    // `crate::security_scan` probe outcomes as `compute_build_
+    // attestation` — one typed primitive, two artifact kinds
+    // (build closure / container image), one honest sentinel per kind
+    // when no probe layer is integrated. The prior
+    // `Blake3Hash::digest(format!("image-sbom-{}", tag))` /
+    // `format!("image-vuln-{}", tag)` per-tag constants are the
+    // image-side peer of the `format!("sbom-{}", service)` /
+    // `format!("vuln-scan-{}", service)` constants commit-this-commit
+    // closes at the build-attestation surface; both inflate Phase 1
+    // claims with name-keyed deterministic hashes that have no
+    // relationship to a probe response (THEORY §V.2). Two tagged
+    // images pointing at the same manifest now yield the same
+    // `sbom_hash` (because no probe ran for either) instead of two
+    // distinct hashes incidentally derived from the tag string.
+    let image_sbom_outcome = crate::security_scan::SbomProbeOutcome::Absent;
+    let image_vuln_scan_outcome = crate::security_scan::VulnScanProbeOutcome::Absent;
+    let sbom_hash = image_sbom_outcome.to_attestation_hash();
+    let (vuln_scan_hash, vuln_count, critical_high_vulns) =
+        image_vuln_scan_outcome.to_attestation_fields();
 
     Ok(ci::image_attestation(
         image_ref,
@@ -392,8 +425,8 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
         cosign_verified,
         signer_identity,
         vuln_scan_hash,
-        0,
-        0,
+        vuln_count,
+        critical_high_vulns,
         sbom_hash,
     ))
 }
@@ -2026,5 +2059,117 @@ mod tests {
             "the skopeo-probe-failed arm must record \"unknown\", not a \
              hardcoded architecture the probe never substantiated"
         );
+    }
+
+    /// Load-bearing SBOM / vuln-scan honesty pin: the prior call sites
+    /// in `compute_build_attestation` and `compute_image_attestation`
+    /// stamped four name-keyed deterministic constants into every
+    /// Phase 1 record as the SBOM / vuln-scan identity:
+    /// `Blake3Hash::digest(format!("sbom-{service}", ...))`,
+    /// `format!("vuln-scan-{service}", ...)`,
+    /// `format!("image-sbom-{tag}", ...)`,
+    /// `format!("image-vuln-{tag}", ...)`. No syft / grype probe layer
+    /// was integrated, so each was the BLAKE3 of a name template — a
+    /// pure function of the artifact's name, with zero relationship
+    /// to a real SBOM / scan document. Worse, the paired `(0, 0)` CVE
+    /// counts asserted "real scan found zero CVEs" when in fact no
+    /// scan was run. The typed primitives
+    /// [`crate::security_scan::SbomProbeOutcome::Absent`] and
+    /// [`crate::security_scan::VulnScanProbeOutcome::Absent`] are the
+    /// honest record: a single per-kind sentinel hash
+    /// (`b"no-sbom"` / `b"no-vuln-scan"`), invariant across artifact
+    /// name, paired with zero counts that honestly mean "no evidence
+    /// collected, never to be confused with a real scan that found
+    /// zero". Same shape as
+    /// `test_chart_hash_probe_failure_distinguishable_from_empty_chart`
+    /// one layer over.
+    ///
+    /// Fail-before: two services / tags `alpha` and `beta` produced
+    /// DIFFERENT `sbom_hash` and `vuln_scan_hash` values (the name was
+    /// the only input). After the fix: both yield the same sentinel
+    /// (because the same fact — "no probe ran" — holds for both), and
+    /// the sentinel is structurally distinct from every pre-fix name-
+    /// derived constant under any plausible service / tag.
+    #[test]
+    fn test_sbom_and_vuln_scan_route_through_typed_probe_outcome() {
+        use crate::security_scan::{SbomProbeOutcome, VulnScanProbeOutcome};
+
+        // These are the exact expressions `compute_build_attestation`
+        // and `compute_image_attestation` now pass for the SBOM /
+        // vuln-scan claims. Pinning them at the call-site expression
+        // level (mirrors `test_cosign_signer_identity_flows_into_
+        // attestation` and `test_image_architecture_recovered_from_
+        // typed_outcome` one layer over) means a future refactor that
+        // dropped the typed-primitive route would fail this test
+        // before any Phase 1 record was published under the regression.
+        let sbom_now = SbomProbeOutcome::Absent.to_attestation_hash();
+        let (vuln_now, cve_now, crit_now) = VulnScanProbeOutcome::Absent.to_attestation_fields();
+
+        // The honest sentinels.
+        assert_eq!(sbom_now, Blake3Hash::digest(b"no-sbom"));
+        assert_eq!(vuln_now, Blake3Hash::digest(b"no-vuln-scan"));
+        // Counts default to zero because no scan was run, not because
+        // a scan found zero (the latter would carry a real scan-
+        // document BLAKE3 in the hash slot — never the b"no-vuln-scan"
+        // sentinel paired with zero counts).
+        assert_eq!((cve_now, crit_now), (0, 0));
+
+        // The post-fix sbom_hash is invariant across artifact name.
+        // The pre-fix `format!("sbom-{}", service)` /
+        // `format!("image-sbom-{}", tag)` constants drifted per
+        // service / tag; the typed sentinel does not, because the
+        // dishonesty being closed is "no probe layer was integrated",
+        // which is the same fact regardless of which service or tag
+        // is being attested.
+        for name in ["alpha", "beta", "service-with-dashes", ""] {
+            for pre_fix_template in [
+                format!("sbom-{name}"),
+                format!("vuln-scan-{name}"),
+                format!("image-sbom-{name}"),
+                format!("image-vuln-{name}"),
+            ] {
+                assert_ne!(
+                    sbom_now.to_hex(),
+                    Blake3Hash::digest(pre_fix_template.as_bytes()).to_hex(),
+                    "the post-fix sbom_hash must differ from every \
+                     pre-fix name-derived placeholder (here: {pre_fix_template:?}); \
+                     conflating them was the prior honesty bug",
+                );
+                assert_ne!(
+                    vuln_now.to_hex(),
+                    Blake3Hash::digest(pre_fix_template.as_bytes()).to_hex(),
+                    "the post-fix vuln_scan_hash must differ from every \
+                     pre-fix name-derived placeholder (here: {pre_fix_template:?})",
+                );
+            }
+        }
+
+        // And distinct from each other and from sibling probe-failure
+        // sentinels at the source / build / image / chart layers. The
+        // one-sentinel-per-probe discipline relies on these being
+        // structurally distinct byte strings; a verifier reading any
+        // ONE sentinel hash must be able to recover the kind-of-claim
+        // from the value alone, without re-resolving the artifact.
+        assert_ne!(sbom_now, vuln_now);
+        for sibling in [
+            b"no-tree-listing".as_slice(),
+            b"no-flake-lock".as_slice(),
+            b"no-manifest".as_slice(),
+            b"no-chart-dir".as_slice(),
+            b"".as_slice(),
+        ] {
+            assert_ne!(
+                sbom_now.to_hex(),
+                Blake3Hash::digest(sibling).to_hex(),
+                "the b\"no-sbom\" sentinel must differ from sibling \
+                 probe-failure sentinels and from blake3-of-empty",
+            );
+            assert_ne!(
+                vuln_now.to_hex(),
+                Blake3Hash::digest(sibling).to_hex(),
+                "the b\"no-vuln-scan\" sentinel must differ from sibling \
+                 probe-failure sentinels and from blake3-of-empty",
+            );
+        }
     }
 }

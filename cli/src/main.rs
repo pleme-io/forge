@@ -13,6 +13,8 @@ mod duration;
 mod helm_provenance;
 mod oci_architecture;
 mod oci_manifest;
+#[cfg(feature = "attestation")]
+mod security_scan;
 mod store_path;
 mod tree_listing;
 mod version;
