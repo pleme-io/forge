@@ -11,6 +11,7 @@ mod chart_listing;
 mod cosign;
 mod duration;
 mod helm_provenance;
+mod oci_architecture;
 mod oci_manifest;
 mod store_path;
 mod tree_listing;

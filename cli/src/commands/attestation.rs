@@ -312,18 +312,35 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     //     registry-side JSON formatting, key ordering, mutable
     //     `annotations`, or the manifest-format negotiation skopeo may
     //     have driven via Accept headers (THEORY §VI.1).
+    // The same `skopeo inspect --raw` JSON drives two typed primitives:
+    // `oci_manifest::canonical_manifest_fingerprint` → manifest_hash, and
+    // `oci_architecture::parse_manifest_architectures` → architecture.
+    // Both must collapse to a probe-failed sentinel on the Err arm so the
+    // attestation does not silently inflate either claim. The pre-fix
+    // `architecture: "amd64"` hardcode is the dishonesty this branch
+    // closes; see the module docs on `crate::oci_architecture` for the
+    // five operational worlds it preserves (Single / Multi / EmbeddedInConfig
+    // / Absent, plus the v1 explicit case).
     let full_ref = format!("docker://{}:{}", image_ref, tag);
-    let manifest_hash = match run_command_output(
+    let (manifest_hash, architecture) = match run_command_output(
         Path::new("."),
         "skopeo",
         &["inspect", "--raw", &full_ref],
     )
     .await
     {
-        Ok(json) => Blake3Hash::digest(
-            crate::oci_manifest::canonical_manifest_fingerprint(&json).as_bytes(),
+        Ok(json) => {
+            let hash = Blake3Hash::digest(
+                crate::oci_manifest::canonical_manifest_fingerprint(&json).as_bytes(),
+            );
+            let arch =
+                crate::oci_architecture::parse_manifest_architectures(&json).to_attestation_arch();
+            (hash, arch)
+        }
+        Err(_) => (
+            Blake3Hash::digest(b"no-manifest"),
+            crate::oci_architecture::OciArchitectureOutcome::Absent.to_attestation_arch(),
         ),
-        Err(_) => Blake3Hash::digest(b"no-manifest"),
     };
 
     // Probe cosign for an image-signature receipt. Three operational
@@ -370,7 +387,7 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     Ok(ci::image_attestation(
         image_ref,
         tag,
-        "amd64",
+        &architecture,
         manifest_hash,
         cosign_verified,
         signer_identity,
@@ -1905,6 +1922,109 @@ mod tests {
         assert!(
             !att.provenance_verified,
             "ProbeAbsent must collapse to provenance_verified=false",
+        );
+    }
+
+    /// Load-bearing image-attestation honesty pin: the prior
+    /// `architecture: "amd64"` literal at the `ci::image_attestation` call
+    /// site flattened five operational worlds (single-arch v1, index-
+    /// single, index-multi, image-manifest-embedded-in-config, probe-
+    /// absent) into one false claim. The typed primitive
+    /// `OciArchitectureOutcome` recovers the honest architecture from the
+    /// same `skopeo inspect --raw` JSON the call site already fetches for
+    /// `manifest_hash`, and the resulting attestation string is the value
+    /// that flows into `ImageAttestation::architecture`. Pin the
+    /// fail-before / pass-after end-to-end: an arm64-only index manifest
+    /// produces `"arm64"` (the prior hardcode produced `"amd64"`); the
+    /// four other arms produce their respective sentinels. Same shape as
+    /// `test_chart_provenance_verified_recovered_from_typed_outcome` and
+    /// `test_cosign_signer_identity_flows_into_attestation` one layer
+    /// down — each pins that the typed primitive's output reaches the
+    /// attestation field rather than being dropped to a hardcode.
+    #[test]
+    fn test_image_architecture_recovered_from_typed_outcome() {
+        use crate::oci_architecture::{parse_manifest_architectures, OciArchitectureOutcome};
+        const D1: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        const D2: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+        // Fail-before pin: an arm64-only index manifest. The pre-fix
+        // body wrote `"amd64"` into `ImageAttestation::architecture`
+        // regardless of what skopeo returned. After the fix the call
+        // site passes `parse_manifest_architectures(&json).
+        // to_attestation_arch()` — the same expression this test pins.
+        let arm64_index = format!(
+            r#"{{
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "manifests": [
+                    {{"digest": "sha256:{D1}",
+                      "platform": {{"architecture": "arm64", "os": "linux"}}}}
+                ]
+            }}"#
+        );
+        let attestation_arch = parse_manifest_architectures(&arm64_index).to_attestation_arch();
+        assert_eq!(
+            attestation_arch, "arm64",
+            "an arm64-only index manifest must yield architecture=\"arm64\"; \
+             the pre-fix hardcode flattened this to \"amd64\""
+        );
+
+        // A multi-arch index produces the `multi:`-prefixed composite
+        // claim, unmistakable for any literal architecture string the
+        // pre-fix hardcode would have produced.
+        let multi_index = format!(
+            r#"{{
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "manifests": [
+                    {{"digest": "sha256:{D1}",
+                      "platform": {{"architecture": "arm64", "os": "linux"}}}},
+                    {{"digest": "sha256:{D2}",
+                      "platform": {{"architecture": "amd64", "os": "linux"}}}}
+                ]
+            }}"#
+        );
+        assert_eq!(
+            parse_manifest_architectures(&multi_index).to_attestation_arch(),
+            "multi:amd64,arm64",
+            "a multi-arch index must compose into a multi: prefixed claim, \
+             not silently collapse to one architecture"
+        );
+
+        // An OCI image manifest references a config blob by digest; the
+        // architecture lives inside that config blob, which the `--raw`
+        // probe did not fetch. Honest record: the sentinel string, not
+        // a guess.
+        let image_manifest = format!(
+            r#"{{
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {{
+                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": "sha256:{D1}",
+                    "size": 1234
+                }},
+                "layers": [{{"digest": "sha256:{D2}", "size": 5000}}]
+            }}"#
+        );
+        assert_eq!(
+            parse_manifest_architectures(&image_manifest).to_attestation_arch(),
+            "embedded-in-config",
+            "an image manifest must record the embedded-in-config sentinel, \
+             not synthesise an architecture the `--raw` probe never fetched"
+        );
+
+        // The probe-failed arm (the `Err(_)` branch of
+        // `run_command_output` for skopeo) produces the `Absent`
+        // outcome, which collapses to the `"unknown"` sentinel — the
+        // value the call site now passes for `ImageAttestation::
+        // architecture` on a failed skopeo probe instead of the prior
+        // unconditional `"amd64"`.
+        assert_eq!(
+            OciArchitectureOutcome::Absent.to_attestation_arch(),
+            "unknown",
+            "the skopeo-probe-failed arm must record \"unknown\", not a \
+             hardcoded architecture the probe never substantiated"
         );
     }
 }
