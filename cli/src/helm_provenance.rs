@@ -187,9 +187,11 @@ pub fn parse_provenance(contents: &str, expected_tarball_name: &str) -> HelmProv
     let body_armor = &after_header[..sig_pos];
     let after_sig = &after_header[sig_pos + SIG_BEGIN.len()..];
 
-    if !after_sig.contains(SIG_END) {
+    let Some(sig_end_rel) = after_sig.find(SIG_END) else {
         return HelmProvenanceOutcome::VerifyFailed;
-    }
+    };
+    let signature_armor =
+        &after_header[sig_pos..sig_pos + SIG_BEGIN.len() + sig_end_rel + SIG_END.len()];
 
     let signed_body = strip_armor_headers(body_armor);
     let unescaped = dash_unescape(&signed_body);
@@ -197,7 +199,9 @@ pub fn parse_provenance(contents: &str, expected_tarball_name: &str) -> HelmProv
     match find_tarball_sha256(&unescaped, expected_tarball_name) {
         Some(hex) => HelmProvenanceOutcome::Verified {
             signed_chart_hash: Some(hex),
-            signer_key_id: None,
+            signer_key_id: crate::openpgp_signature::parse_signature_armor(signature_armor)
+                .key_id_hex()
+                .map(String::from),
         },
         None => HelmProvenanceOutcome::Unverified,
     }
@@ -369,10 +373,16 @@ mod tests {
             panic!("expected Verified");
         };
         assert_eq!(signed_chart_hash.as_deref(), Some(CHART_DIGEST));
-        assert_eq!(
-            signer_key_id, None,
-            "signer_key_id is reserved for a future OpenPGP packet parser"
-        );
+        // The synthetic test's signature armor is junk base64 (the
+        // `realistic_prov` helper writes placeholder text, not a real
+        // signature packet). The OpenPGP probe over that armor
+        // collapses to [`crate::openpgp_signature::
+        // SignaturePacketOutcome::Malformed`] → `key_id_hex() = None`,
+        // so the recovered `signer_key_id` stays `None` here. The
+        // `test_recovers_signer_key_id_from_well_framed_prov` test one
+        // step over pins the positive case with a synthetic v4 sig
+        // packet whose Issuer subpacket carries a known key ID.
+        assert_eq!(signer_key_id, None);
     }
 
     /// **Load-bearing fail-before/pass-after pin.** A `.prov` that
@@ -389,6 +399,59 @@ mod tests {
         assert_eq!(out, HelmProvenanceOutcome::Unverified);
         assert!(!out.is_verified(), "wrong tarball must not claim verified");
         assert_eq!(out.signed_chart_hash(), None);
+    }
+
+    /// **Load-bearing fail-before / pass-after pin** at the bottom of
+    /// the chart-attestation arc: a `.prov` whose binary signature
+    /// armor IS a well-formed v4 OpenPGP signature packet with an
+    /// Issuer subpacket yields a `Verified` arm whose `signer_key_id`
+    /// carries the 16-char lowercase-hex key ID. The prior commit
+    /// (b8a1d8a) wired the field through but always populated `None`
+    /// because no parser existed; this commit substantiates it by
+    /// routing the signature armor through
+    /// [`crate::openpgp_signature::parse_signature_armor`].
+    #[test]
+    fn test_recovers_signer_key_id_from_well_framed_prov() {
+        use base64::Engine as _;
+        let key_id: [u8; 8] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
+        // Build a minimal v4 sig packet body with Issuer in unhashed
+        // area — same shape `openpgp_signature::tests::
+        // build_v4_sig_armor_issuer_unhashed` builds.
+        let mut sig_body = vec![4u8, 0, 1, 8, 0, 0, 0, 10, 9, 16];
+        sig_body.extend_from_slice(&key_id);
+        sig_body.extend_from_slice(&[0, 0, 0, 1, 0]);
+        let mut packet = vec![0xC2u8, sig_body.len() as u8];
+        packet.extend_from_slice(&sig_body);
+        let armor_b64 = base64::engine::general_purpose::STANDARD.encode(&packet);
+
+        let prov = format!(
+            "-----BEGIN PGP SIGNED MESSAGE-----\n\
+             Hash: SHA512\n\
+             \n\
+             apiVersion: v2\n\
+             name: example\n\
+             version: 0.1.0\n\
+             \n\
+             ...\n\
+             files:\n  \
+             example-0.1.0.tgz: sha256:{}\n\
+             -----BEGIN PGP SIGNATURE-----\n\
+             Version: GnuPG v2\n\
+             \n\
+             {}\n\
+             =AAAA\n\
+             -----END PGP SIGNATURE-----\n",
+            CHART_DIGEST, armor_b64
+        );
+        let HelmProvenanceOutcome::Verified {
+            signed_chart_hash,
+            signer_key_id,
+        } = parse_provenance(&prov, "example-0.1.0.tgz")
+        else {
+            panic!("expected Verified");
+        };
+        assert_eq!(signed_chart_hash.as_deref(), Some(CHART_DIGEST));
+        assert_eq!(signer_key_id.as_deref(), Some("deadbeefcafebabe"));
     }
 
     /// Missing `-----BEGIN PGP SIGNED MESSAGE-----` framing collapses

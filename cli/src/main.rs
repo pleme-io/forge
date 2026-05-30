@@ -13,6 +13,7 @@ mod duration;
 mod helm_provenance;
 mod oci_architecture;
 mod oci_manifest;
+mod openpgp_signature;
 #[cfg(feature = "attestation")]
 mod security_scan;
 mod store_path;
