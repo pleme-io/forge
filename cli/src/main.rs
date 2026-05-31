@@ -11,6 +11,8 @@ mod chart_listing;
 mod cosign;
 mod duration;
 #[cfg(feature = "attestation")]
+mod git_signature;
+#[cfg(feature = "attestation")]
 mod helm_lint;
 mod helm_provenance;
 #[cfg(feature = "attestation")]

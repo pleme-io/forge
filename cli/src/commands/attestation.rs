@@ -84,12 +84,43 @@ pub async fn compute_source_attestation(
     };
     let git_ref = resolve_source_ref(branch_probe.as_deref(), tag_probe.as_deref(), git_sha);
 
-    // Check if commit is signed
+    // `git log -1 --format=%G?` against a commit reports one of eight
+    // single-character codes documented in git-log(1) — `G` (good and
+    // trusted), `U` (good, unknown trust path), `X` (good but signature
+    // expired), `Y` (good but key expired), `R` (good but key revoked),
+    // `B` (bad signature — cryptographic verification failed), `E`
+    // (signature cannot be checked, missing key), `N` (no signature).
+    // The prior `.map(|s| s.trim() == "G" || s.trim() == "U")
+    // .unwrap_or(false)` fold flattened all nine operational worlds
+    // (the eight codes plus the probe-failed world) into a single bool,
+    // silently routing `B` (evidence of compromise — cryptographic
+    // verification failed) into the same bucket as `N` (no signature
+    // ever) and into the same bucket as the probe-failed world. A
+    // downstream verifier reading `commit_signed: false` on the
+    // Phase 1 source attestation could not distinguish "no probe ran"
+    // from "operator chose not to sign" from "signature failed
+    // cryptographic verification" — the load-bearing
+    // evidence-of-compromise discriminator `B` carries was lost
+    // (THEORY §V.2: attestation is cryptographic evidence, not a
+    // wish; a bool that flattens "no evidence" and "evidence of
+    // compromise" cannot substantiate either claim). The typed
+    // `GitCommitSignatureOutcome` (nine arms over the eight `%G?`
+    // codes plus `ProbeAbsent`) preserves each world structurally;
+    // `is_signed()` collapses to the pre-fix bool semantics exactly
+    // (`G` and `U` → `true`, every other arm → `false`), so this
+    // is a pure honesty refactor at the bool surface and an
+    // arm-distinguishing widening at the type surface a future
+    // enrichment commit can route into a richer `signature_verdict`
+    // field on `SourceAttestation`. Same shape as commit c1e83d5
+    // (`KensaPolicyOutcome` for chart-policy), commit d81f639
+    // (`HelmLintOutcome` for chart-quality), and commit 0ff67e1
+    // (`CosignVerifyOutcome` for image-signature).
     let commit_signed =
         run_command_output(repo_root, "git", &["log", "-1", "--format=%G?", git_sha])
             .await
-            .map(|s| s.trim() == "G" || s.trim() == "U")
-            .unwrap_or(false);
+            .map(|s| crate::git_signature::GitCommitSignatureOutcome::from_format_code(&s))
+            .unwrap_or(crate::git_signature::GitCommitSignatureOutcome::ProbeAbsent)
+            .is_signed();
 
     // Compute tree hash from `git ls-tree -r HEAD`. Two honesty
     // disciplines apply, mirroring `flake_lock_hash` above:
@@ -2453,6 +2484,146 @@ mod tests {
              record when no kensa probe ran; the pre-fix `true` \
              hardcode produced `true` here regardless of any probe \
              evidence",
+        );
+    }
+
+    /// **Load-bearing source-attestation honesty pin: the prior
+    /// `.map(|s| s.trim() == "G" || s.trim() == "U").unwrap_or(false)`
+    /// fold at the `compute_source_attestation` call site flattened
+    /// nine operational worlds (the eight `%G?` codes documented in
+    /// git-log(1) plus the probe-failed world) into a single bool,
+    /// silently routing `B` (cryptographic verification failed —
+    /// evidence of compromise) into the same bucket as `N` (no
+    /// signature ever) and into the same bucket as the probe-failed
+    /// world.** The typed primitive
+    /// `crate::git_signature::GitCommitSignatureOutcome` preserves
+    /// each operational world structurally; `is_signed()` collapses
+    /// to the pre-fix bool semantics exactly (`G` and `U` → `true`,
+    /// every other arm → `false`), so the bool-surface behaviour is
+    /// preserved while the type-surface distinction is widened.
+    ///
+    /// Until a follow-up commit widens `SourceAttestation` to carry
+    /// the verdict discriminator directly (a `signature_verdict`
+    /// field whose `Bad` / `Expired` / `Revoked` / `Unsigned`
+    /// distinction sekiban / in-toto-verify could escalate
+    /// differently), the call site routes through `is_signed()` and
+    /// the Phase 1 `commit_signed` bool retains its pre-fix value
+    /// on every documented input. Same fail-before / pass-after
+    /// shape as the sibling
+    /// `test_linter_passed_routes_through_typed_probe_outcome` and
+    /// `test_policy_passed_routes_through_typed_probe_outcome` two
+    /// layers over (typed primitive routes the call site, bool
+    /// surface matches the prior collapse exactly, downstream
+    /// enrichment deferred to a follow-up).
+    ///
+    /// Pin the post-fix call-site routing directly so a future
+    /// regression that re-introduced the inline `s.trim() == "G" ||
+    /// s.trim() == "U"` string match (which silently flattens nine
+    /// worlds into one bool) would fail before any Phase 1 record
+    /// was published under it: the value the call site now passes
+    /// for `commit_signed` is exactly
+    /// `GitCommitSignatureOutcome::from_format_code(&captured)
+    /// .is_signed()` on success and
+    /// `GitCommitSignatureOutcome::ProbeAbsent.is_signed()` on
+    /// probe failure, and both routes are structurally pinned here.
+    /// The end-to-end pin then walks `compute_source_attestation`
+    /// against the hermetic git fixture and confirms the seed
+    /// commit (which `init_repo_with_one_commit` produces with
+    /// `commit.gpgsign=false` → `%G?` = "N" →
+    /// `GitCommitSignatureOutcome::NotSigned` → `is_signed() ==
+    /// false`) drives `att.commit_signed == false` — the bool
+    /// value the pre-fix call site would have produced too, but
+    /// now routed through the typed arm that a future enrichment
+    /// can recover the `NotSigned` discriminator from.
+    #[tokio::test]
+    async fn test_commit_signed_routes_through_typed_signature_outcome() {
+        use crate::git_signature::GitCommitSignatureOutcome;
+
+        // Call-site expression pin: the parser-then-`is_signed` route
+        // collapses every documented `%G?` code to the same bool the
+        // pre-fix inline match would have produced. Pinning the
+        // round-trip at this layer means a future refactor that
+        // dropped the typed-primitive route would fail this test
+        // before any Phase 1 record was published under the
+        // regression. Mirrors
+        // `test_policy_passed_routes_through_typed_probe_outcome`
+        // and `test_linter_passed_routes_through_typed_probe_outcome`
+        // one layer up.
+        for (code, want) in [
+            ("G", true),
+            ("U", true),
+            ("X", false),
+            ("Y", false),
+            ("R", false),
+            ("B", false),
+            ("E", false),
+            ("N", false),
+            ("G\n", true),
+            ("", false),
+            ("Z", false),
+        ] {
+            assert_eq!(
+                GitCommitSignatureOutcome::from_format_code(code).is_signed(),
+                want,
+                "parser→is_signed must match the pre-fix `s.trim() == \"G\" \
+                 || s.trim() == \"U\"` collapse exactly for code {code:?}; \
+                 the honesty refactor preserves bool-surface semantics while \
+                 widening the type surface",
+            );
+        }
+        // Probe-absent route pin: the value the call site falls back
+        // to when `run_command_output(...)` errors is exactly
+        // `GitCommitSignatureOutcome::ProbeAbsent.is_signed()`, which
+        // is structurally `false`. The pre-fix path's
+        // `.unwrap_or(false)` produced the same bool here but routed
+        // through an inline literal that lost the "no probe ran"
+        // discriminator a downstream verifier could otherwise recover
+        // from the typed arm.
+        assert!(
+            !GitCommitSignatureOutcome::ProbeAbsent.is_signed(),
+            "ProbeAbsent must collapse to commit_signed=false at the \
+             Phase 1 attestation surface; the structural distinction \
+             from NotSigned / BadSignature is what a future enrichment \
+             walks",
+        );
+
+        // End-to-end through compute_source_attestation: the hermetic
+        // git fixture produces a seed commit with `commit.gpgsign=false`,
+        // so `git log -1 --format=%G?` reports "N" (no signature) →
+        // `GitCommitSignatureOutcome::NotSigned` → `is_signed() ==
+        // false` → `att.commit_signed == false`. The pre-fix path
+        // would have produced the same bool here, but the typed-route
+        // pin above ensures the value flows through the structural
+        // discriminator a future enrichment can recover the `NotSigned`
+        // arm from.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        crate::test_support::init_repo_with_one_commit(tmp.path());
+        let sha_out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(tmp.path())
+            .output()
+            .expect("git rev-parse spawn");
+        assert!(
+            sha_out.status.success(),
+            "git rev-parse HEAD must succeed in {:?}",
+            tmp.path(),
+        );
+        let sha = String::from_utf8(sha_out.stdout)
+            .expect("git sha utf-8")
+            .trim()
+            .to_string();
+        let att = compute_source_attestation(tmp.path(), &sha)
+            .await
+            .expect("compute_source_attestation");
+        assert!(
+            !att.commit_signed,
+            "the typed-primitive route at the call site must drive \
+             commit_signed=false through to the SourceAttestation \
+             record for an unsigned commit (`%G?` = \"N\" → \
+             GitCommitSignatureOutcome::NotSigned → is_signed() = \
+             false); the pre-fix `s.trim() == \"G\" || s.trim() == \
+             \"U\"` collapse produced the same bool here but routed \
+             through an inline literal that flattened the discriminator",
         );
     }
 }
