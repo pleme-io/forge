@@ -13,6 +13,8 @@ mod duration;
 #[cfg(feature = "attestation")]
 mod helm_lint;
 mod helm_provenance;
+#[cfg(feature = "attestation")]
+mod kensa_policy;
 mod oci_architecture;
 mod oci_manifest;
 mod openpgp_signature;

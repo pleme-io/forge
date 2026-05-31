@@ -517,6 +517,40 @@ pub async fn compute_chart_attestation(
     // `crate::helm_lint::parse_lint_output`.
     let lint_outcome = crate::helm_lint::HelmLintOutcome::ProbeAbsent;
 
+    // `kensa verify chart <chart-path>` is the compliance-engine
+    // probe whose pass/fail evaluation against the declared OSCAL /
+    // NIST 800-53 baseline (THEORY §V.3, §VII.1) populates the
+    // Phase 1 chart attestation's `policy_passed` claim. The prior
+    // `true` literal at this call site (`// Policy: assume passed`)
+    // sealed a green-policy claim from nothing — false by
+    // construction whenever `compute_chart_attestation` was called
+    // outside any kensa pre-deploy gate (THEORY §V.2: attestation
+    // is cryptographic evidence, not a wish; THEORY §III.3:
+    // compliance is a structural dimension every renderer carries,
+    // never a value asserted without evidence). The typed
+    // `KensaPolicyOutcome` (`Passed { evaluated_control_count }` /
+    // `Failed { failed_control_count, evaluated_control_count }` /
+    // `ProbeAbsent`) preserves the three operational worlds the
+    // prior `true` flattened into a single positive claim; the call
+    // site routes through `is_passed()` which returns `true` only
+    // on the `Passed` arm. Today the certification function does
+    // not yet spawn `kensa` itself — the outcome collapses to
+    // `ProbeAbsent` → `policy_passed: false`, honestly naming "no
+    // policy probe ran inside the certification surface" rather
+    // than asserting a green-policy claim flow-control alone
+    // cannot substantiate. Same deferral shape as the sibling
+    // `lint_outcome = HelmLintOutcome::ProbeAbsent` one line above
+    // (commit d81f639) and commit b98eb5a's
+    // `SbomProbeOutcome::Absent` / `VulnScanProbeOutcome::Absent`
+    // at the SBOM / vuln-scan layer: typed primitive available,
+    // real probe wired in by a follow-up that adds the
+    // `tokio::process::Command::new("kensa").args(["verify",
+    // "chart", &chart_path.to_string_lossy()]).output().await`
+    // shell-out and deserializes the resulting
+    // `OutcomeVerificationReport` (VOCABULARY §kensa) into one of
+    // the two evidence-bearing arms.
+    let policy_outcome = crate::kensa_policy::KensaPolicyOutcome::ProbeAbsent;
+
     Ok(ci::chart_attestation(
         chart_name,
         chart_version,
@@ -524,7 +558,7 @@ pub async fn compute_chart_attestation(
         provenance_outcome.is_verified(),
         vec![], // Dependency hashes: populated when chart deps are tracked
         lint_outcome.is_passed(),
-        true, // Policy: assume passed
+        policy_outcome.is_passed(),
         registry_ref,
     ))
 }
@@ -2306,6 +2340,117 @@ mod tests {
             "the typed-primitive route at the call site must drive \
              linter_passed=false through to the ChartAttestation \
              record when no lint probe ran; the pre-fix `true` \
+             hardcode produced `true` here regardless of any probe \
+             evidence",
+        );
+    }
+
+    /// **Load-bearing chart-attestation honesty pin: the prior
+    /// `true, // Policy: assume passed` literal at the
+    /// `ci::chart_attestation` call site stamped a positive
+    /// `policy_passed` claim into every Phase 1 chart attestation
+    /// regardless of whether `kensa` had actually evaluated the
+    /// chart inside the certification function.** The typed
+    /// primitive `crate::kensa_policy::KensaPolicyOutcome` preserves
+    /// the three operational worlds the prior `true` flattened —
+    /// `Passed`, `Failed`, `ProbeAbsent` — and the call site routes
+    /// through `is_passed()`, which returns `true` only on the
+    /// `Passed` arm.
+    ///
+    /// Until a follow-up commit wires `kensa verify chart` shell-out
+    /// at the call site, the outcome collapses to `ProbeAbsent` →
+    /// `policy_passed: false` — honestly naming "no policy probe ran
+    /// inside the certification surface" rather than asserting a
+    /// green-policy claim flow-control alone cannot substantiate.
+    /// Same fail-before / pass-after shape as the sibling
+    /// `test_linter_passed_routes_through_typed_probe_outcome` one
+    /// line up (commit d81f639) and
+    /// `test_sbom_and_vuln_scan_route_through_typed_probe_outcome`
+    /// two layers over (typed probe-absent at the call site, real
+    /// probe deferred to a follow-up).
+    ///
+    /// Pin the post-fix call-site expression directly so a future
+    /// regression that re-introduced a hardcoded `true` would fail
+    /// before any Phase 1 record was published under it: the value
+    /// the call site now passes for `policy_passed` is exactly
+    /// `KensaPolicyOutcome::ProbeAbsent.is_passed()`, and that is
+    /// structurally `false`. The end-to-end pin then walks
+    /// `compute_chart_attestation` against a minimal chart and
+    /// confirms `att.policy_passed == false`, where the pre-fix
+    /// body would have produced `true` regardless of any probe
+    /// evidence — closes the sibling gap commit d81f639 named
+    /// directly in its "Why it compounds" section as the
+    /// named-next consumer (b).
+    #[tokio::test]
+    async fn test_policy_passed_routes_through_typed_probe_outcome() {
+        use crate::kensa_policy::KensaPolicyOutcome;
+
+        // Call-site expression pin: this is the exact expression
+        // `compute_chart_attestation` now passes for `policy_passed`.
+        // The pre-fix call site passed the literal `true`; pinning
+        // the post-fix expression at this layer means a future
+        // refactor that dropped the typed-primitive route would
+        // fail this test before any Phase 1 record was published
+        // under the regression. Same shape as
+        // `test_linter_passed_routes_through_typed_probe_outcome`
+        // one line up (`HelmLintOutcome::ProbeAbsent.is_passed()`).
+        assert!(
+            !KensaPolicyOutcome::ProbeAbsent.is_passed(),
+            "ProbeAbsent must collapse to policy_passed=false in \
+             the Phase 1 chart attestation; the pre-fix `true` \
+             hardcode sealed a green-policy claim from nothing \
+             rather than from evidence",
+        );
+
+        // The other two arms also have well-defined bool collapses
+        // — Passed → true, Failed → false. The three-arm distinction
+        // is structurally preserved at the enum level even though
+        // `is_passed` discards two of them at the bool surface
+        // (mirrors the `test_chart_provenance_four_arms_collapse_to
+        // _distinct_bools` shape one layer over).
+        assert!(KensaPolicyOutcome::Passed {
+            evaluated_control_count: 17,
+        }
+        .is_passed());
+        assert!(!KensaPolicyOutcome::Failed {
+            failed_control_count: 3,
+            evaluated_control_count: 17,
+        }
+        .is_passed());
+
+        // End-to-end through compute_chart_attestation: a minimal
+        // chart whose `compute_chart_attestation` invocation does
+        // not yet spawn `kensa` produces `policy_passed: false`,
+        // where the pre-fix body returned `true` unconditionally.
+        // The provenance and linter probes are also absent (no
+        // `.prov` file, no `helm lint` shell-out), so
+        // `provenance_verified` and `linter_passed` are also
+        // `false` here — separately pinned by
+        // `test_chart_provenance_four_arms_collapse_to_distinct_
+        // bools` and `test_linter_passed_routes_through_typed_
+        // probe_outcome`; this test isolates the policy claim.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let chart_dir = tmp.path().join("example");
+        std::fs::create_dir(&chart_dir).expect("mkdir chart");
+        std::fs::write(
+            chart_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: example\nversion: 0.1.0\n",
+        )
+        .expect("write Chart.yaml");
+        let att = compute_chart_attestation(
+            "example",
+            "0.1.0",
+            &chart_dir,
+            "oci://ghcr.io/example/example",
+            Some(tmp.path()),
+        )
+        .await
+        .expect("compute_chart_attestation");
+        assert!(
+            !att.policy_passed,
+            "the typed-primitive route at the call site must drive \
+             policy_passed=false through to the ChartAttestation \
+             record when no kensa probe ran; the pre-fix `true` \
              hardcode produced `true` here regardless of any probe \
              evidence",
         );
