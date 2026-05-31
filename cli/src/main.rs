@@ -10,6 +10,8 @@ mod config;
 mod chart_listing;
 mod cosign;
 mod duration;
+#[cfg(feature = "attestation")]
+mod helm_lint;
 mod helm_provenance;
 mod oci_architecture;
 mod oci_manifest;

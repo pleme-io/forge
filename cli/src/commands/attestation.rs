@@ -488,14 +488,43 @@ pub async fn compute_chart_attestation(
     let provenance_outcome =
         probe_chart_provenance(chart_name, chart_version, chart_path, tarball_dir).await;
 
+    // `helm lint <chart-dir>` is the chart-quality probe whose `[INFO]`
+    // / `[WARNING]` / `[ERROR]` diagnostics and `N chart(s) linted, M
+    // chart(s) failed` summary populate the Phase 1 chart attestation's
+    // `linter_passed` claim. The prior `true` literal at this call site
+    // (`// Linter: assume passed if forge got this far`) sealed a green-
+    // lint claim from inter-function flow control — false by construction
+    // whenever `compute_chart_attestation` is called outside the canonical
+    // `commands/helm.rs::lint` precondition or whenever that upstream
+    // probe's bail logic was bypassed (THEORY §V.2: attestation is
+    // cryptographic evidence, not a wish). The typed `HelmLintOutcome`
+    // (`Passed { warning_count, info_count }` /
+    // `Failed { failed_chart_count, error_count, warning_count,
+    // info_count }` / `Malformed` / `ProbeAbsent`) preserves the four
+    // operational worlds the prior `true` flattened into a single
+    // positive claim; the call site routes through `is_passed()` which
+    // returns `true` only on the `Passed` arm. Today the certification
+    // function does not yet spawn `helm lint` itself — the outcome
+    // collapses to `ProbeAbsent` → `linter_passed: false`, honestly
+    // naming "no lint probe ran inside the certification surface"
+    // rather than asserting a green-lint claim that flow-control alone
+    // cannot substantiate. Same deferral shape as commit b98eb5a's
+    // `SbomProbeOutcome::Absent` / `VulnScanProbeOutcome::Absent` at
+    // the SBOM / vuln-scan layer: typed primitive available, real
+    // probe wired in by a follow-up that adds the `tokio::process::
+    // Command::new("helm").args(["lint", &chart_path.to_string_lossy()]).
+    // output().await` shell-out and routes the captured output through
+    // `crate::helm_lint::parse_lint_output`.
+    let lint_outcome = crate::helm_lint::HelmLintOutcome::ProbeAbsent;
+
     Ok(ci::chart_attestation(
         chart_name,
         chart_version,
         chart_hash,
         provenance_outcome.is_verified(),
         vec![], // Dependency hashes: populated when chart deps are tracked
-        true,   // Linter: assume passed if forge got this far
-        true,   // Policy: assume passed
+        lint_outcome.is_passed(),
+        true, // Policy: assume passed
         registry_ref,
     ))
 }
@@ -2171,5 +2200,114 @@ mod tests {
                  probe-failure sentinels and from blake3-of-empty",
             );
         }
+    }
+
+    /// **Load-bearing chart-attestation honesty pin: the prior
+    /// `true, // Linter: assume passed if forge got this far` literal
+    /// at the `ci::chart_attestation` call site stamped a positive
+    /// `linter_passed` claim into every Phase 1 chart attestation
+    /// regardless of whether `helm lint` had actually probed the
+    /// chart inside the certification function.** The typed primitive
+    /// `crate::helm_lint::HelmLintOutcome` preserves the four
+    /// operational worlds the prior `true` flattened — Passed,
+    /// Failed, Malformed, ProbeAbsent — and the call site routes
+    /// through `is_passed()`, which returns `true` only on the
+    /// `Passed` arm.
+    ///
+    /// Until a follow-up commit wires `helm lint` shell-out at the
+    /// call site, the outcome collapses to `ProbeAbsent` →
+    /// `linter_passed: false` — honestly naming "no lint probe ran
+    /// inside the certification surface" rather than asserting a
+    /// green-lint claim that flow-control alone cannot substantiate.
+    /// Same fail-before / pass-after shape as
+    /// `test_sbom_and_vuln_scan_route_through_typed_probe_outcome`
+    /// one layer over (typed probe-absent sentinel at the call
+    /// site, real probe deferred to a follow-up).
+    ///
+    /// Pin the post-fix call-site expression directly so a future
+    /// regression that re-introduced a hardcoded `true` would fail
+    /// before any Phase 1 record was published under it: the value
+    /// the call site now passes for `linter_passed` is exactly
+    /// `HelmLintOutcome::ProbeAbsent.is_passed()`, and that is
+    /// structurally `false`. The end-to-end pin then walks
+    /// `compute_chart_attestation` against a minimal chart and
+    /// confirms `att.linter_passed == false`, where the pre-fix
+    /// body would have produced `true` regardless of any probe
+    /// evidence.
+    #[tokio::test]
+    async fn test_linter_passed_routes_through_typed_probe_outcome() {
+        use crate::helm_lint::HelmLintOutcome;
+
+        // Call-site expression pin: this is the exact expression
+        // `compute_chart_attestation` now passes for `linter_passed`.
+        // The pre-fix call site passed the literal `true`; pinning
+        // the post-fix expression at this layer means a future
+        // refactor that dropped the typed-primitive route would
+        // fail this test before any Phase 1 record was published
+        // under the regression. Same shape as
+        // `test_sbom_and_vuln_scan_route_through_typed_probe_outcome`
+        // (`SbomProbeOutcome::Absent.to_attestation_hash()`).
+        assert!(
+            !HelmLintOutcome::ProbeAbsent.is_passed(),
+            "ProbeAbsent must collapse to linter_passed=false in the \
+             Phase 1 chart attestation; the pre-fix `true` hardcode \
+             sealed a green-lint claim from flow control rather than \
+             from evidence",
+        );
+
+        // The other three arms also have well-defined bool collapses
+        // — Passed → true, Failed → false, Malformed → false. The
+        // four-arm distinction is structurally preserved at the enum
+        // level even though `is_passed` discards three of them at
+        // the bool surface (mirrors the
+        // `test_chart_provenance_four_arms_collapse_to_distinct_bools`
+        // shape one layer over).
+        assert!(HelmLintOutcome::Passed {
+            warning_count: 0,
+            info_count: 0,
+        }
+        .is_passed());
+        assert!(!HelmLintOutcome::Failed {
+            failed_chart_count: 1,
+            error_count: 1,
+            warning_count: 0,
+            info_count: 0,
+        }
+        .is_passed());
+        assert!(!HelmLintOutcome::Malformed.is_passed());
+
+        // End-to-end through compute_chart_attestation: a minimal
+        // chart whose `compute_chart_attestation` invocation does
+        // not yet spawn `helm lint` produces `linter_passed: false`,
+        // where the pre-fix body returned `true` unconditionally.
+        // The provenance probe is absent (no `.prov` file), so
+        // `provenance_verified` is also `false` here — separately
+        // pinned by `test_chart_provenance_four_arms_collapse_to_
+        // distinct_bools`, this test isolates the linter claim.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let chart_dir = tmp.path().join("example");
+        std::fs::create_dir(&chart_dir).expect("mkdir chart");
+        std::fs::write(
+            chart_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: example\nversion: 0.1.0\n",
+        )
+        .expect("write Chart.yaml");
+        let att = compute_chart_attestation(
+            "example",
+            "0.1.0",
+            &chart_dir,
+            "oci://ghcr.io/example/example",
+            Some(tmp.path()),
+        )
+        .await
+        .expect("compute_chart_attestation");
+        assert!(
+            !att.linter_passed,
+            "the typed-primitive route at the call site must drive \
+             linter_passed=false through to the ChartAttestation \
+             record when no lint probe ran; the pre-fix `true` \
+             hardcode produced `true` here regardless of any probe \
+             evidence",
+        );
     }
 }
