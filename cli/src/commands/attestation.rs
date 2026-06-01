@@ -784,11 +784,39 @@ pub fn compose_product_certification(
 
     let slsa_dimension = slsa_compliance_dimension(&builds, &policy);
     let all_passed = slsa_dimension.passed;
+    // `compliance_hash` is the BLAKE3 of the canonical fingerprint over
+    // the dimensions vec — sorted by the Display form of each dim's
+    // `dimension_type`, concatenated 32-byte hashes — exactly what
+    // `tameshi::compliance::dimensions::AttestationBuilder::build` runs
+    // internally. The pre-fix `Blake3Hash::digest(b"initial-compliance")`
+    // literal at this call site stamped a name-keyed sentinel
+    // independent of the dimensions vec actually composed into the
+    // attestation, defeating the content-addressed-identity invariant
+    // THEORY §VI.1 names twice over: (a) the same dimension set yielded
+    // two distinct `compliance_hash` values depending on construction
+    // path (forge bare struct vs tameshi builder) — a downstream
+    // verifier could not reconcile the two attestations as describing
+    // the same compliance evidence; and (b) two structurally different
+    // dimension sets (a passing slsa-provenance dim vs a failing one)
+    // produced the same `compliance_hash`, since the stamp was constant
+    // — defeating the discriminator the hash is supposed to provide.
+    // The typed `crate::compliance_dimensions::canonical_dimensions_
+    // fingerprint` is the compliance-side peer of
+    // `crate::tree_listing::canonical_tree_fingerprint` (commit 9c5a99f
+    // for source-tree identity), `crate::oci_manifest::canonical_
+    // manifest_fingerprint` (commit 443bd22 for image-manifest
+    // identity), and `crate::chart_listing::canonical_chart_fingerprint`
+    // (commit e8a2df7 for chart-content identity): the constant-stamp
+    // dishonesty closes the same way one layer up.
+    let dimensions = vec![slsa_dimension];
+    let compliance_hash = Blake3Hash::digest(
+        &crate::compliance_dimensions::canonical_dimensions_fingerprint(&dimensions),
+    );
     let compliance = ComplianceAttestation {
         environment: environment.to_string(),
         artifact: product.to_string(),
-        dimensions: vec![slsa_dimension],
-        compliance_hash: Blake3Hash::digest(b"initial-compliance"),
+        dimensions,
+        compliance_hash,
         computed_at: chrono::Utc::now(),
         policy_name: policy.name.clone(),
         all_passed,
@@ -2935,6 +2963,137 @@ mod tests {
             "Reproducible → reproducible=true → substantiated build \
              earns L3; the typed primitive gates the grade, never \
              floors it",
+        );
+    }
+
+    /// **Load-bearing compliance-honesty pin (fail-before / pass-after).**
+    /// The prior `compose_product_certification` body stamped
+    /// `compliance_hash: Blake3Hash::digest(b"initial-compliance")` on
+    /// every `ComplianceAttestation` it composed — a name-keyed sentinel
+    /// independent of the dimensions vec the attestation carries. Two
+    /// structural honesty failures followed (mirroring the closed gaps at
+    /// the source-tree, image-manifest, and chart-content layers): (a)
+    /// the same dimension set produced two distinct `compliance_hash`
+    /// values depending on construction path (forge bare struct vs
+    /// `tameshi::compliance::dimensions::AttestationBuilder::build`),
+    /// defeating the content-addressed-identity invariant THEORY §VI.1
+    /// rests on; and (b) two structurally different dimension sets — a
+    /// passing slsa-provenance dim vs a failing one — produced the same
+    /// `compliance_hash`, since the stamp was constant. The post-fix call
+    /// site digests the canonical fingerprint over the dimensions vec
+    /// through [`crate::compliance_dimensions::canonical_dimensions_fingerprint`],
+    /// matching the algorithm `AttestationBuilder::build` runs internally.
+    ///
+    /// Pin the post-fix call-site expression by exercising the compose
+    /// function end-to-end: a single substantiated build composes into
+    /// one slsa-provenance dimension, and the resulting attestation's
+    /// `compliance_hash` must (a) NOT equal the pre-fix sentinel and
+    /// (b) match the BLAKE3 of the canonical fingerprint over the
+    /// recorded dimensions. Same fail-before / pass-after shape as
+    /// `test_tree_hash_probe_failure_distinguishable_from_empty_listing`
+    /// and `test_manifest_hash_stable_across_key_order_and_metadata` one
+    /// layer over: the typed canonical-fingerprint primitive replaces a
+    /// name-keyed constant at the call site, and the test pins the
+    /// resulting hash against both the prior dishonest constant and the
+    /// honest content-derived value.
+    #[test]
+    fn test_compose_compliance_hash_grounded_in_dimensions_not_sentinel() {
+        let source = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source,
+            vec![build_at("backend", SlsaLevel::L2)],
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+
+        // (a) The post-fix hash is NOT the pre-fix name-keyed sentinel —
+        // the load-bearing regression pin. A future regression that
+        // brought back `Blake3Hash::digest(b"initial-compliance")` at the
+        // call site would fail here before any Phase 1.5 attestation
+        // record was published under it.
+        let sentinel = Blake3Hash::digest(b"initial-compliance");
+        assert_ne!(
+            cert.compliance.compliance_hash.to_hex(),
+            sentinel.to_hex(),
+            "compliance_hash must NOT collapse to the pre-fix \
+             `Blake3Hash::digest(b\"initial-compliance\")` sentinel; \
+             a future regression that re-introduced the constant would \
+             fail this test before any Phase 1.5 attestation was \
+             published under it",
+        );
+
+        // (b) The post-fix hash IS the BLAKE3 of the canonical
+        // fingerprint over the dimensions the attestation actually
+        // carries — the content-addressed-identity invariant THEORY
+        // §VI.1 names. The same algorithm
+        // `AttestationBuilder::build` runs internally, so a future
+        // consumer of forge that constructs the equivalent attestation
+        // through tameshi's builder gets the byte-identical hash.
+        let expected = Blake3Hash::digest(
+            &crate::compliance_dimensions::canonical_dimensions_fingerprint(
+                &cert.compliance.dimensions,
+            ),
+        );
+        assert_eq!(
+            cert.compliance.compliance_hash.to_hex(),
+            expected.to_hex(),
+            "compliance_hash must be the BLAKE3 of the canonical \
+             fingerprint over the dimensions vec — sorted by the Display \
+             form of each dim's `dimension_type`, concatenated 32-byte \
+             hashes — exactly what `AttestationBuilder::build` runs \
+             internally",
+        );
+
+        // (c) Two structurally different dimension sets must produce
+        // distinct `compliance_hash` values — the discriminator the
+        // hash is supposed to provide. Compose a second attestation
+        // whose single SLSA dim fails the floor (L0 under the L2
+        // staging policy) and confirm the hashes differ. Pre-fix both
+        // composed to the same sentinel hash; post-fix they MUST
+        // diverge because the slsa-provenance dim's `hash` field
+        // (BLAKE3 of the summary string) differs across the two cases.
+        let source_b = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert_b = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source_b,
+            vec![], // no builds → L0 → fails staging floor
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+        assert_ne!(
+            cert.compliance.compliance_hash.to_hex(),
+            cert_b.compliance.compliance_hash.to_hex(),
+            "two attestations carrying structurally distinct dimension \
+             sets (one with a passing L2 slsa dim, one with a failing \
+             L0 dim) must produce distinct `compliance_hash` values; \
+             the pre-fix sentinel produced byte-identical hashes for \
+             these two cases — the discriminator the hash is supposed \
+             to provide was lost",
         );
     }
 }

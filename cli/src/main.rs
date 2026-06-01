@@ -8,6 +8,8 @@ mod config;
 
 // Shared utilities
 mod chart_listing;
+#[cfg(feature = "attestation")]
+mod compliance_dimensions;
 mod cosign;
 mod duration;
 #[cfg(feature = "attestation")]
