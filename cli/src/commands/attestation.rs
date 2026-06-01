@@ -695,11 +695,50 @@ pub fn compose_product_certification(
 
     // For initial PoC, use minimal deployment and compliance attestations.
     // These will be populated by sekiban and kensa once deployed.
+    //
+    // FluxCD's source-controller `GitRepository.status.conditions[type=
+    // SourceVerified]` is the typed evidence channel for the Phase 2
+    // `source_verified` claim (THEORY §VII.2: FluxCD is the process
+    // manager for every cluster; the reconciler emits the condition only
+    // after fetching the commit, resolving the bundle, and verifying the
+    // signature against the keyring within the reconciliation interval).
+    // The prior `source_verified: true` literal at this call site sealed
+    // a positive Phase 2 source-verification claim from nothing — no
+    // kubectl probe ran inside the certification surface, no
+    // `GitRepository.status` was inspected, no `SourceVerified`
+    // condition was walked. A Phase 2 deployment attestation that records
+    // `source_verified: true` against a deployment whose FluxCD
+    // `GitRepository` was never queried (and may not even carry a
+    // `verify` block on its spec) is false by construction (THEORY §V.2:
+    // attestation is cryptographic evidence, not a wish; THEORY §VII.1:
+    // attestation-gated deployments are structural, not policy overlays).
+    // The typed `FluxSourceVerificationOutcome` (`Verified` /
+    // `VerifyFailed` / `ProbeAbsent`) preserves the three operational
+    // worlds the prior `true` flattened into a single positive claim;
+    // the call site routes through `is_verified()` which returns `true`
+    // only on the `Verified` arm. Today the certification function does
+    // not yet spawn a kubectl probe itself — the outcome collapses to
+    // `ProbeAbsent` → `source_verified: false`, honestly naming "no
+    // FluxCD source-verification probe ran inside the certification
+    // surface" rather than asserting a green source-verified claim
+    // flow-control alone cannot substantiate. Same deferral shape as
+    // commit c1e83d5's `KensaPolicyOutcome::ProbeAbsent` at the chart-
+    // policy layer, commit d81f639's `HelmLintOutcome::ProbeAbsent` at
+    // the chart-quality layer, and commit b98eb5a's
+    // `SbomProbeOutcome::Absent` / `VulnScanProbeOutcome::Absent` at
+    // the SBOM / vuln-scan layer: typed primitive available, real
+    // probe wired in by a follow-up that adds the `tokio::process::
+    // Command::new("kubectl").args(["get", "gitrepository", ...]).
+    // output().await` (or a typed `kube::Api::<GitRepository>::get(...)`
+    // query) shell-out and walks the resulting `status.conditions`
+    // array for the `SourceVerified` entry.
+    let source_verification_outcome =
+        crate::flux_source_verification::FluxSourceVerificationOutcome::ProbeAbsent;
     let deployment = DeploymentAttestation {
         namespace: format!("{}-{}", product, environment),
         kustomization: format!("{}-{}", product, environment),
         source_commit: source.commit.clone(),
-        source_verified: true,
+        source_verified: source_verification_outcome.is_verified(),
         manifest_hash: Blake3Hash::digest(b"pending-deployment"),
         all_releases_signed: false, // Will be true after this pipeline completes
         cis_k8s_pass_rate: 0.0,     // Populated post-deploy by kensa
@@ -2624,6 +2663,114 @@ mod tests {
              false); the pre-fix `s.trim() == \"G\" || s.trim() == \
              \"U\"` collapse produced the same bool here but routed \
              through an inline literal that flattened the discriminator",
+        );
+    }
+
+    /// **Load-bearing deployment-attestation honesty pin: the prior
+    /// `source_verified: true` literal at the `compose_product_
+    /// certification` call site stamped a positive Phase 2 source-
+    /// verification claim into every `DeploymentAttestation` regardless
+    /// of whether FluxCD's source-controller had actually verified the
+    /// commit signature for the deployment's `GitRepository`.** The
+    /// typed primitive `crate::flux_source_verification::
+    /// FluxSourceVerificationOutcome` preserves the three operational
+    /// worlds the prior `true` flattened — `Verified`, `VerifyFailed`,
+    /// `ProbeAbsent` — and the call site routes through
+    /// `is_verified()`, which returns `true` only on the `Verified`
+    /// arm.
+    ///
+    /// Until a follow-up commit wires a `kubectl get gitrepository`
+    /// (or typed `kube::Api::<GitRepository>::get(...)`) probe at the
+    /// call site, the outcome collapses to `ProbeAbsent` →
+    /// `source_verified: false` — honestly naming "no FluxCD source-
+    /// verification probe ran inside the certification surface" rather
+    /// than asserting a green source-verified claim flow-control alone
+    /// cannot substantiate. Same fail-before / pass-after shape as the
+    /// sibling `test_linter_passed_routes_through_typed_probe_outcome`
+    /// (commit d81f639) and `test_policy_passed_routes_through_typed_
+    /// probe_outcome` (commit c1e83d5) one layer over (typed probe-
+    /// absent at the call site, real probe deferred to a follow-up).
+    ///
+    /// Pin the post-fix call-site expression directly so a future
+    /// regression that re-introduced a hardcoded `true` would fail
+    /// before any Phase 2 record was published under it: the value
+    /// the call site now passes for `source_verified` is exactly
+    /// `FluxSourceVerificationOutcome::ProbeAbsent.is_verified()`, and
+    /// that is structurally `false`. The end-to-end pin then walks
+    /// `compose_product_certification` against a minimal source
+    /// attestation and confirms `cert.deployment.source_verified ==
+    /// false`, where the pre-fix body would have produced `true`
+    /// regardless of any probe evidence — closes the sibling gap the
+    /// `// These will be populated by sekiban and kensa once deployed`
+    /// comment named directly above the `source_verified: true`
+    /// literal in `compose_product_certification`.
+    #[test]
+    fn test_source_verified_routes_through_typed_flux_outcome() {
+        use crate::flux_source_verification::FluxSourceVerificationOutcome;
+
+        // Call-site expression pin: this is the exact expression
+        // `compose_product_certification` now passes for
+        // `source_verified`. The pre-fix call site passed the literal
+        // `true`; pinning the post-fix expression at this layer means
+        // a future refactor that dropped the typed-primitive route
+        // would fail this test before any Phase 2 record was published
+        // under the regression. Same shape as
+        // `test_policy_passed_routes_through_typed_probe_outcome`
+        // (`KensaPolicyOutcome::ProbeAbsent.is_passed()`) one layer
+        // over.
+        assert!(
+            !FluxSourceVerificationOutcome::ProbeAbsent.is_verified(),
+            "ProbeAbsent must collapse to source_verified=false in \
+             the Phase 2 deployment attestation; the pre-fix `true` \
+             hardcode sealed a green source-verified claim from \
+             nothing rather than from FluxCD evidence",
+        );
+
+        // The other two arms also have well-defined bool collapses —
+        // Verified → true, VerifyFailed → false. The three-arm
+        // distinction is structurally preserved at the enum level
+        // even though `is_verified` discards two of them at the bool
+        // surface (mirrors the `test_chart_provenance_four_arms_
+        // collapse_to_distinct_bools` shape one layer over).
+        assert!(FluxSourceVerificationOutcome::Verified.is_verified());
+        assert!(!FluxSourceVerificationOutcome::VerifyFailed.is_verified());
+
+        // End-to-end through compose_product_certification: a minimal
+        // source attestation composed under the staging policy
+        // produces `source_verified: false` on the resulting
+        // `DeploymentAttestation`, where the pre-fix body returned
+        // `true` unconditionally. The build / image / chart inputs
+        // are empty here so the compose path exercises the deployment-
+        // attestation construction directly without involving the
+        // probe-driven Phase 1 inputs — same isolation discipline as
+        // `test_compose_propagates_honest_compliance` one layer up.
+        let source = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source,
+            vec![build_at("backend", SlsaLevel::L2)],
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+        assert!(
+            !cert.deployment.source_verified,
+            "the typed-primitive route at the call site must drive \
+             source_verified=false through to the DeploymentAttestation \
+             record when no FluxCD probe ran inside the certification \
+             function; the pre-fix `true` hardcode produced `true` here \
+             regardless of any probe evidence",
         );
     }
 }
