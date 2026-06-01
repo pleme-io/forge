@@ -19,6 +19,8 @@ mod helm_lint;
 mod helm_provenance;
 #[cfg(feature = "attestation")]
 mod kensa_policy;
+#[cfg(feature = "attestation")]
+mod nix_reproducibility;
 mod oci_architecture;
 mod oci_manifest;
 mod openpgp_signature;
