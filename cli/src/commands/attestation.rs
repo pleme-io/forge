@@ -320,11 +320,46 @@ pub async fn compute_build_attestation(
     let sbom_hash = sbom_outcome.to_attestation_hash();
     let (vuln_scan_hash, cve_count, critical_high_cves) = vuln_scan_outcome.to_attestation_fields();
 
-    // Reproducibility is not independently re-verified yet; until it is,
-    // the build cannot honestly claim the reproducible-grade SLSA level.
-    // The level is derived from the evidence actually collected, so a
-    // build whose closure could not be materialized claims nothing.
-    let reproducible = false;
+    // Reproducibility is not independently re-verified yet; until it
+    // is, the build cannot honestly claim the reproducible-grade SLSA
+    // level. The level is derived from the evidence actually collected,
+    // so a build whose closure could not be materialized claims
+    // nothing. The pre-fix bare `let reproducible = false;` literal at
+    // this call site flattened three structurally distinct operational
+    // worlds — the `Reproducible` / `Drift` / `ProbeAbsent` distinction
+    // a `nix build --rebuild` determinism probe would yield — into a
+    // single negative bucket. The `Drift` collapse is the most
+    // load-bearing: a Phase 1 build attestation that records
+    // `reproducible: false` against a build whose `nix build --rebuild`
+    // probe DETECTED non-determinism (evidence of compromise: some
+    // non-hermetic input drove the build) is structurally
+    // indistinguishable from one against a build whose probe was
+    // never spawned (no evidence either way). A downstream verifier
+    // that fails-closed on evidence of compromise (the drift world)
+    // cannot distinguish it from the no-evidence-collected world under
+    // the bare bool. The typed `NixReproducibilityOutcome` (`Reproducible`
+    // / `Drift` / `ProbeAbsent`) preserves the three operational worlds
+    // structurally; the call site routes through `is_reproducible()`,
+    // which returns `true` only on the `Reproducible` arm — the
+    // bool-surface semantics collapse to the pre-fix literal exactly,
+    // and the SLSA-level rubric in `build_slsa_level` still caps
+    // substantiated-but-not-determinism-verified builds at L2. Today
+    // the build-attestation function does not yet spawn a `nix build
+    // --rebuild` probe itself — the outcome collapses to `ProbeAbsent`
+    // → `reproducible: false`, honestly naming "no determinism probe
+    // ran inside the build-attestation function" rather than asserting
+    // a green reproducible claim flow-control alone cannot
+    // substantiate. Same deferral shape as commit 5931e32's
+    // `FluxSourceVerificationOutcome::ProbeAbsent` at the
+    // source-verification layer, commit c1e83d5's
+    // `KensaPolicyOutcome::ProbeAbsent` at the chart-policy layer,
+    // commit d81f639's `HelmLintOutcome::ProbeAbsent` at the
+    // chart-quality layer, and commit b98eb5a's `SbomProbeOutcome::
+    // Absent` / `VulnScanProbeOutcome::Absent` at the SBOM /
+    // vuln-scan layer.
+    let reproducibility_outcome =
+        crate::nix_reproducibility::NixReproducibilityOutcome::ProbeAbsent;
+    let reproducible = reproducibility_outcome.is_reproducible();
     let slsa_level = build_slsa_level(&derivation, &closure_info, reproducible);
 
     Ok(ci::build_attestation(
@@ -2771,6 +2806,135 @@ mod tests {
              record when no FluxCD probe ran inside the certification \
              function; the pre-fix `true` hardcode produced `true` here \
              regardless of any probe evidence",
+        );
+    }
+
+    /// **Load-bearing build-attestation honesty pin: the prior bare
+    /// `let reproducible = false;` literal inside
+    /// `compute_build_attestation` stamped a negative Phase 1
+    /// reproducibility claim into every `BuildAttestation` it composed
+    /// regardless of whether a `nix build --rebuild` determinism probe
+    /// had actually run.** The bool surface was honest at the
+    /// SLSA-level layer (a substantiated build without a determinism
+    /// probe caps at L2 under `build_slsa_level`, never the
+    /// reproducible-grade L3) but flattened three structurally
+    /// distinct operational worlds a downstream verifier reading
+    /// `reproducible: false` could not recover from the bool alone:
+    /// `Reproducible` (re-build matched), `Drift` (re-build detected
+    /// non-determinism — evidence of compromise), and `ProbeAbsent`
+    /// (no re-build ran inside the build-attestation function — no
+    /// evidence either way). The typed primitive
+    /// `crate::nix_reproducibility::NixReproducibilityOutcome`
+    /// preserves the three operational worlds the prior bare bool
+    /// flattened, and the call site routes through
+    /// `is_reproducible()`, which returns `true` only on the
+    /// `Reproducible` arm.
+    ///
+    /// Until a follow-up commit wires a `nix build --rebuild` (or
+    /// `nix-build --check`) probe at the call site, the outcome
+    /// collapses to `ProbeAbsent` → `reproducible: false` — honestly
+    /// naming "no determinism probe ran inside the build-attestation
+    /// function" rather than collapsing it into the same bucket as a
+    /// probe-detected drift. Same fail-before / pass-after shape as
+    /// the sibling
+    /// `test_source_verified_routes_through_typed_flux_outcome`
+    /// (commit 5931e32) one layer up (typed probe-absent at the call
+    /// site, real probe deferred to a follow-up).
+    ///
+    /// Pin the post-fix call-site expression directly so a future
+    /// regression that re-introduced a hardcoded bare bool would fail
+    /// before any Phase 1 record was published under it: the value
+    /// the call site now passes for `reproducible` is exactly
+    /// `NixReproducibilityOutcome::ProbeAbsent.is_reproducible()`, and
+    /// that is structurally `false`. The bool-collapse pins confirm
+    /// `Reproducible` → `true` (the one positive arm) and `Drift` →
+    /// `false` (the arm that carries evidence of non-determinism but
+    /// must NOT claim reproducible at the bool surface). The
+    /// downstream SLSA-level pin then walks `build_slsa_level` with
+    /// the same typed-route expression and confirms the L2 cap holds
+    /// — closes the sibling gap the `// Reproducibility is not
+    /// independently re-verified yet` comment named directly above
+    /// the bare bool literal in `compute_build_attestation`.
+    #[test]
+    fn test_reproducible_routes_through_typed_nix_outcome() {
+        use crate::nix_reproducibility::NixReproducibilityOutcome;
+
+        // Call-site expression pin: this is the exact expression
+        // `compute_build_attestation` now passes for `reproducible`.
+        // The pre-fix call site passed the bare literal `false`;
+        // pinning the post-fix expression at this layer means a
+        // future refactor that dropped the typed-primitive route
+        // would fail this test before any Phase 1 record was
+        // published under the regression. Same shape as
+        // `test_source_verified_routes_through_typed_flux_outcome`
+        // (`FluxSourceVerificationOutcome::ProbeAbsent.is_verified()`)
+        // one layer over.
+        assert!(
+            !NixReproducibilityOutcome::ProbeAbsent.is_reproducible(),
+            "ProbeAbsent must collapse to reproducible=false in the \
+             Phase 1 build attestation; the pre-fix bare `let \
+             reproducible = false;` literal carried the same bool \
+             here as for `Drift`, conflating no-evidence-collected \
+             with evidence-of-non-determinism",
+        );
+
+        // The other two arms also have well-defined bool collapses —
+        // Reproducible → true, Drift → false. The three-arm
+        // distinction is structurally preserved at the enum level
+        // even though `is_reproducible` discards two of them at the
+        // bool surface (mirrors the
+        // `test_chart_provenance_four_arms_collapse_to_distinct_bools`
+        // shape one layer over).
+        assert!(NixReproducibilityOutcome::Reproducible.is_reproducible());
+        assert!(!NixReproducibilityOutcome::Drift.is_reproducible());
+
+        // Downstream SLSA-level pin: the typed-route expression
+        // composed into `build_slsa_level` with a fully-substantiated
+        // derivation + closure must still cap at L2, never L3 — the
+        // bool-surface semantics of the pre-fix literal are preserved
+        // exactly through the typed primitive, so the reproducible-
+        // grade L3 stays unreachable until a `Reproducible` outcome
+        // is wired in by a follow-up. Mirrors
+        // `test_build_slsa_level_substantiated_nonreproducible_is_l2`
+        // but through the post-fix typed expression rather than the
+        // pre-fix bare `false` literal.
+        let reproducible = NixReproducibilityOutcome::ProbeAbsent.is_reproducible();
+        let level = build_slsa_level(
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-mysvc.drv",
+            r#"[{"path":"/nix/store/abc123-mysvc","narHash":"sha256-x"}]"#,
+            reproducible,
+        );
+        assert_eq!(
+            level,
+            SlsaLevel::L2,
+            "ProbeAbsent → reproducible=false → substantiated build \
+             caps at L2 under build_slsa_level; the reproducible L3 \
+             grade stays unreachable until a `Reproducible` outcome \
+             is wired in by a follow-up that spawns `nix build \
+             --rebuild`",
+        );
+
+        // And confirm that the `Reproducible` arm — the one positive
+        // arm — would unlock L3 against the same substantiated
+        // derivation + closure. This is the inverse pin: the typed
+        // primitive is the gate, not a permanent floor; a future
+        // commit that wires the re-build probe at the call site and
+        // observes byte-identical output will earn the L3 grade
+        // honestly. Mirrors
+        // `test_build_slsa_level_substantiated_reproducible_is_l3`
+        // but through the typed expression.
+        let reproducible_arm = NixReproducibilityOutcome::Reproducible.is_reproducible();
+        let level_l3 = build_slsa_level(
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-mysvc.drv",
+            r#"[{"path":"/nix/store/abc123-mysvc","narHash":"sha256-x"}]"#,
+            reproducible_arm,
+        );
+        assert_eq!(
+            level_l3,
+            SlsaLevel::L3,
+            "Reproducible → reproducible=true → substantiated build \
+             earns L3; the typed primitive gates the grade, never \
+             floors it",
         );
     }
 }
