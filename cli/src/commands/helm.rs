@@ -558,13 +558,48 @@ fn prepare_chart_workspace(
 }
 
 /// The `file://` repository paths declared in a Chart.yaml's `dependencies`.
+/// Parsed with serde_yaml so BOTH block style (`repository: file://…` on its own
+/// line) AND flow style (`- {name: …, repository: "file://…"}` inline) are
+/// caught — a line-scan misses the flow form and was leaving siblings unstaged.
 fn file_dep_paths(chart_yaml_content: &str) -> Vec<String> {
-    chart_yaml_content
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("repository:").map(str::trim))
-        .map(|v| v.trim_matches(['"', '\''].as_ref()).to_string())
-        .filter(|v| v.starts_with("file://"))
-        .collect()
+    #[derive(serde::Deserialize)]
+    struct ChartYaml {
+        #[serde(default)]
+        dependencies: Vec<Dep>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Dep {
+        #[serde(default)]
+        repository: String,
+    }
+    serde_yaml::from_str::<ChartYaml>(chart_yaml_content)
+        .map(|c| {
+            c.dependencies
+                .into_iter()
+                .map(|d| d.repository)
+                .filter(|r| r.starts_with("file://"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod file_dep_tests {
+    use super::file_dep_paths;
+
+    #[test]
+    fn parses_block_and_flow_dependency_styles() {
+        let block = "dependencies:\n  - name: pleme-lareira\n    repository: \"file://../pleme-lareira\"\n";
+        assert_eq!(file_dep_paths(block), vec!["file://../pleme-lareira"]);
+
+        let flow = "dependencies:\n  - {name: pleme-lareira, version: \"~0.1.0\", repository: \"file://../pleme-lareira\"}\n";
+        assert_eq!(file_dep_paths(flow), vec!["file://../pleme-lareira"]);
+
+        // OCI/HTTP repos are not file:// and must be ignored; no deps → empty.
+        let oci = "dependencies:\n  - name: pleme-lib\n    repository: \"oci://ghcr.io/pleme-io/charts\"\n";
+        assert!(file_dep_paths(oci).is_empty());
+        assert!(file_dep_paths("name: x\nversion: 0.1.0\n").is_empty());
+    }
 }
 
 /// Recursively copy a chart's `file://` sibling chart dependencies into `tmp_path`
