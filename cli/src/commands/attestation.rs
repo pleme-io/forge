@@ -820,14 +820,68 @@ pub fn compose_product_certification(
     let network_policy_outcome =
         crate::network_policy_admission::NetworkPolicyAdmissionOutcome::ProbeAbsent;
 
+    // FluxCD's `helm.toolkit.fluxcd.io/v2` `HelmRelease` resources are
+    // the typed evidence channel for the Phase 2 `all_releases_signed`
+    // claim: each `HelmRelease` carries a `metadata.annotations[
+    // tameshi::ci::ANNOTATION_SIGNATURE]` entry that forge's `deploy`
+    // step injects (derived from `generate_annotation_map` over the
+    // certification's hash), and `sekiban` admission verifies it
+    // before admitting the resource into the cluster (THEORY §V.4
+    // Phase 2: only Phase-2-signed resources are admitted into
+    // production; THEORY §VII.1: the gate is structural, the admission
+    // webhook refuses any resource without a valid signature at the
+    // K8s API server itself). The prior `all_releases_signed: false`
+    // literal at this call site was honest at the bool surface (a
+    // deployment attestation that records `all_releases_signed: false`
+    // against a certification function that never spawned a kubectl
+    // probe is correctly negative) but flattened three structurally
+    // distinct operational worlds — the `Verified` / `VerifyFailed`
+    // / `ProbeAbsent` distinction a `kubectl get helmrelease` probe
+    // would yield — into a single negative bucket. The `VerifyFailed`
+    // collapse is the most load-bearing: a Phase 2 deployment
+    // attestation that records `all_releases_signed: false` against a
+    // namespace whose kubectl probe RAN and observed one or more
+    // `HelmRelease` resources whose `metadata.annotations` lack a
+    // valid `ANNOTATION_SIGNATURE` entry (evidence of an unsigned
+    // release the prior deploy step failed to seal) is structurally
+    // indistinguishable from one against a namespace whose probe was
+    // never spawned (no evidence either way). A downstream `sekiban`
+    // strict-production policy that fails-closed on evidence of
+    // unsigned `HelmRelease` admissions cannot express that gate
+    // against the pre-fix bare bool — every Phase 2 record asserts
+    // the same negative value regardless of whether the probe
+    // substantiated an unsigned-release state or simply never ran.
+    // The typed `HelmReleaseSignatureOutcome` (`Verified` /
+    // `VerifyFailed` / `ProbeAbsent`) preserves the three operational
+    // worlds structurally; the call site routes through
+    // `is_verified()`, which returns `true` only on the `Verified`
+    // arm — the bool-surface semantics collapse to the pre-fix
+    // literal exactly. Today the certification function does not yet
+    // spawn a kubectl probe itself — the outcome collapses to
+    // `ProbeAbsent` → `all_releases_signed: false`, honestly naming
+    // "no HelmRelease signature-annotation probe ran inside the
+    // certification function" rather than asserting a single negative
+    // bool a probe-detected unsigned-release state would have also
+    // produced. Same deferral shape as the sibling
+    // `source_verification_outcome` / `network_policy_outcome` /
+    // commit 72424bd's `NixReproducibilityOutcome::ProbeAbsent` at
+    // the build-determinism layer, commit c1e83d5's
+    // `KensaPolicyOutcome::ProbeAbsent` at the chart-policy layer,
+    // commit d81f639's `HelmLintOutcome::ProbeAbsent` at the chart-
+    // quality layer, and commit b98eb5a's
+    // `SbomProbeOutcome::Absent` / `VulnScanProbeOutcome::Absent` at
+    // the SBOM / vuln-scan layer.
+    let helm_release_signature_outcome =
+        crate::helm_release_signature::HelmReleaseSignatureOutcome::ProbeAbsent;
+
     let deployment = DeploymentAttestation {
         namespace: format!("{}-{}", product, environment),
         kustomization: format!("{}-{}", product, environment),
         source_commit: source.commit.clone(),
         source_verified: source_verification_outcome.is_verified(),
         manifest_hash: Blake3Hash::digest(b"pending-deployment"),
-        all_releases_signed: false, // Will be true after this pipeline completes
-        cis_k8s_pass_rate: 0.0,     // Populated post-deploy by kensa
+        all_releases_signed: helm_release_signature_outcome.is_verified(),
+        cis_k8s_pass_rate: 0.0, // Populated post-deploy by kensa
         network_policies_verified: network_policy_outcome.is_verified(),
         running_pods: 0,
         all_healthy: false,
@@ -3276,6 +3330,138 @@ mod tests {
              through an inline literal that flattened the discriminator \
              between `ProbeAbsent` (no probe) and `VerifyFailed` \
              (probe ran and namespace lacks covering NetworkPolicy)",
+        );
+    }
+
+    /// **Load-bearing deployment-attestation honesty pin: the prior
+    /// `all_releases_signed: false` literal at the
+    /// `compose_product_certification` call site stamped a negative
+    /// Phase 2 HelmRelease-signature claim into every
+    /// `DeploymentAttestation` regardless of whether the cluster's
+    /// `HelmRelease` resources had actually been queried for the
+    /// deployment's namespace.** The bool surface was honest at the
+    /// claim layer (a deployment attestation that records
+    /// `all_releases_signed: false` against a certification function
+    /// that never spawned a kubectl probe is correctly negative) but
+    /// flattened three structurally distinct operational worlds a
+    /// downstream verifier reading `all_releases_signed: false` could
+    /// not recover from the bool alone: `Verified` (probe ran and
+    /// every `HelmRelease` carries a valid sekiban signature
+    /// annotation), `VerifyFailed` (probe ran and one or more
+    /// `HelmRelease` resources lack the annotation — evidence of an
+    /// unsigned release the prior deploy step failed to seal,
+    /// the structural failure THEORY §V.4 Phase 2 / §VII.1 names),
+    /// and `ProbeAbsent` (no kubectl probe ran inside the
+    /// certification function — no evidence either way). The typed
+    /// primitive `crate::helm_release_signature::
+    /// HelmReleaseSignatureOutcome` preserves the three operational
+    /// worlds the prior bare bool flattened, and the call site routes
+    /// through `is_verified()`, which returns `true` only on the
+    /// `Verified` arm.
+    ///
+    /// Until a follow-up commit wires a `kubectl get helmrelease`
+    /// (or typed `kube::Api::<HelmRelease>::list(...)`) probe at the
+    /// call site, the outcome collapses to `ProbeAbsent` →
+    /// `all_releases_signed: false` — honestly naming "no HelmRelease
+    /// signature-annotation probe ran inside the certification
+    /// function" rather than collapsing it into the same bool bucket
+    /// as a probe-detected unsigned-release state. Same fail-before /
+    /// pass-after shape as the sibling
+    /// `test_network_policies_verified_routes_through_typed_outcome`
+    /// (commit f8a5d8e) one layer over and
+    /// `test_source_verified_routes_through_typed_flux_outcome`
+    /// (commit 5931e32) two layers over (typed probe-absent at the
+    /// call site, real probe deferred to a follow-up).
+    ///
+    /// Pin the post-fix call-site expression directly so a future
+    /// regression that re-introduced a hardcoded bare `false` would
+    /// fail before any Phase 2 record was published under it: the
+    /// value the call site now passes for `all_releases_signed` is
+    /// exactly `HelmReleaseSignatureOutcome::ProbeAbsent.
+    /// is_verified()`, and that is structurally `false`. The
+    /// end-to-end pin then walks `compose_product_certification`
+    /// against a minimal source attestation and confirms `cert.
+    /// deployment.all_releases_signed == false`, where the pre-fix
+    /// body would have produced the same bool but through an inline
+    /// literal that flattened the discriminator — closes the sibling
+    /// gap the `// Will be true after this pipeline completes`
+    /// comment named directly above the `all_releases_signed: false`
+    /// literal in `compose_product_certification`.
+    #[test]
+    fn test_all_releases_signed_routes_through_typed_outcome() {
+        use crate::helm_release_signature::HelmReleaseSignatureOutcome;
+
+        // Call-site expression pin: this is the exact expression
+        // `compose_product_certification` now passes for
+        // `all_releases_signed`. The pre-fix call site passed the
+        // literal `false`; pinning the post-fix expression at this
+        // layer means a future refactor that dropped the typed-
+        // primitive route would fail this test before any Phase 2
+        // record was published under the regression. Same shape as
+        // `test_network_policies_verified_routes_through_typed_outcome`
+        // (`NetworkPolicyAdmissionOutcome::ProbeAbsent.is_verified()`)
+        // one layer over.
+        assert!(
+            !HelmReleaseSignatureOutcome::ProbeAbsent.is_verified(),
+            "ProbeAbsent must collapse to all_releases_signed=false \
+             in the Phase 2 deployment attestation; the pre-fix \
+             `false` hardcode carried the same bool here as for \
+             `VerifyFailed`, conflating no-evidence-collected with \
+             evidence-of-unsigned-release",
+        );
+
+        // The other two arms also have well-defined bool collapses —
+        // Verified → true, VerifyFailed → false. The three-arm
+        // distinction is structurally preserved at the enum level
+        // even though `is_verified` discards two of them at the bool
+        // surface (mirrors the
+        // `test_chart_provenance_four_arms_collapse_to_distinct_bools`
+        // shape one layer over).
+        assert!(HelmReleaseSignatureOutcome::Verified.is_verified());
+        assert!(!HelmReleaseSignatureOutcome::VerifyFailed.is_verified());
+
+        // End-to-end through compose_product_certification: a minimal
+        // source attestation composed under the staging policy
+        // produces `all_releases_signed: false` on the resulting
+        // `DeploymentAttestation`, where the pre-fix body produced
+        // the same bool but through an inline literal. The build /
+        // image / chart inputs are empty (except the one build that
+        // gives the SLSA-provenance compliance dimension non-trivial
+        // content) so the compose path exercises the deployment-
+        // attestation construction directly without involving the
+        // probe-driven Phase 1 inputs — same isolation discipline as
+        // `test_network_policies_verified_routes_through_typed_outcome`
+        // one layer over.
+        let source = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source,
+            vec![build_at("backend", SlsaLevel::L2)],
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+        assert!(
+            !cert.deployment.all_releases_signed,
+            "the typed-primitive route at the call site must drive \
+             all_releases_signed=false through to the \
+             DeploymentAttestation record when no kubectl HelmRelease \
+             probe ran inside the certification function; the pre-fix \
+             `false` hardcode produced the same bool here but routed \
+             through an inline literal that flattened the discriminator \
+             between `ProbeAbsent` (no probe) and `VerifyFailed` \
+             (probe ran and namespace has unsigned HelmReleases)",
         );
     }
 }

@@ -20,6 +20,8 @@ mod git_signature;
 mod helm_lint;
 mod helm_provenance;
 #[cfg(feature = "attestation")]
+mod helm_release_signature;
+#[cfg(feature = "attestation")]
 mod kensa_policy;
 #[cfg(feature = "attestation")]
 mod network_policy_admission;
