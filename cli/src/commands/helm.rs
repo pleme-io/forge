@@ -542,8 +542,68 @@ fn prepare_chart_workspace(
             .with_context(|| format!("Failed to copy library chart from {}", lib_src.display()))?;
     }
 
+    // Stage the chart's file:// SIBLING chart deps (anything beyond the lib
+    // chart) as flat siblings in the temp dir, recursively — so a wrapper chart
+    // (e.g. lareira-jellyfin → file://../pleme-lareira → file://../pleme-microservice)
+    // resolves every `file://../X` to tmp/X under helm dependency update. Without
+    // this the tmp-copy isolates the chart away from its siblings and lint fails
+    // with "directory .../pleme-lareira not found". The lib chart + the chart
+    // itself are already staged, so seed `copied` with them to avoid re-copy / loops.
+    let mut copied: std::collections::HashSet<String> =
+        [chart_name.to_string(), lib_chart_name.to_string()].into_iter().collect();
+    stage_file_sibling_deps(&src_chart, tmp_path, &mut copied)?;
+
     let chart_path = dst_chart.to_string_lossy().to_string();
     Ok((tmpdir, chart_path))
+}
+
+/// The `file://` repository paths declared in a Chart.yaml's `dependencies`.
+fn file_dep_paths(chart_yaml_content: &str) -> Vec<String> {
+    chart_yaml_content
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("repository:").map(str::trim))
+        .map(|v| v.trim_matches(['"', '\''].as_ref()).to_string())
+        .filter(|v| v.starts_with("file://"))
+        .collect()
+}
+
+/// Recursively copy a chart's `file://` sibling chart dependencies into `tmp_path`
+/// as flat siblings (matching helm's `file://../X` resolution from the copied
+/// chart). `copied` tracks already-staged chart dir names so a dep shared by many
+/// wrappers (pleme-lareira, pleme-microservice, …) is copied once and cycles
+/// terminate. `chart_src` is the dep's ORIGINAL on-disk dir, so nested file://
+/// deps resolve against the real charts directory.
+fn stage_file_sibling_deps(
+    chart_src: &Path,
+    tmp_path: &Path,
+    copied: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    let chart_yaml = chart_src.join("Chart.yaml");
+    if !chart_yaml.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&chart_yaml)
+        .with_context(|| format!("Failed to read {}", chart_yaml.display()))?;
+
+    for rel in file_dep_paths(&content) {
+        let rel_path = rel.strip_prefix("file://").unwrap_or(&rel);
+        let dep_src = match chart_src.join(rel_path).canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue, // unresolved file:// dep — let helm surface it
+        };
+        let Some(dep_name) = dep_src.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if copied.contains(dep_name) || !dep_src.is_dir() {
+            continue;
+        }
+        copy_dir_recursive(&dep_src, &tmp_path.join(dep_name))
+            .with_context(|| format!("Failed to copy sibling chart dep {}", dep_name))?;
+        copied.insert(dep_name.to_string());
+        // Recurse against the dep's ORIGINAL dir so ITS file:// siblings resolve.
+        stage_file_sibling_deps(&dep_src, tmp_path, copied)?;
+    }
+    Ok(())
 }
 
 /// Recursively copy a directory.
