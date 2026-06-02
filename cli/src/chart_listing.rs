@@ -39,7 +39,16 @@
 //! mirroring the existing `b"no-tree-listing"`, `b"no-manifest"`, and
 //! `b"no-flake-lock"` peers.
 
-use tameshi::hash::Blake3Hash;
+/// Lowercase-hex BLAKE3 digest of `data`. Uses the `blake3` crate directly so
+/// this CORE (default-built) module carries no dependency on the *optional*
+/// `tameshi` attestation crate — `tameshi` is gated behind the `attestation`
+/// feature, and `mod chart_listing` is the chart-identity oracle consumed by the
+/// non-attestation release/lint paths, so it must compile under default features.
+/// The value is byte-identical to `tameshi::hash::Blake3Hash::digest(data).to_hex()`
+/// (both are the standard BLAKE3 of `data` rendered as lowercase hex).
+fn blake3_hex(data: &[u8]) -> String {
+    blake3::hash(data).to_hex().to_string()
+}
 
 /// One validated chart-directory entry: a chart-relative path
 /// (forward-slash-separated for filesystem portability) and the
@@ -66,7 +75,7 @@ impl ChartEntry {
     pub fn new(path: String, content: &[u8]) -> Self {
         Self {
             path,
-            content_hash: Blake3Hash::digest(content).to_hex(),
+            content_hash: blake3_hex(content),
         }
     }
 
@@ -132,7 +141,7 @@ mod tests {
         );
         assert_eq!(
             a.content_hash(),
-            Blake3Hash::digest(b"hello").to_hex(),
+            blake3_hex(b"hello"),
             "the content hash is the BLAKE3 of the bytes",
         );
     }
@@ -167,8 +176,8 @@ mod tests {
             e("values.yaml", b"x: 1\n"),
         ];
         let fp = canonical_chart_fingerprint(entries);
-        let chart_yaml_hash = Blake3Hash::digest(b"name: foo\n").to_hex();
-        let values_yaml_hash = Blake3Hash::digest(b"x: 1\n").to_hex();
+        let chart_yaml_hash = blake3_hex(b"name: foo\n");
+        let values_yaml_hash = blake3_hex(b"x: 1\n");
         let expected = format!("Chart.yaml\t{chart_yaml_hash}\nvalues.yaml\t{values_yaml_hash}",);
         assert_eq!(fp, expected, "repeated entries collapse to one line");
     }
