@@ -31,6 +31,8 @@ mod oci_architecture;
 mod oci_manifest;
 mod openpgp_signature;
 #[cfg(feature = "attestation")]
+mod pod_health;
+#[cfg(feature = "attestation")]
 mod security_scan;
 mod store_path;
 mod tree_listing;
