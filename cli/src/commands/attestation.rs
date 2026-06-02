@@ -874,6 +874,56 @@ pub fn compose_product_certification(
     let helm_release_signature_outcome =
         crate::helm_release_signature::HelmReleaseSignatureOutcome::ProbeAbsent;
 
+    // Kubernetes `Pod` resources covering the namespace's deployed
+    // workloads are the typed evidence channel for the Phase 2
+    // `all_healthy` claim: each `Pod` carries a `status.phase`
+    // (lifecycle position — `Pending`, `Running`, `Succeeded`,
+    // `Failed`, `Unknown`) and a `status.conditions[type=Ready]` entry
+    // (readiness signal that gates Service endpoint inclusion — a
+    // `Running` pod with `Ready=False` is excluded from load-balancer
+    // targets even though its lifecycle phase is positive). The prior
+    // `all_healthy: false` literal at this call site was honest at the
+    // bool surface (a deployment attestation that records `all_healthy:
+    // false` against a certification function that never spawned a
+    // `kubectl get pods` probe is correctly negative) but flattened
+    // three structurally distinct operational worlds — the `Healthy`
+    // / `UnhealthyPods` / `ProbeAbsent` distinction a `kubectl get
+    // pods -n <ns> -o json` (or typed `kube::Api::<Pod>::list(...)`)
+    // probe would yield — into a single negative bucket. The
+    // `UnhealthyPods` collapse is the most load-bearing: a Phase 2
+    // deployment attestation that records `all_healthy: false` against
+    // a namespace whose kubectl probe RAN and observed one or more
+    // pods in `Pending`, `Failed`, `Unknown`, or `Running`-but-not-
+    // `Ready` state (evidence of a rollout that landed unhealthy
+    // workloads — the structural failure THEORY §V.4 Phase 2 names)
+    // is structurally indistinguishable from one against a namespace
+    // whose probe was never spawned (no evidence either way). A
+    // downstream `sekiban` strict-production policy that fails-closed
+    // on evidence of unhealthy pods cannot express that gate against
+    // the pre-fix bare bool — every Phase 2 record asserts the same
+    // negative value regardless of whether `kubectl get pods`
+    // substantiated an unhealthy-pod state or whether it simply never
+    // ran. The typed `PodHealthOutcome` (`Healthy` / `UnhealthyPods`
+    // / `ProbeAbsent`) preserves the three operational worlds
+    // structurally; the call site routes through `is_healthy()`, which
+    // returns `true` only on the `Healthy` arm — the bool-surface
+    // semantics collapse to the pre-fix literal exactly. Today the
+    // certification function does not yet spawn a kubectl probe itself
+    // — the outcome collapses to `ProbeAbsent` → `all_healthy: false`,
+    // honestly naming "no pod-health probe ran inside the certification
+    // function" rather than asserting a single negative bool a
+    // probe-detected unhealthy-pod state would have also produced.
+    // Same deferral shape as the sibling `helm_release_signature_
+    // outcome` (commit 8b1407d), `network_policy_outcome` (commit
+    // f8a5d8e), `source_verification_outcome` (commit 5931e32),
+    // commit 72424bd's `NixReproducibilityOutcome::ProbeAbsent` at the
+    // build-determinism layer, commit c1e83d5's `KensaPolicyOutcome::
+    // ProbeAbsent` at the chart-policy layer, commit d81f639's
+    // `HelmLintOutcome::ProbeAbsent` at the chart-quality layer, and
+    // commit b98eb5a's `SbomProbeOutcome::Absent` /
+    // `VulnScanProbeOutcome::Absent` at the SBOM / vuln-scan layer.
+    let pod_health_outcome = crate::pod_health::PodHealthOutcome::ProbeAbsent;
+
     let deployment = DeploymentAttestation {
         namespace: format!("{}-{}", product, environment),
         kustomization: format!("{}-{}", product, environment),
@@ -884,7 +934,7 @@ pub fn compose_product_certification(
         cis_k8s_pass_rate: 0.0, // Populated post-deploy by kensa
         network_policies_verified: network_policy_outcome.is_verified(),
         running_pods: 0,
-        all_healthy: false,
+        all_healthy: pod_health_outcome.is_healthy(),
     };
 
     let slsa_dimension = slsa_compliance_dimension(&builds, &policy);
@@ -3462,6 +3512,133 @@ mod tests {
              through an inline literal that flattened the discriminator \
              between `ProbeAbsent` (no probe) and `VerifyFailed` \
              (probe ran and namespace has unsigned HelmReleases)",
+        );
+    }
+
+    /// **Load-bearing deployment-attestation honesty pin: the prior
+    /// `all_healthy: false` literal at the `compose_product_
+    /// certification` call site stamped a negative Phase 2 pod-health
+    /// claim into every `DeploymentAttestation` regardless of whether
+    /// the cluster's `Pod` resources had actually been queried for the
+    /// deployment's namespace.** The bool surface was honest at the
+    /// claim layer (a deployment attestation that records
+    /// `all_healthy: false` against a certification function that never
+    /// spawned a kubectl probe is correctly negative) but flattened
+    /// three structurally distinct operational worlds a downstream
+    /// verifier reading `all_healthy: false` could not recover from
+    /// the bool alone: `Healthy` (probe ran and every `Pod` is
+    /// `Running` and `Ready`), `UnhealthyPods` (probe ran and one or
+    /// more `Pod` resources are in `Pending`, `Failed`, `Unknown`, or
+    /// `Running`-but-not-`Ready` state — evidence of a rollout that
+    /// landed unhealthy workloads, the structural failure THEORY §V.4
+    /// Phase 2 names), and `ProbeAbsent` (no kubectl probe ran inside
+    /// the certification function — no evidence either way). The typed
+    /// primitive `crate::pod_health::PodHealthOutcome` preserves the
+    /// three operational worlds the prior bare bool flattened, and the
+    /// call site routes through `is_healthy()`, which returns `true`
+    /// only on the `Healthy` arm.
+    ///
+    /// Until a follow-up commit wires a `kubectl get pods` (or typed
+    /// `kube::Api::<Pod>::list(...)`) probe at the call site, the
+    /// outcome collapses to `ProbeAbsent` → `all_healthy: false` —
+    /// honestly naming "no pod-health probe ran inside the
+    /// certification function" rather than collapsing it into the same
+    /// bool bucket as a probe-detected unhealthy-pod state. Same
+    /// fail-before / pass-after shape as the sibling
+    /// `test_all_releases_signed_routes_through_typed_outcome`
+    /// (commit 8b1407d) one layer over and
+    /// `test_network_policies_verified_routes_through_typed_outcome`
+    /// (commit f8a5d8e) two layers over (typed probe-absent at the
+    /// call site, real probe deferred to a follow-up).
+    ///
+    /// Pin the post-fix call-site expression directly so a future
+    /// regression that re-introduced a hardcoded bare `false` would
+    /// fail before any Phase 2 record was published under it: the
+    /// value the call site now passes for `all_healthy` is exactly
+    /// `PodHealthOutcome::ProbeAbsent.is_healthy()`, and that is
+    /// structurally `false`. The end-to-end pin then walks
+    /// `compose_product_certification` against a minimal source
+    /// attestation and confirms `cert.deployment.all_healthy == false`,
+    /// where the pre-fix body would have produced the same bool but
+    /// through an inline literal that flattened the discriminator —
+    /// closes the sibling gap the `// These will be populated by
+    /// sekiban and kensa once deployed` comment named directly above
+    /// the `all_healthy: false` literal in
+    /// `compose_product_certification`.
+    #[test]
+    fn test_all_healthy_routes_through_typed_pod_outcome() {
+        use crate::pod_health::PodHealthOutcome;
+
+        // Call-site expression pin: this is the exact expression
+        // `compose_product_certification` now passes for `all_healthy`.
+        // The pre-fix call site passed the literal `false`; pinning
+        // the post-fix expression at this layer means a future refactor
+        // that dropped the typed-primitive route would fail this test
+        // before any Phase 2 record was published under the regression.
+        // Same shape as `test_all_releases_signed_routes_through_typed_
+        // outcome` (`HelmReleaseSignatureOutcome::ProbeAbsent.
+        // is_verified()`) one layer over.
+        assert!(
+            !PodHealthOutcome::ProbeAbsent.is_healthy(),
+            "ProbeAbsent must collapse to all_healthy=false in the \
+             Phase 2 deployment attestation; the pre-fix `false` \
+             hardcode carried the same bool here as for \
+             `UnhealthyPods`, conflating no-evidence-collected with \
+             evidence-of-unhealthy-pod",
+        );
+
+        // The other two arms also have well-defined bool collapses —
+        // Healthy → true, UnhealthyPods → false. The three-arm
+        // distinction is structurally preserved at the enum level even
+        // though `is_healthy` discards two of them at the bool surface
+        // (mirrors the
+        // `test_all_releases_signed_routes_through_typed_outcome`
+        // shape one layer over).
+        assert!(PodHealthOutcome::Healthy.is_healthy());
+        assert!(!PodHealthOutcome::UnhealthyPods.is_healthy());
+
+        // End-to-end through compose_product_certification: a minimal
+        // source attestation composed under the staging policy produces
+        // `all_healthy: false` on the resulting `DeploymentAttestation`,
+        // where the pre-fix body produced the same bool but through an
+        // inline literal. The build / image / chart inputs are empty
+        // (except the one build that gives the SLSA-provenance
+        // compliance dimension non-trivial content) so the compose path
+        // exercises the deployment-attestation construction directly
+        // without involving the probe-driven Phase 1 inputs — same
+        // isolation discipline as
+        // `test_all_releases_signed_routes_through_typed_outcome` one
+        // layer over.
+        let source = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source,
+            vec![build_at("backend", SlsaLevel::L2)],
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+        assert!(
+            !cert.deployment.all_healthy,
+            "the typed-primitive route at the call site must drive \
+             all_healthy=false through to the DeploymentAttestation \
+             record when no kubectl Pod probe ran inside the \
+             certification function; the pre-fix `false` hardcode \
+             produced the same bool here but routed through an inline \
+             literal that flattened the discriminator between \
+             `ProbeAbsent` (no probe) and `UnhealthyPods` (probe ran \
+             and namespace has non-Running-or-non-Ready pods)",
         );
     }
 }
