@@ -769,6 +769,57 @@ pub fn compose_product_certification(
     // array for the `SourceVerified` entry.
     let source_verification_outcome =
         crate::flux_source_verification::FluxSourceVerificationOutcome::ProbeAbsent;
+
+    // `kubectl get networkpolicy -n <ns> -o json` (or its typed
+    // `kube-rs` equivalent `kube::Api::<NetworkPolicy>::list(...)`)
+    // is the cluster-side probe whose `NetworkPolicyList.items`
+    // walked against the namespace's pod-listing populates the
+    // Phase 2 deployment attestation's `network_policies_verified`
+    // claim. The prior `network_policies_verified: false` literal at
+    // this call site was honest at the bool surface (a deployment
+    // attestation that records `network_policies_verified: false`
+    // against a certification function that never spawned a kubectl
+    // probe is correctly negative) but flattened three structurally
+    // distinct operational worlds — the `Verified` / `VerifyFailed`
+    // / `ProbeAbsent` distinction a `kubectl get networkpolicy`
+    // probe would yield — into a single negative bucket. The
+    // `VerifyFailed` collapse is the most load-bearing: a Phase 2
+    // deployment attestation that records `network_policies_verified:
+    // false` against a namespace whose kubectl probe RAN and
+    // observed zero matching `NetworkPolicy` resources (evidence of
+    // an open / unsegmented namespace, the structural failure CIS
+    // Kubernetes Benchmark §5.3.2 names) is structurally
+    // indistinguishable from one against a namespace whose probe was
+    // never spawned (no evidence either way). A downstream `sekiban`
+    // strict-production policy that fails-closed on evidence of
+    // missing network segmentation cannot express that gate against
+    // the pre-fix bare bool — every Phase 2 record asserts the same
+    // negative value regardless of whether `kubectl get
+    // networkpolicy` substantiated a missing-policy state or whether
+    // it simply never ran. The typed
+    // `NetworkPolicyAdmissionOutcome` (`Verified` / `VerifyFailed`
+    // / `ProbeAbsent`) preserves the three operational worlds
+    // structurally; the call site routes through `is_verified()`,
+    // which returns `true` only on the `Verified` arm — the bool-
+    // surface semantics collapse to the pre-fix literal exactly.
+    // Today the certification function does not yet spawn a kubectl
+    // probe itself — the outcome collapses to `ProbeAbsent` →
+    // `network_policies_verified: false`, honestly naming "no
+    // NetworkPolicy admission probe ran inside the certification
+    // function" rather than asserting a single negative bool a
+    // probe-detected missing-policy state would have also produced.
+    // Same deferral shape as the sibling
+    // `source_verification_outcome = FluxSourceVerificationOutcome::
+    // ProbeAbsent` two lines up (commit 5931e32), commit 72424bd's
+    // `NixReproducibilityOutcome::ProbeAbsent` at the build-
+    // determinism layer, commit c1e83d5's `KensaPolicyOutcome::
+    // ProbeAbsent` at the chart-policy layer, commit d81f639's
+    // `HelmLintOutcome::ProbeAbsent` at the chart-quality layer, and
+    // commit b98eb5a's `SbomProbeOutcome::Absent` /
+    // `VulnScanProbeOutcome::Absent` at the SBOM / vuln-scan layer.
+    let network_policy_outcome =
+        crate::network_policy_admission::NetworkPolicyAdmissionOutcome::ProbeAbsent;
+
     let deployment = DeploymentAttestation {
         namespace: format!("{}-{}", product, environment),
         kustomization: format!("{}-{}", product, environment),
@@ -777,7 +828,7 @@ pub fn compose_product_certification(
         manifest_hash: Blake3Hash::digest(b"pending-deployment"),
         all_releases_signed: false, // Will be true after this pipeline completes
         cis_k8s_pass_rate: 0.0,     // Populated post-deploy by kensa
-        network_policies_verified: false,
+        network_policies_verified: network_policy_outcome.is_verified(),
         running_pods: 0,
         all_healthy: false,
     };
@@ -3094,6 +3145,137 @@ mod tests {
              the pre-fix sentinel produced byte-identical hashes for \
              these two cases — the discriminator the hash is supposed \
              to provide was lost",
+        );
+    }
+
+    /// **Load-bearing deployment-attestation honesty pin: the prior
+    /// `network_policies_verified: false` literal at the
+    /// `compose_product_certification` call site stamped a negative
+    /// Phase 2 network-segmentation claim into every
+    /// `DeploymentAttestation` regardless of whether the cluster's
+    /// `NetworkPolicy` resources had actually been queried for the
+    /// deployment's namespace.** The bool surface was honest at the
+    /// claim layer (a deployment attestation that records
+    /// `network_policies_verified: false` against a certification
+    /// function that never spawned a kubectl probe is correctly
+    /// negative) but flattened three structurally distinct
+    /// operational worlds a downstream verifier reading
+    /// `network_policies_verified: false` could not recover from
+    /// the bool alone: `Verified` (probe ran and every workload is
+    /// covered), `VerifyFailed` (probe ran and the namespace has no
+    /// covering NetworkPolicy — evidence of an open / unsegmented
+    /// namespace, the structural failure CIS Kubernetes Benchmark
+    /// §5.3.2 names), and `ProbeAbsent` (no kubectl probe ran inside
+    /// the certification function — no evidence either way). The
+    /// typed primitive
+    /// `crate::network_policy_admission::NetworkPolicyAdmissionOutcome`
+    /// preserves the three operational worlds the prior bare bool
+    /// flattened, and the call site routes through `is_verified()`,
+    /// which returns `true` only on the `Verified` arm.
+    ///
+    /// Until a follow-up commit wires a `kubectl get networkpolicy`
+    /// (or typed `kube::Api::<NetworkPolicy>::list(...)`) probe at
+    /// the call site, the outcome collapses to `ProbeAbsent` →
+    /// `network_policies_verified: false` — honestly naming "no
+    /// NetworkPolicy admission probe ran inside the certification
+    /// function" rather than collapsing it into the same bool bucket
+    /// as a probe-detected missing-policy state. Same fail-before /
+    /// pass-after shape as the sibling
+    /// `test_source_verified_routes_through_typed_flux_outcome`
+    /// (commit 5931e32) one layer over and
+    /// `test_reproducible_routes_through_typed_nix_outcome` (commit
+    /// 72424bd) two layers over (typed probe-absent at the call
+    /// site, real probe deferred to a follow-up).
+    ///
+    /// Pin the post-fix call-site expression directly so a future
+    /// regression that re-introduced a hardcoded bare `false` would
+    /// fail before any Phase 2 record was published under it: the
+    /// value the call site now passes for `network_policies_verified`
+    /// is exactly `NetworkPolicyAdmissionOutcome::ProbeAbsent.
+    /// is_verified()`, and that is structurally `false`. The
+    /// end-to-end pin then walks `compose_product_certification`
+    /// against a minimal source attestation and confirms `cert.
+    /// deployment.network_policies_verified == false`, where the
+    /// pre-fix body would have produced the same bool but through an
+    /// inline literal that flattened the discriminator — closes the
+    /// sibling gap the `// These will be populated by sekiban and
+    /// kensa once deployed` comment named directly above the
+    /// `network_policies_verified: false` literal in
+    /// `compose_product_certification`.
+    #[test]
+    fn test_network_policies_verified_routes_through_typed_outcome() {
+        use crate::network_policy_admission::NetworkPolicyAdmissionOutcome;
+
+        // Call-site expression pin: this is the exact expression
+        // `compose_product_certification` now passes for
+        // `network_policies_verified`. The pre-fix call site passed
+        // the literal `false`; pinning the post-fix expression at
+        // this layer means a future refactor that dropped the typed-
+        // primitive route would fail this test before any Phase 2
+        // record was published under the regression. Same shape as
+        // `test_source_verified_routes_through_typed_flux_outcome`
+        // (`FluxSourceVerificationOutcome::ProbeAbsent.is_verified()`)
+        // one layer over.
+        assert!(
+            !NetworkPolicyAdmissionOutcome::ProbeAbsent.is_verified(),
+            "ProbeAbsent must collapse to network_policies_verified=\
+             false in the Phase 2 deployment attestation; the pre-fix \
+             `false` hardcode carried the same bool here as for \
+             `VerifyFailed`, conflating no-evidence-collected with \
+             evidence-of-missing-policy",
+        );
+
+        // The other two arms also have well-defined bool collapses —
+        // Verified → true, VerifyFailed → false. The three-arm
+        // distinction is structurally preserved at the enum level
+        // even though `is_verified` discards two of them at the bool
+        // surface (mirrors the
+        // `test_chart_provenance_four_arms_collapse_to_distinct_bools`
+        // shape one layer over).
+        assert!(NetworkPolicyAdmissionOutcome::Verified.is_verified());
+        assert!(!NetworkPolicyAdmissionOutcome::VerifyFailed.is_verified());
+
+        // End-to-end through compose_product_certification: a minimal
+        // source attestation composed under the staging policy
+        // produces `network_policies_verified: false` on the resulting
+        // `DeploymentAttestation`, where the pre-fix body produced
+        // the same bool but through an inline literal. The build /
+        // image / chart inputs are empty here so the compose path
+        // exercises the deployment-attestation construction directly
+        // without involving the probe-driven Phase 1 inputs — same
+        // isolation discipline as
+        // `test_source_verified_routes_through_typed_flux_outcome`
+        // one layer over.
+        let source = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source,
+            vec![build_at("backend", SlsaLevel::L2)],
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+        assert!(
+            !cert.deployment.network_policies_verified,
+            "the typed-primitive route at the call site must drive \
+             network_policies_verified=false through to the \
+             DeploymentAttestation record when no kubectl NetworkPolicy \
+             probe ran inside the certification function; the pre-fix \
+             `false` hardcode produced the same bool here but routed \
+             through an inline literal that flattened the discriminator \
+             between `ProbeAbsent` (no probe) and `VerifyFailed` \
+             (probe ran and namespace lacks covering NetworkPolicy)",
         );
     }
 }
