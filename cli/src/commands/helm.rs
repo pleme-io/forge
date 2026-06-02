@@ -495,19 +495,45 @@ fn discover_charts(charts_dir: &str, exclude_name: &str) -> Result<Vec<String>> 
         bail!("Charts directory not found: {}", charts_dir);
     }
 
-    let mut charts: Vec<String> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-        .filter(|e| {
-            let name = e.file_name();
-            let name_str = name.to_string_lossy();
-            name_str != exclude_name && e.path().join("Chart.yaml").exists()
-        })
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
+    let mut charts: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(dir)?.filter_map(std::result::Result::ok) {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == exclude_name || !entry.path().join("Chart.yaml").exists() {
+            continue;
+        }
+        // Per-chart opt-out: a digest-substituted / GitOps-local chart (not a
+        // generic OCI library chart — e.g. it pins an all-zero placeholder image
+        // digest a separate flow substitutes at release) declares
+        // `annotations: { pleme.io/oci-auto-release: "false" }` and is skipped.
+        // Logged, never silently dropped (no-silent-caps).
+        if chart_oci_auto_release_disabled(&entry.path()) {
+            info!("Skipping {} (pleme.io/oci-auto-release: \"false\")", name);
+            continue;
+        }
+        charts.push(name);
+    }
 
     charts.sort();
     Ok(charts)
+}
+
+/// Whether a chart opts OUT of OCI auto-release via
+/// `annotations["pleme.io/oci-auto-release"] == "false"` in its Chart.yaml.
+fn chart_oci_auto_release_disabled(chart_dir: &Path) -> bool {
+    #[derive(serde::Deserialize)]
+    struct ChartYaml {
+        #[serde(default)]
+        annotations: std::collections::BTreeMap<String, String>,
+    }
+    std::fs::read_to_string(chart_dir.join("Chart.yaml"))
+        .ok()
+        .and_then(|c| serde_yaml::from_str::<ChartYaml>(&c).ok())
+        .and_then(|c| c.annotations.get("pleme.io/oci-auto-release").cloned())
+        .map(|v| v == "false")
+        .unwrap_or(false)
 }
 
 /// Prepare a temp directory with a chart and its library dependency.
