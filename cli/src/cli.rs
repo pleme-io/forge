@@ -1762,6 +1762,20 @@ pub enum HelmCommands {
         #[arg(long, default_value = "oci://ghcr.io/pleme-io/charts")]
         registry: String,
     },
+
+    /// Mirror upstream third-party subcharts into the pleme-io OCI registry so
+    /// the auto-release never fetches from a third-party repo at release time.
+    /// Everything is derived from the wrapper charts' own Chart.yaml dependencies
+    /// — no separate catalog.
+    Mirror {
+        /// Directory containing wrapper chart subdirectories
+        #[arg(long, default_value = "charts")]
+        charts_dir: String,
+
+        /// OCI registry to mirror INTO
+        #[arg(long, default_value = "oci://ghcr.io/pleme-io/charts")]
+        registry: String,
+    },
 }
 
 /// Tool release lifecycle subcommands
