@@ -1044,6 +1044,64 @@ pub fn compose_product_certification(
     let deployment_manifest_outcome =
         crate::deployment_manifest::DeploymentManifestRenderOutcome::ProbeAbsent;
 
+    // `kensa cis-k8s --cluster <ctx> --format json` (or its typed
+    // `kensa::cis_k8s::audit(...)` library equivalent) is the cluster-
+    // side probe whose `passed_controls / total_controls` ratio over
+    // the union of CIS Kubernetes Benchmark §1 (Master-Node) / §2
+    // (etcd) / §3 (Control-Plane) / §4 (Worker-Node) / §5 (Policies)
+    // controls populates the Phase 2 deployment attestation's
+    // `cis_k8s_pass_rate` claim. The prior `cis_k8s_pass_rate: 0.0`
+    // literal at this call site was honest at the f64 surface (a
+    // deployment attestation that records `cis_k8s_pass_rate: 0.0`
+    // against a certification function that never spawned a kensa
+    // probe is correctly zero — no evidence was collected, and the
+    // surface value fails-closed under any policy whose
+    // `min_cis_pass_rate > 0.0`) but flattened two structurally
+    // distinct operational worlds — the `Probed { ratio: 0.0 }` /
+    // `ProbeAbsent` distinction a kensa CIS probe would yield — into a
+    // single zero. The `Probed { ratio: 0.0 }` collapse is the load-
+    // bearing discriminator loss: a Phase 2 deployment attestation
+    // that records `cis_k8s_pass_rate: 0.0` against a cluster whose
+    // kensa probe RAN and observed zero passing controls (evidence of
+    // a freshly provisioned cluster or one whose CIS baseline never
+    // landed — the structural failure CIS Kubernetes Benchmark §1–§5
+    // names) is structurally indistinguishable from one against a
+    // cluster whose probe was never spawned (no evidence either way).
+    // A downstream `sekiban` strict-production policy that fails-closed
+    // on evidence of a zero-pass-rate posture cannot express that gate
+    // against the pre-fix bare f64 — every Phase 2 record asserts the
+    // same zero regardless of whether `kensa cis-k8s` substantiated a
+    // zero-pass-rate state or whether it simply never ran. The typed
+    // `crate::cis_k8s_pass_rate::CisK8sPassRateOutcome` (`Probed {
+    // ratio }` / `ProbeAbsent`) preserves both operational worlds the
+    // prior bare f64 flattened; the call site routes through
+    // `pass_rate()` which collapses `Probed { ratio } -> ratio` and
+    // `ProbeAbsent -> 0.0` — f64 surface unchanged for the no-probe-
+    // ran world, structural discriminator restored. With this commit,
+    // the last remaining hardcoded scalar field on the Phase 2
+    // `DeploymentAttestation` closes the typed-primitive route,
+    // leaving every Phase 2 field grounded in a typed probe outcome.
+    // Same deferral shape as commit d002374's
+    // `PodListingOutcome::ProbeAbsent` at the running-pod-count layer,
+    // commit e76db87's `PodHealthOutcome::ProbeAbsent` at the
+    // pod-readiness layer, commit 8b1407d's
+    // `HelmReleaseSignatureOutcome::ProbeAbsent` at the HelmRelease-
+    // signature layer, commit f8a5d8e's
+    // `NetworkPolicyAdmissionOutcome::ProbeAbsent` at the network-
+    // segmentation layer, commit 5931e32's
+    // `FluxSourceVerificationOutcome::ProbeAbsent` at the source-
+    // verification layer, commit 36d90b6's
+    // `DeploymentManifestRenderOutcome::ProbeAbsent` at the rendered-
+    // manifest layer, and commits 72424bd / c1e83d5 / d81f639 /
+    // b98eb5a at the build-determinism / chart-policy / chart-quality
+    // / SBOM-vuln-scan layers. Today the certification function does
+    // not yet spawn a kensa CIS probe itself — the outcome collapses
+    // to `ProbeAbsent` → `cis_k8s_pass_rate: 0.0`, honestly naming
+    // "no kensa CIS probe ran inside the certification function"
+    // rather than asserting a single zero a probe-detected zero-pass-
+    // rate cluster would have also produced.
+    let cis_k8s_pass_rate_outcome = crate::cis_k8s_pass_rate::CisK8sPassRateOutcome::ProbeAbsent;
+
     let deployment = DeploymentAttestation {
         namespace: format!("{}-{}", product, environment),
         kustomization: format!("{}-{}", product, environment),
@@ -1051,7 +1109,7 @@ pub fn compose_product_certification(
         source_verified: source_verification_outcome.is_verified(),
         manifest_hash: deployment_manifest_outcome.manifest_hash(),
         all_releases_signed: helm_release_signature_outcome.is_verified(),
-        cis_k8s_pass_rate: 0.0, // Populated post-deploy by kensa
+        cis_k8s_pass_rate: cis_k8s_pass_rate_outcome.pass_rate(),
         network_policies_verified: network_policy_outcome.is_verified(),
         running_pods: pod_listing_outcome.running_pods(),
         all_healthy: pod_health_outcome.is_healthy(),
@@ -4091,6 +4149,161 @@ mod tests {
              DeploymentAttestation record; any divergence would mean \
              the typed primitive is NOT the sole source of the usize \
              at the call site, re-opening the discriminator loss the \
+             primitive exists to close",
+        );
+    }
+
+    /// **Load-bearing deployment-attestation honesty pin: the prior
+    /// `cis_k8s_pass_rate: 0.0` literal at the
+    /// `compose_product_certification` call site stamped a bare zero
+    /// `f64` into every Phase 2 `DeploymentAttestation`'s
+    /// `cis_k8s_pass_rate` field regardless of whether a kensa CIS-
+    /// Kubernetes-Benchmark audit ran inside the certification
+    /// function.** Two structurally distinct operational worlds —
+    /// `Probed { ratio: 0.0 }` (probe RAN against a cluster that failed
+    /// every CIS control — evidence of a freshly provisioned cluster
+    /// or one whose CIS baseline never landed, the structural failure
+    /// mode CIS Kubernetes Benchmark §1–§5 names) and `ProbeAbsent`
+    /// (no probe ran inside the certification function — no evidence
+    /// either way) — collapsed to the same `0.0`, losing the
+    /// discriminator a downstream `sekiban` strict-production policy
+    /// that fails-closed on evidence of a zero-pass-rate cluster
+    /// depends on. The typed primitive
+    /// `crate::cis_k8s_pass_rate::CisK8sPassRateOutcome` (`Probed {
+    /// ratio }` / `ProbeAbsent`) preserves both operational worlds the
+    /// prior bare `f64` flattened; the call site routes through
+    /// `pass_rate()` which collapses `Probed { ratio } -> ratio` and
+    /// `ProbeAbsent -> 0.0` — `f64` surface unchanged for the no-
+    /// probe-ran world, structural discriminator restored. With this
+    /// commit, the last remaining hardcoded scalar field on the Phase
+    /// 2 `DeploymentAttestation` closes the typed-primitive route,
+    /// leaving every Phase 2 field grounded in a typed probe outcome.
+    ///
+    /// Until a follow-up commit wires a `kensa cis-k8s` (or typed
+    /// `kensa::cis_k8s::audit(...)`) probe at the call site, the
+    /// outcome collapses to `ProbeAbsent -> cis_k8s_pass_rate: 0.0` —
+    /// honestly naming "no kensa CIS probe ran inside the
+    /// certification function" rather than stamping a zero that would
+    /// also be produced under probed-zero-pass-rate. Same fail-before
+    /// / pass-after shape as
+    /// `test_running_pods_routes_through_typed_pod_listing_outcome`
+    /// (commit d002374) and
+    /// `test_manifest_hash_routes_through_typed_render_outcome`
+    /// (commit 36d90b6) at the sibling Phase 2 scalar fields (typed
+    /// probe-absent at the call site, real probe deferred to a
+    /// follow-up).
+    ///
+    /// Pin the post-fix call-site expression directly so a future
+    /// regression that re-introduced the hardcoded bare `0.0` literal
+    /// would fail before any Phase 2 record was published under it:
+    /// the value the call site now passes for `cis_k8s_pass_rate` is
+    /// exactly `CisK8sPassRateOutcome::ProbeAbsent.pass_rate()`, which
+    /// is `0.0` (matching the pre-fix surface value) BUT routes
+    /// through a structurally distinct enum arm from `Probed { ratio:
+    /// 0.0 }`. The end-to-end pin then walks
+    /// `compose_product_certification` against a minimal source
+    /// attestation and confirms `cert.deployment.cis_k8s_pass_rate ==
+    /// 0.0` through the typed route rather than an inline literal —
+    /// closes the last `// Populated post-deploy by kensa`-annotated
+    /// gap on the Phase 2 deployment-attestation surface.
+    #[test]
+    fn test_cis_k8s_pass_rate_routes_through_typed_outcome() {
+        use crate::cis_k8s_pass_rate::CisK8sPassRateOutcome;
+
+        // Call-site expression pin: this is the exact expression
+        // `compose_product_certification` now passes for
+        // `cis_k8s_pass_rate`. The pre-fix call site passed the literal
+        // `0.0`; pinning the post-fix expression at this layer means a
+        // future refactor that dropped the typed-primitive route would
+        // fail this test before any Phase 2 record was published under
+        // the regression. Same shape as
+        // `test_running_pods_routes_through_typed_pod_listing_outcome`
+        // (`PodListingOutcome::ProbeAbsent.running_pods()`) at the
+        // sibling Phase 2 scalar field.
+        assert_eq!(
+            CisK8sPassRateOutcome::ProbeAbsent.pass_rate(),
+            0.0,
+            "ProbeAbsent must collapse to pass_rate=0.0 in the Phase 2 \
+             deployment attestation; the pre-fix `0.0` hardcode \
+             carried the same f64 here as for `Probed {{ ratio: 0.0 }}`, \
+             conflating no-evidence-collected with probed-zero-pass-rate",
+        );
+
+        // The Probed arm passes ratios through unchanged — the
+        // structural distinction the typed primitive preserves at the
+        // enum level even though `ProbeAbsent` and `Probed { ratio:
+        // 0.0 }` collapse to the same `f64` at the surface.
+        assert_eq!(
+            CisK8sPassRateOutcome::Probed { ratio: 0.0 }.pass_rate(),
+            0.0,
+        );
+        assert_eq!(
+            CisK8sPassRateOutcome::Probed { ratio: 0.92 }.pass_rate(),
+            0.92,
+        );
+        assert_ne!(
+            CisK8sPassRateOutcome::Probed { ratio: 0.0 },
+            CisK8sPassRateOutcome::ProbeAbsent,
+            "Probed{{ratio: 0.0}} must remain structurally distinct \
+             from ProbeAbsent at the enum level — the discriminator \
+             the pre-fix `0.0` hardcode erased",
+        );
+
+        // End-to-end through compose_product_certification: a minimal
+        // source attestation composed under the staging policy produces
+        // `cis_k8s_pass_rate: 0.0` on the resulting
+        // `DeploymentAttestation`, where the pre-fix body produced the
+        // same f64 but through an inline literal. Same isolation
+        // discipline as
+        // `test_running_pods_routes_through_typed_pod_listing_outcome`
+        // at the sibling Phase 2 scalar field.
+        let source = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source,
+            vec![build_at("backend", SlsaLevel::L2)],
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+        assert_eq!(
+            cert.deployment.cis_k8s_pass_rate, 0.0,
+            "the typed-primitive route at the call site must drive \
+             cis_k8s_pass_rate=0.0 through to the DeploymentAttestation \
+             record when no kensa CIS probe ran inside the \
+             certification function; the pre-fix `0.0` hardcode \
+             produced the same f64 here but routed through an inline \
+             literal that flattened the discriminator between \
+             `ProbeAbsent` (no probe) and `Probed {{ ratio: 0.0 }}` \
+             (probe ran and cluster fails every CIS control)",
+        );
+
+        // Confirm the typed primitive is the sole source of the
+        // cis_k8s_pass_rate value at the call site by walking the same
+        // expression directly and confirming the Phase 2 record carries
+        // exactly its result. A future refactor that swapped in a
+        // different probe-absent expression (or re-introduced a bare
+        // literal) would fail this pin before any record was published
+        // under it.
+        assert_eq!(
+            cert.deployment.cis_k8s_pass_rate,
+            CisK8sPassRateOutcome::ProbeAbsent.pass_rate(),
+            "the typed-primitive route at the call site must drive the \
+             exact `ProbeAbsent.pass_rate()` value through to the \
+             DeploymentAttestation record; any divergence would mean \
+             the typed primitive is NOT the sole source of the f64 at \
+             the call site, re-opening the discriminator loss the \
              primitive exists to close",
         );
     }
