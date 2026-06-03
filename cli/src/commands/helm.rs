@@ -6,7 +6,85 @@
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Command;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+/// Per-attempt wall-clock cap on `helm dependency update`. pleme-io wrapper
+/// charts pull third-party subcharts (victoria-metrics-k8s-stack, cert-manager,
+/// authentik, …) from upstream `*.github.io` repos at release time — those
+/// downloads are not vendored in git (`.gitignore` excludes `charts/*/*.tgz`),
+/// so a slow or unreachable upstream would otherwise block `helm dependency
+/// update` indefinitely and wedge the entire monorepo auto-release. The cap
+/// converts a hang into a typed per-chart failure that `release_all` collects
+/// and continues past.
+const DEP_TIMEOUT_SECS: u64 = 240;
+/// Extra attempts after the first (so `DEP_RETRIES + 1` total) — absorbs
+/// transient upstream slowness / index flakiness with linear backoff.
+const DEP_RETRIES: u32 = 1;
+
+/// Run `program <args>` with a hard wall-clock timeout, inheriting stdio so
+/// output still streams to CI. Returns `Ok(true)` on success, `Ok(false)` on a
+/// clean non-zero exit, and `Err` if the process had to be killed at the
+/// timeout. Generic over the program so the timeout machinery is unit-testable
+/// without a real `helm` on PATH.
+fn run_program_timed(program: &str, args: &[&str], timeout: Duration) -> Result<bool> {
+    let mut child = Command::new(program)
+        .args(args)
+        .spawn()
+        .with_context(|| format!("failed to spawn {} {}", program, args.join(" ")))?;
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.success());
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{} {} timed out after {}s", program, args.join(" "), timeout.as_secs());
+        }
+        sleep(Duration::from_millis(50));
+    }
+}
+
+/// Run `helm <args>` with a hard wall-clock timeout (see [`run_program_timed`]).
+fn run_helm_timed(args: &[&str], timeout: Duration) -> Result<bool> {
+    run_program_timed("helm", args, timeout)
+}
+
+/// `helm dependency update` for a chart, bounded by [`DEP_TIMEOUT_SECS`] and
+/// retried [`DEP_RETRIES`] times with linear backoff. A genuinely unreachable
+/// dependency surfaces as a typed error (so the chart is marked failed rather
+/// than shipped against unresolved deps); the caller (`release_all`/`lint_all`)
+/// records the failure and proceeds to the next chart. file://-only charts
+/// resolve offline and exit 0 even when an unrelated repo index is unreachable.
+fn helm_dependency_update(chart_dir: &str) -> Result<()> {
+    let timeout = Duration::from_secs(DEP_TIMEOUT_SECS);
+    let mut last = String::new();
+    for attempt in 1..=(DEP_RETRIES + 1) {
+        match run_helm_timed(&["dependency", "update", chart_dir], timeout) {
+            Ok(true) => return Ok(()),
+            Ok(false) => last = "helm dependency update exited non-zero".to_string(),
+            Err(e) => last = e.to_string(),
+        }
+        if attempt <= DEP_RETRIES {
+            warn!(
+                "helm dependency update attempt {}/{} failed for {} ({}); retrying",
+                attempt,
+                DEP_RETRIES + 1,
+                chart_dir,
+                last
+            );
+            sleep(Duration::from_secs(5 * u64::from(attempt)));
+        }
+    }
+    bail!(
+        "helm dependency update failed after {} attempts for {}: {}",
+        DEP_RETRIES + 1,
+        chart_dir,
+        last
+    )
+}
 
 /// Run `helm lint` + `helm template` validation on a chart directory.
 ///
@@ -30,15 +108,10 @@ pub fn lint(chart_dir: &str) -> Result<()> {
                 .any(|line| line.trim() == "type: library")
     };
 
-    // helm dependency update (resolves file:// references)
-    let dep_status = Command::new("helm")
-        .args(["dependency", "update", chart_dir])
-        .status()
-        .context("Failed to run helm dependency update")?;
-
-    if !dep_status.success() {
-        warn!("helm dependency update had warnings (non-fatal)");
-    }
+    // helm dependency update (resolves file:// references + fetches remote
+    // subcharts) — bounded + retried so a slow/unreachable upstream fails this
+    // chart cleanly instead of hanging the whole release.
+    helm_dependency_update(chart_dir)?;
 
     // helm lint
     let lint_status = Command::new("helm")
@@ -139,10 +212,17 @@ pub fn package(chart_dir: &str, output: &str, version: Option<&str>) -> Result<S
 
     info!("Packaging chart: {} → {}", chart_dir, output);
 
-    // helm dependency update
-    let _ = Command::new("helm")
-        .args(["dependency", "update", chart_dir])
-        .status();
+    // Resolve dependencies — but skip the (network) re-fetch when `charts/` is
+    // already populated by a prior `lint` pass on this same workspace (the
+    // release_all path lints then packages the same temp dir). Avoids a second
+    // upstream download per chart and the hang risk that comes with it.
+    let charts_sub = chart_path.join("charts");
+    let already_resolved = std::fs::read_dir(&charts_sub)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    if !already_resolved {
+        helm_dependency_update(chart_dir)?;
+    }
 
     // helm package
     let mut args = vec!["package", chart_dir, "--destination", output];
@@ -300,10 +380,8 @@ pub fn template(chart_dir: &str, values: Option<&str>, set_values: &[String]) ->
         bail!("Chart directory not found: {}", chart_dir);
     }
 
-    // helm dependency update
-    let _ = Command::new("helm")
-        .args(["dependency", "update", chart_dir])
-        .status();
+    // helm dependency update (bounded + retried)
+    helm_dependency_update(chart_dir)?;
 
     let mut args = vec!["template".to_string(), "test".to_string(), chart_dir.to_string()];
 
@@ -625,6 +703,33 @@ mod file_dep_tests {
         let oci = "dependencies:\n  - name: pleme-lib\n    repository: \"oci://ghcr.io/pleme-io/charts\"\n";
         assert!(file_dep_paths(oci).is_empty());
         assert!(file_dep_paths("name: x\nversion: 0.1.0\n").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::run_program_timed;
+    use std::time::Duration;
+
+    #[test]
+    fn fast_success_returns_ok_true() {
+        // `true` exits 0 immediately, well within the timeout.
+        assert!(run_program_timed("true", &[], Duration::from_secs(5)).unwrap());
+    }
+
+    #[test]
+    fn clean_nonzero_returns_ok_false() {
+        // `false` exits 1 — a clean non-zero, not a timeout-kill.
+        assert!(!run_program_timed("false", &[], Duration::from_secs(5)).unwrap());
+    }
+
+    #[test]
+    fn slow_process_is_killed_at_timeout() {
+        // `sleep 5` cannot finish within a 1s cap — the process is killed and a
+        // typed timeout error is returned (the property that stops a hung
+        // upstream from wedging the release).
+        let err = run_program_timed("sleep", &["5"], Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
     }
 }
 
