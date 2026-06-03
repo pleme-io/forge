@@ -11,6 +11,8 @@ mod chart_listing;
 #[cfg(feature = "attestation")]
 mod compliance_dimensions;
 mod cosign;
+#[cfg(feature = "attestation")]
+mod deployment_manifest;
 mod duration;
 #[cfg(feature = "attestation")]
 mod flux_source_verification;
