@@ -14,6 +14,7 @@ pub mod federation_tests;
 pub mod flux;
 pub mod frontend_validation;
 pub mod gem;
+pub mod crossplane;
 pub mod github_runner_ci;
 pub mod helm;
 pub mod image_release;

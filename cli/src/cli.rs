@@ -1340,6 +1340,12 @@ pub enum Commands {
         working_dir: String,
     },
 
+    /// Crossplane package SDLC (Function/Configuration packages, render, validate)
+    Crossplane {
+        #[command(subcommand)]
+        command: CrossplaneCommands,
+    },
+
     /// TypeScript project operations
     Typescript {
         #[command(subcommand)]
@@ -1775,6 +1781,77 @@ pub enum HelmCommands {
         /// OCI registry to mirror INTO
         #[arg(long, default_value = "oci://ghcr.io/pleme-io/charts")]
         registry: String,
+    },
+}
+
+/// Crossplane package SDLC subcommands — the typed core every substrate
+/// `mkCrossplane*` app + reusable workflow wraps, and every crossplane-package
+/// repo (functions, configurations) consumes.
+#[derive(Subcommand)]
+pub enum CrossplaneCommands {
+    /// Build + push a composition Function package (xpkg) from a Nix-built
+    /// runtime image + a package/ root.
+    FunctionRelease {
+        /// Directory containing crossplane.yaml (the Function meta)
+        #[arg(long, default_value = "package")]
+        package_root: String,
+
+        /// Nix-built runtime image as a `docker save` tarball (no Dockerfile)
+        #[arg(long, required = true)]
+        runtime_image: String,
+
+        /// OCI repo to push to (e.g. ghcr.io/pleme-io/function-pitr-drill)
+        #[arg(long, required = true)]
+        package: String,
+
+        /// Package tag
+        #[arg(long, required = true)]
+        tag: String,
+    },
+
+    /// Build + push a Configuration package (XRD + Composition bundle; no runtime).
+    ConfigurationRelease {
+        /// Directory containing crossplane.yaml + the XRDs/Compositions
+        #[arg(long, default_value = "package")]
+        package_root: String,
+
+        /// OCI repo to push to (e.g. ghcr.io/pleme-io/configuration-pitr)
+        #[arg(long, required = true)]
+        package: String,
+
+        /// Package tag
+        #[arg(long, required = true)]
+        tag: String,
+    },
+
+    /// Render a composite against its Composition + functions (the test surface).
+    Render {
+        /// Composite (XR) YAML
+        #[arg(long, required = true)]
+        composite: String,
+
+        /// Composition YAML
+        #[arg(long, required = true)]
+        composition: String,
+
+        /// Functions YAML (the Function CRs the pipeline references)
+        #[arg(long, required = true)]
+        functions: String,
+
+        /// Optional observed-resources YAML
+        #[arg(long)]
+        observed: Option<String>,
+    },
+
+    /// Validate resources against an extensions dir (crossplane beta validate).
+    Validate {
+        /// Extensions directory (CRDs/XRDs/Providers/Functions)
+        #[arg(long, required = true)]
+        extensions: String,
+
+        /// Resources file (or directory) to validate
+        #[arg(long, required = true)]
+        resources: String,
     },
 }
 
