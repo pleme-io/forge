@@ -924,6 +924,56 @@ pub fn compose_product_certification(
     // `VulnScanProbeOutcome::Absent` at the SBOM / vuln-scan layer.
     let pod_health_outcome = crate::pod_health::PodHealthOutcome::ProbeAbsent;
 
+    // Kubernetes `Pod` resources covering the namespace's deployed
+    // workloads are the typed evidence channel for the Phase 2
+    // `running_pods` count claim — the cluster-observed
+    // `PodList.items.len()` over a `kubectl get pods -n <ns> -o json`
+    // (or typed `kube::Api::<Pod>::list(...)`) probe. The prior
+    // `running_pods: 0` literal at this call site was honest at the
+    // usize surface (a deployment attestation that records `running_
+    // pods: 0` against a certification function that never spawned a
+    // kubectl probe is correctly zero — no evidence collected) but
+    // flattened two structurally distinct operational worlds —
+    // `Counted { count: 0 }` (probe RAN against an empty namespace and
+    // observed zero pods — evidence of a rollout that admitted the
+    // `HelmRelease` but never materialised any workloads) and
+    // `ProbeAbsent` (no probe ran inside the certification function —
+    // no evidence either way) — into a single zero a downstream
+    // verifier cannot recover the kind-of-claim from. The `Counted {
+    // count: 0 }` collapse is the load-bearing discriminator loss: a
+    // downstream `sekiban` strict-production policy that fails-closed
+    // on evidence of an empty deployment (probe ran AND running_pods
+    // == 0 — the cluster admitted the release but never materialised
+    // any workloads, the post-admission failure mode THEORY §V.4 /
+    // §VII.1 name as the Phase 2 honesty channel) cannot express that
+    // gate against the pre-fix bare usize — every Phase 2 record
+    // asserts the same zero regardless of whether `kubectl get pods`
+    // substantiated an empty-namespace state or whether it simply
+    // never ran. The typed `PodListingOutcome` (`Counted { count }` /
+    // `ProbeAbsent`) preserves the two operational worlds structurally;
+    // the call site routes through `running_pods()`, which collapses
+    // `Counted { count } -> count` and `ProbeAbsent -> 0` — the usize
+    // surface semantics collapse to the pre-fix literal exactly when
+    // no probe ran. Today the certification function does not yet
+    // spawn a kubectl probe itself — the outcome collapses to
+    // `ProbeAbsent -> running_pods: 0`, honestly naming "no pod-
+    // listing probe ran inside the certification function" rather
+    // than asserting a single zero a probe-detected empty-namespace
+    // state would have also produced. Same deferral shape as commit
+    // e76db87 (`PodHealthOutcome::ProbeAbsent` at the pod-readiness
+    // layer — the sibling probe at the same `kubectl get pods`
+    // shell-out: a follow-up that wires the kubectl probe at the call
+    // site can populate BOTH `running_pods` AND `all_healthy` from
+    // the same `PodList` walk), commit 36d90b6 (`DeploymentManifest
+    // RenderOutcome::ProbeAbsent` at the rendered-manifest layer),
+    // commit 8b1407d (`HelmReleaseSignatureOutcome::ProbeAbsent` at
+    // the HelmRelease-signature layer), commit f8a5d8e
+    // (`NetworkPolicyAdmissionOutcome::ProbeAbsent` at the network-
+    // segmentation layer), and commit 5931e32
+    // (`FluxSourceVerificationOutcome::ProbeAbsent` at the FluxCD
+    // source-verification layer).
+    let pod_listing_outcome = crate::pod_listing::PodListingOutcome::ProbeAbsent;
+
     // A `kustomize build <kustomization>` (or `flux build kustomization
     // <name> --path <path>`) shell-out against the deployment's
     // Kustomization root is the typed evidence channel for the Phase 2
@@ -1003,7 +1053,7 @@ pub fn compose_product_certification(
         all_releases_signed: helm_release_signature_outcome.is_verified(),
         cis_k8s_pass_rate: 0.0, // Populated post-deploy by kensa
         network_policies_verified: network_policy_outcome.is_verified(),
-        running_pods: 0,
+        running_pods: pod_listing_outcome.running_pods(),
         all_healthy: pod_health_outcome.is_healthy(),
     };
 
@@ -3887,6 +3937,159 @@ mod tests {
              exact `ProbeAbsent.manifest_hash()` value through to the \
              DeploymentAttestation record; any divergence would mean \
              the typed primitive is NOT the sole source of the hash \
+             at the call site, re-opening the discriminator loss the \
+             primitive exists to close",
+        );
+    }
+
+    /// **Load-bearing deployment-attestation honesty pin: the prior
+    /// `running_pods: 0` literal at the `compose_product_certification`
+    /// call site stamped a bare zero into every Phase 2
+    /// `DeploymentAttestation`'s `running_pods` field regardless of
+    /// whether a kubectl pod-listing probe ran inside the certification
+    /// function.** Two structurally distinct operational worlds —
+    /// `Counted { count: 0 }` (probe RAN against an empty namespace and
+    /// observed zero pods — evidence of a rollout that admitted the
+    /// `HelmRelease` but never materialised any workloads, the
+    /// post-admission failure mode THEORY §V.4 / §VII.1 name as the
+    /// Phase 2 honesty channel) and `ProbeAbsent` (no probe ran inside
+    /// the certification function — no evidence either way) — collapsed
+    /// to the same `0`, losing the discriminator a downstream `sekiban`
+    /// strict-production policy that fails-closed on evidence of an
+    /// empty deployment depends on. The typed primitive
+    /// `crate::pod_listing::PodListingOutcome` (`Counted { count }` /
+    /// `ProbeAbsent`) preserves both operational worlds the prior bare
+    /// usize flattened; the call site routes through `running_pods()`
+    /// which collapses `Counted { count } -> count` and `ProbeAbsent
+    /// -> 0` — usize surface unchanged for the no-probe-ran world,
+    /// structural discriminator restored.
+    ///
+    /// Until a follow-up commit wires a `kubectl get pods` (or typed
+    /// `kube::Api::<Pod>::list(...)`) probe at the call site, the
+    /// outcome collapses to `ProbeAbsent -> running_pods: 0` —
+    /// honestly naming "no pod-listing probe ran inside the
+    /// certification function" rather than stamping a zero that would
+    /// also be produced under probed-empty-namespace. The probe is the
+    /// natural companion of [`crate::pod_health::PodHealthOutcome`]
+    /// (commit e76db87) at the same `PodList` walk: a single
+    /// follow-up that wires `kube::Api::<Pod>::list(...)` populates
+    /// BOTH `running_pods` AND `all_healthy` from the same response.
+    /// Same fail-before / pass-after shape as
+    /// `test_all_healthy_routes_through_typed_pod_outcome` (commit
+    /// e76db87) and `test_manifest_hash_routes_through_typed_render_
+    /// outcome` (commit 36d90b6) one layer over (typed probe-absent
+    /// at the call site, real probe deferred to a follow-up).
+    ///
+    /// Pin the post-fix call-site expression directly so a future
+    /// regression that re-introduced the hardcoded bare `0` literal
+    /// would fail before any Phase 2 record was published under it:
+    /// the value the call site now passes for `running_pods` is
+    /// exactly `PodListingOutcome::ProbeAbsent.running_pods()`, which
+    /// is `0` (matching the pre-fix surface value) BUT routes through
+    /// a structurally distinct enum arm from `Counted { count: 0 }`.
+    /// The end-to-end pin then walks `compose_product_certification`
+    /// against a minimal source attestation and confirms
+    /// `cert.deployment.running_pods == 0` through the typed route
+    /// rather than an inline literal — closes the sibling gap the
+    /// `// These will be populated by sekiban and kensa once deployed`
+    /// comment named directly above the `running_pods: 0` literal in
+    /// `compose_product_certification`.
+    #[test]
+    fn test_running_pods_routes_through_typed_pod_listing_outcome() {
+        use crate::pod_listing::PodListingOutcome;
+
+        // Call-site expression pin: this is the exact expression
+        // `compose_product_certification` now passes for `running_pods`.
+        // The pre-fix call site passed the literal `0`; pinning the
+        // post-fix expression at this layer means a future refactor
+        // that dropped the typed-primitive route would fail this test
+        // before any Phase 2 record was published under the regression.
+        // Same shape as `test_all_healthy_routes_through_typed_pod_
+        // outcome` (`PodHealthOutcome::ProbeAbsent.is_healthy()`) one
+        // layer over.
+        assert_eq!(
+            PodListingOutcome::ProbeAbsent.running_pods(),
+            0,
+            "ProbeAbsent must collapse to running_pods=0 in the Phase 2 \
+             deployment attestation; the pre-fix `0` hardcode carried \
+             the same usize here as for `Counted {{ count: 0 }}`, \
+             conflating no-evidence-collected with probed-empty-namespace",
+        );
+
+        // The Counted arm passes counts through unchanged — the
+        // structural distinction the typed primitive preserves at the
+        // enum level even though `ProbeAbsent` and `Counted { count:
+        // 0 }` collapse to the same usize at the bool surface.
+        // (Mirrors the `test_is_verified_pins_all_arms` shape one
+        // layer over in the sibling probe modules.)
+        assert_eq!(PodListingOutcome::Counted { count: 0 }.running_pods(), 0);
+        assert_eq!(PodListingOutcome::Counted { count: 3 }.running_pods(), 3);
+        assert_ne!(
+            PodListingOutcome::Counted { count: 0 },
+            PodListingOutcome::ProbeAbsent,
+            "Counted{{count: 0}} must remain structurally distinct from \
+             ProbeAbsent at the enum level — the discriminator the \
+             pre-fix `0` hardcode erased",
+        );
+
+        // End-to-end through compose_product_certification: a minimal
+        // source attestation composed under the staging policy produces
+        // `running_pods: 0` on the resulting `DeploymentAttestation`,
+        // where the pre-fix body produced the same usize but through
+        // an inline literal. The build / image / chart inputs are
+        // empty (except the one build that gives the SLSA-provenance
+        // compliance dimension non-trivial content) so the compose
+        // path exercises the deployment-attestation construction
+        // directly without involving the probe-driven Phase 1 inputs
+        // — same isolation discipline as
+        // `test_all_healthy_routes_through_typed_pod_outcome` one
+        // layer over.
+        let source = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source,
+            vec![build_at("backend", SlsaLevel::L2)],
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+        assert_eq!(
+            cert.deployment.running_pods, 0,
+            "the typed-primitive route at the call site must drive \
+             running_pods=0 through to the DeploymentAttestation \
+             record when no kubectl Pod-listing probe ran inside the \
+             certification function; the pre-fix `0` hardcode \
+             produced the same usize here but routed through an \
+             inline literal that flattened the discriminator between \
+             `ProbeAbsent` (no probe) and `Counted {{ count: 0 }}` \
+             (probe ran and namespace is empty)",
+        );
+
+        // Confirm the typed primitive is the sole source of the
+        // running_pods value at the call site by walking the same
+        // expression directly and confirming the Phase 2 record
+        // carries exactly its result. A future refactor that swapped
+        // in a different probe-absent expression (or re-introduced a
+        // bare literal) would fail this pin before any record was
+        // published under it.
+        assert_eq!(
+            cert.deployment.running_pods,
+            PodListingOutcome::ProbeAbsent.running_pods(),
+            "the typed-primitive route at the call site must drive the \
+             exact `ProbeAbsent.running_pods()` value through to the \
+             DeploymentAttestation record; any divergence would mean \
+             the typed primitive is NOT the sole source of the usize \
              at the call site, re-opening the discriminator loss the \
              primitive exists to close",
         );

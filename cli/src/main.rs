@@ -35,6 +35,8 @@ mod openpgp_signature;
 #[cfg(feature = "attestation")]
 mod pod_health;
 #[cfg(feature = "attestation")]
+mod pod_listing;
+#[cfg(feature = "attestation")]
 mod security_scan;
 mod store_path;
 mod tree_listing;
