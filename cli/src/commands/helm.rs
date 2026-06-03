@@ -123,7 +123,12 @@ pub fn lint(chart_dir: &str) -> Result<()> {
         bail!("helm lint failed for {}", chart_dir);
     }
 
-    // helm template (validation) — skip for library charts
+    // helm template (validation) — skip for library charts. Discard rendered
+    // stdout (keep stderr for errors): this is an exit-code validation, not a
+    // render, and a wrapper chart like lareira-vm-stack emits MEGABYTES of
+    // rendered manifests (victoria-metrics-k8s-stack + Grafana dashboards) that
+    // otherwise blow past GitHub's per-step log limit, truncating the log and
+    // hiding any later chart's real failure.
     if is_library {
         info!("Skipping helm template for library chart");
     } else {
@@ -132,6 +137,7 @@ pub fn lint(chart_dir: &str) -> Result<()> {
                 "template", "test", chart_dir,
                 "--set", "image.repository=test",
             ])
+            .stdout(std::process::Stdio::null())
             .status()
             .context("Failed to run helm template")?;
 
