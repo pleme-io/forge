@@ -3,9 +3,9 @@
 //! Today: building + pushing a Crossplane **composition Function** package
 //! (xpkg) from a Nix-built runtime image + a `package/crossplane.yaml`. This is
 //! the typed core of the reusable function-package-release pattern; substrate's
-//! `mkFunctionPackageReleaseApp` + the `crossplane-function-release` reusable
-//! workflow wrap it, and a function repo (e.g. pitr-tools) consumes it with a
-//! 3-line shim — the same shape as `forge image-release` + `mkImageReleaseApp`.
+//! `mkCrossplaneFunctionReleaseApp` + the `crossplane-function-auto-release.yml`
+//! reusable workflow wrap it, and a function repo (e.g. pitr-tools) consumes it
+//! with a 3-line shim — the same shape as `forge image-release` + `mkImageReleaseApp`.
 //!
 //! Per Pillar 8 (Nix-only image building, no Dockerfiles): the runtime image is
 //! built by Nix (`dockerTools`) and handed in as a `docker save` tarball; this
@@ -37,12 +37,16 @@ pub fn function_release(
         bail!("runtime image tarball not found: {}", runtime_image);
     }
 
-    let out = format!(
-        "{}/.xpkg-out.xpkg",
-        std::env::temp_dir().to_string_lossy().trim_end_matches('/')
-    );
+    // Typed path surface (★★ TYPED EMISSION — PathBuf::join, not format!() +
+    // trim_end_matches, which mishandles separators).
+    let out = std::env::temp_dir().join(".xpkg-out.xpkg");
 
-    info!("crossplane xpkg build: {} + {} → {}", package_root, runtime_image, out);
+    info!(
+        "crossplane xpkg build: {} + {} → {}",
+        package_root,
+        runtime_image,
+        out.display()
+    );
     let build = Command::new("crossplane")
         .args([
             "xpkg",
@@ -52,8 +56,8 @@ pub fn function_release(
             "--embed-runtime-image-tarball",
             runtime_image,
             "--package-file",
-            &out,
         ])
+        .arg(&out)
         .status()
         .context("failed to run `crossplane xpkg build` (is the crossplane CLI on PATH?)")?;
     if !build.success() {
@@ -62,8 +66,13 @@ pub fn function_release(
 
     let dest = format!("{}:{}", package_ref.trim_end_matches('/'), tag);
     info!("crossplane xpkg push → {}", dest);
+    // `xpkg push <package> -f <files>`: the tag is the positional <package>; the
+    // file flag's long form is `--package-files` (plural — verified against the
+    // crossplane CLI, NOT the singular `--package-file` that `build` uses).
     let push = Command::new("crossplane")
-        .args(["xpkg", "push", "--package-files", &out, &dest])
+        .args(["xpkg", "push", "--package-files"])
+        .arg(&out)
+        .arg(&dest)
         .status()
         .context("failed to run `crossplane xpkg push`")?;
     if !push.success() {
@@ -82,13 +91,11 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
     if !Path::new(package_root).join("crossplane.yaml").exists() {
         bail!("no crossplane.yaml under package-root {}", package_root);
     }
-    let out = format!(
-        "{}/.xpkg-config.xpkg",
-        std::env::temp_dir().to_string_lossy().trim_end_matches('/')
-    );
-    info!("crossplane xpkg build (configuration): {} → {}", package_root, out);
+    let out = std::env::temp_dir().join(".xpkg-config.xpkg");
+    info!("crossplane xpkg build (configuration): {} → {}", package_root, out.display());
     let build = Command::new("crossplane")
-        .args(["xpkg", "build", "--package-root", package_root, "--package-file", &out])
+        .args(["xpkg", "build", "--package-root", package_root, "--package-file"])
+        .arg(&out)
         .status()
         .context("failed to run `crossplane xpkg build`")?;
     if !build.success() {
@@ -97,7 +104,9 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
     let dest = format!("{}:{}", package_ref.trim_end_matches('/'), tag);
     info!("crossplane xpkg push → {}", dest);
     let push = Command::new("crossplane")
-        .args(["xpkg", "push", "--package-files", &out, &dest])
+        .args(["xpkg", "push", "--package-files"])
+        .arg(&out)
+        .arg(&dest)
         .status()
         .context("failed to run `crossplane xpkg push`")?;
     if !push.success() {
@@ -116,6 +125,22 @@ pub fn render(
     functions: &str,
     observed: Option<&str>,
 ) -> Result<()> {
+    // Fail with a typed forge error (not an opaque CLI error) when an input is
+    // missing — parity with function_release's pre-checks.
+    for (label, path) in [
+        ("composite", composite),
+        ("composition", composition),
+        ("functions", functions),
+    ] {
+        if !Path::new(path).exists() {
+            bail!("crossplane render: {} file not found: {}", label, path);
+        }
+    }
+    if let Some(o) = observed {
+        if !Path::new(o).exists() {
+            bail!("crossplane render: observed-resources file not found: {}", o);
+        }
+    }
     let mut args = vec!["render", composite, composition, functions];
     if let Some(o) = observed {
         args.push("--observed-resources");
@@ -134,6 +159,11 @@ pub fn render(
 /// Validate resources against an extensions directory (`crossplane beta
 /// validate`) — the SDLC's schema-validation surface.
 pub fn validate(extensions: &str, resources: &str) -> Result<()> {
+    for (label, path) in [("extensions", extensions), ("resources", resources)] {
+        if !Path::new(path).exists() {
+            bail!("crossplane validate: {} path not found: {}", label, path);
+        }
+    }
     let status = Command::new("crossplane")
         .args(["beta", "validate", extensions, resources])
         .status()
