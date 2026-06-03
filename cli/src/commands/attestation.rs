@@ -924,12 +924,82 @@ pub fn compose_product_certification(
     // `VulnScanProbeOutcome::Absent` at the SBOM / vuln-scan layer.
     let pod_health_outcome = crate::pod_health::PodHealthOutcome::ProbeAbsent;
 
+    // A `kustomize build <kustomization>` (or `flux build kustomization
+    // <name> --path <path>`) shell-out against the deployment's
+    // Kustomization root is the typed evidence channel for the Phase 2
+    // `manifest_hash` claim: the multi-document YAML stream the probe
+    // emits, walked into the sorted, deduplicated set of `<apiVersion>|
+    // <kind>|<namespace>|<name> TAB <content-hash-hex>` lines a
+    // downstream verifier would itself derive (THEORY §VI.1 content-
+    // addressed identity), is the canonical fingerprint the
+    // attestation's `manifest_hash` field would BLAKE3 over. The prior
+    // `Blake3Hash::digest(b"pending-deployment")` literal at this call
+    // site stamped a name-keyed sentinel independent of the rendered
+    // manifest stream actually composed into the attestation, defeating
+    // the content-addressed-identity invariant THEORY §VI.1 names twice
+    // over: (a) the same Phase 2 deployment record across every product,
+    // every environment, every cluster received the same `manifest_hash`
+    // value — a downstream verifier could not distinguish two
+    // attestations describing structurally different rendered cluster
+    // states under the shared constant; and (b) three structurally
+    // distinct operational worlds — `Rendered` (kustomize succeeded
+    // and the stream canonicalised), `RenderFailed` (kustomize exited
+    // non-zero — evidence of render-time failure, the structural
+    // failure that gates Phase 2 admission under THEORY §V.4), and
+    // `ProbeAbsent` (no render probe ran inside the certification
+    // function — no evidence either way) — all collapsed to the same
+    // `b"pending-deployment"` hash, routing evidence-of-render-failure
+    // into the same downstream channel as no-probe-ran (the
+    // discriminator a `sekiban` strict-production policy that
+    // fails-closed on render-time failure needs). The typed
+    // `crate::deployment_manifest::DeploymentManifestRenderOutcome`
+    // (three arms over `Rendered { fingerprint }` / `RenderFailed` /
+    // `ProbeAbsent`) preserves each operational world structurally, and
+    // `manifest_hash()` emits a distinct BLAKE3 digest per arm so the
+    // Phase 2 `manifest_hash` field is content-addressed in every world
+    // a downstream probe could report. The typed primitive is the
+    // rendered-manifest-side peer of `crate::tree_listing::canonical_
+    // tree_fingerprint` (commit 9c5a99f for source-tree identity),
+    // `crate::oci_manifest::canonical_manifest_fingerprint` (commit
+    // 443bd22 for image-manifest identity), `crate::chart_listing::
+    // canonical_chart_fingerprint` (commit e8a2df7 for chart-content
+    // identity), `crate::compliance_dimensions::canonical_dimensions_
+    // fingerprint` (commit 5baaa50 for compliance-dimensions identity),
+    // and `crate::store_path::canonical_closure_fingerprint` (commit
+    // 1652-1669 for Nix-closure identity): the constant-stamp
+    // dishonesty closes the same way one layer up. Today the
+    // certification function does not yet spawn a kustomize probe
+    // itself — the outcome collapses to `ProbeAbsent` →
+    // `Blake3Hash::digest(b"no-manifest-render")`, honestly naming "no
+    // render probe ran inside the certification function" rather than
+    // stamping a constant that would also be produced under
+    // render-failure and under any successful render against any
+    // namespace, all three collapsing to the same hash. Same deferral
+    // shape as commit e76db87 (`PodHealthOutcome::ProbeAbsent` at the
+    // pod-health layer), commit 8b1407d (`HelmReleaseSignatureOutcome::
+    // ProbeAbsent` at the HelmRelease-signature layer), commit f8a5d8e
+    // (`NetworkPolicyAdmissionOutcome::ProbeAbsent` at the network-
+    // segmentation layer), commit 5931e32 (`FluxSourceVerificationOutcome::
+    // ProbeAbsent` at the FluxCD source-verification layer), commit
+    // 72424bd (`NixReproducibilityOutcome::ProbeAbsent` at the build-
+    // determinism layer), commit c1e83d5 (`KensaPolicyOutcome::
+    // ProbeAbsent` at the chart-policy layer), commit d81f639
+    // (`HelmLintOutcome::ProbeAbsent` at the chart-quality layer), and
+    // commit b98eb5a (`SbomProbeOutcome::Absent` / `VulnScanProbeOutcome::
+    // Absent` at the SBOM / vuln-scan layer): typed primitive available,
+    // real probe wired in by a follow-up that adds the
+    // `tokio::process::Command::new("kustomize").args(["build", &path]).
+    // output().await` (or `flux build kustomization`) shell-out and
+    // canonicalises the resulting YAML stream into a fingerprint.
+    let deployment_manifest_outcome =
+        crate::deployment_manifest::DeploymentManifestRenderOutcome::ProbeAbsent;
+
     let deployment = DeploymentAttestation {
         namespace: format!("{}-{}", product, environment),
         kustomization: format!("{}-{}", product, environment),
         source_commit: source.commit.clone(),
         source_verified: source_verification_outcome.is_verified(),
-        manifest_hash: Blake3Hash::digest(b"pending-deployment"),
+        manifest_hash: deployment_manifest_outcome.manifest_hash(),
         all_releases_signed: helm_release_signature_outcome.is_verified(),
         cis_k8s_pass_rate: 0.0, // Populated post-deploy by kensa
         network_policies_verified: network_policy_outcome.is_verified(),
@@ -3639,6 +3709,186 @@ mod tests {
              literal that flattened the discriminator between \
              `ProbeAbsent` (no probe) and `UnhealthyPods` (probe ran \
              and namespace has non-Running-or-non-Ready pods)",
+        );
+    }
+
+    /// **Load-bearing deployment-attestation honesty pin: the prior
+    /// `manifest_hash: Blake3Hash::digest(b"pending-deployment")` literal
+    /// at the `compose_product_certification` call site stamped a
+    /// name-keyed sentinel into every Phase 2 `DeploymentAttestation`'s
+    /// `manifest_hash` field regardless of which rendered manifest stream
+    /// the certification was assembled against.** Two structural honesty
+    /// failures followed (mirroring the closed gaps at the chart-content,
+    /// source-tree, image-manifest, Nix-closure, and compliance-
+    /// dimensions layers): (a) every Phase 2 deployment record across
+    /// every product, environment, and cluster collapsed to the same
+    /// `manifest_hash` value, defeating the content-addressed-identity
+    /// invariant THEORY §VI.1 names — a downstream verifier reading two
+    /// attestations carrying the same `manifest_hash` could not
+    /// distinguish them as describing the same rendered cluster state
+    /// from describing two different rendered states under the shared
+    /// constant; and (b) three structurally distinct operational worlds
+    /// — `Rendered` (kustomize / flux build succeeded and the YAML
+    /// stream canonicalised), `RenderFailed` (kustomize exited non-zero
+    /// — evidence of render-time failure, the structural failure that
+    /// gates Phase 2 admission under THEORY §V.4), and `ProbeAbsent`
+    /// (no render probe ran inside the certification function — no
+    /// evidence either way) — all collapsed to the same
+    /// `b"pending-deployment"` hash, losing the discriminator a
+    /// `sekiban` strict-production policy that fails-closed on
+    /// render-time failure depends on. The typed primitive
+    /// `crate::deployment_manifest::DeploymentManifestRenderOutcome`
+    /// preserves the three operational worlds the prior name-keyed
+    /// constant flattened; the call site routes through `manifest_hash()`
+    /// which emits a structurally distinct BLAKE3 digest per arm.
+    ///
+    /// Until a follow-up commit wires a `kustomize build` (or
+    /// `flux build kustomization`) probe at the call site, the outcome
+    /// collapses to `ProbeAbsent` → `Blake3Hash::digest(b"no-manifest-
+    /// render")` — honestly naming "no render probe ran inside the
+    /// certification function" rather than stamping a constant that
+    /// would also be produced under render-failure and under any
+    /// successful render against any namespace. Same fail-before /
+    /// pass-after shape as the sibling
+    /// `test_all_healthy_routes_through_typed_pod_outcome` (commit
+    /// e76db87) one layer over and
+    /// `test_compose_compliance_hash_grounded_in_dimensions_not_sentinel`
+    /// (commit 5baaa50) at the compliance-dimensions layer (typed
+    /// probe-absent at the call site, real probe deferred to a
+    /// follow-up).
+    ///
+    /// Pin the post-fix call-site expression directly so a future
+    /// regression that re-introduced the hardcoded name-keyed constant
+    /// would fail before any Phase 2 record was published under it: the
+    /// value the call site now passes for `manifest_hash` is exactly
+    /// `DeploymentManifestRenderOutcome::ProbeAbsent.manifest_hash()`,
+    /// which is `Blake3Hash::digest(b"no-manifest-render")` and NOT
+    /// `Blake3Hash::digest(b"pending-deployment")`. The end-to-end pin
+    /// then walks `compose_product_certification` against a minimal
+    /// source attestation and confirms `cert.deployment.manifest_hash`
+    /// equals the typed-outcome value, where the pre-fix body would
+    /// have produced the pre-fix sentinel — closes the sibling gap the
+    /// `// For initial PoC, use minimal deployment` comment named
+    /// directly above the `Blake3Hash::digest(b"pending-deployment")`
+    /// literal in `compose_product_certification`.
+    #[test]
+    fn test_manifest_hash_routes_through_typed_render_outcome() {
+        use crate::deployment_manifest::DeploymentManifestRenderOutcome;
+
+        // Call-site expression pin: this is the exact expression
+        // `compose_product_certification` now passes for `manifest_hash`.
+        // The pre-fix call site passed `Blake3Hash::digest(b"pending-
+        // deployment")`; pinning the post-fix expression at this layer
+        // means a future refactor that dropped the typed-primitive
+        // route would fail this test before any Phase 2 record was
+        // published under the regression. Same shape as
+        // `test_all_healthy_routes_through_typed_pod_outcome`
+        // (`PodHealthOutcome::ProbeAbsent.is_healthy()`) one layer
+        // over.
+        let pre_fix_sentinel = Blake3Hash::digest(b"pending-deployment");
+        let probe_absent_hash = DeploymentManifestRenderOutcome::ProbeAbsent.manifest_hash();
+        assert_ne!(
+            probe_absent_hash.to_hex(),
+            pre_fix_sentinel.to_hex(),
+            "ProbeAbsent.manifest_hash() must NOT equal the pre-fix \
+             `Blake3Hash::digest(b\"pending-deployment\")` constant; the \
+             pre-fix constant collapsed three operational worlds \
+             (Rendered, RenderFailed, ProbeAbsent) into a single hash \
+             that stamped byte-identically across every Phase 2 \
+             deployment record",
+        );
+
+        // The other two arms also produce structurally distinct
+        // manifest_hash values from each other and from ProbeAbsent.
+        // The three-arm distinction is structurally preserved at both
+        // the enum level and the BLAKE3-digest level — a downstream
+        // verifier walking either surface recovers the kind-of-claim
+        // (mirrors the `test_three_arms_produce_three_distinct_
+        // manifest_hashes` pin in the typed primitive's own test
+        // module).
+        let rendered = DeploymentManifestRenderOutcome::Rendered {
+            fingerprint: b"apps/v1|Deployment|myns|svc\tabc".to_vec(),
+        };
+        let failed = DeploymentManifestRenderOutcome::RenderFailed;
+        let absent = DeploymentManifestRenderOutcome::ProbeAbsent;
+        assert_ne!(
+            rendered.manifest_hash().to_hex(),
+            failed.manifest_hash().to_hex()
+        );
+        assert_ne!(
+            rendered.manifest_hash().to_hex(),
+            absent.manifest_hash().to_hex()
+        );
+        assert_ne!(
+            failed.manifest_hash().to_hex(),
+            absent.manifest_hash().to_hex()
+        );
+
+        // End-to-end through compose_product_certification: a minimal
+        // source attestation composed under the staging policy produces
+        // a `manifest_hash` on the resulting `DeploymentAttestation` that
+        // equals the typed-outcome `ProbeAbsent` value, where the pre-
+        // fix body would have produced the pre-fix `b"pending-deployment"`
+        // sentinel. The build / image / chart inputs are empty (except
+        // the one build that gives the SLSA-provenance compliance
+        // dimension non-trivial content) so the compose path exercises
+        // the deployment-attestation construction directly without
+        // involving the probe-driven Phase 1 inputs — same isolation
+        // discipline as `test_all_healthy_routes_through_typed_pod_
+        // outcome` one layer over.
+        let source = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source,
+            vec![build_at("backend", SlsaLevel::L2)],
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+
+        // (a) The Phase 2 record's `manifest_hash` is NOT the pre-fix
+        // sentinel — the load-bearing regression pin. A future
+        // regression that re-introduced `Blake3Hash::digest(b"pending-
+        // deployment")` at the call site would fail here before any
+        // Phase 2 attestation was published under it.
+        assert_ne!(
+            cert.deployment.manifest_hash.to_hex(),
+            pre_fix_sentinel.to_hex(),
+            "the typed-primitive route at the call site must drive \
+             manifest_hash away from the pre-fix `Blake3Hash::digest(\
+             b\"pending-deployment\")` constant through to the \
+             DeploymentAttestation record; the pre-fix literal stamped \
+             the same hash across every Phase 2 deployment regardless \
+             of which rendered manifest stream the certification was \
+             assembled against",
+        );
+
+        // (b) The Phase 2 record's `manifest_hash` IS exactly the typed-
+        // outcome `ProbeAbsent` value — confirms the typed primitive
+        // is the sole source of the hash at the call site. A future
+        // refactor that swapped in a different sentinel (or a
+        // different probe-absent expression) would fail this pin
+        // before any record was published under it.
+        assert_eq!(
+            cert.deployment.manifest_hash.to_hex(),
+            probe_absent_hash.to_hex(),
+            "the typed-primitive route at the call site must drive the \
+             exact `ProbeAbsent.manifest_hash()` value through to the \
+             DeploymentAttestation record; any divergence would mean \
+             the typed primitive is NOT the sole source of the hash \
+             at the call site, re-opening the discriminator loss the \
+             primitive exists to close",
         );
     }
 }
