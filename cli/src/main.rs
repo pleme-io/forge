@@ -9,6 +9,8 @@ mod config;
 // Shared utilities
 mod chart_listing;
 #[cfg(feature = "attestation")]
+mod cis_k8s_pass_rate;
+#[cfg(feature = "attestation")]
 mod compliance_dimensions;
 mod cosign;
 #[cfg(feature = "attestation")]
