@@ -996,6 +996,12 @@ async fn main() -> Result<()> {
                     &registry,
                 )?;
             }
+            HelmCommands::Mirror {
+                charts_dir,
+                registry,
+            } => {
+                commands::helm::mirror(&charts_dir, &registry)?;
+            }
         },
         Commands::Tool { command } => match command {
             ToolCommands::Release {

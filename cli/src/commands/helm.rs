@@ -317,6 +317,192 @@ pub fn push(chart: &str, registry: &str) -> Result<()> {
     Ok(())
 }
 
+/// A parsed chart dependency (name + version + repository).
+struct ChartDep {
+    name: String,
+    version: String,
+    repository: String,
+}
+
+/// Parse a Chart.yaml's `dependencies:` into name/version/repository triples.
+/// Handles both block and flow YAML styles (serde_yaml).
+fn parse_deps(chart_yaml_content: &str) -> Vec<ChartDep> {
+    #[derive(serde::Deserialize)]
+    struct ChartYaml {
+        #[serde(default)]
+        dependencies: Vec<Dep>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Dep {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        repository: String,
+    }
+    serde_yaml::from_str::<ChartYaml>(chart_yaml_content)
+        .map(|c| {
+            c.dependencies
+                .into_iter()
+                .map(|d| ChartDep { name: d.name, version: d.version, repository: d.repository })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The canonical pleme-io OCI registry. Third-party Helm subchart deps are
+/// transparently routed through this mirror at release time (see
+/// [`redirect_remote_deps_to_mirror`]) — the hermetic supply-chain law.
+pub const PLEME_OCI_REGISTRY: &str = "oci://ghcr.io/pleme-io/charts";
+
+/// `true` for a third-party (non-pleme-io-OCI) Helm repository — an `http(s)://`
+/// repo or an `oci://` repo that is NOT already the pleme-io mirror. These are
+/// the deps the mirror copies and the redirect reroutes.
+fn is_third_party_repo(repo: &str, registry: &str) -> bool {
+    let remote = repo.starts_with("http://") || repo.starts_with("https://") || repo.starts_with("oci://");
+    remote && !repo.trim_end_matches('/').starts_with(registry.trim_end_matches('/'))
+}
+
+/// Mirror every third-party Helm subchart a wrapper chart depends on into the
+/// pleme-io OCI registry, so the auto-release never fetches from a third-party
+/// repo at release time (the hermetic supply-chain law).
+///
+/// Everything is derived from the wrapper charts' own `Chart.yaml` dependencies
+/// under `charts_dir` — the operator declares the real upstream + version once,
+/// in the dependency, and the substrate mirrors it. There is NO separate catalog
+/// to drift. For each `{name, upstreamRepo, version}` dependency whose repository
+/// is third-party, the chart is pulled from its upstream and pushed to
+/// `registry`. Idempotent: a `(name, version)` already in `registry` is skipped,
+/// so only a NEW upstream version ever touches the third-party repo. A repo with
+/// no third-party deps is a clean no-op (so the action is safe to run anywhere).
+/// Every helm call is bounded by [`DEP_TIMEOUT_SECS`].
+pub fn mirror(charts_dir: &str, registry: &str) -> Result<()> {
+    // Derive (name, upstream, version) from the wrapper deps themselves.
+    let mut wanted: std::collections::BTreeMap<(String, String), String> =
+        std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(charts_dir)?.filter_map(std::result::Result::ok) {
+        let cy = entry.path().join("Chart.yaml");
+        if !cy.exists() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&cy).unwrap_or_default();
+        for d in parse_deps(&content) {
+            if !d.version.is_empty() && is_third_party_repo(&d.repository, registry) {
+                wanted.insert((d.name, d.version), d.repository);
+            }
+        }
+    }
+    if wanted.is_empty() {
+        info!("Mirror: no third-party subchart deps under {charts_dir} — nothing to mirror");
+        return Ok(());
+    }
+
+    let timeout = Duration::from_secs(DEP_TIMEOUT_SECS);
+    let reg = registry.trim_end_matches('/');
+    let mut mirrored = 0u32;
+    let mut skipped = 0u32;
+    for ((name, version), upstream) in &wanted {
+        let oci_ref = format!("{reg}/{name}");
+
+        // Already mirrored? `helm show chart` succeeds iff the ref exists.
+        if run_program_timed("helm", &["show", "chart", &oci_ref, "--version", version], timeout)
+            .unwrap_or(false)
+        {
+            info!("Mirror: {name}:{version} already in {reg} — skip");
+            skipped += 1;
+            continue;
+        }
+
+        let tmp = tempfile::tempdir().context("mirror tempdir")?;
+        let tmps = tmp.path().to_string_lossy().to_string();
+
+        // Pull from upstream — OCI repos take the chart name in the path, HTTP
+        // repos take it via --repo.
+        let pulled = if upstream.starts_with("oci://") {
+            let r = format!("{}/{}", upstream.trim_end_matches('/'), name);
+            run_program_timed("helm", &["pull", &r, "--version", version, "-d", &tmps], timeout)?
+        } else {
+            run_program_timed(
+                "helm",
+                &["pull", name, "--repo", upstream, "--version", version, "-d", &tmps],
+                timeout,
+            )?
+        };
+        if !pulled {
+            bail!("helm pull failed for {name} {version} from {upstream}");
+        }
+
+        // The pulled tarball name may carry a `v` prefix or differ from
+        // {name}-{version}; find the .tgz rather than assume.
+        let tgz = std::fs::read_dir(tmp.path())?
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "tgz"))
+            .with_context(|| format!("no .tgz pulled for {name} {version}"))?;
+
+        if !run_program_timed("helm", &["push", &tgz.to_string_lossy(), registry], timeout)? {
+            bail!("helm push failed for {name} {version} → {registry}");
+        }
+        info!("Mirrored {name}:{version} ({upstream}) → {registry}");
+        mirrored += 1;
+    }
+
+    info!("Mirror complete: {mirrored} pushed, {skipped} already present ({} total)", wanted.len());
+    Ok(())
+}
+
+/// Rewrite a chart's third-party Helm subchart dependency repositories to the
+/// pleme-io OCI mirror, in place. Called on the temp workspace copy before
+/// `helm dependency update` so the release fetches every subchart from ghcr (which
+/// we control) instead of a third-party `*.github.io` repo — the release half of
+/// the hermetic supply-chain law. The committed Chart.yaml is left untouched
+/// (it honestly declares the real upstream); only the per-release temp copy is
+/// rerouted. A no-op when there are no third-party deps. Requires the subchart to
+/// have been mirrored first (the `mirror` step / `helm-mirror` action runs ahead
+/// of the release).
+fn redirect_remote_deps_to_mirror(chart_dir: &Path, registry: &str) -> Result<()> {
+    let chart_yaml = chart_dir.join("Chart.yaml");
+    if !chart_yaml.exists() {
+        return Ok(());
+    }
+    let original = std::fs::read_to_string(&chart_yaml)?;
+    let mut doc: serde_yaml::Value = match serde_yaml::from_str(&original) {
+        Ok(v) => v,
+        Err(_) => return Ok(()), // leave unparseable Chart.yaml to helm to surface
+    };
+    let Some(deps) = doc.get_mut("dependencies").and_then(|d| d.as_sequence_mut()) else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for dep in deps.iter_mut() {
+        let Some(map) = dep.as_mapping_mut() else { continue };
+        let repo = map
+            .get(serde_yaml::Value::from("repository"))
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .to_string();
+        if is_third_party_repo(&repo, registry) {
+            map.insert(
+                serde_yaml::Value::from("repository"),
+                serde_yaml::Value::from(registry),
+            );
+            changed = true;
+        }
+    }
+    if changed {
+        let rendered = serde_yaml::to_string(&doc).context("re-serialize redirected Chart.yaml")?;
+        std::fs::write(&chart_yaml, rendered).context("write redirected Chart.yaml")?;
+        // A stale Chart.lock would now disagree with the rerouted deps; drop it so
+        // `helm dependency update` regenerates it against the mirror.
+        let lock = chart_dir.join("Chart.lock");
+        if lock.exists() {
+            let _ = std::fs::remove_file(lock);
+        }
+    }
+    Ok(())
+}
+
 /// Deploy a service by updating the HelmRelease image tag in the k8s repo.
 pub fn deploy(
     service: &str,
@@ -693,6 +879,13 @@ fn prepare_chart_workspace(
         [chart_name.to_string(), lib_chart_name.to_string()].into_iter().collect();
     stage_file_sibling_deps(&src_chart, tmp_path, &mut copied)?;
 
+    // Hermetic supply-chain law: reroute any third-party subchart deps in the
+    // TEMP copy to the pleme-io OCI mirror, so lint/package/release fetch from
+    // ghcr (which we control), never from a third-party repo. The committed
+    // Chart.yaml keeps declaring the real upstream; only this per-release copy is
+    // redirected. Requires the subchart to have been mirrored first.
+    redirect_remote_deps_to_mirror(&dst_chart, PLEME_OCI_REGISTRY)?;
+
     let chart_path = dst_chart.to_string_lossy().to_string();
     Ok((tmpdir, chart_path))
 }
@@ -739,6 +932,42 @@ mod file_dep_tests {
         let oci = "dependencies:\n  - name: pleme-lib\n    repository: \"oci://ghcr.io/pleme-io/charts\"\n";
         assert!(file_dep_paths(oci).is_empty());
         assert!(file_dep_paths("name: x\nversion: 0.1.0\n").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod parse_deps_tests {
+    use super::parse_deps;
+
+    #[test]
+    fn extracts_name_version_repository_for_mirror() {
+        // A wrapper chart with a remote subchart + a file:// lib — the mirror only
+        // cares about (name, version); repository is carried for the http/oci split.
+        let cy = "\
+apiVersion: v2
+name: lareira-vm-stack
+version: 0.1.0
+dependencies:
+  - name: pleme-lib
+    version: \">=0.18.1 <0.19.0\"
+    repository: \"file://../pleme-lib\"
+  - name: victoria-metrics-k8s-stack
+    version: \"0.39.0\"
+    repository: \"https://victoriametrics.github.io/helm-charts/\"
+";
+        let deps = parse_deps(cy);
+        assert_eq!(deps.len(), 2);
+        let vm = deps.iter().find(|d| d.name == "victoria-metrics-k8s-stack").unwrap();
+        assert_eq!(vm.version, "0.39.0");
+        assert_eq!(vm.repository, "https://victoriametrics.github.io/helm-charts/");
+        // flow style + a v-prefixed version (cert-manager shape) parses too.
+        let flow = "dependencies:\n  - {name: cert-manager, version: \"v1.17.1\", repository: \"https://charts.jetstack.io\"}\n";
+        let d = parse_deps(flow);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].name, "cert-manager");
+        assert_eq!(d[0].version, "v1.17.1");
+        // no deps → empty, never panics.
+        assert!(parse_deps("name: x\n").is_empty());
     }
 }
 
