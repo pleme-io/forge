@@ -68,7 +68,7 @@ mod ui;
 mod test_support;
 
 use cli::{
-    BootstrapCommands, Cli, Commands, GemCommands, HelmCommands, InfraCommands, LocalCommands,
+    BootstrapCommands, Cli, Commands, CrossplaneCommands, GemCommands, HelmCommands, InfraCommands, LocalCommands,
     PangeaCommands, PangeaInfraCommands, ToolCommands, TypescriptCommands,
 };
 use commands::{
@@ -1102,6 +1102,35 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Crossplane { command } => match command {
+            CrossplaneCommands::FunctionRelease {
+                package_root,
+                runtime_image,
+                package,
+                tag,
+            } => {
+                commands::crossplane::function_release(&package_root, &runtime_image, &package, &tag)?;
+            }
+            CrossplaneCommands::ConfigurationRelease {
+                package_root,
+                package,
+                tag,
+            } => {
+                commands::crossplane::configuration_release(&package_root, &package, &tag)?;
+            }
+            CrossplaneCommands::Render {
+                composite,
+                composition,
+                functions,
+                observed,
+            } => {
+                commands::crossplane::render(&composite, &composition, &functions, observed.as_deref())?;
+            }
+            CrossplaneCommands::Validate { extensions, resources } => {
+                commands::crossplane::validate(&extensions, &resources)?;
+            }
+        },
+
         Commands::Typescript { command } => match command {
             TypescriptCommands::Regenerate { project } => {
                 commands::typescript::regenerate(&project)?;
