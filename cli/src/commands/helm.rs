@@ -972,6 +972,64 @@ dependencies:
 }
 
 #[cfg(test)]
+mod hermetic_mirror_tests {
+    use super::{is_third_party_repo, redirect_remote_deps_to_mirror, PLEME_OCI_REGISTRY};
+
+    #[test]
+    fn classifies_third_party_repos() {
+        let reg = PLEME_OCI_REGISTRY;
+        // third-party: any http(s) repo, or an oci repo that is NOT the mirror.
+        assert!(is_third_party_repo("https://charts.jetstack.io", reg));
+        assert!(is_third_party_repo("http://example.com/charts", reg));
+        assert!(is_third_party_repo("oci://ghcr.io/actions/actions-runner-controller-charts", reg));
+        // NOT third-party: file:// siblings, and the mirror itself (with/without slash).
+        assert!(!is_third_party_repo("file://../pleme-lib", reg));
+        assert!(!is_third_party_repo("oci://ghcr.io/pleme-io/charts", reg));
+        assert!(!is_third_party_repo("oci://ghcr.io/pleme-io/charts/", reg));
+        assert!(!is_third_party_repo("", reg));
+    }
+
+    #[test]
+    fn redirect_reroutes_third_party_keeps_file_and_drops_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let chart = dir.path();
+        std::fs::write(
+            chart.join("Chart.yaml"),
+            "apiVersion: v2\nname: w\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: \">=0.18.1 <0.19.0\"\n    repository: \"file://../pleme-lib\"\n  - name: victoria-metrics-k8s-stack\n    version: \"0.39.0\"\n    repository: \"https://victoriametrics.github.io/helm-charts/\"\n",
+        )
+        .unwrap();
+        std::fs::write(chart.join("Chart.lock"), "stale\n").unwrap();
+
+        redirect_remote_deps_to_mirror(chart, PLEME_OCI_REGISTRY).unwrap();
+
+        let out = std::fs::read_to_string(chart.join("Chart.yaml")).unwrap();
+        let deps = super::parse_deps(&out);
+        let lib = deps.iter().find(|d| d.name == "pleme-lib").unwrap();
+        let vm = deps.iter().find(|d| d.name == "victoria-metrics-k8s-stack").unwrap();
+        // file:// dep is left untouched; the third-party dep is rerouted to the mirror.
+        assert_eq!(lib.repository, "file://../pleme-lib");
+        assert_eq!(vm.repository, PLEME_OCI_REGISTRY);
+        // the now-stale lock is removed so helm regenerates against the mirror.
+        assert!(!chart.join("Chart.lock").exists());
+    }
+
+    #[test]
+    fn redirect_is_noop_without_third_party_deps() {
+        let dir = tempfile::tempdir().unwrap();
+        let chart = dir.path();
+        std::fs::write(
+            chart.join("Chart.yaml"),
+            "apiVersion: v2\nname: w\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: \">=0.18.1 <0.19.0\"\n    repository: \"file://../pleme-lib\"\n",
+        )
+        .unwrap();
+        std::fs::write(chart.join("Chart.lock"), "keep\n").unwrap();
+        redirect_remote_deps_to_mirror(chart, PLEME_OCI_REGISTRY).unwrap();
+        // nothing rerouted ⇒ the lock is preserved.
+        assert_eq!(std::fs::read_to_string(chart.join("Chart.lock")).unwrap(), "keep\n");
+    }
+}
+
+#[cfg(test)]
 mod timeout_tests {
     use super::run_program_timed;
     use std::time::Duration;
