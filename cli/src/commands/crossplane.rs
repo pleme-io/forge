@@ -40,6 +40,11 @@ pub fn function_release(
     // Typed path surface (★★ TYPED EMISSION — PathBuf::join, not format!() +
     // trim_end_matches, which mishandles separators).
     let out = std::env::temp_dir().join(".xpkg-out.xpkg");
+    // Scope --examples-root to the package dir. crossplane defaults it to
+    // ./examples (cwd-relative), which scans the REPO's examples/ — those are
+    // often non-Crossplane YAML (e.g. a drill spec) and fail to parse as package
+    // examples. A package's own examples (if any) live under <package-root>/examples.
+    let examples = Path::new(package_root).join("examples");
 
     info!(
         "crossplane xpkg build: {} + {} → {}",
@@ -58,6 +63,8 @@ pub fn function_release(
             "--package-file",
         ])
         .arg(&out)
+        .arg("--examples-root")
+        .arg(&examples)
         .status()
         .context("failed to run `crossplane xpkg build` (is the crossplane CLI on PATH?)")?;
     if !build.success() {
@@ -92,10 +99,13 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
         bail!("no crossplane.yaml under package-root {}", package_root);
     }
     let out = std::env::temp_dir().join(".xpkg-config.xpkg");
+    let examples = Path::new(package_root).join("examples");
     info!("crossplane xpkg build (configuration): {} → {}", package_root, out.display());
     let build = Command::new("crossplane")
         .args(["xpkg", "build", "--package-root", package_root, "--package-file"])
         .arg(&out)
+        .arg("--examples-root")
+        .arg(&examples)
         .status()
         .context("failed to run `crossplane xpkg build`")?;
     if !build.success() {
