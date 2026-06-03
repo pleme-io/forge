@@ -23,6 +23,18 @@ const DEP_TIMEOUT_SECS: u64 = 240;
 /// transient upstream slowness / index flakiness with linear backoff.
 const DEP_RETRIES: u32 = 1;
 
+/// A digest-pinned placeholder image tag for lint/template validation. Charts
+/// under a fedramp-high (or stricter) compliance baseline `fail()` rendering
+/// unless the image is digest-pinned (CM-2, SI-7); a bare repository left the
+/// tag at the chart default (e.g. `v1.18.0`) and made every such workload chart
+/// unlintable. The value is the sha256 of the empty string — a recognizable
+/// placeholder that satisfies the digest check; non-compliance charts ignore it.
+/// Applied to BOTH `helm lint` and `helm template` so the fail() can't fire in
+/// either pass.
+const LINT_IMAGE_TAG: &str =
+    "image.tag=sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const LINT_IMAGE_REPO: &str = "image.repository=test";
+
 /// Run `program <args>` with a hard wall-clock timeout, inheriting stdio so
 /// output still streams to CI. Returns `Ok(true)` on success, `Ok(false)` on a
 /// clean non-zero exit, and `Err` if the process had to be killed at the
@@ -113,9 +125,27 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     // chart cleanly instead of hanging the whole release.
     helm_dependency_update(chart_dir)?;
 
+    // Common value arguments for lint + template. The digest-pinned placeholder
+    // image (see LINT_IMAGE_TAG) keeps a fedramp-high chart's compliance fail()
+    // from firing; an optional `ci/lint-values.yaml` (helm chart-testing
+    // convention) supplies any values the chart `required`s to render (e.g.
+    // pleme-discord-bot's botName), so a chart can keep its deploy-time guard AND
+    // still lint generically.
+    let mut value_args: Vec<String> = vec![
+        "--set".into(), LINT_IMAGE_REPO.into(),
+        "--set".into(), LINT_IMAGE_TAG.into(),
+    ];
+    let ci_values = chart_path.join("ci").join("lint-values.yaml");
+    if ci_values.exists() {
+        value_args.push("-f".into());
+        value_args.push(ci_values.to_string_lossy().into_owned());
+    }
+
     // helm lint
+    let mut lint_args: Vec<String> = vec!["lint".into(), chart_dir.into()];
+    lint_args.extend(value_args.iter().cloned());
     let lint_status = Command::new("helm")
-        .args(["lint", chart_dir])
+        .args(&lint_args)
         .status()
         .context("Failed to run helm lint")?;
 
@@ -132,11 +162,11 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     if is_library {
         info!("Skipping helm template for library chart");
     } else {
+        let mut tmpl_args: Vec<String> =
+            vec!["template".into(), "test".into(), chart_dir.into()];
+        tmpl_args.extend(value_args.iter().cloned());
         let template_status = Command::new("helm")
-            .args([
-                "template", "test", chart_dir,
-                "--set", "image.repository=test",
-            ])
+            .args(&tmpl_args)
             .stdout(std::process::Stdio::null())
             .status()
             .context("Failed to run helm template")?;
