@@ -7,6 +7,8 @@ mod commands;
 mod config;
 
 // Shared utilities
+#[cfg(feature = "attestation")]
+mod chart_dependencies;
 mod chart_listing;
 #[cfg(feature = "attestation")]
 mod cis_k8s_pass_rate;

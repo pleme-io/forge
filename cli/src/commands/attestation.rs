@@ -617,12 +617,60 @@ pub async fn compute_chart_attestation(
     // the two evidence-bearing arms.
     let policy_outcome = crate::kensa_policy::KensaPolicyOutcome::ProbeAbsent;
 
+    // `Chart.yaml dependencies:` is the typed evidence channel for the
+    // Phase 1 chart attestation's `dependency_hashes` claim: each entry
+    // canonicalises to a `(name, version, repository)` triple — the
+    // three fields a downstream verifier needs to resolve the dep
+    // against an OCI registry or HTTP Helm repo — and the per-dep
+    // identity is the BLAKE3 of the TAB-framed canonical line. The
+    // prior `vec![]` literal at this call site (`// Dependency hashes:
+    // populated when chart deps are tracked`) was honest at the
+    // `Vec<DependencyHash>` surface (a Phase 1 chart attestation that
+    // records `dependency_hashes: []` against a certification function
+    // that never read `Chart.yaml` has collected no dep-graph evidence)
+    // but flattened two structurally distinct operational worlds —
+    // `Listed { deps: vec![] }` (Chart.yaml WAS read and the chart
+    // declares zero `dependencies:` entries — evidence that the chart
+    // is a leaf in the dep graph) and `ProbeAbsent` (Chart.yaml was
+    // never read, or was unreadable, or was malformed — no evidence
+    // either way) — into the same empty vec a downstream verifier
+    // cannot recover the kind-of-claim from. The `Listed { deps:
+    // vec![] }` collapse is the load-bearing discriminator loss: a
+    // downstream `sekiban` strict-production policy that fails-closed
+    // on the absence of a Chart.yaml read inside the certification
+    // function (the structural failure mode for a chart-supply-chain
+    // provenance gate, where the operator must distinguish "the chart
+    // truly declares no third-party deps" from "we never even looked
+    // at Chart.yaml") cannot express that gate against the pre-fix
+    // bare vec. The typed `crate::chart_dependencies::
+    // ChartDependenciesOutcome` (`Listed { deps }` / `ProbeAbsent`)
+    // preserves both operational worlds the prior bare vec flattened;
+    // the call site routes through `to_dependency_hashes()` which
+    // collapses `Listed { deps }` to one
+    // `tameshi::certification::DependencyHash` per dep (each carrying
+    // `(name, version, blake3(canonical-line))`) and `ProbeAbsent` to
+    // `vec![]` — Vec surface unchanged for the no-probe-ran world,
+    // structural discriminator restored. Unlike the sibling probe
+    // outcomes routed through `ProbeAbsent` at the call site pending a
+    // kubectl / `nix build --rebuild` / `kensa` / `syft` / `helm lint`
+    // shell-out, the Chart.yaml probe is cheap (the file is already on
+    // disk at `chart_path`), so this commit wires the real probe in at
+    // the call site — a well-formed Chart.yaml declaring N deps yields
+    // `Listed { deps }` carrying N per-dep canonical entries, the
+    // probed dep-graph identity composed directly into the Phase 1
+    // record. Same wired-in shape as commit a5376a6's
+    // `GitCommitSignatureOutcome::from_format_code` at the source-
+    // commit-signature layer (`git log --format=%G?` is cheap, so the
+    // probe is real at the call site).
+    let chart_dependencies_outcome =
+        crate::chart_dependencies::probe_chart_dependencies(chart_path).await;
+
     Ok(ci::chart_attestation(
         chart_name,
         chart_version,
         chart_hash,
         provenance_outcome.is_verified(),
-        vec![], // Dependency hashes: populated when chart deps are tracked
+        chart_dependencies_outcome.to_dependency_hashes(),
         lint_outcome.is_passed(),
         policy_outcome.is_passed(),
         registry_ref,
@@ -2920,6 +2968,202 @@ mod tests {
              hardcode produced `true` here regardless of any probe \
              evidence",
         );
+    }
+
+    /// **Load-bearing chart-attestation honesty pin: the prior
+    /// `vec![], // Dependency hashes: populated when chart deps are
+    /// tracked` literal at the `ci::chart_attestation` call site
+    /// stamped an empty `dependency_hashes` vec into every Phase 1
+    /// chart attestation regardless of whether `Chart.yaml` actually
+    /// declared third-party dependencies.** The typed primitive
+    /// `crate::chart_dependencies::ChartDependenciesOutcome` preserves
+    /// both operational worlds the prior `vec![]` flattened — `Listed
+    /// { deps }` (Chart.yaml WAS read and the chart's declared dep set
+    /// was walked, with one [`tameshi::certification::DependencyHash`]
+    /// per declared dep) and `ProbeAbsent` (no Chart.yaml read, or
+    /// unreadable, or malformed) — and the call site routes through
+    /// `probe_chart_dependencies(...).await.to_dependency_hashes()`
+    /// over the chart_path that's already on disk. Unlike the sibling
+    /// `helm_lint` / `kensa_policy` / `flux_source_verification` /
+    /// `nix_reproducibility` probes that defer to `ProbeAbsent` pending
+    /// a real shell-out, the Chart.yaml probe is cheap (it reads a
+    /// file the chart_path argument names) so this commit wires the
+    /// real probe in at the call site.
+    ///
+    /// Two end-to-end pins, mirroring the two operational worlds:
+    ///   * A minimal chart with `Chart.yaml` declaring no
+    ///     `dependencies:` block yields `Listed { deps: vec![] }` →
+    ///     `dependency_hashes: vec![]` at the surface, but the typed
+    ///     outcome carries the leaf-chart claim structurally. The
+    ///     surface vec is the same as for the pre-fix hardcode, but
+    ///     the source of the value is a probe that actually read the
+    ///     file rather than a literal.
+    ///   * A chart with `Chart.yaml` declaring N >= 1 deps yields
+    ///     `Listed { deps }` → `dependency_hashes: vec![DependencyHash
+    ///     { name, version, hash: blake3(name TAB version TAB
+    ///     repository) }; N]`. The pre-fix `vec![]` literal would
+    ///     have produced an empty vec against the same chart_path,
+    ///     erasing the substantive dep-graph evidence the typed
+    ///     primitive now surfaces. This is the fail-before-fix arm: a
+    ///     pre-fix run against this chart would assert
+    ///     `att.dependency_hashes.is_empty()`, where the post-fix run
+    ///     asserts `att.dependency_hashes.len() == 2`.
+    ///
+    /// Same wired-in shape as commit a5376a6's
+    /// `GitCommitSignatureOutcome::from_format_code` at the source-
+    /// commit-signature layer (`git log --format=%G?` is cheap, so
+    /// the probe is real at the call site).
+    #[tokio::test]
+    async fn test_dependency_hashes_route_through_typed_probe_outcome() {
+        use crate::chart_dependencies::{parse_chart_yaml_dependencies, ChartDependenciesOutcome};
+
+        // Call-site expression pin: this is the exact expression
+        // `compute_chart_attestation` now passes for
+        // `dependency_hashes`. The pre-fix call site passed the
+        // literal `vec![]`; pinning the post-fix expression at this
+        // layer means a future refactor that dropped the typed-
+        // primitive route would fail this test before any Phase 1
+        // record was published under the regression. Same shape as
+        // `test_policy_passed_routes_through_typed_probe_outcome` two
+        // tests up.
+        assert!(
+            ChartDependenciesOutcome::ProbeAbsent
+                .to_dependency_hashes()
+                .is_empty(),
+            "ProbeAbsent must collapse to dependency_hashes=vec![] in \
+             the Phase 1 chart attestation; the pre-fix `vec![]` \
+             hardcode flattened the no-probe-ran world into the same \
+             empty vec as the leaf-chart world, losing the \
+             discriminator a downstream verifier needs",
+        );
+
+        // Listed{deps: vec![]} (leaf chart — probe ran, chart declares
+        // no deps) collapses to the same surface vec as ProbeAbsent
+        // (both yield vec![]) but stays structurally distinct at the
+        // enum level — the load-bearing discriminator the pre-fix
+        // `vec![]` literal erased. Same shape as
+        // `test_probed_zero_collapses_to_zero_but_stays_distinct` for
+        // `CisK8sPassRateOutcome` (commit f40dae7) one shape away.
+        let leaf = ChartDependenciesOutcome::Listed { deps: Vec::new() };
+        let absent = ChartDependenciesOutcome::ProbeAbsent;
+        assert!(leaf.to_dependency_hashes().is_empty());
+        assert!(absent.to_dependency_hashes().is_empty());
+        assert!(
+            matches!(leaf, ChartDependenciesOutcome::Listed { .. }),
+            "Listed{{deps: vec![]}} must remain in the Listed arm — \
+             structurally distinct from ProbeAbsent",
+        );
+
+        // End-to-end through compute_chart_attestation: a leaf chart
+        // (Chart.yaml present, no dependencies: block) yields
+        // dependency_hashes: vec![] via the Listed{deps: vec![]} arm,
+        // surface-equivalent to the pre-fix literal but routed
+        // through the typed probe.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let chart_dir = tmp.path().join("leaf");
+        std::fs::create_dir(&chart_dir).expect("mkdir chart");
+        std::fs::write(
+            chart_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: leaf\nversion: 0.1.0\n",
+        )
+        .expect("write Chart.yaml");
+        let att_leaf = compute_chart_attestation(
+            "leaf",
+            "0.1.0",
+            &chart_dir,
+            "oci://ghcr.io/example/leaf",
+            Some(tmp.path()),
+        )
+        .await
+        .expect("compute_chart_attestation");
+        assert!(
+            att_leaf.dependency_hashes.is_empty(),
+            "a leaf chart (no Chart.yaml dependencies: block) must \
+             surface dependency_hashes=vec![] — the Listed{{deps: \
+             vec![]}} arm of the typed probe",
+        );
+
+        // End-to-end through compute_chart_attestation: a chart whose
+        // Chart.yaml declares two deps yields dependency_hashes with
+        // two entries, each carrying (name, version, canonical-hash).
+        // This is the fail-before arm: the pre-fix `vec![]` literal
+        // would have produced an empty vec against this same
+        // chart_path, erasing the substantive dep-graph evidence the
+        // typed primitive now surfaces. A regression that re-
+        // introduced `vec![]` at the call site would fail this
+        // assertion.
+        let multi_dir = tmp.path().join("multi");
+        std::fs::create_dir(&multi_dir).expect("mkdir chart");
+        let multi_chart_yaml = r#"
+apiVersion: v2
+name: multi
+version: 0.1.0
+dependencies:
+  - name: common
+    version: 1.0.0
+    repository: "oci://ghcr.io/pleme-io/charts"
+  - name: redis
+    version: 3.0.0
+    repository: "oci://ghcr.io/pleme-io/charts"
+"#;
+        std::fs::write(multi_dir.join("Chart.yaml"), multi_chart_yaml).expect("write Chart.yaml");
+        let att_multi = compute_chart_attestation(
+            "multi",
+            "0.1.0",
+            &multi_dir,
+            "oci://ghcr.io/example/multi",
+            Some(tmp.path()),
+        )
+        .await
+        .expect("compute_chart_attestation");
+        assert_eq!(
+            att_multi.dependency_hashes.len(),
+            2,
+            "a chart declaring two Chart.yaml dependencies must surface \
+             two DependencyHash entries — the Listed{{deps}} arm of \
+             the typed probe carries one per declared dep. The pre-fix \
+             `vec![]` literal would have produced 0 here, erasing the \
+             dep-graph evidence; a regression re-introducing the \
+             literal would fail this pin",
+        );
+        // The surfaced DependencyHash entries are exactly what
+        // `parse_chart_yaml_dependencies` over the same Chart.yaml
+        // content produces: same canonical canonicalisation, same
+        // BLAKE3 per dep — pinning the bytes-on-the-wire identity of
+        // the dep-graph claim.
+        let parsed = parse_chart_yaml_dependencies(multi_chart_yaml).to_dependency_hashes();
+        let mut surfaced_names: Vec<&str> = att_multi
+            .dependency_hashes
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        surfaced_names.sort_unstable();
+        let mut parsed_names: Vec<&str> = parsed.iter().map(|d| d.name.as_str()).collect();
+        parsed_names.sort_unstable();
+        assert_eq!(
+            surfaced_names, parsed_names,
+            "the surfaced dependency_hashes names must match those the \
+             pure parser would extract from the same Chart.yaml — \
+             pinning that the probe and the parser agree on the \
+             canonical dep set",
+        );
+        for surfaced in &att_multi.dependency_hashes {
+            let matching = parsed
+                .iter()
+                .find(|p| p.name == surfaced.name && p.version == surfaced.version);
+            let matching = matching.unwrap_or_else(|| {
+                panic!(
+                    "no parser-side entry matches surfaced name={} version={}",
+                    surfaced.name, surfaced.version,
+                )
+            });
+            assert_eq!(
+                surfaced.hash, matching.hash,
+                "the surfaced canonical-line BLAKE3 must equal the \
+                 parser-side canonical-line BLAKE3 for the same \
+                 (name, version) entry",
+            );
+        }
     }
 
     /// **Load-bearing source-attestation honesty pin: the prior
