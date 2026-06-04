@@ -355,6 +355,8 @@ impl DeploymentManifestRenderOutcome {
     }
 }
 
+crate::impl_probe_outcome!(DeploymentManifestRenderOutcome, ProbeAbsent);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,5 +539,18 @@ mod tests {
         assert_ne!(rendered, failed);
         assert_ne!(rendered, absent);
         assert_ne!(failed, absent);
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Rendered` and `RenderFailed` do not.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(DeploymentManifestRenderOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!DeploymentManifestRenderOutcome::Rendered {
+            fingerprint: b"x".to_vec(),
+        }
+        .is_probe_absent());
+        assert!(!DeploymentManifestRenderOutcome::RenderFailed.is_probe_absent());
     }
 }

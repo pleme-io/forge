@@ -148,6 +148,8 @@ impl HelmProvenanceOutcome {
     }
 }
 
+crate::impl_probe_outcome!(HelmProvenanceOutcome, ProbeAbsent);
+
 /// Parse the contents of a Helm `.prov` provenance file into a
 /// [`HelmProvenanceOutcome`].
 ///
@@ -668,5 +670,20 @@ mod tests {
             .signed_chart_hash(),
             Some(CHART_DIGEST)
         );
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Verified`, `Unverified`, and `VerifyFailed` do not.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(HelmProvenanceOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!HelmProvenanceOutcome::Verified {
+            signed_chart_hash: None,
+            signer_key_id: None,
+        }
+        .is_probe_absent());
+        assert!(!HelmProvenanceOutcome::Unverified.is_probe_absent());
+        assert!(!HelmProvenanceOutcome::VerifyFailed.is_probe_absent());
     }
 }

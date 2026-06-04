@@ -248,6 +248,8 @@ impl FluxSourceVerificationOutcome {
     }
 }
 
+crate::impl_probe_outcome!(FluxSourceVerificationOutcome, ProbeAbsent);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +329,15 @@ mod tests {
         assert_ne!(verified, verify_failed);
         assert_ne!(verified, absent);
         assert_ne!(verify_failed, absent);
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Verified` and `VerifyFailed` do not.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(FluxSourceVerificationOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!FluxSourceVerificationOutcome::Verified.is_probe_absent());
+        assert!(!FluxSourceVerificationOutcome::VerifyFailed.is_probe_absent());
     }
 }

@@ -305,6 +305,8 @@ impl ChartDependenciesOutcome {
     }
 }
 
+crate::impl_probe_outcome!(ChartDependenciesOutcome, ProbeAbsent);
+
 /// Canonical, order-independent dep vec for a [`ChartDependency`]
 /// set: sort each dep by its canonical line and deduplicate. Two
 /// Chart.yaml layouts declaring the same `(name, version, repository)`
@@ -718,5 +720,24 @@ dependencies:
             "missing Chart.yaml must yield ProbeAbsent, not a silent \
              empty Listed",
         );
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Listed { .. }` does not, including for the empty-deps leaf
+    /// chart that surfaces the same `vec![]` claim as `ProbeAbsent` —
+    /// the load-bearing discriminator the trait names.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(ChartDependenciesOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!ChartDependenciesOutcome::Listed { deps: vec![] }.is_probe_absent());
+        assert!(!ChartDependenciesOutcome::Listed {
+            deps: vec![ChartDependency {
+                name: "redis".to_string(),
+                version: "17.0.0".to_string(),
+                repository: "https://charts.example.com".to_string(),
+            }],
+        }
+        .is_probe_absent());
     }
 }

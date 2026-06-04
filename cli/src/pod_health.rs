@@ -266,6 +266,8 @@ impl PodHealthOutcome {
     }
 }
 
+crate::impl_probe_outcome!(PodHealthOutcome, ProbeAbsent);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +356,15 @@ mod tests {
         assert_ne!(healthy, unhealthy);
         assert_ne!(healthy, absent);
         assert_ne!(unhealthy, absent);
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Healthy` and `UnhealthyPods` do not.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(PodHealthOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!PodHealthOutcome::Healthy.is_probe_absent());
+        assert!(!PodHealthOutcome::UnhealthyPods.is_probe_absent());
     }
 }

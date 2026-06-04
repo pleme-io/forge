@@ -223,6 +223,8 @@ impl PodListingOutcome {
     }
 }
 
+crate::impl_probe_outcome!(PodListingOutcome, ProbeAbsent);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +342,18 @@ mod tests {
                 "Counted{{count: {n}}} must pass through unchanged",
             );
         }
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Counted { .. }` does not. The load-bearing structural
+    /// discriminator the trait names, anchored at this module so a
+    /// future regression that hand-rolled a divergent impl is caught
+    /// locally rather than only at the trait-module test.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(PodListingOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!PodListingOutcome::Counted { count: 0 }.is_probe_absent());
+        assert!(!PodListingOutcome::Counted { count: 7 }.is_probe_absent());
     }
 }

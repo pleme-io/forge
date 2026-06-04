@@ -137,6 +137,8 @@ impl OciArchitectureOutcome {
     }
 }
 
+crate::impl_probe_outcome!(OciArchitectureOutcome, Absent);
+
 /// Parse a `skopeo inspect --raw` manifest JSON document into an
 /// [`OciArchitectureOutcome`].
 ///
@@ -550,5 +552,23 @@ mod tests {
             "an arm64-only manifest must NOT be reported as amd64; \
              the prior hardcode flattened this case to a false claim"
         );
+    }
+
+    /// `ProbeOutcome` impl pin: `Absent` identifies as absent (the
+    /// alternative-named absent variant the `security_scan` modules
+    /// also use); `Single`, `Multi`, and `EmbeddedInConfig` do not.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(OciArchitectureOutcome::Absent.is_probe_absent());
+        assert!(!OciArchitectureOutcome::Single {
+            arch: "arm64".to_string(),
+        }
+        .is_probe_absent());
+        assert!(!OciArchitectureOutcome::Multi {
+            archs: vec!["amd64".to_string(), "arm64".to_string()],
+        }
+        .is_probe_absent());
+        assert!(!OciArchitectureOutcome::EmbeddedInConfig.is_probe_absent());
     }
 }
