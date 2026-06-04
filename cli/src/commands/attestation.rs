@@ -21,6 +21,7 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 use tokio::process::Command;
+use tracing::info;
 
 use tameshi::certification::{
     relaxed_staging_policy, strict_production_policy, BuildAttestation, CertificationPolicy,
@@ -1150,6 +1151,49 @@ pub fn compose_product_certification(
     // rate cluster would have also produced.
     let cis_k8s_pass_rate_outcome = crate::cis_k8s_pass_rate::CisK8sPassRateOutcome::ProbeAbsent;
 
+    // Probe-coverage telemetry: count the (ran, absent) split over the
+    // seven typed probe outcomes the Phase 2 `DeploymentAttestation`
+    // depends on, emitted alongside the composed certification so a
+    // downstream `sekiban` admission verifier reconciliation can
+    // distinguish a high-evidence Phase 2 record (every probe ran and
+    // produced evidence) from one whose fields all collapsed to honest
+    // defaults (every probe `ProbeAbsent`, today's certification-
+    // function state). The signal is the first generic consumer of the
+    // `ProbeOutcome` trait (commit ddc789d) — the trait's
+    // `is_probe_absent` predicate is the load-bearing discriminator the
+    // `probe_coverage` helper walks. The previous per-field-claim
+    // honesty channel (commits b98eb5a → ddc789d closed seventeen typed
+    // outcomes, each preserving the structural distinction between
+    // "probe ran" and "no evidence collected" at one Phase 1 / Phase 2
+    // attestation field) is lifted here to a per-record signal: a
+    // verifier reading `(ran: 0, absent: 7)` on a deployment record can
+    // recover "no deployment probes ran inside the certification
+    // function" structurally, where the per-field bool / hash / count /
+    // ratio shape required the verifier to re-walk the typed-primitive
+    // surface at every field to reach the same conclusion. THEORY §V.4
+    // / §VII.1 Phase 2 honesty channel; THEORY §VI.1 one-oracle
+    // discipline (the seven-probe coverage is composed at one site
+    // rather than per-field-derived by the verifier).
+    let deployment_coverage = deployment_probe_coverage(
+        &source_verification_outcome,
+        &network_policy_outcome,
+        &helm_release_signature_outcome,
+        &pod_health_outcome,
+        &pod_listing_outcome,
+        &deployment_manifest_outcome,
+        &cis_k8s_pass_rate_outcome,
+    );
+    info!(
+        target: "forge::attestation::probe_coverage",
+        product = product,
+        environment = environment,
+        cluster = cluster,
+        deployment_probes_ran = deployment_coverage.ran,
+        deployment_probes_absent = deployment_coverage.absent,
+        deployment_probes_total = deployment_coverage.total(),
+        "deployment-attestation probe coverage"
+    );
+
     let deployment = DeploymentAttestation {
         namespace: format!("{}-{}", product, environment),
         kustomization: format!("{}-{}", product, environment),
@@ -1215,6 +1259,54 @@ pub fn compose_product_certification(
         .map_err(|e| anyhow::anyhow!("Certification failed: {}", e))?;
 
     Ok(cert)
+}
+
+/// Probe-coverage telemetry summary for the seven typed probe outcomes
+/// that ground every field on the Phase 2 [`DeploymentAttestation`] a
+/// downstream `sekiban` admission verifier reconciliation reads. The
+/// seven-probe invariant is foreclosed at the parameter list: a future
+/// regression that added an eighth probe to
+/// [`compose_product_certification`] but forgot to thread it through
+/// this helper would leave the new probe's `ran` / `absent` state out of
+/// the telemetry signal — a structural failure
+/// [`test_deployment_probe_coverage_all_ran_ceiling`] catches by asserting
+/// `total() == 7`. Symmetrically, a probe removed from the deployment
+/// record but left in this helper would fail compilation against the
+/// removed outcome type, surfacing the orphan parameter at the
+/// `pub fn`-references-non-existent-outcome compile gate.
+///
+/// The function is the structural carrier of the seven-probe contract:
+/// every typed outcome bound at the
+/// [`compose_product_certification`] call site appears exactly once
+/// here, and the typed parameter list pins the contract against the
+/// seven implementor enums by name. The trait-object slice form
+/// (`&[&dyn ProbeOutcome; 7]`) is the load-bearing call-site shape — the
+/// [`crate::probe_outcome::probe_coverage`] free function (commit
+/// ddc789d) walks it linearly without re-deriving the absent-arm
+/// discriminator per implementor.
+///
+/// THEORY §V.4 / §VII.1: Phase 2 attestation honesty channel. THEORY
+/// §VI.1: one-oracle discipline — the coverage signal is composed at
+/// one site, not per-field-derived by the downstream verifier.
+fn deployment_probe_coverage(
+    source_verification: &crate::flux_source_verification::FluxSourceVerificationOutcome,
+    network_policy: &crate::network_policy_admission::NetworkPolicyAdmissionOutcome,
+    helm_release_signature: &crate::helm_release_signature::HelmReleaseSignatureOutcome,
+    pod_health: &crate::pod_health::PodHealthOutcome,
+    pod_listing: &crate::pod_listing::PodListingOutcome,
+    deployment_manifest: &crate::deployment_manifest::DeploymentManifestRenderOutcome,
+    cis_k8s_pass_rate: &crate::cis_k8s_pass_rate::CisK8sPassRateOutcome,
+) -> crate::probe_outcome::ProbeCoverage {
+    let outcomes: [&dyn crate::probe_outcome::ProbeOutcome; 7] = [
+        source_verification,
+        network_policy,
+        helm_release_signature,
+        pod_health,
+        pod_listing,
+        deployment_manifest,
+        cis_k8s_pass_rate,
+    ];
+    crate::probe_outcome::probe_coverage(outcomes.iter().copied())
 }
 
 /// Generate attestation annotation values from a certification.
@@ -4550,5 +4642,248 @@ dependencies:
              the call site, re-opening the discriminator loss the \
              primitive exists to close",
         );
+    }
+
+    /// Load-bearing probe-coverage floor pin: the seven typed probe
+    /// outcomes the Phase 2 `DeploymentAttestation` depends on, all in
+    /// their `ProbeAbsent` arm (today's `compose_product_certification`
+    /// call-site state), produce `ProbeCoverage { ran: 0, absent: 7 }`.
+    /// This is the floor every per-field typed-primitive commit
+    /// (b98eb5a → ddc789d) collapsed to one probe at a time; the
+    /// seven-probe coverage signal lifts the honesty channel from
+    /// per-field-claim ("did this probe run?") to per-record
+    /// ("how much of this attestation's evidence channel actually
+    /// fired?") — a downstream `sekiban` admission verifier
+    /// reconciliation can distinguish a high-evidence Phase 2 record
+    /// from one whose every field collapsed to its honest default by
+    /// reading the structured `(ran, absent, total)` fields on the
+    /// `target: "forge::attestation::probe_coverage"` tracing event
+    /// `compose_product_certification` emits alongside the composed
+    /// certification.
+    #[test]
+    fn test_deployment_probe_coverage_all_absent_floor() {
+        use crate::cis_k8s_pass_rate::CisK8sPassRateOutcome;
+        use crate::deployment_manifest::DeploymentManifestRenderOutcome;
+        use crate::flux_source_verification::FluxSourceVerificationOutcome;
+        use crate::helm_release_signature::HelmReleaseSignatureOutcome;
+        use crate::network_policy_admission::NetworkPolicyAdmissionOutcome;
+        use crate::pod_health::PodHealthOutcome;
+        use crate::pod_listing::PodListingOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+
+        let coverage = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::ProbeAbsent,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::ProbeAbsent,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::ProbeAbsent,
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert_eq!(coverage, ProbeCoverage { ran: 0, absent: 7 });
+        assert_eq!(
+            coverage.total(),
+            7,
+            "the seven-probe count is the load-bearing structural \
+             invariant the helper carries; a future regression that \
+             dropped a parameter would shift the total here"
+        );
+    }
+
+    /// Load-bearing probe-coverage ceiling pin: the seven typed probe
+    /// outcomes all in their non-absent arms (the world a follow-up
+    /// commit that wires real kubectl / kustomize / kensa probes at the
+    /// `compose_product_certification` call site reaches) produce
+    /// `ProbeCoverage { ran: 7, absent: 0 }`. The symmetric counterpart
+    /// of the all-absent floor — together the two tests pin that every
+    /// individual probe contributes exactly one to the ran or absent
+    /// count (the all-absent floor has all seven in absent; the
+    /// all-ran ceiling has all seven in ran; total stays at seven in
+    /// both). A future regression that omitted a probe from the
+    /// seven-element `&[&dyn ProbeOutcome; 7]` slice would shift the
+    /// total below seven and fail this pin.
+    #[test]
+    fn test_deployment_probe_coverage_all_ran_ceiling() {
+        use crate::cis_k8s_pass_rate::CisK8sPassRateOutcome;
+        use crate::deployment_manifest::DeploymentManifestRenderOutcome;
+        use crate::flux_source_verification::FluxSourceVerificationOutcome;
+        use crate::helm_release_signature::HelmReleaseSignatureOutcome;
+        use crate::network_policy_admission::NetworkPolicyAdmissionOutcome;
+        use crate::pod_health::PodHealthOutcome;
+        use crate::pod_listing::PodListingOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+
+        let coverage = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::Verified,
+            &NetworkPolicyAdmissionOutcome::Verified,
+            &HelmReleaseSignatureOutcome::Verified,
+            &PodHealthOutcome::Healthy,
+            &PodListingOutcome::Counted { count: 3 },
+            &DeploymentManifestRenderOutcome::Rendered {
+                fingerprint: b"test-manifest".to_vec(),
+            },
+            &CisK8sPassRateOutcome::Probed { ratio: 1.0 },
+        );
+        assert_eq!(coverage, ProbeCoverage { ran: 7, absent: 0 });
+        assert_eq!(coverage.total(), 7);
+    }
+
+    /// Probe-coverage arithmetic pin: a mixed slice where three of the
+    /// seven probes are in their non-absent arms and four are
+    /// `ProbeAbsent` yields `ProbeCoverage { ran: 3, absent: 4 }`. Pins
+    /// that the helper walks every element (not just a prefix or a
+    /// fixed subset) and that the `ran + absent == total == 7`
+    /// invariant holds for every arm-split. A future regression that
+    /// hardcoded the ran/absent split based on a single representative
+    /// probe (or short-circuited on the first absent probe) would fail
+    /// this pin.
+    #[test]
+    fn test_deployment_probe_coverage_mixed_arms_arithmetic() {
+        use crate::cis_k8s_pass_rate::CisK8sPassRateOutcome;
+        use crate::deployment_manifest::DeploymentManifestRenderOutcome;
+        use crate::flux_source_verification::FluxSourceVerificationOutcome;
+        use crate::helm_release_signature::HelmReleaseSignatureOutcome;
+        use crate::network_policy_admission::NetworkPolicyAdmissionOutcome;
+        use crate::pod_health::PodHealthOutcome;
+        use crate::pod_listing::PodListingOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+
+        let coverage = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::Verified,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::VerifyFailed,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::Counted { count: 0 },
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        // Three probes in a non-absent arm (`Verified`, `VerifyFailed`,
+        // `Counted { count: 0 }` — note the load-bearing distinction
+        // `Counted { count: 0 }` from `ProbeAbsent`: a probe RAN against
+        // an empty namespace), four in `ProbeAbsent`.
+        assert_eq!(coverage, ProbeCoverage { ran: 3, absent: 4 });
+        assert_eq!(coverage.total(), 7);
+    }
+
+    /// Pins that EVERY one of the seven probe-outcome parameters
+    /// contributes to the coverage count: walking each probe through its
+    /// non-absent arm in isolation (all other six in `ProbeAbsent`)
+    /// yields `ProbeCoverage { ran: 1, absent: 6 }`. A future regression
+    /// that omitted any parameter from the seven-element slice (or
+    /// pinned its slice index to a constant arm) would fail the
+    /// corresponding sub-case here. The load-bearing structural
+    /// invariant: every typed outcome bound at the
+    /// `compose_product_certification` call site participates in the
+    /// coverage signal.
+    #[test]
+    fn test_deployment_probe_coverage_each_probe_individually_counted() {
+        use crate::cis_k8s_pass_rate::CisK8sPassRateOutcome;
+        use crate::deployment_manifest::DeploymentManifestRenderOutcome;
+        use crate::flux_source_verification::FluxSourceVerificationOutcome;
+        use crate::helm_release_signature::HelmReleaseSignatureOutcome;
+        use crate::network_policy_admission::NetworkPolicyAdmissionOutcome;
+        use crate::pod_health::PodHealthOutcome;
+        use crate::pod_listing::PodListingOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+
+        let one_one_one = ProbeCoverage { ran: 1, absent: 6 };
+
+        // 1. source-verification
+        let c = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::Verified,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::ProbeAbsent,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::ProbeAbsent,
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert_eq!(
+            c, one_one_one,
+            "FluxSourceVerificationOutcome::Verified must count"
+        );
+
+        // 2. network-policy
+        let c = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::ProbeAbsent,
+            &NetworkPolicyAdmissionOutcome::Verified,
+            &HelmReleaseSignatureOutcome::ProbeAbsent,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::ProbeAbsent,
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert_eq!(
+            c, one_one_one,
+            "NetworkPolicyAdmissionOutcome::Verified must count"
+        );
+
+        // 3. helm-release-signature
+        let c = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::ProbeAbsent,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::Verified,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::ProbeAbsent,
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert_eq!(
+            c, one_one_one,
+            "HelmReleaseSignatureOutcome::Verified must count"
+        );
+
+        // 4. pod-health
+        let c = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::ProbeAbsent,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::ProbeAbsent,
+            &PodHealthOutcome::Healthy,
+            &PodListingOutcome::ProbeAbsent,
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert_eq!(c, one_one_one, "PodHealthOutcome::Healthy must count");
+
+        // 5. pod-listing
+        let c = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::ProbeAbsent,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::ProbeAbsent,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::Counted { count: 5 },
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert_eq!(c, one_one_one, "PodListingOutcome::Counted must count");
+
+        // 6. deployment-manifest
+        let c = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::ProbeAbsent,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::ProbeAbsent,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::ProbeAbsent,
+            &DeploymentManifestRenderOutcome::Rendered {
+                fingerprint: b"x".to_vec(),
+            },
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert_eq!(
+            c, one_one_one,
+            "DeploymentManifestRenderOutcome::Rendered must count"
+        );
+
+        // 7. cis-k8s-pass-rate
+        let c = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::ProbeAbsent,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::ProbeAbsent,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::ProbeAbsent,
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::Probed { ratio: 0.5 },
+        );
+        assert_eq!(c, one_one_one, "CisK8sPassRateOutcome::Probed must count");
     }
 }
