@@ -149,6 +149,8 @@ impl SbomProbeOutcome {
     }
 }
 
+crate::impl_probe_outcome!(SbomProbeOutcome, Absent);
+
 /// Outcome of probing for a vulnerability scan (CVE enumeration)
 /// against a build artifact or container image. Mirrors
 /// [`SbomProbeOutcome`] one layer over — same `Collected` / `Absent`
@@ -207,6 +209,8 @@ impl VulnScanProbeOutcome {
         }
     }
 }
+
+crate::impl_probe_outcome!(VulnScanProbeOutcome, Absent);
 
 #[cfg(test)]
 mod tests {
@@ -334,5 +338,27 @@ mod tests {
         assert_eq!(alpha, beta);
         let pre_fix_alpha = Blake3Hash::digest(format!("image-vuln-{}", "alpha").as_bytes());
         assert_ne!(alpha.0, pre_fix_alpha);
+    }
+
+    /// `ProbeOutcome` impl pin for both `SbomProbeOutcome` and
+    /// `VulnScanProbeOutcome`: the `Absent` arm identifies as absent
+    /// (this module uses the alternative `Absent` variant name —
+    /// shared with `OciArchitectureOutcome`); the `Collected` arms do
+    /// not.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(SbomProbeOutcome::Absent.is_probe_absent());
+        assert!(!SbomProbeOutcome::Collected {
+            hash: Blake3Hash::digest(b"x"),
+        }
+        .is_probe_absent());
+        assert!(VulnScanProbeOutcome::Absent.is_probe_absent());
+        assert!(!VulnScanProbeOutcome::Collected {
+            hash: Blake3Hash::digest(b"y"),
+            total_cves: 0,
+            critical_high: 0,
+        }
+        .is_probe_absent());
     }
 }

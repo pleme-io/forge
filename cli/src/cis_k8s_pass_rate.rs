@@ -241,6 +241,8 @@ impl CisK8sPassRateOutcome {
     }
 }
 
+crate::impl_probe_outcome!(CisK8sPassRateOutcome, ProbeAbsent);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,5 +375,16 @@ mod tests {
                 "Probed{{ratio: {ratio}}} must pass through unchanged",
             );
         }
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Probed { .. }` does not. The load-bearing structural
+    /// discriminator the trait names, anchored at this module.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(CisK8sPassRateOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!CisK8sPassRateOutcome::Probed { ratio: 0.0 }.is_probe_absent());
+        assert!(!CisK8sPassRateOutcome::Probed { ratio: 0.92 }.is_probe_absent());
     }
 }

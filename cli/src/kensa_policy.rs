@@ -257,6 +257,8 @@ impl KensaPolicyOutcome {
     }
 }
 
+crate::impl_probe_outcome!(KensaPolicyOutcome, ProbeAbsent);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +415,22 @@ mod tests {
         assert_eq!(broad.failed_control_count(), 3);
         assert_eq!(narrow.evaluated_control_count(), 4);
         assert_eq!(broad.evaluated_control_count(), 100);
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Passed` and `Failed` do not.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(KensaPolicyOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!KensaPolicyOutcome::Passed {
+            evaluated_control_count: 0,
+        }
+        .is_probe_absent());
+        assert!(!KensaPolicyOutcome::Failed {
+            failed_control_count: 1,
+            evaluated_control_count: 2,
+        }
+        .is_probe_absent());
     }
 }

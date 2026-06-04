@@ -219,6 +219,8 @@ impl NixReproducibilityOutcome {
     }
 }
 
+crate::impl_probe_outcome!(NixReproducibilityOutcome, ProbeAbsent);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +305,15 @@ mod tests {
         assert_ne!(reproducible, drift);
         assert_ne!(reproducible, absent);
         assert_ne!(drift, absent);
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Reproducible` and `Drift` do not.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(NixReproducibilityOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!NixReproducibilityOutcome::Reproducible.is_probe_absent());
+        assert!(!NixReproducibilityOutcome::Drift.is_probe_absent());
     }
 }

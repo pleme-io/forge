@@ -121,6 +121,8 @@ impl CosignVerifyOutcome {
     }
 }
 
+crate::impl_probe_outcome!(CosignVerifyOutcome, ProbeAbsent);
+
 /// Parse the stdout of a successful `cosign verify --output json` probe
 /// into a [`CosignVerifyOutcome`].
 ///
@@ -437,5 +439,20 @@ mod tests {
             .signer_identity(),
             Some("u@e")
         );
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Verified`, `Unverified`, and `VerifyFailed` do not.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(CosignVerifyOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!CosignVerifyOutcome::Verified {
+            signer_identity: None,
+            manifest_digest: None,
+        }
+        .is_probe_absent());
+        assert!(!CosignVerifyOutcome::Unverified.is_probe_absent());
+        assert!(!CosignVerifyOutcome::VerifyFailed.is_probe_absent());
     }
 }

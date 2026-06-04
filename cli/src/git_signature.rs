@@ -341,6 +341,8 @@ impl GitCommitSignatureOutcome {
     }
 }
 
+crate::impl_probe_outcome!(GitCommitSignatureOutcome, ProbeAbsent);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,6 +680,31 @@ mod tests {
                  exactly for code {code:?}; the honesty refactor \
                  preserves bool-surface semantics while widening the \
                  type surface",
+            );
+        }
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent; the
+    /// eight format-code arms (`Good` / `GoodUnknownValidity` /
+    /// `ExpiredSignature` / `ExpiredKey` / `RevokedKey` / `BadSignature`
+    /// / `Uncheckable` / `NotSigned`) all identify as not-absent.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(GitCommitSignatureOutcome::ProbeAbsent.is_probe_absent());
+        for arm in [
+            GitCommitSignatureOutcome::Good,
+            GitCommitSignatureOutcome::GoodUnknownValidity,
+            GitCommitSignatureOutcome::ExpiredSignature,
+            GitCommitSignatureOutcome::ExpiredKey,
+            GitCommitSignatureOutcome::RevokedKey,
+            GitCommitSignatureOutcome::BadSignature,
+            GitCommitSignatureOutcome::Uncheckable,
+            GitCommitSignatureOutcome::NotSigned,
+        ] {
+            assert!(
+                !arm.is_probe_absent(),
+                "{arm:?} must not identify as absent"
             );
         }
     }

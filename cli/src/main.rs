@@ -40,6 +40,7 @@ mod openpgp_signature;
 mod pod_health;
 #[cfg(feature = "attestation")]
 mod pod_listing;
+mod probe_outcome;
 #[cfg(feature = "attestation")]
 mod security_scan;
 mod store_path;

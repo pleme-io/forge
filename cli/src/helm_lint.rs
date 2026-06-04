@@ -222,6 +222,8 @@ impl HelmLintOutcome {
     }
 }
 
+crate::impl_probe_outcome!(HelmLintOutcome, ProbeAbsent);
+
 /// Parse the captured stdout AND stderr of a `helm lint <chart-dir>`
 /// probe into a [`HelmLintOutcome`].
 ///
@@ -567,5 +569,26 @@ Error: 3 chart(s) linted, 2 chart(s) failed
             None,
             "non-numeric M must collapse to None, never to a guessed 0",
         );
+    }
+
+    /// `ProbeOutcome` impl pin: `ProbeAbsent` identifies as absent;
+    /// `Passed`, `Failed`, and `Malformed` do not.
+    #[test]
+    fn test_probe_outcome_impl() {
+        use crate::probe_outcome::ProbeOutcome;
+        assert!(HelmLintOutcome::ProbeAbsent.is_probe_absent());
+        assert!(!HelmLintOutcome::Passed {
+            warning_count: 0,
+            info_count: 0,
+        }
+        .is_probe_absent());
+        assert!(!HelmLintOutcome::Failed {
+            failed_chart_count: 1,
+            error_count: 1,
+            warning_count: 0,
+            info_count: 0,
+        }
+        .is_probe_absent());
+        assert!(!HelmLintOutcome::Malformed.is_probe_absent());
     }
 }
