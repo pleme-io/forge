@@ -666,6 +666,48 @@ pub async fn compute_chart_attestation(
     let chart_dependencies_outcome =
         crate::chart_dependencies::probe_chart_dependencies(chart_path).await;
 
+    // Probe-coverage telemetry for the Phase 1 chart attestation, the
+    // chart-side peer of the `deployment_probe_coverage` signal emitted
+    // alongside the Phase 2 `DeploymentAttestation` at
+    // `compose_product_certification` (commit 3152279). Four typed probe
+    // outcomes ground every evidence-bearing field on
+    // `ChartAttestation` — `provenance_outcome` (Helm `.prov` signature,
+    // commit 0ff67e1), `lint_outcome` (`helm lint`, commit d81f639),
+    // `policy_outcome` (`kensa verify chart`, commit c1e83d5), and
+    // `chart_dependencies_outcome` (Chart.yaml dep-graph probe, commit
+    // 5c0d121). The previous per-field honesty channel (each typed
+    // outcome preserves the structural distinction between "probe ran"
+    // and "no probe ran" at one chart-attestation field) is lifted here
+    // to a per-record signal: a downstream `sekiban` admission verifier
+    // reconciliation reading `(ran, absent, total)` on the
+    // `forge::attestation::chart_probe_coverage` tracing event can
+    // distinguish a high-evidence Phase 1 chart record (every probe
+    // ran, surfaced as `ran: 4`) from one whose every field collapsed
+    // to its honest default (every probe `ProbeAbsent`, surfaced as
+    // `absent: 4`, today's call-site state for the three deferred
+    // probes — `chart_dependencies_outcome` already wires a real
+    // probe at the call site, so the signal sits at `ran: 1, absent: 3`
+    // for any chart whose Chart.yaml parses). THEORY §V.4 Phase 1
+    // honesty channel; THEORY §VI.1 one-oracle discipline — the
+    // four-probe coverage is composed at one site, not per-field-
+    // derived by the verifier.
+    let coverage = chart_probe_coverage(
+        &provenance_outcome,
+        &lint_outcome,
+        &policy_outcome,
+        &chart_dependencies_outcome,
+    );
+    info!(
+        target: "forge::attestation::chart_probe_coverage",
+        chart_name = chart_name,
+        chart_version = chart_version,
+        registry_ref = registry_ref,
+        chart_probes_ran = coverage.ran,
+        chart_probes_absent = coverage.absent,
+        chart_probes_total = coverage.total(),
+        "chart-attestation probe coverage"
+    );
+
     Ok(ci::chart_attestation(
         chart_name,
         chart_version,
@@ -1306,6 +1348,43 @@ fn deployment_probe_coverage(
         deployment_manifest,
         cis_k8s_pass_rate,
     ];
+    crate::probe_outcome::probe_coverage(outcomes.iter().copied())
+}
+
+/// Probe-coverage telemetry summary for the four typed probe outcomes
+/// that ground every evidence-bearing field on the Phase 1
+/// [`ChartAttestation`] a downstream `sekiban` admission verifier
+/// reconciliation reads. The four-probe invariant is foreclosed at the
+/// parameter list: a future regression that added a fifth probe to
+/// [`compute_chart_attestation`] but forgot to thread it through this
+/// helper would leave the new probe's `ran` / `absent` state out of the
+/// telemetry signal — a structural failure
+/// [`test_chart_probe_coverage_all_ran_ceiling`] catches by asserting
+/// `total() == 4`. Symmetrically, a probe removed from the chart record
+/// but left in this helper would fail compilation against the removed
+/// outcome type, surfacing the orphan parameter at the
+/// `pub fn`-references-non-existent-outcome compile gate.
+///
+/// The function is the chart-side peer of
+/// [`deployment_probe_coverage`] one layer over: the typed parameter
+/// list pins the four-probe contract against the four implementor enums
+/// by name, and the trait-object slice form (`&[&dyn ProbeOutcome; 4]`)
+/// is the load-bearing call-site shape the
+/// [`crate::probe_outcome::probe_coverage`] free function (commit
+/// ddc789d) walks linearly without re-deriving the absent-arm
+/// discriminator per implementor.
+///
+/// THEORY §V.4 / §VII.1: Phase 1 attestation honesty channel. THEORY
+/// §VI.1: one-oracle discipline — the coverage signal is composed at
+/// one site, not per-field-derived by the downstream verifier.
+fn chart_probe_coverage(
+    provenance: &crate::helm_provenance::HelmProvenanceOutcome,
+    lint: &crate::helm_lint::HelmLintOutcome,
+    policy: &crate::kensa_policy::KensaPolicyOutcome,
+    dependencies: &crate::chart_dependencies::ChartDependenciesOutcome,
+) -> crate::probe_outcome::ProbeCoverage {
+    let outcomes: [&dyn crate::probe_outcome::ProbeOutcome; 4] =
+        [provenance, lint, policy, dependencies];
     crate::probe_outcome::probe_coverage(outcomes.iter().copied())
 }
 
@@ -4885,5 +4964,182 @@ dependencies:
             &CisK8sPassRateOutcome::Probed { ratio: 0.5 },
         );
         assert_eq!(c, one_one_one, "CisK8sPassRateOutcome::Probed must count");
+    }
+
+    /// Load-bearing chart-probe-coverage floor pin: the four typed probe
+    /// outcomes that ground every evidence-bearing field on the Phase 1
+    /// `ChartAttestation`, all in their `ProbeAbsent` arm, produce
+    /// `ProbeCoverage { ran: 0, absent: 4 }`. The chart-side peer of
+    /// `test_deployment_probe_coverage_all_absent_floor` one layer over
+    /// — together the two floor pins pin that the per-record coverage
+    /// signal lifts the per-field honesty channel uniformly across the
+    /// Phase 1 chart record and the Phase 2 deployment record.
+    #[test]
+    fn test_chart_probe_coverage_all_absent_floor() {
+        use crate::chart_dependencies::ChartDependenciesOutcome;
+        use crate::helm_lint::HelmLintOutcome;
+        use crate::helm_provenance::HelmProvenanceOutcome;
+        use crate::kensa_policy::KensaPolicyOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+
+        let coverage = chart_probe_coverage(
+            &HelmProvenanceOutcome::ProbeAbsent,
+            &HelmLintOutcome::ProbeAbsent,
+            &KensaPolicyOutcome::ProbeAbsent,
+            &ChartDependenciesOutcome::ProbeAbsent,
+        );
+        assert_eq!(coverage, ProbeCoverage { ran: 0, absent: 4 });
+        assert_eq!(
+            coverage.total(),
+            4,
+            "the four-probe count is the load-bearing structural \
+             invariant the helper carries; a future regression that \
+             dropped a parameter would shift the total here"
+        );
+    }
+
+    /// Load-bearing chart-probe-coverage ceiling pin: the four typed
+    /// probe outcomes all in their non-absent arms (the world a
+    /// follow-up commit that wires real `helm lint` / `kensa verify`
+    /// probes at the `compute_chart_attestation` call site reaches —
+    /// `chart_dependencies_outcome` already wires a real probe today)
+    /// produce `ProbeCoverage { ran: 4, absent: 0 }`. The symmetric
+    /// counterpart of the all-absent floor — together the two tests pin
+    /// that every individual probe contributes exactly one to the ran
+    /// or absent count.
+    #[test]
+    fn test_chart_probe_coverage_all_ran_ceiling() {
+        use crate::chart_dependencies::ChartDependenciesOutcome;
+        use crate::helm_lint::HelmLintOutcome;
+        use crate::helm_provenance::HelmProvenanceOutcome;
+        use crate::kensa_policy::KensaPolicyOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+
+        let coverage = chart_probe_coverage(
+            &HelmProvenanceOutcome::Verified {
+                signed_chart_hash: Some("deadbeef".to_string()),
+                signer_key_id: None,
+            },
+            &HelmLintOutcome::Passed {
+                warning_count: 0,
+                info_count: 0,
+            },
+            &KensaPolicyOutcome::Passed {
+                evaluated_control_count: 12,
+            },
+            &ChartDependenciesOutcome::Listed { deps: vec![] },
+        );
+        assert_eq!(coverage, ProbeCoverage { ran: 4, absent: 0 });
+        assert_eq!(coverage.total(), 4);
+    }
+
+    /// Chart-probe-coverage arithmetic pin: a mixed slice where two of
+    /// the four probes are in their non-absent arms (one `Listed { deps:
+    /// vec![] }` carrying the load-bearing leaf-chart distinction from
+    /// `ProbeAbsent`, one `VerifyFailed` carrying the
+    /// well-framing-failed-vs-absent distinction) and two are
+    /// `ProbeAbsent` yields `ProbeCoverage { ran: 2, absent: 2 }`. Pins
+    /// that the helper walks every element AND that the load-bearing
+    /// "probe ran and produced negative evidence" arms (`VerifyFailed`,
+    /// `Failed { .. }`, `Listed { deps: vec![] }`) count as ran, not
+    /// absent — the discriminator the trait's `is_probe_absent`
+    /// predicate preserves over the surface `is_verified` / `is_passed`
+    /// bools.
+    #[test]
+    fn test_chart_probe_coverage_mixed_arms_arithmetic() {
+        use crate::chart_dependencies::ChartDependenciesOutcome;
+        use crate::helm_lint::HelmLintOutcome;
+        use crate::helm_provenance::HelmProvenanceOutcome;
+        use crate::kensa_policy::KensaPolicyOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+
+        let coverage = chart_probe_coverage(
+            &HelmProvenanceOutcome::VerifyFailed,
+            &HelmLintOutcome::ProbeAbsent,
+            &KensaPolicyOutcome::ProbeAbsent,
+            &ChartDependenciesOutcome::Listed { deps: vec![] },
+        );
+        // Two probes in a non-absent arm (`VerifyFailed` — probe RAN
+        // and the `.prov` framing failed; `Listed { deps: vec![] }` —
+        // probe RAN and Chart.yaml declares no deps, the leaf-chart
+        // discriminator from `ProbeAbsent`), two in `ProbeAbsent`.
+        assert_eq!(coverage, ProbeCoverage { ran: 2, absent: 2 });
+        assert_eq!(coverage.total(), 4);
+    }
+
+    /// Pins that EVERY one of the four chart-probe-outcome parameters
+    /// contributes to the coverage count: walking each probe through its
+    /// non-absent arm in isolation (all other three in `ProbeAbsent`)
+    /// yields `ProbeCoverage { ran: 1, absent: 3 }`. A future regression
+    /// that omitted any parameter from the four-element slice (or
+    /// pinned its slice index to a constant arm) would fail the
+    /// corresponding sub-case here. The load-bearing structural
+    /// invariant: every typed outcome bound at the
+    /// `compute_chart_attestation` call site participates in the
+    /// chart-coverage signal.
+    #[test]
+    fn test_chart_probe_coverage_each_probe_individually_counted() {
+        use crate::chart_dependencies::ChartDependenciesOutcome;
+        use crate::helm_lint::HelmLintOutcome;
+        use crate::helm_provenance::HelmProvenanceOutcome;
+        use crate::kensa_policy::KensaPolicyOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+
+        let one_three = ProbeCoverage { ran: 1, absent: 3 };
+
+        // 1. provenance
+        let c = chart_probe_coverage(
+            &HelmProvenanceOutcome::Verified {
+                signed_chart_hash: None,
+                signer_key_id: None,
+            },
+            &HelmLintOutcome::ProbeAbsent,
+            &KensaPolicyOutcome::ProbeAbsent,
+            &ChartDependenciesOutcome::ProbeAbsent,
+        );
+        assert_eq!(c, one_three, "HelmProvenanceOutcome::Verified must count");
+
+        // 2. lint
+        let c = chart_probe_coverage(
+            &HelmProvenanceOutcome::ProbeAbsent,
+            &HelmLintOutcome::Passed {
+                warning_count: 0,
+                info_count: 0,
+            },
+            &KensaPolicyOutcome::ProbeAbsent,
+            &ChartDependenciesOutcome::ProbeAbsent,
+        );
+        assert_eq!(c, one_three, "HelmLintOutcome::Passed must count");
+
+        // 3. policy
+        let c = chart_probe_coverage(
+            &HelmProvenanceOutcome::ProbeAbsent,
+            &HelmLintOutcome::ProbeAbsent,
+            &KensaPolicyOutcome::Passed {
+                evaluated_control_count: 1,
+            },
+            &ChartDependenciesOutcome::ProbeAbsent,
+        );
+        assert_eq!(c, one_three, "KensaPolicyOutcome::Passed must count");
+
+        // 4. dependencies — the load-bearing `Listed { deps: vec![] }`
+        // leaf-chart arm (probe RAN against a Chart.yaml declaring no
+        // deps) must count as ran, not absent. This is the
+        // discriminator the trait's `is_probe_absent` preserves over
+        // the surface `Vec<DependencyHash>` `to_dependency_hashes()`
+        // collapse (which yields the same empty vec for `Listed { deps:
+        // vec![] }` AND `ProbeAbsent`).
+        let c = chart_probe_coverage(
+            &HelmProvenanceOutcome::ProbeAbsent,
+            &HelmLintOutcome::ProbeAbsent,
+            &KensaPolicyOutcome::ProbeAbsent,
+            &ChartDependenciesOutcome::Listed { deps: vec![] },
+        );
+        assert_eq!(
+            c, one_three,
+            "ChartDependenciesOutcome::Listed must count (probe RAN; the \
+             leaf-chart discriminator from ProbeAbsent that the surface \
+             Vec<DependencyHash> erases)"
+        );
     }
 }
