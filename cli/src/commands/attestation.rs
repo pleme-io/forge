@@ -363,6 +363,47 @@ pub async fn compute_build_attestation(
     let reproducible = reproducibility_outcome.is_reproducible();
     let slsa_level = build_slsa_level(&derivation, &closure_info, reproducible);
 
+    // Probe-coverage telemetry for the Phase 1 build attestation, the
+    // build-side peer of `chart_probe_coverage` (commit a7a1db9, Phase 1
+    // chart-attestation, four probes) and `deployment_probe_coverage`
+    // (commit 3152279, Phase 2 deployment-attestation, seven probes).
+    // Three typed probe outcomes ground every evidence-bearing field on
+    // `BuildAttestation` — `sbom_outcome` (syft / SBOM probe layer,
+    // commit b98eb5a), `vuln_scan_outcome` (grype / CVE scan probe
+    // layer, commit b98eb5a), and `reproducibility_outcome`
+    // (`nix build --rebuild` determinism probe, commit 72424bd). The
+    // per-field honesty channel each typed outcome preserves (the
+    // structural distinction between "probe ran and produced evidence"
+    // and "no probe ran / no evidence collected" at one
+    // build-attestation field) is lifted here to a per-record signal: a
+    // downstream `sekiban` admission verifier reconciliation reading
+    // `(ran, absent, total)` on the
+    // `forge::attestation::build_probe_coverage` tracing event can
+    // distinguish a high-evidence Phase 1 build record (every probe
+    // ran, surfaced as `ran: 3`) from one whose every field collapsed
+    // to its honest default (every probe `Absent` / `ProbeAbsent`,
+    // surfaced as `absent: 3`, today's call-site state — no syft /
+    // grype / determinism probe layer is integrated yet). With the
+    // three Phase-1 build / Phase-1 chart / Phase-2 deployment
+    // coverage events composed at the three load-bearing
+    // attestation-composition sites, the per-record evidence-coverage
+    // signal is uniform across every attestation record forge
+    // composes. THEORY §V.4 Phase 1 honesty channel; THEORY §VI.1
+    // one-oracle discipline — the three-probe coverage is composed at
+    // one site, not per-field-derived by the verifier.
+    let coverage =
+        build_probe_coverage(&sbom_outcome, &vuln_scan_outcome, &reproducibility_outcome);
+    info!(
+        target: "forge::attestation::build_probe_coverage",
+        service = service,
+        derivation = derivation.as_str(),
+        slsa_level = ?slsa_level,
+        build_probes_ran = coverage.ran,
+        build_probes_absent = coverage.absent,
+        build_probes_total = coverage.total(),
+        "build-attestation probe coverage"
+    );
+
     Ok(ci::build_attestation(
         service,
         &derivation,
@@ -1385,6 +1426,42 @@ fn chart_probe_coverage(
 ) -> crate::probe_outcome::ProbeCoverage {
     let outcomes: [&dyn crate::probe_outcome::ProbeOutcome; 4] =
         [provenance, lint, policy, dependencies];
+    crate::probe_outcome::probe_coverage(outcomes.iter().copied())
+}
+
+/// Probe-coverage telemetry summary for the three typed probe outcomes
+/// that ground every evidence-bearing field on the Phase 1
+/// [`BuildAttestation`] a downstream `sekiban` admission verifier
+/// reconciliation reads. The three-probe invariant is foreclosed at the
+/// parameter list: a future regression that added a fourth probe to
+/// [`compute_build_attestation`] but forgot to thread it through this
+/// helper would leave the new probe's `ran` / `absent` state out of the
+/// telemetry signal — a structural failure
+/// [`test_build_probe_coverage_all_ran_ceiling`] catches by asserting
+/// `total() == 3`. Symmetrically, a probe removed from the build record
+/// but left in this helper would fail compilation against the removed
+/// outcome type, surfacing the orphan parameter at the
+/// `fn`-references-non-existent-outcome compile gate.
+///
+/// The function is the build-side peer of [`chart_probe_coverage`]
+/// (four Phase 1 chart probes) and [`deployment_probe_coverage`] (seven
+/// Phase 2 deployment probes) one layer over: the typed parameter list
+/// pins the three-probe contract against the three implementor enums by
+/// name, and the trait-object slice form (`&[&dyn ProbeOutcome; 3]`) is
+/// the load-bearing call-site shape the
+/// [`crate::probe_outcome::probe_coverage`] free function (commit
+/// ddc789d) walks linearly without re-deriving the absent-arm
+/// discriminator per implementor.
+///
+/// THEORY §V.4 / §VII.1: Phase 1 attestation honesty channel. THEORY
+/// §VI.1: one-oracle discipline — the coverage signal is composed at
+/// one site, not per-field-derived by the downstream verifier.
+fn build_probe_coverage(
+    sbom: &crate::security_scan::SbomProbeOutcome,
+    vuln_scan: &crate::security_scan::VulnScanProbeOutcome,
+    reproducibility: &crate::nix_reproducibility::NixReproducibilityOutcome,
+) -> crate::probe_outcome::ProbeCoverage {
+    let outcomes: [&dyn crate::probe_outcome::ProbeOutcome; 3] = [sbom, vuln_scan, reproducibility];
     crate::probe_outcome::probe_coverage(outcomes.iter().copied())
 }
 
@@ -5140,6 +5217,163 @@ dependencies:
             "ChartDependenciesOutcome::Listed must count (probe RAN; the \
              leaf-chart discriminator from ProbeAbsent that the surface \
              Vec<DependencyHash> erases)"
+        );
+    }
+
+    /// Load-bearing build-probe-coverage floor pin: the three typed
+    /// probe outcomes that ground every evidence-bearing field on the
+    /// Phase 1 `BuildAttestation`, all in their absent arm (today's
+    /// `compute_build_attestation` call-site state — no syft / grype /
+    /// `nix build --rebuild` probe layer is integrated yet), produce
+    /// `ProbeCoverage { ran: 0, absent: 3 }`. The build-side peer of
+    /// `test_chart_probe_coverage_all_absent_floor` (Phase 1 chart,
+    /// four probes) and `test_deployment_probe_coverage_all_absent_floor`
+    /// (Phase 2 deployment, seven probes) — together the three floor
+    /// pins pin that the per-record coverage signal lifts the per-field
+    /// honesty channel uniformly across every attestation record forge
+    /// composes.
+    #[test]
+    fn test_build_probe_coverage_all_absent_floor() {
+        use crate::nix_reproducibility::NixReproducibilityOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+        use crate::security_scan::{SbomProbeOutcome, VulnScanProbeOutcome};
+
+        let coverage = build_probe_coverage(
+            &SbomProbeOutcome::Absent,
+            &VulnScanProbeOutcome::Absent,
+            &NixReproducibilityOutcome::ProbeAbsent,
+        );
+        assert_eq!(coverage, ProbeCoverage { ran: 0, absent: 3 });
+        assert_eq!(
+            coverage.total(),
+            3,
+            "the three-probe count is the load-bearing structural \
+             invariant the helper carries; a future regression that \
+             dropped a parameter would shift the total here"
+        );
+    }
+
+    /// Load-bearing build-probe-coverage ceiling pin: the three typed
+    /// probe outcomes all in their non-absent arms (the world a
+    /// follow-up commit that wires real syft / grype / `nix build
+    /// --rebuild` probes at the `compute_build_attestation` call site
+    /// reaches) produce `ProbeCoverage { ran: 3, absent: 0 }`. The
+    /// symmetric counterpart of the all-absent floor — together the
+    /// two tests pin that every individual probe contributes exactly
+    /// one to the ran or absent count.
+    #[test]
+    fn test_build_probe_coverage_all_ran_ceiling() {
+        use crate::nix_reproducibility::NixReproducibilityOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+        use crate::security_scan::{SbomProbeOutcome, VulnScanProbeOutcome};
+        use tameshi::hash::Blake3Hash;
+
+        let coverage = build_probe_coverage(
+            &SbomProbeOutcome::Collected {
+                hash: Blake3Hash::digest(b"sbom-payload"),
+            },
+            &VulnScanProbeOutcome::Collected {
+                hash: Blake3Hash::digest(b"vuln-scan-payload"),
+                total_cves: 0,
+                critical_high: 0,
+            },
+            &NixReproducibilityOutcome::Reproducible,
+        );
+        assert_eq!(coverage, ProbeCoverage { ran: 3, absent: 0 });
+        assert_eq!(coverage.total(), 3);
+    }
+
+    /// Build-probe-coverage arithmetic pin: a mixed slice where one of
+    /// the three probes is in its non-absent arm carrying the
+    /// load-bearing `Drift` discriminator (probe RAN and the
+    /// `nix build --rebuild` two-pass detected non-determinism —
+    /// evidence of compromise, structurally distinct from
+    /// `ProbeAbsent`) and the other two are absent yields
+    /// `ProbeCoverage { ran: 1, absent: 2 }`. Pins that the helper
+    /// walks every element AND that the load-bearing "probe ran and
+    /// produced negative evidence" arm (`Drift`) counts as ran, not
+    /// absent — the discriminator the trait's `is_probe_absent`
+    /// predicate preserves over the surface `is_reproducible()` bool
+    /// (which collapses both `Drift` and `ProbeAbsent` to `false`).
+    #[test]
+    fn test_build_probe_coverage_mixed_arms_arithmetic() {
+        use crate::nix_reproducibility::NixReproducibilityOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+        use crate::security_scan::{SbomProbeOutcome, VulnScanProbeOutcome};
+
+        let coverage = build_probe_coverage(
+            &SbomProbeOutcome::Absent,
+            &VulnScanProbeOutcome::Absent,
+            &NixReproducibilityOutcome::Drift,
+        );
+        // One probe in its non-absent arm (`Drift` — `nix build
+        // --rebuild` RAN and detected non-determinism, evidence of
+        // compromise, distinct from `ProbeAbsent`), two in `Absent`.
+        assert_eq!(coverage, ProbeCoverage { ran: 1, absent: 2 });
+        assert_eq!(coverage.total(), 3);
+    }
+
+    /// Pins that EVERY one of the three build-probe-outcome parameters
+    /// contributes to the coverage count: walking each probe through
+    /// its non-absent arm in isolation (the other two in their absent
+    /// arms) yields `ProbeCoverage { ran: 1, absent: 2 }`. A future
+    /// regression that omitted any parameter from the three-element
+    /// slice (or pinned its slice index to a constant arm) would fail
+    /// the corresponding sub-case here. The third sub-case is the
+    /// load-bearing `NixReproducibilityOutcome::Drift` arm — pins that
+    /// the determinism-probe-ran-and-detected-drift discriminator
+    /// (which the surface `is_reproducible()` bool collapses to the
+    /// same `false` as `ProbeAbsent`) still counts as a probe-ran
+    /// outcome in the coverage signal, the structural distinction the
+    /// typed primitive preserves.
+    #[test]
+    fn test_build_probe_coverage_each_probe_individually_counted() {
+        use crate::nix_reproducibility::NixReproducibilityOutcome;
+        use crate::probe_outcome::ProbeCoverage;
+        use crate::security_scan::{SbomProbeOutcome, VulnScanProbeOutcome};
+        use tameshi::hash::Blake3Hash;
+
+        let one_two = ProbeCoverage { ran: 1, absent: 2 };
+
+        // 1. sbom
+        let c = build_probe_coverage(
+            &SbomProbeOutcome::Collected {
+                hash: Blake3Hash::digest(b"sbom"),
+            },
+            &VulnScanProbeOutcome::Absent,
+            &NixReproducibilityOutcome::ProbeAbsent,
+        );
+        assert_eq!(c, one_two, "SbomProbeOutcome::Collected must count");
+
+        // 2. vuln-scan
+        let c = build_probe_coverage(
+            &SbomProbeOutcome::Absent,
+            &VulnScanProbeOutcome::Collected {
+                hash: Blake3Hash::digest(b"vuln"),
+                total_cves: 0,
+                critical_high: 0,
+            },
+            &NixReproducibilityOutcome::ProbeAbsent,
+        );
+        assert_eq!(c, one_two, "VulnScanProbeOutcome::Collected must count");
+
+        // 3. reproducibility — the load-bearing `Drift` arm
+        // (`nix build --rebuild` RAN and detected non-determinism, the
+        // evidence-of-compromise discriminator distinct from
+        // `ProbeAbsent`) must count as ran, not absent. This is the
+        // discriminator the trait's `is_probe_absent` preserves over
+        // the surface `is_reproducible()` bool (which collapses BOTH
+        // `Drift` AND `ProbeAbsent` to `false`).
+        let c = build_probe_coverage(
+            &SbomProbeOutcome::Absent,
+            &VulnScanProbeOutcome::Absent,
+            &NixReproducibilityOutcome::Drift,
+        );
+        assert_eq!(
+            c, one_two,
+            "NixReproducibilityOutcome::Drift must count (probe RAN; the \
+             drift-detected discriminator from ProbeAbsent that the \
+             surface is_reproducible() bool erases)"
         );
     }
 }
