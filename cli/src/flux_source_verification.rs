@@ -250,6 +250,85 @@ impl FluxSourceVerificationOutcome {
 
 crate::impl_probe_outcome!(FluxSourceVerificationOutcome, ProbeAbsent);
 
+/// Parse the JSON output of `kubectl get gitrepository <name> -n <ns>
+/// -o json` (or the equivalent `kube::Api::<GitRepository>::get(...)`
+/// serialization) and recover the typed
+/// [`FluxSourceVerificationOutcome`] for the source's `SourceVerified`
+/// condition.
+///
+/// The function is the parser-layer peer of
+/// [`crate::helm_lint::parse_lint_output`] one layer over:
+/// `parse_lint_output` recovers the typed
+/// [`crate::helm_lint::HelmLintOutcome`] from `helm lint` text-mode
+/// summary lines; this function recovers
+/// [`FluxSourceVerificationOutcome`] from the JSON-encoded
+/// `source.toolkit.fluxcd.io/v1` `GitRepository.status.conditions`
+/// surface. A follow-up commit that wires
+/// `tokio::process::Command::new("kubectl").args(["get",
+/// "gitrepository", &name, "-n", &namespace, "-o", "json"])` (or a typed
+/// `kube::Api::<GitRepository>::get(...)`) at the
+/// [`crate::commands::attestation::compose_product_certification`] call
+/// site composes the shell-out with this parser to route the call site
+/// out of its current unconditional [`Self::ProbeAbsent`] arm.
+///
+/// ## The three-arm mapping
+///
+/// 1. The JSON deserializes AND `.status.conditions[]` contains an
+///    entry with `type == "SourceVerified"` AND `status == "True"` →
+///    [`Self::Verified`]. FluxCD's source-controller verified the
+///    commit signature against the bundle's keyring within the last
+///    reconciliation interval; the Phase 2 deployment attestation can
+///    honestly claim `source_verified: true`.
+/// 2. The JSON deserializes AND `.status.conditions[]` contains an
+///    entry with `type == "SourceVerified"` AND `status == "False"` →
+///    [`Self::VerifyFailed`]. FluxCD's source-controller observed the
+///    `GitRepository` and emitted the condition, but the verification
+///    did not succeed (signature mismatch, missing key in keyring, etc.).
+///    Phase 2 cannot claim `source_verified: true`; the discriminator
+///    distinguishes this "probe ran and reported negative" world from
+///    the "probe never ran" world the [`Self::ProbeAbsent`] arm names.
+/// 3. Every other input — malformed JSON, missing `status`, missing
+///    `conditions`, no `SourceVerified` entry in the array, a
+///    `SourceVerified` entry with `status` equal to `"Unknown"` or any
+///    other non-`True`/`False` value — folds into [`Self::ProbeAbsent`].
+///    The module-level docstring names this fold explicitly: "any
+///    malformed JSON / missing condition will fold into `ProbeAbsent`
+///    (response received but no usable evidence = no-evidence-
+///    collected)." The parser is exit-agnostic by construction — exit
+///    code is not consulted; a kubectl failure surfaces upstream as a
+///    [`Self::ProbeAbsent`] outcome chosen at the shell-out call site
+///    rather than as a parser arm.
+///
+/// THEORY §V.2: attestation is cryptographic evidence, not a wish. The
+/// parser preserves the structural distinction between "probe ran and
+/// reported negative" and "no probe ran / no usable evidence" — the
+/// pre-typed `true` hardcode collapsed both into a single positive
+/// claim.
+#[allow(dead_code)]
+pub fn parse_gitrepository_status(json_text: &str) -> FluxSourceVerificationOutcome {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+        return FluxSourceVerificationOutcome::ProbeAbsent;
+    };
+    let Some(conditions) = value
+        .get("status")
+        .and_then(|status| status.get("conditions"))
+        .and_then(|conditions| conditions.as_array())
+    else {
+        return FluxSourceVerificationOutcome::ProbeAbsent;
+    };
+    for condition in conditions {
+        if condition.get("type").and_then(|t| t.as_str()) != Some("SourceVerified") {
+            continue;
+        }
+        return match condition.get("status").and_then(|s| s.as_str()) {
+            Some("True") => FluxSourceVerificationOutcome::Verified,
+            Some("False") => FluxSourceVerificationOutcome::VerifyFailed,
+            _ => FluxSourceVerificationOutcome::ProbeAbsent,
+        };
+    }
+    FluxSourceVerificationOutcome::ProbeAbsent
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +418,209 @@ mod tests {
         assert!(FluxSourceVerificationOutcome::ProbeAbsent.is_probe_absent());
         assert!(!FluxSourceVerificationOutcome::Verified.is_probe_absent());
         assert!(!FluxSourceVerificationOutcome::VerifyFailed.is_probe_absent());
+    }
+
+    /// A canonical `kubectl get gitrepository -o json` response whose
+    /// `status.conditions[]` array carries a `SourceVerified=True`
+    /// entry — the world FluxCD's source-controller produces after
+    /// fetching the commit, resolving the bundle, and verifying the
+    /// signature against the keyring within the last reconciliation
+    /// interval. Parses to [`FluxSourceVerificationOutcome::Verified`]
+    /// — the one arm that lets the Phase 2 deployment attestation
+    /// honestly claim `source_verified: true`.
+    #[test]
+    fn test_parse_source_verified_true_yields_verified() {
+        let json = r#"{
+            "apiVersion": "source.toolkit.fluxcd.io/v1",
+            "kind": "GitRepository",
+            "status": {
+                "conditions": [
+                    {"type": "Ready", "status": "True"},
+                    {"type": "SourceVerified", "status": "True",
+                     "reason": "Succeeded",
+                     "message": "verified signature of revision main@sha1:abc"}
+                ]
+            }
+        }"#;
+        assert_eq!(
+            parse_gitrepository_status(json),
+            FluxSourceVerificationOutcome::Verified,
+        );
+    }
+
+    /// A `kubectl get gitrepository -o json` response whose
+    /// `status.conditions[]` carries a `SourceVerified=False` entry —
+    /// the world FluxCD's source-controller produces when signature
+    /// verification fails (the keyring did not match the commit
+    /// signature, or an explicit verify failure). Parses to
+    /// [`FluxSourceVerificationOutcome::VerifyFailed`]. The
+    /// discriminator distinguishes this "probe ran and reported
+    /// negative" world from the "no probe ran" world the
+    /// [`FluxSourceVerificationOutcome::ProbeAbsent`] arm names —
+    /// the load-bearing structural distinction the pre-typed `true`
+    /// hardcode erased.
+    #[test]
+    fn test_parse_source_verified_false_yields_verify_failed() {
+        let json = r#"{
+            "status": {
+                "conditions": [
+                    {"type": "SourceVerified", "status": "False",
+                     "reason": "VerificationFailed",
+                     "message": "no matching key in bundle"}
+                ]
+            }
+        }"#;
+        assert_eq!(
+            parse_gitrepository_status(json),
+            FluxSourceVerificationOutcome::VerifyFailed,
+        );
+    }
+
+    /// A `kubectl get gitrepository -o json` response whose
+    /// `status.conditions[]` carries no `SourceVerified` entry at all
+    /// — the world where `GitRepository.spec.verify` is not
+    /// configured for the source, so the source-controller never
+    /// emits the condition. The module-level docstring names this
+    /// fold explicitly: "any malformed JSON / missing condition will
+    /// fold into `ProbeAbsent`." Parses to
+    /// [`FluxSourceVerificationOutcome::ProbeAbsent`]. A regression
+    /// that collapsed this case into [`FluxSourceVerificationOutcome::
+    /// VerifyFailed`] would conflate "verify is not configured" with
+    /// "verify is configured and reported negative" — two structurally
+    /// distinct worlds the typed primitive preserves.
+    #[test]
+    fn test_parse_missing_source_verified_condition_yields_probe_absent() {
+        let json = r#"{
+            "status": {
+                "conditions": [
+                    {"type": "Ready", "status": "True"},
+                    {"type": "Reconciling", "status": "False"}
+                ]
+            }
+        }"#;
+        assert_eq!(
+            parse_gitrepository_status(json),
+            FluxSourceVerificationOutcome::ProbeAbsent,
+        );
+    }
+
+    /// A response missing the `status` block entirely — the world a
+    /// `GitRepository` resource exists at but the source-controller
+    /// has not yet reconciled it (no status fields populated). Parses
+    /// to [`FluxSourceVerificationOutcome::ProbeAbsent`] — no usable
+    /// evidence, the parser is exit-agnostic by construction.
+    #[test]
+    fn test_parse_missing_status_block_yields_probe_absent() {
+        let json = r#"{
+            "apiVersion": "source.toolkit.fluxcd.io/v1",
+            "kind": "GitRepository",
+            "spec": {"url": "https://example.com/repo.git"}
+        }"#;
+        assert_eq!(
+            parse_gitrepository_status(json),
+            FluxSourceVerificationOutcome::ProbeAbsent,
+        );
+    }
+
+    /// A response whose `status.conditions` is an empty array.
+    /// Reconciliation has run but emitted no conditions yet (an
+    /// intermediate state). Parses to [`FluxSourceVerificationOutcome::
+    /// ProbeAbsent`].
+    #[test]
+    fn test_parse_empty_conditions_array_yields_probe_absent() {
+        let json = r#"{"status": {"conditions": []}}"#;
+        assert_eq!(
+            parse_gitrepository_status(json),
+            FluxSourceVerificationOutcome::ProbeAbsent,
+        );
+    }
+
+    /// A `SourceVerified` condition with a `status` value of
+    /// `"Unknown"` — the standard Kubernetes condition-status tristate
+    /// the source-controller may emit transiently while reconciliation
+    /// is in-flight (per the `metav1.ConditionStatus` enum used by
+    /// every K8s controller). Parses to
+    /// [`FluxSourceVerificationOutcome::ProbeAbsent`]: no positive
+    /// `True` evidence and no explicit `False` verdict either, so the
+    /// honest collapse is into the no-usable-evidence arm. A
+    /// regression that mapped `"Unknown"` to
+    /// [`FluxSourceVerificationOutcome::VerifyFailed`] would seal a
+    /// negative Phase 2 verdict against a state where the controller
+    /// has not yet completed verification.
+    #[test]
+    fn test_parse_unknown_status_yields_probe_absent() {
+        let json = r#"{
+            "status": {
+                "conditions": [
+                    {"type": "SourceVerified", "status": "Unknown",
+                     "reason": "Progressing"}
+                ]
+            }
+        }"#;
+        assert_eq!(
+            parse_gitrepository_status(json),
+            FluxSourceVerificationOutcome::ProbeAbsent,
+        );
+    }
+
+    /// Malformed JSON — the world a kubectl shell-out failed entirely
+    /// (the command produced text on stderr that is not parseable as
+    /// JSON, or the resource was not found). The module-level
+    /// docstring names this fold explicitly. Parses to
+    /// [`FluxSourceVerificationOutcome::ProbeAbsent`]. A regression
+    /// that panicked on unparseable input would surface the shell-out
+    /// failure as a runtime panic rather than as an honest
+    /// no-evidence-collected outcome.
+    #[test]
+    fn test_parse_malformed_json_yields_probe_absent() {
+        let json = "Error from server (NotFound): gitrepositories.source.toolkit.fluxcd.io \"missing\" not found";
+        assert_eq!(
+            parse_gitrepository_status(json),
+            FluxSourceVerificationOutcome::ProbeAbsent,
+        );
+    }
+
+    /// A `SourceVerified` condition appears AFTER several unrelated
+    /// conditions in the `conditions[]` array — the parser walks the
+    /// full array rather than peeking at the first entry. Pins that
+    /// the parser is order-independent over the conditions array; a
+    /// future regression that hard-coded `conditions[0]` would fail
+    /// this test.
+    #[test]
+    fn test_parse_source_verified_after_other_conditions_yields_verified() {
+        let json = r#"{
+            "status": {
+                "conditions": [
+                    {"type": "Ready", "status": "True"},
+                    {"type": "Reconciling", "status": "False"},
+                    {"type": "Stalled", "status": "False"},
+                    {"type": "SourceVerified", "status": "True"}
+                ]
+            }
+        }"#;
+        assert_eq!(
+            parse_gitrepository_status(json),
+            FluxSourceVerificationOutcome::Verified,
+        );
+    }
+
+    /// A `SourceVerified` condition with the `status` field omitted
+    /// — a malformed condition entry that does not present a verdict.
+    /// Parses to [`FluxSourceVerificationOutcome::ProbeAbsent`]. The
+    /// parser does not guess the verdict from absence of the
+    /// `status` field; the honest collapse is into no-usable-evidence.
+    #[test]
+    fn test_parse_source_verified_without_status_field_yields_probe_absent() {
+        let json = r#"{
+            "status": {
+                "conditions": [
+                    {"type": "SourceVerified", "reason": "Pending"}
+                ]
+            }
+        }"#;
+        assert_eq!(
+            parse_gitrepository_status(json),
+            FluxSourceVerificationOutcome::ProbeAbsent,
+        );
     }
 }
