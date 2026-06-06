@@ -280,6 +280,85 @@ impl HelmReleaseSignatureOutcome {
 
 crate::impl_probe_outcome!(HelmReleaseSignatureOutcome, ProbeAbsent);
 
+/// Parse the JSON output of `kubectl get helmrelease -n <ns> -o json`
+/// (or the equivalent `kube::Api::<HelmRelease>::list(...)`
+/// serialization) and recover the typed [`HelmReleaseSignatureOutcome`]
+/// for the namespace's collective `all_releases_signed` claim.
+///
+/// The function is the parser-layer peer of
+/// [`crate::flux_source_verification::parse_gitrepository_status`] one
+/// layer over: same shape (raw kubectl JSON → typed outcome), same
+/// exit-agnostic discipline (no exit code consulted), same honest
+/// collapse-into-[`HelmReleaseSignatureOutcome::ProbeAbsent`] on
+/// malformed input. The semantic axis differs — the FluxCD parser walks
+/// `status.conditions[*]` for a single binary verdict, while this
+/// parser walks the `items[*]` array and applies a universal quantifier
+/// over each item's `metadata.annotations[tameshi::ci::
+/// ANNOTATION_SIGNATURE]` field. A follow-up commit that wires
+/// `tokio::process::Command::new("kubectl").args(["get", "helmrelease",
+/// "-n", &namespace, "-o", "json"])` (or a typed
+/// `kube::Api::<HelmRelease>::list(...)`) at the
+/// [`crate::commands::attestation::compose_product_certification`] call
+/// site composes the shell-out with this parser to route the call site
+/// out of its current unconditional [`Self::ProbeAbsent`] arm.
+///
+/// ## The three-arm mapping
+///
+/// 1. The JSON deserializes AND `.items[]` is present AND every entry
+///    carries a non-empty `metadata.annotations[
+///    "sekiban.pleme.io/signature"]` value →
+///    [`Self::Verified`]. An empty `.items[]` array also yields
+///    [`Self::Verified`] (the universal quantifier over the empty set is
+///    vacuously satisfied — a namespace with zero `HelmRelease`
+///    resources trivially satisfies "all releases are signed", as the
+///    module-level docstring's `Verified` arm names explicitly).
+/// 2. The JSON deserializes AND `.items[]` is present AND one or more
+///    entries lack a non-empty signature annotation (annotation missing,
+///    annotation present but the empty string, `metadata` or
+///    `annotations` block absent on the entry) → [`Self::VerifyFailed`].
+///    The discriminator distinguishes this "probe ran and observed
+///    actual unsigned cluster state" world from the "probe never ran"
+///    world the [`Self::ProbeAbsent`] arm names — the load-bearing
+///    structural distinction the pre-typed `false` hardcode erased by
+///    flattening both worlds into the same `all_releases_signed: false`
+///    bool.
+/// 3. Every other input — malformed JSON, missing `.items` array,
+///    `.items` not an array — folds into [`Self::ProbeAbsent`]. The
+///    module-level docstring names this fold explicitly: "any malformed
+///    JSON / missing field will fold into `ProbeAbsent` (response
+///    received but no usable evidence = no-evidence-collected)." The
+///    parser is exit-agnostic by construction; a kubectl failure
+///    surfaces upstream as a [`Self::ProbeAbsent`] outcome chosen at
+///    the shell-out call site rather than as a parser arm.
+///
+/// THEORY §V.2: attestation is cryptographic evidence, not a wish. The
+/// parser preserves the structural distinction between "probe ran and
+/// observed one or more HelmRelease resources lacking the sekiban
+/// signature annotation" and "no probe ran / no usable evidence" — the
+/// pre-typed `false` hardcode collapsed both into a single negative
+/// claim.
+#[allow(dead_code)]
+pub fn parse_helmrelease_list(json_text: &str) -> HelmReleaseSignatureOutcome {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+        return HelmReleaseSignatureOutcome::ProbeAbsent;
+    };
+    let Some(items) = value.get("items").and_then(|i| i.as_array()) else {
+        return HelmReleaseSignatureOutcome::ProbeAbsent;
+    };
+    for item in items {
+        let signed = item
+            .get("metadata")
+            .and_then(|m| m.get("annotations"))
+            .and_then(|a| a.get(tameshi::ci::ANNOTATION_SIGNATURE))
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if !signed {
+            return HelmReleaseSignatureOutcome::VerifyFailed;
+        }
+    }
+    HelmReleaseSignatureOutcome::Verified
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +460,245 @@ mod tests {
         assert!(HelmReleaseSignatureOutcome::ProbeAbsent.is_probe_absent());
         assert!(!HelmReleaseSignatureOutcome::Verified.is_probe_absent());
         assert!(!HelmReleaseSignatureOutcome::VerifyFailed.is_probe_absent());
+    }
+
+    /// A canonical `kubectl get helmrelease -o json` response whose
+    /// `items[]` carries a single `HelmRelease` resource with a
+    /// non-empty `metadata.annotations["sekiban.pleme.io/signature"]`
+    /// value — the world a properly-signed Phase 2 deployment produces.
+    /// Parses to [`HelmReleaseSignatureOutcome::Verified`] — the one
+    /// arm that lets the Phase 2 deployment attestation honestly claim
+    /// `all_releases_signed: true`.
+    #[test]
+    fn test_parse_single_signed_release_yields_verified() {
+        let json = r#"{
+            "apiVersion": "v1",
+            "kind": "List",
+            "items": [
+                {
+                    "apiVersion": "helm.toolkit.fluxcd.io/v2",
+                    "kind": "HelmRelease",
+                    "metadata": {
+                        "name": "billing",
+                        "namespace": "pleme-prod",
+                        "annotations": {
+                            "sekiban.pleme.io/signature": "blake3:abc123"
+                        }
+                    }
+                }
+            ]
+        }"#;
+        assert_eq!(
+            parse_helmrelease_list(json),
+            HelmReleaseSignatureOutcome::Verified,
+        );
+    }
+
+    /// Multiple `HelmRelease` items, every one carrying a non-empty
+    /// sekiban signature annotation — pins the universal-quantifier
+    /// semantics across an item count greater than one. Parses to
+    /// [`HelmReleaseSignatureOutcome::Verified`]. A regression that
+    /// short-circuited on the first signed item without walking the
+    /// rest would mask an unsigned tail; pairs with
+    /// `test_parse_one_unsigned_in_multi_yields_verify_failed` to pin
+    /// the all-items invariant.
+    #[test]
+    fn test_parse_multiple_signed_releases_yield_verified() {
+        let json = r#"{
+            "items": [
+                {"metadata": {"annotations": {"sekiban.pleme.io/signature": "a"}}},
+                {"metadata": {"annotations": {"sekiban.pleme.io/signature": "b"}}},
+                {"metadata": {"annotations": {"sekiban.pleme.io/signature": "c"}}}
+            ]
+        }"#;
+        assert_eq!(
+            parse_helmrelease_list(json),
+            HelmReleaseSignatureOutcome::Verified,
+        );
+    }
+
+    /// An empty `items[]` array — the world a namespace has zero
+    /// `HelmRelease` resources at all. The universal quantifier over the
+    /// empty set is vacuously satisfied; the module-level docstring's
+    /// `Verified` arm names this case explicitly: "the namespace contains
+    /// zero `HelmRelease` resources at all (an empty namespace trivially
+    /// satisfies 'all releases are signed' — the universal-quantifier
+    /// over an empty set)." Parses to
+    /// [`HelmReleaseSignatureOutcome::Verified`]. A regression that
+    /// folded empty-items into [`HelmReleaseSignatureOutcome::
+    /// VerifyFailed`] would force every namespace without a HelmRelease
+    /// resource into a permanent negative Phase 2 verdict — the
+    /// structural mismatch the typed primitive's docstring foreclosed.
+    #[test]
+    fn test_parse_empty_items_yields_verified_vacuously() {
+        let json = r#"{"items": []}"#;
+        assert_eq!(
+            parse_helmrelease_list(json),
+            HelmReleaseSignatureOutcome::Verified,
+        );
+    }
+
+    /// A single `HelmRelease` item whose `metadata.annotations` block
+    /// is present but carries no `sekiban.pleme.io/signature` entry —
+    /// the world an unsigned release was admitted somehow (e.g. the
+    /// `sekiban` admission webhook was bypassed, or the resource was
+    /// applied before the webhook was deployed). Parses to
+    /// [`HelmReleaseSignatureOutcome::VerifyFailed`] — the
+    /// evidence-of-unsigned-release arm the typed primitive
+    /// structurally distinguishes from [`HelmReleaseSignatureOutcome::
+    /// ProbeAbsent`].
+    #[test]
+    fn test_parse_unsigned_release_yields_verify_failed() {
+        let json = r#"{
+            "items": [
+                {
+                    "metadata": {
+                        "name": "rogue",
+                        "annotations": {
+                            "other.annotation/key": "value"
+                        }
+                    }
+                }
+            ]
+        }"#;
+        assert_eq!(
+            parse_helmrelease_list(json),
+            HelmReleaseSignatureOutcome::VerifyFailed,
+        );
+    }
+
+    /// Multiple items, the first two signed and the third missing the
+    /// sekiban signature annotation — pins that the parser walks the
+    /// full `items[]` array rather than peeking at only the first
+    /// entry. A regression that hard-coded `items[0]` would pass the
+    /// signed-first cases above but fail this one. Parses to
+    /// [`HelmReleaseSignatureOutcome::VerifyFailed`].
+    #[test]
+    fn test_parse_one_unsigned_in_multi_yields_verify_failed() {
+        let json = r#"{
+            "items": [
+                {"metadata": {"annotations": {"sekiban.pleme.io/signature": "a"}}},
+                {"metadata": {"annotations": {"sekiban.pleme.io/signature": "b"}}},
+                {"metadata": {"name": "third-unsigned"}}
+            ]
+        }"#;
+        assert_eq!(
+            parse_helmrelease_list(json),
+            HelmReleaseSignatureOutcome::VerifyFailed,
+        );
+    }
+
+    /// A `HelmRelease` item whose signature annotation is present but
+    /// is the empty string — the module-level docstring's `VerifyFailed`
+    /// arm names this sub-case explicitly: "annotation present but
+    /// empty". The empty-string is structurally distinct from a valid
+    /// signature; the parser folds it into
+    /// [`HelmReleaseSignatureOutcome::VerifyFailed`] rather than letting
+    /// an empty value masquerade as evidence of a valid Phase 2
+    /// signature. A regression that treated annotation-present-but-empty
+    /// as `Verified` would let an attacker who could set the annotation
+    /// key (but not produce a valid signature) bypass the Phase 2
+    /// `all_releases_signed` claim.
+    #[test]
+    fn test_parse_empty_signature_annotation_yields_verify_failed() {
+        let json = r#"{
+            "items": [
+                {
+                    "metadata": {
+                        "annotations": {
+                            "sekiban.pleme.io/signature": ""
+                        }
+                    }
+                }
+            ]
+        }"#;
+        assert_eq!(
+            parse_helmrelease_list(json),
+            HelmReleaseSignatureOutcome::VerifyFailed,
+        );
+    }
+
+    /// A `HelmRelease` item whose `metadata.annotations` block is
+    /// missing entirely — no annotations of any kind on the resource.
+    /// The module-level docstring's `VerifyFailed` arm names this case
+    /// implicitly: there is no valid signature annotation. Parses to
+    /// [`HelmReleaseSignatureOutcome::VerifyFailed`]. The parser does
+    /// not require the `annotations` block to exist for the signature
+    /// lookup; a missing block is structurally equivalent to a present-
+    /// but-unsigned block at the verdict layer.
+    #[test]
+    fn test_parse_missing_annotations_block_yields_verify_failed() {
+        let json = r#"{
+            "items": [
+                {
+                    "metadata": {
+                        "name": "no-annotations"
+                    }
+                }
+            ]
+        }"#;
+        assert_eq!(
+            parse_helmrelease_list(json),
+            HelmReleaseSignatureOutcome::VerifyFailed,
+        );
+    }
+
+    /// A response missing the `items` array entirely — not a valid
+    /// `HelmReleaseList` shape. The module-level docstring names this
+    /// fold explicitly: "any malformed JSON / missing field will fold
+    /// into `ProbeAbsent`." Parses to [`HelmReleaseSignatureOutcome::
+    /// ProbeAbsent`]. Structurally distinct from
+    /// [`HelmReleaseSignatureOutcome::VerifyFailed`]: the absence of
+    /// the list shape is evidence-of-no-probe, not evidence-of-
+    /// unsigned-release.
+    #[test]
+    fn test_parse_missing_items_array_yields_probe_absent() {
+        let json = r#"{
+            "apiVersion": "v1",
+            "kind": "List"
+        }"#;
+        assert_eq!(
+            parse_helmrelease_list(json),
+            HelmReleaseSignatureOutcome::ProbeAbsent,
+        );
+    }
+
+    /// Malformed JSON — the world a kubectl shell-out failed entirely
+    /// (the command produced text on stderr that is not parseable as
+    /// JSON, e.g. an RBAC denial or a missing-namespace error). The
+    /// module-level docstring names this fold explicitly. Parses to
+    /// [`HelmReleaseSignatureOutcome::ProbeAbsent`] without panic — the
+    /// honest no-evidence-collected collapse, not a runtime panic that
+    /// would surface the shell-out failure inside composition.
+    #[test]
+    fn test_parse_malformed_json_yields_probe_absent() {
+        let json =
+            "Error from server (Forbidden): helmreleases.helm.toolkit.fluxcd.io is forbidden";
+        assert_eq!(
+            parse_helmrelease_list(json),
+            HelmReleaseSignatureOutcome::ProbeAbsent,
+        );
+    }
+
+    /// The signature annotation key string is the one
+    /// `tameshi::ci::ANNOTATION_SIGNATURE` constant — a regression that
+    /// hard-coded a stale or typo'd annotation key (e.g.
+    /// `sekiban.pleme.io/sig` or the legacy
+    /// `pleme.io/sekiban-signature`) would still pass every fixture
+    /// above (because those fixtures use the literal canonical key)
+    /// but would fail this pin against any change to the canonical
+    /// key the tameshi crate publishes. The parser sources the
+    /// annotation key from `tameshi::ci::ANNOTATION_SIGNATURE` at
+    /// compile time; this test pins that single source of truth.
+    #[test]
+    fn test_parse_uses_canonical_annotation_key() {
+        let json = format!(
+            r#"{{"items": [{{"metadata": {{"annotations": {{"{}": "sig"}}}}}}]}}"#,
+            tameshi::ci::ANNOTATION_SIGNATURE,
+        );
+        assert_eq!(
+            parse_helmrelease_list(&json),
+            HelmReleaseSignatureOutcome::Verified,
+        );
     }
 }
