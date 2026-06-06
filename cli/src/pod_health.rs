@@ -268,6 +268,117 @@ impl PodHealthOutcome {
 
 crate::impl_probe_outcome!(PodHealthOutcome, ProbeAbsent);
 
+/// Parse the JSON output of `kubectl get pods -n <ns> -o json` (or the
+/// equivalent `kube::Api::<Pod>::list(...)` serialization) and recover
+/// the typed [`PodHealthOutcome`] for the namespace's collective
+/// `all_healthy` claim.
+///
+/// The function is the parser-layer peer of
+/// [`crate::pod_listing::parse_pod_list`] one layer over (same
+/// `PodList.items[]` input domain, distinct semantic axis: that parser
+/// walks `.items.len()` into a two-arm count, while this parser walks
+/// `.items[*]` applying a universal-quantifier predicate over each
+/// item's `status.phase` and `status.conditions[type=Ready]` into a
+/// three-arm verdict) and the universal-quantifier peer of
+/// [`crate::helm_release_signature::parse_helmrelease_list`] two layers
+/// over (same shape: walk `.items[*]`, apply per-item predicate, fold
+/// into `Healthy` / `UnhealthyPods` / `ProbeAbsent`). Same exit-
+/// agnostic discipline (no exit code consulted), same honest
+/// collapse-into-[`PodHealthOutcome::ProbeAbsent`] on malformed input.
+/// A follow-up commit that wires the kubectl shell-out at the
+/// [`crate::commands::attestation::compose_product_certification`]
+/// call site composes ONE `kubectl get pods -o json` invocation with
+/// both parsers — feeding the same JSON stdout into
+/// [`crate::pod_listing::parse_pod_list`] for the `running_pods` claim
+/// AND into [`parse_pod_health`] for the `all_healthy` claim. The two
+/// parsers' shared input domain is the structural prerequisite for
+/// that single-probe / two-claim composition: a regression that
+/// drifted one parser's `items[]` walk off the canonical
+/// [`k8s_openapi::api::core::v1::PodList`] shape (e.g. peeking at a
+/// different field path) would surface at parser-test time against
+/// canonical fixtures rather than at integration-test time against a
+/// live cluster.
+///
+/// ## The three-arm mapping
+///
+/// 1. The JSON deserializes AND `.items[]` is present AND every entry
+///    satisfies `status.phase == "Running"` AND has a
+///    `status.conditions[]` entry with `type == "Ready"` AND
+///    `status == "True"` → [`PodHealthOutcome::Healthy`]. An empty
+///    `.items[]` array also yields [`PodHealthOutcome::Healthy`] — the
+///    universal quantifier over the empty set is vacuously satisfied
+///    (the module-level docstring's `Healthy` arm names this case
+///    explicitly: "the namespace contains zero `Pod` resources at all
+///    — an empty namespace trivially satisfies all pods are healthy").
+///    Same vacuous-truth-on-empty discipline
+///    [`crate::helm_release_signature::parse_helmrelease_list`]
+///    carries one layer over.
+/// 2. The JSON deserializes AND `.items[]` is present AND one or more
+///    entries fail the predicate (any of: `status` block missing,
+///    `status.phase != "Running"`, no `Ready` condition entry,
+///    `Ready` condition's `status != "True"`) →
+///    [`PodHealthOutcome::UnhealthyPods`]. The discriminator
+///    distinguishes this "probe ran and observed actual unhealthy
+///    cluster state" world from the "probe never ran" world the
+///    [`PodHealthOutcome::ProbeAbsent`] arm names — the load-bearing
+///    structural distinction the pre-typed `false` hardcode erased by
+///    flattening both worlds into the same `all_healthy: false` bool.
+///    The `metav1.ConditionStatus` tristate (`True` / `False` /
+///    `Unknown`) informs the `Unknown -> UnhealthyPods` collapse: a
+///    `Ready=Unknown` pod is a probe-observed not-positively-ready
+///    state (the kubelet has not confirmed readiness), structurally
+///    distinct from the no-probe-ran world.
+/// 3. Every other input — malformed JSON, missing `.items` array,
+///    `.items` not an array — folds into
+///    [`PodHealthOutcome::ProbeAbsent`]. The parser is exit-agnostic
+///    by construction; a kubectl failure surfaces upstream as a
+///    [`PodHealthOutcome::ProbeAbsent`] outcome chosen at the shell-
+///    out call site rather than as a parser arm.
+///
+/// THEORY §V.2: attestation is cryptographic evidence, not a wish.
+/// The parser preserves the structural distinction between "probe ran
+/// and observed one or more pods that are not `Running`-and-`Ready`"
+/// and "no probe ran / no usable evidence" — the pre-typed `false`
+/// hardcode collapsed both into a single negative claim.
+/// THEORY §VI.1: one oracle, not a per-consumer re-derivation. The
+/// parser is the one site that walks `items[*].status.phase` and
+/// `items[*].status.conditions[type=Ready]`; downstream consumers
+/// pattern-match the typed three-arm enum.
+#[allow(dead_code)]
+pub fn parse_pod_health(json_text: &str) -> PodHealthOutcome {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+        return PodHealthOutcome::ProbeAbsent;
+    };
+    let Some(items) = value.get("items").and_then(|i| i.as_array()) else {
+        return PodHealthOutcome::ProbeAbsent;
+    };
+    for item in items {
+        let Some(status) = item.get("status") else {
+            return PodHealthOutcome::UnhealthyPods;
+        };
+        let phase_running = status
+            .get("phase")
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| p == "Running");
+        if !phase_running {
+            return PodHealthOutcome::UnhealthyPods;
+        }
+        let ready_true = status
+            .get("conditions")
+            .and_then(|c| c.as_array())
+            .is_some_and(|conds| {
+                conds.iter().any(|cond| {
+                    cond.get("type").and_then(|t| t.as_str()) == Some("Ready")
+                        && cond.get("status").and_then(|s| s.as_str()) == Some("True")
+                })
+            });
+        if !ready_true {
+            return PodHealthOutcome::UnhealthyPods;
+        }
+    }
+    PodHealthOutcome::Healthy
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +477,291 @@ mod tests {
         assert!(PodHealthOutcome::ProbeAbsent.is_probe_absent());
         assert!(!PodHealthOutcome::Healthy.is_probe_absent());
         assert!(!PodHealthOutcome::UnhealthyPods.is_probe_absent());
+    }
+
+    /// A canonical `kubectl get pods -n <ns> -o json` response with a
+    /// single `Pod` whose `status.phase == "Running"` AND whose
+    /// `status.conditions[]` carries a `Ready=True` entry — the world
+    /// a properly-rolled-out Phase 2 deployment produces. Parses to
+    /// [`PodHealthOutcome::Healthy`] — the one arm that lets the
+    /// Phase 2 deployment attestation honestly claim `all_healthy:
+    /// true`.
+    #[test]
+    fn test_parse_single_running_ready_yields_healthy() {
+        let json = r#"{
+            "apiVersion": "v1",
+            "kind": "PodList",
+            "items": [
+                {
+                    "metadata": {"name": "svc-0", "namespace": "demo"},
+                    "status": {
+                        "phase": "Running",
+                        "conditions": [
+                            {"type": "Ready", "status": "True"}
+                        ]
+                    }
+                }
+            ]
+        }"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::Healthy);
+    }
+
+    /// Three `Running` + `Ready=True` pods yield
+    /// [`PodHealthOutcome::Healthy`]. Pairs with the
+    /// `one-unhealthy-in-multi` test below to pin the all-items
+    /// universal-quantifier semantics: every entry must pass the
+    /// predicate, not just the first.
+    #[test]
+    fn test_parse_multiple_running_ready_yield_healthy() {
+        let json = r#"{
+            "items": [
+                {"status": {"phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}]}},
+                {"status": {"phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}]}},
+                {"status": {"phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}]}}
+            ]
+        }"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::Healthy);
+    }
+
+    /// A canonical `PodList` response with an empty `items[]` array
+    /// (the namespace is probed and contains zero `Pod` resources)
+    /// parses to [`PodHealthOutcome::Healthy`] — the vacuous
+    /// universal-quantifier over the empty set, as the module-level
+    /// `Healthy` arm's docstring names explicitly. A regression that
+    /// folded empty-items into [`PodHealthOutcome::UnhealthyPods`]
+    /// would force every namespace without pods into a permanent
+    /// negative Phase 2 pod-health verdict. Same vacuous-truth
+    /// discipline [`crate::helm_release_signature::
+    /// parse_helmrelease_list`] applies to empty `HelmReleaseList`
+    /// responses.
+    #[test]
+    fn test_parse_empty_items_yields_healthy_vacuously() {
+        let json = r#"{"apiVersion": "v1", "kind": "PodList", "items": []}"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::Healthy);
+    }
+
+    /// A pod whose `status.phase == "Pending"` (scheduler couldn't
+    /// place it, or the image is still pulling) parses to
+    /// [`PodHealthOutcome::UnhealthyPods`]. Structurally distinct
+    /// from [`PodHealthOutcome::ProbeAbsent`]: the kubectl probe ran
+    /// and observed actual unhealthy cluster state.
+    #[test]
+    fn test_parse_pending_pod_yields_unhealthy() {
+        let json = r#"{
+            "items": [
+                {"status": {"phase": "Pending",
+                            "conditions": [{"type": "PodScheduled",
+                                            "status": "False",
+                                            "reason": "Unschedulable"}]}}
+            ]
+        }"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::UnhealthyPods);
+    }
+
+    /// A pod whose `status.phase == "Failed"` (crashlooping past the
+    /// restart budget, or a Job-style pod that exited non-zero) parses
+    /// to [`PodHealthOutcome::UnhealthyPods`]. Pins the `Failed` arm
+    /// of the `status.phase` non-`Running` set the module-level
+    /// `UnhealthyPods` docstring names.
+    #[test]
+    fn test_parse_failed_pod_yields_unhealthy() {
+        let json = r#"{
+            "items": [
+                {"status": {"phase": "Failed"}}
+            ]
+        }"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::UnhealthyPods);
+    }
+
+    /// The load-bearing discriminator: a pod whose `status.phase ==
+    /// "Running"` BUT whose `Ready` condition's `status == "False"`
+    /// (the pod is alive but its readiness probe is failing — Kubernetes
+    /// excludes it from Service endpoint sets even though the lifecycle
+    /// phase is positive) parses to [`PodHealthOutcome::UnhealthyPods`].
+    /// A regression that consulted only `status.phase` and ignored the
+    /// `Ready` condition would pass every test above but fail this one
+    /// — silently claiming `all_healthy: true` against a namespace
+    /// whose pods are alive but failing readiness, the precise failure
+    /// the module-level docstring's `Running`-but-not-`Ready` sub-case
+    /// names as load-bearing.
+    #[test]
+    fn test_parse_running_not_ready_yields_unhealthy() {
+        let json = r#"{
+            "items": [
+                {"status": {"phase": "Running",
+                            "conditions": [
+                                {"type": "Ready", "status": "False",
+                                 "reason": "ContainersNotReady"}
+                            ]}}
+            ]
+        }"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::UnhealthyPods);
+    }
+
+    /// A pod whose `Ready` condition carries the `metav1.
+    /// ConditionStatus` tristate value `"Unknown"` (kubelet has not yet
+    /// confirmed readiness — transient in-flight reconciliation, or the
+    /// node hosting the pod has gone unreachable) parses to
+    /// [`PodHealthOutcome::UnhealthyPods`]. The `Unknown -> UnhealthyPods`
+    /// collapse mirrors the discipline `parse_gitrepository_status`
+    /// applies at the FluxCD layer two parsers over, with one structural
+    /// difference: at the source-verification layer, `Unknown ->
+    /// ProbeAbsent` because an in-flight Flux reconciliation is no-
+    /// usable-evidence; at the pod-readiness layer, `Ready=Unknown` IS
+    /// itself evidence (the kubelet ran AND has not confirmed the pod
+    /// healthy), so the cluster has produced positive observation of a
+    /// not-positively-ready state — structurally distinct from no-probe-
+    /// ran. A regression that mapped `Ready=Unknown` to `Healthy` (or to
+    /// `ProbeAbsent`) would defeat the Phase 2 honesty channel against
+    /// a transient unhealthy state.
+    #[test]
+    fn test_parse_ready_status_unknown_yields_unhealthy() {
+        let json = r#"{
+            "items": [
+                {"status": {"phase": "Running",
+                            "conditions": [
+                                {"type": "Ready", "status": "Unknown",
+                                 "reason": "NodeLost"}
+                            ]}}
+            ]
+        }"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::UnhealthyPods);
+    }
+
+    /// A pod whose `status.phase == "Running"` AND whose
+    /// `status.conditions[]` carries no `Ready` entry at all (only
+    /// `PodScheduled`, `Initialized`, `ContainersReady`) parses to
+    /// [`PodHealthOutcome::UnhealthyPods`]. Missing `Ready` entry is
+    /// structurally equivalent to `Ready=False` at the verdict layer:
+    /// the cluster has not produced positive Ready evidence, so the
+    /// Phase 2 deployment attestation cannot honestly claim healthy.
+    /// A regression that defaulted absent `Ready` entries to true
+    /// would silently approve every pod whose kubelet had not yet
+    /// emitted the readiness condition.
+    #[test]
+    fn test_parse_no_ready_condition_yields_unhealthy() {
+        let json = r#"{
+            "items": [
+                {"status": {"phase": "Running",
+                            "conditions": [
+                                {"type": "PodScheduled", "status": "True"},
+                                {"type": "Initialized", "status": "True"}
+                            ]}}
+            ]
+        }"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::UnhealthyPods);
+    }
+
+    /// Three pods — the first two `Running` + `Ready=True`, the third
+    /// `Pending` — parses to [`PodHealthOutcome::UnhealthyPods`]. Pins
+    /// the parser walks the full `items[]` array and short-circuits at
+    /// the first failing predicate rather than peeking at `items[0]`.
+    /// A regression that hard-coded `items[0]` would pass the
+    /// healthy-first / all-healthy / pending-only cases but fail this
+    /// one.
+    #[test]
+    fn test_parse_one_unhealthy_in_multi_yields_unhealthy() {
+        let json = r#"{
+            "items": [
+                {"status": {"phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}]}},
+                {"status": {"phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}]}},
+                {"status": {"phase": "Pending"}}
+            ]
+        }"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::UnhealthyPods);
+    }
+
+    /// A pod with no `status` block at all (a freshly-admitted Pod the
+    /// kubelet has not yet reconciled, or a malformed item with only a
+    /// `metadata` block) parses to [`PodHealthOutcome::UnhealthyPods`].
+    /// Absence of evidence-of-readiness is treated as evidence-of-
+    /// not-ready at the per-pod predicate layer — structurally
+    /// equivalent to a pod whose status block is present but reports
+    /// `Pending`. This mirrors the `parse_helmrelease_list` discipline
+    /// where a missing `metadata.annotations` block on an item folds
+    /// into [`crate::helm_release_signature::
+    /// HelmReleaseSignatureOutcome::VerifyFailed`] rather than
+    /// silently passing.
+    #[test]
+    fn test_parse_missing_status_block_yields_unhealthy() {
+        let json = r#"{
+            "items": [
+                {"metadata": {"name": "svc-0"}}
+            ]
+        }"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::UnhealthyPods);
+    }
+
+    /// A response missing the `items` field entirely — a non-list
+    /// resource (e.g. a single `Pod` response from `kubectl get pod
+    /// <name>` rather than `kubectl get pods`) or a malformed list
+    /// shape. Parses to [`PodHealthOutcome::ProbeAbsent`]:
+    /// structurally distinct from [`PodHealthOutcome::UnhealthyPods`]
+    /// because the absence of the list shape is evidence-of-no-probe,
+    /// not evidence-of-unhealthy-pod.
+    #[test]
+    fn test_parse_missing_items_yields_probe_absent() {
+        let json = r#"{"apiVersion": "v1", "kind": "Pod",
+                       "metadata": {"name": "svc-0"}}"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::ProbeAbsent);
+    }
+
+    /// A response whose `items` field is present but not a JSON array
+    /// parses to [`PodHealthOutcome::ProbeAbsent`]. A regression that
+    /// treated `items: null` or `items: {}` as
+    /// [`PodHealthOutcome::Healthy`] (the empty-set vacuous-truth arm)
+    /// would silently claim healthy against a malformed-input world.
+    #[test]
+    fn test_parse_items_not_array_yields_probe_absent() {
+        let json = r#"{"items": {"unexpected": "object"}}"#;
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::ProbeAbsent);
+    }
+
+    /// kubectl `Error from server (Forbidden): ...` stderr-mode output
+    /// (not JSON at all) parses to [`PodHealthOutcome::ProbeAbsent`]
+    /// without panic — the honest no-evidence-collected collapse. A
+    /// regression that panicked on unparseable input would surface a
+    /// shell-out failure as a runtime panic rather than as a typed
+    /// no-evidence outcome.
+    #[test]
+    fn test_parse_malformed_json_yields_probe_absent() {
+        let json = "Error from server (Forbidden): pods is forbidden";
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::ProbeAbsent);
+    }
+
+    /// The two parsers over `PodList.items[]` —
+    /// [`crate::pod_listing::parse_pod_list`] (count) and
+    /// [`parse_pod_health`] (universal-quantifier health predicate) —
+    /// compose against the SAME canonical `PodList` JSON: feeding one
+    /// healthy-pod response into both parsers yields `Counted { count:
+    /// 1 }` AND `Healthy`, structurally pinning the single-probe /
+    /// two-claim composition the future
+    /// [`crate::commands::attestation::compose_product_certification`]
+    /// shell-out depends on. A regression that drifted either parser
+    /// off the canonical `items[]` walk (e.g. peeked at a different
+    /// field path) would surface here rather than at integration-test
+    /// time against a live cluster.
+    #[test]
+    fn test_both_pod_list_parsers_compose_against_one_response() {
+        use crate::pod_listing::{parse_pod_list, PodListingOutcome};
+        let json = r#"{
+            "apiVersion": "v1",
+            "kind": "PodList",
+            "items": [
+                {"metadata": {"name": "svc-0"},
+                 "status": {"phase": "Running",
+                            "conditions": [{"type": "Ready", "status": "True"}]}}
+            ]
+        }"#;
+        assert_eq!(
+            parse_pod_list(json),
+            PodListingOutcome::Counted { count: 1 }
+        );
+        assert_eq!(parse_pod_health(json), PodHealthOutcome::Healthy);
     }
 }
