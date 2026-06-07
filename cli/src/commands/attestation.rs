@@ -401,6 +401,7 @@ pub async fn compute_build_attestation(
         build_probes_ran = coverage.ran,
         build_probes_absent = coverage.absent,
         build_probes_total = coverage.total(),
+        build_probes_coverage_ratio = coverage.coverage_ratio(),
         "build-attestation probe coverage"
     );
 
@@ -746,6 +747,7 @@ pub async fn compute_chart_attestation(
         chart_probes_ran = coverage.ran,
         chart_probes_absent = coverage.absent,
         chart_probes_total = coverage.total(),
+        chart_probes_coverage_ratio = coverage.coverage_ratio(),
         "chart-attestation probe coverage"
     );
 
@@ -1274,6 +1276,7 @@ pub fn compose_product_certification(
         deployment_probes_ran = deployment_coverage.ran,
         deployment_probes_absent = deployment_coverage.absent,
         deployment_probes_total = deployment_coverage.total(),
+        deployment_probes_coverage_ratio = deployment_coverage.coverage_ratio(),
         "deployment-attestation probe coverage"
     );
 

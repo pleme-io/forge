@@ -155,11 +155,54 @@ pub struct ProbeCoverage {
 #[allow(dead_code)]
 impl ProbeCoverage {
     /// Total number of probes counted. The invariant `ran + absent ==
-    /// total` holds by construction; a downstream consumer can derive
-    /// the ratio `ran as f64 / total as f64` for a Phase 1 / Phase 2
-    /// telemetry signal.
+    /// total` holds by construction; downstream telemetry consumers
+    /// derive the evidence-coverage ratio via [`coverage_ratio`].
+    ///
+    /// [`coverage_ratio`]: ProbeCoverage::coverage_ratio
     pub fn total(&self) -> usize {
         self.ran + self.absent
+    }
+
+    /// Fraction of counted probes that produced evidence — `ran as f64 /
+    /// total as f64` when `total > 0`, and `0.0` when `total == 0` (the
+    /// empty-slice boundary case [`probe_coverage`] returns
+    /// `ProbeCoverage { ran: 0, absent: 0 }` for). The structural
+    /// distinction between "no probes counted" and "every probe ran but
+    /// surfaced an absent default" is preserved at the [`total`] field,
+    /// not flattened into the ratio: a consumer that wants to
+    /// disambiguate "no probes ran because the slice was empty" from
+    /// "no probes ran because every probe surfaced an absent default"
+    /// reads `total() == 0` vs. `total() > 0 && coverage_ratio() == 0.0`.
+    ///
+    /// The bare-f64 surface is the largest common shape the three
+    /// load-bearing telemetry emission sites
+    /// (`commands::attestation::compose_product_certification`,
+    /// `commands::attestation::compute_chart_attestation`, and
+    /// `commands::attestation::compute_build_attestation`) cheaply admit
+    /// — `tracing`'s `Visit` API records `f64` directly without the
+    /// per-emission `unwrap_or` an `Option<f64>` surface would force at
+    /// every call site (and without the structurally-divergent sentinel
+    /// — `f64::NAN`, `-1.0`, `Empty` — each call site would otherwise
+    /// pick). The empty-slice 0.0 collapse documented above is the load-
+    /// bearing decision the test suite pins; the structural
+    /// disambiguator stays at `total()`.
+    ///
+    /// Lifts the derivation `ran as f64 / total as f64` from the
+    /// downstream verifier the prior docstring gestured at to the
+    /// composition site, so the three telemetry events forge emits
+    /// surface a uniform `*_probes_coverage_ratio` field a `sekiban`
+    /// admission verifier (THEORY §V.4 / §VII.1 honesty channel) /
+    /// Prometheus alert rule reads with one field-name pattern across
+    /// build / chart / deployment attestation records. THEORY §VI.1:
+    /// one oracle — the ratio is derived at one site, not
+    /// per-emission-call inlined at each telemetry consumer.
+    pub fn coverage_ratio(&self) -> f64 {
+        let total = self.total();
+        if total == 0 {
+            0.0
+        } else {
+            self.ran as f64 / total as f64
+        }
     }
 }
 
@@ -299,5 +342,87 @@ mod tests {
         let outcomes: [&dyn ProbeOutcome; 3] = [&a, &b, &c];
         let coverage = probe_coverage(outcomes.iter().copied());
         assert_eq!(coverage, ProbeCoverage { ran: 0, absent: 3 });
+    }
+
+    /// `coverage_ratio` returns `0.0` for the empty-slice boundary case
+    /// `probe_coverage` over an empty iterator produces. The structural
+    /// distinction between "no probes counted" and "every probe absent"
+    /// is preserved at `total()` (which returns `0` here vs. `N` for the
+    /// all-absent floor), not flattened into the ratio. A future
+    /// regression that hand-rolled the division without guarding the
+    /// `total == 0` denominator would emit `f64::NAN` and fail this pin,
+    /// surfacing the boundary case at the typed-primitive site rather
+    /// than at the tracing-field emission downstream.
+    #[test]
+    fn test_coverage_ratio_empty_returns_zero() {
+        let coverage = ProbeCoverage { ran: 0, absent: 0 };
+        assert_eq!(coverage.total(), 0);
+        assert_eq!(coverage.coverage_ratio(), 0.0);
+    }
+
+    /// `coverage_ratio` returns `1.0` when every counted probe ran —
+    /// the all-probes-ran ceiling the
+    /// `*_probe_coverage_all_ran_ceiling` siblings at
+    /// `commands::attestation` pin against the typed-primitive floors.
+    /// Pinned across the three load-bearing total counts (3 for build,
+    /// 4 for chart, 7 for deployment) so a future regression that
+    /// hardcoded the denominator to one specific total would fail
+    /// against the other two.
+    #[test]
+    fn test_coverage_ratio_all_ran_is_one() {
+        assert_eq!(ProbeCoverage { ran: 3, absent: 0 }.coverage_ratio(), 1.0);
+        assert_eq!(ProbeCoverage { ran: 4, absent: 0 }.coverage_ratio(), 1.0);
+        assert_eq!(ProbeCoverage { ran: 7, absent: 0 }.coverage_ratio(), 1.0);
+    }
+
+    /// `coverage_ratio` returns `0.0` when every counted probe surfaced
+    /// an absent default — the all-probes-absent floor today's
+    /// `compose_product_certification` / `compute_chart_attestation` /
+    /// `compute_build_attestation` call-site state sits at. The
+    /// structural disambiguator from the empty-slice case is `total() >
+    /// 0` here vs. `total() == 0` for the empty boundary; both produce
+    /// `coverage_ratio() == 0.0` but a consumer can recover the kind-
+    /// of-claim from the `total` field.
+    #[test]
+    fn test_coverage_ratio_all_absent_is_zero() {
+        let coverage = ProbeCoverage { ran: 0, absent: 7 };
+        assert_eq!(coverage.total(), 7);
+        assert_eq!(coverage.coverage_ratio(), 0.0);
+    }
+
+    /// `coverage_ratio` returns the arithmetic fraction for the mixed
+    /// arm-split — the realistic Phase 2 deployment-attestation
+    /// three-of-seven shape `test_deployment_probe_coverage_mixed_arms_
+    /// arithmetic` exercises one layer over, plus the half-and-half
+    /// (1, 1) corner case the rational `0.5` pins exactly under IEEE-754
+    /// (no floating-point rounding to chase). A regression that swapped
+    /// `ran` and `absent` in the numerator would flip `3/7` to `4/7`
+    /// and fail this pin.
+    #[test]
+    fn test_coverage_ratio_mixed_split_arithmetic() {
+        assert_eq!(ProbeCoverage { ran: 1, absent: 1 }.coverage_ratio(), 0.5);
+        assert_eq!(
+            ProbeCoverage { ran: 3, absent: 4 }.coverage_ratio(),
+            3.0 / 7.0
+        );
+        assert_eq!(
+            ProbeCoverage { ran: 2, absent: 1 }.coverage_ratio(),
+            2.0 / 3.0
+        );
+    }
+
+    /// `coverage_ratio` is deterministic — repeated calls on the same
+    /// `ProbeCoverage` value return bit-identical `f64`s. Pins that the
+    /// method is a pure function of `ran` / `absent` with no hidden
+    /// state (e.g. a stray `rand` or a cached interior-mutable field),
+    /// the load-bearing invariant a downstream `sekiban` admission
+    /// verifier reconciliation depends on when comparing two telemetry
+    /// emissions of the same `ProbeCoverage` for equality.
+    #[test]
+    fn test_coverage_ratio_is_deterministic() {
+        let coverage = ProbeCoverage { ran: 3, absent: 4 };
+        let first = coverage.coverage_ratio();
+        let second = coverage.coverage_ratio();
+        assert_eq!(first.to_bits(), second.to_bits());
     }
 }
