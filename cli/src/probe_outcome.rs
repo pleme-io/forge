@@ -206,6 +206,85 @@ impl ProbeCoverage {
     }
 }
 
+/// Identity element of the [`Add`](std::ops::Add) impl below: the empty-
+/// slice [`probe_coverage`] result, the zero value every [`Sum`] fold
+/// starts from. Pins `ProbeCoverage::default() == ProbeCoverage { ran: 0,
+/// absent: 0 }` structurally so a downstream verifier reading a
+/// fleet-wide aggregate via `.iter().sum::<ProbeCoverage>()` cannot drift
+/// against the empty-slice boundary case [`probe_coverage`] already
+/// returns for the same shape.
+impl Default for ProbeCoverage {
+    fn default() -> Self {
+        Self { ran: 0, absent: 0 }
+    }
+}
+
+/// Componentwise `usize::saturating_add` over [`ProbeCoverage`] —
+/// `(a.ran + b.ran, a.absent + b.absent)`. The structural monoid
+/// `(ProbeCoverage, +, default())` lifts the per-phase coverage every
+/// `*_probe_coverage` helper at `commands::attestation` produces (the
+/// Phase 1 build / Phase 1 chart / Phase 2 deployment shape) to a single
+/// product-level signal a future emission site can compose with
+/// `[build, chart, deployment].iter().copied().sum::<ProbeCoverage>()`
+/// — one site, not per-field-summed at every downstream verifier (THEORY
+/// §VI.1 one-oracle discipline).
+///
+/// `saturating_add` rather than the panicking `+` is the load-bearing
+/// arithmetic: a fleet-wide aggregator summing the per-record coverage
+/// across every Phase 1 / Phase 2 attestation forge composes
+/// (multi-product, multi-cluster, multi-environment) cannot panic on
+/// overflow at `usize::MAX` — the saturating ceiling preserves the
+/// monoid's totality (every pair of `ProbeCoverage` values has a defined
+/// sum) where the unchecked addition would surface a panic on the
+/// pathological aggregate (1 << 64 probe records on a 64-bit target,
+/// realistically unreachable but structurally foreclosed here).
+impl std::ops::Add for ProbeCoverage {
+    type Output = ProbeCoverage;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        ProbeCoverage {
+            ran: self.ran.saturating_add(rhs.ran),
+            absent: self.absent.saturating_add(rhs.absent),
+        }
+    }
+}
+
+/// In-place sibling of [`Add`](std::ops::Add) above. The `*self = *self +
+/// rhs` body reuses the `Copy` derive on [`ProbeCoverage`] (the type is
+/// two `usize`s — trivially copyable) so the assign form is a one-line
+/// delegation that cannot drift from the `Add` semantics.
+impl std::ops::AddAssign for ProbeCoverage {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+/// Owned-iterator [`Sum`] impl: `iter.fold(default(), Add::add)`. Lifts
+/// a `Vec<ProbeCoverage>` / `[ProbeCoverage; N]` / `impl Iterator<Item =
+/// ProbeCoverage>` to a single aggregate value the downstream telemetry
+/// emission site can hand to `tracing::info!` alongside the per-phase
+/// fields. The empty-iterator case returns [`ProbeCoverage::default`] (0
+/// ran, 0 absent) — the same empty-slice boundary `probe_coverage`
+/// returns, so the two surfaces compose without a structural seam.
+impl std::iter::Sum for ProbeCoverage {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), std::ops::Add::add)
+    }
+}
+
+/// Borrowed-iterator [`Sum`] impl: lets a `&[ProbeCoverage]` borrow
+/// reach `.iter().sum::<ProbeCoverage>()` without an explicit `.copied()`
+/// at the call site — the idiomatic shape every other numeric `Sum` in
+/// `std` already admits (`<i64 as Sum<&'a i64>>` etc.). The delegation
+/// through `.copied()` reuses the `Copy` derive on [`ProbeCoverage`] so
+/// the borrowed form cannot drift from the owned `Sum` semantics one
+/// impl up.
+impl<'a> std::iter::Sum<&'a ProbeCoverage> for ProbeCoverage {
+    fn sum<I: Iterator<Item = &'a ProbeCoverage>>(iter: I) -> Self {
+        iter.copied().sum()
+    }
+}
+
 /// Walk a slice of `&dyn ProbeOutcome` references and compute the
 /// probe-coverage summary — the count of probes that ran vs. the count
 /// of probes that surfaced an absent default. Linear in the slice
@@ -424,5 +503,167 @@ mod tests {
         let first = coverage.coverage_ratio();
         let second = coverage.coverage_ratio();
         assert_eq!(first.to_bits(), second.to_bits());
+    }
+
+    /// `ProbeCoverage::default()` returns the empty-slice
+    /// `probe_coverage` shape — `ran: 0, absent: 0` — so the two
+    /// surfaces compose without a structural seam. The
+    /// `Sum::sum`-over-empty-iterator case below depends on this
+    /// identity; a future regression that hand-rolled a default with a
+    /// non-zero `absent` field would silently inflate every Phase 1 /
+    /// Phase 2 fleet-wide aggregate by that constant.
+    #[test]
+    fn test_default_is_empty_probe_coverage() {
+        assert_eq!(
+            ProbeCoverage::default(),
+            ProbeCoverage { ran: 0, absent: 0 }
+        );
+        let empty: [&dyn ProbeOutcome; 0] = [];
+        assert_eq!(
+            probe_coverage(empty.iter().copied()),
+            ProbeCoverage::default()
+        );
+    }
+
+    /// `Add` composes componentwise — `(a.ran + b.ran, a.absent +
+    /// b.absent)` — and `total()` adds the same way (5 = 3 + 2; 3 = 1 +
+    /// 2). The realistic Phase-1-build / Phase-1-chart / Phase-2-
+    /// deployment fold a future product-level signal will run at the
+    /// `compose_product_certification` call site: three per-record
+    /// coverages summed into one product-record aggregate. A future
+    /// regression that swapped `ran` / `absent` in the impl body would
+    /// flip a high-evidence product record into a fully-absent one;
+    /// this pin closes that arm.
+    #[test]
+    fn test_add_composes_componentwise() {
+        let build = ProbeCoverage { ran: 3, absent: 0 };
+        let chart = ProbeCoverage { ran: 1, absent: 3 };
+        let deployment = ProbeCoverage { ran: 0, absent: 7 };
+        let product = build + chart + deployment;
+        assert_eq!(product, ProbeCoverage { ran: 4, absent: 10 });
+        assert_eq!(product.total(), 14);
+    }
+
+    /// `Default` is the identity of `Add` — `c + default() == c` and
+    /// `default() + c == c` for every `c`. The monoid law THEORY §VI.1
+    /// one-oracle discipline depends on: a downstream verifier reading
+    /// `product = phases.iter().sum::<ProbeCoverage>()` cannot drift
+    /// from `product = phases[0] + phases[1] + ...` because the empty-
+    /// fold seed is `default()` and `default()` is structurally the
+    /// identity. A future regression that returned a non-zero default
+    /// (e.g., `{ran: 1, absent: 0}` as a "probably ran" stub) would
+    /// fail this pin at both arms.
+    #[test]
+    fn test_add_default_is_identity() {
+        let c = ProbeCoverage { ran: 3, absent: 4 };
+        assert_eq!(c + ProbeCoverage::default(), c);
+        assert_eq!(ProbeCoverage::default() + c, c);
+    }
+
+    /// `Add` is commutative and associative — the structural monoid
+    /// laws that make `[a, b, c].iter().sum::<ProbeCoverage>()`
+    /// independent of iteration order. A fleet-wide aggregator that
+    /// folds across an unordered set of per-record coverages (a
+    /// `HashMap<ProductId, ProbeCoverage>::values()` walk, for
+    /// example) reads the same aggregate regardless of hash-map
+    /// iteration order; this pin closes the "Add silently depends on
+    /// argument order" regression arm.
+    #[test]
+    fn test_add_is_commutative_and_associative() {
+        let a = ProbeCoverage { ran: 3, absent: 0 };
+        let b = ProbeCoverage { ran: 1, absent: 3 };
+        let c = ProbeCoverage { ran: 0, absent: 7 };
+        assert_eq!(a + b, b + a);
+        assert_eq!((a + b) + c, a + (b + c));
+    }
+
+    /// `Add` saturates at `usize::MAX` rather than panicking on
+    /// overflow — the load-bearing arithmetic the docstring above
+    /// names. A fleet-wide aggregator summing across pathologically
+    /// many per-record coverages (1 << 64 probe records on a 64-bit
+    /// target, unreachable in practice but structurally foreclosed
+    /// here) cannot drive a panic the unchecked `+` would surface;
+    /// the monoid stays total over the full `usize` range.
+    #[test]
+    fn test_add_saturates_at_usize_max() {
+        let max = ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        };
+        let plus_one = ProbeCoverage { ran: 1, absent: 1 };
+        assert_eq!(
+            max + plus_one,
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            }
+        );
+    }
+
+    /// `AddAssign` is the in-place sibling of `Add` and produces the
+    /// same value. A future regression that decoupled the two impls
+    /// (e.g., reimplemented `add_assign` directly with a different
+    /// arithmetic) would fail this pin. The `*self = *self + rhs`
+    /// delegation in the impl body relies on the `Copy` derive on
+    /// `ProbeCoverage`; this test exercises the round-trip.
+    #[test]
+    fn test_add_assign_matches_add() {
+        let mut acc = ProbeCoverage { ran: 3, absent: 0 };
+        acc += ProbeCoverage { ran: 1, absent: 3 };
+        acc += ProbeCoverage { ran: 0, absent: 7 };
+        assert_eq!(acc, ProbeCoverage { ran: 4, absent: 10 });
+    }
+
+    /// `Sum` over an owned iterator folds with `Add` from `default()`.
+    /// The realistic call-site shape a future product-level emission
+    /// will use: collect per-phase coverages into a `Vec` (or an
+    /// inline array), call `.into_iter().sum::<ProbeCoverage>()`, emit
+    /// the aggregate as `product_probes_coverage_ratio`. Equivalent
+    /// to the explicit `a + b + c` fold one assertion up — this pin
+    /// closes the "Sum drifts from Add" regression arm.
+    #[test]
+    fn test_sum_owned_iterator_folds_with_add() {
+        let phases = vec![
+            ProbeCoverage { ran: 3, absent: 0 },
+            ProbeCoverage { ran: 1, absent: 3 },
+            ProbeCoverage { ran: 0, absent: 7 },
+        ];
+        let product: ProbeCoverage = phases.into_iter().sum();
+        assert_eq!(product, ProbeCoverage { ran: 4, absent: 10 });
+        assert_eq!(product.total(), 14);
+    }
+
+    /// `Sum` over a borrowed iterator (`.iter().sum::<ProbeCoverage>()`
+    /// — no `.copied()` at the call site) returns the same aggregate as
+    /// the owned form. The borrowed `Sum<&'a Self>` impl exists so
+    /// `&[ProbeCoverage]` reaches the idiomatic numeric-`Sum` shape
+    /// every `<i64 as Sum<&'a i64>>`-style impl in `std` already
+    /// admits; a future regression that diverged the two surfaces
+    /// would fail this pin.
+    #[test]
+    fn test_sum_borrowed_iterator_matches_owned() {
+        let phases = [
+            ProbeCoverage { ran: 3, absent: 0 },
+            ProbeCoverage { ran: 1, absent: 3 },
+            ProbeCoverage { ran: 0, absent: 7 },
+        ];
+        let borrowed: ProbeCoverage = phases.iter().sum();
+        let owned: ProbeCoverage = phases.into_iter().sum();
+        assert_eq!(borrowed, owned);
+        assert_eq!(borrowed, ProbeCoverage { ran: 4, absent: 10 });
+    }
+
+    /// `Sum` over an empty iterator returns `default()` — the identity
+    /// of the monoid. Symmetric to `test_probe_coverage_empty_slice`
+    /// one layer over: the empty-slice trait-object walk and the
+    /// empty-`Vec`-of-coverages fold produce the same `ProbeCoverage
+    /// { ran: 0, absent: 0 }` value, so the two surfaces compose
+    /// without a structural seam at the empty-input boundary.
+    #[test]
+    fn test_sum_empty_iterator_is_default() {
+        let empty: Vec<ProbeCoverage> = Vec::new();
+        let aggregate: ProbeCoverage = empty.into_iter().sum();
+        assert_eq!(aggregate, ProbeCoverage::default());
+        assert_eq!(aggregate.total(), 0);
     }
 }
