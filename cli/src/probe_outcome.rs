@@ -158,9 +158,30 @@ impl ProbeCoverage {
     /// total` holds by construction; downstream telemetry consumers
     /// derive the evidence-coverage ratio via [`coverage_ratio`].
     ///
+    /// Arithmetic is `usize::saturating_add` rather than the panicking
+    /// `+` — the load-bearing carrier of the monoid totality claim the
+    /// [`Add`](std::ops::Add) impl below names. The post-saturation
+    /// state `ProbeCoverage { ran: usize::MAX, absent: usize::MAX }`
+    /// (reachable in finite steps via repeated `Add` from any starting
+    /// point under a pathological fleet-wide aggregate) returns
+    /// `usize::MAX` here rather than panicking in debug or wrapping
+    /// silently in release — both arms the unchecked `self.ran +
+    /// self.absent` would surface. The three load-bearing telemetry
+    /// emission sites
+    /// (`commands::attestation::compute_build_attestation`,
+    /// `commands::attestation::compute_chart_attestation`, and
+    /// `commands::attestation::compose_product_certification`) read
+    /// `total()` directly into a `tracing::info!` field, so a panic
+    /// here would propagate through the attestation composition site;
+    /// the saturating ceiling keeps the telemetry channel alive under
+    /// every reachable `ProbeCoverage` value. THEORY §VI.1: the monoid
+    /// totality is upheld at every method, not just at `Add` — a
+    /// downstream verifier reading `total()` cannot drive a panic the
+    /// `Add`-side saturation foreclosed one impl up.
+    ///
     /// [`coverage_ratio`]: ProbeCoverage::coverage_ratio
     pub fn total(&self) -> usize {
-        self.ran + self.absent
+        self.ran.saturating_add(self.absent)
     }
 
     /// Fraction of counted probes that produced evidence — `ran as f64 /
@@ -665,5 +686,50 @@ mod tests {
         let aggregate: ProbeCoverage = empty.into_iter().sum();
         assert_eq!(aggregate, ProbeCoverage::default());
         assert_eq!(aggregate.total(), 0);
+    }
+
+    /// `total()` saturates at `usize::MAX` rather than panicking on
+    /// overflow — the load-bearing arithmetic the docstring on
+    /// [`ProbeCoverage::total`] names. The post-saturation state
+    /// `{ran: usize::MAX, absent: usize::MAX}` is reachable in finite
+    /// steps via the monoid `Add` (the sibling
+    /// `test_add_saturates_at_usize_max` pin proves it), so a `total()`
+    /// implementation routed through the unchecked `self.ran +
+    /// self.absent` would panic in debug (and silently wrap in release)
+    /// at exactly this value — defeating the totality claim the
+    /// `Add`-side saturation upholds one impl up. The three load-
+    /// bearing telemetry emission sites (`compute_build_attestation`,
+    /// `compute_chart_attestation`, `compose_product_certification`)
+    /// emit `total()` directly into a `tracing::info!` field, so a
+    /// panic here would propagate through the attestation composition
+    /// site; this pin closes that arm at the typed-primitive surface.
+    #[test]
+    fn test_total_saturates_at_usize_max() {
+        let saturated = ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        };
+        assert_eq!(saturated.total(), usize::MAX);
+    }
+
+    /// `coverage_ratio()` does not panic at the post-saturation state
+    /// `{ran: usize::MAX, absent: usize::MAX}` — it routes through
+    /// `total()`, which now saturates at `usize::MAX` rather than
+    /// overflowing on `ran + absent`. The float arithmetic `usize::MAX
+    /// as f64 / usize::MAX as f64` is `1.0` in IEEE-754 (both numerator
+    /// and denominator round identically to the same `f64`), which the
+    /// pin asserts directly. A future regression that reverted `total()`
+    /// to the unchecked `+` would panic at this call site in debug and
+    /// produce a nonsensical wrapped ratio in release — both arms
+    /// closed here. Symmetric to `test_add_saturates_at_usize_max` one
+    /// impl up: the monoid totality is now upheld at every method the
+    /// telemetry emission sites read, not just at `Add`.
+    #[test]
+    fn test_coverage_ratio_does_not_panic_at_saturated_state() {
+        let saturated = ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        };
+        assert_eq!(saturated.coverage_ratio(), 1.0);
     }
 }
