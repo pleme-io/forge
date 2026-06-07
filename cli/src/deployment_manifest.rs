@@ -357,6 +357,204 @@ impl DeploymentManifestRenderOutcome {
 
 crate::impl_probe_outcome!(DeploymentManifestRenderOutcome, ProbeAbsent);
 
+/// Recover the typed three-arm [`DeploymentManifestRenderOutcome`] from
+/// the multi-document YAML stream a `kustomize build <kustomization>` or
+/// `flux build kustomization <name> --path <path>` shell-out yields. The
+/// parser is the seventh parser in the Phase 2 deployment-probe family —
+/// after [`crate::flux_source_verification::parse_gitrepository_status`]
+/// (commit e07d64d, three-arm over JSON `status.conditions[]`),
+/// [`crate::helm_release_signature::parse_helmrelease_list`] (commit
+/// 1f2f9a3, three-arm universal-quantifier over JSON
+/// `items[].metadata.annotations[]`),
+/// [`crate::pod_listing::parse_pod_list`] (commit 46165ef, two-arm
+/// items-len count over JSON `PodList.items[]`),
+/// [`crate::pod_health::parse_pod_health`] (commit c1faa28, three-arm
+/// universal-quantifier over JSON `PodList.items[]`),
+/// [`crate::network_policy_admission::parse_networkpolicy_list`] (commit
+/// 7465feb, three-arm universal-quantifier over JSON
+/// `NetworkPolicyList.items[]`), and
+/// [`crate::cis_k8s_pass_rate::parse_cis_k8s_audit_json`] (commit 60c14c3,
+/// two-arm ratio over JSON `{passed_controls, total_controls}`). It is the
+/// FIRST parser in the family whose input is a multi-document YAML stream
+/// rather than a single JSON value — the structurally distinct shape the
+/// previous commit's body named as "the remaining gap … the natural next
+/// leverage step".
+///
+/// ## What the parser closes
+///
+/// `commands/attestation.rs::compose_product_certification` today stamps
+/// the typed primitive's [`DeploymentManifestRenderOutcome::ProbeAbsent`]
+/// arm at the call site with no parser, so the Phase 2 deployment
+/// attestation's `manifest_hash` field surfaces
+/// `Blake3Hash::digest(b"no-manifest-render")` against every
+/// certification. With the parser landed, a follow-up commit that wires
+/// `tokio::process::Command::new("kustomize").args(["build", &path])
+/// .output().await` at the call site can pipe the rendered stream
+/// straight into [`parse_kustomize_output`] and route the call-site
+/// outcome through [`DeploymentManifestRenderOutcome::Rendered { fingerprint }`]
+/// / [`DeploymentManifestRenderOutcome::RenderFailed`] /
+/// [`DeploymentManifestRenderOutcome::ProbeAbsent`] arms structurally
+/// — no inline YAML walk at the call site, no per-call-site
+/// canonical-content reconstruction, no implicit `ProbeAbsent` collapse
+/// hidden in a shell-out match. The parser is testable in isolation
+/// against canonical kustomize-output shapes (no cluster, no kustomize
+/// binary, no kube-rs runtime), which means the shell-out call-site code
+/// stays narrow (spawn + read stdout + pass to parser), and every
+/// regression in the YAML-to-fingerprint map fails the parser tests
+/// pinned here rather than surfacing at integration test time.
+///
+/// ## The three-arm mapping
+///
+/// 1. The YAML stream parses AND yields one or more non-null documents
+///    AND every non-null document carries a string `apiVersion`, a string
+///    `kind`, and a string `metadata.name` →
+///    [`DeploymentManifestRenderOutcome::Rendered`] with `fingerprint`
+///    set to the UTF-8 bytes of the sorted, deduplicated set of
+///    `<apiVersion>|<kind>|<namespace>|<name> TAB <content-hash-hex>`
+///    lines joined by `\n`, one per document. The `<namespace>` field is
+///    the empty string for cluster-scoped resources (whose
+///    `metadata.namespace` is legitimately absent). The
+///    `<content-hash-hex>` is the lowercase-hex BLAKE3 of the canonical
+///    JSON serialisation of the document — sorted-keys throughout (via
+///    `serde_json::Value`'s default `BTreeMap` backing), so byte-
+///    identical Kubernetes manifests with different key orderings
+///    fingerprint identically. The line set is gathered into a
+///    `BTreeSet<String>` for canonical ordering and dedup, mirroring the
+///    same canonical-form discipline
+///    [`crate::chart_listing::canonical_chart_fingerprint`] applies one
+///    layer over and
+///    [`crate::tree_listing::canonical_tree_fingerprint`] applies two
+///    layers over.
+/// 2. Every other input — malformed YAML (the stream itself is not
+///    parseable), a non-mapping at any document root (e.g. a bare scalar
+///    or sequence), a document missing `apiVersion`, missing `kind`, or
+///    missing `metadata.name`, or an empty input that yields zero non-
+///    null documents (the degenerate "kustomize was asked to render a
+///    Kustomization that produced no resources" or "the stream was empty
+///    altogether" world — no usable rendered identity, the same
+///    structural failure class as a non-zero kustomize exit) — folds into
+///    [`DeploymentManifestRenderOutcome::RenderFailed`]. Same exit-
+///    agnostic, no-panic discipline the sibling parsers carry.
+/// 3. [`DeploymentManifestRenderOutcome::ProbeAbsent`] is NOT a parser
+///    output: it names the world where the call site did not spawn a
+///    kustomize / flux build probe at all, and is constructed directly
+///    by the call site when no shell-out fires. The parser maps a probe
+///    that DID fire (either successfully or with parseable failure) into
+///    the `Rendered` / `RenderFailed` arms only. This matches the
+///    discipline at [`crate::network_policy_admission::parse_networkpolicy_list`]
+///    (which produces `Verified` / `VerifyFailed` from a kubectl response
+///    but leaves `ProbeAbsent` to the call site when no kubectl ran) and
+///    [`crate::flux_source_verification::parse_gitrepository_status`]
+///    (which produces `Verified` / `VerifyFailed` from a flux response
+///    but leaves `ProbeAbsent` to the call site when no flux ran).
+///
+/// ## Why empty-stream collapses to `RenderFailed`, not vacuous `Rendered`
+///
+/// An empty multi-document YAML stream (zero `---`-separated non-null
+/// documents) is the degenerate "kustomize ran and produced no rendered
+/// resources" world — a Kustomization whose `resources:` field is empty,
+/// or one whose every component build resulted in zero output. The
+/// `Rendered` arm encodes "the canonical fingerprint of the rendered
+/// manifest content"; a fingerprint over zero documents is the empty
+/// string, structurally indistinguishable from any other zero-document
+/// rendering and unable to discriminate one empty kustomization from
+/// another at the BLAKE3 surface. The honest collapse is
+/// [`DeploymentManifestRenderOutcome::RenderFailed`]: the kustomize probe
+/// fired and produced no manifest content the Phase 2 attestation can
+/// claim a rendered-manifest identity against. Sibling discipline:
+/// [`crate::network_policy_admission::parse_networkpolicy_list`] folds
+/// empty `items[]` into `VerifyFailed` (CIS §5.3.2 baseline failure on
+/// an unsegmented namespace, not vacuous pass), the same shape one layer
+/// over.
+///
+/// ## Why canonical JSON for the per-document content hash, not raw bytes
+///
+/// Two byte-identical Kubernetes manifests with different key orderings
+/// (the kustomize output's `apiVersion` first vs `kind` first, or
+/// `metadata.name` before `metadata.namespace` vs after — every
+/// kustomize version produces a slightly different YAML serialisation
+/// shape) must fingerprint identically: the content-addressed identity
+/// invariant THEORY §VI.1 names rests on the canonical form, not on
+/// any particular serialiser's output. The parser parses each document
+/// into a `serde_json::Value` (whose `Map` is `BTreeMap`-backed by
+/// default, sorting keys lexically), then `serde_json::to_string` emits
+/// a canonical-key-order JSON serialisation. The BLAKE3 of those bytes
+/// is the content-hash. A downstream verifier walking the same rendered
+/// stream by running the same `kustomize build` against the same source
+/// tree (potentially with a different kustomize version emitting a
+/// different key order in YAML) recovers byte-identical content hashes
+/// because both sides reduce through the same canonical-JSON oracle.
+/// Same canonical-content discipline as
+/// `commands/attestation.rs::test_manifest_hash_stable_across_key_order_and_metadata`
+/// pins at the call-site layer.
+///
+/// THEORY §V.1: make invalid states unrepresentable. The three-arm
+/// codomain `{Rendered, RenderFailed, ProbeAbsent}` is foreclosed at the
+/// type level. THEORY §VI.1: one oracle, not a per-consumer re-
+/// derivation. The parser is the one site that walks the multi-document
+/// YAML stream into a canonical `<apiVersion>|<kind>|<namespace>|<name>
+/// TAB <content-hash-hex>` fingerprint; downstream consumers pattern-
+/// match the typed three-arm enum and read the canonical fingerprint
+/// bytes from the `Rendered` arm. THEORY §VII.1: attestation-gated
+/// deployments are structural — a `sekiban` strict-production policy
+/// that fails-closed on evidence of render-time failure can express that
+/// gate against the typed `RenderFailed` arm, where the pre-fix
+/// `b"pending-deployment"` constant flattened it into the same hash as
+/// `ProbeAbsent` and `Rendered`-over-any-stream.
+#[allow(dead_code)]
+pub fn parse_kustomize_output(yaml_text: &str) -> DeploymentManifestRenderOutcome {
+    use serde::Deserialize;
+
+    let mut lines: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for doc in serde_yaml::Deserializer::from_str(yaml_text) {
+        let value = match serde_json::Value::deserialize(doc) {
+            Ok(v) => v,
+            Err(_) => return DeploymentManifestRenderOutcome::RenderFailed,
+        };
+        if value.is_null() {
+            continue;
+        }
+        let Some(obj) = value.as_object() else {
+            return DeploymentManifestRenderOutcome::RenderFailed;
+        };
+        let Some(api_version) = obj.get("apiVersion").and_then(|v| v.as_str()) else {
+            return DeploymentManifestRenderOutcome::RenderFailed;
+        };
+        let Some(kind) = obj.get("kind").and_then(|v| v.as_str()) else {
+            return DeploymentManifestRenderOutcome::RenderFailed;
+        };
+        let metadata = obj.get("metadata").and_then(|v| v.as_object());
+        let Some(name) = metadata
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str())
+        else {
+            return DeploymentManifestRenderOutcome::RenderFailed;
+        };
+        let namespace = metadata
+            .and_then(|m| m.get("namespace"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let canonical_bytes =
+            serde_json::to_vec(&value).expect("serde_json::Value always serialises to JSON bytes");
+        let content_hash = blake3::hash(&canonical_bytes).to_hex().to_string();
+        lines.insert(format!(
+            "{api_version}|{kind}|{namespace}|{name}\t{content_hash}"
+        ));
+    }
+
+    if lines.is_empty() {
+        return DeploymentManifestRenderOutcome::RenderFailed;
+    }
+
+    let fingerprint = lines
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes();
+    DeploymentManifestRenderOutcome::Rendered { fingerprint }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,5 +750,590 @@ mod tests {
         }
         .is_probe_absent());
         assert!(!DeploymentManifestRenderOutcome::RenderFailed.is_probe_absent());
+    }
+
+    /// Helper: assert an outcome is `Rendered` and return its fingerprint
+    /// bytes — keeps the parser tests free of pattern-match boilerplate
+    /// while preserving the structural distinction at the assertion
+    /// site.
+    fn rendered_fingerprint(outcome: DeploymentManifestRenderOutcome) -> Vec<u8> {
+        match outcome {
+            DeploymentManifestRenderOutcome::Rendered { fingerprint } => fingerprint,
+            other => panic!("expected Rendered, got {other:?}"),
+        }
+    }
+
+    /// A canonical one-document `kustomize build` output (a single
+    /// `apps/v1 Deployment` in namespace `myns`) parses to
+    /// [`DeploymentManifestRenderOutcome::Rendered`] with a non-empty
+    /// fingerprint whose single line carries the
+    /// `apps/v1|Deployment|myns|svc-a` identity prefix the parser's
+    /// canonical-line grammar names. Pins the load-bearing happy-path
+    /// shape every downstream test composes against.
+    #[test]
+    fn test_parse_single_deployment_yields_rendered() {
+        let yaml = r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: myns
+spec:
+  replicas: 3
+"#;
+        let fp = rendered_fingerprint(parse_kustomize_output(yaml));
+        let line = String::from_utf8(fp).unwrap();
+        assert!(
+            line.starts_with("apps/v1|Deployment|myns|svc-a\t"),
+            "expected canonical line prefix, got {line:?}",
+        );
+        let parts: Vec<&str> = line.split('\t').collect();
+        assert_eq!(parts.len(), 2, "expected exactly one TAB separator");
+        assert_eq!(parts[1].len(), 64, "BLAKE3 hex is 64 chars; got {parts:?}");
+    }
+
+    /// A multi-document `kustomize build` output (a `Service` and a
+    /// `Deployment` in the same namespace) parses to
+    /// [`DeploymentManifestRenderOutcome::Rendered`] with TWO canonical
+    /// lines, one per document, joined by `\n` in lexical order. The
+    /// `Deployment` sorts before `Service` because the prefix
+    /// `apps/v1|Deployment|…` lexically precedes `v1|Service|…`. Pins
+    /// the multi-document walk over `serde_yaml::Deserializer::from_str`'s
+    /// iterator — a regression that walked only the first document would
+    /// fail this test with a single-line fingerprint.
+    #[test]
+    fn test_parse_multi_document_yields_one_line_per_document() {
+        let yaml = r#"
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-a
+  namespace: myns
+spec:
+  ports: [{port: 80}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: myns
+spec:
+  replicas: 3
+"#;
+        let fp = rendered_fingerprint(parse_kustomize_output(yaml));
+        let text = String::from_utf8(fp).unwrap();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected two canonical lines, got {lines:?}"
+        );
+        assert!(
+            lines[0].starts_with("apps/v1|Deployment|myns|svc-a\t"),
+            "expected Deployment to sort first, got {lines:?}",
+        );
+        assert!(
+            lines[1].starts_with("v1|Service|myns|svc-a\t"),
+            "expected Service to sort second, got {lines:?}",
+        );
+    }
+
+    /// Two kustomize streams whose documents appear in DIFFERENT orders
+    /// but name the same `(apiVersion, kind, namespace, name, content)`
+    /// set fingerprint identically. The load-bearing canonical-form
+    /// property the `BTreeSet`-driven line-sort enforces: a downstream
+    /// verifier walking the same kustomization but seeing kustomize emit
+    /// its documents in a different order recovers the same fingerprint.
+    /// Same canonical-form discipline as
+    /// `chart_listing::test_canonical_fingerprint_is_order_independent`
+    /// one layer over.
+    #[test]
+    fn test_parse_is_document_order_independent() {
+        let forward = r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-a
+  namespace: myns
+data: {x: "1"}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: myns
+spec: {replicas: 1}
+"#;
+        let reversed = r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: myns
+spec: {replicas: 1}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-a
+  namespace: myns
+data: {x: "1"}
+"#;
+        assert_eq!(
+            parse_kustomize_output(forward),
+            parse_kustomize_output(reversed),
+            "fingerprint must be document-order-independent — the load-\
+             bearing canonical-form property a downstream verifier walking \
+             the same kustomization depends on",
+        );
+    }
+
+    /// Two kustomize documents whose key ORDER differs within the
+    /// document (`apiVersion` first vs `kind` first; `spec` before
+    /// `metadata` vs after) but whose key-VALUE pairs are identical
+    /// fingerprint identically. The load-bearing canonical-content
+    /// property the `serde_json::Value`-driven canonical-JSON
+    /// serialisation enforces — `serde_json::Map` is `BTreeMap`-backed
+    /// by default, sorting keys lexically, so the per-document content
+    /// hash is invariant under key reordering. A future regression that
+    /// hashed raw bytes (or enabled `serde_json`'s `preserve_order`
+    /// feature) would silently make the fingerprint shape-dependent and
+    /// fail this test. Same canonical-content discipline as
+    /// `commands/attestation.rs::test_manifest_hash_stable_across_key_order_and_metadata`
+    /// at the call-site layer.
+    #[test]
+    fn test_parse_is_key_order_independent_within_document() {
+        let api_first = r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: myns
+spec:
+  replicas: 3
+"#;
+        let kind_first = r#"
+kind: Deployment
+spec:
+  replicas: 3
+metadata:
+  namespace: myns
+  name: svc-a
+apiVersion: apps/v1
+"#;
+        assert_eq!(
+            parse_kustomize_output(api_first),
+            parse_kustomize_output(kind_first),
+            "fingerprint must be key-order-independent — the canonical-\
+             JSON oracle sorts keys lexically so a downstream verifier \
+             walking the same content under a different YAML key order \
+             recovers the same fingerprint",
+        );
+    }
+
+    /// A duplicate document (the same `(apiVersion, kind, namespace,
+    /// name, content)` tuple appearing twice in the stream) collapses to
+    /// ONE canonical line. The `BTreeSet`-driven line-dedup enforces
+    /// this idempotently. Mirrors
+    /// `chart_listing::test_canonical_fingerprint_dedups_repeated_entries`
+    /// one layer over. A real kustomize output should never produce
+    /// duplicate resources, but a malformed Kustomization that double-
+    /// included a base could; the canonical-form property is what makes
+    /// the fingerprint a function of the resource SET, not the document
+    /// list.
+    #[test]
+    fn test_parse_dedups_repeated_documents() {
+        let with_dup = r#"
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-a
+  namespace: myns
+spec: {ports: [{port: 80}]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-a
+  namespace: myns
+spec: {ports: [{port: 80}]}
+"#;
+        let without_dup = r#"
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-a
+  namespace: myns
+spec: {ports: [{port: 80}]}
+"#;
+        assert_eq!(
+            parse_kustomize_output(with_dup),
+            parse_kustomize_output(without_dup),
+            "byte-identical duplicate documents must collapse to one \
+             canonical line",
+        );
+    }
+
+    /// A document missing `metadata.namespace` (a legitimately cluster-
+    /// scoped resource such as a `ClusterRole` or a `Namespace` itself)
+    /// parses to [`DeploymentManifestRenderOutcome::Rendered`] with an
+    /// EMPTY namespace field in the canonical line. Pins the cluster-
+    /// scoped resource discriminator: a regression that folded missing-
+    /// namespace into `RenderFailed` would force every Kustomization
+    /// that produced a cluster-scoped resource (every install of an
+    /// operator CRD, every cluster-wide RBAC binding, every Namespace
+    /// resource the Kustomization creates itself) into the failure arm.
+    #[test]
+    fn test_parse_cluster_scoped_resource_yields_empty_namespace() {
+        let yaml = r#"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: edit
+rules: []
+"#;
+        let fp = rendered_fingerprint(parse_kustomize_output(yaml));
+        let line = String::from_utf8(fp).unwrap();
+        assert!(
+            line.starts_with("rbac.authorization.k8s.io/v1|ClusterRole||edit\t"),
+            "expected empty namespace field between two |s, got {line:?}",
+        );
+    }
+
+    /// A document missing the top-level `apiVersion` field — a malformed
+    /// kustomize output a real `kustomize build` should never produce,
+    /// but a future kustomize regression or an upstream Kustomization
+    /// that ate its `apiVersion:` line could. Parses to
+    /// [`DeploymentManifestRenderOutcome::RenderFailed`]. No content
+    /// claim is possible without an `apiVersion` discriminator at the
+    /// per-resource line.
+    #[test]
+    fn test_parse_missing_api_version_yields_render_failed() {
+        let yaml = r#"
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: myns
+"#;
+        assert_eq!(
+            parse_kustomize_output(yaml),
+            DeploymentManifestRenderOutcome::RenderFailed,
+        );
+    }
+
+    /// A document missing the top-level `kind` field — symmetric to the
+    /// missing-`apiVersion` failure mode above. Parses to
+    /// [`DeploymentManifestRenderOutcome::RenderFailed`].
+    #[test]
+    fn test_parse_missing_kind_yields_render_failed() {
+        let yaml = r#"
+apiVersion: apps/v1
+metadata:
+  name: svc-a
+  namespace: myns
+"#;
+        assert_eq!(
+            parse_kustomize_output(yaml),
+            DeploymentManifestRenderOutcome::RenderFailed,
+        );
+    }
+
+    /// A document missing `metadata.name` — every Kubernetes resource
+    /// REQUIRES a `metadata.name` (the cluster-scoped or namespace-
+    /// scoped identity key the apiserver indexes by). Parses to
+    /// [`DeploymentManifestRenderOutcome::RenderFailed`]. A regression
+    /// that fell back to an empty name would silently collapse every
+    /// nameless resource into the same canonical line, defeating the
+    /// per-resource discriminator.
+    #[test]
+    fn test_parse_missing_metadata_name_yields_render_failed() {
+        let yaml = r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: myns
+"#;
+        assert_eq!(
+            parse_kustomize_output(yaml),
+            DeploymentManifestRenderOutcome::RenderFailed,
+        );
+    }
+
+    /// A multi-document stream where one document parses cleanly and a
+    /// subsequent one is missing `apiVersion` parses to
+    /// [`DeploymentManifestRenderOutcome::RenderFailed`] — the parser
+    /// walks every document and short-circuits on the first failing
+    /// one. A regression that hard-coded `documents[0]` would pass this
+    /// test with `Rendered` over the first document only and silently
+    /// drop the failing second document from the fingerprint.
+    #[test]
+    fn test_parse_one_malformed_in_multi_yields_render_failed() {
+        let yaml = r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-a
+  namespace: myns
+data: {x: "1"}
+---
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: myns
+"#;
+        assert_eq!(
+            parse_kustomize_output(yaml),
+            DeploymentManifestRenderOutcome::RenderFailed,
+        );
+    }
+
+    /// A document whose root is a bare scalar (not a mapping) — a
+    /// malformed kustomize output, or stderr-mode noise leaking into
+    /// stdout. Parses to [`DeploymentManifestRenderOutcome::RenderFailed`].
+    #[test]
+    fn test_parse_non_mapping_root_yields_render_failed() {
+        let yaml = "just a string";
+        assert_eq!(
+            parse_kustomize_output(yaml),
+            DeploymentManifestRenderOutcome::RenderFailed,
+        );
+    }
+
+    /// A document whose root is a YAML SEQUENCE rather than a mapping
+    /// (e.g. a List-typed object the kustomize output forgot to expand)
+    /// parses to [`DeploymentManifestRenderOutcome::RenderFailed`].
+    #[test]
+    fn test_parse_sequence_root_yields_render_failed() {
+        let yaml = "- one\n- two\n";
+        assert_eq!(
+            parse_kustomize_output(yaml),
+            DeploymentManifestRenderOutcome::RenderFailed,
+        );
+    }
+
+    /// An empty input — the degenerate "kustomize ran and produced zero
+    /// rendered resources" or "the stream was empty altogether" world.
+    /// Parses to [`DeploymentManifestRenderOutcome::RenderFailed`]: no
+    /// rendered-manifest identity can be claimed against a zero-document
+    /// stream. Pins the load-bearing semantic break with vacuous
+    /// `Rendered` over an empty fingerprint — a regression that emitted
+    /// `Rendered { fingerprint: b"".to_vec() }` here would collapse every
+    /// empty-render kustomization to the same BLAKE3 hash regardless of
+    /// which Kustomization root produced it.
+    #[test]
+    fn test_parse_empty_input_yields_render_failed() {
+        assert_eq!(
+            parse_kustomize_output(""),
+            DeploymentManifestRenderOutcome::RenderFailed,
+        );
+    }
+
+    /// Whitespace-only input parses to
+    /// [`DeploymentManifestRenderOutcome::RenderFailed`] — same shape
+    /// as empty input. A kustomize binary that emitted only newlines
+    /// (perhaps because every base was empty) maps to the same no-
+    /// rendered-content arm.
+    #[test]
+    fn test_parse_whitespace_only_yields_render_failed() {
+        assert_eq!(
+            parse_kustomize_output("   \n\n   \n"),
+            DeploymentManifestRenderOutcome::RenderFailed,
+        );
+    }
+
+    /// A stream consisting only of a `---` separator (zero non-null
+    /// documents) parses to
+    /// [`DeploymentManifestRenderOutcome::RenderFailed`] — the parser
+    /// skips null documents (a leading or trailing `---` is a legitimate
+    /// YAML stream marker, not an error), but a stream with NO non-null
+    /// documents has no rendered content to claim. Pins the dual
+    /// invariant: null-document tolerance (the parser walks past them)
+    /// AND empty-after-skipping → `RenderFailed`.
+    #[test]
+    fn test_parse_only_separators_yields_render_failed() {
+        assert_eq!(
+            parse_kustomize_output("---\n---\n"),
+            DeploymentManifestRenderOutcome::RenderFailed,
+        );
+    }
+
+    /// A real kustomize stream often ends with a trailing `---\n` after
+    /// its last document — a benign YAML stream marker that produces a
+    /// trailing null document. The parser SKIPS null documents rather
+    /// than treating them as malformed; the leading non-null content
+    /// still produces a `Rendered` outcome. Pins the load-bearing
+    /// tolerance discriminator: a regression that folded the trailing
+    /// null into `RenderFailed` would force every well-formed kustomize
+    /// output that ended with a separator into the failure arm.
+    #[test]
+    fn test_parse_trailing_separator_still_yields_rendered() {
+        let yaml = r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-a
+  namespace: myns
+data: {x: "1"}
+---
+"#;
+        let fp = rendered_fingerprint(parse_kustomize_output(yaml));
+        let text = String::from_utf8(fp).unwrap();
+        assert!(
+            text.starts_with("v1|ConfigMap|myns|cm-a\t"),
+            "expected one canonical line for the leading document, got {text:?}",
+        );
+    }
+
+    /// Garbage non-YAML input (e.g. a `kustomize: command not found`
+    /// stderr-mode line leaking into stdout) parses to
+    /// [`DeploymentManifestRenderOutcome::RenderFailed`] without panic.
+    /// Same exit-agnostic, no-panic discipline the sibling JSON parsers
+    /// carry one layer over.
+    #[test]
+    fn test_parse_garbage_input_yields_render_failed_without_panic() {
+        let yaml = "kustomize: command not found:\n  : : :  invalid : : :\n";
+        assert_eq!(
+            parse_kustomize_output(yaml),
+            DeploymentManifestRenderOutcome::RenderFailed,
+        );
+    }
+
+    /// Two kustomize streams over structurally distinct manifest content
+    /// (same `(apiVersion, kind, namespace, name)` identity but different
+    /// `spec` content — the load-bearing post-deployment-change
+    /// discriminator a content-addressed `manifest_hash` must capture)
+    /// produce distinct fingerprints AND distinct `manifest_hash`
+    /// values. Pins the content-addressed-identity invariant THEORY
+    /// §VI.1 names: a downstream verifier reading two attestations
+    /// against the same identity tuple but different content recovers
+    /// the discriminator at the BLAKE3 surface. Mirrors
+    /// `chart_listing::test_canonical_fingerprint_changes_when_content_changes`
+    /// one layer over.
+    #[test]
+    fn test_parse_distinct_content_produces_distinct_manifest_hashes() {
+        let v1 = r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: myns
+spec:
+  replicas: 3
+"#;
+        let v2 = r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: myns
+spec:
+  replicas: 5
+"#;
+        let fp1 = parse_kustomize_output(v1);
+        let fp2 = parse_kustomize_output(v2);
+        assert_ne!(
+            fp1, fp2,
+            "two distinct manifest contents must produce distinct fingerprints",
+        );
+        assert_ne!(
+            fp1.manifest_hash().to_hex(),
+            fp2.manifest_hash().to_hex(),
+            "two distinct manifest contents must produce distinct \
+             manifest_hash values — the content-addressed-identity \
+             invariant THEORY §VI.1 names",
+        );
+    }
+
+    /// Two kustomize streams whose only difference is `metadata.name`
+    /// (same content shape, different per-resource identity) produce
+    /// distinct fingerprints. Pins the per-resource-identity
+    /// discriminator on the line PREFIX (the `<apiVersion>|<kind>|
+    /// <namespace>|<name>` key portion), distinct from the content-hash
+    /// discriminator the prior test pins on the line SUFFIX.
+    #[test]
+    fn test_parse_distinct_names_produce_distinct_fingerprints() {
+        let svc_a = r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-a
+  namespace: myns
+spec: {replicas: 3}
+"#;
+        let svc_b = r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-b
+  namespace: myns
+spec: {replicas: 3}
+"#;
+        assert_ne!(
+            parse_kustomize_output(svc_a),
+            parse_kustomize_output(svc_b),
+            "two distinct resource names at the same content must \
+             produce distinct fingerprints — the per-resource-identity \
+             discriminator on the line prefix",
+        );
+    }
+
+    /// The parser's `Rendered` output composes end-to-end with the
+    /// `manifest_hash()` method: a typed-equal arm produces a typed-
+    /// equal hash. Pins the single-probe / single-claim composition the
+    /// call site rests on — a regression in either the parser OR the
+    /// `manifest_hash()` method surfaces here rather than at integration
+    /// time. Same composition-pin shape as
+    /// `pod_health::test_both_pod_list_parsers_compose_against_one_response`
+    /// one layer over.
+    #[test]
+    fn test_parser_and_manifest_hash_compose_end_to_end() {
+        let yaml = r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-a
+  namespace: myns
+data: {x: "1"}
+"#;
+        let outcome = parse_kustomize_output(yaml);
+        let hash = outcome.manifest_hash();
+        // Reconstruct the same outcome via the typed primitive directly
+        // (using the fingerprint bytes the parser produced) and confirm
+        // the hash agrees — the canonical-form invariant the call site
+        // depends on.
+        let DeploymentManifestRenderOutcome::Rendered { fingerprint } = &outcome else {
+            panic!("expected Rendered outcome");
+        };
+        let manual = DeploymentManifestRenderOutcome::Rendered {
+            fingerprint: fingerprint.clone(),
+        };
+        assert_eq!(
+            hash.to_hex(),
+            manual.manifest_hash().to_hex(),
+            "parser-produced Rendered fingerprint must agree with a \
+             typed-primitive-constructed Rendered over the same bytes",
+        );
+    }
+
+    /// `RenderFailed` returned by the parser composes with the typed-
+    /// primitive's `manifest_hash()` method to produce the same sentinel
+    /// `Blake3Hash::digest(b"manifest-render-failed")` hash a typed-
+    /// primitive-constructed `RenderFailed` produces. Pins the parser-
+    /// to-typed-primitive equivalence at the failure arm: a downstream
+    /// verifier reading the `manifest_hash` field cannot distinguish a
+    /// call site that constructed `RenderFailed` directly from one that
+    /// recovered it through `parse_kustomize_output` — both routes
+    /// produce the same BLAKE3 surface.
+    #[test]
+    fn test_parser_render_failed_matches_typed_primitive_sentinel() {
+        let parsed = parse_kustomize_output("not yaml ::: invalid");
+        assert_eq!(
+            parsed.manifest_hash().to_hex(),
+            DeploymentManifestRenderOutcome::RenderFailed
+                .manifest_hash()
+                .to_hex(),
+            "parser-produced RenderFailed must produce the same \
+             manifest_hash as typed-primitive-constructed RenderFailed",
+        );
     }
 }
