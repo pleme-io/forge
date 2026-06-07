@@ -261,6 +261,99 @@ impl NetworkPolicyAdmissionOutcome {
 
 crate::impl_probe_outcome!(NetworkPolicyAdmissionOutcome, ProbeAbsent);
 
+/// Parse the JSON output of `kubectl get networkpolicy -n <ns> -o json`
+/// (or the equivalent `kube::Api::<NetworkPolicy>::list(...)`
+/// serialization) and recover the typed
+/// [`NetworkPolicyAdmissionOutcome`] for the namespace's collective
+/// `network_policies_verified` claim.
+///
+/// The function is the fifth parser in the Phase 2 deployment-probe
+/// family — after [`crate::flux_source_verification::
+/// parse_gitrepository_status`] (universal-quantifier over FluxCD
+/// `GitRepository.status.conditions[type=SourceVerified]`, three-arm),
+/// [`crate::helm_release_signature::parse_helmrelease_list`]
+/// (universal-quantifier over FluxCD `HelmReleaseList.items[*].metadata.
+/// annotations[sekiban.pleme.io/signature]`, three-arm),
+/// [`crate::pod_listing::parse_pod_list`] (items-len count over `core/v1`
+/// `PodList.items[]`, two-arm), and [`crate::pod_health::parse_pod_health`]
+/// (universal-quantifier over `PodList.items[*].status.{phase,
+/// conditions[type=Ready]}`, three-arm) — and the second universal-
+/// quantifier parser to walk the `*.items[]` shape for the
+/// `Verified` / `VerifyFailed` / `ProbeAbsent` trichotomy. Same
+/// exit-agnostic discipline (no exit code consulted), same honest
+/// collapse-into-[`Self::ProbeAbsent`] on malformed input. A follow-up
+/// commit that wires the kubectl shell-out at the
+/// [`crate::commands::attestation::compose_product_certification`]
+/// call site composes ONE `kubectl get networkpolicy -o json` invocation
+/// with this parser to route the call site out of its current
+/// unconditional [`Self::ProbeAbsent`] arm.
+///
+/// ## The three-arm mapping
+///
+/// 1. The JSON deserializes AND `.items[]` is present AND non-empty AND
+///    every entry carries a `spec.podSelector` field (the required key
+///    on the `networking.k8s.io/v1` `NetworkPolicy.spec` schema — an
+///    empty `podSelector: {}` matches every pod in the namespace, the
+///    canonical default-deny baseline CIS Kubernetes Benchmark §5.3.2
+///    names as the strict-production floor) → [`Self::Verified`].
+/// 2. The JSON deserializes AND `.items[]` is present AND empty (the
+///    namespace contains zero `NetworkPolicy` resources — an
+///    unsegmented namespace), OR one or more entries lack a
+///    `spec.podSelector` field (a structurally malformed policy that
+///    cannot cover any workload) → [`Self::VerifyFailed`]. The
+///    empty-items collapse is the CIS §5.3.2 break with the vacuous-
+///    truth-on-empty discipline [`crate::helm_release_signature::
+///    parse_helmrelease_list`] and [`crate::pod_health::parse_pod_health`]
+///    apply one layer over: zero `NetworkPolicy` resources in a namespace
+///    is itself the evidence-of-missing-segmentation the CIS strict
+///    baseline names as a failure, NOT a vacuous-truth-on-empty pass.
+///    The discriminator distinguishes this "probe ran and observed
+///    actual missing-policy cluster state" world from the "probe never
+///    ran" world the [`Self::ProbeAbsent`] arm names — the load-bearing
+///    structural distinction the pre-typed `false` hardcode erased by
+///    flattening both worlds into the same `network_policies_verified:
+///    false` bool.
+/// 3. Every other input — malformed JSON, missing `.items` array,
+///    `.items` not an array — folds into [`Self::ProbeAbsent`]. The
+///    module-level docstring names this fold explicitly: "any malformed
+///    JSON / missing field will fold into `ProbeAbsent` (response
+///    received but no usable evidence = no-evidence-collected)." The
+///    parser is exit-agnostic by construction; a kubectl failure
+///    surfaces upstream as a [`Self::ProbeAbsent`] outcome chosen at
+///    the shell-out call site rather than as a parser arm.
+///
+/// THEORY §V.2: attestation is cryptographic evidence, not a wish. The
+/// parser preserves the structural distinction between "probe ran and
+/// observed a namespace with zero or structurally malformed
+/// NetworkPolicy resources" and "no probe ran / no usable evidence" —
+/// the pre-typed `false` hardcode collapsed both into a single negative
+/// claim.
+/// THEORY §VI.1: one oracle, not a per-consumer re-derivation. The
+/// parser is the one site that walks `items[*].spec.podSelector`;
+/// downstream consumers pattern-match the typed three-arm enum.
+#[allow(dead_code)]
+pub fn parse_networkpolicy_list(json_text: &str) -> NetworkPolicyAdmissionOutcome {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+        return NetworkPolicyAdmissionOutcome::ProbeAbsent;
+    };
+    let Some(items) = value.get("items").and_then(|i| i.as_array()) else {
+        return NetworkPolicyAdmissionOutcome::ProbeAbsent;
+    };
+    if items.is_empty() {
+        return NetworkPolicyAdmissionOutcome::VerifyFailed;
+    }
+    for item in items {
+        let has_pod_selector = item
+            .get("spec")
+            .and_then(|s| s.get("podSelector"))
+            .is_some();
+        if !has_pod_selector {
+            return NetworkPolicyAdmissionOutcome::VerifyFailed;
+        }
+    }
+    NetworkPolicyAdmissionOutcome::Verified
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +455,236 @@ mod tests {
         assert!(NetworkPolicyAdmissionOutcome::ProbeAbsent.is_probe_absent());
         assert!(!NetworkPolicyAdmissionOutcome::Verified.is_probe_absent());
         assert!(!NetworkPolicyAdmissionOutcome::VerifyFailed.is_probe_absent());
+    }
+
+    /// A canonical `kubectl get networkpolicy -n <ns> -o json` response
+    /// with one `NetworkPolicy` whose `spec.podSelector` is the
+    /// default-deny baseline (`{}` — match every pod in the namespace —
+    /// the strict-baseline shape CIS Kubernetes Benchmark §5.3.2 names)
+    /// parses to [`NetworkPolicyAdmissionOutcome::Verified`]. The one
+    /// arm that lets the Phase 2 deployment attestation honestly claim
+    /// `network_policies_verified: true`.
+    #[test]
+    fn test_parse_default_deny_policy_yields_verified() {
+        let json = r#"{
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicyList",
+            "items": [
+                {
+                    "metadata": {"name": "default-deny", "namespace": "demo"},
+                    "spec": {"podSelector": {}}
+                }
+            ]
+        }"#;
+        assert_eq!(
+            parse_networkpolicy_list(json),
+            NetworkPolicyAdmissionOutcome::Verified
+        );
+    }
+
+    /// A `NetworkPolicy` whose `spec.podSelector.matchLabels` names a
+    /// specific workload (the targeted-policy shape, not the default-
+    /// deny baseline) also parses to
+    /// [`NetworkPolicyAdmissionOutcome::Verified`] — the parser pins
+    /// the existence of a `podSelector` field, not its specific shape.
+    /// A regression that required `podSelector: {}` exactly would force
+    /// every targeted policy into the negative arm.
+    #[test]
+    fn test_parse_targeted_policy_yields_verified() {
+        let json = r#"{
+            "items": [
+                {
+                    "metadata": {"name": "allow-frontend"},
+                    "spec": {
+                        "podSelector": {"matchLabels": {"app": "frontend"}},
+                        "policyTypes": ["Ingress"]
+                    }
+                }
+            ]
+        }"#;
+        assert_eq!(
+            parse_networkpolicy_list(json),
+            NetworkPolicyAdmissionOutcome::Verified
+        );
+    }
+
+    /// Two `NetworkPolicy` resources (a default-deny baseline plus a
+    /// targeted ingress allow) both carrying `spec.podSelector` yield
+    /// [`NetworkPolicyAdmissionOutcome::Verified`]. Pairs with
+    /// `one-malformed-in-multi` below to pin the all-items
+    /// universal-quantifier semantics: every entry must pass the
+    /// predicate, not just the first.
+    #[test]
+    fn test_parse_multiple_policies_yield_verified() {
+        let json = r#"{
+            "items": [
+                {"metadata": {"name": "default-deny"},
+                 "spec": {"podSelector": {}}},
+                {"metadata": {"name": "allow-frontend"},
+                 "spec": {"podSelector": {"matchLabels": {"app": "frontend"}}}}
+            ]
+        }"#;
+        assert_eq!(
+            parse_networkpolicy_list(json),
+            NetworkPolicyAdmissionOutcome::Verified
+        );
+    }
+
+    /// A canonical `NetworkPolicyList` response with an empty `items[]`
+    /// array — the namespace was probed and contains zero
+    /// `NetworkPolicy` resources, the CIS Kubernetes Benchmark §5.3.2
+    /// failure mode — parses to
+    /// [`NetworkPolicyAdmissionOutcome::VerifyFailed`], NOT vacuously
+    /// to [`NetworkPolicyAdmissionOutcome::Verified`]. This is the
+    /// load-bearing semantic break with the vacuous-truth-on-empty
+    /// discipline [`crate::helm_release_signature::parse_helmrelease_list`]
+    /// and [`crate::pod_health::parse_pod_health`] apply one layer over:
+    /// at the helmrelease / pod-health layers, an empty namespace
+    /// trivially satisfies the per-item invariant (zero items, zero
+    /// failures); at the network-segmentation layer, zero items IS
+    /// itself the evidence of an unsegmented namespace the CIS strict
+    /// baseline names as failure. A regression that folded empty-items
+    /// into [`NetworkPolicyAdmissionOutcome::Verified`] would silently
+    /// approve every namespace that landed in the cluster without a
+    /// covering policy — precisely the gap the typed primitive exists
+    /// to close.
+    #[test]
+    fn test_parse_empty_items_yields_verify_failed() {
+        let json = r#"{
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicyList",
+            "items": []
+        }"#;
+        assert_eq!(
+            parse_networkpolicy_list(json),
+            NetworkPolicyAdmissionOutcome::VerifyFailed,
+            "empty items must collapse to VerifyFailed (CIS §5.3.2 \
+             failure: namespace has zero covering NetworkPolicy), NOT \
+             to Verified via vacuous-truth-on-empty as parse_helmrelease_\
+             list and parse_pod_health do one layer over",
+        );
+    }
+
+    /// An item with no `spec` block at all (a structurally malformed
+    /// `NetworkPolicy` resource — the `spec.podSelector` field is
+    /// required by the `networking.k8s.io/v1` schema and admission
+    /// would have rejected the resource at creation, but a tampered or
+    /// hand-rolled JSON response could surface this shape) parses to
+    /// [`NetworkPolicyAdmissionOutcome::VerifyFailed`]. Structurally
+    /// distinct from [`NetworkPolicyAdmissionOutcome::ProbeAbsent`]:
+    /// the kubectl probe ran and observed actual unhealthy cluster
+    /// state.
+    #[test]
+    fn test_parse_item_missing_spec_yields_verify_failed() {
+        let json = r#"{
+            "items": [
+                {"metadata": {"name": "broken"}}
+            ]
+        }"#;
+        assert_eq!(
+            parse_networkpolicy_list(json),
+            NetworkPolicyAdmissionOutcome::VerifyFailed
+        );
+    }
+
+    /// An item whose `spec` block is present but lacks the required
+    /// `podSelector` key parses to
+    /// [`NetworkPolicyAdmissionOutcome::VerifyFailed`]. A regression
+    /// that consulted only the existence of `spec` and ignored the
+    /// `podSelector` key would pass every test above but fail this one
+    /// — silently claiming `network_policies_verified: true` against a
+    /// namespace whose policy carries no pod-selection rule.
+    #[test]
+    fn test_parse_item_missing_pod_selector_yields_verify_failed() {
+        let json = r#"{
+            "items": [
+                {"metadata": {"name": "broken"},
+                 "spec": {"policyTypes": ["Ingress"]}}
+            ]
+        }"#;
+        assert_eq!(
+            parse_networkpolicy_list(json),
+            NetworkPolicyAdmissionOutcome::VerifyFailed
+        );
+    }
+
+    /// Two `NetworkPolicy` resources — the first valid (default-deny
+    /// baseline), the second malformed (missing `spec.podSelector`) —
+    /// parses to [`NetworkPolicyAdmissionOutcome::VerifyFailed`]. Pins
+    /// the parser walks the full `items[]` array and short-circuits at
+    /// the first failing predicate rather than peeking at `items[0]`.
+    /// A regression that hard-coded `items[0]` would pass the
+    /// healthy-first / all-healthy / empty-only cases but fail this
+    /// one. Same all-items discipline as
+    /// [`crate::pod_health::parse_pod_health`]'s
+    /// `test_parse_one_unhealthy_in_multi_yields_unhealthy`.
+    #[test]
+    fn test_parse_one_malformed_in_multi_yields_verify_failed() {
+        let json = r#"{
+            "items": [
+                {"metadata": {"name": "default-deny"},
+                 "spec": {"podSelector": {}}},
+                {"metadata": {"name": "broken"},
+                 "spec": {"policyTypes": ["Ingress"]}}
+            ]
+        }"#;
+        assert_eq!(
+            parse_networkpolicy_list(json),
+            NetworkPolicyAdmissionOutcome::VerifyFailed
+        );
+    }
+
+    /// A response missing the `items` field entirely — a non-list
+    /// resource (e.g. a single `NetworkPolicy` response from
+    /// `kubectl get networkpolicy <name>` rather than the list-mode
+    /// `kubectl get networkpolicy`) or a malformed list shape. Parses
+    /// to [`NetworkPolicyAdmissionOutcome::ProbeAbsent`]: structurally
+    /// distinct from [`NetworkPolicyAdmissionOutcome::VerifyFailed`]
+    /// because the absence of the list shape is evidence-of-no-probe,
+    /// not evidence-of-missing-policy.
+    #[test]
+    fn test_parse_missing_items_yields_probe_absent() {
+        let json = r#"{"apiVersion": "networking.k8s.io/v1",
+                       "kind": "NetworkPolicy",
+                       "metadata": {"name": "default-deny"}}"#;
+        assert_eq!(
+            parse_networkpolicy_list(json),
+            NetworkPolicyAdmissionOutcome::ProbeAbsent
+        );
+    }
+
+    /// A response whose `items` field is present but not a JSON array
+    /// parses to [`NetworkPolicyAdmissionOutcome::ProbeAbsent`]. A
+    /// regression that treated `items: null` or `items: {}` as an
+    /// empty-items [`NetworkPolicyAdmissionOutcome::VerifyFailed`]
+    /// would silently route malformed-input worlds into the evidence-
+    /// of-missing-policy arm, defeating the discriminator between
+    /// "probe shape is broken" and "probe ran and observed an
+    /// unsegmented namespace".
+    #[test]
+    fn test_parse_items_not_array_yields_probe_absent() {
+        let json = r#"{"items": {"unexpected": "object"}}"#;
+        assert_eq!(
+            parse_networkpolicy_list(json),
+            NetworkPolicyAdmissionOutcome::ProbeAbsent
+        );
+    }
+
+    /// kubectl `Error from server (Forbidden): ...` stderr-mode output
+    /// (not JSON at all) parses to
+    /// [`NetworkPolicyAdmissionOutcome::ProbeAbsent`] without panic —
+    /// the honest no-evidence-collected collapse. A regression that
+    /// panicked on unparseable input would surface a shell-out failure
+    /// as a runtime panic rather than as a typed no-evidence outcome.
+    /// Same exit-agnostic discipline as
+    /// [`crate::pod_health::parse_pod_health`]'s
+    /// `test_parse_malformed_json_yields_probe_absent`.
+    #[test]
+    fn test_parse_malformed_json_yields_probe_absent() {
+        let json = "Error from server (Forbidden): networkpolicies is forbidden";
+        assert_eq!(
+            parse_networkpolicy_list(json),
+            NetworkPolicyAdmissionOutcome::ProbeAbsent
+        );
     }
 }
