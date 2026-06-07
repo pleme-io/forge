@@ -243,6 +243,114 @@ impl CisK8sPassRateOutcome {
 
 crate::impl_probe_outcome!(CisK8sPassRateOutcome, ProbeAbsent);
 
+/// Recover the typed two-arm [`CisK8sPassRateOutcome`] from the
+/// JSON-encoded kensa CIS-Kubernetes-Benchmark audit surface a
+/// `kensa cis-k8s --cluster <ctx> --format json` shell-out (or its typed
+/// `kensa::cis_k8s::audit(...)` library equivalent) yields. The parser is
+/// the sixth parser in the Phase 2 deployment-probe family — after
+/// [`crate::flux_source_verification::parse_gitrepository_status`] (commit
+/// e07d64d, three-arm over `status.conditions[]`),
+/// [`crate::helm_release_signature::parse_helmrelease_list`] (commit
+/// 1f2f9a3, three-arm universal-quantifier over
+/// `items[].metadata.annotations[]`),
+/// [`crate::pod_listing::parse_pod_list`] (commit 46165ef, two-arm
+/// items-len count over `PodList.items[]`),
+/// [`crate::pod_health::parse_pod_health`] (commit c1faa28, three-arm
+/// universal-quantifier over `PodList.items[]`), and
+/// [`crate::network_policy_admission::parse_networkpolicy_list`] (commit
+/// 7465feb, three-arm universal-quantifier over
+/// `NetworkPolicyList.items[]`). It is the first parser whose typed
+/// outcome carries an `f64` payload (the ratio) and the second two-arm
+/// parser in the family — same shape discipline as
+/// [`crate::pod_listing::parse_pod_list`] (the count IS the evidence;
+/// no third arm names a structural distinction the bare payload does
+/// not already carry).
+///
+/// ## What the parser closes
+///
+/// `commands/attestation.rs::compose_product_certification` today stamps
+/// the typed primitive's [`CisK8sPassRateOutcome::ProbeAbsent`] arm at
+/// the call site with no parser, so the Phase 2 deployment attestation's
+/// `cis_k8s_pass_rate` field surfaces a hardcoded `0.0` against every
+/// certification. With the parser landed, the call site can pipe the
+/// JSON response from `kensa cis-k8s --cluster <ctx> --format json`
+/// straight into [`parse_cis_k8s_audit_json`] and route the call-site
+/// outcome through [`CisK8sPassRateOutcome::Probed { ratio }`] /
+/// [`CisK8sPassRateOutcome::ProbeAbsent`] arms structurally — no inline
+/// ratio computation, no per-call-site JSON walk over the kensa shape,
+/// no implicit `ProbeAbsent` collapse hidden in a shell-out match. The
+/// parser is testable in isolation against canonical kensa response
+/// shapes (no cluster, no kensa, no kube-rs runtime), which means the
+/// shell-out call-site code stays narrow (spawn + read stdout + pass to
+/// parser), and every regression in the JSON-to-ratio map fails the
+/// parser tests pinned here rather than surfacing at integration test
+/// time against a live cluster.
+///
+/// ## The two-arm mapping
+///
+/// 1. The JSON deserializes AND both `passed_controls` and
+///    `total_controls` are non-negative integer values AND
+///    `total_controls` is strictly positive →
+///    [`CisK8sPassRateOutcome::Probed`] with `ratio: passed as f64 /
+///    total as f64`. The ratio is passed through without clamp or
+///    round, preserving the full `[0.0, ∞)` `f64` domain a passed /
+///    total quotient could yield (in practice always in `[0.0, 1.0]` for
+///    a well-formed kensa response). A cluster that fails every control
+///    parses to `Probed { ratio: 0.0 }` — the load-bearing structural
+///    discriminator the typed primitive exists to preserve, distinct from
+///    [`CisK8sPassRateOutcome::ProbeAbsent`] even though both collapse to
+///    `pass_rate(): 0.0` at the `f64` surface.
+/// 2. Every other input — malformed JSON, missing `passed_controls`,
+///    missing `total_controls`, fields that fail integer coercion (e.g.
+///    string-encoded "92" or a floating-point `92.5`), negative integer
+///    fields, or `total_controls == 0` (the division-by-zero degenerate
+///    that produces no usable evidence — a kensa run that audited zero
+///    CIS controls yields no ratio to attest) — folds into
+///    [`CisK8sPassRateOutcome::ProbeAbsent`]. Same exit-agnostic,
+///    no-panic discipline
+///    [`crate::flux_source_verification::parse_gitrepository_status`]
+///    and the sibling parsers carry one and several layers over.
+///
+/// ## Why `total_controls == 0` collapses to `ProbeAbsent`, not `Probed { ratio: 0.0 }`
+///
+/// The `Probed { ratio: 0.0 }` arm names "kensa ran and observed zero
+/// passing controls against a non-empty audit set" (the load-bearing
+/// zero-pass-rate posture a Phase 2 record encodes as evidence of an
+/// un-baselined cluster). A `total_controls == 0` response carries no
+/// per-control evidence at all — the divisor is undefined, the ratio
+/// cannot be honestly computed, and the resulting `f64::NAN` (or the
+/// arbitrary `0.0` a default branch would produce) is no evidence,
+/// structurally indistinguishable from a probe that never ran. The
+/// honest collapse is [`CisK8sPassRateOutcome::ProbeAbsent`]: same
+/// discipline as the sibling parsers' fold of malformed inputs into the
+/// no-usable-evidence arm.
+///
+/// THEORY §V.1: make invalid states unrepresentable. The two-arm codomain
+/// `{Probed, ProbeAbsent}` is foreclosed at the type level; a regression
+/// that wanted to introduce a `Malformed` arm would force every consumer
+/// to handle a world the parser does not produce. THEORY §VI.1: one
+/// oracle, not a per-consumer re-derivation. The parser is the one site
+/// that walks the `passed_controls / total_controls` shape for its
+/// ratio; downstream consumers pattern-match the typed two-arm enum.
+#[allow(dead_code)]
+pub fn parse_cis_k8s_audit_json(json_text: &str) -> CisK8sPassRateOutcome {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+        return CisK8sPassRateOutcome::ProbeAbsent;
+    };
+    let Some(passed) = value.get("passed_controls").and_then(|v| v.as_u64()) else {
+        return CisK8sPassRateOutcome::ProbeAbsent;
+    };
+    let Some(total) = value.get("total_controls").and_then(|v| v.as_u64()) else {
+        return CisK8sPassRateOutcome::ProbeAbsent;
+    };
+    if total == 0 {
+        return CisK8sPassRateOutcome::ProbeAbsent;
+    }
+    CisK8sPassRateOutcome::Probed {
+        ratio: passed as f64 / total as f64,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +494,224 @@ mod tests {
         assert!(CisK8sPassRateOutcome::ProbeAbsent.is_probe_absent());
         assert!(!CisK8sPassRateOutcome::Probed { ratio: 0.0 }.is_probe_absent());
         assert!(!CisK8sPassRateOutcome::Probed { ratio: 0.92 }.is_probe_absent());
+    }
+
+    /// A canonical `kensa cis-k8s --cluster <ctx> --format json` response
+    /// reporting 92 passed of 100 total CIS Kubernetes Benchmark controls
+    /// (the headline near-baseline posture a hardened cluster produces).
+    /// Parses to [`CisK8sPassRateOutcome::Probed`] with `ratio: 0.92` —
+    /// the one arm that lets the Phase 2 deployment attestation record a
+    /// non-zero `cis_k8s_pass_rate` claim grounded in a real kensa
+    /// observation.
+    #[test]
+    fn test_parse_near_baseline_yields_probed_ratio() {
+        let json = r#"{
+            "passed_controls": 92,
+            "total_controls": 100
+        }"#;
+        assert_eq!(
+            parse_cis_k8s_audit_json(json),
+            CisK8sPassRateOutcome::Probed { ratio: 0.92 },
+        );
+    }
+
+    /// A kensa response reporting every CIS control passing
+    /// (`100 / 100`) — the full-baseline ceiling a hardened cluster
+    /// produces. Parses to [`CisK8sPassRateOutcome::Probed`] with
+    /// `ratio: 1.0`. Pins the upper bound of the `[0.0, 1.0]` domain
+    /// the parser passes through without clamp.
+    #[test]
+    fn test_parse_perfect_pass_yields_probed_one() {
+        let json = r#"{"passed_controls": 50, "total_controls": 50}"#;
+        assert_eq!(
+            parse_cis_k8s_audit_json(json),
+            CisK8sPassRateOutcome::Probed { ratio: 1.0 },
+        );
+    }
+
+    /// A kensa response reporting zero passing controls
+    /// (`0 / 100`) — the load-bearing zero-pass-rate posture a freshly
+    /// provisioned cluster or one whose CIS baseline never landed
+    /// produces. Parses to [`CisK8sPassRateOutcome::Probed`] with
+    /// `ratio: 0.0`. The load-bearing structural discriminator: a
+    /// regression that collapsed `passed_controls: 0` into
+    /// [`CisK8sPassRateOutcome::ProbeAbsent`] would force every
+    /// zero-pass-rate cluster's evidence-of-empty-CIS-baseline state to
+    /// surface as no-probe-ran, erasing the distinction the typed
+    /// primitive exists to preserve. The pre-fix `0.0` literal at the
+    /// call site already collapsed both worlds to the same `f64`; the
+    /// parser must hold the discriminator at the enum level even where
+    /// the surface `f64` is shared.
+    #[test]
+    fn test_parse_zero_passing_yields_probed_zero() {
+        let json = r#"{"passed_controls": 0, "total_controls": 100}"#;
+        assert_eq!(
+            parse_cis_k8s_audit_json(json),
+            CisK8sPassRateOutcome::Probed { ratio: 0.0 },
+        );
+    }
+
+    /// A kensa response missing the `passed_controls` field — a malformed
+    /// kensa output, or a CIS audit that failed to enumerate the passed
+    /// set. Parses to [`CisK8sPassRateOutcome::ProbeAbsent`]: no usable
+    /// evidence at the per-field shape the parser walks.
+    #[test]
+    fn test_parse_missing_passed_controls_yields_probe_absent() {
+        let json = r#"{"total_controls": 100}"#;
+        assert_eq!(
+            parse_cis_k8s_audit_json(json),
+            CisK8sPassRateOutcome::ProbeAbsent,
+        );
+    }
+
+    /// A kensa response missing the `total_controls` field — the divisor
+    /// the ratio depends on is absent. Parses to
+    /// [`CisK8sPassRateOutcome::ProbeAbsent`]: no usable evidence to
+    /// compute the per-cluster pass rate.
+    #[test]
+    fn test_parse_missing_total_controls_yields_probe_absent() {
+        let json = r#"{"passed_controls": 50}"#;
+        assert_eq!(
+            parse_cis_k8s_audit_json(json),
+            CisK8sPassRateOutcome::ProbeAbsent,
+        );
+    }
+
+    /// A kensa response whose `total_controls` is exactly zero — the
+    /// degenerate divisor-zero state a kensa run that audited zero CIS
+    /// controls produces (no Master-Node, etcd, Control-Plane,
+    /// Worker-Node, or Policies controls evaluated). Parses to
+    /// [`CisK8sPassRateOutcome::ProbeAbsent`]: same honest collapse the
+    /// module docstring names as "no usable evidence; the divisor is
+    /// undefined". A regression that returned `Probed { ratio: 0.0 }`
+    /// here would conflate "kensa ran and the cluster failed every
+    /// non-trivial CIS control" with "kensa ran but had no controls to
+    /// evaluate" — two structurally distinct worlds the parser must
+    /// distinguish, and a regression that produced `Probed { ratio:
+    /// f64::NAN }` would silently propagate a non-comparable `f64`
+    /// through the Phase 2 attestation field.
+    #[test]
+    fn test_parse_zero_total_controls_yields_probe_absent() {
+        let json = r#"{"passed_controls": 0, "total_controls": 0}"#;
+        assert_eq!(
+            parse_cis_k8s_audit_json(json),
+            CisK8sPassRateOutcome::ProbeAbsent,
+        );
+    }
+
+    /// A kensa response whose `passed_controls` field is a string
+    /// (`"92"`) rather than a JSON number — a malformed kensa output
+    /// shape no real CIS audit produces, but a robust parser must
+    /// collapse honestly. Parses to [`CisK8sPassRateOutcome::
+    /// ProbeAbsent`]. A regression that string-coerced the field would
+    /// silently produce ratios from malformed input.
+    #[test]
+    fn test_parse_string_passed_yields_probe_absent() {
+        let json = r#"{"passed_controls": "92", "total_controls": 100}"#;
+        assert_eq!(
+            parse_cis_k8s_audit_json(json),
+            CisK8sPassRateOutcome::ProbeAbsent,
+        );
+    }
+
+    /// A kensa response whose `passed_controls` field is a negative
+    /// integer (`-1`) — no real CIS audit produces this, but the
+    /// `as_u64()` coercion the parser uses returns `None` for negative
+    /// values, structurally folding the malformed-input world into
+    /// [`CisK8sPassRateOutcome::ProbeAbsent`]. A regression that
+    /// hand-rolled `as_i64()` followed by an `as f64` cast would
+    /// silently produce a negative ratio.
+    #[test]
+    fn test_parse_negative_passed_yields_probe_absent() {
+        let json = r#"{"passed_controls": -1, "total_controls": 100}"#;
+        assert_eq!(
+            parse_cis_k8s_audit_json(json),
+            CisK8sPassRateOutcome::ProbeAbsent,
+        );
+    }
+
+    /// `kensa: command not found` shell-mode stderr output (not JSON at
+    /// all) parses to [`CisK8sPassRateOutcome::ProbeAbsent`] without
+    /// panic — the honest no-evidence-collected collapse. A regression
+    /// that panicked on unparseable input would surface a shell-out
+    /// failure as a runtime panic rather than as a typed no-evidence
+    /// outcome.
+    #[test]
+    fn test_parse_malformed_json_yields_probe_absent() {
+        let json = "kensa: command not found";
+        assert_eq!(
+            parse_cis_k8s_audit_json(json),
+            CisK8sPassRateOutcome::ProbeAbsent,
+        );
+    }
+
+    /// An empty JSON object `{}` parses to [`CisK8sPassRateOutcome::
+    /// ProbeAbsent`] — neither field is present, no ratio can be
+    /// honestly computed. Pins the both-fields-required contract: the
+    /// parser does not synthesize a default `0` for either field, and
+    /// does not assume any default total (e.g. the kube-bench default
+    /// control count).
+    #[test]
+    fn test_parse_empty_object_yields_probe_absent() {
+        assert_eq!(
+            parse_cis_k8s_audit_json("{}"),
+            CisK8sPassRateOutcome::ProbeAbsent,
+        );
+    }
+
+    /// Pin the load-bearing discriminator at the parser surface: a
+    /// canonical `Probed { ratio: 0.0 }` response (zero passing controls
+    /// over a non-empty audit set) collapses to the same `pass_rate()
+    /// == 0.0` as `ProbeAbsent`, but remains structurally distinct at
+    /// the enum level. The pre-typed `0.0` literal flattened both worlds
+    /// indistinguishably into the same Phase 2 `cis_k8s_pass_rate`
+    /// f64; the parser preserves the discriminator from JSON input to
+    /// typed enum. Same shape as
+    /// [`crate::pod_listing::tests::test_parse_counted_zero_distinct_from_probe_absent`]
+    /// one layer over.
+    #[test]
+    fn test_parse_probed_zero_distinct_from_probe_absent() {
+        let probed_failing =
+            parse_cis_k8s_audit_json(r#"{"passed_controls": 0, "total_controls": 100}"#);
+        let absent = parse_cis_k8s_audit_json("not json");
+        assert_eq!(probed_failing.pass_rate(), absent.pass_rate());
+        assert_ne!(
+            probed_failing, absent,
+            "parser must preserve the Probed{{ratio: 0.0}} vs \
+             ProbeAbsent discriminator across the JSON-to-enum boundary \
+             — the same invariant \
+             test_probed_zero_collapses_to_zero_but_stays_distinct pins \
+             at the enum-construction layer",
+        );
+    }
+
+    /// Pin a representative sweep of integer pass / total combinations
+    /// the kensa CIS audit could yield across the realistic
+    /// `[0, total]` domain. Each combination's ratio is passed through
+    /// without clamp or round; the parser's `passed as f64 / total as
+    /// f64` quotient matches the call-site `pass_rate()` field exactly
+    /// for every input. A future refactor that introduced a clamp or a
+    /// percentage cast (e.g. `* 100.0`) would silently transform
+    /// cluster-observed ratios and fail this pin.
+    #[test]
+    fn test_parse_sweep_of_realistic_ratios() {
+        for (passed, total, expected) in [
+            (0_u64, 1_u64, 0.0_f64),
+            (1, 1, 1.0),
+            (1, 2, 0.5),
+            (1, 4, 0.25),
+            (3, 4, 0.75),
+            (92, 100, 0.92),
+            (99, 100, 0.99),
+            (250, 500, 0.5),
+        ] {
+            let json = format!(r#"{{"passed_controls": {passed}, "total_controls": {total}}}"#);
+            assert_eq!(
+                parse_cis_k8s_audit_json(&json),
+                CisK8sPassRateOutcome::Probed { ratio: expected },
+                "parser must yield Probed{{ratio: {expected}}} for \
+                 {passed}/{total}",
+            );
+        }
     }
 }
