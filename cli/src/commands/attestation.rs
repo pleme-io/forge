@@ -403,6 +403,7 @@ pub async fn compute_build_attestation(
         build_probes_total = coverage.total(),
         build_probes_coverage_ratio = coverage.coverage_ratio(),
         build_probes_fully_covered = coverage.is_fully_covered(),
+        build_probes_empty = coverage.is_empty(),
         "build-attestation probe coverage"
     );
 
@@ -750,6 +751,7 @@ pub async fn compute_chart_attestation(
         chart_probes_total = coverage.total(),
         chart_probes_coverage_ratio = coverage.coverage_ratio(),
         chart_probes_fully_covered = coverage.is_fully_covered(),
+        chart_probes_empty = coverage.is_empty(),
         "chart-attestation probe coverage"
     );
 
@@ -1280,6 +1282,7 @@ pub fn compose_product_certification(
         deployment_probes_total = deployment_coverage.total(),
         deployment_probes_coverage_ratio = deployment_coverage.coverage_ratio(),
         deployment_probes_fully_covered = deployment_coverage.is_fully_covered(),
+        deployment_probes_empty = deployment_coverage.is_empty(),
         "deployment-attestation probe coverage"
     );
 
@@ -5582,6 +5585,267 @@ dependencies:
             !mixed.is_fully_covered(),
             "Phase 2 deployment mixed-arm state (3 ran, 4 absent) must \
              NOT satisfy is_fully_covered"
+        );
+    }
+
+    /// Pins the chain `build_probe_coverage(...) → ProbeCoverage →
+    /// is_empty()` across the three reachable arms of the four-arm
+    /// decision matrix the docstring on
+    /// [`crate::probe_outcome::ProbeCoverage::is_empty`] tabulates: the
+    /// all-ran ceiling, the all-absent floor, and the mixed-arm
+    /// intermediate. The fixed-arity `build_probe_coverage(_, _, _)`
+    /// helper consumes exactly three outcome references, so `total > 0`
+    /// holds at every reachable value — the empty-slice boundary arm
+    /// (`ran: 0, absent: 0`) is structurally unreachable through this
+    /// helper and is pinned by the typed-primitive test
+    /// `crate::probe_outcome::tests::test_is_empty_pins_empty_boundary`
+    /// one layer over. This is the load-bearing chain the
+    /// `build_probes_empty` tracing field at the
+    /// `compute_build_attestation` emission site reads: a downstream
+    /// `sekiban` admission verifier reconciliation reading
+    /// `forge::attestation::build_probe_coverage` distinguishes the
+    /// all-absent floor (`empty: false, fully_covered: false`,
+    /// today's call-site state — the strict-production gate
+    /// fails-closed) from the future empty-aggregate arm (`empty:
+    /// true`, surfaced when the iterator-based
+    /// [`crate::probe_outcome::probe_coverage`] composes a fleet-wide
+    /// signal over zero records) without re-deriving `total == 0` at
+    /// the verifier (THEORY §VI.1 one-oracle discipline). Also pins
+    /// the structural mutual-exclusion invariant from the
+    /// typed-primitive pin
+    /// `test_is_empty_and_is_fully_covered_are_mutually_exclusive`: at
+    /// every reachable build-phase coverage value, `is_empty()` and
+    /// `is_fully_covered()` are disjoint.
+    #[test]
+    fn test_build_probe_coverage_empty_predicate_chain() {
+        use crate::nix_reproducibility::NixReproducibilityOutcome;
+        use crate::security_scan::{SbomProbeOutcome, VulnScanProbeOutcome};
+        use tameshi::hash::Blake3Hash;
+
+        let ceiling = build_probe_coverage(
+            &SbomProbeOutcome::Collected {
+                hash: Blake3Hash::digest(b"sbom-payload"),
+            },
+            &VulnScanProbeOutcome::Collected {
+                hash: Blake3Hash::digest(b"vuln-scan-payload"),
+                total_cves: 0,
+                critical_high: 0,
+            },
+            &NixReproducibilityOutcome::Reproducible,
+        );
+        assert!(
+            !ceiling.is_empty(),
+            "Phase 1 build all-ran ceiling must NOT satisfy is_empty \
+             (total == 3, fixed-arity helper forecloses the empty arm)"
+        );
+        assert!(
+            !(ceiling.is_empty() && ceiling.is_fully_covered()),
+            "Phase 1 build all-ran ceiling: is_empty and \
+             is_fully_covered are structurally mutually exclusive"
+        );
+
+        let floor = build_probe_coverage(
+            &SbomProbeOutcome::Absent,
+            &VulnScanProbeOutcome::Absent,
+            &NixReproducibilityOutcome::ProbeAbsent,
+        );
+        assert!(
+            !floor.is_empty(),
+            "Phase 1 build all-absent floor (today's call-site state — \
+             ran: 0, absent: 3) must NOT satisfy is_empty: the typed \
+             predicate distinguishes the all-absent floor from the \
+             structurally-unreachable empty-slice arm, where \
+             coverage_ratio collapses both to 0.0"
+        );
+        assert!(
+            !(floor.is_empty() && floor.is_fully_covered()),
+            "Phase 1 build all-absent floor: is_empty and \
+             is_fully_covered are structurally mutually exclusive"
+        );
+
+        let mixed = build_probe_coverage(
+            &SbomProbeOutcome::Collected {
+                hash: Blake3Hash::digest(b"sbom-payload"),
+            },
+            &VulnScanProbeOutcome::Absent,
+            &NixReproducibilityOutcome::Reproducible,
+        );
+        assert!(
+            !mixed.is_empty(),
+            "Phase 1 build mixed-arm state (ran: 2, absent: 1) must \
+             NOT satisfy is_empty"
+        );
+        assert!(
+            !(mixed.is_empty() && mixed.is_fully_covered()),
+            "Phase 1 build mixed-arm state: is_empty and \
+             is_fully_covered are structurally mutually exclusive"
+        );
+    }
+
+    /// Phase 1 chart-side peer of
+    /// `test_build_probe_coverage_empty_predicate_chain` — pins the
+    /// same `chart_probe_coverage(...) → is_empty()` chain across the
+    /// ceiling / floor / mixed arms over the four-probe chart shape.
+    /// The fixed-arity `chart_probe_coverage(_, _, _, _)` helper
+    /// forecloses the empty-slice arm; the typed-primitive pin
+    /// `crate::probe_outcome::tests::test_is_empty_pins_empty_boundary`
+    /// covers it one layer over. The load-bearing chain the
+    /// `chart_probes_empty` tracing field at the
+    /// `compute_chart_attestation` emission site reads.
+    #[test]
+    fn test_chart_probe_coverage_empty_predicate_chain() {
+        use crate::chart_dependencies::ChartDependenciesOutcome;
+        use crate::helm_lint::HelmLintOutcome;
+        use crate::helm_provenance::HelmProvenanceOutcome;
+        use crate::kensa_policy::KensaPolicyOutcome;
+
+        let ceiling = chart_probe_coverage(
+            &HelmProvenanceOutcome::Verified {
+                signed_chart_hash: Some("deadbeef".to_string()),
+                signer_key_id: None,
+            },
+            &HelmLintOutcome::Passed {
+                warning_count: 0,
+                info_count: 0,
+            },
+            &KensaPolicyOutcome::Passed {
+                evaluated_control_count: 12,
+            },
+            &ChartDependenciesOutcome::Listed { deps: vec![] },
+        );
+        assert!(
+            !ceiling.is_empty(),
+            "Phase 1 chart all-ran ceiling must NOT satisfy is_empty \
+             (total == 4, fixed-arity helper forecloses the empty arm)"
+        );
+        assert!(
+            !(ceiling.is_empty() && ceiling.is_fully_covered()),
+            "Phase 1 chart all-ran ceiling: is_empty and \
+             is_fully_covered are structurally mutually exclusive"
+        );
+
+        let floor = chart_probe_coverage(
+            &HelmProvenanceOutcome::ProbeAbsent,
+            &HelmLintOutcome::ProbeAbsent,
+            &KensaPolicyOutcome::ProbeAbsent,
+            &ChartDependenciesOutcome::ProbeAbsent,
+        );
+        assert!(
+            !floor.is_empty(),
+            "Phase 1 chart all-absent floor (ran: 0, absent: 4) must \
+             NOT satisfy is_empty: the typed predicate distinguishes \
+             the all-absent floor from the structurally-unreachable \
+             empty-slice arm"
+        );
+        assert!(
+            !(floor.is_empty() && floor.is_fully_covered()),
+            "Phase 1 chart all-absent floor: is_empty and \
+             is_fully_covered are structurally mutually exclusive"
+        );
+
+        let mixed = chart_probe_coverage(
+            &HelmProvenanceOutcome::ProbeAbsent,
+            &HelmLintOutcome::ProbeAbsent,
+            &KensaPolicyOutcome::ProbeAbsent,
+            &ChartDependenciesOutcome::Listed { deps: vec![] },
+        );
+        assert!(
+            !mixed.is_empty(),
+            "Phase 1 chart mixed-arm state (ran: 1, absent: 3 — the \
+             realistic call-site shape with chart-deps wired) must \
+             NOT satisfy is_empty"
+        );
+        assert!(
+            !(mixed.is_empty() && mixed.is_fully_covered()),
+            "Phase 1 chart mixed-arm state: is_empty and \
+             is_fully_covered are structurally mutually exclusive"
+        );
+    }
+
+    /// Phase 2 deployment-side peer of the two empty-predicate chain
+    /// pins above — pins the `deployment_probe_coverage(...) →
+    /// is_empty()` chain across the ceiling / floor / mixed arms over
+    /// the seven-probe deployment shape. The fixed-arity
+    /// `deployment_probe_coverage(_, _, _, _, _, _, _)` helper
+    /// forecloses the empty-slice arm; the typed-primitive pin
+    /// `crate::probe_outcome::tests::test_is_empty_pins_empty_boundary`
+    /// covers it one layer over. The load-bearing chain the
+    /// `deployment_probes_empty` tracing field at the
+    /// `compose_product_certification` emission site reads.
+    #[test]
+    fn test_deployment_probe_coverage_empty_predicate_chain() {
+        use crate::cis_k8s_pass_rate::CisK8sPassRateOutcome;
+        use crate::deployment_manifest::DeploymentManifestRenderOutcome;
+        use crate::flux_source_verification::FluxSourceVerificationOutcome;
+        use crate::helm_release_signature::HelmReleaseSignatureOutcome;
+        use crate::network_policy_admission::NetworkPolicyAdmissionOutcome;
+        use crate::pod_health::PodHealthOutcome;
+        use crate::pod_listing::PodListingOutcome;
+
+        let ceiling = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::Verified,
+            &NetworkPolicyAdmissionOutcome::Verified,
+            &HelmReleaseSignatureOutcome::Verified,
+            &PodHealthOutcome::Healthy,
+            &PodListingOutcome::Counted { count: 3 },
+            &DeploymentManifestRenderOutcome::Rendered {
+                fingerprint: b"test-manifest".to_vec(),
+            },
+            &CisK8sPassRateOutcome::Probed { ratio: 1.0 },
+        );
+        assert!(
+            !ceiling.is_empty(),
+            "Phase 2 deployment all-ran ceiling must NOT satisfy \
+             is_empty (total == 7, fixed-arity helper forecloses the \
+             empty arm)"
+        );
+        assert!(
+            !(ceiling.is_empty() && ceiling.is_fully_covered()),
+            "Phase 2 deployment all-ran ceiling: is_empty and \
+             is_fully_covered are structurally mutually exclusive"
+        );
+
+        let floor = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::ProbeAbsent,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::ProbeAbsent,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::ProbeAbsent,
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert!(
+            !floor.is_empty(),
+            "Phase 2 deployment all-absent floor (today's \
+             certification function state — ran: 0, absent: 7) must \
+             NOT satisfy is_empty: the typed predicate distinguishes \
+             the all-absent floor from the structurally-unreachable \
+             empty-slice arm"
+        );
+        assert!(
+            !(floor.is_empty() && floor.is_fully_covered()),
+            "Phase 2 deployment all-absent floor: is_empty and \
+             is_fully_covered are structurally mutually exclusive"
+        );
+
+        let mixed = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::Verified,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::VerifyFailed,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::Counted { count: 0 },
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert!(
+            !mixed.is_empty(),
+            "Phase 2 deployment mixed-arm state (ran: 3, absent: 4) \
+             must NOT satisfy is_empty"
+        );
+        assert!(
+            !(mixed.is_empty() && mixed.is_fully_covered()),
+            "Phase 2 deployment mixed-arm state: is_empty and \
+             is_fully_covered are structurally mutually exclusive"
         );
     }
 }
