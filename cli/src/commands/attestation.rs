@@ -402,6 +402,7 @@ pub async fn compute_build_attestation(
         build_probes_absent = coverage.absent,
         build_probes_total = coverage.total(),
         build_probes_coverage_ratio = coverage.coverage_ratio(),
+        build_probes_fully_covered = coverage.is_fully_covered(),
         "build-attestation probe coverage"
     );
 
@@ -748,6 +749,7 @@ pub async fn compute_chart_attestation(
         chart_probes_absent = coverage.absent,
         chart_probes_total = coverage.total(),
         chart_probes_coverage_ratio = coverage.coverage_ratio(),
+        chart_probes_fully_covered = coverage.is_fully_covered(),
         "chart-attestation probe coverage"
     );
 
@@ -1277,6 +1279,7 @@ pub fn compose_product_certification(
         deployment_probes_absent = deployment_coverage.absent,
         deployment_probes_total = deployment_coverage.total(),
         deployment_probes_coverage_ratio = deployment_coverage.coverage_ratio(),
+        deployment_probes_fully_covered = deployment_coverage.is_fully_covered(),
         "deployment-attestation probe coverage"
     );
 
@@ -5377,6 +5380,208 @@ dependencies:
             "NixReproducibilityOutcome::Drift must count (probe RAN; the \
              drift-detected discriminator from ProbeAbsent that the \
              surface is_reproducible() bool erases)"
+        );
+    }
+
+    /// Pins the chain `build_probe_coverage(...) → ProbeCoverage →
+    /// is_fully_covered()` across the three load-bearing arms of the
+    /// four-arm decision matrix the docstring on
+    /// [`crate::probe_outcome::ProbeCoverage::is_fully_covered`]
+    /// tabulates: the all-ran ceiling (true), the all-absent floor
+    /// (false), and the mixed-arm intermediate (false). This is the
+    /// load-bearing chain the `build_probes_fully_covered` tracing field
+    /// at the `compute_build_attestation` emission site reads — a
+    /// downstream `sekiban` strict-production admission verifier
+    /// reconciliation gates production deploys on `every probe
+    /// substantiated its claim`, which collapses to one bool at the
+    /// `forge::attestation::build_probe_coverage` tracing event rather
+    /// than re-derived per call site (THEORY §VI.1 one-oracle discipline,
+    /// THEORY §VII.1 attestation-gated deployments). A future regression
+    /// that swapped the predicate at the typed-primitive site (e.g.,
+    /// relaxed `ran > 0 && absent == 0` to `absent == 0` alone, silently
+    /// flipping the empty case to true) would fail this pin at the
+    /// `compute_build_attestation` chain — not just at the typed-primitive
+    /// site one layer over.
+    #[test]
+    fn test_build_probe_coverage_fully_covered_predicate_chain() {
+        use crate::nix_reproducibility::NixReproducibilityOutcome;
+        use crate::security_scan::{SbomProbeOutcome, VulnScanProbeOutcome};
+        use tameshi::hash::Blake3Hash;
+
+        // Ceiling: every probe in its non-absent arm — fully covered.
+        let ceiling = build_probe_coverage(
+            &SbomProbeOutcome::Collected {
+                hash: Blake3Hash::digest(b"sbom-payload"),
+            },
+            &VulnScanProbeOutcome::Collected {
+                hash: Blake3Hash::digest(b"vuln-scan-payload"),
+                total_cves: 0,
+                critical_high: 0,
+            },
+            &NixReproducibilityOutcome::Reproducible,
+        );
+        assert!(
+            ceiling.is_fully_covered(),
+            "Phase 1 build all-ran ceiling must satisfy is_fully_covered"
+        );
+
+        // Floor: every probe absent — NOT fully covered (today's
+        // call-site state — no syft / grype / determinism probe layer
+        // is integrated yet; the verifier must fail-closed here).
+        let floor = build_probe_coverage(
+            &SbomProbeOutcome::Absent,
+            &VulnScanProbeOutcome::Absent,
+            &NixReproducibilityOutcome::ProbeAbsent,
+        );
+        assert!(
+            !floor.is_fully_covered(),
+            "Phase 1 build all-absent floor must NOT satisfy \
+             is_fully_covered (today's call-site state — the strict \
+             gate fails-closed)"
+        );
+
+        // Mixed: one absent — NOT fully covered. The realistic
+        // intermediate world a follow-up commit wiring two of the three
+        // probes lands at; one absent probe poisons the strict gate.
+        let mixed = build_probe_coverage(
+            &SbomProbeOutcome::Collected {
+                hash: Blake3Hash::digest(b"sbom-payload"),
+            },
+            &VulnScanProbeOutcome::Absent,
+            &NixReproducibilityOutcome::Reproducible,
+        );
+        assert!(
+            !mixed.is_fully_covered(),
+            "Phase 1 build mixed-arm state (one probe absent) must NOT \
+             satisfy is_fully_covered — one absent probe in any phase \
+             poisons the strict-production gate"
+        );
+    }
+
+    /// Phase 1 chart-side peer of
+    /// `test_build_probe_coverage_fully_covered_predicate_chain` — pins
+    /// the same `chart_probe_coverage(...) → is_fully_covered()` chain
+    /// across the ceiling / floor / mixed arms over the four-probe
+    /// chart shape. The load-bearing chain the
+    /// `chart_probes_fully_covered` tracing field at the
+    /// `compute_chart_attestation` emission site reads.
+    #[test]
+    fn test_chart_probe_coverage_fully_covered_predicate_chain() {
+        use crate::chart_dependencies::ChartDependenciesOutcome;
+        use crate::helm_lint::HelmLintOutcome;
+        use crate::helm_provenance::HelmProvenanceOutcome;
+        use crate::kensa_policy::KensaPolicyOutcome;
+
+        let ceiling = chart_probe_coverage(
+            &HelmProvenanceOutcome::Verified {
+                signed_chart_hash: Some("deadbeef".to_string()),
+                signer_key_id: None,
+            },
+            &HelmLintOutcome::Passed {
+                warning_count: 0,
+                info_count: 0,
+            },
+            &KensaPolicyOutcome::Passed {
+                evaluated_control_count: 12,
+            },
+            &ChartDependenciesOutcome::Listed { deps: vec![] },
+        );
+        assert!(
+            ceiling.is_fully_covered(),
+            "Phase 1 chart all-ran ceiling must satisfy is_fully_covered"
+        );
+
+        let floor = chart_probe_coverage(
+            &HelmProvenanceOutcome::ProbeAbsent,
+            &HelmLintOutcome::ProbeAbsent,
+            &KensaPolicyOutcome::ProbeAbsent,
+            &ChartDependenciesOutcome::ProbeAbsent,
+        );
+        assert!(
+            !floor.is_fully_covered(),
+            "Phase 1 chart all-absent floor must NOT satisfy \
+             is_fully_covered"
+        );
+
+        // Mixed: `chart_dependencies_outcome` already wires a real
+        // probe today, so this is the realistic call-site shape — three
+        // deferred probes absent, one ran. Strict gate fails-closed.
+        let mixed = chart_probe_coverage(
+            &HelmProvenanceOutcome::ProbeAbsent,
+            &HelmLintOutcome::ProbeAbsent,
+            &KensaPolicyOutcome::ProbeAbsent,
+            &ChartDependenciesOutcome::Listed { deps: vec![] },
+        );
+        assert!(
+            !mixed.is_fully_covered(),
+            "Phase 1 chart mixed-arm state (3 of 4 absent) must NOT \
+             satisfy is_fully_covered"
+        );
+    }
+
+    /// Phase 2 deployment-side peer of the two predicate-chain pins
+    /// above — pins the `deployment_probe_coverage(...) →
+    /// is_fully_covered()` chain across the ceiling / floor / mixed
+    /// arms over the seven-probe deployment shape. The load-bearing
+    /// chain the `deployment_probes_fully_covered` tracing field at
+    /// the `compose_product_certification` emission site reads.
+    #[test]
+    fn test_deployment_probe_coverage_fully_covered_predicate_chain() {
+        use crate::cis_k8s_pass_rate::CisK8sPassRateOutcome;
+        use crate::deployment_manifest::DeploymentManifestRenderOutcome;
+        use crate::flux_source_verification::FluxSourceVerificationOutcome;
+        use crate::helm_release_signature::HelmReleaseSignatureOutcome;
+        use crate::network_policy_admission::NetworkPolicyAdmissionOutcome;
+        use crate::pod_health::PodHealthOutcome;
+        use crate::pod_listing::PodListingOutcome;
+
+        let ceiling = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::Verified,
+            &NetworkPolicyAdmissionOutcome::Verified,
+            &HelmReleaseSignatureOutcome::Verified,
+            &PodHealthOutcome::Healthy,
+            &PodListingOutcome::Counted { count: 3 },
+            &DeploymentManifestRenderOutcome::Rendered {
+                fingerprint: b"test-manifest".to_vec(),
+            },
+            &CisK8sPassRateOutcome::Probed { ratio: 1.0 },
+        );
+        assert!(
+            ceiling.is_fully_covered(),
+            "Phase 2 deployment all-ran ceiling must satisfy \
+             is_fully_covered"
+        );
+
+        let floor = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::ProbeAbsent,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::ProbeAbsent,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::ProbeAbsent,
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert!(
+            !floor.is_fully_covered(),
+            "Phase 2 deployment all-absent floor (today's certification \
+             function state) must NOT satisfy is_fully_covered"
+        );
+
+        // Mixed 3-of-7 — the realistic intermediate shape exercised by
+        // `test_deployment_probe_coverage_mixed_arms_arithmetic`.
+        let mixed = deployment_probe_coverage(
+            &FluxSourceVerificationOutcome::Verified,
+            &NetworkPolicyAdmissionOutcome::ProbeAbsent,
+            &HelmReleaseSignatureOutcome::VerifyFailed,
+            &PodHealthOutcome::ProbeAbsent,
+            &PodListingOutcome::Counted { count: 0 },
+            &DeploymentManifestRenderOutcome::ProbeAbsent,
+            &CisK8sPassRateOutcome::ProbeAbsent,
+        );
+        assert!(
+            !mixed.is_fully_covered(),
+            "Phase 2 deployment mixed-arm state (3 ran, 4 absent) must \
+             NOT satisfy is_fully_covered"
         );
     }
 }
