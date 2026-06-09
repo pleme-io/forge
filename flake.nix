@@ -2,7 +2,7 @@
   description = "Forge - Build, push, and deploy platform for Nix-based services";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.follows = "substrate/nixpkgs";
 
     flake-parts = {
       url = "github:hercules-ci/flake-parts";
@@ -21,7 +21,6 @@
 
     substrate = {
       url = "github:pleme-io/substrate";
-      inputs.nixpkgs.follows = "nixpkgs";
       inputs.fenix.follows = "fenix";
     };
 
