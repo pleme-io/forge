@@ -20,9 +20,6 @@
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
-use tokio::process::Command;
-use tracing::info;
-
 use tameshi::certification::{
     relaxed_staging_policy, strict_production_policy, BuildAttestation, CertificationPolicy,
     ChartAttestation, DeploymentAttestation, ImageAttestation, ProductCertification,
@@ -32,6 +29,128 @@ use tameshi::ci;
 use tameshi::compliance::dimensions::{ComplianceAttestation, ComplianceDimension, DimensionType};
 use tameshi::compliance::slsa::{determine_slsa_level, SlsaLevel};
 use tameshi::hash::Blake3Hash;
+use tokio::process::Command;
+
+/// Emit the canonical six-field probe-coverage [`tracing::info!`] event
+/// uniformly across the three attestation phases — Phase 1 build, Phase 1
+/// chart, Phase 2 deployment — without retyping the
+/// `(ran, absent, total, coverage_ratio, fully_covered, empty)` shape at
+/// each emission site.
+///
+/// ## Why this exists
+///
+/// Three nearly-identical `info!` blocks accreted at
+/// [`compute_build_attestation`], [`compute_chart_attestation`], and
+/// [`compose_product_certification`] over the four-then-five-then-six field
+/// trajectory (commits 1662987, 4309da4, 3552bcf). Each block differed only
+/// by (a) the tracing target string, (b) the per-phase context fields, (c)
+/// the phase-prefixed field idents (`build_probes_*` /
+/// `chart_probes_*` / `deployment_probes_*`), (d) the [`ProbeCoverage`]
+/// variable name, and (e) the message string — the shape itself was
+/// identical at every site. Adding a seventh field (a future
+/// `ProbeCoverage::is_saturated`, `coverage_ratio_pct`, or any other typed
+/// boundary discriminator the four-arm matrix tabulated on
+/// [`crate::probe_outcome::ProbeCoverage::is_fully_covered`] grows to admit)
+/// required touching three sites in lockstep; a regression that wired the
+/// new field at two of three would surface a structural per-site emission
+/// drift at telemetry-comparison time rather than at compile time. This
+/// macro forecloses that drift class by centralising the six-method
+/// `(ran, absent, total(), coverage_ratio(), is_fully_covered(), is_empty())`
+/// mapping at one internal `@__shape` arm; the three public phase arms
+/// (`build` / `chart` / `deployment`) supply the phase-prefixed field idents
+/// declaratively, so adding a seventh field touches the internal arm and
+/// three two-line dispatch tails — never a public call site.
+///
+/// ## Usage
+///
+/// ```ignore
+/// emit_probe_coverage!(
+///     build,
+///     target: "forge::attestation::build_probe_coverage",
+///     coverage: coverage,
+///     message: "build-attestation probe coverage",
+///     service = service,
+///     derivation = derivation.as_str(),
+///     slsa_level = ?slsa_level,
+/// );
+/// ```
+///
+/// The macro forwards the per-phase context fields verbatim (matching
+/// `tracing::info!`'s `name = value` / `name = ?value` / `name = %value`
+/// syntax via the `$($ctx:tt)*` tail), then emits the six probe-coverage
+/// fields in canonical order, then the message string.
+///
+/// ## Theory grounding
+///
+/// THEORY.md §VI.1 (one oracle): the field shape is derived at one site,
+/// not retyped per emission. THEORY.md §V.4 / §VII.1: the six-field shape
+/// surfaces the Phase 1 / Phase 2 honesty channel uniformly at every
+/// per-phase telemetry record a downstream `sekiban` admission verifier
+/// reconciliation reads.
+macro_rules! emit_probe_coverage {
+    (
+        @__shape,
+        ran: $ran:ident,
+        absent: $absent:ident,
+        total: $total:ident,
+        coverage_ratio: $ratio:ident,
+        fully_covered: $fully_covered:ident,
+        empty: $empty:ident,
+        target: $target:literal,
+        coverage: $coverage:expr,
+        message: $msg:literal,
+        $($ctx:tt)*
+    ) => {{
+        let __cov = &$coverage;
+        ::tracing::info!(
+            target: $target,
+            $($ctx)*
+            $ran = __cov.ran,
+            $absent = __cov.absent,
+            $total = __cov.total(),
+            $ratio = __cov.coverage_ratio(),
+            $fully_covered = __cov.is_fully_covered(),
+            $empty = __cov.is_empty(),
+            $msg
+        );
+    }};
+    (build, $($rest:tt)*) => {
+        emit_probe_coverage!(
+            @__shape,
+            ran: build_probes_ran,
+            absent: build_probes_absent,
+            total: build_probes_total,
+            coverage_ratio: build_probes_coverage_ratio,
+            fully_covered: build_probes_fully_covered,
+            empty: build_probes_empty,
+            $($rest)*
+        )
+    };
+    (chart, $($rest:tt)*) => {
+        emit_probe_coverage!(
+            @__shape,
+            ran: chart_probes_ran,
+            absent: chart_probes_absent,
+            total: chart_probes_total,
+            coverage_ratio: chart_probes_coverage_ratio,
+            fully_covered: chart_probes_fully_covered,
+            empty: chart_probes_empty,
+            $($rest)*
+        )
+    };
+    (deployment, $($rest:tt)*) => {
+        emit_probe_coverage!(
+            @__shape,
+            ran: deployment_probes_ran,
+            absent: deployment_probes_absent,
+            total: deployment_probes_total,
+            coverage_ratio: deployment_probes_coverage_ratio,
+            fully_covered: deployment_probes_fully_covered,
+            empty: deployment_probes_empty,
+            $($rest)*
+        )
+    };
+}
 
 /// Attestation values suitable for injection into HelmRelease or kustomization.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -393,18 +512,14 @@ pub async fn compute_build_attestation(
     // one site, not per-field-derived by the verifier.
     let coverage =
         build_probe_coverage(&sbom_outcome, &vuln_scan_outcome, &reproducibility_outcome);
-    info!(
+    emit_probe_coverage!(
+        build,
         target: "forge::attestation::build_probe_coverage",
+        coverage: coverage,
+        message: "build-attestation probe coverage",
         service = service,
         derivation = derivation.as_str(),
         slsa_level = ?slsa_level,
-        build_probes_ran = coverage.ran,
-        build_probes_absent = coverage.absent,
-        build_probes_total = coverage.total(),
-        build_probes_coverage_ratio = coverage.coverage_ratio(),
-        build_probes_fully_covered = coverage.is_fully_covered(),
-        build_probes_empty = coverage.is_empty(),
-        "build-attestation probe coverage"
     );
 
     Ok(ci::build_attestation(
@@ -741,18 +856,14 @@ pub async fn compute_chart_attestation(
         &policy_outcome,
         &chart_dependencies_outcome,
     );
-    info!(
+    emit_probe_coverage!(
+        chart,
         target: "forge::attestation::chart_probe_coverage",
+        coverage: coverage,
+        message: "chart-attestation probe coverage",
         chart_name = chart_name,
         chart_version = chart_version,
         registry_ref = registry_ref,
-        chart_probes_ran = coverage.ran,
-        chart_probes_absent = coverage.absent,
-        chart_probes_total = coverage.total(),
-        chart_probes_coverage_ratio = coverage.coverage_ratio(),
-        chart_probes_fully_covered = coverage.is_fully_covered(),
-        chart_probes_empty = coverage.is_empty(),
-        "chart-attestation probe coverage"
     );
 
     Ok(ci::chart_attestation(
@@ -1272,18 +1383,14 @@ pub fn compose_product_certification(
         &deployment_manifest_outcome,
         &cis_k8s_pass_rate_outcome,
     );
-    info!(
+    emit_probe_coverage!(
+        deployment,
         target: "forge::attestation::probe_coverage",
+        coverage: deployment_coverage,
+        message: "deployment-attestation probe coverage",
         product = product,
         environment = environment,
         cluster = cluster,
-        deployment_probes_ran = deployment_coverage.ran,
-        deployment_probes_absent = deployment_coverage.absent,
-        deployment_probes_total = deployment_coverage.total(),
-        deployment_probes_coverage_ratio = deployment_coverage.coverage_ratio(),
-        deployment_probes_fully_covered = deployment_coverage.is_fully_covered(),
-        deployment_probes_empty = deployment_coverage.is_empty(),
-        "deployment-attestation probe coverage"
     );
 
     let deployment = DeploymentAttestation {
@@ -5846,6 +5953,287 @@ dependencies:
             !(mixed.is_empty() && mixed.is_fully_covered()),
             "Phase 2 deployment mixed-arm state: is_empty and \
              is_fully_covered are structurally mutually exclusive"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // emit_probe_coverage! macro — schema pins
+    //
+    // The macro centralises the six-field tracing shape — `(ran, absent,
+    // total, coverage_ratio, fully_covered, empty)` — at one internal arm
+    // so the three per-phase emission sites cannot drift on field count,
+    // field order, or the `ProbeCoverage` method that maps to each field.
+    // The pins below capture each phase's tracing event via a minimal
+    // [`tracing::Subscriber`] impl, then assert the six probe-coverage
+    // fields surface with the expected phase-prefixed names, in the
+    // canonical order the macro emits, with the values
+    // [`ProbeCoverage`]'s typed methods compute. A regression that
+    // (a) dropped a field at the macro's internal arm, (b) swapped the
+    // `ran` and `absent` method calls, (c) re-ordered the emission so a
+    // downstream verifier reading positional tracing-event fields drifted,
+    // or (d) mis-prefixed a phase arm (e.g., chart's `ran` field emitted
+    // as `build_probes_ran`) would fail the corresponding pin here.
+    // ────────────────────────────────────────────────────────────────────
+
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Record as SpanRecord};
+    use tracing::{Event, Id, Metadata, Subscriber};
+
+    /// Captured tracing-event shape — the target string and the ordered
+    /// `(field_name, debug_rendering)` pairs the macro emitted. Used as
+    /// the test-side oracle the pins below compare against.
+    #[derive(Default)]
+    struct CapturedEvent {
+        target: String,
+        fields: Vec<(String, String)>,
+    }
+
+    /// Minimal field visitor that records each `(name, debug-rendered)`
+    /// pair into the captured-event accumulator. The debug rendering is
+    /// the largest common shape every `record_*` arm admits without a
+    /// per-type branch — `tracing`'s [`Visit`] trait dispatches numeric,
+    /// bool, and string forms separately, so each arm formats the value
+    /// in a way the pins below can assert against a fixed string.
+    struct CaptureVisitor<'a> {
+        fields: &'a mut Vec<(String, String)>,
+    }
+
+    impl<'a> Visit for CaptureVisitor<'a> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .push((field.name().to_string(), format!("{:?}", value)));
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_f64(&mut self, field: &Field, value: f64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    /// Minimal [`Subscriber`] impl that records every event's target and
+    /// fields into the shared accumulator. Span machinery is stubbed —
+    /// the macro emits events, not spans, so [`Subscriber::event`] is the
+    /// only method that needs to do work.
+    struct CaptureSubscriber {
+        captured: Arc<Mutex<CapturedEvent>>,
+    }
+
+    impl Subscriber for CaptureSubscriber {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &SpanRecord<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut captured = self.captured.lock().expect("capture mutex poisoned");
+            captured.target = event.metadata().target().to_string();
+            captured.fields.clear();
+            let mut visitor = CaptureVisitor {
+                fields: &mut captured.fields,
+            };
+            event.record(&mut visitor);
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    /// Run `f` under a default [`CaptureSubscriber`] and return the
+    /// recorded event. The macro under test emits exactly one event per
+    /// invocation, so the captured shape reflects that single event.
+    fn capture_emission<F: FnOnce()>(f: F) -> CapturedEvent {
+        let captured = Arc::new(Mutex::new(CapturedEvent::default()));
+        let subscriber = CaptureSubscriber {
+            captured: Arc::clone(&captured),
+        };
+        tracing::subscriber::with_default(subscriber, f);
+        let captured = captured.lock().expect("capture mutex poisoned");
+        CapturedEvent {
+            target: captured.target.clone(),
+            fields: captured.fields.clone(),
+        }
+    }
+
+    /// Names of the six probe-coverage fields the macro emits, in the
+    /// canonical order — the same order
+    /// [`crate::probe_outcome::ProbeCoverage::is_fully_covered`]'s
+    /// docstring four-arm matrix tabulates. Returned with a phase prefix
+    /// so each phase's pin can compare against its own expected slice.
+    fn expected_field_names(prefix: &str) -> Vec<String> {
+        [
+            "ran",
+            "absent",
+            "total",
+            "coverage_ratio",
+            "fully_covered",
+            "empty",
+        ]
+        .iter()
+        .map(|suffix| format!("{prefix}_probes_{suffix}"))
+        .collect()
+    }
+
+    /// Phase 1 build: pins the macro emits exactly six probe-coverage
+    /// fields, in canonical order, with `build_probes_*` prefixes, against
+    /// the `forge::attestation::build_probe_coverage` target. The mixed
+    /// arm `(ran: 2, absent: 1)` exercises all three non-empty-non-empty
+    /// arms — `ran > 0` and `absent > 0` both non-zero — so the value pins
+    /// substantiate the typed method routes the macro composes.
+    #[test]
+    fn test_emit_probe_coverage_build_schema_pin() {
+        let coverage = crate::probe_outcome::ProbeCoverage { ran: 2, absent: 1 };
+        let captured = capture_emission(|| {
+            emit_probe_coverage!(
+                build,
+                target: "forge::attestation::build_probe_coverage",
+                coverage: coverage,
+                message: "build-attestation probe coverage",
+                service = "svc",
+                derivation = "drv",
+            );
+        });
+        assert_eq!(
+            captured.target, "forge::attestation::build_probe_coverage",
+            "macro must emit to the canonical build phase target",
+        );
+        let probe_field_names: Vec<String> = captured
+            .fields
+            .iter()
+            .filter(|(name, _)| name.starts_with("build_probes_"))
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert_eq!(
+            probe_field_names,
+            expected_field_names("build"),
+            "macro must emit the six build_probes_* fields in canonical \
+             order — a regression that dropped, re-ordered, or renamed a \
+             field at the internal `@__shape` arm fails this pin",
+        );
+        let by_name: std::collections::HashMap<_, _> = captured.fields.iter().cloned().collect();
+        assert_eq!(by_name["build_probes_ran"], "2");
+        assert_eq!(by_name["build_probes_absent"], "1");
+        assert_eq!(by_name["build_probes_total"], "3");
+        assert_eq!(by_name["build_probes_fully_covered"], "false");
+        assert_eq!(by_name["build_probes_empty"], "false");
+    }
+
+    /// Phase 1 chart: same schema pin as the build sibling above, against
+    /// the `forge::attestation::chart_probe_coverage` target with the
+    /// four-probe `(ran: 3, absent: 0)` ceiling — exercises the
+    /// fully-covered predicate's `true` arm and the `total() == ran` /
+    /// `coverage_ratio() == 1.0` boundary the prior typed-primitive pins
+    /// substantiate one layer over.
+    #[test]
+    fn test_emit_probe_coverage_chart_schema_pin() {
+        let coverage = crate::probe_outcome::ProbeCoverage { ran: 3, absent: 0 };
+        let captured = capture_emission(|| {
+            emit_probe_coverage!(
+                chart,
+                target: "forge::attestation::chart_probe_coverage",
+                coverage: coverage,
+                message: "chart-attestation probe coverage",
+                chart_name = "mychart",
+                chart_version = "1.0.0",
+                registry_ref = "ghcr.io/x/y",
+            );
+        });
+        assert_eq!(
+            captured.target, "forge::attestation::chart_probe_coverage",
+            "macro must emit to the canonical chart phase target",
+        );
+        let probe_field_names: Vec<String> = captured
+            .fields
+            .iter()
+            .filter(|(name, _)| name.starts_with("chart_probes_"))
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert_eq!(
+            probe_field_names,
+            expected_field_names("chart"),
+            "macro must emit the six chart_probes_* fields in canonical \
+             order — a regression that swapped a build/chart/deployment \
+             dispatch arm's prefix mapping fails this pin",
+        );
+        let by_name: std::collections::HashMap<_, _> = captured.fields.iter().cloned().collect();
+        assert_eq!(by_name["chart_probes_ran"], "3");
+        assert_eq!(by_name["chart_probes_absent"], "0");
+        assert_eq!(by_name["chart_probes_total"], "3");
+        assert_eq!(by_name["chart_probes_fully_covered"], "true");
+        assert_eq!(by_name["chart_probes_empty"], "false");
+    }
+
+    /// Phase 2 deployment: same schema pin as the build/chart siblings,
+    /// against the legacy `forge::attestation::probe_coverage` target
+    /// (commit 3152279 named the target before the build/chart phases
+    /// later differentiated their targets — the macro preserves the
+    /// legacy target string exactly so a downstream consumer reading the
+    /// existing tracing target cannot drift under this commit). The
+    /// all-absent `(ran: 0, absent: 7)` floor exercises today's
+    /// [`compose_product_certification`] call-site state — no Phase 2
+    /// probe ran inside the certification function — and pins the
+    /// `is_empty()` / `is_fully_covered()` boundary discriminator pair at
+    /// the all-absent arm of the four-arm matrix the typed primitive
+    /// tabulates.
+    #[test]
+    fn test_emit_probe_coverage_deployment_schema_pin() {
+        let coverage = crate::probe_outcome::ProbeCoverage { ran: 0, absent: 7 };
+        let captured = capture_emission(|| {
+            emit_probe_coverage!(
+                deployment,
+                target: "forge::attestation::probe_coverage",
+                coverage: coverage,
+                message: "deployment-attestation probe coverage",
+                product = "prod",
+                environment = "staging",
+                cluster = "plo",
+            );
+        });
+        assert_eq!(
+            captured.target, "forge::attestation::probe_coverage",
+            "macro must preserve the legacy deployment phase target — \
+             downstream `RUST_LOG=forge::attestation::probe_coverage=info` \
+             filters cannot drift under this commit",
+        );
+        let probe_field_names: Vec<String> = captured
+            .fields
+            .iter()
+            .filter(|(name, _)| name.starts_with("deployment_probes_"))
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert_eq!(
+            probe_field_names,
+            expected_field_names("deployment"),
+            "macro must emit the six deployment_probes_* fields in \
+             canonical order",
+        );
+        let by_name: std::collections::HashMap<_, _> = captured.fields.iter().cloned().collect();
+        assert_eq!(by_name["deployment_probes_ran"], "0");
+        assert_eq!(by_name["deployment_probes_absent"], "7");
+        assert_eq!(by_name["deployment_probes_total"], "7");
+        assert_eq!(by_name["deployment_probes_fully_covered"], "false");
+        assert_eq!(
+            by_name["deployment_probes_empty"], "false",
+            "all-absent floor is structurally distinct from the empty \
+             arm — `is_empty` reflects `total() == 0`, the seven-probe \
+             call site cannot satisfy it",
         );
     }
 }
