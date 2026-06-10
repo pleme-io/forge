@@ -54,12 +54,13 @@ use tokio::process::Command;
 /// required touching three sites in lockstep; a regression that wired the
 /// new field at two of three would surface a structural per-site emission
 /// drift at telemetry-comparison time rather than at compile time. This
-/// macro forecloses that drift class by centralising the six-method
-/// `(ran, absent, total(), coverage_ratio(), is_fully_covered(), is_empty())`
-/// mapping at one internal `@__shape` arm; the three public phase arms
-/// (`build` / `chart` / `deployment`) supply the phase-prefixed field idents
-/// declaratively, so adding a seventh field touches the internal arm and
-/// three two-line dispatch tails — never a public call site.
+/// macro forecloses that drift class by centralising the seven-method
+/// `(ran, absent, total(), coverage_ratio(), is_fully_covered(), is_empty(),
+/// is_saturated())` mapping at one internal `@__shape` arm; the three
+/// public phase arms (`build` / `chart` / `deployment`) supply the
+/// phase-prefixed field idents declaratively, so adding an eighth field
+/// touches the internal arm and three two-line dispatch tails — never a
+/// public call site.
 ///
 /// ## Usage
 ///
@@ -77,8 +78,18 @@ use tokio::process::Command;
 ///
 /// The macro forwards the per-phase context fields verbatim (matching
 /// `tracing::info!`'s `name = value` / `name = ?value` / `name = %value`
-/// syntax via the `$($ctx:tt)*` tail), then emits the six probe-coverage
-/// fields in canonical order, then the message string.
+/// syntax via the `$($ctx:tt)*` tail), then emits the seven probe-coverage
+/// fields in canonical order, then the message string. The seventh
+/// `*_probes_saturated` field surfaces the trustworthiness signal for the
+/// `*_probes_coverage_ratio` field: at the saturated state (`ran ==
+/// usize::MAX || absent == usize::MAX`, reachable asymptotically via
+/// fleet-wide aggregation through the [`Add`] impl's `saturating_add`
+/// clamp) the f64 division `ran/total` rounds against the true ratio, so
+/// a downstream `sekiban` admission verifier reading
+/// `*_probes_coverage_ratio` must gate on `!*_probes_saturated` to
+/// foreclose that drift class.
+///
+/// [`Add`]: std::ops::Add
 ///
 /// ## Theory grounding
 ///
@@ -96,6 +107,7 @@ macro_rules! emit_probe_coverage {
         coverage_ratio: $ratio:ident,
         fully_covered: $fully_covered:ident,
         empty: $empty:ident,
+        saturated: $saturated:ident,
         target: $target:literal,
         coverage: $coverage:expr,
         message: $msg:literal,
@@ -111,6 +123,7 @@ macro_rules! emit_probe_coverage {
             $ratio = __cov.coverage_ratio(),
             $fully_covered = __cov.is_fully_covered(),
             $empty = __cov.is_empty(),
+            $saturated = __cov.is_saturated(),
             $msg
         );
     }};
@@ -123,6 +136,7 @@ macro_rules! emit_probe_coverage {
             coverage_ratio: build_probes_coverage_ratio,
             fully_covered: build_probes_fully_covered,
             empty: build_probes_empty,
+            saturated: build_probes_saturated,
             $($rest)*
         )
     };
@@ -135,6 +149,7 @@ macro_rules! emit_probe_coverage {
             coverage_ratio: chart_probes_coverage_ratio,
             fully_covered: chart_probes_fully_covered,
             empty: chart_probes_empty,
+            saturated: chart_probes_saturated,
             $($rest)*
         )
     };
@@ -147,6 +162,7 @@ macro_rules! emit_probe_coverage {
             coverage_ratio: deployment_probes_coverage_ratio,
             fully_covered: deployment_probes_fully_covered,
             empty: deployment_probes_empty,
+            saturated: deployment_probes_saturated,
             $($rest)*
         )
     };
@@ -5959,14 +5975,14 @@ dependencies:
     // ────────────────────────────────────────────────────────────────────
     // emit_probe_coverage! macro — schema pins
     //
-    // The macro centralises the six-field tracing shape — `(ran, absent,
-    // total, coverage_ratio, fully_covered, empty)` — at one internal arm
-    // so the three per-phase emission sites cannot drift on field count,
-    // field order, or the `ProbeCoverage` method that maps to each field.
-    // The pins below capture each phase's tracing event via a minimal
-    // [`tracing::Subscriber`] impl, then assert the six probe-coverage
-    // fields surface with the expected phase-prefixed names, in the
-    // canonical order the macro emits, with the values
+    // The macro centralises the seven-field tracing shape — `(ran, absent,
+    // total, coverage_ratio, fully_covered, empty, saturated)` — at one
+    // internal arm so the three per-phase emission sites cannot drift on
+    // field count, field order, or the `ProbeCoverage` method that maps to
+    // each field. The pins below capture each phase's tracing event via a
+    // minimal [`tracing::Subscriber`] impl, then assert the seven
+    // probe-coverage fields surface with the expected phase-prefixed
+    // names, in the canonical order the macro emits, with the values
     // [`ProbeCoverage`]'s typed methods compute. A regression that
     // (a) dropped a field at the macro's internal arm, (b) swapped the
     // `ran` and `absent` method calls, (c) re-ordered the emission so a
@@ -6072,11 +6088,14 @@ dependencies:
         }
     }
 
-    /// Names of the six probe-coverage fields the macro emits, in the
+    /// Names of the seven probe-coverage fields the macro emits, in the
     /// canonical order — the same order
     /// [`crate::probe_outcome::ProbeCoverage::is_fully_covered`]'s
-    /// docstring four-arm matrix tabulates. Returned with a phase prefix
-    /// so each phase's pin can compare against its own expected slice.
+    /// docstring four-arm matrix tabulates, extended with the orthogonal
+    /// [`crate::probe_outcome::ProbeCoverage::is_saturated`]
+    /// trustworthiness predicate at the tail. Returned with a phase
+    /// prefix so each phase's pin can compare against its own expected
+    /// slice.
     fn expected_field_names(prefix: &str) -> Vec<String> {
         [
             "ran",
@@ -6085,6 +6104,7 @@ dependencies:
             "coverage_ratio",
             "fully_covered",
             "empty",
+            "saturated",
         ]
         .iter()
         .map(|suffix| format!("{prefix}_probes_{suffix}"))
@@ -6123,7 +6143,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("build"),
-            "macro must emit the six build_probes_* fields in canonical \
+            "macro must emit the seven build_probes_* fields in canonical \
              order — a regression that dropped, re-ordered, or renamed a \
              field at the internal `@__shape` arm fails this pin",
         );
@@ -6133,6 +6153,12 @@ dependencies:
         assert_eq!(by_name["build_probes_total"], "3");
         assert_eq!(by_name["build_probes_fully_covered"], "false");
         assert_eq!(by_name["build_probes_empty"], "false");
+        assert_eq!(
+            by_name["build_probes_saturated"], "false",
+            "the mixed `(ran: 2, absent: 1)` arm sits well below the \
+             saturating-add ceiling — `is_saturated` is false at every \
+             realistically-sized Phase 1 build coverage",
+        );
     }
 
     /// Phase 1 chart: same schema pin as the build sibling above, against
@@ -6168,7 +6194,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("chart"),
-            "macro must emit the six chart_probes_* fields in canonical \
+            "macro must emit the seven chart_probes_* fields in canonical \
              order — a regression that swapped a build/chart/deployment \
              dispatch arm's prefix mapping fails this pin",
         );
@@ -6178,6 +6204,13 @@ dependencies:
         assert_eq!(by_name["chart_probes_total"], "3");
         assert_eq!(by_name["chart_probes_fully_covered"], "true");
         assert_eq!(by_name["chart_probes_empty"], "false");
+        assert_eq!(
+            by_name["chart_probes_saturated"], "false",
+            "the fully-covered ceiling at `(ran: 3, absent: 0)` is \
+             orthogonal to `is_saturated` — neither component is at \
+             `usize::MAX`, so the typed trustworthiness flag stays false \
+             at the all-ran chart-attestation arm",
+        );
     }
 
     /// Phase 2 deployment: same schema pin as the build/chart siblings,
@@ -6221,7 +6254,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("deployment"),
-            "macro must emit the six deployment_probes_* fields in \
+            "macro must emit the seven deployment_probes_* fields in \
              canonical order",
         );
         let by_name: std::collections::HashMap<_, _> = captured.fields.iter().cloned().collect();
@@ -6234,6 +6267,76 @@ dependencies:
             "all-absent floor is structurally distinct from the empty \
              arm — `is_empty` reflects `total() == 0`, the seven-probe \
              call site cannot satisfy it",
+        );
+        assert_eq!(
+            by_name["deployment_probes_saturated"], "false",
+            "today's `compose_product_certification` call-site state \
+             `(ran: 0, absent: 7)` sits at the all-absent floor — \
+             `is_saturated` is the orthogonal trustworthiness flag, \
+             false at every realistically-sized Phase 2 deployment \
+             coverage",
+        );
+    }
+
+    /// Phase 1 build at the post-saturation state: pins the macro emits
+    /// the seventh `*_probes_saturated` field as `true` exactly at the
+    /// `{ran: usize::MAX, absent: usize::MAX}` ceiling state the
+    /// saturating monoid `Add` reaches asymptotically. The orthogonal
+    /// trustworthiness signal a downstream `sekiban` admission verifier
+    /// reading `*_probes_coverage_ratio` must gate against — at this
+    /// state the f64 division `MAX as f64 / MAX as f64` reads as `1.0`
+    /// against the true 0.5 ratio (every saturated component dropped
+    /// equal evidence past the ceiling), so a verifier conditioning
+    /// only on `*_probes_coverage_ratio >= 0.5` would silently accept
+    /// the drift. This pin closes that arm at the telemetry-emission
+    /// surface: the saturated boolean reaches the wire so the verifier
+    /// reads both the ratio AND its trustworthiness.
+    #[test]
+    fn test_emit_probe_coverage_saturated_state_flags_trustworthiness() {
+        let coverage = crate::probe_outcome::ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        };
+        let captured = capture_emission(|| {
+            emit_probe_coverage!(
+                build,
+                target: "forge::attestation::build_probe_coverage",
+                coverage: coverage,
+                message: "build-attestation probe coverage",
+                service = "svc",
+                derivation = "drv",
+            );
+        });
+        let by_name: std::collections::HashMap<_, _> = captured.fields.iter().cloned().collect();
+        assert_eq!(
+            by_name["build_probes_saturated"], "true",
+            "the post-saturation state `{{ran: MAX, absent: MAX}}` must \
+             surface `is_saturated == true` on the wire — a downstream \
+             verifier reading `*_probes_coverage_ratio` (which reads as \
+             1.0 here against the true 0.5 ratio) gates on this field \
+             to foreclose the drift class",
+        );
+        assert_eq!(
+            by_name["build_probes_coverage_ratio"], "1",
+            "documents the IEEE-754 drift the saturated flag warns \
+             against: `MAX as f64 / MAX as f64` rounds to 1.0 (formatted \
+             by the tracing visitor as `1` against the integral float), \
+             not the true 0.5 ratio of the unsaturated `{{ran: N, absent: \
+             N}}` shape — `is_saturated` is the trustworthiness predicate \
+             that surfaces the drift",
+        );
+        assert_eq!(
+            by_name["build_probes_fully_covered"], "false",
+            "`is_fully_covered` (`absent == 0` is the load-bearing test) \
+             stays robust under saturation — `absent == MAX` is not 0, \
+             so the saturation-robust discriminator correctly reads false",
+        );
+        assert_eq!(
+            by_name["build_probes_empty"], "false",
+            "`is_empty` (`total() == 0` is the load-bearing test) stays \
+             robust under saturation — `total()` saturates to MAX, not \
+             0, so the saturation-robust discriminator correctly reads \
+             false",
         );
     }
 }
