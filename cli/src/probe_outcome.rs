@@ -364,6 +364,66 @@ impl ProbeCoverage {
     pub fn is_saturated(&self) -> bool {
         self.ran == usize::MAX || self.absent == usize::MAX
     }
+
+    /// Coverage fraction as an integer percent in `0..=100`. Returns `0`
+    /// for the empty-slice boundary case (`total() == 0`), and
+    /// `(ran * 100) / total()` (Euclidean floor) for every reachable
+    /// non-empty value. The companion of [`coverage_ratio`]: the float
+    /// surface is the largest common shape every `tracing::Visit::record_
+    /// f64` consumer admits cheaply, the integer surface is the largest
+    /// common shape every Prometheus `*_probe_coverage_ratio_pct > 90`
+    /// alert rule / typed-policy threshold gate admits cheaply (integer
+    /// arithmetic against an integer threshold, no IEEE-754 epsilon
+    /// drift at the decision boundary `>= 0.9` floats imprecisely
+    /// surface — `0.9_f64` is `0.8999...` under the binary fraction, so
+    /// a fleet-wide aggregator summing per-record ratios across N records
+    /// reads N`*0.9_f64` against an `N*0.9_f64 + epsilon` threshold and
+    /// may admit or reject the same evidence depending on N).
+    ///
+    /// Routes through `u128` arithmetic to foreclose overflow at the
+    /// `ran * 100` multiplication — `usize::MAX * 100` overflows `u128`
+    /// only at `u128::MAX / 100 ≈ 3.4e36 / 100 ≈ 3.4e34`, well above
+    /// the `usize::MAX ≈ 1.8e19` (64-bit) reach of the saturating
+    /// monoid `Add`, so the integer arithmetic is total over every
+    /// reachable `ProbeCoverage` value. The post-saturation state
+    /// `{ran: MAX, absent: MAX}` reads `100` here (the true 0.5 ratio
+    /// is dropped past the saturating clamp, same drift as
+    /// [`coverage_ratio`]'s float reading of 1.0); the orthogonal
+    /// [`is_saturated`] flag is the load-bearing trustworthiness
+    /// signal a downstream verifier reads alongside this field to
+    /// gate on `!is_saturated() && coverage_ratio_pct() >= 90` against
+    /// the post-saturation drift.
+    ///
+    /// The cast to `u8` is structurally lossless: the quotient
+    /// `(ran * 100) / total <= 100` by construction (`ran <= total`
+    /// since `total = ran + absent` componentwise), so the result
+    /// always fits in `u8`. A regression that hand-rolled the body with
+    /// `* 100` BEFORE the division (the post-overflow form
+    /// `(self.ran * 100) / self.total()` in `usize` arithmetic) would
+    /// panic at any `ran > usize::MAX / 100` in debug and silently
+    /// wrap in release — both arms closed at the `u128` cast.
+    ///
+    /// THEORY §VI.1 one-oracle discipline: the percent form is derived
+    /// at one site (here), not re-inlined as
+    /// `(coverage.ran as f64 / coverage.total() as f64 * 100.0) as
+    /// u8` per consumer (which would inherit the float-imprecision
+    /// drift at the `0.9_f64` boundary). THEORY §V.4 / §VII.1: the
+    /// honesty channel surfaces both the float and the integer ratio
+    /// forms — a downstream verifier reads whichever shape its
+    /// admission gate's threshold representation aligns with, without
+    /// re-deriving the conversion at the consumer surface.
+    ///
+    /// [`coverage_ratio`]: ProbeCoverage::coverage_ratio
+    /// [`is_saturated`]: ProbeCoverage::is_saturated
+    pub fn coverage_ratio_pct(&self) -> u8 {
+        let total = self.total();
+        if total == 0 {
+            return 0;
+        }
+        let ran = self.ran as u128;
+        let total = total as u128;
+        ((ran * 100) / total) as u8
+    }
 }
 
 /// Identity element of the [`Add`](std::ops::Add) impl below: the empty-
@@ -1120,5 +1180,183 @@ mod tests {
         assert!((build_saturated + chart_normal).is_saturated());
         assert!((chart_normal + deployment_normal + build_saturated).is_saturated());
         assert!(!(chart_normal + deployment_normal).is_saturated());
+    }
+
+    /// `coverage_ratio_pct()` returns `0` for the empty-slice boundary
+    /// case (`probe_coverage` over an empty iterator produces
+    /// `ProbeCoverage { ran: 0, absent: 0 }`). The structural
+    /// disambiguator from the all-absent floor remains at `total()`:
+    /// both produce `coverage_ratio_pct() == 0` but a downstream verifier
+    /// reads `total() == 0` (empty) vs. `total() > 0 && coverage_ratio_pct
+    /// == 0` (every counted probe absent). Symmetric to
+    /// `test_coverage_ratio_empty_returns_zero` for the float surface.
+    #[test]
+    fn test_coverage_ratio_pct_empty_returns_zero() {
+        let empty = ProbeCoverage { ran: 0, absent: 0 };
+        assert_eq!(empty.total(), 0);
+        assert_eq!(empty.coverage_ratio_pct(), 0);
+    }
+
+    /// `coverage_ratio_pct()` returns `100` for the all-probes-ran
+    /// ceiling. Pinned across the three load-bearing total counts (3 for
+    /// build, 4 for chart, 7 for deployment) so a future regression that
+    /// hardcoded the denominator to one specific total would fail
+    /// against the other two. The integer-form ceiling the typed
+    /// admission gate `*_probe_coverage_ratio_pct >= 100` reads against
+    /// (the strict-production threshold a `sekiban` admission verifier
+    /// gates on, dual of the float-form `coverage_ratio() == 1.0`
+    /// ceiling).
+    #[test]
+    fn test_coverage_ratio_pct_all_ran_is_hundred() {
+        assert_eq!(
+            ProbeCoverage { ran: 3, absent: 0 }.coverage_ratio_pct(),
+            100
+        );
+        assert_eq!(
+            ProbeCoverage { ran: 4, absent: 0 }.coverage_ratio_pct(),
+            100
+        );
+        assert_eq!(
+            ProbeCoverage { ran: 7, absent: 0 }.coverage_ratio_pct(),
+            100
+        );
+    }
+
+    /// `coverage_ratio_pct()` returns `0` when every counted probe
+    /// surfaced an absent default — the all-probes-absent floor today's
+    /// `compose_product_certification` / `compute_chart_attestation` /
+    /// `compute_build_attestation` call-site state sits at. The
+    /// structural disambiguator from the empty-slice case stays at
+    /// `total()` (`total() > 0` here vs. `total() == 0` for the empty
+    /// boundary). Symmetric to `test_coverage_ratio_all_absent_is_zero`
+    /// for the float surface.
+    #[test]
+    fn test_coverage_ratio_pct_all_absent_is_zero() {
+        let all_absent = ProbeCoverage { ran: 0, absent: 7 };
+        assert_eq!(all_absent.total(), 7);
+        assert_eq!(all_absent.coverage_ratio_pct(), 0);
+    }
+
+    /// `coverage_ratio_pct()` floors `(ran * 100) / total` to the
+    /// nearest integer percent (Euclidean division, no rounding). Pinned
+    /// across the realistic Phase 2 deployment-attestation
+    /// three-of-seven shape and the half-and-half (1, 1) corner case so
+    /// a future regression that swapped `ran` and `absent` in the
+    /// numerator would flip `3/7 = 42` to `4/7 = 57` and fail this pin.
+    /// The floor discipline is load-bearing for the admission threshold:
+    /// a verifier gating `>= 90` against `(ran: 89, absent: 11)` reads
+    /// `coverage_ratio_pct() == 89` (the floor of `89.0/100 = 89%`,
+    /// dropping the 0.0 fractional), correctly refusing the just-below
+    /// state, where a round-half-up form would round `(ran: 895, absent:
+    /// 105)` to `90` and silently admit the just-below-90% state.
+    #[test]
+    fn test_coverage_ratio_pct_mixed_split_arithmetic() {
+        assert_eq!(ProbeCoverage { ran: 1, absent: 1 }.coverage_ratio_pct(), 50);
+        assert_eq!(ProbeCoverage { ran: 3, absent: 4 }.coverage_ratio_pct(), 42);
+        assert_eq!(ProbeCoverage { ran: 2, absent: 1 }.coverage_ratio_pct(), 66);
+        assert_eq!(
+            ProbeCoverage {
+                ran: 89,
+                absent: 11
+            }
+            .coverage_ratio_pct(),
+            89,
+            "the just-below-90% state floors to 89 — the strict \
+             admission threshold `>= 90` correctly refuses this state"
+        );
+    }
+
+    /// `coverage_ratio_pct()` does not panic at the post-saturation
+    /// state `{ran: usize::MAX, absent: usize::MAX}` — the `u128` cast
+    /// at the multiplication forecloses the `ran * 100` overflow
+    /// `usize::MAX * 100` would surface in the unchecked `usize`
+    /// arithmetic. The `MAX * 100 / MAX` reading is `100` (every
+    /// saturated component dropped equal evidence past the ceiling),
+    /// the same drift `coverage_ratio()`'s float reading of `1.0`
+    /// against the true `0.5` surfaces — the orthogonal
+    /// [`ProbeCoverage::is_saturated`] flag is the trustworthiness
+    /// signal a downstream verifier reads alongside this field to
+    /// foreclose the drift class at the wire level. Symmetric to
+    /// `test_coverage_ratio_does_not_panic_at_saturated_state` one
+    /// impl up: the monoid totality is upheld at the integer-percent
+    /// surface as well.
+    #[test]
+    fn test_coverage_ratio_pct_does_not_panic_at_saturated_state() {
+        let saturated = ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        };
+        assert_eq!(saturated.coverage_ratio_pct(), 100);
+        assert!(saturated.is_saturated());
+    }
+
+    /// `coverage_ratio_pct()` is in `0..=100` for every reachable
+    /// `ProbeCoverage` value — the invariant the `u8` return type
+    /// surfaces structurally. The cast `((ran * 100) / total) as u8`
+    /// is structurally lossless because `ran <= total` (componentwise)
+    /// implies `(ran * 100) / total <= 100`. Pinned across the four
+    /// arms of the matrix the docstring on [`ProbeCoverage::
+    /// is_fully_covered`] tabulates (empty, all-absent, mixed,
+    /// fully-covered) AND the saturated boundary so a future
+    /// regression that decoupled the `<= 100` bound (e.g.,
+    /// hand-rolled `ran * 200 / total` for a "double-resolution
+    /// percent" form) would fail this pin at one of the arms it
+    /// over-shot.
+    #[test]
+    fn test_coverage_ratio_pct_is_in_range_0_to_100() {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 3, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+        ];
+        for c in cases {
+            let pct = c.coverage_ratio_pct();
+            assert!(
+                pct <= 100,
+                "coverage_ratio_pct must be in 0..=100 at {c:?} — got {pct}",
+            );
+        }
+    }
+
+    /// `coverage_ratio_pct()` floors to the same integer the
+    /// f64-multiplied `coverage_ratio() * 100.0` form reads at every
+    /// non-saturated value. Pinned across the four arms of the matrix
+    /// plus a near-boundary just-below-threshold case so a regression
+    /// that drifted between the float and integer surfaces (e.g.,
+    /// hand-rolled the integer body via the f64 round-trip
+    /// `(self.coverage_ratio() * 100.0) as u8`, which would inherit
+    /// the IEEE-754 imprecision the docstring names) would fail this
+    /// pin at the just-below state where the float form rounds
+    /// differently than the integer floor.
+    #[test]
+    fn test_coverage_ratio_pct_matches_floor_of_float_ratio_times_hundred() {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 3, absent: 0 },
+            ProbeCoverage { ran: 1, absent: 1 },
+            ProbeCoverage {
+                ran: 89,
+                absent: 11,
+            },
+        ];
+        for c in cases {
+            let pct = c.coverage_ratio_pct();
+            let expected = (c.coverage_ratio() * 100.0).floor() as u8;
+            assert_eq!(
+                pct, expected,
+                "integer floor must match floor(f64_ratio * 100) at {c:?}",
+            );
+        }
     }
 }
