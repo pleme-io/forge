@@ -428,6 +428,79 @@ impl ProbeCoverage {
         self.ran > 0 && self.absent > 0
     }
 
+    /// True iff at least one counted probe ran and produced evidence —
+    /// `ran > 0`. The typed primitive for the relaxed-staging admission
+    /// gate the docstrings on [`is_mixed`] and on the
+    /// [`emit_probe_coverage!`](crate::commands) macro reference as
+    /// `is_mixed() || is_fully_covered()` — the structural disjunction of
+    /// the two `ran > 0` arms of the four-arm matrix the docstring on
+    /// [`is_fully_covered`] tabulates. Before this predicate, a downstream
+    /// `sekiban` admission verifier wanting to admit "any progress was
+    /// made" (the relaxed-staging gate that admits both the mixed and
+    /// fully-covered arms while rejecting the empty and all-absent floors)
+    /// had to compose `coverage.is_mixed() || coverage.is_fully_covered()`
+    /// at the consumer surface; after this predicate, the verifier reads
+    /// one bool — `coverage.has_evidence()` — and the integer-arithmetic
+    /// body `self.ran > 0` collapses the two-arm disjunction at the typed-
+    /// primitive surface.
+    ///
+    /// The structural complement of `!has_evidence()` is "no counted probe
+    /// ran" — the disjunction of the two `ran == 0` arms ([`is_empty`] at
+    /// `(0, 0)` and [`is_all_absent`] at `(0, N)`), the operational floor
+    /// today's [`compose_product_certification`] / [`compute_chart_attestation`]
+    /// / [`compute_build_attestation`] call sites sit at (every typed
+    /// outcome bound at its `ProbeAbsent` / `Absent` arm, so `ran == 0`
+    /// uniformly). The relaxed-staging policy fails closed at
+    /// `!has_evidence()` and admits everything above; the strict-production
+    /// policy gates the additional ratio-and-trustworthiness composition
+    /// `!is_saturated() && is_fully_covered()` one layer up.
+    ///
+    /// The single-conjunct body `self.ran > 0` is strictly cheaper than the
+    /// two-call disjunction it replaces: `is_mixed() || is_fully_covered()`
+    /// reads `ran > 0` twice and `absent` once (`(ran > 0 && absent > 0) ||
+    /// (ran > 0 && absent == 0)`), where `has_evidence()` reads `ran` once.
+    /// The cost matters at fleet-wide-aggregate scales the monoid `Sum`
+    /// fold reaches (one read per phase per record across an N-record
+    /// fleet aggregate); at one read per record the structural shape
+    /// matters more than the cycle count, but the named primitive is
+    /// cheaper at both surfaces.
+    ///
+    /// Symmetric to [`is_saturated`] in the orthogonality dimension: every
+    /// reachable `ProbeCoverage` value carries an `(has_evidence,
+    /// is_saturated)` two-bool pair the strict-production admission gate
+    /// reads as `(true, false)` to admit, where the relaxed-staging gate
+    /// reads only `has_evidence == true`. Saturation-robust by construction:
+    /// the body is integer arithmetic against `ran` alone, so the post-
+    /// saturation state `{ran: usize::MAX, absent: 0}` correctly reads
+    /// `has_evidence() == true` (every counted probe — even the dropped
+    /// past-ceiling increments — ran), and the post-saturation state `{ran:
+    /// 0, absent: usize::MAX}` correctly reads `has_evidence() == false`
+    /// (no counted probe ran). The two-arm disjunction `is_mixed() ||
+    /// is_fully_covered()` is also saturation-robust (both predicates read
+    /// against the components themselves), so the two surfaces compose
+    /// without a structural seam at the saturated state.
+    ///
+    /// [`compose_product_certification`]: crate::commands::attestation::compose_product_certification
+    /// [`compute_build_attestation`]: crate::commands::attestation::compute_build_attestation
+    /// [`compute_chart_attestation`]: crate::commands::attestation::compute_chart_attestation
+    /// [`is_all_absent`]: ProbeCoverage::is_all_absent
+    /// [`is_empty`]: ProbeCoverage::is_empty
+    /// [`is_fully_covered`]: ProbeCoverage::is_fully_covered
+    /// [`is_mixed`]: ProbeCoverage::is_mixed
+    /// [`is_saturated`]: ProbeCoverage::is_saturated
+    ///
+    /// THEORY §VI.1 one-oracle discipline: the predicate is derived at one
+    /// site (here), not re-inlined as `coverage.is_mixed() ||
+    /// coverage.is_fully_covered()` per consumer (which the typed
+    /// primitive surface forecloses at the call-site form). THEORY §V.4 /
+    /// §VII.1 honesty channel: the discriminator names "at least one
+    /// counted probe ran," the load-bearing precondition the relaxed-
+    /// staging admission gate admits and the all-absent-floor /
+    /// empty-boundary failure case rejects.
+    pub fn has_evidence(&self) -> bool {
+        self.ran > 0
+    }
+
     /// True iff at least one component has reached the saturating-add
     /// ceiling — `ran == usize::MAX || absent == usize::MAX`. The
     /// orthogonal boundary discriminator the saturating monoid arithmetic
@@ -1695,6 +1768,148 @@ mod tests {
         };
         assert!(!saturated_absent_only.is_mixed());
         assert!(saturated_absent_only.is_all_absent());
+    }
+
+    /// `has_evidence()` returns `true` iff at least one counted probe ran
+    /// — `ran > 0`. Pinned across the fully-covered ceiling (3, 4, 7) AND
+    /// the realistic Phase 2 mixed three-of-seven shape, the half-and-half
+    /// (1, 1) corner, and the 2-of-3 / 89-of-100 splits so a regression
+    /// that hardcoded the predicate to one specific value (or accidentally
+    /// dropped a non-zero `absent` arm) would fail across the others. The
+    /// typed-primitive surface the relaxed-staging admission gate reads
+    /// directly — every value where `has_evidence()` is `true` is an
+    /// admissible relaxed-staging coverage record.
+    #[test]
+    fn test_has_evidence_when_any_probe_ran_is_true() {
+        assert!(ProbeCoverage { ran: 3, absent: 0 }.has_evidence());
+        assert!(ProbeCoverage { ran: 4, absent: 0 }.has_evidence());
+        assert!(ProbeCoverage { ran: 7, absent: 0 }.has_evidence());
+        assert!(ProbeCoverage { ran: 1, absent: 1 }.has_evidence());
+        assert!(ProbeCoverage { ran: 3, absent: 4 }.has_evidence());
+        assert!(ProbeCoverage { ran: 2, absent: 1 }.has_evidence());
+        assert!(ProbeCoverage {
+            ran: 89,
+            absent: 11
+        }
+        .has_evidence());
+    }
+
+    /// `has_evidence()` returns `false` for both `ran == 0` arms — the
+    /// empty floor `(0, 0)` and the all-absent floor `(0, N)`. Pinned
+    /// across both arms (and across three sizes of the all-absent floor:
+    /// 3, 4, 7 — the per-phase build / chart / deployment counts the prior
+    /// pins use) so a future regression that relaxed the predicate to
+    /// `total() > 0` (the structural sibling that admits the all-absent
+    /// floor) would flip the all-absent floor to `true` and fail this pin.
+    /// Today's `compose_product_certification` /
+    /// `compute_chart_attestation` / `compute_build_attestation` call-site
+    /// state sits at exactly the all-absent floor — the relaxed-staging
+    /// admission gate correctly refuses this state because
+    /// `has_evidence() == false`.
+    #[test]
+    fn test_has_evidence_at_no_ran_arms_is_false() {
+        assert!(!ProbeCoverage { ran: 0, absent: 0 }.has_evidence());
+        assert!(!ProbeCoverage { ran: 0, absent: 3 }.has_evidence());
+        assert!(!ProbeCoverage { ran: 0, absent: 4 }.has_evidence());
+        assert!(!ProbeCoverage { ran: 0, absent: 7 }.has_evidence());
+    }
+
+    /// `has_evidence()` is structurally equivalent to the two-call
+    /// disjunction `is_mixed() || is_fully_covered()` it lifts from the
+    /// consumer surface. Pinned across the four arms of the matrix the
+    /// docstring on [`ProbeCoverage::is_fully_covered`] tabulates so a
+    /// future regression that decoupled `has_evidence` from the two-arm
+    /// disjunction (e.g., hand-rolled the body as `total() > 0`, which
+    /// would admit the all-absent floor that neither `is_mixed` nor
+    /// `is_fully_covered` admits) would fail this pin at the all-absent
+    /// arm. The structural equivalence is what makes the typed primitive
+    /// the proper one-oracle surface for the relaxed-staging admission
+    /// gate: a verifier reading `has_evidence()` reads exactly what
+    /// `is_mixed() || is_fully_covered()` reads, with no behavioural seam.
+    #[test]
+    fn test_has_evidence_equals_disjunction_of_mixed_and_fully_covered() {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 3, absent: 0 },
+            ProbeCoverage { ran: 1, absent: 1 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+        ];
+        for c in cases {
+            assert_eq!(
+                c.has_evidence(),
+                c.is_mixed() || c.is_fully_covered(),
+                "has_evidence must equal the two-arm disjunction at {c:?}",
+            );
+        }
+    }
+
+    /// `has_evidence()` composes with the monoid `Add` shape exactly the
+    /// way a downstream fleet-wide aggregator depends on: a per-phase
+    /// no-evidence coverage summed with any per-phase has-evidence
+    /// coverage produces a has-evidence aggregate (one phase contributing
+    /// `ran > 0` lifts the aggregate off the no-evidence floor). Mirrors
+    /// the structural intuition: a product certification has evidence iff
+    /// any phase contributed evidence. A future regression that swapped
+    /// `ran` and `absent` in the impl body of `Add` would silently flip a
+    /// has-evidence build-phase coverage into a no-evidence aggregate;
+    /// this pin closes that arm at the typed-primitive surface.
+    #[test]
+    fn test_has_evidence_composes_under_monoid_add() {
+        let build_absent = ProbeCoverage { ran: 0, absent: 3 };
+        let chart_absent = ProbeCoverage { ran: 0, absent: 4 };
+        let deployment_absent = ProbeCoverage { ran: 0, absent: 7 };
+        let chart_ran = ProbeCoverage { ran: 1, absent: 3 };
+        assert!(!build_absent.has_evidence());
+        assert!(!chart_absent.has_evidence());
+        assert!(!deployment_absent.has_evidence());
+        assert!(chart_ran.has_evidence());
+        assert!(!(build_absent + chart_absent).has_evidence());
+        assert!(!(build_absent + chart_absent + deployment_absent).has_evidence());
+        assert!((build_absent + chart_ran).has_evidence());
+        assert!((build_absent + chart_ran + deployment_absent).has_evidence());
+    }
+
+    /// `has_evidence()` stays saturation-robust: the body `ran > 0` reads
+    /// against the `ran` component itself, not against any derived ratio.
+    /// At the post-saturation state `{ran: usize::MAX, absent: 0}` it
+    /// correctly reads `true` (every counted probe — even the dropped
+    /// past-ceiling increments — ran); at the post-saturation state `{ran:
+    /// 0, absent: usize::MAX}` it correctly reads `false` (no counted
+    /// probe ran). The symmetric saturated state `{ran: MAX, absent: MAX}`
+    /// reads `true` (both components are non-zero), matching the typed-arm
+    /// disjunction `is_mixed() || is_fully_covered() == true || false ==
+    /// true` at that state. Mirrors the saturation-robust discipline the
+    /// `test_is_mixed_stays_robust_at_saturated_state` /
+    /// `test_is_all_absent_stays_robust_at_saturated_absent` siblings pin
+    /// for the arm-predicates one layer up.
+    #[test]
+    fn test_has_evidence_stays_robust_at_saturated_state() {
+        let saturated_ran_only = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        assert!(saturated_ran_only.has_evidence());
+        assert!(saturated_ran_only.is_saturated());
+        assert!(saturated_ran_only.is_fully_covered());
+
+        let saturated_absent_only = ProbeCoverage {
+            ran: 0,
+            absent: usize::MAX,
+        };
+        assert!(!saturated_absent_only.has_evidence());
+        assert!(saturated_absent_only.is_saturated());
+        assert!(saturated_absent_only.is_all_absent());
+
+        let saturated_both = ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        };
+        assert!(saturated_both.has_evidence());
+        assert!(saturated_both.is_saturated());
+        assert!(saturated_both.is_mixed());
     }
 
     /// `coverage_ratio_pct()` floors to the same integer the
