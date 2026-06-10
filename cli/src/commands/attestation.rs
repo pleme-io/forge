@@ -31,11 +31,11 @@ use tameshi::compliance::slsa::{determine_slsa_level, SlsaLevel};
 use tameshi::hash::Blake3Hash;
 use tokio::process::Command;
 
-/// Emit the canonical eight-field probe-coverage [`tracing::info!`] event
+/// Emit the canonical ten-field probe-coverage [`tracing::info!`] event
 /// uniformly across the three attestation phases — Phase 1 build, Phase 1
 /// chart, Phase 2 deployment — without retyping the `(ran, absent, total,
-/// coverage_ratio, fully_covered, empty, saturated, coverage_ratio_pct)`
-/// shape at each emission site.
+/// coverage_ratio, fully_covered, empty, saturated, coverage_ratio_pct,
+/// all_absent, mixed)` shape at each emission site.
 ///
 /// ## Why this exists
 ///
@@ -103,20 +103,38 @@ use tokio::process::Command;
 /// the consumer surface — the integer-arithmetic body of
 /// [`ProbeCoverage::is_all_absent`] (`ran == 0 && absent > 0`) forecloses
 /// the float-comparison drift class the consumer-side composition would
-/// inherit.
+/// inherit. The tenth `*_probes_mixed` field closes the four-arm matrix
+/// at the named-field surface — the structural mirror of
+/// `*_probes_all_absent` at the interior arm (`ran > 0 && absent > 0`),
+/// the "some counted probes ran, some surfaced absent defaults" state a
+/// Phase 2 deployment-attestation rollout passes through on its way
+/// from the all-absent floor to the fully-covered ceiling. The four
+/// arm-predicate fields on the wire (`*_probes_empty`,
+/// `*_probes_all_absent`, `*_probes_mixed`, `*_probes_fully_covered`)
+/// are mutually exclusive and jointly exhaustive — a `sekiban`
+/// admission verifier reading the relaxed-staging-policy
+/// "partial-coverage progress" gate reads
+/// `*_probes_mixed == true || *_probes_fully_covered == true` rather
+/// than composing the three-predicate negation `!*_probes_empty &&
+/// !*_probes_all_absent` at the consumer surface (which would silently
+/// admit a regression that decoupled the three extreme-arm predicates
+/// from the mixed-arm predicate at the typed-primitive surface).
 ///
 /// [`Add`]: std::ops::Add
 ///
 /// ## Theory grounding
 ///
 /// THEORY.md §VI.1 (one oracle): the field shape is derived at one site,
-/// not retyped per emission. THEORY.md §V.4 / §VII.1: the eight-field
+/// not retyped per emission. THEORY.md §V.4 / §VII.1: the ten-field
 /// shape surfaces the Phase 1 / Phase 2 honesty channel uniformly at every
 /// per-phase telemetry record a downstream `sekiban` admission verifier
 /// reconciliation reads — the float-form `coverage_ratio` and the
 /// integer-form `coverage_ratio_pct` are two surfaces of the same
 /// derived evidence-coverage signal, both gated by the same
-/// trustworthiness predicate `saturated` at the adjacent field.
+/// trustworthiness predicate `saturated` at the adjacent field, and the
+/// four arm-predicate fields close the four-arm matrix uniformly so the
+/// admission verifier reads one bool per arm rather than composing
+/// per-consumer arm-conditions at the wire.
 macro_rules! emit_probe_coverage {
     (
         @__shape,
@@ -129,6 +147,7 @@ macro_rules! emit_probe_coverage {
         saturated: $saturated:ident,
         coverage_ratio_pct: $ratio_pct:ident,
         all_absent: $all_absent:ident,
+        mixed: $mixed:ident,
         target: $target:literal,
         coverage: $coverage:expr,
         message: $msg:literal,
@@ -147,6 +166,7 @@ macro_rules! emit_probe_coverage {
             $saturated = __cov.is_saturated(),
             $ratio_pct = __cov.coverage_ratio_pct(),
             $all_absent = __cov.is_all_absent(),
+            $mixed = __cov.is_mixed(),
             $msg
         );
     }};
@@ -162,6 +182,7 @@ macro_rules! emit_probe_coverage {
             saturated: build_probes_saturated,
             coverage_ratio_pct: build_probes_coverage_ratio_pct,
             all_absent: build_probes_all_absent,
+            mixed: build_probes_mixed,
             $($rest)*
         )
     };
@@ -177,6 +198,7 @@ macro_rules! emit_probe_coverage {
             saturated: chart_probes_saturated,
             coverage_ratio_pct: chart_probes_coverage_ratio_pct,
             all_absent: chart_probes_all_absent,
+            mixed: chart_probes_mixed,
             $($rest)*
         )
     };
@@ -192,6 +214,7 @@ macro_rules! emit_probe_coverage {
             saturated: deployment_probes_saturated,
             coverage_ratio_pct: deployment_probes_coverage_ratio_pct,
             all_absent: deployment_probes_all_absent,
+            mixed: deployment_probes_mixed,
             $($rest)*
         )
     };
@@ -6118,20 +6141,23 @@ dependencies:
         }
     }
 
-    /// Names of the nine probe-coverage fields the macro emits, in the
+    /// Names of the ten probe-coverage fields the macro emits, in the
     /// canonical order — the same order
     /// [`crate::probe_outcome::ProbeCoverage::is_fully_covered`]'s
     /// docstring four-arm matrix tabulates, extended with the orthogonal
     /// [`crate::probe_outcome::ProbeCoverage::is_saturated`]
     /// trustworthiness predicate at the seventh position, the integer
     /// [`crate::probe_outcome::ProbeCoverage::coverage_ratio_pct`]
-    /// percent companion at the eighth, and the
+    /// percent companion at the eighth, the
     /// [`crate::probe_outcome::ProbeCoverage::is_all_absent`]
-    /// arm-predicate at the ninth — the typed discriminator for the
-    /// third arm of the four-arm matrix the typed primitive tabulates
-    /// (the "every counted probe surfaced an absent default" state
-    /// today's three call sites sit at). Returned with a phase prefix
-    /// so each phase's pin can compare against its own expected slice.
+    /// arm-predicate at the ninth, and the
+    /// [`crate::probe_outcome::ProbeCoverage::is_mixed`] arm-predicate at
+    /// the tenth — the typed discriminator for the fourth and final arm
+    /// of the four-arm matrix (the interior `ran > 0 && absent > 0`
+    /// state a Phase 2 deployment-attestation rollout passes through on
+    /// its way from the all-absent floor to the fully-covered ceiling).
+    /// Returned with a phase prefix so each phase's pin can compare
+    /// against its own expected slice.
     fn expected_field_names(prefix: &str) -> Vec<String> {
         [
             "ran",
@@ -6143,6 +6169,7 @@ dependencies:
             "saturated",
             "coverage_ratio_pct",
             "all_absent",
+            "mixed",
         ]
         .iter()
         .map(|suffix| format!("{prefix}_probes_{suffix}"))
@@ -6181,7 +6208,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("build"),
-            "macro must emit the nine build_probes_* fields in canonical \
+            "macro must emit the ten build_probes_* fields in canonical \
              order — a regression that dropped, re-ordered, or renamed a \
              field at the internal `@__shape` arm fails this pin",
         );
@@ -6212,6 +6239,20 @@ dependencies:
              `is_all_absent` (`ran == 0 && absent > 0`) reads false \
              here, structurally disambiguating the mixed arm from the \
              all-absent floor below it",
+        );
+        assert_eq!(
+            by_name["build_probes_mixed"], "true",
+            "the mixed `(ran: 2, absent: 1)` arm sits at exactly the \
+             state the typed `is_mixed` predicate names \
+             (`ran > 0 && absent > 0`) — the structural mirror of the \
+             `all_absent` discriminator one assertion up, closing the \
+             four-arm matrix at the named-field surface. A downstream \
+             `sekiban` admission verifier gating on relaxed-staging \
+             partial-coverage progress (`*_probes_mixed == true || \
+             *_probes_fully_covered == true`) admits this state with one \
+             two-bool read rather than composing the three-predicate \
+             negation `!*_probes_empty && !*_probes_all_absent` at the \
+             consumer surface",
         );
     }
 
@@ -6248,7 +6289,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("chart"),
-            "macro must emit the nine chart_probes_* fields in canonical \
+            "macro must emit the ten chart_probes_* fields in canonical \
              order — a regression that swapped a build/chart/deployment \
              dispatch arm's prefix mapping fails this pin",
         );
@@ -6279,6 +6320,17 @@ dependencies:
              structural mirror of the all-absent floor — `is_fully_covered \
              && !is_all_absent` pins the two extremes of the four-arm \
              matrix as mutually exclusive at the chart phase",
+        );
+        assert_eq!(
+            by_name["chart_probes_mixed"], "false",
+            "the fully-covered ceiling at `(ran: 3, absent: 0)` has \
+             `absent == 0`, so `is_mixed` (`ran > 0 && absent > 0`) reads \
+             false — the structural mirror of the build-mixed-arm \
+             `is_mixed == true` reading one phase up: the fully-covered \
+             ceiling and the mixed arm are mutually exclusive at every \
+             reachable `ProbeCoverage` value, the four-arm matrix \
+             partition pin closes that invariant uniformly across the \
+             three per-phase records",
         );
     }
 
@@ -6323,7 +6375,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("deployment"),
-            "macro must emit the nine deployment_probes_* fields in \
+            "macro must emit the ten deployment_probes_* fields in \
              canonical order",
         );
         let by_name: std::collections::HashMap<_, _> = captured.fields.iter().cloned().collect();
@@ -6365,6 +6417,20 @@ dependencies:
              this state with one bool comparison rather than composing \
              `*_probes_total > 0 && *_probes_coverage_ratio == 0.0` at \
              the consumer surface",
+        );
+        assert_eq!(
+            by_name["deployment_probes_mixed"], "false",
+            "the all-absent floor at `(ran: 0, absent: 7)` has \
+             `ran == 0`, so `is_mixed` (`ran > 0 && absent > 0`) reads \
+             false — the all-absent floor and the mixed arm are \
+             mutually exclusive, structurally pinned by the \
+             `test_arm_predicates_partition_the_matrix` invariant one \
+             layer over. Today's `compose_product_certification` \
+             call-site state sits at the all-absent floor, NOT the \
+             mixed arm — a `sekiban` admission verifier reading the \
+             relaxed-staging partial-coverage gate \
+             (`*_probes_mixed || *_probes_fully_covered`) correctly \
+             refuses this state",
         );
     }
 
@@ -6452,6 +6518,20 @@ dependencies:
              assertion up: the integer-arithmetic body of every \
              arm-predicate forecloses the IEEE-754 drift class the \
              float-form ratio surfaces here",
+        );
+        assert_eq!(
+            by_name["build_probes_mixed"], "true",
+            "`is_mixed` (`ran > 0 && absent > 0` is the load-bearing \
+             test) reads true at `{{ran: MAX, absent: MAX}}` because \
+             both components are non-zero — the post-saturation state \
+             structurally satisfies the mixed-arm body even though the \
+             derived `coverage_ratio()` rounds to 1.0 against the true \
+             0.5 ratio. The orthogonal `is_saturated == true` flag is \
+             the trustworthiness signal a downstream verifier reads to \
+             know the derived ratio is unreliable while the arm \
+             classification stays robust: the four arm-predicates each \
+             read against the components themselves, so the typed-arm \
+             classification is well-defined at every saturated state",
         );
     }
 }
