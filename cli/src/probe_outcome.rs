@@ -255,6 +255,23 @@ impl ProbeCoverage {
     /// the verifier through the typed discriminator the empty case cannot
     /// satisfy.
     ///
+    /// The four-arm matrix is orthogonal to [`is_saturated`]: every
+    /// reachable `ProbeCoverage` value sits at exactly one of the four
+    /// arms above, but every arm can independently be saturated
+    /// (`ran == usize::MAX || absent == usize::MAX`) or unsaturated
+    /// against the saturating monoid arithmetic the `Add` impl below
+    /// admits. The saturation flag is the load-bearing trustworthiness
+    /// signal a downstream consumer reads alongside `coverage_ratio()`
+    /// — at the saturated state `{ran: MAX, absent: MAX}` (reachable
+    /// asymptotically via fleet-wide aggregation), the true 0.5 ratio
+    /// reads as 1.0 through the f64 division, so a verifier that gated
+    /// only on `coverage_ratio() >= 0.9` would silently accept the
+    /// post-saturation drift; conditioning on `!is_saturated() &&
+    /// coverage_ratio() >= 0.9` instead forecloses that arm at the
+    /// typed-primitive surface.
+    ///
+    /// [`is_saturated`]: ProbeCoverage::is_saturated
+    ///
     /// THEORY §VI.1 one-oracle discipline: the predicate is derived at
     /// one site (here), not re-inlined as `coverage.ran > 0 &&
     /// coverage.absent == 0` per consumer. THEORY §V.4 / §VII.1 honesty
@@ -289,6 +306,63 @@ impl ProbeCoverage {
     /// [`HashMap::is_empty`]: std::collections::HashMap::is_empty
     pub fn is_empty(&self) -> bool {
         self.total() == 0
+    }
+
+    /// True iff at least one component has reached the saturating-add
+    /// ceiling — `ran == usize::MAX || absent == usize::MAX`. The
+    /// orthogonal boundary discriminator the saturating monoid arithmetic
+    /// the [`Add`](std::ops::Add) impl below admits produces under a
+    /// pathological fleet-wide aggregate: the `Add` clamp the `ran.
+    /// saturating_add(rhs.ran)` / `absent.saturating_add(rhs.absent)`
+    /// surfaces drops every increment past `usize::MAX`, so a component
+    /// at the ceiling no longer carries the true count it once stood
+    /// for. Downstream [`total`] and [`coverage_ratio`] derive from the
+    /// post-clamp components, so the float-division `ran as f64 / total
+    /// as f64` at the saturated state collapses against the true ratio
+    /// — the regression `test_coverage_ratio_does_not_panic_at_
+    /// saturated_state` already pins (the `{ran: MAX, absent: MAX}`
+    /// true-ratio 0.5 reads as 1.0 through the saturated `f64` divison).
+    /// `is_saturated` is the typed-primitive flag a downstream `sekiban`
+    /// admission verifier reads to know the derived ratio is unreliable
+    /// — when `true`, the verifier falls back on the saturation-robust
+    /// [`is_fully_covered`] (`absent == 0` is the load-bearing test, not
+    /// arithmetic on the sum) and [`is_empty`] (`total() == 0` is the
+    /// load-bearing test, false at every saturated state since both
+    /// components are non-negative and at least one is `usize::MAX`)
+    /// discriminators.
+    ///
+    /// Orthogonal to the four-arm matrix the docstring on
+    /// [`is_fully_covered`] tabulates: every reachable `ProbeCoverage`
+    /// value sits at exactly one arm of `(is_empty, is_fully_covered,
+    /// mixed, all_absent)`, but every arm can independently be
+    /// saturated or unsaturated. The empty arm `{ran: 0, absent: 0}` is
+    /// the only arm that is structurally unsaturated (both components
+    /// are 0, neither at `usize::MAX`); the three non-empty arms each
+    /// admit both a saturated and an unsaturated representative. The
+    /// telemetry contract (`*_probes_saturated` field a future
+    /// `emit_probe_coverage!` extension emits) reflects this
+    /// orthogonality: the field is `false` for every realistically-sized
+    /// fleet aggregate (the saturating ceiling is `1 << 64` records on a
+    /// 64-bit target — unreachable in practice but structurally
+    /// foreclosed by the saturating arithmetic the monoid uses).
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the saturation predicate
+    /// is derived at one site (here), not re-inlined as `coverage.ran
+    /// == usize::MAX || coverage.absent == usize::MAX` per downstream
+    /// telemetry consumer. THEORY.md §V.4 / §VII.1: the honesty channel
+    /// surfaces both the coverage ratio AND its trustworthiness — a
+    /// downstream verifier that gated only on `coverage_ratio() >= 0.9`
+    /// would silently accept the `{MAX, MAX}` post-saturation state
+    /// (true 0.5 ratio reading as 1.0); gating on `!is_saturated() &&
+    /// coverage_ratio() >= 0.9` instead forecloses that drift class at
+    /// the typed-primitive surface.
+    ///
+    /// [`coverage_ratio`]: ProbeCoverage::coverage_ratio
+    /// [`is_empty`]: ProbeCoverage::is_empty
+    /// [`is_fully_covered`]: ProbeCoverage::is_fully_covered
+    /// [`total`]: ProbeCoverage::total
+    pub fn is_saturated(&self) -> bool {
+        self.ran == usize::MAX || self.absent == usize::MAX
     }
 }
 
@@ -910,5 +984,141 @@ mod tests {
             absent: usize::MAX,
         };
         assert_eq!(saturated.coverage_ratio(), 1.0);
+    }
+
+    /// `is_saturated()` returns `true` iff at least one component has
+    /// hit the saturating-add ceiling `usize::MAX`. Pinned across the
+    /// three reachable saturated arms — `ran` only saturated, `absent`
+    /// only saturated, and the post-saturation state where both
+    /// components are at the ceiling — so a future regression that
+    /// hardcoded the predicate to one component would fail against the
+    /// others. The typed-primitive flag a downstream verifier reads
+    /// alongside `coverage_ratio()` to know the derived ratio is
+    /// unreliable: at every state this predicate returns `true`, the
+    /// float division `ran as f64 / total() as f64` has dropped at
+    /// least one true increment past the saturating clamp.
+    #[test]
+    fn test_is_saturated_at_any_component_max_is_true() {
+        assert!(ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        }
+        .is_saturated());
+        assert!(ProbeCoverage {
+            ran: 0,
+            absent: usize::MAX,
+        }
+        .is_saturated());
+        assert!(ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        }
+        .is_saturated());
+        assert!(ProbeCoverage {
+            ran: usize::MAX,
+            absent: 42,
+        }
+        .is_saturated());
+        assert!(ProbeCoverage {
+            ran: 42,
+            absent: usize::MAX,
+        }
+        .is_saturated());
+    }
+
+    /// `is_saturated()` returns `false` for every realistically-sized
+    /// `ProbeCoverage` value. Pinned across the four arms of the matrix
+    /// the docstring on [`ProbeCoverage::is_fully_covered`] tabulates
+    /// (empty, all-absent, mixed, fully-covered) so a future regression
+    /// that flipped the predicate to a vacuous `true` would fail every
+    /// arm here. Symmetric to the saturated-true pin one test up: the
+    /// two pins together pin the boundary between the saturated and
+    /// unsaturated regions of `ProbeCoverage` exactly at the
+    /// component-MAX inflection.
+    #[test]
+    fn test_is_saturated_below_ceiling_is_false() {
+        assert!(!ProbeCoverage { ran: 0, absent: 0 }.is_saturated());
+        assert!(!ProbeCoverage { ran: 0, absent: 7 }.is_saturated());
+        assert!(!ProbeCoverage { ran: 3, absent: 4 }.is_saturated());
+        assert!(!ProbeCoverage { ran: 3, absent: 0 }.is_saturated());
+        assert!(!ProbeCoverage {
+            ran: usize::MAX - 1,
+            absent: usize::MAX - 1,
+        }
+        .is_saturated());
+    }
+
+    /// `is_saturated()` is the load-bearing trustworthiness flag at the
+    /// `{ran: MAX, absent: MAX}` post-saturation state where the true
+    /// ratio is 0.5 (every saturated component dropped equal evidence
+    /// past the ceiling), but `coverage_ratio()` reads as `1.0` — the
+    /// f64 division `MAX as f64 / MAX as f64` rounds identically against
+    /// the IEEE-754 representation. A downstream verifier that gates
+    /// only on `coverage_ratio() >= 0.5` would silently accept this
+    /// state as fully covered; the typed `is_saturated()` flag forces
+    /// the verifier through the trustworthiness predicate the f64
+    /// division alone cannot surface. This pin is the structural witness
+    /// for the docstring's "honest-signal drift" claim — `is_saturated`
+    /// is `true` exactly at the state where `coverage_ratio` is
+    /// untrustworthy.
+    #[test]
+    fn test_is_saturated_flags_coverage_ratio_drift_at_saturated_state() {
+        let saturated = ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        };
+        assert!(saturated.is_saturated());
+        assert_eq!(saturated.coverage_ratio(), 1.0);
+        assert!(!saturated.is_fully_covered());
+        assert!(!saturated.is_empty());
+    }
+
+    /// `is_saturated()` is reachable in finite steps from any
+    /// unsaturated starting point via the monoid `Add` — the
+    /// saturating-add clamp at the component level forecloses
+    /// `usize::MAX` as an asymptotic limit of repeated addition. Mirrors
+    /// the `test_add_saturates_at_usize_max` pin one layer over: the
+    /// pin there proves the saturating clamp at the `Add` impl, this
+    /// pin proves the typed-primitive flag surfaces the resulting state.
+    /// Together they close the round-trip: a fleet-wide aggregator
+    /// summing per-record coverages via `.iter().sum::<ProbeCoverage>()`
+    /// reaches the saturated state in finite steps, and the resulting
+    /// telemetry record flags itself as saturated through the typed
+    /// predicate here.
+    #[test]
+    fn test_is_saturated_reached_through_monoid_add() {
+        let high = ProbeCoverage {
+            ran: usize::MAX - 3,
+            absent: 0,
+        };
+        let increment = ProbeCoverage { ran: 7, absent: 0 };
+        let aggregate = high + increment;
+        assert_eq!(aggregate.ran, usize::MAX);
+        assert!(aggregate.is_saturated());
+        assert!(!high.is_saturated());
+    }
+
+    /// `is_saturated()` composes with the monoid `Add` shape exactly
+    /// the way a downstream fleet-wide aggregator depends on: summing a
+    /// saturated Phase 1 build coverage with an unsaturated Phase 1
+    /// chart coverage produces a saturated aggregate (one saturated
+    /// component in any phase poisons the trustworthiness signal).
+    /// Mirrors the [`is_fully_covered_sums_under_monoid_add`] pin one
+    /// layer over: a product certification's `coverage_ratio()` is
+    /// trustworthy only when every phase is unsaturated.
+    #[test]
+    fn test_is_saturated_propagates_under_monoid_add() {
+        let build_saturated = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let chart_normal = ProbeCoverage { ran: 1, absent: 3 };
+        let deployment_normal = ProbeCoverage { ran: 0, absent: 7 };
+        assert!(build_saturated.is_saturated());
+        assert!(!chart_normal.is_saturated());
+        assert!(!deployment_normal.is_saturated());
+        assert!((build_saturated + chart_normal).is_saturated());
+        assert!((chart_normal + deployment_normal + build_saturated).is_saturated());
+        assert!(!(chart_normal + deployment_normal).is_saturated());
     }
 }
