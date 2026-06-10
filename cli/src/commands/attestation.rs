@@ -31,11 +31,11 @@ use tameshi::compliance::slsa::{determine_slsa_level, SlsaLevel};
 use tameshi::hash::Blake3Hash;
 use tokio::process::Command;
 
-/// Emit the canonical six-field probe-coverage [`tracing::info!`] event
+/// Emit the canonical eight-field probe-coverage [`tracing::info!`] event
 /// uniformly across the three attestation phases — Phase 1 build, Phase 1
-/// chart, Phase 2 deployment — without retyping the
-/// `(ran, absent, total, coverage_ratio, fully_covered, empty)` shape at
-/// each emission site.
+/// chart, Phase 2 deployment — without retyping the `(ran, absent, total,
+/// coverage_ratio, fully_covered, empty, saturated, coverage_ratio_pct)`
+/// shape at each emission site.
 ///
 /// ## Why this exists
 ///
@@ -54,13 +54,13 @@ use tokio::process::Command;
 /// required touching three sites in lockstep; a regression that wired the
 /// new field at two of three would surface a structural per-site emission
 /// drift at telemetry-comparison time rather than at compile time. This
-/// macro forecloses that drift class by centralising the seven-method
+/// macro forecloses that drift class by centralising the eight-method
 /// `(ran, absent, total(), coverage_ratio(), is_fully_covered(), is_empty(),
-/// is_saturated())` mapping at one internal `@__shape` arm; the three
-/// public phase arms (`build` / `chart` / `deployment`) supply the
-/// phase-prefixed field idents declaratively, so adding an eighth field
-/// touches the internal arm and three two-line dispatch tails — never a
-/// public call site.
+/// is_saturated(), coverage_ratio_pct())` mapping at one internal
+/// `@__shape` arm; the three public phase arms (`build` / `chart` /
+/// `deployment`) supply the phase-prefixed field idents declaratively, so
+/// adding a ninth field touches the internal arm and three two-line
+/// dispatch tails — never a public call site.
 ///
 /// ## Usage
 ///
@@ -78,7 +78,7 @@ use tokio::process::Command;
 ///
 /// The macro forwards the per-phase context fields verbatim (matching
 /// `tracing::info!`'s `name = value` / `name = ?value` / `name = %value`
-/// syntax via the `$($ctx:tt)*` tail), then emits the seven probe-coverage
+/// syntax via the `$($ctx:tt)*` tail), then emits the eight probe-coverage
 /// fields in canonical order, then the message string. The seventh
 /// `*_probes_saturated` field surfaces the trustworthiness signal for the
 /// `*_probes_coverage_ratio` field: at the saturated state (`ran ==
@@ -87,17 +87,26 @@ use tokio::process::Command;
 /// clamp) the f64 division `ran/total` rounds against the true ratio, so
 /// a downstream `sekiban` admission verifier reading
 /// `*_probes_coverage_ratio` must gate on `!*_probes_saturated` to
-/// foreclose that drift class.
+/// foreclose that drift class. The eighth `*_probes_coverage_ratio_pct`
+/// field is the integer-percent (`u8`, `0..=100`) companion of
+/// `*_probes_coverage_ratio` — the surface a Prometheus alert rule /
+/// typed-policy threshold gate (`*_probe_coverage_ratio_pct >= 90`) reads
+/// against, foreclosing the IEEE-754 epsilon drift the float comparison
+/// `>= 0.9_f64` admits at the just-below-threshold boundary the integer
+/// floor (Euclidean division `(ran * 100) / total`) refuses cleanly.
 ///
 /// [`Add`]: std::ops::Add
 ///
 /// ## Theory grounding
 ///
 /// THEORY.md §VI.1 (one oracle): the field shape is derived at one site,
-/// not retyped per emission. THEORY.md §V.4 / §VII.1: the six-field shape
-/// surfaces the Phase 1 / Phase 2 honesty channel uniformly at every
+/// not retyped per emission. THEORY.md §V.4 / §VII.1: the eight-field
+/// shape surfaces the Phase 1 / Phase 2 honesty channel uniformly at every
 /// per-phase telemetry record a downstream `sekiban` admission verifier
-/// reconciliation reads.
+/// reconciliation reads — the float-form `coverage_ratio` and the
+/// integer-form `coverage_ratio_pct` are two surfaces of the same
+/// derived evidence-coverage signal, both gated by the same
+/// trustworthiness predicate `saturated` at the adjacent field.
 macro_rules! emit_probe_coverage {
     (
         @__shape,
@@ -108,6 +117,7 @@ macro_rules! emit_probe_coverage {
         fully_covered: $fully_covered:ident,
         empty: $empty:ident,
         saturated: $saturated:ident,
+        coverage_ratio_pct: $ratio_pct:ident,
         target: $target:literal,
         coverage: $coverage:expr,
         message: $msg:literal,
@@ -124,6 +134,7 @@ macro_rules! emit_probe_coverage {
             $fully_covered = __cov.is_fully_covered(),
             $empty = __cov.is_empty(),
             $saturated = __cov.is_saturated(),
+            $ratio_pct = __cov.coverage_ratio_pct(),
             $msg
         );
     }};
@@ -137,6 +148,7 @@ macro_rules! emit_probe_coverage {
             fully_covered: build_probes_fully_covered,
             empty: build_probes_empty,
             saturated: build_probes_saturated,
+            coverage_ratio_pct: build_probes_coverage_ratio_pct,
             $($rest)*
         )
     };
@@ -150,6 +162,7 @@ macro_rules! emit_probe_coverage {
             fully_covered: chart_probes_fully_covered,
             empty: chart_probes_empty,
             saturated: chart_probes_saturated,
+            coverage_ratio_pct: chart_probes_coverage_ratio_pct,
             $($rest)*
         )
     };
@@ -163,6 +176,7 @@ macro_rules! emit_probe_coverage {
             fully_covered: deployment_probes_fully_covered,
             empty: deployment_probes_empty,
             saturated: deployment_probes_saturated,
+            coverage_ratio_pct: deployment_probes_coverage_ratio_pct,
             $($rest)*
         )
     };
@@ -5975,20 +5989,21 @@ dependencies:
     // ────────────────────────────────────────────────────────────────────
     // emit_probe_coverage! macro — schema pins
     //
-    // The macro centralises the seven-field tracing shape — `(ran, absent,
-    // total, coverage_ratio, fully_covered, empty, saturated)` — at one
-    // internal arm so the three per-phase emission sites cannot drift on
-    // field count, field order, or the `ProbeCoverage` method that maps to
-    // each field. The pins below capture each phase's tracing event via a
-    // minimal [`tracing::Subscriber`] impl, then assert the seven
-    // probe-coverage fields surface with the expected phase-prefixed
-    // names, in the canonical order the macro emits, with the values
-    // [`ProbeCoverage`]'s typed methods compute. A regression that
-    // (a) dropped a field at the macro's internal arm, (b) swapped the
-    // `ran` and `absent` method calls, (c) re-ordered the emission so a
-    // downstream verifier reading positional tracing-event fields drifted,
-    // or (d) mis-prefixed a phase arm (e.g., chart's `ran` field emitted
-    // as `build_probes_ran`) would fail the corresponding pin here.
+    // The macro centralises the eight-field tracing shape — `(ran, absent,
+    // total, coverage_ratio, fully_covered, empty, saturated,
+    // coverage_ratio_pct)` — at one internal arm so the three per-phase
+    // emission sites cannot drift on field count, field order, or the
+    // `ProbeCoverage` method that maps to each field. The pins below
+    // capture each phase's tracing event via a minimal
+    // [`tracing::Subscriber`] impl, then assert the eight probe-coverage
+    // fields surface with the expected phase-prefixed names, in the
+    // canonical order the macro emits, with the values [`ProbeCoverage`]'s
+    // typed methods compute. A regression that (a) dropped a field at the
+    // macro's internal arm, (b) swapped the `ran` and `absent` method
+    // calls, (c) re-ordered the emission so a downstream verifier reading
+    // positional tracing-event fields drifted, or (d) mis-prefixed a phase
+    // arm (e.g., chart's `ran` field emitted as `build_probes_ran`) would
+    // fail the corresponding pin here.
     // ────────────────────────────────────────────────────────────────────
 
     use std::sync::{Arc, Mutex};
@@ -6088,14 +6103,18 @@ dependencies:
         }
     }
 
-    /// Names of the seven probe-coverage fields the macro emits, in the
+    /// Names of the eight probe-coverage fields the macro emits, in the
     /// canonical order — the same order
     /// [`crate::probe_outcome::ProbeCoverage::is_fully_covered`]'s
     /// docstring four-arm matrix tabulates, extended with the orthogonal
     /// [`crate::probe_outcome::ProbeCoverage::is_saturated`]
-    /// trustworthiness predicate at the tail. Returned with a phase
-    /// prefix so each phase's pin can compare against its own expected
-    /// slice.
+    /// trustworthiness predicate at the seventh position and the integer
+    /// [`crate::probe_outcome::ProbeCoverage::coverage_ratio_pct`]
+    /// percent companion at the eighth — the Prometheus-alert-rule /
+    /// typed-policy-threshold integer surface the float
+    /// `coverage_ratio` field's IEEE-754 representation cannot cleanly
+    /// gate against. Returned with a phase prefix so each phase's pin
+    /// can compare against its own expected slice.
     fn expected_field_names(prefix: &str) -> Vec<String> {
         [
             "ran",
@@ -6105,6 +6124,7 @@ dependencies:
             "fully_covered",
             "empty",
             "saturated",
+            "coverage_ratio_pct",
         ]
         .iter()
         .map(|suffix| format!("{prefix}_probes_{suffix}"))
@@ -6143,7 +6163,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("build"),
-            "macro must emit the seven build_probes_* fields in canonical \
+            "macro must emit the eight build_probes_* fields in canonical \
              order — a regression that dropped, re-ordered, or renamed a \
              field at the internal `@__shape` arm fails this pin",
         );
@@ -6158,6 +6178,14 @@ dependencies:
             "the mixed `(ran: 2, absent: 1)` arm sits well below the \
              saturating-add ceiling — `is_saturated` is false at every \
              realistically-sized Phase 1 build coverage",
+        );
+        assert_eq!(
+            by_name["build_probes_coverage_ratio_pct"], "66",
+            "the mixed `(ran: 2, absent: 1)` arm floors to `2*100/3 = 66` \
+             — the integer-percent surface a Prometheus alert rule / \
+             typed-policy threshold reads against; pins the
+             `coverage_ratio_pct` companion of `coverage_ratio` at the \
+             non-empty / non-saturated / non-fully-covered arm",
         );
     }
 
@@ -6194,7 +6222,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("chart"),
-            "macro must emit the seven chart_probes_* fields in canonical \
+            "macro must emit the eight chart_probes_* fields in canonical \
              order — a regression that swapped a build/chart/deployment \
              dispatch arm's prefix mapping fails this pin",
         );
@@ -6210,6 +6238,14 @@ dependencies:
              orthogonal to `is_saturated` — neither component is at \
              `usize::MAX`, so the typed trustworthiness flag stays false \
              at the all-ran chart-attestation arm",
+        );
+        assert_eq!(
+            by_name["chart_probes_coverage_ratio_pct"], "100",
+            "the fully-covered ceiling at `(ran: 3, absent: 0)` reads \
+             `3*100/3 = 100` — the integer ceiling the typed admission \
+             gate `*_probe_coverage_ratio_pct >= 100` (strict-production \
+             threshold) reads against, dual of the float ceiling \
+             `coverage_ratio() == 1.0` the prior field surfaces",
         );
     }
 
@@ -6254,7 +6290,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("deployment"),
-            "macro must emit the seven deployment_probes_* fields in \
+            "macro must emit the eight deployment_probes_* fields in \
              canonical order",
         );
         let by_name: std::collections::HashMap<_, _> = captured.fields.iter().cloned().collect();
@@ -6275,6 +6311,16 @@ dependencies:
              `is_saturated` is the orthogonal trustworthiness flag, \
              false at every realistically-sized Phase 2 deployment \
              coverage",
+        );
+        assert_eq!(
+            by_name["deployment_probes_coverage_ratio_pct"], "0",
+            "the all-absent floor at `(ran: 0, absent: 7)` reads \
+             `0*100/7 = 0` — the integer floor the typed admission \
+             gate `*_probe_coverage_ratio_pct >= 90` reads against, \
+             correctly refusing today's no-probe-ran state where the \
+             float-form `coverage_ratio() == 0.0` (different IEEE-754 \
+             representation but the same operational meaning) also \
+             reads at the floor",
         );
     }
 
@@ -6337,6 +6383,19 @@ dependencies:
              robust under saturation — `total()` saturates to MAX, not \
              0, so the saturation-robust discriminator correctly reads \
              false",
+        );
+        assert_eq!(
+            by_name["build_probes_coverage_ratio_pct"], "100",
+            "documents the integer-percent drift the saturated flag \
+             warns against: `MAX * 100 / MAX` reads `100` against the \
+             true `50` (`0.5 * 100`) of the unsaturated `{{ran: N, \
+             absent: N}}` shape — the same operational drift the \
+             prior `coverage_ratio` f64 field surfaces, so the typed \
+             trustworthiness signal `is_saturated == true` is the \
+             load-bearing condition a downstream verifier reads \
+             alongside BOTH ratio surfaces (`coverage_ratio` and \
+             `coverage_ratio_pct`) to foreclose the drift class at \
+             either consumer's preferred scale",
         );
     }
 }
