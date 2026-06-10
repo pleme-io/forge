@@ -308,6 +308,67 @@ impl ProbeCoverage {
         self.total() == 0
     }
 
+    /// True iff every counted probe surfaced an absent default — `ran == 0
+    /// && absent > 0`. The structural mirror of [`is_fully_covered`]
+    /// (`ran > 0 && absent == 0`): both predicates name an extreme arm of
+    /// the four-arm matrix the docstring on [`is_fully_covered`]
+    /// tabulates, bracketing the empty arm `(ran: 0, absent: 0)` where
+    /// neither holds. Names the third arm of the matrix — today's
+    /// [`compose_product_certification`] / [`compute_chart_attestation`]
+    /// / [`compute_build_attestation`] call-site state (every typed
+    /// outcome bound at its `ProbeAbsent` / `Absent` arm, so every
+    /// counted probe surfaced the honest default claim the typed
+    /// primitive preserves over the pre-typed bare literal).
+    ///
+    /// The compounding shape: before this predicate, a downstream
+    /// `sekiban` admission verifier wanting to reject "every counted
+    /// probe absent" (the operational state forge's call sites sit at
+    /// today — the strict-production gate fails closed on it) had to
+    /// compose `!coverage.is_empty() && coverage.coverage_ratio() == 0.0`
+    /// at the consumer surface, mixing the float-form ratio's
+    /// IEEE-754-imprecise equality comparison with the boundary-case
+    /// predicate. After this predicate, the verifier reads one bool —
+    /// `coverage.is_all_absent()` — and the integer-arithmetic body
+    /// `ran == 0 && absent > 0` forecloses the float-comparison drift
+    /// class the consumer-side composition would inherit.
+    ///
+    /// The four reachable arms of the matrix resolve cleanly under the
+    /// three named predicates: `is_empty()` flags the empty arm,
+    /// `is_all_absent()` flags the all-absent arm, `is_fully_covered()`
+    /// flags the fully-covered arm, and the mixed arm is the negation of
+    /// all three (`!is_empty() && !is_all_absent() && !is_fully_covered()`).
+    /// The four predicates are mutually exclusive and jointly exhaustive
+    /// (`is_empty + is_all_absent + is_fully_covered + mixed == 1` for
+    /// every reachable [`ProbeCoverage`] value).
+    ///
+    /// Orthogonal to [`is_saturated`]: the all-absent arm at `(ran: 0,
+    /// absent: usize::MAX)` is both `is_all_absent() == true` AND
+    /// `is_saturated() == true`. The predicate stays saturation-robust
+    /// (the load-bearing tests are `ran == 0` and `absent > 0`, not
+    /// arithmetic on the sum) so a downstream verifier reading
+    /// `is_all_absent()` against the saturated state cannot drift the
+    /// way `coverage_ratio() == 0.0` would (which reads as `1.0` at
+    /// `{ran: MAX, absent: MAX}` against the true 0.5 ratio).
+    ///
+    /// [`compose_product_certification`]: crate::commands::attestation::compose_product_certification
+    /// [`compute_build_attestation`]: crate::commands::attestation::compute_build_attestation
+    /// [`compute_chart_attestation`]: crate::commands::attestation::compute_chart_attestation
+    /// [`is_fully_covered`]: ProbeCoverage::is_fully_covered
+    /// [`is_saturated`]: ProbeCoverage::is_saturated
+    ///
+    /// THEORY §VI.1 one-oracle discipline: the predicate is derived at
+    /// one site (here), not re-inlined as `!coverage.is_empty() &&
+    /// coverage.coverage_ratio() == 0.0` per consumer (which would
+    /// inherit the IEEE-754 imprecision the float-equality comparison
+    /// admits at the saturated state). THEORY §V.4 / §VII.1 honesty
+    /// channel: the discriminator names "every counted probe surfaced
+    /// the honest default claim," the load-bearing precondition the
+    /// Phase 1 / Phase 2 strict admission gate fails-closed on at
+    /// today's call-site state.
+    pub fn is_all_absent(&self) -> bool {
+        self.ran == 0 && self.absent > 0
+    }
+
     /// True iff at least one component has reached the saturating-add
     /// ceiling — `ran == usize::MAX || absent == usize::MAX`. The
     /// orthogonal boundary discriminator the saturating monoid arithmetic
@@ -1023,6 +1084,144 @@ mod tests {
                 "is_empty and is_fully_covered must be mutually exclusive at {c:?}",
             );
         }
+    }
+
+    /// `is_all_absent()` returns `true` iff every counted probe surfaced
+    /// an absent default — `ran == 0 && absent > 0`. Pinned across the
+    /// three load-bearing total counts (3 for build, 4 for chart, 7 for
+    /// deployment) so a future regression that hardcoded the `absent >
+    /// 0` check to one specific N would fail against the other two. The
+    /// typed discriminator a downstream `sekiban` admission verifier
+    /// reads to fail closed on today's call-site state — every typed
+    /// outcome bound at its `ProbeAbsent` / `Absent` arm, no probe ran.
+    #[test]
+    fn test_is_all_absent_when_no_probe_ran_is_true() {
+        assert!(ProbeCoverage { ran: 0, absent: 3 }.is_all_absent());
+        assert!(ProbeCoverage { ran: 0, absent: 4 }.is_all_absent());
+        assert!(ProbeCoverage { ran: 0, absent: 7 }.is_all_absent());
+    }
+
+    /// `is_all_absent()` returns `false` for the empty-slice boundary
+    /// case `probe_coverage` over an empty iterator produces (`ran: 0,
+    /// absent: 0`). The structural disambiguator from the all-absent
+    /// arm: both have `ran == 0` but only the all-absent arm has
+    /// `absent > 0`. A future regression that relaxed the predicate to
+    /// `ran == 0` alone (dropping the `absent > 0` conjunct) would
+    /// silently flip the empty case to `true` and conflate the
+    /// boundary; this pin closes that arm. Symmetric to
+    /// `test_is_fully_covered_empty_returns_false` one layer over.
+    #[test]
+    fn test_is_all_absent_empty_returns_false() {
+        let empty = ProbeCoverage { ran: 0, absent: 0 };
+        assert!(!empty.is_all_absent());
+        assert!(empty.is_empty());
+    }
+
+    /// `is_all_absent()` returns `false` when any counted probe ran —
+    /// the fully-covered ceiling AND the mixed-split intermediate
+    /// states. Pinned across the all-ran ceiling (3, 4, 7) plus three
+    /// mixed-split shapes (1-of-2, 3-of-7, 2-of-3) so a future
+    /// regression that hardcoded the predicate to one specific
+    /// `ran` value would fail across the others. Symmetric to
+    /// `test_is_fully_covered_any_absent_is_false` one layer over.
+    #[test]
+    fn test_is_all_absent_any_ran_is_false() {
+        assert!(!ProbeCoverage { ran: 3, absent: 0 }.is_all_absent());
+        assert!(!ProbeCoverage { ran: 4, absent: 0 }.is_all_absent());
+        assert!(!ProbeCoverage { ran: 7, absent: 0 }.is_all_absent());
+        assert!(!ProbeCoverage { ran: 1, absent: 1 }.is_all_absent());
+        assert!(!ProbeCoverage { ran: 3, absent: 4 }.is_all_absent());
+        assert!(!ProbeCoverage { ran: 2, absent: 1 }.is_all_absent());
+    }
+
+    /// The three named arm-predicates (`is_empty`, `is_all_absent`,
+    /// `is_fully_covered`) are mutually exclusive AND, with the mixed
+    /// arm `!is_empty && !is_all_absent && !is_fully_covered`, jointly
+    /// exhaustive — exactly one of the four conditions holds for every
+    /// reachable `ProbeCoverage` value. The structural pin closes the
+    /// four-arm matrix the docstring on [`ProbeCoverage::is_fully_covered`]
+    /// tabulates: a regression that decoupled the three predicates
+    /// (e.g., made `is_all_absent` also return `true` at the empty arm)
+    /// would fail this pin at the offending arm.
+    #[test]
+    fn test_arm_predicates_partition_the_matrix() {
+        let empty = ProbeCoverage { ran: 0, absent: 0 };
+        let all_absent = ProbeCoverage { ran: 0, absent: 7 };
+        let mixed = ProbeCoverage { ran: 3, absent: 4 };
+        let fully_covered = ProbeCoverage { ran: 3, absent: 0 };
+        for c in [empty, all_absent, mixed, fully_covered] {
+            let e = c.is_empty();
+            let a = c.is_all_absent();
+            let f = c.is_fully_covered();
+            let m = !e && !a && !f;
+            let arm_count = u32::from(e) + u32::from(a) + u32::from(f) + u32::from(m);
+            assert_eq!(
+                arm_count, 1,
+                "exactly one of (empty, all_absent, fully_covered, mixed) \
+                 must hold at {c:?} — got {arm_count} (empty={e}, \
+                 all_absent={a}, fully_covered={f}, mixed={m})",
+            );
+        }
+        assert!(empty.is_empty());
+        assert!(all_absent.is_all_absent());
+        assert!(fully_covered.is_fully_covered());
+        assert!(!mixed.is_empty() && !mixed.is_all_absent() && !mixed.is_fully_covered());
+    }
+
+    /// `is_all_absent()` composes with the monoid `Add` shape the way a
+    /// downstream fleet-wide aggregator depends on: summing two
+    /// all-absent per-phase coverages stays all-absent (no phase added
+    /// evidence), but summing an all-absent phase with any phase that
+    /// has `ran > 0` produces a non-all-absent aggregate (any phase
+    /// that ran lifts the aggregate off the all-absent floor). Mirrors
+    /// the structural intuition: a product certification rests on the
+    /// all-absent floor only when every phase rested there too.
+    #[test]
+    fn test_is_all_absent_sums_under_monoid_add() {
+        let build_absent = ProbeCoverage { ran: 0, absent: 3 };
+        let chart_absent = ProbeCoverage { ran: 0, absent: 4 };
+        let deployment_absent = ProbeCoverage { ran: 0, absent: 7 };
+        let chart_ran = ProbeCoverage { ran: 1, absent: 3 };
+        assert!(build_absent.is_all_absent());
+        assert!(chart_absent.is_all_absent());
+        assert!(deployment_absent.is_all_absent());
+        assert!(!chart_ran.is_all_absent());
+        assert!((build_absent + chart_absent).is_all_absent());
+        assert!((build_absent + chart_absent + deployment_absent).is_all_absent());
+        assert!(!(build_absent + chart_ran).is_all_absent());
+        assert!(!(build_absent + chart_ran + deployment_absent).is_all_absent());
+    }
+
+    /// `is_all_absent()` stays saturation-robust at the
+    /// `(ran: 0, absent: usize::MAX)` arm — both `is_all_absent` AND
+    /// `is_saturated` are `true`, the discriminator does not silently
+    /// flip the way `coverage_ratio() == 0.0` would at that state
+    /// (which reads as `0.0` correctly here — the saturated `absent`
+    /// component does not poison the numerator — but a verifier using
+    /// the symmetric `{ran: usize::MAX, absent: 0}` shape against
+    /// `coverage_ratio() == 1.0` would not be able to disambiguate
+    /// "every counted probe ran" from "the saturating clamp dropped
+    /// equal evidence at the ceiling"). The integer-arithmetic body
+    /// `ran == 0 && absent > 0` forecloses both drift directions
+    /// through equality / inequality tests on the components themselves.
+    #[test]
+    fn test_is_all_absent_stays_robust_at_saturated_absent() {
+        let saturated_absent = ProbeCoverage {
+            ran: 0,
+            absent: usize::MAX,
+        };
+        assert!(saturated_absent.is_all_absent());
+        assert!(saturated_absent.is_saturated());
+        assert!(!saturated_absent.is_empty());
+        assert!(!saturated_absent.is_fully_covered());
+        assert_eq!(saturated_absent.coverage_ratio(), 0.0);
+        assert_eq!(saturated_absent.coverage_ratio_pct(), 0);
+
+        let saturated_both = ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        };
+        assert!(!saturated_both.is_all_absent());
     }
 
     /// `coverage_ratio()` does not panic at the post-saturation state
