@@ -59,7 +59,7 @@ use tokio::process::Command;
 /// is_saturated(), coverage_ratio_pct())` mapping at one internal
 /// `@__shape` arm; the three public phase arms (`build` / `chart` /
 /// `deployment`) supply the phase-prefixed field idents declaratively, so
-/// adding a ninth field touches the internal arm and three two-line
+/// adding a tenth field touches the internal arm and three two-line
 /// dispatch tails — never a public call site.
 ///
 /// ## Usage
@@ -78,7 +78,7 @@ use tokio::process::Command;
 ///
 /// The macro forwards the per-phase context fields verbatim (matching
 /// `tracing::info!`'s `name = value` / `name = ?value` / `name = %value`
-/// syntax via the `$($ctx:tt)*` tail), then emits the eight probe-coverage
+/// syntax via the `$($ctx:tt)*` tail), then emits the nine probe-coverage
 /// fields in canonical order, then the message string. The seventh
 /// `*_probes_saturated` field surfaces the trustworthiness signal for the
 /// `*_probes_coverage_ratio` field: at the saturated state (`ran ==
@@ -93,7 +93,17 @@ use tokio::process::Command;
 /// typed-policy threshold gate (`*_probe_coverage_ratio_pct >= 90`) reads
 /// against, foreclosing the IEEE-754 epsilon drift the float comparison
 /// `>= 0.9_f64` admits at the just-below-threshold boundary the integer
-/// floor (Euclidean division `(ran * 100) / total`) refuses cleanly.
+/// floor (Euclidean division `(ran * 100) / total`) refuses cleanly. The
+/// ninth `*_probes_all_absent` field is the typed discriminator for the
+/// third arm of the four-arm matrix the typed primitive tabulates — the
+/// "every counted probe surfaced an absent default" state today's three
+/// call sites sit at. A downstream verifier that wants to fail closed on
+/// this state reads one bool (`*_probes_all_absent == true`) rather than
+/// composing `*_probes_total > 0 && *_probes_coverage_ratio == 0.0` at
+/// the consumer surface — the integer-arithmetic body of
+/// [`ProbeCoverage::is_all_absent`] (`ran == 0 && absent > 0`) forecloses
+/// the float-comparison drift class the consumer-side composition would
+/// inherit.
 ///
 /// [`Add`]: std::ops::Add
 ///
@@ -118,6 +128,7 @@ macro_rules! emit_probe_coverage {
         empty: $empty:ident,
         saturated: $saturated:ident,
         coverage_ratio_pct: $ratio_pct:ident,
+        all_absent: $all_absent:ident,
         target: $target:literal,
         coverage: $coverage:expr,
         message: $msg:literal,
@@ -135,6 +146,7 @@ macro_rules! emit_probe_coverage {
             $empty = __cov.is_empty(),
             $saturated = __cov.is_saturated(),
             $ratio_pct = __cov.coverage_ratio_pct(),
+            $all_absent = __cov.is_all_absent(),
             $msg
         );
     }};
@@ -149,6 +161,7 @@ macro_rules! emit_probe_coverage {
             empty: build_probes_empty,
             saturated: build_probes_saturated,
             coverage_ratio_pct: build_probes_coverage_ratio_pct,
+            all_absent: build_probes_all_absent,
             $($rest)*
         )
     };
@@ -163,6 +176,7 @@ macro_rules! emit_probe_coverage {
             empty: chart_probes_empty,
             saturated: chart_probes_saturated,
             coverage_ratio_pct: chart_probes_coverage_ratio_pct,
+            all_absent: chart_probes_all_absent,
             $($rest)*
         )
     };
@@ -177,6 +191,7 @@ macro_rules! emit_probe_coverage {
             empty: deployment_probes_empty,
             saturated: deployment_probes_saturated,
             coverage_ratio_pct: deployment_probes_coverage_ratio_pct,
+            all_absent: deployment_probes_all_absent,
             $($rest)*
         )
     };
@@ -5989,13 +6004,13 @@ dependencies:
     // ────────────────────────────────────────────────────────────────────
     // emit_probe_coverage! macro — schema pins
     //
-    // The macro centralises the eight-field tracing shape — `(ran, absent,
+    // The macro centralises the nine-field tracing shape — `(ran, absent,
     // total, coverage_ratio, fully_covered, empty, saturated,
-    // coverage_ratio_pct)` — at one internal arm so the three per-phase
-    // emission sites cannot drift on field count, field order, or the
-    // `ProbeCoverage` method that maps to each field. The pins below
-    // capture each phase's tracing event via a minimal
-    // [`tracing::Subscriber`] impl, then assert the eight probe-coverage
+    // coverage_ratio_pct, all_absent)` — at one internal arm so the three
+    // per-phase emission sites cannot drift on field count, field order,
+    // or the `ProbeCoverage` method that maps to each field. The pins
+    // below capture each phase's tracing event via a minimal
+    // [`tracing::Subscriber`] impl, then assert the nine probe-coverage
     // fields surface with the expected phase-prefixed names, in the
     // canonical order the macro emits, with the values [`ProbeCoverage`]'s
     // typed methods compute. A regression that (a) dropped a field at the
@@ -6103,18 +6118,20 @@ dependencies:
         }
     }
 
-    /// Names of the eight probe-coverage fields the macro emits, in the
+    /// Names of the nine probe-coverage fields the macro emits, in the
     /// canonical order — the same order
     /// [`crate::probe_outcome::ProbeCoverage::is_fully_covered`]'s
     /// docstring four-arm matrix tabulates, extended with the orthogonal
     /// [`crate::probe_outcome::ProbeCoverage::is_saturated`]
-    /// trustworthiness predicate at the seventh position and the integer
+    /// trustworthiness predicate at the seventh position, the integer
     /// [`crate::probe_outcome::ProbeCoverage::coverage_ratio_pct`]
-    /// percent companion at the eighth — the Prometheus-alert-rule /
-    /// typed-policy-threshold integer surface the float
-    /// `coverage_ratio` field's IEEE-754 representation cannot cleanly
-    /// gate against. Returned with a phase prefix so each phase's pin
-    /// can compare against its own expected slice.
+    /// percent companion at the eighth, and the
+    /// [`crate::probe_outcome::ProbeCoverage::is_all_absent`]
+    /// arm-predicate at the ninth — the typed discriminator for the
+    /// third arm of the four-arm matrix the typed primitive tabulates
+    /// (the "every counted probe surfaced an absent default" state
+    /// today's three call sites sit at). Returned with a phase prefix
+    /// so each phase's pin can compare against its own expected slice.
     fn expected_field_names(prefix: &str) -> Vec<String> {
         [
             "ran",
@@ -6125,6 +6142,7 @@ dependencies:
             "empty",
             "saturated",
             "coverage_ratio_pct",
+            "all_absent",
         ]
         .iter()
         .map(|suffix| format!("{prefix}_probes_{suffix}"))
@@ -6163,7 +6181,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("build"),
-            "macro must emit the eight build_probes_* fields in canonical \
+            "macro must emit the nine build_probes_* fields in canonical \
              order — a regression that dropped, re-ordered, or renamed a \
              field at the internal `@__shape` arm fails this pin",
         );
@@ -6186,6 +6204,14 @@ dependencies:
              typed-policy threshold reads against; pins the
              `coverage_ratio_pct` companion of `coverage_ratio` at the \
              non-empty / non-saturated / non-fully-covered arm",
+        );
+        assert_eq!(
+            by_name["build_probes_all_absent"], "false",
+            "the mixed `(ran: 2, absent: 1)` arm sits at the mixed arm \
+             of the four-arm matrix (`ran > 0 && absent > 0`) — \
+             `is_all_absent` (`ran == 0 && absent > 0`) reads false \
+             here, structurally disambiguating the mixed arm from the \
+             all-absent floor below it",
         );
     }
 
@@ -6222,7 +6248,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("chart"),
-            "macro must emit the eight chart_probes_* fields in canonical \
+            "macro must emit the nine chart_probes_* fields in canonical \
              order — a regression that swapped a build/chart/deployment \
              dispatch arm's prefix mapping fails this pin",
         );
@@ -6246,6 +6272,13 @@ dependencies:
              gate `*_probe_coverage_ratio_pct >= 100` (strict-production \
              threshold) reads against, dual of the float ceiling \
              `coverage_ratio() == 1.0` the prior field surfaces",
+        );
+        assert_eq!(
+            by_name["chart_probes_all_absent"], "false",
+            "the fully-covered ceiling at `(ran: 3, absent: 0)` is the \
+             structural mirror of the all-absent floor — `is_fully_covered \
+             && !is_all_absent` pins the two extremes of the four-arm \
+             matrix as mutually exclusive at the chart phase",
         );
     }
 
@@ -6290,7 +6323,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("deployment"),
-            "macro must emit the eight deployment_probes_* fields in \
+            "macro must emit the nine deployment_probes_* fields in \
              canonical order",
         );
         let by_name: std::collections::HashMap<_, _> = captured.fields.iter().cloned().collect();
@@ -6321,6 +6354,17 @@ dependencies:
              float-form `coverage_ratio() == 0.0` (different IEEE-754 \
              representation but the same operational meaning) also \
              reads at the floor",
+        );
+        assert_eq!(
+            by_name["deployment_probes_all_absent"], "true",
+            "the all-absent floor at `(ran: 0, absent: 7)` is exactly \
+             the state the typed `is_all_absent` predicate names — \
+             today's `compose_product_certification` call-site state \
+             sits here, and a downstream `sekiban` admission verifier \
+             gating on `*_probes_all_absent == true` fails closed at \
+             this state with one bool comparison rather than composing \
+             `*_probes_total > 0 && *_probes_coverage_ratio == 0.0` at \
+             the consumer surface",
         );
     }
 
@@ -6396,6 +6440,18 @@ dependencies:
              alongside BOTH ratio surfaces (`coverage_ratio` and \
              `coverage_ratio_pct`) to foreclose the drift class at \
              either consumer's preferred scale",
+        );
+        assert_eq!(
+            by_name["build_probes_all_absent"], "false",
+            "`is_all_absent` (`ran == 0 && absent > 0` is the \
+             load-bearing test) stays robust under saturation — \
+             `ran == MAX` is not 0, so the saturation-robust \
+             arm-predicate correctly reads false at the post-saturation \
+             state. The structural mirror of the saturation-robust \
+             `is_fully_covered` and `is_empty` discriminators one \
+             assertion up: the integer-arithmetic body of every \
+             arm-predicate forecloses the IEEE-754 drift class the \
+             float-form ratio surfaces here",
         );
     }
 }
