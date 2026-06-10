@@ -31,11 +31,11 @@ use tameshi::compliance::slsa::{determine_slsa_level, SlsaLevel};
 use tameshi::hash::Blake3Hash;
 use tokio::process::Command;
 
-/// Emit the canonical ten-field probe-coverage [`tracing::info!`] event
+/// Emit the canonical eleven-field probe-coverage [`tracing::info!`] event
 /// uniformly across the three attestation phases — Phase 1 build, Phase 1
 /// chart, Phase 2 deployment — without retyping the `(ran, absent, total,
 /// coverage_ratio, fully_covered, empty, saturated, coverage_ratio_pct,
-/// all_absent, mixed)` shape at each emission site.
+/// all_absent, mixed, has_evidence)` shape at each emission site.
 ///
 /// ## Why this exists
 ///
@@ -59,7 +59,7 @@ use tokio::process::Command;
 /// is_saturated(), coverage_ratio_pct())` mapping at one internal
 /// `@__shape` arm; the three public phase arms (`build` / `chart` /
 /// `deployment`) supply the phase-prefixed field idents declaratively, so
-/// adding a tenth field touches the internal arm and three two-line
+/// adding an eleventh field touches the internal arm and three two-line
 /// dispatch tails — never a public call site.
 ///
 /// ## Usage
@@ -78,7 +78,7 @@ use tokio::process::Command;
 ///
 /// The macro forwards the per-phase context fields verbatim (matching
 /// `tracing::info!`'s `name = value` / `name = ?value` / `name = %value`
-/// syntax via the `$($ctx:tt)*` tail), then emits the nine probe-coverage
+/// syntax via the `$($ctx:tt)*` tail), then emits the eleven probe-coverage
 /// fields in canonical order, then the message string. The seventh
 /// `*_probes_saturated` field surfaces the trustworthiness signal for the
 /// `*_probes_coverage_ratio` field: at the saturated state (`ran ==
@@ -118,7 +118,16 @@ use tokio::process::Command;
 /// than composing the three-predicate negation `!*_probes_empty &&
 /// !*_probes_all_absent` at the consumer surface (which would silently
 /// admit a regression that decoupled the three extreme-arm predicates
-/// from the mixed-arm predicate at the typed-primitive surface).
+/// from the mixed-arm predicate at the typed-primitive surface). The
+/// eleventh `*_probes_has_evidence` field is the typed primitive for
+/// the two-arm disjunction the previous sentence names — `ran > 0`,
+/// the relaxed-staging admission gate at one bool rather than at the
+/// two-bool `*_probes_mixed || *_probes_fully_covered` composition.
+/// A downstream `sekiban` admission verifier reading the relaxed-
+/// staging policy reads `*_probes_has_evidence == true` directly,
+/// while the strict-production policy gates the additional
+/// trustworthiness composition `!*_probes_saturated &&
+/// *_probes_fully_covered` one ratio-surface up.
 ///
 /// [`Add`]: std::ops::Add
 ///
@@ -148,6 +157,7 @@ macro_rules! emit_probe_coverage {
         coverage_ratio_pct: $ratio_pct:ident,
         all_absent: $all_absent:ident,
         mixed: $mixed:ident,
+        has_evidence: $has_evidence:ident,
         target: $target:literal,
         coverage: $coverage:expr,
         message: $msg:literal,
@@ -167,6 +177,7 @@ macro_rules! emit_probe_coverage {
             $ratio_pct = __cov.coverage_ratio_pct(),
             $all_absent = __cov.is_all_absent(),
             $mixed = __cov.is_mixed(),
+            $has_evidence = __cov.has_evidence(),
             $msg
         );
     }};
@@ -183,6 +194,7 @@ macro_rules! emit_probe_coverage {
             coverage_ratio_pct: build_probes_coverage_ratio_pct,
             all_absent: build_probes_all_absent,
             mixed: build_probes_mixed,
+            has_evidence: build_probes_has_evidence,
             $($rest)*
         )
     };
@@ -199,6 +211,7 @@ macro_rules! emit_probe_coverage {
             coverage_ratio_pct: chart_probes_coverage_ratio_pct,
             all_absent: chart_probes_all_absent,
             mixed: chart_probes_mixed,
+            has_evidence: chart_probes_has_evidence,
             $($rest)*
         )
     };
@@ -215,6 +228,7 @@ macro_rules! emit_probe_coverage {
             coverage_ratio_pct: deployment_probes_coverage_ratio_pct,
             all_absent: deployment_probes_all_absent,
             mixed: deployment_probes_mixed,
+            has_evidence: deployment_probes_has_evidence,
             $($rest)*
         )
     };
@@ -6027,21 +6041,21 @@ dependencies:
     // ────────────────────────────────────────────────────────────────────
     // emit_probe_coverage! macro — schema pins
     //
-    // The macro centralises the nine-field tracing shape — `(ran, absent,
+    // The macro centralises the eleven-field tracing shape — `(ran, absent,
     // total, coverage_ratio, fully_covered, empty, saturated,
-    // coverage_ratio_pct, all_absent)` — at one internal arm so the three
-    // per-phase emission sites cannot drift on field count, field order,
-    // or the `ProbeCoverage` method that maps to each field. The pins
-    // below capture each phase's tracing event via a minimal
-    // [`tracing::Subscriber`] impl, then assert the nine probe-coverage
-    // fields surface with the expected phase-prefixed names, in the
-    // canonical order the macro emits, with the values [`ProbeCoverage`]'s
-    // typed methods compute. A regression that (a) dropped a field at the
-    // macro's internal arm, (b) swapped the `ran` and `absent` method
-    // calls, (c) re-ordered the emission so a downstream verifier reading
-    // positional tracing-event fields drifted, or (d) mis-prefixed a phase
-    // arm (e.g., chart's `ran` field emitted as `build_probes_ran`) would
-    // fail the corresponding pin here.
+    // coverage_ratio_pct, all_absent, mixed, has_evidence)` — at one
+    // internal arm so the three per-phase emission sites cannot drift on
+    // field count, field order, or the `ProbeCoverage` method that maps to
+    // each field. The pins below capture each phase's tracing event via a
+    // minimal [`tracing::Subscriber`] impl, then assert the eleven probe-
+    // coverage fields surface with the expected phase-prefixed names, in
+    // the canonical order the macro emits, with the values
+    // [`ProbeCoverage`]'s typed methods compute. A regression that (a)
+    // dropped a field at the macro's internal arm, (b) swapped the `ran`
+    // and `absent` method calls, (c) re-ordered the emission so a
+    // downstream verifier reading positional tracing-event fields drifted,
+    // or (d) mis-prefixed a phase arm (e.g., chart's `ran` field emitted
+    // as `build_probes_ran`) would fail the corresponding pin here.
     // ────────────────────────────────────────────────────────────────────
 
     use std::sync::{Arc, Mutex};
@@ -6141,7 +6155,7 @@ dependencies:
         }
     }
 
-    /// Names of the ten probe-coverage fields the macro emits, in the
+    /// Names of the eleven probe-coverage fields the macro emits, in the
     /// canonical order — the same order
     /// [`crate::probe_outcome::ProbeCoverage::is_fully_covered`]'s
     /// docstring four-arm matrix tabulates, extended with the orthogonal
@@ -6150,12 +6164,17 @@ dependencies:
     /// [`crate::probe_outcome::ProbeCoverage::coverage_ratio_pct`]
     /// percent companion at the eighth, the
     /// [`crate::probe_outcome::ProbeCoverage::is_all_absent`]
-    /// arm-predicate at the ninth, and the
+    /// arm-predicate at the ninth, the
     /// [`crate::probe_outcome::ProbeCoverage::is_mixed`] arm-predicate at
     /// the tenth — the typed discriminator for the fourth and final arm
     /// of the four-arm matrix (the interior `ran > 0 && absent > 0`
     /// state a Phase 2 deployment-attestation rollout passes through on
-    /// its way from the all-absent floor to the fully-covered ceiling).
+    /// its way from the all-absent floor to the fully-covered ceiling)
+    /// — and the
+    /// [`crate::probe_outcome::ProbeCoverage::has_evidence`] disjunctive
+    /// predicate at the eleventh, the typed primitive for the
+    /// relaxed-staging admission gate `is_mixed() || is_fully_covered()`
+    /// at one bool rather than the two-bool consumer-surface composition.
     /// Returned with a phase prefix so each phase's pin can compare
     /// against its own expected slice.
     fn expected_field_names(prefix: &str) -> Vec<String> {
@@ -6170,6 +6189,7 @@ dependencies:
             "coverage_ratio_pct",
             "all_absent",
             "mixed",
+            "has_evidence",
         ]
         .iter()
         .map(|suffix| format!("{prefix}_probes_{suffix}"))
@@ -6208,7 +6228,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("build"),
-            "macro must emit the ten build_probes_* fields in canonical \
+            "macro must emit the eleven build_probes_* fields in canonical \
              order — a regression that dropped, re-ordered, or renamed a \
              field at the internal `@__shape` arm fails this pin",
         );
@@ -6254,6 +6274,18 @@ dependencies:
              negation `!*_probes_empty && !*_probes_all_absent` at the \
              consumer surface",
         );
+        assert_eq!(
+            by_name["build_probes_has_evidence"], "true",
+            "the mixed `(ran: 2, absent: 1)` arm has `ran > 0`, so \
+             `has_evidence` reads true — the typed primitive for the \
+             two-arm disjunction `is_mixed || is_fully_covered` at one \
+             bool. A downstream `sekiban` admission verifier reading the \
+             relaxed-staging admission gate reads this single field \
+             rather than the two-bool consumer-surface composition the \
+             prior `mixed` assertion documents, and the integer-arithmetic \
+             body `ran > 0` is strictly cheaper than the two-call \
+             disjunction it replaces",
+        );
     }
 
     /// Phase 1 chart: same schema pin as the build sibling above, against
@@ -6289,7 +6321,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("chart"),
-            "macro must emit the ten chart_probes_* fields in canonical \
+            "macro must emit the eleven chart_probes_* fields in canonical \
              order — a regression that swapped a build/chart/deployment \
              dispatch arm's prefix mapping fails this pin",
         );
@@ -6331,6 +6363,17 @@ dependencies:
              reachable `ProbeCoverage` value, the four-arm matrix \
              partition pin closes that invariant uniformly across the \
              three per-phase records",
+        );
+        assert_eq!(
+            by_name["chart_probes_has_evidence"], "true",
+            "the fully-covered ceiling at `(ran: 3, absent: 0)` has \
+             `ran > 0`, so `has_evidence` reads true — the structural \
+             equivalence `has_evidence == is_mixed || is_fully_covered` \
+             pins this state at the fully-covered side of the two-arm \
+             disjunction (`mixed == false` one assertion up, \
+             `fully_covered == true` four assertions up), and the typed \
+             primitive surfaces the relaxed-staging admission gate at \
+             one bool",
         );
     }
 
@@ -6375,7 +6418,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("deployment"),
-            "macro must emit the ten deployment_probes_* fields in \
+            "macro must emit the eleven deployment_probes_* fields in \
              canonical order",
         );
         let by_name: std::collections::HashMap<_, _> = captured.fields.iter().cloned().collect();
@@ -6431,6 +6474,19 @@ dependencies:
              relaxed-staging partial-coverage gate \
              (`*_probes_mixed || *_probes_fully_covered`) correctly \
              refuses this state",
+        );
+        assert_eq!(
+            by_name["deployment_probes_has_evidence"], "false",
+            "the all-absent floor at `(ran: 0, absent: 7)` has \
+             `ran == 0`, so `has_evidence` reads false — the typed \
+             primitive for the relaxed-staging admission gate correctly \
+             refuses today's `compose_product_certification` call-site \
+             state at one bool rather than at the two-bool composition \
+             the prior `mixed` assertion documents. The structural \
+             equivalence `has_evidence == is_mixed || is_fully_covered` \
+             pins this state at the no-evidence side of the two-arm \
+             disjunction — both `mixed` (one assertion up) and \
+             `fully_covered` (six assertions up) read false here",
         );
     }
 
@@ -6532,6 +6588,19 @@ dependencies:
              classification stays robust: the four arm-predicates each \
              read against the components themselves, so the typed-arm \
              classification is well-defined at every saturated state",
+        );
+        assert_eq!(
+            by_name["build_probes_has_evidence"], "true",
+            "`has_evidence` (`ran > 0` is the load-bearing test) stays \
+             robust under saturation — `ran == MAX` is not 0, so the \
+             saturation-robust primitive correctly reads true at the \
+             post-saturation state. The structural mirror of the \
+             saturation-robust `is_mixed` discriminator one assertion \
+             up: the integer-arithmetic body reads against `ran` alone, \
+             not against any post-saturation derived ratio, so the \
+             relaxed-staging admission gate's typed primitive stays \
+             well-defined where the float-form `coverage_ratio` reads \
+             as 1.0 against the true 0.5 ratio",
         );
     }
 }
