@@ -122,6 +122,7 @@ impl CosignVerifyOutcome {
 }
 
 crate::impl_probe_outcome!(CosignVerifyOutcome, ProbeAbsent);
+crate::impl_verified_outcome!(CosignVerifyOutcome);
 
 /// Parse the stdout of a successful `cosign verify --output json` probe
 /// into a [`CosignVerifyOutcome`].

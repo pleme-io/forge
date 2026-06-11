@@ -260,6 +260,7 @@ impl NetworkPolicyAdmissionOutcome {
 }
 
 crate::impl_probe_outcome!(NetworkPolicyAdmissionOutcome, ProbeAbsent);
+crate::impl_verified_outcome!(NetworkPolicyAdmissionOutcome);
 
 /// Parse the JSON output of `kubectl get networkpolicy -n <ns> -o json`
 /// (or the equivalent `kube::Api::<NetworkPolicy>::list(...)`

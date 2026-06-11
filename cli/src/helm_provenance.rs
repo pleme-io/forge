@@ -149,6 +149,7 @@ impl HelmProvenanceOutcome {
 }
 
 crate::impl_probe_outcome!(HelmProvenanceOutcome, ProbeAbsent);
+crate::impl_verified_outcome!(HelmProvenanceOutcome);
 
 /// Parse the contents of a Helm `.prov` provenance file into a
 /// [`HelmProvenanceOutcome`].

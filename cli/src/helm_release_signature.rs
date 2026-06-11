@@ -279,6 +279,7 @@ impl HelmReleaseSignatureOutcome {
 }
 
 crate::impl_probe_outcome!(HelmReleaseSignatureOutcome, ProbeAbsent);
+crate::impl_verified_outcome!(HelmReleaseSignatureOutcome);
 
 /// Parse the JSON output of `kubectl get helmrelease -n <ns> -o json`
 /// (or the equivalent `kube::Api::<HelmRelease>::list(...)`
