@@ -158,6 +158,7 @@ macro_rules! emit_probe_coverage {
         all_absent: $all_absent:ident,
         mixed: $mixed:ident,
         has_evidence: $has_evidence:ident,
+        admission_eligible_strict: $admission_strict:ident,
         target: $target:literal,
         coverage: $coverage:expr,
         message: $msg:literal,
@@ -178,6 +179,7 @@ macro_rules! emit_probe_coverage {
             $all_absent = __cov.is_all_absent(),
             $mixed = __cov.is_mixed(),
             $has_evidence = __cov.has_evidence(),
+            $admission_strict = __cov.is_admission_eligible_strict(),
             $msg
         );
     }};
@@ -195,6 +197,7 @@ macro_rules! emit_probe_coverage {
             all_absent: build_probes_all_absent,
             mixed: build_probes_mixed,
             has_evidence: build_probes_has_evidence,
+            admission_eligible_strict: build_probes_admission_eligible_strict,
             $($rest)*
         )
     };
@@ -212,6 +215,7 @@ macro_rules! emit_probe_coverage {
             all_absent: chart_probes_all_absent,
             mixed: chart_probes_mixed,
             has_evidence: chart_probes_has_evidence,
+            admission_eligible_strict: chart_probes_admission_eligible_strict,
             $($rest)*
         )
     };
@@ -229,6 +233,7 @@ macro_rules! emit_probe_coverage {
             all_absent: deployment_probes_all_absent,
             mixed: deployment_probes_mixed,
             has_evidence: deployment_probes_has_evidence,
+            admission_eligible_strict: deployment_probes_admission_eligible_strict,
             $($rest)*
         )
     };
@@ -6190,6 +6195,7 @@ dependencies:
             "all_absent",
             "mixed",
             "has_evidence",
+            "admission_eligible_strict",
         ]
         .iter()
         .map(|suffix| format!("{prefix}_probes_{suffix}"))
@@ -6286,6 +6292,19 @@ dependencies:
              body `ran > 0` is strictly cheaper than the two-call \
              disjunction it replaces",
         );
+        assert_eq!(
+            by_name["build_probes_admission_eligible_strict"], "false",
+            "the mixed `(ran: 2, absent: 1)` arm has `absent > 0`, so \
+             `is_fully_covered` reads false, so the strict gate \
+             conjunction `!is_saturated() && is_fully_covered()` reads \
+             false — the typed primitive correctly REJECTS partial \
+             coverage at the strict-production admission gate, while \
+             `has_evidence` (the relaxed-staging gate one assertion up) \
+             ACCEPTS it. The two admission gates surface the asymmetric \
+             admission decision at adjacent typed fields, so a downstream \
+             `sekiban` admission verifier reads its phase's gate decision \
+             at one bool",
+        );
     }
 
     /// Phase 1 chart: same schema pin as the build sibling above, against
@@ -6374,6 +6393,20 @@ dependencies:
              `fully_covered == true` four assertions up), and the typed \
              primitive surfaces the relaxed-staging admission gate at \
              one bool",
+        );
+        assert_eq!(
+            by_name["chart_probes_admission_eligible_strict"], "true",
+            "the fully-covered non-saturated ceiling at `(ran: 3, \
+             absent: 0)` is exactly the corner of the matrix the strict \
+             gate admits — `is_fully_covered == true` AND \
+             `is_saturated == false`, so the conjunction `!is_saturated() \
+             && is_fully_covered()` reads true. The strict gate ACCEPTS \
+             this state, mirroring the relaxed gate one assertion up \
+             (`has_evidence == true`): at the fully-covered ceiling both \
+             gates admit, the implication \
+             `is_admission_eligible_strict => has_evidence` (since \
+             `is_fully_covered` requires `ran > 0`) is pinned here at \
+             the corner where both are simultaneously true",
         );
     }
 
@@ -6488,6 +6521,18 @@ dependencies:
              disjunction — both `mixed` (one assertion up) and \
              `fully_covered` (six assertions up) read false here",
         );
+        assert_eq!(
+            by_name["deployment_probes_admission_eligible_strict"], "false",
+            "the all-absent floor at `(ran: 0, absent: 7)` has \
+             `is_fully_covered == false` (`ran == 0`), so the strict \
+             gate conjunction `!is_saturated() && is_fully_covered()` \
+             reads false — today's `compose_product_certification` \
+             call-site state is REJECTED by both the relaxed-staging \
+             gate (one assertion up) AND the strict-production gate. \
+             Pins the implication `!has_evidence => !is_admission_eligible_strict` \
+             at the floor where no evidence is collected: a state that \
+             fails the relaxed gate cannot pass the stricter gate",
+        );
     }
 
     /// Phase 1 build at the post-saturation state: pins the macro emits
@@ -6601,6 +6646,23 @@ dependencies:
              relaxed-staging admission gate's typed primitive stays \
              well-defined where the float-form `coverage_ratio` reads \
              as 1.0 against the true 0.5 ratio",
+        );
+        assert_eq!(
+            by_name["build_probes_admission_eligible_strict"], "false",
+            "the strict gate `!is_saturated() && is_fully_covered()` \
+             reads false at the post-saturation state precisely because \
+             `is_saturated == true` (two assertions up) — even if \
+             `is_fully_covered` were to read true here (it does not at \
+             `{{MAX, MAX}}` since `absent != 0`, but at the sibling \
+             saturated arm `{{MAX, 0}}` it would), the saturation factor \
+             of the strict conjunction WOULD STILL REJECT the state. \
+             The load-bearing trustworthiness clamp: the float-form \
+             `coverage_ratio` rounds to 1.0 against the true 0.5 ratio \
+             at this state, and the integer-form `coverage_ratio_pct` \
+             reads 100 against the true 50, so a downstream verifier \
+             gating on either ratio surface would silently accept the \
+             drift; the strict gate's `!is_saturated()` factor \
+             forecloses that admission at the typed-primitive surface",
         );
     }
 }
