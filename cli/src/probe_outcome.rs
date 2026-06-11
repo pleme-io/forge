@@ -617,6 +617,77 @@ impl ProbeCoverage {
         let total = total as u128;
         ((ran * 100) / total) as u8
     }
+
+    /// True iff every counted probe ran AND the coverage signal is
+    /// trustworthy — the typed primitive for the strict-production
+    /// admission gate the [`is_saturated`] / [`is_fully_covered`]
+    /// docstrings have named since the saturation flag landed: a
+    /// downstream `sekiban` admission verifier wanting to admit only
+    /// records whose evidence channel both fully fired AND whose
+    /// derived ratio surfaces are reliable composes `!is_saturated() &&
+    /// is_fully_covered()` at the consumer surface. Before this
+    /// predicate, every strict-production gate had to retype that
+    /// two-bool conjunction. After this predicate, the gate reads one
+    /// bool — `coverage.is_admission_eligible_strict()` — and the
+    /// integer-arithmetic body collapses the two-bool composition at
+    /// the typed-primitive surface.
+    ///
+    /// Symmetric to [`has_evidence`] one layer over: where
+    /// `has_evidence` lifts the relaxed-staging gate's two-bool
+    /// disjunction `is_mixed() || is_fully_covered()` to one typed
+    /// primitive (`ran > 0`), this lifts the strict-production gate's
+    /// two-bool conjunction `!is_saturated() && is_fully_covered()` to
+    /// one typed primitive. Every reachable `ProbeCoverage` value
+    /// carries an `(has_evidence, is_admission_eligible_strict)`
+    /// two-bool pair the two admission gates read uniformly — the
+    /// relaxed-staging gate reads `has_evidence == true` (some
+    /// evidence), the strict-production gate reads
+    /// `is_admission_eligible_strict == true` (complete AND
+    /// trustworthy evidence), and the strict gate strictly implies the
+    /// relaxed gate (`is_fully_covered() => has_evidence()` since
+    /// `is_fully_covered()` requires `ran > 0`).
+    ///
+    /// Saturation-robust by construction: `is_fully_covered()` reads
+    /// `absent == 0 && ran > 0` against the components themselves
+    /// (never against derived arithmetic), so the post-saturation
+    /// state `{ran: usize::MAX, absent: 0}` is structurally
+    /// `is_fully_covered() == true` BUT `is_saturated() == true`, so
+    /// the conjunction correctly rejects (`true && !true == false`) —
+    /// the saturated state cannot pass the strict gate even though
+    /// every counted probe (up to the ceiling) ran. This is the
+    /// load-bearing trustworthiness clamp: the float-form
+    /// [`coverage_ratio`] and the integer-form [`coverage_ratio_pct`]
+    /// both round to `1.0` / `100` at `{ran: MAX, absent: 0}` and
+    /// against the true ratio at `{ran: MAX, absent: MAX}` — the
+    /// strict gate forecloses both drift classes uniformly through the
+    /// `!is_saturated()` factor.
+    ///
+    /// At every reachable `(ran, absent)` value, the predicate equals
+    /// the documented consumer composition exactly — the structural
+    /// equivalence
+    /// `is_admission_eligible_strict() == (!is_saturated() &&
+    /// is_fully_covered())`
+    /// is pinned across the empty / all-absent / mixed / fully-covered
+    /// arms AND each of the three saturated representatives by
+    /// [`test_is_admission_eligible_strict_equals_documented_composition`].
+    ///
+    /// [`coverage_ratio`]: ProbeCoverage::coverage_ratio
+    /// [`coverage_ratio_pct`]: ProbeCoverage::coverage_ratio_pct
+    /// [`has_evidence`]: ProbeCoverage::has_evidence
+    /// [`is_fully_covered`]: ProbeCoverage::is_fully_covered
+    /// [`is_saturated`]: ProbeCoverage::is_saturated
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the strict-production
+    /// admission predicate is derived at one site (here), not
+    /// re-inlined as `!coverage.is_saturated() &&
+    /// coverage.is_fully_covered()` per downstream consumer. THEORY.md
+    /// §V.4 / §VII.1 honesty channel: the strict gate names "complete
+    /// AND trustworthy evidence," the load-bearing precondition the
+    /// strict-production admission gate admits and every other arm
+    /// (empty, all-absent, mixed, fully-covered-but-saturated) rejects.
+    pub fn is_admission_eligible_strict(&self) -> bool {
+        !self.is_saturated() && self.is_fully_covered()
+    }
 }
 
 /// Identity element of the [`Add`](std::ops::Add) impl below: the empty-
@@ -1943,5 +2014,161 @@ mod tests {
                 "integer floor must match floor(f64_ratio * 100) at {c:?}",
             );
         }
+    }
+
+    /// Strict-production admission gate is `true` exactly at the
+    /// `is_fully_covered() && !is_saturated()` corner of the matrix.
+    /// Pinned across the three load-bearing total counts (3 / 4 / 7,
+    /// matching the build / chart / deployment phase probe counts) so a
+    /// regression that pinned the predicate to a single phase's total
+    /// would fail at the other two.
+    #[test]
+    fn test_is_admission_eligible_strict_at_fully_covered_non_saturated_arm_is_true() {
+        for total in [3usize, 4, 7] {
+            let c = ProbeCoverage {
+                ran: total,
+                absent: 0,
+            };
+            assert!(
+                c.is_admission_eligible_strict(),
+                "fully-covered non-saturated arm must pass the strict gate at {c:?}",
+            );
+        }
+    }
+
+    /// Strict gate rejects every non-(fully-covered) arm. Pins:
+    /// - empty floor `(0, 0)` — `is_fully_covered()` false (`ran == 0`)
+    /// - all-absent floor `(0, N)` — `is_fully_covered()` false (same)
+    /// - mixed arm `(N, M)` with both positive — `is_fully_covered()`
+    ///   false (`absent > 0`)
+    /// All three rejection arms close at the `is_fully_covered() == false`
+    /// factor of the conjunction; the saturation factor is exercised
+    /// separately below.
+    #[test]
+    fn test_is_admission_eligible_strict_rejects_non_fully_covered_arms() {
+        let empty = ProbeCoverage { ran: 0, absent: 0 };
+        let all_absent = ProbeCoverage { ran: 0, absent: 7 };
+        let mixed_low = ProbeCoverage { ran: 1, absent: 1 };
+        let mixed_high = ProbeCoverage {
+            ran: 89,
+            absent: 11,
+        };
+        for c in [empty, all_absent, mixed_low, mixed_high] {
+            assert!(
+                !c.is_admission_eligible_strict(),
+                "non-fully-covered arm must fail the strict gate at {c:?}",
+            );
+        }
+    }
+
+    /// Strict gate rejects every saturated state, INCLUDING the
+    /// `{ran: usize::MAX, absent: 0}` representative that
+    /// `is_fully_covered()` reads as `true`. Saturation-robustness is
+    /// the load-bearing factor — the `coverage_ratio()` /
+    /// `coverage_ratio_pct()` reads at `{MAX, 0}` round to `1.0` / `100`
+    /// honestly (every counted probe up to the ceiling ran), but the
+    /// saturating-add clamp means an unknown number of past-ceiling
+    /// increments were dropped, so the derived ratio cannot be trusted
+    /// — the strict gate refuses to admit.
+    #[test]
+    fn test_is_admission_eligible_strict_at_saturated_state_is_false() {
+        let saturated_ran_only = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let saturated_absent_only = ProbeCoverage {
+            ran: 0,
+            absent: usize::MAX,
+        };
+        let saturated_both = ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        };
+        for c in [saturated_ran_only, saturated_absent_only, saturated_both] {
+            assert!(
+                !c.is_admission_eligible_strict(),
+                "saturated state must fail the strict gate at {c:?} — the \
+                 saturating-add clamp dropped past-ceiling increments, so \
+                 the derived ratio surfaces cannot be trusted",
+            );
+        }
+    }
+
+    /// Structural equivalence with the documented consumer composition
+    /// `!is_saturated() && is_fully_covered()`. Pins the one-oracle
+    /// invariant the typed primitive carries — a regression that
+    /// hand-rolled the body (e.g., `is_fully_covered() && !is_empty()`)
+    /// would fail at the saturated `{MAX, 0}` arm where
+    /// `is_fully_covered() == true` AND `is_empty() == false` AND
+    /// `is_saturated() == true`, so the divergent composition would
+    /// erroneously admit a state the documented strict gate refuses.
+    /// Walks every cell of the cross product
+    /// `({empty, all_absent, mixed, fully_covered} × {saturated,
+    /// non_saturated})` (the empty arm is structurally non-saturated
+    /// only, since both components are 0; the other three each admit
+    /// both saturation states).
+    #[test]
+    fn test_is_admission_eligible_strict_equals_documented_composition() {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 }, // empty (always non-saturated)
+            ProbeCoverage { ran: 0, absent: 7 }, // all-absent non-saturated
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            }, // all-absent saturated
+            ProbeCoverage { ran: 3, absent: 4 }, // mixed non-saturated
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            }, // mixed saturated
+            ProbeCoverage { ran: 7, absent: 0 }, // fully-covered non-saturated
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            }, // fully-covered saturated
+        ];
+        for c in cases {
+            let direct = c.is_admission_eligible_strict();
+            let composed = !c.is_saturated() && c.is_fully_covered();
+            assert_eq!(
+                direct, composed,
+                "typed-primitive surface must equal the documented \
+                 consumer composition at {c:?} — a regression that hand-rolled \
+                 the body would fail this pin at the saturated `{{MAX, 0}}` arm \
+                 where the discriminators decouple",
+            );
+        }
+    }
+
+    /// Under the saturating monoid `Add`, any phase whose contribution
+    /// has `absent > 0` breaks the strict gate at the aggregate — the
+    /// aggregate's `absent` field inherits the contributing phase's
+    /// `absent` (monoid `Add` is component-wise saturating add), so the
+    /// aggregate's `is_fully_covered() == (absent == 0 && ran > 0)`
+    /// reads `false` whenever any phase contributed an absent probe.
+    /// The fleet-wide aggregate the `Sum` fold computes thus admits
+    /// the strict gate only when EVERY phase is fully covered AND no
+    /// component reached the saturating ceiling. Pinned across two
+    /// representative two-phase aggregates: one where both phases are
+    /// fully covered (aggregate passes), one where one phase
+    /// contributes an absent (aggregate fails).
+    #[test]
+    fn test_is_admission_eligible_strict_composes_under_monoid_add() {
+        let phase_a_full = ProbeCoverage { ran: 3, absent: 0 };
+        let phase_b_full = ProbeCoverage { ran: 4, absent: 0 };
+        let aggregate_full = phase_a_full + phase_b_full;
+        assert!(
+            aggregate_full.is_admission_eligible_strict(),
+            "two fully-covered phases sum to a fully-covered aggregate \
+             that passes the strict gate — {aggregate_full:?}",
+        );
+
+        let phase_b_partial = ProbeCoverage { ran: 3, absent: 1 };
+        let aggregate_with_absent = phase_a_full + phase_b_partial;
+        assert!(
+            !aggregate_with_absent.is_admission_eligible_strict(),
+            "any phase contributing an absent probe breaks the \
+             aggregate's strict gate — {aggregate_with_absent:?}",
+        );
     }
 }
