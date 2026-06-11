@@ -961,6 +961,86 @@ impl VerificationCoverage {
     }
 }
 
+/// Componentwise `usize::saturating_add` over [`VerificationCoverage`] —
+/// `(a.verified + b.verified, a.unverified + b.unverified)`. The
+/// structural monoid `(VerificationCoverage, +, default())` lifts the
+/// per-phase verification-trustworthiness signal a future emission site
+/// at `commands::attestation` will produce (the Phase 1 flux-source /
+/// helm-release-signature shape composed with the Phase 2 helm-
+/// provenance / cosign / network-policy shape) to a single product-
+/// level signal a downstream verifier can compose with `[build, chart,
+/// deployment].iter().copied().sum::<VerificationCoverage>()` — one
+/// site, not per-field-summed at every downstream consumer (THEORY
+/// §VI.1 one-oracle discipline). The orthogonal-axis peer of the
+/// [`ProbeCoverage`] monoid one impl group up: the two monoids compose
+/// in parallel against the same record, surfacing the
+/// no-evidence-dimension aggregate and the verification-trustworthiness-
+/// dimension aggregate at the same product-level emission site.
+///
+/// `saturating_add` rather than the panicking `+` is the load-bearing
+/// arithmetic: a fleet-wide aggregator summing the per-record coverage
+/// across every Phase 1 / Phase 2 verification-bearing record (multi-
+/// product, multi-cluster, multi-environment) cannot panic on overflow
+/// at `usize::MAX` — the saturating ceiling preserves the monoid's
+/// totality (every pair of `VerificationCoverage` values has a defined
+/// sum) where the unchecked addition would surface a panic on the
+/// pathological aggregate (1 << 64 verification records on a 64-bit
+/// target, realistically unreachable but structurally foreclosed here),
+/// composing with the [`VerificationCoverage::total`] saturating
+/// ceiling one impl up so the post-`Add` state can be handed to
+/// `total()` without re-introducing the panic the sibling impl already
+/// foreclosed.
+impl std::ops::Add for VerificationCoverage {
+    type Output = VerificationCoverage;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        VerificationCoverage {
+            verified: self.verified.saturating_add(rhs.verified),
+            unverified: self.unverified.saturating_add(rhs.unverified),
+        }
+    }
+}
+
+/// In-place sibling of [`Add`](std::ops::Add) above. The `*self = *self
+/// + rhs` body reuses the `Copy` derive on [`VerificationCoverage`]
+/// (the type is two `usize`s — trivially copyable) so the assign form
+/// is a one-line delegation that cannot drift from the `Add` semantics.
+/// Mirrors [`ProbeCoverage`]'s `AddAssign` at the orthogonal axis.
+impl std::ops::AddAssign for VerificationCoverage {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+/// Owned-iterator [`Sum`] impl: `iter.fold(default(), Add::add)`. Lifts
+/// a `Vec<VerificationCoverage>` / `[VerificationCoverage; N]` /
+/// `impl Iterator<Item = VerificationCoverage>` to a single aggregate
+/// value the downstream telemetry emission site can hand to
+/// `tracing::info!` alongside the per-phase fields. The empty-iterator
+/// case returns [`VerificationCoverage::default`] (0 verified, 0
+/// unverified) — the same empty-slice boundary [`verification_coverage`]
+/// returns, so the two surfaces compose without a structural seam at
+/// the empty-input boundary.
+impl std::iter::Sum for VerificationCoverage {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), std::ops::Add::add)
+    }
+}
+
+/// Borrowed-iterator [`Sum`] impl: lets a `&[VerificationCoverage]`
+/// borrow reach `.iter().sum::<VerificationCoverage>()` without an
+/// explicit `.copied()` at the call site — the idiomatic shape every
+/// other numeric `Sum` in `std` already admits (`<i64 as Sum<&'a i64>>`
+/// etc.). The delegation through `.copied()` reuses the `Copy` derive
+/// on [`VerificationCoverage`] so the borrowed form cannot drift from
+/// the owned `Sum` semantics one impl up. Mirrors [`ProbeCoverage`]'s
+/// borrowed `Sum` at the orthogonal axis.
+impl<'a> std::iter::Sum<&'a VerificationCoverage> for VerificationCoverage {
+    fn sum<I: Iterator<Item = &'a VerificationCoverage>>(iter: I) -> Self {
+        iter.copied().sum()
+    }
+}
+
 /// Walk a slice of `&dyn VerifiedOutcome` references and compute the
 /// verification-coverage summary — the count of probes that
 /// substantiated a positive verification verdict vs. the count that did
@@ -2767,5 +2847,263 @@ mod tests {
             verification.total(),
             "both helpers count every element of the slice exactly once"
         );
+    }
+
+    /// `VerificationCoverage::default()` is the empty-slice
+    /// [`verification_coverage`] result and the identity element of the
+    /// monoid `Add` impl below. Pins both surfaces against the same
+    /// `{verified: 0, unverified: 0}` zero so a future regression that
+    /// returned a non-zero default (e.g., `{verified: 1, unverified: 0}`
+    /// as a "probably verified" stub) would fail this pin at both arms.
+    /// Mirrors [`test_default_is_empty_probe_coverage`] at the
+    /// orthogonal axis.
+    #[test]
+    fn test_default_is_empty_verification_coverage() {
+        assert_eq!(
+            VerificationCoverage::default(),
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0
+            }
+        );
+        let empty: [&dyn VerifiedOutcome; 0] = [];
+        assert_eq!(
+            verification_coverage(empty.iter().copied()),
+            VerificationCoverage::default()
+        );
+    }
+
+    /// `Add` composes componentwise — `(a.verified + b.verified,
+    /// a.unverified + b.unverified)` — and `total()` adds the same way
+    /// (10 = 4 + 6; 4 = 3 + 1). The realistic Phase-1-flux / Phase-1-
+    /// helm-release-signature / Phase-2-cosign fold a future product-
+    /// level signal will run at the `compose_product_certification`
+    /// call site: three per-record coverages summed into one product-
+    /// record aggregate. A regression that swapped `verified` /
+    /// `unverified` in the impl body would flip a high-trust product
+    /// record into a fully-unverified one; this pin closes that arm.
+    /// Mirrors [`test_add_composes_componentwise`] at the orthogonal
+    /// axis.
+    #[test]
+    fn test_verification_add_composes_componentwise() {
+        let flux = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        let helm_signature = VerificationCoverage {
+            verified: 1,
+            unverified: 3,
+        };
+        let cosign = VerificationCoverage {
+            verified: 0,
+            unverified: 3,
+        };
+        let product = flux + helm_signature + cosign;
+        assert_eq!(
+            product,
+            VerificationCoverage {
+                verified: 4,
+                unverified: 6
+            }
+        );
+        assert_eq!(product.total(), 10);
+    }
+
+    /// `Default` is the identity of `Add` — `c + default() == c` and
+    /// `default() + c == c` for every `c`. The monoid law THEORY §VI.1
+    /// one-oracle discipline depends on at the orthogonal axis: a
+    /// downstream verifier reading `product =
+    /// phases.iter().sum::<VerificationCoverage>()` cannot drift from
+    /// `product = phases[0] + phases[1] + ...` because the empty-fold
+    /// seed is `default()` and `default()` is structurally the
+    /// identity. A regression that returned a non-zero default would
+    /// fail this pin at both arms. Mirrors
+    /// [`test_add_default_is_identity`] at the orthogonal axis.
+    #[test]
+    fn test_verification_add_default_is_identity() {
+        let c = VerificationCoverage {
+            verified: 3,
+            unverified: 4,
+        };
+        assert_eq!(c + VerificationCoverage::default(), c);
+        assert_eq!(VerificationCoverage::default() + c, c);
+    }
+
+    /// `Add` is commutative and associative — the structural monoid
+    /// laws that make `[a, b, c].iter().sum::<VerificationCoverage>()`
+    /// independent of iteration order. A fleet-wide aggregator that
+    /// folds across an unordered set of per-record coverages (a
+    /// `HashMap<ProductId, VerificationCoverage>::values()` walk, for
+    /// example) reads the same aggregate regardless of hash-map
+    /// iteration order; this pin closes the "Add silently depends on
+    /// argument order" regression arm. Mirrors
+    /// [`test_add_is_commutative_and_associative`] at the orthogonal
+    /// axis.
+    #[test]
+    fn test_verification_add_is_commutative_and_associative() {
+        let a = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        let b = VerificationCoverage {
+            verified: 1,
+            unverified: 3,
+        };
+        let c = VerificationCoverage {
+            verified: 0,
+            unverified: 3,
+        };
+        assert_eq!(a + b, b + a);
+        assert_eq!((a + b) + c, a + (b + c));
+    }
+
+    /// `Add` saturates at `usize::MAX` rather than panicking on
+    /// overflow — the load-bearing arithmetic the docstring above
+    /// names. A fleet-wide aggregator summing across pathologically
+    /// many per-record coverages (1 << 64 verification records on a
+    /// 64-bit target, unreachable in practice but structurally
+    /// foreclosed here) cannot drive a panic the unchecked `+` would
+    /// surface; the monoid stays total over the full `usize` range and
+    /// composes with the saturating
+    /// [`VerificationCoverage::total`] ceiling one impl up so the
+    /// post-`Add` aggregate can be handed to `total()` without
+    /// re-introducing the panic. Mirrors
+    /// [`test_add_saturates_at_usize_max`] at the orthogonal axis.
+    #[test]
+    fn test_verification_add_saturates_at_usize_max() {
+        let max = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: usize::MAX,
+        };
+        let plus_one = VerificationCoverage {
+            verified: 1,
+            unverified: 1,
+        };
+        assert_eq!(
+            max + plus_one,
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            }
+        );
+    }
+
+    /// `AddAssign` is the in-place sibling of `Add` and produces the
+    /// same value. A regression that decoupled the two impls (e.g.,
+    /// reimplemented `add_assign` directly with a different arithmetic)
+    /// would fail this pin. The `*self = *self + rhs` delegation in
+    /// the impl body relies on the `Copy` derive on
+    /// `VerificationCoverage`; this test exercises the round-trip.
+    /// Mirrors [`test_add_assign_matches_add`] at the orthogonal axis.
+    #[test]
+    fn test_verification_add_assign_matches_add() {
+        let mut acc = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        acc += VerificationCoverage {
+            verified: 1,
+            unverified: 3,
+        };
+        acc += VerificationCoverage {
+            verified: 0,
+            unverified: 3,
+        };
+        assert_eq!(
+            acc,
+            VerificationCoverage {
+                verified: 4,
+                unverified: 6
+            }
+        );
+    }
+
+    /// `Sum` over an owned iterator folds with `Add` from `default()`.
+    /// The realistic call-site shape a future product-level emission
+    /// will use: collect per-phase coverages into a `Vec` (or an inline
+    /// array), call `.into_iter().sum::<VerificationCoverage>()`, emit
+    /// the aggregate as `product_verification_coverage_ratio`.
+    /// Equivalent to the explicit `a + b + c` fold one assertion up —
+    /// this pin closes the "Sum drifts from Add" regression arm.
+    /// Mirrors [`test_sum_owned_iterator_folds_with_add`] at the
+    /// orthogonal axis.
+    #[test]
+    fn test_verification_sum_owned_iterator_folds_with_add() {
+        let phases = vec![
+            VerificationCoverage {
+                verified: 3,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+        ];
+        let product: VerificationCoverage = phases.into_iter().sum();
+        assert_eq!(
+            product,
+            VerificationCoverage {
+                verified: 4,
+                unverified: 6
+            }
+        );
+        assert_eq!(product.total(), 10);
+    }
+
+    /// `Sum` over a borrowed iterator
+    /// (`.iter().sum::<VerificationCoverage>()` — no `.copied()` at the
+    /// call site) returns the same aggregate as the owned form. The
+    /// borrowed `Sum<&'a Self>` impl exists so `&[VerificationCoverage]`
+    /// reaches the idiomatic numeric-`Sum` shape every `<i64 as Sum<&'a
+    /// i64>>`-style impl in `std` already admits; a regression that
+    /// diverged the two surfaces would fail this pin. Mirrors
+    /// [`test_sum_borrowed_iterator_matches_owned`] at the orthogonal
+    /// axis.
+    #[test]
+    fn test_verification_sum_borrowed_iterator_matches_owned() {
+        let phases = [
+            VerificationCoverage {
+                verified: 3,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+        ];
+        let borrowed: VerificationCoverage = phases.iter().sum();
+        let owned: VerificationCoverage = phases.into_iter().sum();
+        assert_eq!(borrowed, owned);
+        assert_eq!(
+            borrowed,
+            VerificationCoverage {
+                verified: 4,
+                unverified: 6
+            }
+        );
+    }
+
+    /// `Sum` over an empty iterator returns `default()` — the identity
+    /// of the monoid. Symmetric to
+    /// [`test_verification_coverage_empty_slice`] one layer over: the
+    /// empty-slice trait-object walk and the empty-`Vec`-of-coverages
+    /// fold produce the same `VerificationCoverage { verified: 0,
+    /// unverified: 0 }` value, so the two surfaces compose without a
+    /// structural seam at the empty-input boundary. Mirrors
+    /// [`test_sum_empty_iterator_is_default`] at the orthogonal axis.
+    #[test]
+    fn test_verification_sum_empty_iterator_is_default() {
+        let empty: Vec<VerificationCoverage> = Vec::new();
+        let aggregate: VerificationCoverage = empty.into_iter().sum();
+        assert_eq!(aggregate, VerificationCoverage::default());
+        assert_eq!(aggregate.total(), 0);
     }
 }
