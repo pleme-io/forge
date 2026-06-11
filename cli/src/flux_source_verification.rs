@@ -249,6 +249,7 @@ impl FluxSourceVerificationOutcome {
 }
 
 crate::impl_probe_outcome!(FluxSourceVerificationOutcome, ProbeAbsent);
+crate::impl_verified_outcome!(FluxSourceVerificationOutcome);
 
 /// Parse the JSON output of `kubectl get gitrepository <name> -n <ns>
 /// -o json` (or the equivalent `kube::Api::<GitRepository>::get(...)`

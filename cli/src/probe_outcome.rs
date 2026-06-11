@@ -132,6 +132,105 @@ macro_rules! impl_probe_outcome {
     };
 }
 
+/// Common contract for typed probe outcomes that carry a `Verified` arm
+/// — the structural discriminator naming "the probe ran AND substantiated
+/// a positive verification verdict." Five sibling modules carry a typed
+/// `*Outcome` enum whose `is_verified` inherent method has structurally
+/// identical bodies (`matches!(self, Self::Verified)` for unit-variant
+/// form, `matches!(self, Self::Verified { .. })` for struct-variant
+/// form):
+///
+/// * [`crate::flux_source_verification::FluxSourceVerificationOutcome`]
+///   — `Verified` (unit) / `VerifyFailed` / `ProbeAbsent`.
+/// * [`crate::helm_release_signature::HelmReleaseSignatureOutcome`]
+///   — `Verified` (unit) / `VerifyFailed` / `ProbeAbsent`.
+/// * [`crate::network_policy_admission::NetworkPolicyAdmissionOutcome`]
+///   — `Verified` (unit) / `VerifyFailed` / `ProbeAbsent`.
+/// * [`crate::helm_provenance::HelmProvenanceOutcome`]
+///   — `Verified { signed_chart_hash }` (struct) / `Unverified` /
+///   `VerifyFailed` / `ProbeAbsent`.
+/// * [`crate::cosign::CosignVerifyOutcome`]
+///   — `Verified { signer_identity, .. }` (struct) / `VerifyFailed` /
+///   `Unsigned` / `ProbeAbsent`.
+///
+/// Object-safe by construction (one `&self` method returning a `bool`,
+/// no generics, no associated types) so a slice of `&dyn VerifiedOutcome`
+/// references can be collected at the attestation composition site and
+/// walked by a future `verification_coverage` helper parallel to the
+/// existing [`probe_coverage`] free function — the typed-primitive
+/// surface for the verification-trustworthiness dimension orthogonal to
+/// the no-evidence dimension [`ProbeOutcome::is_probe_absent`] already
+/// discriminates.
+///
+/// The two dimensions decompose any `Verified`-bearing outcome into a
+/// `(is_probe_absent, is_verified)` two-bool pair that names three of
+/// the four matrix cells: `(false, true)` is the verified arm,
+/// `(false, false)` is any negative-evidence arm (`VerifyFailed`,
+/// `Unverified`, `Unsigned`), and `(true, false)` is the absent-probe
+/// arm. The fourth corner `(true, true)` — a probe that did not run yet
+/// substantiated a positive verdict — is structurally unreachable on
+/// every implementor: the probe-absent variant is distinct from the
+/// verified variant in every enum's match shape, so the two
+/// discriminators are mutually exclusive at the positive end. THEORY
+/// §V.4 / §VII.1: the verification-trustworthiness signal is the
+/// honesty channel a downstream `sekiban` strict-production admission
+/// verifier reads alongside the probe-coverage signal — a record whose
+/// every probe ran (`is_probe_absent` false uniformly) but whose
+/// verification-bearing subset rejected (`is_verified` false on the
+/// verified-bearing arms) fails closed on a different gate than a
+/// record whose probes did not run at all. THEORY §VI.1: the
+/// verification discriminator is derived at one site (the typed enum's
+/// `Verified` arm match), not re-inlined per call site as bool fields
+/// on the downstream attestation struct.
+#[allow(dead_code)]
+pub trait VerifiedOutcome {
+    /// True iff this outcome represents the "probe ran AND substantiated
+    /// a positive verification verdict" world — the structural
+    /// discriminator the `Verified`-bearing outcome family preserves
+    /// over the pre-typed bare bool that flattened the verified /
+    /// negatively-verified / no-probe-ran trio into a single value.
+    ///
+    /// Every implementor's inherent `is_verified` body is one of
+    /// `matches!(self, Self::Verified)` (unit form) or
+    /// `matches!(self, Self::Verified { .. })` (struct form); the
+    /// [`impl_verified_outcome!`](crate::impl_verified_outcome) macro
+    /// delegates the trait body through the inherent method so both
+    /// variant shapes are admitted uniformly without the macro taking a
+    /// position on the match pattern.
+    fn is_verified(&self) -> bool;
+}
+
+/// Emit the [`VerifiedOutcome`] impl for `$ty`, delegating the trait
+/// body through `<$ty>::is_verified(self)` — the inherent method the
+/// implementor already defines. Admits both the unit-form `Verified`
+/// and the struct-form `Verified { .. }` variants without branching at
+/// the macro surface: the inherent method already chose the right
+/// `matches!` shape, the macro just lifts that choice to the trait
+/// surface.
+///
+/// ```ignore
+/// crate::impl_verified_outcome!(FluxSourceVerificationOutcome);
+/// crate::impl_verified_outcome!(HelmProvenanceOutcome);
+/// ```
+///
+/// The macro is the load-bearing carrier of the trait invariant: every
+/// implementor's trait body is `<$ty>::is_verified(self)`, so a future
+/// regression that hand-rolled a divergent trait impl (e.g. returned a
+/// hardcoded `false` because the implementor "doesn't have a Verified
+/// arm at the trait surface") is structurally foreclosed — there is one
+/// expression in the macro body, and the caller supplies only the type
+/// name.
+#[macro_export]
+macro_rules! impl_verified_outcome {
+    ($ty:ty) => {
+        impl $crate::probe_outcome::VerifiedOutcome for $ty {
+            fn is_verified(&self) -> bool {
+                <$ty>::is_verified(self)
+            }
+        }
+    };
+}
+
 /// Probe-coverage summary: count of probes that ran vs. probes that
 /// surfaced an absent default. The Phase 1 / Phase 2 honesty channel a
 /// future telemetry consumer at the
@@ -823,6 +922,51 @@ mod tests {
         Absent,
     }
     crate::impl_probe_outcome!(DummyAbsentOutcome, Absent);
+
+    /// A three-arm dummy with the unit-form `Verified` / `VerifyFailed`
+    /// / `ProbeAbsent` shape — mirrors the
+    /// [`crate::flux_source_verification::FluxSourceVerificationOutcome`]
+    /// / [`crate::helm_release_signature::HelmReleaseSignatureOutcome`]
+    /// / [`crate::network_policy_admission::NetworkPolicyAdmissionOutcome`]
+    /// shape, without depending on the (feature-gated) attestation
+    /// modules. Exercises the [`impl_verified_outcome!`](crate::impl_verified_outcome)
+    /// macro against the unit-variant inherent-`is_verified` form.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum DummyVerifiedOutcome {
+        Verified,
+        VerifyFailed,
+        ProbeAbsent,
+    }
+    impl DummyVerifiedOutcome {
+        fn is_verified(&self) -> bool {
+            matches!(self, Self::Verified)
+        }
+    }
+    crate::impl_probe_outcome!(DummyVerifiedOutcome, ProbeAbsent);
+    crate::impl_verified_outcome!(DummyVerifiedOutcome);
+
+    /// A four-arm dummy with the struct-form `Verified { .. }` shape —
+    /// mirrors the [`crate::helm_provenance::HelmProvenanceOutcome`] and
+    /// [`crate::cosign::CosignVerifyOutcome`] shape, exercising the
+    /// [`impl_verified_outcome!`](crate::impl_verified_outcome) macro
+    /// against the struct-variant inherent-`is_verified` form. The
+    /// inherent method uses `matches!(self, Self::Verified { .. })`;
+    /// the macro lifts the verdict to the trait surface uniformly with
+    /// the unit-form sibling above.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum DummyVerifiedFieldsOutcome {
+        Verified { fingerprint: String },
+        VerifyFailed,
+        Unverified,
+        ProbeAbsent,
+    }
+    impl DummyVerifiedFieldsOutcome {
+        fn is_verified(&self) -> bool {
+            matches!(self, Self::Verified { .. })
+        }
+    }
+    crate::impl_probe_outcome!(DummyVerifiedFieldsOutcome, ProbeAbsent);
+    crate::impl_verified_outcome!(DummyVerifiedFieldsOutcome);
 
     /// Pin the load-bearing trait invariant: the absent variant
     /// identifies as absent, and every other variant identifies as
@@ -2169,6 +2313,139 @@ mod tests {
             !aggregate_with_absent.is_admission_eligible_strict(),
             "any phase contributing an absent probe breaks the \
              aggregate's strict gate — {aggregate_with_absent:?}",
+        );
+    }
+
+    /// Pin the load-bearing [`VerifiedOutcome`] trait invariant against
+    /// the unit-variant form: only the `Verified` arm reads `true`, the
+    /// negative-evidence and absent-probe arms read `false`. The macro-
+    /// generated impl delegates through `<Self>::is_verified(self)` so
+    /// this also pins the structural equivalence between the trait
+    /// surface and the inherent surface at every reachable arm — a
+    /// regression that hand-rolled a divergent trait impl (e.g. returned
+    /// a hardcoded `false` because the implementor "doesn't have a
+    /// Verified arm at the trait surface", or returned `true` for the
+    /// absent arm — the structurally-impossible `(true, true)` corner
+    /// of the two-dimension matrix) would fail this pin.
+    #[test]
+    fn test_verified_outcome_trait_pins_unit_form() {
+        assert!(VerifiedOutcome::is_verified(
+            &DummyVerifiedOutcome::Verified
+        ));
+        assert!(!VerifiedOutcome::is_verified(
+            &DummyVerifiedOutcome::VerifyFailed
+        ));
+        assert!(!VerifiedOutcome::is_verified(
+            &DummyVerifiedOutcome::ProbeAbsent
+        ));
+    }
+
+    /// Pin the same load-bearing invariant against the struct-variant
+    /// form (`Verified { fingerprint: String }`): the macro lifts the
+    /// inherent `matches!(self, Self::Verified { .. })` body to the
+    /// trait surface unchanged. The four-arm shape (`Verified` +
+    /// `Unverified` + `VerifyFailed` + `ProbeAbsent`) mirrors
+    /// [`HelmProvenanceOutcome`]; the test pins each arm's verdict so a
+    /// regression that flattened `Unverified` and `VerifyFailed` into a
+    /// single arm or that misread the struct-form variant as not-
+    /// verified would fail.
+    #[test]
+    fn test_verified_outcome_trait_pins_struct_form() {
+        let verified = DummyVerifiedFieldsOutcome::Verified {
+            fingerprint: "sha256:abc".to_string(),
+        };
+        assert!(VerifiedOutcome::is_verified(&verified));
+        assert!(!VerifiedOutcome::is_verified(
+            &DummyVerifiedFieldsOutcome::Unverified
+        ));
+        assert!(!VerifiedOutcome::is_verified(
+            &DummyVerifiedFieldsOutcome::VerifyFailed
+        ));
+        assert!(!VerifiedOutcome::is_verified(
+            &DummyVerifiedFieldsOutcome::ProbeAbsent
+        ));
+    }
+
+    /// Pin that [`VerifiedOutcome`] is object-safe — a slice of `&dyn
+    /// VerifiedOutcome` references can be collected and walked through
+    /// the trait-object surface without depending on the concrete
+    /// implementor type. The heterogeneous slice mixes the unit-form
+    /// and struct-form dummies, exactly as the future
+    /// `verification_coverage(&[&dyn VerifiedOutcome])` helper would
+    /// walk a deployment record's three verification-bearing probes
+    /// (flux-source / network-policy / helm-release-signature, all
+    /// unit-form) alongside the chart record's provenance probe
+    /// (helm-provenance, struct-form) and the image record's cosign
+    /// probe (cosign, struct-form). The filter-count of two pins the
+    /// dyn-dispatch surface: a regression that broke object safety
+    /// would fail to compile this test.
+    #[test]
+    fn test_verified_outcome_is_object_safe_across_variant_shapes() {
+        let unit_verified = DummyVerifiedOutcome::Verified;
+        let unit_failed = DummyVerifiedOutcome::VerifyFailed;
+        let unit_absent = DummyVerifiedOutcome::ProbeAbsent;
+        let struct_verified = DummyVerifiedFieldsOutcome::Verified {
+            fingerprint: "sha256:xyz".to_string(),
+        };
+        let struct_unverified = DummyVerifiedFieldsOutcome::Unverified;
+        let outcomes: [&dyn VerifiedOutcome; 5] = [
+            &unit_verified,
+            &unit_failed,
+            &unit_absent,
+            &struct_verified,
+            &struct_unverified,
+        ];
+        let verified_count = outcomes.iter().filter(|o| o.is_verified()).count();
+        assert_eq!(
+            verified_count, 2,
+            "exactly two of five outcomes are Verified — the trait-\
+             object slice must count both the unit-form and struct-form \
+             verified arms uniformly without depending on the concrete \
+             implementor type"
+        );
+    }
+
+    /// Pin the orthogonal decomposition of the two structural
+    /// discriminators ([`ProbeOutcome::is_probe_absent`] and
+    /// [`VerifiedOutcome::is_verified`]) into a `(is_probe_absent,
+    /// is_verified)` two-bool pair. Three of the four matrix cells are
+    /// reachable: `(false, true)` for the `Verified` arm, `(false,
+    /// false)` for any non-absent non-verified arm (`VerifyFailed`,
+    /// `Unverified`), and `(true, false)` for the `ProbeAbsent` arm.
+    /// The fourth corner `(true, true)` — a probe that did not run yet
+    /// substantiated a positive verdict — is structurally unreachable
+    /// on every implementor and the test does not list it; any
+    /// regression that introduced a fourth-corner arm at any dummy
+    /// would fail at compile or at this pin.
+    #[test]
+    fn test_probe_absent_and_verified_decompose_orthogonally() {
+        let verified = DummyVerifiedOutcome::Verified;
+        let failed = DummyVerifiedOutcome::VerifyFailed;
+        let absent = DummyVerifiedOutcome::ProbeAbsent;
+
+        assert_eq!(
+            (
+                verified.is_probe_absent(),
+                VerifiedOutcome::is_verified(&verified)
+            ),
+            (false, true),
+            "Verified arm: probe ran AND substantiated positive verdict"
+        );
+        assert_eq!(
+            (
+                failed.is_probe_absent(),
+                VerifiedOutcome::is_verified(&failed)
+            ),
+            (false, false),
+            "VerifyFailed arm: probe ran AND substantiated negative verdict"
+        );
+        assert_eq!(
+            (
+                absent.is_probe_absent(),
+                VerifiedOutcome::is_verified(&absent)
+            ),
+            (true, false),
+            "ProbeAbsent arm: no probe ran AND no verdict"
         );
     }
 }
