@@ -897,6 +897,102 @@ where
     ProbeCoverage { ran, absent }
 }
 
+/// Verification-coverage summary: count of verification-bearing probe
+/// outcomes that substantiated a positive verification verdict
+/// ([`VerifiedOutcome::is_verified`] returned `true`) vs. count that did
+/// not. The orthogonal-axis peer of [`ProbeCoverage`]: where
+/// `ProbeCoverage` summarizes the no-evidence dimension over the full
+/// seventeen-outcome attestation pipeline (every typed outcome
+/// implements [`ProbeOutcome`]), `VerificationCoverage` summarizes the
+/// verification-trustworthiness dimension over the five-outcome
+/// `Verified`-bearing subset (only the [`VerifiedOutcome`] implementors:
+/// `FluxSourceVerificationOutcome`, `HelmReleaseSignatureOutcome`,
+/// `NetworkPolicyAdmissionOutcome`, `HelmProvenanceOutcome`,
+/// `CosignVerifyOutcome`).
+///
+/// The `unverified` field counts every non-verified arm uniformly — the
+/// negative-verdict arms (`VerifyFailed`, `Unverified`, `Unsigned`) and
+/// the absent-probe arm (`ProbeAbsent`) collapse together at this
+/// surface, because the only signal a `&dyn VerifiedOutcome` exposes is
+/// the bare `is_verified()` bool. A future commit that wants to recover
+/// the (negative-verdict / absent-probe) split walks the same slice
+/// through the `&dyn ProbeOutcome` peer trait and joins on the
+/// `(is_probe_absent, is_verified)` two-bool decomposition the
+/// orthogonality test [`tests::test_probe_absent_and_verified_decompose_
+/// orthogonally`] pins.
+///
+/// THEORY.md §VI.1 one-oracle discipline: the verification-coverage
+/// summary is derived at one site (here), not re-inlined as a per-
+/// implementor `match` at every consumer of the verification-bearing
+/// subset. THEORY.md §V.4 / §VII.1 honesty channel: the
+/// `verified / unverified` split is the typed-primitive surface a
+/// downstream `sekiban` strict-production admission verifier reads
+/// alongside the [`ProbeCoverage`] signal — a record can carry full
+/// probe coverage (`ran == 7, absent == 0`) AND partial verification
+/// coverage (`verified == 2, unverified == 1`), where the two
+/// orthogonal signals expose two distinct failure modes the
+/// `compose_product_certification` call site otherwise flattens.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VerificationCoverage {
+    /// Number of verification-bearing outcomes whose `is_verified()`
+    /// returned `true` — the probe ran AND substantiated a positive
+    /// verification verdict.
+    pub verified: usize,
+    /// Number of verification-bearing outcomes whose `is_verified()`
+    /// returned `false` — the structural complement, which collapses
+    /// every negative-verdict arm (`VerifyFailed`, `Unverified`,
+    /// `Unsigned`) and the absent-probe arm (`ProbeAbsent`) into a
+    /// single count at this surface.
+    pub unverified: usize,
+}
+
+#[allow(dead_code)]
+impl VerificationCoverage {
+    /// Total number of verification-bearing outcomes counted. The
+    /// invariant `verified + unverified == total` holds by construction.
+    /// Arithmetic is `usize::saturating_add` rather than the panicking
+    /// `+` — symmetric to [`ProbeCoverage::total`], which carries the
+    /// same monoid-totality claim a future
+    /// [`std::ops::Add`] impl on [`VerificationCoverage`] would compose
+    /// with.
+    pub fn total(&self) -> usize {
+        self.verified.saturating_add(self.unverified)
+    }
+}
+
+/// Walk a slice of `&dyn VerifiedOutcome` references and compute the
+/// verification-coverage summary — the count of probes that
+/// substantiated a positive verification verdict vs. the count that did
+/// not. Linear in the slice length, no allocation. The
+/// verification-trustworthiness peer of [`probe_coverage`]: the two
+/// helpers walk orthogonal dimensions of the typed-outcome family (the
+/// no-evidence dimension at [`ProbeOutcome::is_probe_absent`] for
+/// `probe_coverage`, the verification-trustworthiness dimension at
+/// [`VerifiedOutcome::is_verified`] for `verification_coverage`), so a
+/// downstream `compose_product_certification` call site collects both
+/// summaries against the same record without re-deriving the
+/// discriminators per consumer.
+#[allow(dead_code)]
+pub fn verification_coverage<'a, I>(outcomes: I) -> VerificationCoverage
+where
+    I: IntoIterator<Item = &'a dyn VerifiedOutcome>,
+{
+    let mut verified = 0usize;
+    let mut unverified = 0usize;
+    for outcome in outcomes {
+        if outcome.is_verified() {
+            verified += 1;
+        } else {
+            unverified += 1;
+        }
+    }
+    VerificationCoverage {
+        verified,
+        unverified,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2446,6 +2542,230 @@ mod tests {
             ),
             (true, false),
             "ProbeAbsent arm: no probe ran AND no verdict"
+        );
+    }
+
+    /// `verification_coverage` over an empty slice returns
+    /// `VerificationCoverage { verified: 0, unverified: 0 }` —
+    /// structurally equal to `VerificationCoverage::default()`. The
+    /// boundary case a future
+    /// `compose_product_certification` call site may surface during
+    /// integration-test paths where no `Verified`-bearing typed outcomes
+    /// were materialized. Mirrors
+    /// [`test_probe_coverage_empty_slice`] one helper over.
+    #[test]
+    fn test_verification_coverage_empty_slice() {
+        let outcomes: [&dyn VerifiedOutcome; 0] = [];
+        let coverage = verification_coverage(outcomes.iter().copied());
+        assert_eq!(
+            coverage,
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0
+            }
+        );
+        assert_eq!(coverage, VerificationCoverage::default());
+        assert_eq!(coverage.total(), 0);
+    }
+
+    /// `verification_coverage` counts the verified vs. unverified split
+    /// correctly across a heterogeneous slice that mixes both the
+    /// unit-variant dummy (`Verified` / `VerifyFailed` / `ProbeAbsent`)
+    /// and the struct-variant dummy
+    /// (`Verified { fingerprint }` / `Unverified` / `VerifyFailed` /
+    /// `ProbeAbsent`) through the `&dyn VerifiedOutcome` trait-object
+    /// form — pins that the helper walks the trait-object surface
+    /// uniformly across both variant shapes, exactly as the future
+    /// `compose_product_certification` call site walks the
+    /// `FluxSourceVerificationOutcome` / `HelmReleaseSignatureOutcome`
+    /// / `NetworkPolicyAdmissionOutcome` (unit form) alongside the
+    /// `HelmProvenanceOutcome` / `CosignVerifyOutcome` (struct form).
+    /// Two of five outcomes are `Verified`, three are not.
+    #[test]
+    fn test_verification_coverage_mixed_slice() {
+        let unit_verified = DummyVerifiedOutcome::Verified;
+        let unit_failed = DummyVerifiedOutcome::VerifyFailed;
+        let unit_absent = DummyVerifiedOutcome::ProbeAbsent;
+        let struct_verified = DummyVerifiedFieldsOutcome::Verified {
+            fingerprint: "sha256:abc".to_string(),
+        };
+        let struct_unverified = DummyVerifiedFieldsOutcome::Unverified;
+        let outcomes: [&dyn VerifiedOutcome; 5] = [
+            &unit_verified,
+            &unit_failed,
+            &unit_absent,
+            &struct_verified,
+            &struct_unverified,
+        ];
+        let coverage = verification_coverage(outcomes.iter().copied());
+        assert_eq!(
+            coverage,
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3
+            }
+        );
+        assert_eq!(coverage.total(), 5);
+    }
+
+    /// `verification_coverage` counts `VerificationCoverage { verified:
+    /// N, unverified: 0 }` when every outcome substantiated a positive
+    /// verification verdict — the all-verified ceiling the
+    /// strict-production `sekiban` admission gate fails-closed against.
+    /// Mirrors [`test_probe_coverage_all_ran`] one helper over.
+    #[test]
+    fn test_verification_coverage_all_verified() {
+        let a = DummyVerifiedOutcome::Verified;
+        let b = DummyVerifiedOutcome::Verified;
+        let c = DummyVerifiedFieldsOutcome::Verified {
+            fingerprint: "sha256:xyz".to_string(),
+        };
+        let outcomes: [&dyn VerifiedOutcome; 3] = [&a, &b, &c];
+        let coverage = verification_coverage(outcomes.iter().copied());
+        assert_eq!(
+            coverage,
+            VerificationCoverage {
+                verified: 3,
+                unverified: 0
+            }
+        );
+        assert_eq!(coverage.total(), 3);
+    }
+
+    /// `verification_coverage` counts `VerificationCoverage { verified:
+    /// 0, unverified: N }` when no outcome substantiated a positive
+    /// verdict — pins the structural collapse of the negative-verdict
+    /// arms (`VerifyFailed`, `Unverified`) and the absent-probe arm
+    /// (`ProbeAbsent`) into the single `unverified` count at this
+    /// surface, the documented behavior of the bare-bool
+    /// [`VerifiedOutcome::is_verified`] discriminator. A consumer that
+    /// wants to recover the (negative-verdict / absent-probe) split
+    /// walks the same slice through the `&dyn ProbeOutcome` peer trait
+    /// and joins on the `(is_probe_absent, is_verified)` two-bool
+    /// decomposition the
+    /// [`test_probe_absent_and_verified_decompose_orthogonally`]
+    /// pin documents.
+    #[test]
+    fn test_verification_coverage_all_unverified() {
+        let failed = DummyVerifiedOutcome::VerifyFailed;
+        let absent = DummyVerifiedOutcome::ProbeAbsent;
+        let struct_unverified = DummyVerifiedFieldsOutcome::Unverified;
+        let outcomes: [&dyn VerifiedOutcome; 3] = [&failed, &absent, &struct_unverified];
+        let coverage = verification_coverage(outcomes.iter().copied());
+        assert_eq!(
+            coverage,
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3
+            }
+        );
+        assert_eq!(coverage.total(), 3);
+    }
+
+    /// `VerificationCoverage::total` saturates at `usize::MAX` rather
+    /// than panicking — the monoid totality claim a future
+    /// [`std::ops::Add`] impl on [`VerificationCoverage`] will compose
+    /// with, symmetric to the saturating ceiling
+    /// [`ProbeCoverage::total`] upholds. The post-ceiling state
+    /// `VerificationCoverage { verified: usize::MAX, unverified:
+    /// usize::MAX }` returns `usize::MAX` here, not a panic in debug or
+    /// a silent wrap in release. The three load-bearing
+    /// representative arms exercised mirror the
+    /// [`test_total_saturates_at_usize_max`] sibling against
+    /// `ProbeCoverage`.
+    #[test]
+    fn test_verification_coverage_total_saturates_at_usize_max() {
+        let saturated_both = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: usize::MAX,
+        };
+        assert_eq!(saturated_both.total(), usize::MAX);
+
+        let saturated_verified_only = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 1,
+        };
+        assert_eq!(saturated_verified_only.total(), usize::MAX);
+
+        let saturated_unverified_only = VerificationCoverage {
+            verified: 1,
+            unverified: usize::MAX,
+        };
+        assert_eq!(saturated_unverified_only.total(), usize::MAX);
+    }
+
+    /// Pin the orthogonal-axis composition: the same heterogeneous slice
+    /// of `Verified`-bearing typed outcomes can be walked through BOTH
+    /// the [`probe_coverage`] helper (over `&dyn ProbeOutcome` — the
+    /// no-evidence dimension) AND the [`verification_coverage`] helper
+    /// (over `&dyn VerifiedOutcome` — the
+    /// verification-trustworthiness dimension), and the two summaries
+    /// carry orthogonal-but-related counts:
+    ///
+    /// - `ProbeCoverage::total() == VerificationCoverage::total()` —
+    ///   both helpers count every element of the slice exactly once;
+    /// - `ProbeCoverage::absent == count(ProbeAbsent arm)`; the
+    ///   `VerificationCoverage::unverified` count INCLUDES that absent
+    ///   count and ADDS the negative-verdict count on top, by the
+    ///   `(false, true)` corner being unreachable on every
+    ///   `Verified`-bearing implementor — `ProbeCoverage::ran ==
+    ///   VerificationCoverage::verified + (count of probes that ran
+    ///   but failed verification)`.
+    ///
+    /// The five-outcome slice from
+    /// [`test_verification_coverage_mixed_slice`] exercises every
+    /// reachable corner of the `(is_probe_absent, is_verified)`
+    /// two-bool matrix:
+    /// - `(false, true)`: 2 verified (`unit_verified`,
+    ///   `struct_verified`)
+    /// - `(false, false)`: 2 ran-but-failed (`unit_failed`,
+    ///   `struct_unverified`)
+    /// - `(true, false)`: 1 absent (`unit_absent`)
+    /// - `(true, true)`: structurally unreachable
+    ///
+    /// So the slice surfaces `ProbeCoverage { ran: 4, absent: 1 }` AND
+    /// `VerificationCoverage { verified: 2, unverified: 3 }` and the
+    /// two totals agree at `5`.
+    #[test]
+    fn test_probe_and_verification_coverage_compose_orthogonally() {
+        let unit_verified = DummyVerifiedOutcome::Verified;
+        let unit_failed = DummyVerifiedOutcome::VerifyFailed;
+        let unit_absent = DummyVerifiedOutcome::ProbeAbsent;
+        let struct_verified = DummyVerifiedFieldsOutcome::Verified {
+            fingerprint: "sha256:abc".to_string(),
+        };
+        let struct_unverified = DummyVerifiedFieldsOutcome::Unverified;
+
+        let probe_outcomes: [&dyn ProbeOutcome; 5] = [
+            &unit_verified,
+            &unit_failed,
+            &unit_absent,
+            &struct_verified,
+            &struct_unverified,
+        ];
+        let verified_outcomes: [&dyn VerifiedOutcome; 5] = [
+            &unit_verified,
+            &unit_failed,
+            &unit_absent,
+            &struct_verified,
+            &struct_unverified,
+        ];
+
+        let probe = probe_coverage(probe_outcomes.iter().copied());
+        let verification = verification_coverage(verified_outcomes.iter().copied());
+
+        assert_eq!(probe, ProbeCoverage { ran: 4, absent: 1 });
+        assert_eq!(
+            verification,
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3
+            }
+        );
+        assert_eq!(
+            probe.total(),
+            verification.total(),
+            "both helpers count every element of the slice exactly once"
         );
     }
 }
