@@ -1093,15 +1093,15 @@ impl VerificationCoverage {
     /// via the saturating monoid [`Add`](std::ops::Add) impl), the true
     /// 0.5 ratio reads as 1.0 through the f64 division because [`total`]
     /// saturates at `usize::MAX` and the division collapses against the
-    /// clamped ceiling. A future [`is_saturated`]-style flag (peer of
-    /// [`ProbeCoverage::is_saturated`]) is the load-bearing
-    /// trustworthiness signal a downstream verifier reads alongside
-    /// this field; gating on
+    /// clamped ceiling. The orthogonal [`is_saturated`] flag — peer of
+    /// [`ProbeCoverage::is_saturated`] at the verification axis — is the
+    /// load-bearing trustworthiness signal a downstream verifier reads
+    /// alongside this field; gating on
     /// `!is_saturated() && verification_ratio() >= 0.9` forecloses the
     /// post-saturation drift at the typed-primitive surface the same
     /// way the [`ProbeCoverage`] analogue already does.
     ///
-    /// [`is_saturated`]: ProbeCoverage::is_saturated
+    /// [`is_saturated`]: VerificationCoverage::is_saturated
     /// [`total`]: VerificationCoverage::total
     pub fn verification_ratio(&self) -> f64 {
         let total = self.total();
@@ -1110,6 +1110,74 @@ impl VerificationCoverage {
         } else {
             self.verified as f64 / total as f64
         }
+    }
+
+    /// True iff at least one component has reached the saturating-add
+    /// ceiling — `verified == usize::MAX || unverified == usize::MAX`.
+    /// The orthogonal-axis peer of [`ProbeCoverage::is_saturated`]: the
+    /// typed-primitive trustworthiness flag a downstream `sekiban`
+    /// admission verifier reads to know the derived [`verification_ratio`]
+    /// is unreliable. At every state this predicate returns `true`, the
+    /// float division `verified as f64 / total() as f64` has dropped at
+    /// least one true increment past the saturating clamp the monoid
+    /// [`Add`](std::ops::Add) impl admits — the post-saturation state
+    /// `{verified: usize::MAX, unverified: usize::MAX}` reads as
+    /// `verification_ratio() == 1.0` against the true 0.5 ratio, exactly
+    /// the drift class [`ProbeCoverage::is_saturated`] forecloses at the
+    /// no-evidence axis.
+    ///
+    /// When the flag is `true`, the verifier falls back on the
+    /// saturation-robust [`is_fully_verified`] (`unverified == 0` is the
+    /// load-bearing test, not arithmetic on the sum) and [`is_empty`]
+    /// (`total() == 0` is `false` at every saturated state since both
+    /// components are non-negative and at least one is `usize::MAX`)
+    /// discriminators. Symmetric to [`ProbeCoverage::is_saturated`]'s
+    /// fallback to [`ProbeCoverage::is_fully_covered`] /
+    /// [`ProbeCoverage::is_empty`] one impl group up.
+    ///
+    /// Orthogonal to the four-arm matrix the docstring on
+    /// [`is_fully_verified`] tabulates: every reachable
+    /// `VerificationCoverage` value sits at exactly one arm of `(is_empty,
+    /// is_fully_verified, mixed, all-unverified)`, but every arm can
+    /// independently be saturated or unsaturated. The empty arm
+    /// `{verified: 0, unverified: 0}` is the only arm that is
+    /// structurally unsaturated (both components are 0, neither at
+    /// `usize::MAX`); the three non-empty arms each admit both a
+    /// saturated and an unsaturated representative. Mirrors the
+    /// [`ProbeCoverage::is_saturated`] orthogonality at the no-evidence
+    /// axis exactly.
+    ///
+    /// The strict-production admission gate the [`is_fully_verified`]
+    /// docstring named as a future composition reads
+    /// `!is_saturated() && is_fully_verified()` against the two flags
+    /// — the same two-bool conjunction
+    /// [`ProbeCoverage::is_admission_eligible_strict`] lifts at the
+    /// no-evidence axis. A future `VerificationCoverage::
+    /// is_admission_eligible_strict` peer (mirror of
+    /// [`ProbeCoverage::is_admission_eligible_strict`]) is the natural
+    /// follow-up, lifting the two-bool conjunction here to one typed
+    /// primitive at the verification axis.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the saturation predicate
+    /// is derived at one site (here), not re-inlined as
+    /// `verification.verified == usize::MAX || verification.unverified
+    /// == usize::MAX` per downstream telemetry consumer. THEORY.md
+    /// §V.4 / §VII.1 honesty channel: the verification-axis honesty
+    /// signal surfaces both the verification ratio AND its
+    /// trustworthiness — a downstream verifier that gated only on
+    /// `verification_ratio() >= 0.9` would silently accept the
+    /// `{verified: MAX, unverified: MAX}` post-saturation state (true
+    /// 0.5 ratio reading as 1.0); gating on `!is_saturated() &&
+    /// verification_ratio() >= 0.9` instead forecloses that drift
+    /// class at the typed-primitive surface, mirroring
+    /// [`ProbeCoverage::is_saturated`]'s discipline at the orthogonal
+    /// axis.
+    ///
+    /// [`is_empty`]: VerificationCoverage::is_empty
+    /// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
+    /// [`verification_ratio`]: VerificationCoverage::verification_ratio
+    pub fn is_saturated(&self) -> bool {
+        self.verified == usize::MAX || self.unverified == usize::MAX
     }
 }
 
@@ -3618,5 +3686,181 @@ mod tests {
         let first = coverage.verification_ratio();
         let second = coverage.verification_ratio();
         assert_eq!(first.to_bits(), second.to_bits());
+    }
+
+    /// `is_saturated()` returns `true` at every state where at least one
+    /// component has hit the saturating-add ceiling `usize::MAX`. Pinned
+    /// across the five reachable saturated arms — `verified` only
+    /// saturated, `unverified` only saturated, both at the ceiling, and
+    /// the asymmetric `(MAX, N)` / `(N, MAX)` representatives — so a
+    /// future regression that hardcoded the predicate to one component
+    /// would fail against the others. Mirrors the
+    /// [`test_is_saturated_at_any_component_max_is_true`] pin at the
+    /// orthogonal axis. The typed-primitive flag a downstream `sekiban`
+    /// admission verifier reads alongside `verification_ratio()` to know
+    /// the derived ratio is unreliable: at every state this predicate
+    /// returns `true`, the float division `verified as f64 / total() as
+    /// f64` has dropped at least one true increment past the saturating
+    /// clamp.
+    #[test]
+    fn test_verification_is_saturated_at_any_component_max_is_true() {
+        assert!(VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        }
+        .is_saturated());
+        assert!(VerificationCoverage {
+            verified: 0,
+            unverified: usize::MAX,
+        }
+        .is_saturated());
+        assert!(VerificationCoverage {
+            verified: usize::MAX,
+            unverified: usize::MAX,
+        }
+        .is_saturated());
+        assert!(VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 42,
+        }
+        .is_saturated());
+        assert!(VerificationCoverage {
+            verified: 42,
+            unverified: usize::MAX,
+        }
+        .is_saturated());
+    }
+
+    /// `is_saturated()` returns `false` for every realistically-sized
+    /// `VerificationCoverage` value. Pinned across the four arms of the
+    /// matrix the docstring on [`VerificationCoverage::is_fully_verified`]
+    /// tabulates (empty, all-unverified, mixed, fully-verified) so a
+    /// future regression that flipped the predicate to a vacuous `true`
+    /// would fail every arm here. Symmetric to the saturated-true pin one
+    /// test up: the two pins together pin the boundary between the
+    /// saturated and unsaturated regions of `VerificationCoverage`
+    /// exactly at the component-MAX inflection. Mirrors
+    /// [`test_is_saturated_below_ceiling_is_false`] at the orthogonal
+    /// axis, with the four-arm shape adapted to the verification axis
+    /// (`{0, 0}` empty, `{0, 5}` all-unverified, `{2, 3}` mixed, `{3, 0}`
+    /// fully-verified) plus the just-below-ceiling pair the no-evidence
+    /// axis test also pins.
+    #[test]
+    fn test_verification_is_saturated_below_ceiling_is_false() {
+        assert!(!VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        }
+        .is_saturated());
+        assert!(!VerificationCoverage {
+            verified: 0,
+            unverified: 5,
+        }
+        .is_saturated());
+        assert!(!VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        }
+        .is_saturated());
+        assert!(!VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        }
+        .is_saturated());
+        assert!(!VerificationCoverage {
+            verified: usize::MAX - 1,
+            unverified: usize::MAX - 1,
+        }
+        .is_saturated());
+    }
+
+    /// `is_saturated()` is the load-bearing trustworthiness flag at the
+    /// `{verified: MAX, unverified: MAX}` post-saturation state where the
+    /// true ratio is 0.5 (every saturated component dropped equal evidence
+    /// past the ceiling), but `verification_ratio()` reads as `1.0` — the
+    /// f64 division `MAX as f64 / MAX as f64` rounds identically against
+    /// the IEEE-754 representation. A downstream verifier that gates only
+    /// on `verification_ratio() >= 0.5` would silently accept this state
+    /// as fully verified; the typed `is_saturated()` flag forces the
+    /// verifier through the trustworthiness predicate the f64 division
+    /// alone cannot surface. This pin is the structural witness for the
+    /// docstring's "honest-signal drift" claim — `is_saturated` is `true`
+    /// exactly at the state where `verification_ratio` is untrustworthy.
+    /// Mirrors [`test_is_saturated_flags_coverage_ratio_drift_at_
+    /// saturated_state`] at the orthogonal axis, with the additional
+    /// `is_fully_verified` / `is_empty` saturation-robustness arms
+    /// matching the `is_fully_covered` / `is_empty` shape one impl group
+    /// up.
+    #[test]
+    fn test_verification_is_saturated_flags_verification_ratio_drift_at_saturated_state() {
+        let saturated = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: usize::MAX,
+        };
+        assert!(saturated.is_saturated());
+        assert_eq!(saturated.verification_ratio(), 1.0);
+        assert!(!saturated.is_fully_verified());
+        assert!(!saturated.is_empty());
+    }
+
+    /// `is_saturated()` is reachable in finite steps from any unsaturated
+    /// starting point via the monoid `Add` — the saturating-add clamp at
+    /// the component level forecloses `usize::MAX` as an asymptotic limit
+    /// of repeated addition. Mirrors the
+    /// [`test_verification_add_saturates_at_usize_max`] pin one layer
+    /// over: the pin there proves the saturating clamp at the `Add` impl,
+    /// this pin proves the typed-primitive flag surfaces the resulting
+    /// state. Together they close the round-trip: a fleet-wide aggregator
+    /// summing per-record coverages via
+    /// `.iter().sum::<VerificationCoverage>()` reaches the saturated state
+    /// in finite steps, and the resulting telemetry record flags itself
+    /// as saturated through the typed predicate here. Mirrors
+    /// [`test_is_saturated_reached_through_monoid_add`] at the orthogonal
+    /// axis.
+    #[test]
+    fn test_verification_is_saturated_reached_through_monoid_add() {
+        let high = VerificationCoverage {
+            verified: usize::MAX - 3,
+            unverified: 0,
+        };
+        let increment = VerificationCoverage {
+            verified: 7,
+            unverified: 0,
+        };
+        let aggregate = high + increment;
+        assert_eq!(aggregate.verified, usize::MAX);
+        assert!(aggregate.is_saturated());
+        assert!(!high.is_saturated());
+    }
+
+    /// `is_saturated()` composes with the monoid `Add` shape exactly the
+    /// way a downstream fleet-wide aggregator depends on: summing a
+    /// saturated Phase 1 flux-source coverage with an unsaturated Phase 2
+    /// helm-provenance coverage produces a saturated aggregate (one
+    /// saturated component in any phase poisons the trustworthiness
+    /// signal). Mirrors the
+    /// [`test_is_saturated_propagates_under_monoid_add`] pin at the
+    /// orthogonal axis: a product certification's `verification_ratio()`
+    /// is trustworthy only when every phase is unsaturated.
+    #[test]
+    fn test_verification_is_saturated_propagates_under_monoid_add() {
+        let flux_saturated = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        let helm_release_normal = VerificationCoverage {
+            verified: 1,
+            unverified: 0,
+        };
+        let helm_provenance_normal = VerificationCoverage {
+            verified: 0,
+            unverified: 3,
+        };
+        assert!(flux_saturated.is_saturated());
+        assert!(!helm_release_normal.is_saturated());
+        assert!(!helm_provenance_normal.is_saturated());
+        assert!((flux_saturated + helm_release_normal).is_saturated());
+        assert!((helm_release_normal + helm_provenance_normal + flux_saturated).is_saturated());
+        assert!(!(helm_release_normal + helm_provenance_normal).is_saturated());
     }
 }
