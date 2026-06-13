@@ -1996,6 +1996,151 @@ pub fn compose_is_fully_complete(
     probe.is_fully_covered() && verification.is_fully_verified()
 }
 
+/// Parallel-composed any-axis-has-evidence predicate over the two
+/// orthogonal typed-primitive surfaces — the two-bool disjunction
+/// `probe.has_evidence() || verification.has_evidence()` collapsed to
+/// one bool at one site. Reads `true` iff AT LEAST ONE counted probe
+/// ran (no-evidence axis: `ran > 0`) OR AT LEAST ONE counted
+/// verification cleared (verification-trustworthiness axis: `verified
+/// > 0`) — the relaxed-staging admission precondition the fleet-wide
+/// gate consults across both orthogonal axes.
+///
+/// The structural completion of the parallel-axis compose family:
+/// where [`compose_admission_eligible_strict`] (commit 7d818bd) is the
+/// four-way conjunction "complete AND trustworthy on BOTH axes",
+/// [`compose_is_saturated`] (commit 2ea2240) is "untrustworthy on AT
+/// LEAST ONE axis", [`compose_is_empty`] (commit a50a371) is "vacuous
+/// on BOTH axes", and [`compose_is_fully_complete`] (commit 078826b)
+/// is "complete on BOTH axes", this is the relaxed admission factor
+/// "evidence on AT LEAST ONE axis" — the load-bearing precondition the
+/// fleet-wide relaxed-staging admission gate at `commands::attestation`
+/// reads to admit "any honest-positive arm surfaced on any orthogonal
+/// axis" vs. reject "every counted record on every axis collapsed to
+/// the no-evidence floor (absent / unverified) or the empty-boundary
+/// state". The five-member compose family now closes the structural
+/// arms the two-axis admission decomposition surfaces: AND of
+/// completeness, AND of strict admission, OR of saturation, AND of
+/// emptiness, OR of has-evidence.
+///
+/// Disjunction (not conjunction) is structurally load-bearing here:
+/// has-evidence is the OR of per-axis has-evidence — evidence on
+/// EITHER axis is enough to admit the relaxed precondition. A
+/// regression that composed the conjunction `probe.has_evidence() &&
+/// verification.has_evidence()` would silently reject the
+/// one-axis-evidenced state as no-evidence (the drift class this
+/// helper exists to foreclose), suppressing the relaxed-staging
+/// admission gate at every state where only one axis has surfaced
+/// positive evidence — the typical Phase 1 / Phase 2 partial-progress
+/// state the relaxed gate exists to admit.
+///
+/// The orthogonal-axis peer of the two per-axis [`has_evidence`]
+/// predicates: where each per-axis predicate collapses the `ran > 0`
+/// / `verified > 0` boundary at one orthogonal axis to one bool at
+/// the typed-primitive surface, this collapses the two-bool axis-
+/// level disjunction `probe.has_evidence() ||
+/// verification.has_evidence()` across both axes to one bool at one
+/// site. A downstream consumer emitting an aggregate-has-evidence
+/// telemetry field across both axes (the natural follow-up to the
+/// per-axis `*_probes_have_evidence` /
+/// `*_verifications_have_evidence` fields the `emit_probe_coverage!`
+/// macro family will extend) reads one bool —
+/// `compose_has_evidence(&probe, &verification)` — rather than
+/// composing the two-bool per-axis surface at every consumer. Before
+/// this helper, every aggregate-has-evidence emitter had to retype
+/// the two-bool consumer composition (with the drift class a
+/// regression that conjuncted the per-axis flags silently rejects the
+/// one-axis-evidenced state as no-evidence); after this helper, the
+/// emitter reads one bool and the parallel-axis composition is sealed
+/// at the typed-primitive surface so a future third orthogonal axis
+/// (e.g., a compliance-dimensions axis the
+/// [`crate::compliance_dimensions`] family hints at) extends the
+/// composition here, not at every downstream consumer in lockstep.
+///
+/// The load-bearing structural relation
+/// `compose_has_evidence(p, v) == !(p.is_empty() && v.is_empty()) ==
+/// !compose_is_empty(p, v)` does NOT hold in general — `has_evidence`
+/// is the strictly stronger discriminator: at the all-absent /
+/// all-unverified states (`{ran: 0, absent: N}` /
+/// `{verified: 0, unverified: M}`, both `N > 0` and `M > 0`),
+/// `compose_is_empty` reads `false` (records counted on both axes)
+/// but `compose_has_evidence` also reads `false` (zero
+/// honest-positive arms surfaced). The distinction is the
+/// load-bearing reason this helper exists separately from
+/// `!compose_is_empty`: the relaxed-staging gate admits only on
+/// positive evidence, not on the presence of any record (including
+/// every-absent records that, structurally, do NOT clear the
+/// admission gate at any tier). Pinned at
+/// [`tests::test_compose_has_evidence_strictly_stronger_than_not_empty`].
+///
+/// Saturation-robust by construction: each per-axis `has_evidence()`
+/// reads its `ran` / `verified` component itself, not against any
+/// derived ratio. At the post-saturation arm `{ran: usize::MAX,
+/// absent: 0}` / `{verified: usize::MAX, unverified: 0}` the
+/// composition correctly reads `true` (every counted record — even
+/// the dropped past-ceiling increments — surfaced its honest-positive
+/// arm on at least one axis). At the inverse-saturation arm
+/// `{ran: 0, absent: usize::MAX}` / `{verified: 0, unverified:
+/// usize::MAX}` paired with the empty opposite axis, the composition
+/// correctly reads `false` (no counted record surfaced its
+/// honest-positive arm on either axis). The saturated-but-rolled
+/// drift class is foreclosed at the typed-primitive surface, mirroring
+/// the discipline [`compose_is_empty`] and [`compose_is_fully_complete`]
+/// already establish for the structural complements.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented two-axis composition exactly — the
+/// structural equivalence
+/// `compose_has_evidence(p, v) == (p.has_evidence() ||
+/// v.has_evidence())`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_has_evidence_equals_documented_composition`].
+///
+/// THEORY.md §VI.1 one-oracle discipline: the two-axis
+/// any-axis-has-evidence disjunction is derived at one site (here),
+/// not re-inlined as `probe.has_evidence() ||
+/// verification.has_evidence()` per downstream consumer (which would
+/// inherit a drift class on the day a third orthogonal axis is added
+/// — every consumer would need to extend their composition in
+/// lockstep, exactly the structural seam this helper forecloses,
+/// mirroring the discipline [`compose_admission_eligible_strict`],
+/// [`compose_is_saturated`], [`compose_is_empty`], and
+/// [`compose_is_fully_complete`] already established for the
+/// complementary gates). THEORY.md §V.4 / §VII.1 honesty channel: the
+/// aggregate-has-evidence surface reads one bool naming "at least one
+/// counted record on at least one orthogonal axis surfaced its
+/// honest-positive arm," the load-bearing relaxed-staging admission
+/// precondition the fleet-wide gate consults before integrating the
+/// strict gate's completeness AND trustworthiness factors. The
+/// decomposition pin `is_fully_complete => has_evidence` (every
+/// both-axes-complete state strictly carries evidence on at least one
+/// axis, since completeness on either axis implies `ran > 0` or
+/// `verified > 0` on that axis) seals the relaxed-vs-strict ordering
+/// at the composed-axis surface.
+///
+/// Frontier lineage: Bazel's `--build_event_stream` / Buck2's
+/// build-event surface emit a per-axis "any action completed
+/// successfully" relaxed event distinct from the strict "every action
+/// completed successfully" event the fully-complete reading carries;
+/// the per-axis relaxed gate consults the "any" event across the
+/// composed axes the same way `compose_has_evidence` lifts here.
+/// SLSA L3+'s provenance gate distinguishes "at least one required
+/// attestation present" (the relaxed precondition the gate reads
+/// first to detect any progress toward the attestation requirement)
+/// from "every required attestation present" (the strict admission
+/// reading); this helper lifts the same relaxed-vs-strict
+/// decomposition across the two-axis typed-primitive surface.
+/// Sigstore's policy controller surfaces "at least one matched
+/// attestation cleared" as a distinct relaxed reading before
+/// integrating the strict "every matched attestation cleared" gate;
+/// this helper lifts the same discipline across the two-axis
+/// composition.
+///
+/// [`has_evidence`]: ProbeCoverage::has_evidence
+#[allow(dead_code)]
+pub fn compose_has_evidence(probe: &ProbeCoverage, verification: &VerificationCoverage) -> bool {
+    probe.has_evidence() || verification.has_evidence()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6448,5 +6593,397 @@ mod tests {
         assert!(saturated_both.has_evidence());
         assert!(saturated_both.is_saturated());
         assert!(!saturated_both.is_fully_verified());
+    }
+
+    /// Parallel-composed any-axis-has-evidence predicate reads `true`
+    /// at every state where at least one orthogonal axis has surfaced
+    /// a counted honest-positive arm. Pins the load-bearing relaxed-
+    /// staging admission precondition: the composition admits as soon
+    /// as `ran > 0` OR `verified > 0` on either axis. Walks the cross
+    /// product of the three per-axis evidenced representatives (mixed,
+    /// fully-covered/fully-verified small, saturated-but-honest
+    /// `usize::MAX`) against the four per-axis representatives
+    /// (empty, no-evidence floor, mixed, fully-positive) on the
+    /// opposite axis — at every cross-product cell where at least one
+    /// axis carries evidence, the composition admits. A regression
+    /// that returned the conjunction would over-reject the
+    /// one-axis-evidenced states at the cells the
+    /// no-evidence-opposite-axis arms pair against.
+    #[test]
+    fn test_compose_has_evidence_at_any_axis_evidence_arm_is_true() {
+        let probe_evidenced = [
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        let verification_opposites = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_evidenced {
+            for verification in verification_opposites {
+                assert!(
+                    compose_has_evidence(&probe, &verification),
+                    "probe-axis evidence must admit the relaxed-staging \
+                     precondition at probe={probe:?} \
+                     verification={verification:?} — a regression that \
+                     returned the conjunction would erroneously reject \
+                     the one-axis-evidenced state and suppress the \
+                     relaxed admission gate",
+                );
+            }
+        }
+        let verification_evidenced = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        let probe_opposites = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 5 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        for verification in verification_evidenced {
+            for probe in probe_opposites {
+                assert!(
+                    compose_has_evidence(&probe, &verification),
+                    "verification-axis evidence must admit the relaxed-\
+                     staging precondition at probe={probe:?} \
+                     verification={verification:?} — a regression that \
+                     returned the conjunction would erroneously reject \
+                     the one-axis-evidenced state and suppress the \
+                     relaxed admission gate",
+                );
+            }
+        }
+    }
+
+    /// Parallel-composed any-axis-has-evidence predicate rejects every
+    /// no-evidence-on-both-axes state — the two structural arms where
+    /// `compose_has_evidence` must read `false`: the both-empty
+    /// boundary `({ran: 0, absent: 0}, {verified: 0, unverified: 0})`
+    /// and the both-no-evidence floor (all-absent probe paired with
+    /// all-unverified verification). Pins the load-bearing
+    /// fail-closed boundary the relaxed-staging admission gate fails-
+    /// closed against — at these states, zero counted record on
+    /// either axis surfaced a positive arm, so the relaxed
+    /// precondition has nothing to admit. Walks the small / medium /
+    /// large representatives of each no-evidence arm so the
+    /// fail-closed reading is pinned across the realistic count
+    /// scales.
+    #[test]
+    fn test_compose_has_evidence_at_no_evidence_arms_is_false() {
+        let empty_probe = ProbeCoverage { ran: 0, absent: 0 };
+        let empty_verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert!(
+            !compose_has_evidence(&empty_probe, &empty_verification),
+            "both-axes-empty boundary must read no-evidence at \
+             ({empty_probe:?}, {empty_verification:?}) — the \
+             fail-closed boundary the relaxed-staging admission gate \
+             rejects",
+        );
+
+        let probe_no_evidence = [
+            ProbeCoverage { ran: 0, absent: 1 },
+            ProbeCoverage { ran: 0, absent: 5 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_no_evidence = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 1,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_no_evidence {
+            for verification in verification_no_evidence {
+                assert!(
+                    !compose_has_evidence(&probe, &verification),
+                    "both-axes-no-evidence floor must read no-evidence \
+                     at probe={probe:?} verification={verification:?} \
+                     — zero counted record on either axis surfaced an \
+                     honest-positive arm; the relaxed-staging \
+                     admission gate fails closed",
+                );
+            }
+        }
+    }
+
+    /// Structural equivalence with the documented two-axis consumer
+    /// composition `probe.has_evidence() ||
+    /// verification.has_evidence()`. Pins the one-oracle invariant the
+    /// typed primitive carries — a regression that hand-rolled the
+    /// body (e.g., returned the conjunction `probe.has_evidence() &&
+    /// verification.has_evidence()`, which would silently reject the
+    /// one-axis-evidenced state, the drift class this helper exists
+    /// to foreclose) would fail at the corresponding
+    /// one-axis-evidenced cells where the divergent composition
+    /// decouples. Walks the cross product of four per-axis
+    /// representatives (empty, all-absent/all-unverified, mixed,
+    /// fully-covered/fully-verified) so every (probe-arm ×
+    /// verification-arm) cell is pinned against the documented
+    /// composition.
+    #[test]
+    fn test_compose_has_evidence_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 5 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_has_evidence(&probe, &verification);
+                let composed = probe.has_evidence() || verification.has_evidence();
+                assert_eq!(
+                    direct, composed,
+                    "typed-primitive composition must equal the \
+                     documented two-axis consumer composition at \
+                     probe={probe:?} verification={verification:?} — \
+                     a regression that replaced the disjunction with a \
+                     conjunction would fail this pin at the \
+                     one-axis-evidenced cells",
+                );
+            }
+        }
+    }
+
+    /// The `compose_has_evidence` predicate is the strictly stronger
+    /// discriminator over `!compose_is_empty`: there exist
+    /// `(probe, verification)` pairs where `!compose_is_empty(p, v)`
+    /// reads `true` (records counted on at least one axis) but
+    /// `compose_has_evidence(p, v)` reads `false` (zero honest-
+    /// positive arms surfaced on either axis). The all-absent-floor /
+    /// all-unverified-floor pair is the structural witness — both
+    /// axes carry counted records but every record surfaced its
+    /// no-evidence arm. Pins the load-bearing distinction the helper
+    /// exists to seal at the typed-primitive surface: the relaxed
+    /// admission gate admits only on positive evidence, not on the
+    /// mere presence of any record. A regression that conflated the
+    /// two surfaces (e.g., defined `compose_has_evidence` as
+    /// `!compose_is_empty`) would silently admit the both-no-evidence
+    /// state and over-emit the relaxed admission verdict at the load-
+    /// bearing fail-closed boundary.
+    #[test]
+    fn test_compose_has_evidence_strictly_stronger_than_not_empty() {
+        let probe_no_evidence = ProbeCoverage { ran: 0, absent: 3 };
+        let verification_no_evidence = VerificationCoverage {
+            verified: 0,
+            unverified: 5,
+        };
+        assert!(
+            !compose_is_empty(&probe_no_evidence, &verification_no_evidence),
+            "all-absent-floor + all-unverified-floor pair is NOT \
+             vacuous at ({probe_no_evidence:?}, \
+             {verification_no_evidence:?}) — records counted on both \
+             axes",
+        );
+        assert!(
+            !compose_has_evidence(&probe_no_evidence, &verification_no_evidence),
+            "all-absent-floor + all-unverified-floor pair has NO \
+             evidence at ({probe_no_evidence:?}, \
+             {verification_no_evidence:?}) — zero honest-positive arms \
+             surfaced; `compose_has_evidence` is the strictly stronger \
+             discriminator than `!compose_is_empty`",
+        );
+
+        let probe_evidence_only = ProbeCoverage { ran: 0, absent: 3 };
+        let verification_evidence = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        assert!(compose_has_evidence(
+            &probe_evidence_only,
+            &verification_evidence
+        ));
+        assert!(!compose_is_empty(
+            &probe_evidence_only,
+            &verification_evidence
+        ));
+    }
+
+    /// The load-bearing relaxed-vs-strict ordering pin: every
+    /// both-axes-complete state strictly carries evidence on at least
+    /// one axis. Pins the implication
+    /// `compose_is_fully_complete(p, v) => compose_has_evidence(p, v)`
+    /// across the cross product of the three per-axis honest fully-
+    /// covered probe representatives × three per-axis honest fully-
+    /// verified verification representatives — at every both-axes-
+    /// complete cell, the relaxed precondition also admits, so the
+    /// strict-and-relaxed gate composition `strict || has_evidence`
+    /// degenerates to `has_evidence` over the strict-admitted subset.
+    /// A regression that broke either compose helper's structural
+    /// reading (e.g., a body that decoupled `has_evidence` from the
+    /// `ran > 0` / `verified > 0` per-axis components) would fail
+    /// this pin at the both-axes-complete cells where the strict gate
+    /// admits but the relaxed gate would erroneously reject.
+    #[test]
+    fn test_compose_is_fully_complete_implies_compose_has_evidence() {
+        let probe_fully_covered = [
+            ProbeCoverage { ran: 1, absent: 0 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        let verification_fully_verified = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_fully_covered {
+            for verification in verification_fully_verified {
+                assert!(
+                    compose_is_fully_complete(&probe, &verification),
+                    "both-axes-complete precondition must admit at \
+                     probe={probe:?} verification={verification:?}",
+                );
+                assert!(
+                    compose_has_evidence(&probe, &verification),
+                    "both-axes-complete state must imply has-evidence \
+                     at probe={probe:?} verification={verification:?} \
+                     — the strict-and-relaxed gate ordering is \
+                     structurally load-bearing",
+                );
+            }
+        }
+    }
+
+    /// The composed any-axis-has-evidence predicate respects monoid
+    /// `Add` on each axis: a fleet-wide aggregate `[phase_a,
+    /// phase_b].iter().sum::<_>()` has evidence iff AT LEAST ONE phase
+    /// contributed an honest-positive increment to AT LEAST ONE axis,
+    /// AND stays no-evidence as long as every phase contributes zero
+    /// `ran` / `verified` increments. Pins the parallel-composition
+    /// invariant against the two-phase aggregate the future
+    /// `commands::attestation` emission site will collect — the
+    /// saturating-add monoid composes through each axis independently,
+    /// then the composed any-axis-has-evidence predicate reads the
+    /// two aggregates together. A regression that broke either axis's
+    /// monoid identity (e.g., a non-zero default that made the empty
+    /// phase falsely surface evidence under sum) would fail this pin
+    /// at the aggregate-reading step where the spurious record would
+    /// defeat the no-evidence discriminator.
+    #[test]
+    fn test_compose_has_evidence_respects_monoid_add_on_both_axes() {
+        let probe_no_evidence_a = ProbeCoverage { ran: 0, absent: 2 };
+        let probe_no_evidence_b = ProbeCoverage { ran: 0, absent: 3 };
+        let verification_no_evidence_a = VerificationCoverage {
+            verified: 0,
+            unverified: 1,
+        };
+        let verification_no_evidence_b = VerificationCoverage {
+            verified: 0,
+            unverified: 4,
+        };
+
+        let probe_aggregate_no_evidence = probe_no_evidence_a + probe_no_evidence_b;
+        let verification_aggregate_no_evidence =
+            verification_no_evidence_a + verification_no_evidence_b;
+        assert!(
+            !compose_has_evidence(
+                &probe_aggregate_no_evidence,
+                &verification_aggregate_no_evidence,
+            ),
+            "two-axis aggregate over no-evidence phases must read \
+             no-evidence — probe={probe_aggregate_no_evidence:?} \
+             verification={verification_aggregate_no_evidence:?}",
+        );
+
+        let probe_phase_evidenced = ProbeCoverage { ran: 3, absent: 0 };
+        let probe_aggregate_evidenced = probe_no_evidence_a + probe_phase_evidenced;
+        assert!(
+            compose_has_evidence(
+                &probe_aggregate_evidenced,
+                &verification_aggregate_no_evidence,
+            ),
+            "any phase contributing `ran > 0` on the probe axis lifts \
+             the aggregate off the no-evidence floor — \
+             probe={probe_aggregate_evidenced:?}",
+        );
+
+        let verification_phase_evidenced = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        let verification_aggregate_evidenced =
+            verification_no_evidence_a + verification_phase_evidenced;
+        assert!(
+            compose_has_evidence(
+                &probe_aggregate_no_evidence,
+                &verification_aggregate_evidenced,
+            ),
+            "any phase contributing `verified > 0` on the verification \
+             axis lifts the aggregate off the no-evidence floor — \
+             verification={verification_aggregate_evidenced:?}",
+        );
     }
 }
