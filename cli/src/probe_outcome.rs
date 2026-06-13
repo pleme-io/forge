@@ -1559,6 +1559,108 @@ pub fn compose_admission_eligible_strict(
     probe.is_admission_eligible_strict() && verification.is_admission_eligible_strict()
 }
 
+/// Parallel-composed trustworthiness-broken predicate over the two
+/// orthogonal typed-primitive surfaces — the two-bool disjunction
+/// `probe.is_saturated() || verification.is_saturated()` collapsed to
+/// one bool at one site. Reads `true` iff AT LEAST ONE counted axis
+/// has reached its saturating-add ceiling, meaning the derived ratio
+/// surface on that axis ([`ProbeCoverage::coverage_ratio`] /
+/// [`ProbeCoverage::coverage_ratio_pct`] on the no-evidence axis,
+/// [`VerificationCoverage::verification_ratio`] /
+/// [`VerificationCoverage::verification_ratio_pct`] on the
+/// verification axis) no longer carries a trustworthy reading against
+/// past-ceiling increments. The structural dual of
+/// [`compose_admission_eligible_strict`]: where the strict gate is the
+/// four-way conjunction `complete AND trustworthy on BOTH axes`, this
+/// is the disjunction `untrustworthy on AT LEAST ONE axis` — the
+/// negation `!compose_is_saturated(probe, verification)` reads `true`
+/// iff BOTH axes are trustworthy, which is exactly the
+/// trustworthiness factor pair the strict gate integrates as
+/// `!probe.is_saturated() && !verification.is_saturated()`.
+///
+/// The orthogonal-axis peer of the two per-axis [`is_saturated`]
+/// predicates: where each per-axis predicate collapses the two-bool
+/// `ran/verified == usize::MAX || absent/unverified == usize::MAX`
+/// disjunction at one orthogonal axis to one bool at the
+/// typed-primitive surface (commits 23fc103 and 70fa38a), this
+/// collapses the two-bool axis-level disjunction `probe.is_saturated()
+/// || verification.is_saturated()` across both axes to one bool at one
+/// site. A downstream consumer emitting an aggregate-trustworthiness
+/// telemetry field across both axes (the natural follow-up to the
+/// per-axis `*_probes_saturated` / `*_verifications_saturated` fields
+/// the `emit_probe_coverage!` macro family will extend) reads one bool
+/// — `compose_is_saturated(&probe, &verification)` — rather than
+/// composing the two-bool per-axis surface at every consumer. Before
+/// this helper, every aggregate-trustworthiness emitter had to retype
+/// the two-bool consumer composition (with the drift class a
+/// regression that dropped one axis silently reads the
+/// one-axis-saturated state as trustworthy); after this helper, the
+/// emitter reads one bool and the parallel-axis composition is sealed
+/// at the typed-primitive surface so a future third orthogonal axis
+/// (e.g., a compliance-dimensions axis the
+/// [`crate::compliance_dimensions`] family hints at) extends the
+/// composition here, not at every downstream consumer in lockstep.
+///
+/// Disjunction (not conjunction) is structurally load-bearing here:
+/// trustworthiness is the AND of per-axis trustworthiness factors,
+/// untrustworthiness (its negation) is the OR of per-axis
+/// untrustworthiness factors by De Morgan — saturation on ANY axis is
+/// enough to break the aggregate's trustworthiness, exactly as
+/// saturation on ANY component (`ran` OR `absent`) is enough to break
+/// the per-axis trustworthiness one impl group up. A regression that
+/// composed the conjunction `probe.is_saturated() &&
+/// verification.is_saturated()` would silently admit the
+/// one-axis-saturated state as trustworthy (the drift class this
+/// helper exists to foreclose).
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented two-axis composition exactly — the
+/// structural equivalence
+/// `compose_is_saturated(p, v) == (p.is_saturated() ||
+/// v.is_saturated())`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_is_saturated_equals_documented_composition`].
+/// The negation `!compose_is_saturated(p, v) == (!p.is_saturated() &&
+/// !v.is_saturated())` is the De Morgan peer the strict gate's
+/// trustworthiness factor reads — pinned at
+/// [`tests::test_compose_is_saturated_negation_matches_strict_trustworthiness_factor`].
+///
+/// THEORY.md §VI.1 one-oracle discipline: the two-axis
+/// trust-broken disjunction is derived at one site (here), not
+/// re-inlined as `probe.is_saturated() || verification.is_saturated()`
+/// per downstream consumer (which would inherit a drift class on the
+/// day a third orthogonal axis is added — every consumer would need
+/// to extend their composition in lockstep, exactly the structural
+/// seam this helper forecloses, mirroring the discipline
+/// [`compose_admission_eligible_strict`] establishes for the
+/// complementary `complete AND trustworthy` gate). THEORY.md §V.4 /
+/// §VII.1 honesty channel: the aggregate-trustworthiness surface
+/// reads one bool naming "the derived ratio is unreliable on AT LEAST
+/// ONE orthogonal axis," the load-bearing precondition the
+/// fleet-wide aggregate-ratio emitter consults before publishing a
+/// derived ratio across both axes. The negation reads "BOTH ratios
+/// are reliable" — the typed-primitive precondition any aggregate
+/// derived ratio across the two axes requires to be a faithful
+/// reading of the true counts.
+///
+/// Frontier lineage: Bazel's `--remote_cache_ttl` / Buck2's remote-
+/// cache `validity` field surface a per-cache trust flag the build-
+/// invocation gate consults before consuming a cache hit; SLSA L3+'s
+/// provenance-validity gate composes per-source-of-evidence trust
+/// flags as a disjunction (any source past its validity window
+/// breaks the aggregate trust) mirroring the discipline this helper
+/// lifts at the typed-primitive surface for the two-axis coverage
+/// trustworthiness factor pair. Sigstore's policy controller reads
+/// per-attestation freshness flags as a disjunction (any attestation
+/// past its expiration breaks the aggregate trust); this helper
+/// lifts the same discipline across the two-axis composition.
+///
+/// [`is_saturated`]: ProbeCoverage::is_saturated
+#[allow(dead_code)]
+pub fn compose_is_saturated(probe: &ProbeCoverage, verification: &VerificationCoverage) -> bool {
+    probe.is_saturated() || verification.is_saturated()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4868,6 +4970,319 @@ mod tests {
             !compose_admission_eligible_strict(&probe_aggregate, &verification_aggregate_partial),
             "any phase contributing a verification-axis unverified \
              breaks the aggregate's composed gate",
+        );
+    }
+
+    /// Parallel-composed saturation predicate is `false` exactly when
+    /// BOTH orthogonal axes are unsaturated — the two-axis
+    /// trustworthiness ceiling every reachable non-saturated
+    /// `(probe, verification)` pair sits at. Pins the load-bearing
+    /// shape the negation `!compose_is_saturated(p, v)` carries: the
+    /// trustworthiness factor pair the strict gate integrates as
+    /// `!probe.is_saturated() && !verification.is_saturated()` is
+    /// equivalent to `!compose_is_saturated(&probe, &verification)`
+    /// by De Morgan, so a downstream emitter that surfaces
+    /// "aggregate ratio is trustworthy" reads the negation of this
+    /// helper rather than re-composing the per-axis factors.
+    #[test]
+    fn test_compose_is_saturated_at_unsaturated_arm_is_false() {
+        let cases = [
+            (
+                ProbeCoverage { ran: 3, absent: 0 },
+                VerificationCoverage {
+                    verified: 2,
+                    unverified: 0,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 4, absent: 3 },
+                VerificationCoverage {
+                    verified: 1,
+                    unverified: 2,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 0, absent: 0 },
+                VerificationCoverage {
+                    verified: 0,
+                    unverified: 0,
+                },
+            ),
+        ];
+        for (probe, verification) in cases {
+            assert!(
+                !compose_is_saturated(&probe, &verification),
+                "both-axes-unsaturated arm must read trustworthy at \
+                 ({probe:?}, {verification:?})",
+            );
+        }
+    }
+
+    /// Composed saturation predicate accepts every probe-axis
+    /// saturated state regardless of the verification axis's
+    /// trustworthiness. Pins the load-bearing factor: the
+    /// composition reads saturation on EITHER axis as enough to
+    /// break aggregate trustworthiness, not as a relaxation against
+    /// the orthogonal axis. Pairs the three probe-axis saturated
+    /// representatives (`{ran: MAX, absent: 0}` /
+    /// `{ran: 0, absent: MAX}` / `{ran: MAX, absent: MAX}`) with an
+    /// unsaturated verification arm so the only trust-breaking
+    /// factor is the probe axis — a regression that dropped the
+    /// probe axis would erroneously read these arms as trustworthy.
+    #[test]
+    fn test_compose_is_saturated_accepts_probe_axis_saturation() {
+        let trusted_verification = VerificationCoverage {
+            verified: 5,
+            unverified: 0,
+        };
+        let probe_saturated = [
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+        ];
+        for probe in probe_saturated {
+            assert!(
+                compose_is_saturated(&probe, &trusted_verification),
+                "probe-axis saturation must break aggregate \
+                 trustworthiness at probe={probe:?} \
+                 verification={trusted_verification:?} — a regression \
+                 that dropped the probe axis would erroneously read \
+                 this state as trustworthy",
+            );
+        }
+    }
+
+    /// Composed saturation predicate accepts every verification-axis
+    /// saturated state regardless of the probe axis's
+    /// trustworthiness. The structural peer of the test above at the
+    /// orthogonal axis. Pairs the three verification-axis saturated
+    /// representatives (`{verified: MAX, unverified: 0}` /
+    /// `{verified: 0, unverified: MAX}` /
+    /// `{verified: MAX, unverified: MAX}`) with an unsaturated probe
+    /// arm so the only trust-breaking factor is the verification
+    /// axis — a regression that dropped the verification axis would
+    /// erroneously read these arms as trustworthy.
+    #[test]
+    fn test_compose_is_saturated_accepts_verification_axis_saturation() {
+        let trusted_probe = ProbeCoverage { ran: 7, absent: 0 };
+        let verification_saturated = [
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+        ];
+        for verification in verification_saturated {
+            assert!(
+                compose_is_saturated(&trusted_probe, &verification),
+                "verification-axis saturation must break aggregate \
+                 trustworthiness at probe={trusted_probe:?} \
+                 verification={verification:?} — a regression that \
+                 dropped the verification axis would erroneously read \
+                 this state as trustworthy",
+            );
+        }
+    }
+
+    /// Structural equivalence with the documented two-axis consumer
+    /// composition `probe.is_saturated() ||
+    /// verification.is_saturated()`. Pins the one-oracle invariant
+    /// the typed primitive carries — a regression that hand-rolled
+    /// the body (e.g., returned the conjunction
+    /// `probe.is_saturated() && verification.is_saturated()`, which
+    /// would silently admit the one-axis-saturated state as
+    /// trustworthy, the drift class this helper exists to foreclose)
+    /// would fail at the corresponding one-axis-saturated cell where
+    /// the divergent composition decouples. Walks the cross product
+    /// of three per-axis representatives (unsaturated, saturated
+    /// fully-fired, saturated-and-absent) so every
+    /// (probe-arm × verification-arm) cell is pinned against the
+    /// documented composition.
+    #[test]
+    fn test_compose_is_saturated_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 0, absent: 0 },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_is_saturated(&probe, &verification);
+                let composed = probe.is_saturated() || verification.is_saturated();
+                assert_eq!(
+                    direct, composed,
+                    "typed-primitive composition must equal the documented \
+                     two-axis consumer composition at probe={probe:?} \
+                     verification={verification:?} — a regression that \
+                     replaced the disjunction with a conjunction would \
+                     fail this pin at the one-axis-saturated cells",
+                );
+            }
+        }
+    }
+
+    /// De Morgan peer: the negation
+    /// `!compose_is_saturated(&probe, &verification)` equals the
+    /// strict gate's trustworthiness factor pair
+    /// `!probe.is_saturated() && !verification.is_saturated()` at
+    /// every reachable `(probe, verification)` pair. Pins the
+    /// load-bearing structural identity an aggregate-trustworthiness
+    /// emitter relies on: rather than retyping the two-factor
+    /// conjunction at every consumer surface (which would inherit
+    /// the same drift class
+    /// [`compose_admission_eligible_strict`] forecloses for the
+    /// complementary `complete AND trustworthy` gate), the consumer
+    /// reads `!compose_is_saturated(&probe, &verification)` as one
+    /// bool. Walks the cross product of per-axis representatives so
+    /// every (probe-arm × verification-arm) cell pins the
+    /// De Morgan identity.
+    #[test]
+    fn test_compose_is_saturated_negation_matches_strict_trustworthiness_factor() {
+        let probe_cases = [
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 0, absent: 0 },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let trustworthy_aggregate = !compose_is_saturated(&probe, &verification);
+                let trustworthy_factor_pair = !probe.is_saturated() && !verification.is_saturated();
+                assert_eq!(
+                    trustworthy_aggregate, trustworthy_factor_pair,
+                    "De Morgan identity must hold at probe={probe:?} \
+                     verification={verification:?} — the negation of \
+                     the disjunction equals the conjunction of the \
+                     per-axis negations, the load-bearing identity the \
+                     strict gate's trustworthiness factor pair relies \
+                     on",
+                );
+            }
+        }
+    }
+
+    /// The composed saturation predicate respects monoid `Add` on
+    /// each axis: a fleet-wide aggregate `[phase_a, phase_b].iter().
+    /// sum::<_>()` is unsaturated iff no phase pushes either axis to
+    /// the ceiling, AND becomes saturated as soon as any phase pair
+    /// reaches the ceiling on either axis. Pins the parallel-
+    /// composition invariant against the two-phase aggregate the
+    /// future `commands::attestation` emission site will collect —
+    /// the saturating-add monoid composes through each axis
+    /// independently, then the composed saturation predicate reads
+    /// the two aggregates together. A regression that broke either
+    /// axis's saturating-add semantics (e.g., a non-saturating `+`
+    /// that wrapped at `usize::MAX`) would fail this pin at the
+    /// aggregate-reading step where the wrap would reset the
+    /// trustworthiness signal.
+    #[test]
+    fn test_compose_is_saturated_respects_monoid_add_on_both_axes() {
+        let probe_phase_a = ProbeCoverage { ran: 3, absent: 0 };
+        let probe_phase_b = ProbeCoverage { ran: 4, absent: 0 };
+        let verification_phase_a = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        let verification_phase_b = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+
+        let probe_aggregate = probe_phase_a + probe_phase_b;
+        let verification_aggregate = verification_phase_a + verification_phase_b;
+        assert!(
+            !compose_is_saturated(&probe_aggregate, &verification_aggregate),
+            "two-axis aggregate over unsaturated phases must read \
+             trustworthy — probe={probe_aggregate:?} \
+             verification={verification_aggregate:?}",
+        );
+
+        let probe_phase_saturated = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let probe_aggregate_saturated = probe_phase_a + probe_phase_saturated;
+        assert!(
+            compose_is_saturated(&probe_aggregate_saturated, &verification_aggregate),
+            "any phase pushing the probe axis to the ceiling breaks \
+             aggregate trustworthiness — probe={probe_aggregate_saturated:?}",
+        );
+
+        let verification_phase_saturated = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        let verification_aggregate_saturated = verification_phase_a + verification_phase_saturated;
+        assert!(
+            compose_is_saturated(&probe_aggregate, &verification_aggregate_saturated),
+            "any phase pushing the verification axis to the ceiling \
+             breaks aggregate trustworthiness — \
+             verification={verification_aggregate_saturated:?}",
         );
     }
 }
