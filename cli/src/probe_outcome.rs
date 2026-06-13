@@ -1156,16 +1156,17 @@ impl VerificationCoverage {
     /// [`ProbeCoverage::is_saturated`] orthogonality at the no-evidence
     /// axis exactly.
     ///
-    /// The strict-production admission gate the [`is_fully_verified`]
-    /// docstring named as a future composition reads
+    /// The strict-production admission gate reads
     /// `!is_saturated() && is_fully_verified()` against the two flags
     /// — the same two-bool conjunction
     /// [`ProbeCoverage::is_admission_eligible_strict`] lifts at the
-    /// no-evidence axis. A future `VerificationCoverage::
-    /// is_admission_eligible_strict` peer (mirror of
-    /// [`ProbeCoverage::is_admission_eligible_strict`]) is the natural
-    /// follow-up, lifting the two-bool conjunction here to one typed
-    /// primitive at the verification axis.
+    /// no-evidence axis. The verification-axis peer
+    /// [`is_admission_eligible_strict`] lifts this two-bool conjunction
+    /// to one typed primitive, mirroring
+    /// [`ProbeCoverage::is_admission_eligible_strict`] at the orthogonal
+    /// axis.
+    ///
+    /// [`is_admission_eligible_strict`]: VerificationCoverage::is_admission_eligible_strict
     ///
     /// THEORY.md §VI.1 one-oracle discipline: the saturation predicate
     /// is derived at one site (here), not re-inlined as
@@ -1265,6 +1266,84 @@ impl VerificationCoverage {
         let verified = self.verified as u128;
         let total = total as u128;
         ((verified * 100) / total) as u8
+    }
+
+    /// True iff every counted verification-bearing probe substantiated a
+    /// positive verification verdict AND the verification signal is
+    /// trustworthy — the typed primitive for the strict-production
+    /// admission gate the [`is_saturated`] / [`is_fully_verified`]
+    /// docstrings have named since the saturation flag landed at the
+    /// verification axis: a downstream `sekiban` admission verifier
+    /// wanting to admit only records whose verification channel both
+    /// fully cleared AND whose derived ratio surfaces are reliable
+    /// composes `!is_saturated() && is_fully_verified()` at the consumer
+    /// surface. Before this predicate, every strict-production gate at
+    /// the verification axis had to retype that two-bool conjunction.
+    /// After this predicate, the gate reads one bool —
+    /// `verification.is_admission_eligible_strict()` — and the
+    /// integer-arithmetic body collapses the two-bool composition at the
+    /// typed-primitive surface.
+    ///
+    /// The orthogonal-axis peer of
+    /// [`ProbeCoverage::is_admission_eligible_strict`]: where the
+    /// no-evidence-axis peer reads `!is_saturated() &&
+    /// is_fully_covered()` over the seventeen-outcome attestation
+    /// pipeline (the `(ran, absent)` axis), this reads `!is_saturated()
+    /// && is_fully_verified()` over the five-outcome [`VerifiedOutcome`]
+    /// subset (the `(verified, unverified)` axis). The two strict gates
+    /// compose in parallel against the same record at the same emission
+    /// site — the strict-production admission verifier reads
+    /// `probe.is_admission_eligible_strict() &&
+    /// verification.is_admission_eligible_strict()` to gate on "every
+    /// probe ran AND every verification cleared AND both signals are
+    /// trustworthy," the load-bearing four-way conjunction the
+    /// typed-primitive surface now collapses to a two-bool consumer
+    /// shape (one bool per orthogonal axis, not four — the inner
+    /// trustworthiness clamps are sealed at the typed-primitive site).
+    ///
+    /// Saturation-robust by construction: [`is_fully_verified`] reads
+    /// `unverified == 0 && verified > 0` against the components
+    /// themselves (never against derived arithmetic), so the
+    /// post-saturation state `{verified: usize::MAX, unverified: 0}` is
+    /// structurally `is_fully_verified() == true` BUT `is_saturated() ==
+    /// true`, so the conjunction correctly rejects (`true && !true ==
+    /// false`) — the saturated state cannot pass the strict gate even
+    /// though every counted verification (up to the ceiling) cleared.
+    /// This is the load-bearing trustworthiness clamp: the float-form
+    /// [`verification_ratio`] and the integer-form
+    /// [`verification_ratio_pct`] both round to `1.0` / `100` at
+    /// `{verified: MAX, unverified: 0}` and against the true ratio at
+    /// `{verified: MAX, unverified: MAX}` — the strict gate forecloses
+    /// both drift classes uniformly through the `!is_saturated()`
+    /// factor, mirroring [`ProbeCoverage::is_admission_eligible_strict`]'s
+    /// discipline at the orthogonal axis exactly.
+    ///
+    /// At every reachable `(verified, unverified)` value, the predicate
+    /// equals the documented consumer composition exactly — the
+    /// structural equivalence
+    /// `is_admission_eligible_strict() == (!is_saturated() &&
+    /// is_fully_verified())`
+    /// is pinned across the empty / all-unverified / mixed /
+    /// fully-verified arms AND each of the three saturated
+    /// representatives by
+    /// [`test_verification_is_admission_eligible_strict_equals_documented_composition`].
+    ///
+    /// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
+    /// [`is_saturated`]: VerificationCoverage::is_saturated
+    /// [`verification_ratio`]: VerificationCoverage::verification_ratio
+    /// [`verification_ratio_pct`]: VerificationCoverage::verification_ratio_pct
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the strict-production
+    /// verification-axis admission predicate is derived at one site
+    /// (here), not re-inlined as `!verification.is_saturated() &&
+    /// verification.is_fully_verified()` per downstream consumer.
+    /// THEORY.md §V.4 / §VII.1 honesty channel: the strict gate names
+    /// "complete AND trustworthy verification," the load-bearing
+    /// precondition the strict-production admission gate admits at the
+    /// verification axis, mirroring the no-evidence-axis peer's
+    /// discipline at the orthogonal axis.
+    pub fn is_admission_eligible_strict(&self) -> bool {
+        !self.is_saturated() && self.is_fully_verified()
     }
 }
 
@@ -4203,5 +4282,210 @@ mod tests {
                 "integer floor must match floor(f64_ratio * 100) at {c:?}",
             );
         }
+    }
+
+    /// Strict-production verification-axis admission gate is `true`
+    /// exactly at the `is_fully_verified() && !is_saturated()` corner of
+    /// the matrix. Pinned across the three load-bearing total counts
+    /// (2 / 3 / 5, matching the Phase 1 flux + helm-release-signature
+    /// count, the Phase 2 helm-provenance + cosign + network-policy
+    /// count, and the aggregate over the [`VerifiedOutcome`] subset) so
+    /// a regression that pinned the predicate to a single phase's total
+    /// would fail at the other two. Mirrors
+    /// `test_is_admission_eligible_strict_at_fully_covered_non_saturated_arm_is_true`
+    /// at the no-evidence axis.
+    #[test]
+    fn test_verification_is_admission_eligible_strict_at_fully_verified_non_saturated_arm_is_true()
+    {
+        for total in [2usize, 3, 5] {
+            let c = VerificationCoverage {
+                verified: total,
+                unverified: 0,
+            };
+            assert!(
+                c.is_admission_eligible_strict(),
+                "fully-verified non-saturated arm must pass the strict gate at {c:?}",
+            );
+        }
+    }
+
+    /// Strict gate rejects every non-(fully-verified) arm. Pins:
+    /// - empty floor `(0, 0)` — `is_fully_verified()` false (`verified == 0`)
+    /// - all-unverified floor `(0, N)` — `is_fully_verified()` false (same)
+    /// - mixed arm `(N, M)` with both positive — `is_fully_verified()`
+    ///   false (`unverified > 0`)
+    ///
+    /// All three rejection arms close at the `is_fully_verified() == false`
+    /// factor of the conjunction; the saturation factor is exercised
+    /// separately below. Mirrors
+    /// `test_is_admission_eligible_strict_rejects_non_fully_covered_arms`
+    /// at the no-evidence axis.
+    #[test]
+    fn test_verification_is_admission_eligible_strict_rejects_non_fully_verified_arms() {
+        let empty = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        let all_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 5,
+        };
+        let mixed_low = VerificationCoverage {
+            verified: 1,
+            unverified: 1,
+        };
+        let mixed_high = VerificationCoverage {
+            verified: 89,
+            unverified: 11,
+        };
+        for c in [empty, all_unverified, mixed_low, mixed_high] {
+            assert!(
+                !c.is_admission_eligible_strict(),
+                "non-fully-verified arm must fail the strict gate at {c:?}",
+            );
+        }
+    }
+
+    /// Strict gate rejects every saturated state, INCLUDING the
+    /// `{verified: usize::MAX, unverified: 0}` representative that
+    /// `is_fully_verified()` reads as `true`. Saturation-robustness is
+    /// the load-bearing factor — the `verification_ratio()` /
+    /// `verification_ratio_pct()` reads at `{MAX, 0}` round to `1.0` /
+    /// `100` honestly (every counted verification up to the ceiling
+    /// cleared), but the saturating-add clamp means an unknown number
+    /// of past-ceiling increments were dropped, so the derived ratio
+    /// cannot be trusted — the strict gate refuses to admit. Mirrors
+    /// `test_is_admission_eligible_strict_at_saturated_state_is_false`
+    /// at the no-evidence axis.
+    #[test]
+    fn test_verification_is_admission_eligible_strict_at_saturated_state_is_false() {
+        let saturated_verified_only = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        let saturated_unverified_only = VerificationCoverage {
+            verified: 0,
+            unverified: usize::MAX,
+        };
+        let saturated_both = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: usize::MAX,
+        };
+        for c in [
+            saturated_verified_only,
+            saturated_unverified_only,
+            saturated_both,
+        ] {
+            assert!(
+                !c.is_admission_eligible_strict(),
+                "saturated state must fail the strict gate at {c:?} — the \
+                 saturating-add clamp dropped past-ceiling increments, so \
+                 the derived ratio surfaces cannot be trusted",
+            );
+        }
+    }
+
+    /// Structural equivalence with the documented consumer composition
+    /// `!is_saturated() && is_fully_verified()`. Pins the one-oracle
+    /// invariant the typed primitive carries — a regression that
+    /// hand-rolled the body (e.g., `is_fully_verified() && !is_empty()`)
+    /// would fail at the saturated `{MAX, 0}` arm where
+    /// `is_fully_verified() == true` AND `is_empty() == false` AND
+    /// `is_saturated() == true`, so the divergent composition would
+    /// erroneously admit a state the documented strict gate refuses.
+    /// Walks every cell of the cross product
+    /// `({empty, all_unverified, mixed, fully_verified} × {saturated,
+    /// non_saturated})` (the empty arm is structurally non-saturated
+    /// only, since both components are 0; the other three each admit
+    /// both saturation states). Mirrors
+    /// `test_is_admission_eligible_strict_equals_documented_composition`
+    /// at the no-evidence axis exactly.
+    #[test]
+    fn test_verification_is_admission_eligible_strict_equals_documented_composition() {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            }, // empty (always non-saturated)
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            }, // all-unverified non-saturated
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            }, // all-unverified saturated
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            }, // mixed non-saturated
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            }, // mixed saturated
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            }, // fully-verified non-saturated
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            }, // fully-verified saturated
+        ];
+        for c in cases {
+            let direct = c.is_admission_eligible_strict();
+            let composed = !c.is_saturated() && c.is_fully_verified();
+            assert_eq!(
+                direct, composed,
+                "typed-primitive surface must equal the documented \
+                 consumer composition at {c:?} — a regression that \
+                 hand-rolled the body would fail this pin at the \
+                 saturated `{{MAX, 0}}` arm where the discriminators \
+                 decouple",
+            );
+        }
+    }
+
+    /// Under the saturating monoid `Add`, any phase whose contribution
+    /// has `unverified > 0` breaks the strict gate at the aggregate —
+    /// the aggregate's `unverified` field inherits the contributing
+    /// phase's `unverified` (monoid `Add` is component-wise saturating
+    /// add), so the aggregate's `is_fully_verified() == (unverified ==
+    /// 0 && verified > 0)` reads `false` whenever any phase contributed
+    /// an unverified record. The fleet-wide aggregate the `Sum` fold
+    /// computes thus admits the strict gate only when EVERY phase is
+    /// fully verified AND no component reached the saturating ceiling.
+    /// Pinned across two representative two-phase aggregates: one where
+    /// both phases are fully verified (aggregate passes), one where one
+    /// phase contributes an unverified (aggregate fails). Mirrors
+    /// `test_is_admission_eligible_strict_composes_under_monoid_add` at
+    /// the no-evidence axis.
+    #[test]
+    fn test_verification_is_admission_eligible_strict_composes_under_monoid_add() {
+        let phase_1_full = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        let phase_2_full = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        let aggregate_full = phase_1_full + phase_2_full;
+        assert!(
+            aggregate_full.is_admission_eligible_strict(),
+            "two fully-verified phases sum to a fully-verified aggregate \
+             that passes the strict gate — {aggregate_full:?}",
+        );
+
+        let phase_2_partial = VerificationCoverage {
+            verified: 2,
+            unverified: 1,
+        };
+        let aggregate_with_unverified = phase_1_full + phase_2_partial;
+        assert!(
+            !aggregate_with_unverified.is_admission_eligible_strict(),
+            "any phase contributing an unverified record breaks the \
+             aggregate's strict gate — {aggregate_with_unverified:?}",
+        );
     }
 }
