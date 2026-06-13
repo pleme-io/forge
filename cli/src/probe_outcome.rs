@@ -1661,6 +1661,118 @@ pub fn compose_is_saturated(probe: &ProbeCoverage, verification: &VerificationCo
     probe.is_saturated() || verification.is_saturated()
 }
 
+/// Parallel-composed vacuous-aggregate predicate over the two
+/// orthogonal typed-primitive surfaces — the two-bool conjunction
+/// `probe.is_empty() && verification.is_empty()` collapsed to one bool
+/// at one site. Reads `true` iff EVERY counted axis surfaced zero
+/// records, meaning the fleet-wide aggregate carries no evidence on
+/// either dimension: the no-evidence axis ([`ProbeCoverage`] over the
+/// seventeen-outcome attestation pipeline) and the
+/// verification-trustworthiness axis ([`VerificationCoverage`] over the
+/// five-outcome [`VerifiedOutcome`] subset) are both at the structural
+/// boundary [`probe_coverage`] / [`verification_coverage`] return for
+/// the empty-iterator input.
+///
+/// The structural peer of [`compose_admission_eligible_strict`] /
+/// [`compose_is_saturated`] at the empty-aggregate axis: where the
+/// strict gate (commit 7d818bd) is the four-way conjunction "complete
+/// AND trustworthy on BOTH axes" and the trust-broken disjunction
+/// (commit 2ea2240) is "untrustworthy on AT LEAST ONE axis", this is
+/// the structural boundary "vacuous on BOTH axes" — the load-bearing
+/// boundary case the fleet-wide aggregate-ratio emission site at
+/// `commands::attestation` reads to gate "emit derived ratio fields
+/// honestly" vs. "the aggregate is structurally vacuous; the derived
+/// ratio surfaces are no-ops". Conjunction (not disjunction) is
+/// structurally load-bearing here: the aggregate is vacuous only when
+/// NEITHER axis carries records — if either axis surfaced even one
+/// record, that axis's ratio surface ([`ProbeCoverage::coverage_ratio`]
+/// / [`VerificationCoverage::verification_ratio`]) is a meaningful
+/// reading. A regression that composed the disjunction
+/// `probe.is_empty() || verification.is_empty()` would silently classify
+/// the one-axis-empty / one-axis-populated state as vacuous (the drift
+/// class this helper exists to foreclose), suppressing telemetry from
+/// the populated axis.
+///
+/// The orthogonal-axis peer of the two per-axis [`is_empty`]
+/// predicates: where each per-axis predicate collapses the
+/// `total() == 0` boundary at one orthogonal axis to one bool at the
+/// typed-primitive surface, this collapses the two-bool axis-level
+/// conjunction `probe.is_empty() && verification.is_empty()` across
+/// both axes to one bool at one site. A downstream consumer emitting
+/// an aggregate-vacuous telemetry field across both axes (the natural
+/// follow-up to the per-axis `*_probes_empty` /
+/// `*_verifications_empty` fields the `emit_probe_coverage!` macro
+/// family will extend) reads one bool —
+/// `compose_is_empty(&probe, &verification)` — rather than composing
+/// the two-bool per-axis surface at every consumer. Before this
+/// helper, every aggregate-vacuous emitter had to retype the two-bool
+/// consumer composition (with the drift class a regression that
+/// disjuncted the per-axis flags silently admits the
+/// one-axis-empty-one-axis-populated state as vacuous); after this
+/// helper, the emitter reads one bool and the parallel-axis
+/// composition is sealed at the typed-primitive surface so a future
+/// third orthogonal axis (e.g., a compliance-dimensions axis the
+/// [`crate::compliance_dimensions`] family hints at) extends the
+/// composition here, not at every downstream consumer in lockstep.
+///
+/// Saturation-robust by construction: each per-axis `is_empty()` reads
+/// `total() == 0` against the components themselves; the
+/// `usize::saturating_add` clamp the monoid [`Add`](std::ops::Add)
+/// impl admits cannot reach `total() == 0` from any non-empty state
+/// (both components are non-negative, and saturating-add only ever
+/// increases a non-negative sum or clamps it at `usize::MAX`). The
+/// post-saturation state `{ran: usize::MAX, absent: 0}` /
+/// `{verified: usize::MAX, unverified: 0}` is structurally `is_empty()
+/// == false` on its respective axis, so the saturated-but-vacuous
+/// drift class is foreclosed at the typed-primitive surface.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented two-axis composition exactly — the
+/// structural equivalence
+/// `compose_is_empty(p, v) == (p.is_empty() && v.is_empty())`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_is_empty_equals_documented_composition`].
+///
+/// THEORY.md §VI.1 one-oracle discipline: the two-axis
+/// vacuous-aggregate conjunction is derived at one site (here), not
+/// re-inlined as `probe.is_empty() && verification.is_empty()` per
+/// downstream consumer (which would inherit a drift class on the day
+/// a third orthogonal axis is added — every consumer would need to
+/// extend their composition in lockstep, exactly the structural seam
+/// this helper forecloses, mirroring the discipline
+/// [`compose_admission_eligible_strict`] and [`compose_is_saturated`]
+/// establish for the complementary gates). THEORY.md §V.4 / §VII.1
+/// honesty channel: the aggregate-vacuous surface reads one bool
+/// naming "the aggregate carries zero records on EVERY orthogonal
+/// axis," the load-bearing precondition the fleet-wide aggregate-
+/// ratio emitter consults before emitting a derived ratio across
+/// both axes — at the vacuous-aggregate state, the derived ratio
+/// surfaces are structurally no-ops (both [`ProbeCoverage::
+/// coverage_ratio`] and [`VerificationCoverage::verification_ratio`]
+/// collapse to `0.0` at the empty-arm via their `if total == 0`
+/// guards), so the emitter typically suppresses the field or annotates
+/// it as the vacuous-aggregate boundary case.
+///
+/// Frontier lineage: Bazel's `--build_event_stream` / Buck2's
+/// build-event surface a structural "no records" boundary distinct
+/// from the "all records cleared" boundary — the empty-aggregate
+/// case is a no-op in their telemetry, not a degenerate "all pass"
+/// reading. SLSA L3+'s provenance-attestation gate distinguishes
+/// "no attestations produced" (structurally vacuous, gate fails-
+/// closed by absence) from "every attestation cleared" (gate
+/// admits); this helper lifts the same distinction at the two-axis
+/// typed-primitive surface. Sigstore's policy controller surfaces
+/// "no attestations matched the policy" as a distinct boundary the
+/// admission gate reads separately from "every matched attestation
+/// cleared"; this helper lifts the same discipline across the two-
+/// axis composition.
+///
+/// [`is_empty`]: ProbeCoverage::is_empty
+#[allow(dead_code)]
+pub fn compose_is_empty(probe: &ProbeCoverage, verification: &VerificationCoverage) -> bool {
+    probe.is_empty() && verification.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5283,6 +5395,285 @@ mod tests {
             "any phase pushing the verification axis to the ceiling \
              breaks aggregate trustworthiness — \
              verification={verification_aggregate_saturated:?}",
+        );
+    }
+
+    /// Parallel-composed vacuous-aggregate predicate is `true` exactly
+    /// at the single both-axes-empty arm `({ran: 0, absent: 0}, {verified:
+    /// 0, unverified: 0})` — the structural boundary [`probe_coverage`]
+    /// and [`verification_coverage`] over empty iterators produce. Pins
+    /// the load-bearing shape the fleet-wide aggregate-vacuous emission
+    /// site reads at: a downstream emitter that gates "emit derived
+    /// ratio fields honestly" on `!compose_is_empty(&probe,
+    /// &verification)` admits the meaningful-aggregate state and
+    /// suppresses telemetry only at the single both-axes-empty arm. A
+    /// regression that returned `false` at this arm would over-emit
+    /// vacuous ratio fields the empty-iterator boundary case structurally
+    /// makes no-ops.
+    #[test]
+    fn test_compose_is_empty_at_both_empty_arm_is_true() {
+        let probe = ProbeCoverage { ran: 0, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert!(
+            compose_is_empty(&probe, &verification),
+            "both-axes-empty arm must read vacuous at \
+             ({probe:?}, {verification:?})",
+        );
+    }
+
+    /// Parallel-composed vacuous-aggregate predicate rejects every
+    /// probe-axis-populated state regardless of the verification axis's
+    /// emptiness. Pins the load-bearing factor: the composition reads
+    /// records on EITHER axis as enough to make the aggregate
+    /// meaningful, not as a relaxation against the orthogonal axis.
+    /// Pairs the three probe-axis non-empty representatives (mixed,
+    /// fully-covered, all-absent) with an empty verification arm so the
+    /// only meaningful-aggregate factor is the probe axis — a regression
+    /// that returned the disjunction would erroneously read these arms
+    /// as vacuous and suppress the populated probe axis's telemetry.
+    #[test]
+    fn test_compose_is_empty_rejects_probe_axis_populated() {
+        let empty_verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        let probe_populated = [
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 5 },
+        ];
+        for probe in probe_populated {
+            assert!(
+                !compose_is_empty(&probe, &empty_verification),
+                "probe-axis records must make the aggregate \
+                 meaningful at probe={probe:?} \
+                 verification={empty_verification:?} — a regression \
+                 that returned the disjunction would erroneously read \
+                 this state as vacuous and suppress the populated probe \
+                 axis's telemetry",
+            );
+        }
+    }
+
+    /// Parallel-composed vacuous-aggregate predicate rejects every
+    /// verification-axis-populated state regardless of the probe axis's
+    /// emptiness. The structural peer of the test above at the
+    /// orthogonal axis. Pairs the three verification-axis non-empty
+    /// representatives (mixed, fully-verified, all-unverified) with an
+    /// empty probe arm so the only meaningful-aggregate factor is the
+    /// verification axis — a regression that returned the disjunction
+    /// would erroneously read these arms as vacuous and suppress the
+    /// populated verification axis's telemetry.
+    #[test]
+    fn test_compose_is_empty_rejects_verification_axis_populated() {
+        let empty_probe = ProbeCoverage { ran: 0, absent: 0 };
+        let verification_populated = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+        ];
+        for verification in verification_populated {
+            assert!(
+                !compose_is_empty(&empty_probe, &verification),
+                "verification-axis records must make the aggregate \
+                 meaningful at probe={empty_probe:?} \
+                 verification={verification:?} — a regression that \
+                 returned the disjunction would erroneously read this \
+                 state as vacuous and suppress the populated \
+                 verification axis's telemetry",
+            );
+        }
+    }
+
+    /// Structural equivalence with the documented two-axis consumer
+    /// composition `probe.is_empty() && verification.is_empty()`. Pins
+    /// the one-oracle invariant the typed primitive carries — a
+    /// regression that hand-rolled the body (e.g., returned the
+    /// disjunction `probe.is_empty() || verification.is_empty()`, which
+    /// would silently classify the one-axis-empty / one-axis-populated
+    /// state as vacuous, the drift class this helper exists to
+    /// foreclose) would fail at the corresponding one-axis-populated
+    /// cell where the divergent composition decouples. Walks the cross
+    /// product of four per-axis representatives (empty,
+    /// all-absent/all-unverified, mixed, fully-covered/fully-verified)
+    /// so every (probe-arm × verification-arm) cell is pinned against
+    /// the documented composition.
+    #[test]
+    fn test_compose_is_empty_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 5 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_is_empty(&probe, &verification);
+                let composed = probe.is_empty() && verification.is_empty();
+                assert_eq!(
+                    direct, composed,
+                    "typed-primitive composition must equal the documented \
+                     two-axis consumer composition at probe={probe:?} \
+                     verification={verification:?} — a regression that \
+                     replaced the conjunction with a disjunction would \
+                     fail this pin at the one-axis-empty cells",
+                );
+            }
+        }
+    }
+
+    /// Saturation-robust pin: at every saturated state on either axis,
+    /// `compose_is_empty` reads `false` — the saturating monoid
+    /// `Add` cannot reach `total() == 0` from any non-empty input on
+    /// either axis (both components are non-negative and at least one
+    /// component is `usize::MAX` at every saturated state). Pins the
+    /// load-bearing trustworthiness clamp: a regression that confused
+    /// "empty" with "saturated and rolled" would fail this pin at the
+    /// `{ran: usize::MAX, absent: 0}` / `{verified: usize::MAX,
+    /// unverified: 0}` arms that surface a derived ratio of `1.0` /
+    /// `100` honestly against the counted increments but are
+    /// structurally NOT empty. Walks the three saturated
+    /// representatives on each axis paired with an empty opposite axis,
+    /// then the both-axes-saturated corner.
+    #[test]
+    fn test_compose_is_empty_at_saturated_states_is_false() {
+        let empty_probe = ProbeCoverage { ran: 0, absent: 0 };
+        let empty_verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        let probe_saturated = [
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+        ];
+        for probe in probe_saturated {
+            assert!(
+                !compose_is_empty(&probe, &empty_verification),
+                "saturated probe axis at probe={probe:?} must read \
+                 non-vacuous against empty verification — saturation \
+                 strictly implies non-emptiness on its axis",
+            );
+        }
+        let verification_saturated = [
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+        ];
+        for verification in verification_saturated {
+            assert!(
+                !compose_is_empty(&empty_probe, &verification),
+                "saturated verification axis at \
+                 verification={verification:?} must read non-vacuous \
+                 against empty probe — saturation strictly implies \
+                 non-emptiness on its axis",
+            );
+        }
+    }
+
+    /// The composed vacuous-aggregate predicate respects monoid `Add`
+    /// on each axis: a fleet-wide aggregate `[phase_a, phase_b]
+    /// .iter().sum::<_>()` is vacuous iff EVERY phase contributed zero
+    /// records to BOTH axes, AND becomes non-vacuous as soon as any
+    /// phase pushes either axis off the empty arm. Pins the parallel-
+    /// composition invariant against the two-phase aggregate the
+    /// future `commands::attestation` emission site will collect — the
+    /// saturating-add monoid composes through each axis independently,
+    /// then the composed vacuous-aggregate predicate reads the two
+    /// aggregates together. A regression that broke either axis's
+    /// monoid identity (e.g., a non-zero default that made the empty
+    /// phase non-empty under sum) would fail this pin at the
+    /// aggregate-reading step where the spurious record would defeat
+    /// the empty discriminator.
+    #[test]
+    fn test_compose_is_empty_respects_monoid_add_on_both_axes() {
+        let probe_empty_a = ProbeCoverage { ran: 0, absent: 0 };
+        let probe_empty_b = ProbeCoverage { ran: 0, absent: 0 };
+        let verification_empty_a = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        let verification_empty_b = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+
+        let probe_aggregate_empty = probe_empty_a + probe_empty_b;
+        let verification_aggregate_empty = verification_empty_a + verification_empty_b;
+        assert!(
+            compose_is_empty(&probe_aggregate_empty, &verification_aggregate_empty),
+            "two-axis aggregate over empty phases must read vacuous — \
+             probe={probe_aggregate_empty:?} \
+             verification={verification_aggregate_empty:?}",
+        );
+
+        let probe_phase_populated = ProbeCoverage { ran: 3, absent: 0 };
+        let probe_aggregate_populated = probe_empty_a + probe_phase_populated;
+        assert!(
+            !compose_is_empty(&probe_aggregate_populated, &verification_aggregate_empty),
+            "any phase contributing records on the probe axis breaks \
+             the vacuous-aggregate state — \
+             probe={probe_aggregate_populated:?}",
+        );
+
+        let verification_phase_populated = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        let verification_aggregate_populated = verification_empty_a + verification_phase_populated;
+        assert!(
+            !compose_is_empty(&probe_aggregate_empty, &verification_aggregate_populated),
+            "any phase contributing records on the verification axis \
+             breaks the vacuous-aggregate state — \
+             verification={verification_aggregate_populated:?}",
         );
     }
 }
