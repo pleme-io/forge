@@ -784,6 +784,17 @@ impl ProbeCoverage {
     /// AND trustworthy evidence," the load-bearing precondition the
     /// strict-production admission gate admits and every other arm
     /// (empty, all-absent, mixed, fully-covered-but-saturated) rejects.
+    ///
+    /// The parallel-composed peer at the two-axis surface is
+    /// [`compose_admission_eligible_strict`], which seals the
+    /// four-way conjunction
+    /// `!probe.is_saturated() && probe.is_fully_covered() &&
+    /// !verification.is_saturated() && verification.is_fully_verified()`
+    /// at one site so a downstream strict-production verifier reads
+    /// one bool across both orthogonal axes rather than composing
+    /// `probe.is_admission_eligible_strict() &&
+    /// verification.is_admission_eligible_strict()` at the consumer
+    /// surface.
     pub fn is_admission_eligible_strict(&self) -> bool {
         !self.is_saturated() && self.is_fully_covered()
     }
@@ -1342,6 +1353,15 @@ impl VerificationCoverage {
     /// precondition the strict-production admission gate admits at the
     /// verification axis, mirroring the no-evidence-axis peer's
     /// discipline at the orthogonal axis.
+    ///
+    /// The parallel-composed peer at the two-axis surface is
+    /// [`compose_admission_eligible_strict`], which seals the
+    /// four-way conjunction across both orthogonal axes at one site
+    /// so a downstream strict-production verifier reads one bool
+    /// across both axes rather than composing
+    /// `probe.is_admission_eligible_strict() &&
+    /// verification.is_admission_eligible_strict()` at the consumer
+    /// surface.
     pub fn is_admission_eligible_strict(&self) -> bool {
         !self.is_saturated() && self.is_fully_verified()
     }
@@ -1457,6 +1477,86 @@ where
         verified,
         unverified,
     }
+}
+
+/// Parallel-composed strict-production admission predicate over the two
+/// orthogonal typed-primitive surfaces — the four-way conjunction
+/// `!probe.is_saturated() && probe.is_fully_covered() &&
+/// !verification.is_saturated() && verification.is_fully_verified()`
+/// collapsed to one bool at one site. Reads `true` iff EVERY counted
+/// probe ran (no-evidence axis fully covered), EVERY counted
+/// verification cleared (verification-trustworthiness axis fully
+/// verified), AND BOTH derived-ratio surfaces are trustworthy (neither
+/// component reached the `usize::saturating_add` ceiling).
+///
+/// The natural follow-up commit 05eee86 named: where
+/// [`ProbeCoverage::is_admission_eligible_strict`] (commit e25a22e)
+/// and [`VerificationCoverage::is_admission_eligible_strict`] (commit
+/// 05eee86) each seal the two-bool conjunction at one orthogonal axis,
+/// this seals the four-way conjunction across both axes at one site.
+/// A downstream `sekiban` strict-production admission verifier reads
+/// one bool — `compose_admission_eligible_strict(&probe, &verification)`
+/// — rather than composing the two-bool per-axis surface
+/// `probe.is_admission_eligible_strict() &&
+/// verification.is_admission_eligible_strict()` at every consumer.
+/// Before this helper, every strict-production gate had to retype the
+/// two-bool consumer composition (with the drift class a regression
+/// that dropped one axis silently admits the one-axis-failing state
+/// the documented gate refuses); after this helper, the gate reads
+/// one bool and the parallel-axis composition is sealed at the
+/// typed-primitive surface.
+///
+/// Saturation-robust by construction: each per-axis
+/// `is_admission_eligible_strict` integrates its own `!is_saturated()`
+/// trustworthiness clamp at the typed-primitive site (see commits
+/// e25a22e and 05eee86), so the parallel composition inherits both
+/// clamps automatically — neither axis can drift by dropping its
+/// saturation factor. The post-saturation state
+/// `{ran: usize::MAX, absent: 0}` on the no-evidence axis OR
+/// `{verified: usize::MAX, unverified: 0}` on the verification axis
+/// — each of which surfaces the derived ratio as `1.0` / `100`
+/// honestly against the counted increments BUT against the true
+/// ratio loses past-ceiling increments — fails the composition
+/// through its respective axis's strict gate.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented two-axis composition exactly — the
+/// structural equivalence
+/// `compose_admission_eligible_strict(p, v) ==
+/// (p.is_admission_eligible_strict() && v.is_admission_eligible_strict())`
+/// is pinned across the cross product of per-axis representatives
+/// by [`tests::test_compose_admission_eligible_strict_equals_documented_composition`].
+///
+/// THEORY.md §VI.1 one-oracle discipline: the four-way conjunction is
+/// derived at one site (here), not re-inlined as `probe.<axis-strict>()
+/// && verification.<axis-strict>()` per downstream consumer (which
+/// would inherit a drift class on the day a third orthogonal axis is
+/// added — every consumer would need to extend their composition in
+/// lockstep, exactly the structural seam this helper forecloses).
+/// THEORY.md §V.4 / §VII.1 honesty channel: the strict-production
+/// admission verdict surfaces at the typed-primitive surface as a
+/// single bool reading "complete AND trustworthy evidence on BOTH
+/// orthogonal axes" — the load-bearing precondition the strict-
+/// production admission gate admits and every other arm
+/// (any-axis-empty, any-axis-mixed, any-axis-saturated) rejects.
+///
+/// Frontier lineage: SLSA L3+ admission policy gates partition the
+/// admission decision into per-axis predicates (build-provenance,
+/// source-integrity, package-signature, runtime-attestation) so the
+/// gate composition is auditably "every axis admits AND every axis
+/// is trustworthy" — exactly the parallel-composed shape this helper
+/// lifts at the typed-primitive surface. Sigstore's policy
+/// controller reads the verification verdict through a single
+/// typed-primitive surface that integrates both the verdict AND its
+/// trustworthiness so a downstream verifier cannot drift by dropping
+/// a trustworthiness factor; this helper lifts the same discipline
+/// across the two-axis composition.
+#[allow(dead_code)]
+pub fn compose_admission_eligible_strict(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    probe.is_admission_eligible_strict() && verification.is_admission_eligible_strict()
 }
 
 #[cfg(test)]
@@ -4486,6 +4586,288 @@ mod tests {
             !aggregate_with_unverified.is_admission_eligible_strict(),
             "any phase contributing an unverified record breaks the \
              aggregate's strict gate — {aggregate_with_unverified:?}",
+        );
+    }
+
+    /// Parallel-composed strict gate is `true` exactly when BOTH
+    /// orthogonal axes admit at their strict gate. Pinned across the
+    /// three load-bearing axis-aligned shapes (`(3, 0)` no-evidence
+    /// axis paired with `(2, 0)` verification axis = Phase 1 build /
+    /// flux-source, `(4, 0)` with `(3, 0)` = Phase 1 chart / helm-
+    /// provenance, `(7, 0)` with `(5, 0)` = Phase 2 deployment /
+    /// aggregate-verified-subset). A regression that collapsed the
+    /// two-axis composition to one axis (e.g., returned only
+    /// `probe.is_admission_eligible_strict()` or only
+    /// `verification.is_admission_eligible_strict()`) would still pass
+    /// this arm at the all-axes-strict corner, but would fail the
+    /// per-axis rejection arms below where the dropped axis is the
+    /// failing one.
+    #[test]
+    fn test_compose_admission_eligible_strict_at_both_strict_arm_is_true() {
+        let cases = [
+            (
+                ProbeCoverage { ran: 3, absent: 0 },
+                VerificationCoverage {
+                    verified: 2,
+                    unverified: 0,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 4, absent: 0 },
+                VerificationCoverage {
+                    verified: 3,
+                    unverified: 0,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 7, absent: 0 },
+                VerificationCoverage {
+                    verified: 5,
+                    unverified: 0,
+                },
+            ),
+        ];
+        for (probe, verification) in cases {
+            assert!(
+                compose_admission_eligible_strict(&probe, &verification),
+                "both-axes-strict arm must pass the composed gate at \
+                 ({probe:?}, {verification:?})",
+            );
+        }
+    }
+
+    /// Composed gate rejects every no-evidence-axis failure
+    /// regardless of the verification axis's verdict. Pins the
+    /// load-bearing factor: the composition reads the no-evidence
+    /// axis as a strict precondition, not as a relaxation of the
+    /// verification axis. Pairs the four no-evidence-axis rejection
+    /// arms (empty, all-absent, mixed-low, saturated-fully-covered)
+    /// with the all-axes-strict verification arm `(5, 0)` so the
+    /// only failing factor is the no-evidence axis — a regression
+    /// that returned only the verification axis's verdict would
+    /// erroneously pass these arms.
+    #[test]
+    fn test_compose_admission_eligible_strict_rejects_probe_axis_failures() {
+        let strict_verification = VerificationCoverage {
+            verified: 5,
+            unverified: 0,
+        };
+        let probe_failures = [
+            ProbeCoverage { ran: 0, absent: 0 }, // empty
+            ProbeCoverage { ran: 0, absent: 7 }, // all-absent
+            ProbeCoverage { ran: 3, absent: 4 }, // mixed
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            }, // saturated-fully-covered
+        ];
+        for probe in probe_failures {
+            assert!(
+                !compose_admission_eligible_strict(&probe, &strict_verification),
+                "no-evidence-axis failure must break the composed gate \
+                 at probe={probe:?} verification={strict_verification:?} \
+                 — a regression that dropped the probe axis would \
+                 erroneously admit this state",
+            );
+        }
+    }
+
+    /// Composed gate rejects every verification-axis failure
+    /// regardless of the no-evidence axis's verdict. The structural
+    /// peer of the test above at the orthogonal axis. Pairs the four
+    /// verification-axis rejection arms (empty, all-unverified,
+    /// mixed, saturated-fully-verified) with the all-axes-strict
+    /// no-evidence arm `(7, 0)` so the only failing factor is the
+    /// verification axis — a regression that returned only the
+    /// no-evidence axis's verdict would erroneously pass these arms.
+    #[test]
+    fn test_compose_admission_eligible_strict_rejects_verification_axis_failures() {
+        let strict_probe = ProbeCoverage { ran: 7, absent: 0 };
+        let verification_failures = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            }, // empty
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            }, // all-unverified
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            }, // mixed
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            }, // saturated-fully-verified
+        ];
+        for verification in verification_failures {
+            assert!(
+                !compose_admission_eligible_strict(&strict_probe, &verification),
+                "verification-axis failure must break the composed gate \
+                 at probe={strict_probe:?} verification={verification:?} \
+                 — a regression that dropped the verification axis would \
+                 erroneously admit this state",
+            );
+        }
+    }
+
+    /// Structural equivalence with the documented two-axis consumer
+    /// composition
+    /// `probe.is_admission_eligible_strict() &&
+    /// verification.is_admission_eligible_strict()`. Pins the
+    /// one-oracle invariant the typed primitive carries — a regression
+    /// that hand-rolled the body (e.g., returned the disjunction
+    /// `probe.is_admission_eligible_strict() ||
+    /// verification.is_admission_eligible_strict()`, or composed only
+    /// the inner `is_fully_*` factors and dropped the saturation
+    /// clamps) would fail at the corresponding axis-failing arm where
+    /// the divergent composition decouples. Walks the cross product
+    /// of three per-axis representatives (a strict-arm pass, a
+    /// fully-covered-but-saturated pass-the-shape-fail-the-clamp arm,
+    /// and a mixed-arm rejection) so every (probe-arm × verification-
+    /// arm) cell is pinned against the documented composition.
+    #[test]
+    fn test_compose_admission_eligible_strict_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 7, absent: 0 }, // strict-pass
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            }, // saturated-fully-covered (rejected by saturation clamp)
+            ProbeCoverage { ran: 3, absent: 4 }, // mixed (rejected by fully-covered factor)
+            ProbeCoverage { ran: 0, absent: 0 }, // empty (rejected by both factors composed)
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            }, // strict-pass
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            }, // saturated-fully-verified (rejected by saturation clamp)
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            }, // mixed (rejected by fully-verified factor)
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            }, // empty (rejected by both factors composed)
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_admission_eligible_strict(&probe, &verification);
+                let composed = probe.is_admission_eligible_strict()
+                    && verification.is_admission_eligible_strict();
+                assert_eq!(
+                    direct, composed,
+                    "typed-primitive composition must equal the documented \
+                     two-axis consumer composition at probe={probe:?} \
+                     verification={verification:?} — a regression that \
+                     dropped one axis or replaced the conjunction with a \
+                     disjunction would fail this pin at the corresponding \
+                     axis-failing cell",
+                );
+            }
+        }
+    }
+
+    /// Saturation on EITHER axis breaks the composed gate even at the
+    /// otherwise-fully-covered / fully-verified arm. Pins the
+    /// load-bearing trustworthiness clamp at both axes: the float-form
+    /// `coverage_ratio` / `verification_ratio` and the integer-form
+    /// `coverage_ratio_pct` / `verification_ratio_pct` round to `1.0` /
+    /// `100` at the post-saturation `{*: MAX, opposite: 0}` arm against
+    /// the counted increments BUT against the true ratio lose past-
+    /// ceiling increments, so the composed gate refuses to admit
+    /// whenever either axis surfaces a saturated state. A regression
+    /// that dropped the saturation clamp on either axis would
+    /// erroneously admit these arms.
+    #[test]
+    fn test_compose_admission_eligible_strict_at_saturated_states_is_false() {
+        let strict_probe = ProbeCoverage { ran: 7, absent: 0 };
+        let strict_verification = VerificationCoverage {
+            verified: 5,
+            unverified: 0,
+        };
+        let saturated_probe = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let saturated_verification = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+
+        assert!(
+            !compose_admission_eligible_strict(&saturated_probe, &strict_verification),
+            "probe-axis saturation must break the composed gate even at \
+             the otherwise-strict verification arm",
+        );
+        assert!(
+            !compose_admission_eligible_strict(&strict_probe, &saturated_verification),
+            "verification-axis saturation must break the composed gate \
+             even at the otherwise-strict probe arm",
+        );
+        assert!(
+            !compose_admission_eligible_strict(&saturated_probe, &saturated_verification),
+            "both-axes saturation must break the composed gate",
+        );
+    }
+
+    /// The composed strict gate respects monoid `Add` on each axis:
+    /// fleet-wide aggregates `[phase_a, phase_b].iter().sum::<_>()` on
+    /// each axis pass the composed gate iff each axis's aggregate
+    /// passes its own strict gate. Pins the parallel-composition
+    /// invariant against the two-phase aggregate the future `commands::
+    /// attestation` emission site will collect — the saturating-add
+    /// monoid composes through each axis independently, then the
+    /// composed gate reads the two aggregates together. A regression
+    /// that broke either axis's monoid (e.g., a non-saturating `+`
+    /// that panicked, or a `Sum` impl that returned the identity in a
+    /// non-empty case) would fail this pin at the aggregate-reading
+    /// step.
+    #[test]
+    fn test_compose_admission_eligible_strict_respects_monoid_add_on_both_axes() {
+        let probe_phase_a = ProbeCoverage { ran: 3, absent: 0 };
+        let probe_phase_b = ProbeCoverage { ran: 4, absent: 0 };
+        let verification_phase_a = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        let verification_phase_b = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+
+        let probe_aggregate = probe_phase_a + probe_phase_b;
+        let verification_aggregate = verification_phase_a + verification_phase_b;
+        assert!(
+            compose_admission_eligible_strict(&probe_aggregate, &verification_aggregate),
+            "two-axis aggregate over fully-passing phases must pass the \
+             composed gate — probe={probe_aggregate:?} \
+             verification={verification_aggregate:?}",
+        );
+
+        let probe_phase_b_partial = ProbeCoverage { ran: 3, absent: 1 };
+        let probe_aggregate_partial = probe_phase_a + probe_phase_b_partial;
+        assert!(
+            !compose_admission_eligible_strict(&probe_aggregate_partial, &verification_aggregate),
+            "any phase contributing a probe-axis absent breaks the \
+             aggregate's composed gate",
+        );
+
+        let verification_phase_b_partial = VerificationCoverage {
+            verified: 2,
+            unverified: 1,
+        };
+        let verification_aggregate_partial = verification_phase_a + verification_phase_b_partial;
+        assert!(
+            !compose_admission_eligible_strict(&probe_aggregate, &verification_aggregate_partial),
+            "any phase contributing a verification-axis unverified \
+             breaks the aggregate's composed gate",
         );
     }
 }
