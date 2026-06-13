@@ -2385,6 +2385,174 @@ pub fn compose_admission_eligible_relaxed(
     compose_has_evidence(probe, verification) && !compose_is_saturated(probe, verification)
 }
 
+/// Parallel-composed both-axes-no-evidence floor predicate over the two
+/// orthogonal typed-primitive surfaces — the four-arm disjunction-of-
+/// disjunctions `(probe.is_all_absent() || probe.is_empty()) &&
+/// (verification.is_all_unverified() || verification.is_empty())`
+/// collapsed to one bool at one site. Reads `true` iff EVERY counted
+/// record on the no-evidence axis ([`ProbeCoverage`] over the seventeen-
+/// outcome attestation pipeline) collapsed to the absent arm OR no
+/// records were counted there, AND EVERY counted record on the
+/// verification-trustworthiness axis ([`VerificationCoverage`] over the
+/// five-outcome [`VerifiedOutcome`] subset) collapsed to the unverified
+/// arm OR no records were counted there. The both-axes no-positive-
+/// evidence floor — the operational fleet-wide state every observed
+/// `(probe, verification)` pair sits at today, before the five
+/// `Verified`-bearing typed outcomes wire real substantiations at their
+/// probe sites.
+///
+/// The structural complement of [`compose_has_evidence`] at the two-axis
+/// surface: where [`compose_has_evidence`] reads `true` iff AT LEAST ONE
+/// counted record on AT LEAST ONE axis surfaced its honest-positive arm,
+/// this reads `true` iff EVERY counted record on EVERY axis surfaced its
+/// no-evidence arm (or no records were counted at all). The load-bearing
+/// De Morgan equivalence
+/// `compose_is_all_no_evidence(p, v) == !compose_has_evidence(p, v)`
+/// holds at every reachable `(probe, verification)` pair — pinned by
+/// [`tests::test_compose_is_all_no_evidence_equals_negation_of_compose_has_evidence`]
+/// — because `(p.is_all_absent() || p.is_empty()) == (p.ran == 0) ==
+/// !p.has_evidence()` (the union of the two `ran == 0` arms exhausts the
+/// no-positive-evidence cases on the probe axis), symmetrically on the
+/// verification axis, and the conjunction across axes mirrors the
+/// disjunction in `compose_has_evidence` under De Morgan. The seven-
+/// member parallel-axis compose family now closes the structural arms
+/// the two-axis admission decomposition surfaces: AND of completeness,
+/// AND of strict admission, OR of saturation, AND of emptiness, OR of
+/// has-evidence, OR of admission eligibility (relaxed), AND of no-
+/// evidence floor.
+///
+/// Conjunction (not disjunction) is structurally load-bearing on the
+/// outer combinator: the both-axes no-evidence floor is the AND of per-
+/// axis no-evidence — EVERY counted axis must surface its no-evidence
+/// arm for the composed reading to admit. A regression that composed
+/// the outer disjunction `(p.is_all_absent() || p.is_empty()) ||
+/// (v.is_all_unverified() || v.is_empty())` would silently classify the
+/// one-axis-evidenced state as no-evidence (the drift class this helper
+/// exists to foreclose), surfacing a false-no-evidence reading at every
+/// downstream consumer that gates on the composed bool. Symmetrically,
+/// disjunction (not conjunction) is structurally load-bearing on the
+/// inner per-axis combinator: the per-axis no-evidence reading is the
+/// OR of the two structural arms `is_all_absent` (records counted, all
+/// collapsed to absent) and `is_empty` (no records counted) — both
+/// share the load-bearing structural property `ran == 0` (or
+/// `verified == 0`) at the per-axis level. A regression that conjuncted
+/// the inner per-axis arms `is_all_absent() && is_empty()` would
+/// reduce to the contradiction `false` at the per-axis level (the two
+/// arms are disjoint by `is_all_absent` requiring `absent > 0` and
+/// `is_empty` requiring `absent == 0`), silently collapsing the
+/// composed reading to `false` at every reachable state — exactly the
+/// drift class the named-arms disjunction-of-disjunctions form
+/// forecloses against the De Morgan negation form `!has_evidence()`.
+///
+/// The orthogonal-axis peer of the two per-axis named-floor predicates
+/// [`ProbeCoverage::is_all_absent`] and
+/// [`VerificationCoverage::is_all_unverified`]: where each per-axis
+/// predicate names the floor arm of the four-arm per-axis matrix
+/// (`(0, N)` at the no-evidence axis / `(0, N)` at the verification-
+/// trustworthiness axis), this composes the floor arms of both
+/// per-axis matrices into one bool at the typed-primitive surface,
+/// the four-corner-product floor of the joint two-axis matrix. A
+/// downstream `sekiban` admission verifier wanting to reject the
+/// fleet-wide "every counted record on every axis collapsed to its
+/// no-evidence arm" state — the load-bearing precondition for the
+/// fail-closed admission gate at the no-attestation-pipeline-wired
+/// frontier state — reads one bool — `compose_is_all_no_evidence(&
+/// probe, &verification)` — rather than composing the four-arm
+/// disjunction-of-disjunctions at the consumer surface (or, equivalently
+/// but with the kind-of-claim erased, `!compose_has_evidence(&probe,
+/// &verification)`). Before this helper, every fleet-wide no-evidence-
+/// floor consumer had to retype the four-arm composition (with the
+/// drift class a regression that swapped the inner / outer combinators
+/// silently admits the state the documented floor refuses); after this
+/// helper, the consumer reads one bool and the parallel-axis composition
+/// is sealed at the typed-primitive surface so a future third orthogonal
+/// axis (e.g., a compliance-dimensions axis the
+/// [`crate::compliance_dimensions`] family hints at) extends the
+/// composition here, not at every downstream consumer in lockstep.
+///
+/// The load-bearing decomposition `compose_admission_eligible_relaxed(p,
+/// v) == !compose_is_all_no_evidence(p, v) && !compose_is_saturated(p,
+/// v)` separates the two orthogonal admission factors at the composed-
+/// axis surface: presence-of-evidence ("at least one counted axis
+/// surfaced its honest-positive arm" — the De Morgan negation of the
+/// no-evidence floor) and trustworthiness ("neither axis reached the
+/// saturating-add ceiling"). The relaxed gate integrates BOTH factors;
+/// this helper surfaces the negated presence-of-evidence factor and
+/// leaves the trustworthiness clamp to the downstream consumer.
+///
+/// Saturation-robust by construction: each per-axis arm predicate reads
+/// the per-axis component itself (`ran == 0` / `verified == 0`), not
+/// against any derived ratio. At the post-saturation arm `{ran: 0,
+/// absent: usize::MAX}` / `{verified: 0, unverified: usize::MAX}` the
+/// composition correctly reads `true` (every counted record — even the
+/// dropped past-ceiling no-evidence increments — surfaced its no-evidence
+/// arm on each axis). At the inverse-saturation arm `{ran: usize::MAX,
+/// absent: 0}` / `{verified: usize::MAX, unverified: 0}` paired with the
+/// empty opposite axis, the composition correctly reads `false` (every
+/// counted record on the saturated axis surfaced its honest-positive
+/// arm, so the per-axis no-evidence reading is structurally `false` on
+/// that axis even though the saturating-add ceiling has been reached).
+/// The saturated-but-rolled drift class is foreclosed at the typed-
+/// primitive surface, mirroring the discipline [`compose_is_empty`],
+/// [`compose_is_fully_complete`], and [`compose_has_evidence`] establish
+/// for the structural complements.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented four-arm composition exactly — the
+/// structural equivalence
+/// `compose_is_all_no_evidence(p, v) == (p.is_all_absent() ||
+/// p.is_empty()) && (v.is_all_unverified() || v.is_empty())`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_is_all_no_evidence_equals_documented_composition`].
+///
+/// THEORY.md §V.4 honesty channel: the both-axes no-evidence floor
+/// surface reads one bool naming "every counted verification-bearing
+/// probe AND every counted no-evidence probe surfaced the honest no-
+/// substantiation arm" — the load-bearing precondition the strict-
+/// production admission gate fails-closed on at today's call-site state
+/// before the five `Verified`-bearing typed outcomes wire real
+/// substantiations. THEORY.md §VI.1 one-oracle discipline: the two-axis
+/// no-evidence-floor conjunction is derived at one site (here), not re-
+/// inlined as `(p.is_all_absent() || p.is_empty()) && (v.is_all_unverified()
+/// || v.is_empty())` per downstream consumer (which would inherit a
+/// drift class on the day a third orthogonal axis is added — every
+/// consumer would need to extend their composition in lockstep, exactly
+/// the structural seam this helper forecloses, mirroring the discipline
+/// [`compose_admission_eligible_strict`], [`compose_is_saturated`],
+/// [`compose_is_empty`], [`compose_is_fully_complete`],
+/// [`compose_has_evidence`], and [`compose_admission_eligible_relaxed`]
+/// already established for the complementary gates).
+///
+/// Frontier lineage: SLSA provenance verification distinguishes "no
+/// attestations produced anywhere in the pipeline" (the fleet-wide no-
+/// evidence floor, the operational state the gate reads first to surface
+/// the structural fail-closed reason) from "at least one attestation
+/// produced somewhere" (the relaxed precondition the gate admits on);
+/// this helper lifts the same fleet-wide no-evidence-floor reading at
+/// the two-axis typed-primitive surface. Sigstore's policy controller
+/// surfaces "no policy-matched attestations across any namespace" as a
+/// distinct fail-closed reading the admission gate consults before
+/// integrating per-attestation freshness — the same fleet-wide no-
+/// evidence-floor discipline this helper lifts across the two-axis
+/// composition. Bazel's `--build_event_stream` / Buck2's build-event
+/// surface emit a structural "no actions completed successfully anywhere
+/// in the build" boundary distinct from the "every action completed
+/// successfully" ceiling — the fleet-wide no-positive-evidence floor a
+/// downstream consumer reads to gate "the build is structurally empty of
+/// progress" vs. "at least one action made progress"; this helper lifts
+/// the same floor distinction at forge's two-axis surface.
+///
+/// [`ProbeCoverage::is_all_absent`]: ProbeCoverage::is_all_absent
+/// [`VerificationCoverage::is_all_unverified`]: VerificationCoverage::is_all_unverified
+#[allow(dead_code)]
+pub fn compose_is_all_no_evidence(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    (probe.is_all_absent() || probe.is_empty())
+        && (verification.is_all_unverified() || verification.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7750,6 +7918,327 @@ mod tests {
              evidenced state — the structural witness the relaxed gate \
              is strictly weaker than the strict gate at the Phase 1 / \
              Phase 2 partial-progress boundary",
+        );
+    }
+
+    /// Pins the floor reading at the four no-evidence representative
+    /// states — the cross product of the two per-axis no-evidence arms
+    /// (`is_empty` at `(0, 0)`, `is_all_absent` / `is_all_unverified` at
+    /// `(0, N>0)`) on each axis. Every combination must read `true`,
+    /// pinning the both-axes no-positive-evidence floor uniformly across
+    /// the four inner-disjunction arms.
+    #[test]
+    fn test_compose_is_all_no_evidence_at_both_axes_no_evidence_arms_is_true() {
+        let probe_empty = ProbeCoverage { ran: 0, absent: 0 };
+        let probe_all_absent = ProbeCoverage { ran: 0, absent: 4 };
+        let verification_empty = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        let verification_all_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 6,
+        };
+        for probe in [probe_empty, probe_all_absent] {
+            for verification in [verification_empty, verification_all_unverified] {
+                assert!(
+                    compose_is_all_no_evidence(&probe, &verification),
+                    "both-axes no-evidence floor must admit at \
+                     probe={probe:?} verification={verification:?} — \
+                     every per-axis-no-evidence × per-axis-no-evidence \
+                     combination is the load-bearing both-axes-no-\
+                     positive-evidence floor THEORY §V.4 names",
+                );
+            }
+        }
+    }
+
+    /// Pins the rejection reading at every state where AT LEAST ONE axis
+    /// has surfaced positive evidence. Covers the three per-axis evidence
+    /// representatives (mixed `(R>0, A>0)`, fully-covered `(M, 0)`,
+    /// saturated-fully-covered `(usize::MAX, 0)`) on each axis composed
+    /// against the four no-evidence representatives on the opposite axis,
+    /// plus the diagonal cross product of evidence × evidence. Every
+    /// combination must read `false`, foreclosing the drift class where a
+    /// regression swapping the outer combinator (AND → OR) would silently
+    /// admit the one-axis-evidenced state as no-evidence.
+    #[test]
+    fn test_compose_is_all_no_evidence_at_any_axis_evidence_arms_is_false() {
+        let probe_no_evidence = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+        ];
+        let probe_evidence = [
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        let verification_no_evidence = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+        ];
+        let verification_evidence = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 4,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_evidence {
+            for verification in verification_no_evidence {
+                assert!(
+                    !compose_is_all_no_evidence(&probe, &verification),
+                    "no-evidence floor must refuse the probe-axis-\
+                     evidenced state at probe={probe:?} \
+                     verification={verification:?}",
+                );
+            }
+        }
+        for probe in probe_no_evidence {
+            for verification in verification_evidence {
+                assert!(
+                    !compose_is_all_no_evidence(&probe, &verification),
+                    "no-evidence floor must refuse the verification-\
+                     axis-evidenced state at probe={probe:?} \
+                     verification={verification:?}",
+                );
+            }
+        }
+        for probe in probe_evidence {
+            for verification in verification_evidence {
+                assert!(
+                    !compose_is_all_no_evidence(&probe, &verification),
+                    "no-evidence floor must refuse the both-axes-\
+                     evidenced state at probe={probe:?} \
+                     verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Pins the structural equivalence with the documented four-arm
+    /// disjunction-of-disjunctions composition across the cross product
+    /// of representative per-axis arms (empty, all-absent/all-unverified,
+    /// mixed, fully-covered/fully-verified, both saturated polarities).
+    /// A regression that swapped any combinator (outer AND ↔ OR, or
+    /// either inner OR ↔ AND) would fail this pin at the corresponding
+    /// divergent cell.
+    #[test]
+    fn test_compose_is_all_no_evidence_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_is_all_no_evidence(&probe, &verification);
+                let composed = (probe.is_all_absent() || probe.is_empty())
+                    && (verification.is_all_unverified() || verification.is_empty());
+                assert_eq!(
+                    direct, composed,
+                    "typed-primitive composition must equal the \
+                     documented four-arm consumer composition at \
+                     probe={probe:?} verification={verification:?} — \
+                     a regression that swapped any combinator would \
+                     fail this pin at the corresponding divergent cell",
+                );
+            }
+        }
+    }
+
+    /// Pins the load-bearing De Morgan equivalence
+    /// `compose_is_all_no_evidence(p, v) == !compose_has_evidence(p, v)`
+    /// across the same cross product of representative per-axis arms.
+    /// The equivalence holds because `(p.is_all_absent() || p.is_empty())
+    /// == (p.ran == 0) == !p.has_evidence()` (the union of the two
+    /// `ran == 0` arms exhausts the no-positive-evidence cases on the
+    /// probe axis), symmetrically on the verification axis, and the
+    /// conjunction across axes mirrors the disjunction in
+    /// `compose_has_evidence` under De Morgan. Pinning this equivalence
+    /// at the test surface forecloses the drift class where a regression
+    /// to either helper would silently break the structural complement
+    /// relation the parallel-axis compose family relies on (e.g., a
+    /// regression to `has_evidence` that flipped the AND ↔ OR inner
+    /// combinator would break the equivalence at the all-absent ×
+    /// all-unverified cell — exactly the structural seam the De Morgan
+    /// equivalence pin surfaces).
+    #[test]
+    fn test_compose_is_all_no_evidence_equals_negation_of_compose_has_evidence() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let floor = compose_is_all_no_evidence(&probe, &verification);
+                let evidence = compose_has_evidence(&probe, &verification);
+                assert_eq!(
+                    floor, !evidence,
+                    "load-bearing De Morgan equivalence \
+                     compose_is_all_no_evidence(p, v) == \
+                     !compose_has_evidence(p, v) must hold at \
+                     probe={probe:?} verification={verification:?} — \
+                     a regression to either helper that broke the \
+                     structural complement relation would fail this \
+                     pin at the corresponding divergent cell",
+                );
+            }
+        }
+    }
+
+    /// Pins the saturation-robust reading at the post-saturation arms
+    /// of both axes. The all-absent / all-unverified arm at the
+    /// `usize::MAX` count `({ran: 0, absent: usize::MAX}, {verified: 0,
+    /// unverified: usize::MAX})` must still read `true` (every counted
+    /// record — even the dropped past-ceiling no-evidence increments —
+    /// collapsed to the no-evidence arm on each axis). The inverse-
+    /// saturation arm `{ran: usize::MAX, absent: 0}` / `{verified:
+    /// usize::MAX, unverified: 0}` must read `false` (every counted
+    /// record on the saturated axis surfaced its honest-positive arm,
+    /// so the per-axis no-evidence reading is structurally `false` on
+    /// that axis — even though the saturating-add ceiling has been
+    /// reached). The integer-arithmetic body of each per-axis arm
+    /// predicate forecloses both drift directions through the
+    /// component-level tests on the components themselves.
+    #[test]
+    fn test_compose_is_all_no_evidence_stays_robust_at_saturated_states() {
+        let probe_saturated_no_evidence = ProbeCoverage {
+            ran: 0,
+            absent: usize::MAX,
+        };
+        let verification_saturated_no_evidence = VerificationCoverage {
+            verified: 0,
+            unverified: usize::MAX,
+        };
+        assert!(
+            compose_is_all_no_evidence(
+                &probe_saturated_no_evidence,
+                &verification_saturated_no_evidence,
+            ),
+            "saturated-but-no-evidence arm must still read `true` at \
+             the both-axes no-evidence floor — the per-axis \
+             integer-arithmetic body forecloses the saturated-but-\
+             rolled drift class through the `ran == 0` / `verified == \
+             0` component-level tests",
+        );
+        let probe_saturated_evidence = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let verification_saturated_evidence = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        assert!(
+            !compose_is_all_no_evidence(
+                &probe_saturated_evidence,
+                &verification_saturated_evidence,
+            ),
+            "saturated-fully-evidenced arm must read `false` at the \
+             both-axes no-evidence floor — the saturating-add ceiling \
+             on the evidence component cannot drift the per-axis \
+             no-evidence reading away from `false` because the \
+             component-level test reads `ran == 0` / `verified == 0` \
+             against the saturated component itself",
+        );
+        assert!(
+            !compose_is_all_no_evidence(
+                &probe_saturated_evidence,
+                &verification_saturated_no_evidence,
+            ),
+            "saturated-fully-evidenced probe × saturated-all-unverified \
+             verification arm must read `false` — the per-axis \
+             no-evidence reading is structurally `false` on the \
+             saturated-evidenced probe axis, foreclosing the composed \
+             AND",
         );
     }
 }
