@@ -1773,6 +1773,144 @@ pub fn compose_is_empty(probe: &ProbeCoverage, verification: &VerificationCovera
     probe.is_empty() && verification.is_empty()
 }
 
+/// Parallel-composed both-axes-complete predicate over the two
+/// orthogonal typed-primitive surfaces — the two-bool conjunction
+/// `probe.is_fully_covered() && verification.is_fully_verified()`
+/// collapsed to one bool at one site. Reads `true` iff EVERY counted
+/// probe ran (no-evidence axis fully covered: `ran > 0 && absent == 0`)
+/// AND EVERY counted verification cleared (verification-trustworthiness
+/// axis fully verified: `verified > 0 && unverified == 0`). The
+/// structural complement of [`compose_is_empty`] at the other end of the
+/// totality axis: where [`compose_is_empty`] flags the both-axes-vacuous
+/// boundary `({ran: 0, absent: 0}, {verified: 0, unverified: 0})`, this
+/// flags the both-axes-complete boundary where every counted record on
+/// every axis surfaced its honest-positive arm.
+///
+/// The structural peer of [`compose_admission_eligible_strict`] /
+/// [`compose_is_saturated`] / [`compose_is_empty`] at the
+/// both-axes-complete axis: where the strict gate (commit 7d818bd) is
+/// the four-way conjunction "complete AND trustworthy on BOTH axes",
+/// the trust-broken disjunction (commit 2ea2240) is "untrustworthy on AT
+/// LEAST ONE axis", and the vacuous-aggregate conjunction (commit
+/// a50a371) is "vacuous on BOTH axes", this is the completeness factor
+/// of the strict gate: "complete on BOTH axes" — the load-bearing
+/// decomposition factor a downstream verifier reads to separate the
+/// completeness reading from the trustworthiness reading at the
+/// composed-axis surface. The four helpers close the parallel-axis
+/// compose family across both axes: AND of completeness, AND of
+/// strict admission, OR of saturation, AND of emptiness — the four
+/// structural arms the two-axis admission decomposition surfaces.
+///
+/// Conjunction (not disjunction) is structurally load-bearing here:
+/// completeness is the AND of per-axis completeness — every counted
+/// axis must surface its fully-covered/fully-verified arm for the
+/// composed reading to admit. A regression that composed the
+/// disjunction `probe.is_fully_covered() || verification.is_fully_verified()`
+/// would silently admit the one-axis-incomplete state as "complete"
+/// (the drift class this helper exists to foreclose), surfacing a
+/// false completeness reading at every downstream consumer that gates
+/// on the composed bool.
+///
+/// The orthogonal-axis peer of the two per-axis [`is_fully_covered`] /
+/// [`is_fully_verified`] predicates: where each per-axis predicate
+/// collapses its component-level two-condition shape at one orthogonal
+/// axis to one bool at the typed-primitive surface, this collapses the
+/// two-bool axis-level conjunction `probe.is_fully_covered() &&
+/// verification.is_fully_verified()` across both axes to one bool at
+/// one site. A downstream consumer emitting an aggregate-completeness
+/// telemetry field across both axes (the natural follow-up to the
+/// per-axis `*_probes_fully_covered` / `*_verifications_fully_verified`
+/// fields the `emit_probe_coverage!` macro family will extend) reads
+/// one bool — `compose_is_fully_complete(&probe, &verification)` —
+/// rather than composing the two-bool per-axis surface at every
+/// consumer. Before this helper, every aggregate-completeness emitter
+/// had to retype the two-bool consumer composition (with the drift
+/// class a regression that disjuncted the per-axis flags silently
+/// reads the one-axis-incomplete state as complete); after this
+/// helper, the emitter reads one bool and the parallel-axis
+/// composition is sealed at the typed-primitive surface so a future
+/// third orthogonal axis (e.g., a compliance-dimensions axis the
+/// [`crate::compliance_dimensions`] family hints at) extends the
+/// composition here, not at every downstream consumer in lockstep.
+///
+/// The load-bearing decomposition `compose_admission_eligible_strict(p,
+/// v) == compose_is_fully_complete(p, v) && !compose_is_saturated(p, v)`
+/// separates the two orthogonal admission factors at the composed-axis
+/// surface: completeness ("every counted axis surfaced its fully-covered
+/// arm") and trustworthiness ("neither axis reached the saturating-add
+/// ceiling"). The strict gate integrates BOTH factors; this helper
+/// surfaces ONLY the completeness factor, so a downstream consumer can
+/// gate on completeness without the trustworthiness clamp (e.g., to
+/// emit a per-axis completeness telemetry field independently of the
+/// trustworthiness telemetry field) without retyping the four-way
+/// conjunction the strict gate seals. Pinned at
+/// [`tests::test_compose_is_fully_complete_decomposes_strict_admission`].
+///
+/// Saturation distinction (load-bearing): this helper reads `true` at
+/// the saturated-but-honest-completeness arm `{ran: usize::MAX, absent:
+/// 0}` / `{verified: usize::MAX, unverified: 0}` — at these arms, the
+/// component-level completeness test `ran > 0 && absent == 0` /
+/// `verified > 0 && unverified == 0` reads `true` honestly against the
+/// counted increments (every counted probe DID run, every counted
+/// verification DID clear), BUT the saturating-add ceiling means
+/// past-ceiling increments are lost so the reading is no longer
+/// trustworthy against the true counts. The strict gate clamps this arm
+/// at the trustworthiness factor `!is_saturated()`; this helper does
+/// NOT — it surfaces the completeness factor honestly and leaves the
+/// trustworthiness clamp to the downstream consumer (via
+/// [`compose_is_saturated`] or the strict gate composition). The
+/// distinction is the load-bearing reason the helper exists separately
+/// from `compose_admission_eligible_strict`: the two factors are
+/// orthogonal and a downstream consumer can read either independently.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented two-axis composition exactly — the
+/// structural equivalence
+/// `compose_is_fully_complete(p, v) == (p.is_fully_covered() &&
+/// v.is_fully_verified())`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_is_fully_complete_equals_documented_composition`].
+///
+/// THEORY.md §VI.1 one-oracle discipline: the two-axis completeness
+/// conjunction is derived at one site (here), not re-inlined as
+/// `probe.is_fully_covered() && verification.is_fully_verified()` per
+/// downstream consumer (which would inherit a drift class on the day a
+/// third orthogonal axis is added — every consumer would need to extend
+/// their composition in lockstep, exactly the structural seam this
+/// helper forecloses, mirroring the discipline
+/// [`compose_admission_eligible_strict`], [`compose_is_saturated`], and
+/// [`compose_is_empty`] establish for the complementary gates).
+/// THEORY.md §V.4 / §VII.1 honesty channel: the aggregate-completeness
+/// surface reads one bool naming "every counted record on every
+/// orthogonal axis surfaced its honest-positive arm," the load-bearing
+/// completeness factor the strict-production admission gate integrates
+/// alongside the orthogonal trustworthiness factor.
+///
+/// Frontier lineage: Bazel's `--build_event_stream` / Buck2's
+/// build-event surface distinguish the "every action succeeded" event
+/// (structural completeness reading, independent of cache-trust
+/// freshness) from the "every action succeeded AND every cache hit was
+/// trustworthy" composed admission gate. SLSA L3+'s provenance gate
+/// distinguishes "every required attestation present" (structural
+/// completeness, the precondition the gate reads first) from "every
+/// attestation present AND trustworthy" (the admission-eligible
+/// reading the gate admits on); this helper lifts the same
+/// completeness-vs-trustworthiness decomposition at the two-axis
+/// typed-primitive surface. Sigstore's policy controller surfaces "every
+/// matched attestation cleared" as a distinct completeness reading
+/// before integrating per-attestation freshness; this helper lifts the
+/// same discipline across the two-axis composition.
+///
+/// [`is_fully_covered`]: ProbeCoverage::is_fully_covered
+/// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
+#[allow(dead_code)]
+pub fn compose_is_fully_complete(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    probe.is_fully_covered() && verification.is_fully_verified()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5674,6 +5812,318 @@ mod tests {
             "any phase contributing records on the verification axis \
              breaks the vacuous-aggregate state — \
              verification={verification_aggregate_populated:?}",
+        );
+    }
+
+    /// Parallel-composed both-axes-complete predicate is `true` at the
+    /// fully-covered/fully-verified arm where every counted probe ran
+    /// AND every counted verification cleared. Pins the load-bearing
+    /// shape the fleet-wide aggregate-completeness emission site reads
+    /// at: a downstream emitter that gates on the composed bool admits
+    /// only the both-axes-complete state. Walks the three honest
+    /// fully-covered probe representatives paired with the three honest
+    /// fully-verified verification representatives (small, medium, and
+    /// the saturated-but-honest `usize::MAX` arm where every counted
+    /// record surfaced its positive arm) — at every such cross-product
+    /// cell, the composition admits. A regression that returned
+    /// `false` at these arms would over-suppress completeness telemetry
+    /// at the load-bearing strict-production state.
+    #[test]
+    fn test_compose_is_fully_complete_at_both_complete_arm_is_true() {
+        let probe_fully_covered = [
+            ProbeCoverage { ran: 1, absent: 0 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        let verification_fully_verified = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_fully_covered {
+            for verification in verification_fully_verified {
+                assert!(
+                    compose_is_fully_complete(&probe, &verification),
+                    "both-axes-complete arm must read complete at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Parallel-composed both-axes-complete predicate rejects every
+    /// probe-axis-incomplete state regardless of the verification axis's
+    /// completeness. Pins the load-bearing factor: completeness on the
+    /// verification axis alone is NOT enough to make the aggregate
+    /// complete — every axis must surface its fully-covered arm. Pairs
+    /// the three probe-axis non-fully-covered representatives (empty,
+    /// all-absent, mixed) with a fully-verified verification arm so the
+    /// only completeness-blocking factor is the probe axis — a
+    /// regression that returned the disjunction would erroneously
+    /// admit these states as complete.
+    #[test]
+    fn test_compose_is_fully_complete_rejects_probe_axis_incomplete() {
+        let fully_verified = VerificationCoverage {
+            verified: 5,
+            unverified: 0,
+        };
+        let probe_incomplete = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 5 },
+            ProbeCoverage { ran: 3, absent: 4 },
+        ];
+        for probe in probe_incomplete {
+            assert!(
+                !compose_is_fully_complete(&probe, &fully_verified),
+                "probe-axis incompleteness must block the composed \
+                 complete reading at probe={probe:?} \
+                 verification={fully_verified:?} — a regression that \
+                 returned the disjunction would erroneously admit this \
+                 state as complete and over-emit completeness telemetry",
+            );
+        }
+    }
+
+    /// Parallel-composed both-axes-complete predicate rejects every
+    /// verification-axis-incomplete state regardless of the probe axis's
+    /// completeness. The structural peer of the test above at the
+    /// orthogonal axis. Pairs the three verification-axis non-fully-
+    /// verified representatives (empty, all-unverified, mixed) with a
+    /// fully-covered probe arm so the only completeness-blocking factor
+    /// is the verification axis — a regression that returned the
+    /// disjunction would erroneously admit these states as complete.
+    #[test]
+    fn test_compose_is_fully_complete_rejects_verification_axis_incomplete() {
+        let fully_covered = ProbeCoverage { ran: 7, absent: 0 };
+        let verification_incomplete = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+        ];
+        for verification in verification_incomplete {
+            assert!(
+                !compose_is_fully_complete(&fully_covered, &verification),
+                "verification-axis incompleteness must block the \
+                 composed complete reading at probe={fully_covered:?} \
+                 verification={verification:?} — a regression that \
+                 returned the disjunction would erroneously admit this \
+                 state as complete and over-emit completeness telemetry",
+            );
+        }
+    }
+
+    /// Structural equivalence with the documented two-axis consumer
+    /// composition `probe.is_fully_covered() && verification.
+    /// is_fully_verified()`. Pins the one-oracle invariant the typed
+    /// primitive carries — a regression that hand-rolled the body (e.g.,
+    /// returned the disjunction `probe.is_fully_covered() ||
+    /// verification.is_fully_verified()`, which would silently admit the
+    /// one-axis-complete-one-axis-incomplete state as complete, the
+    /// drift class this helper exists to foreclose) would fail at the
+    /// corresponding one-axis-incomplete cells where the divergent
+    /// composition decouples. Walks the cross product of four per-axis
+    /// representatives (empty, all-absent/all-unverified, mixed,
+    /// fully-covered/fully-verified) so every (probe-arm ×
+    /// verification-arm) cell is pinned against the documented
+    /// composition.
+    #[test]
+    fn test_compose_is_fully_complete_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 5 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_is_fully_complete(&probe, &verification);
+                let composed = probe.is_fully_covered() && verification.is_fully_verified();
+                assert_eq!(
+                    direct, composed,
+                    "typed-primitive composition must equal the documented \
+                     two-axis consumer composition at probe={probe:?} \
+                     verification={verification:?} — a regression that \
+                     replaced the conjunction with a disjunction would \
+                     fail this pin at the one-axis-complete cells",
+                );
+            }
+        }
+    }
+
+    /// The load-bearing decomposition pin:
+    /// `compose_admission_eligible_strict(p, v) ==
+    ///  compose_is_fully_complete(p, v) && !compose_is_saturated(p, v)`.
+    /// Separates the strict gate into its two orthogonal admission
+    /// factors at the composed-axis surface — completeness (this
+    /// helper) and trustworthiness ([`compose_is_saturated`] negated) —
+    /// and pins that the strict gate is exactly the AND of the two.
+    /// Walks the full 4x4 cross product of per-axis representatives
+    /// (empty, all-absent/all-unverified, mixed, fully-covered/
+    /// fully-verified) AND every saturated probe × saturated
+    /// verification corner (the post-saturation arms where the
+    /// completeness reading and the trustworthiness reading diverge —
+    /// `{ran: usize::MAX, absent: 0}` is structurally fully-covered
+    /// but NOT trustworthy, so the strict gate fails it through the
+    /// trustworthiness factor). A regression that drifted either factor
+    /// from the strict gate's body would fail at the corresponding cell
+    /// where the decomposition diverges.
+    #[test]
+    fn test_compose_is_fully_complete_decomposes_strict_admission() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 5 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let strict = compose_admission_eligible_strict(&probe, &verification);
+                let decomposed = compose_is_fully_complete(&probe, &verification)
+                    && !compose_is_saturated(&probe, &verification);
+                assert_eq!(
+                    strict, decomposed,
+                    "strict gate must equal the AND of completeness and \
+                     trustworthiness factors at probe={probe:?} \
+                     verification={verification:?} — a regression that \
+                     drifted either factor would fail this pin",
+                );
+            }
+        }
+    }
+
+    /// The composed both-axes-complete predicate respects monoid `Add`
+    /// on each axis: a fleet-wide aggregate `[phase_a, phase_b]
+    /// .iter().sum::<_>()` reads complete iff both phases together
+    /// produce the fully-covered/fully-verified arm on both axes —
+    /// any phase contributing an `absent`/`unverified` increment breaks
+    /// the completeness state via the `absent == 0` / `unverified == 0`
+    /// component-level test. Pins the parallel-composition invariant
+    /// against the two-phase aggregate the future
+    /// `commands::attestation` emission site will collect — the
+    /// saturating-add monoid composes through each axis independently,
+    /// then the composed predicate reads the two aggregates together.
+    #[test]
+    fn test_compose_is_fully_complete_respects_monoid_add_on_both_axes() {
+        let probe_phase_a = ProbeCoverage { ran: 3, absent: 0 };
+        let probe_phase_b = ProbeCoverage { ran: 4, absent: 0 };
+        let verification_phase_a = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        let verification_phase_b = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+
+        let probe_aggregate_complete = probe_phase_a + probe_phase_b;
+        let verification_aggregate_complete = verification_phase_a + verification_phase_b;
+        assert!(
+            compose_is_fully_complete(&probe_aggregate_complete, &verification_aggregate_complete),
+            "two-axis aggregate over fully-complete phases must read \
+             complete — probe={probe_aggregate_complete:?} \
+             verification={verification_aggregate_complete:?}",
+        );
+
+        let probe_phase_absent = ProbeCoverage { ran: 0, absent: 1 };
+        let probe_aggregate_broken = probe_phase_a + probe_phase_absent;
+        assert!(
+            !compose_is_fully_complete(&probe_aggregate_broken, &verification_aggregate_complete),
+            "any phase contributing an absent record on the probe axis \
+             breaks the both-axes-complete state — \
+             probe={probe_aggregate_broken:?}",
+        );
+
+        let verification_phase_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 1,
+        };
+        let verification_aggregate_broken = verification_phase_a + verification_phase_unverified;
+        assert!(
+            !compose_is_fully_complete(&probe_aggregate_complete, &verification_aggregate_broken),
+            "any phase contributing an unverified record on the \
+             verification axis breaks the both-axes-complete state — \
+             verification={verification_aggregate_broken:?}",
         );
     }
 }
