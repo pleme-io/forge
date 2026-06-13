@@ -2553,6 +2553,129 @@ pub fn compose_is_all_no_evidence(
         && (verification.is_all_unverified() || verification.is_empty())
 }
 
+/// Parallel-composed fleet-wide relaxed-gate fail-closed disjunction over
+/// the two orthogonal typed-primitive surfaces — the two-helper
+/// disjunction `compose_is_all_no_evidence(p, v) ||
+/// compose_is_saturated(p, v)` collapsed to one bool at one site. Reads
+/// `true` iff EVERY counted record on EVERY axis collapsed to its
+/// no-evidence arm (or no records were counted) OR AT LEAST ONE axis
+/// reached its `usize::saturating_add` ceiling. The structural
+/// fail-closed reason a relaxed-staging admission gate
+/// ([`compose_admission_eligible_relaxed`]) refuses on — under De Morgan
+/// the negation of the relaxed gate decomposes exactly as
+/// `!compose_admission_eligible_relaxed(p, v) ==
+///  compose_is_all_no_evidence(p, v) || compose_is_saturated(p, v)`
+/// because `!(compose_has_evidence && !compose_is_saturated) ==
+///  !compose_has_evidence || compose_is_saturated ==
+///  compose_is_all_no_evidence || compose_is_saturated`
+/// (the second step uses the load-bearing De Morgan equivalence
+/// `compose_is_all_no_evidence(p, v) == !compose_has_evidence(p, v)` the
+/// prior commit pinned).
+///
+/// The structural complement of [`compose_admission_eligible_relaxed`] at
+/// the two-axis surface: where the relaxed gate (commit e6810b2)
+/// integrates "evidence on AT LEAST ONE axis AND trustworthy on BOTH
+/// axes" — the Phase 1 dev/staging admission precondition — this surfaces
+/// the disjunction of the two structural fail-closed reasons (the
+/// no-evidence floor OR the saturation ceiling) the gate refuses on with
+/// the kind-of-claim preserved (rather than the bare bool the De Morgan
+/// negation `!compose_admission_eligible_relaxed(p, v)` would surface).
+/// A downstream `sekiban` admission verifier wanting to surface the
+/// fleet-wide structural fail-closed reason — distinguishing "no
+/// progress made on any axis" from "progress made but trust broken" at
+/// the typed-primitive surface — reads one bool from this helper and
+/// branches on the two component helpers individually rather than
+/// re-deriving the four-arm disjunction-of-disjunctions at the consumer
+/// surface (or, equivalently but with the kind-of-claim erased,
+/// `!compose_admission_eligible_relaxed(p, v)`).
+///
+/// Disjunction (not conjunction) is structurally load-bearing on the
+/// outer combinator: the relaxed gate refuses iff EITHER fail-closed
+/// reason holds — no positive evidence anywhere OR untrustworthy ratio
+/// surface on at least one axis. A regression that composed the
+/// conjunction `compose_is_all_no_evidence(p, v) &&
+/// compose_is_saturated(p, v)` would silently admit the load-bearing
+/// "evidence-bearing but saturated" state (e.g.,
+/// `{ran: usize::MAX, absent: 0}`) as relaxed-eligible, dropping the
+/// trustworthiness factor the relaxed gate inherits verbatim from the
+/// strict gate; symmetrically it would silently admit the "no evidence
+/// but trustworthy" state as relaxed-eligible, dropping the
+/// presence-of-evidence factor the relaxed gate requires.
+///
+/// The eight-member parallel-axis compose family now closes the
+/// structural complements the two-axis admission decomposition surfaces:
+/// AND of completeness, AND of strict admission, OR of saturation, AND
+/// of emptiness, OR of has-evidence, OR of admission eligibility
+/// (relaxed), AND of no-evidence floor, OR of no-evidence-OR-saturated
+/// (relaxed-refuse). The relaxed-gate decomposition
+/// `compose_admission_eligible_relaxed(p, v) ==
+/// !compose_is_all_no_evidence_or_saturated(p, v)` is the De Morgan
+/// peer the natural-language description of the relaxed gate ("admit iff
+/// evidence present and trust intact" ↔ "refuse iff no evidence or
+/// trust broken") makes auditable at the typed-primitive surface —
+/// pinned by
+/// [`tests::test_compose_is_all_no_evidence_or_saturated_equals_negation_of_compose_admission_eligible_relaxed`].
+///
+/// Saturation-robust by construction: the second disjunct
+/// `compose_is_saturated` explicitly reads the saturating-add ceiling
+/// across both axes, so the post-saturation state every other relaxed-
+/// gate ratio surface would lose past-ceiling increments at is
+/// structurally classified as fail-closed here. The first disjunct
+/// `compose_is_all_no_evidence` reads the `ran == 0` / `verified == 0`
+/// per-axis component itself (not against any derived ratio), so the
+/// saturated-but-no-evidence arm `{ran: 0, absent: usize::MAX}` /
+/// `{verified: 0, unverified: usize::MAX}` reads `true` honestly through
+/// both disjuncts.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented two-helper composition exactly — the
+/// structural equivalence
+/// `compose_is_all_no_evidence_or_saturated(p, v) ==
+/// (compose_is_all_no_evidence(p, v) || compose_is_saturated(p, v))`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_is_all_no_evidence_or_saturated_equals_documented_composition`].
+///
+/// THEORY.md §V.4 honesty channel: the relaxed-gate fail-closed
+/// disjunction surface reads one bool naming "the fleet-wide aggregate
+/// has either made no progress (every counted record on every axis
+/// collapsed to no-evidence) or lost trust (a derived-ratio axis hit
+/// the saturating-add ceiling)" — the structural fail-closed reason the
+/// Phase 1 admission gate refuses on, decomposable into its two named
+/// per-helper components at the consumer surface. THEORY.md §VI.1
+/// one-oracle discipline: the two-helper disjunction is derived at one
+/// site (here), not re-inlined as `compose_is_all_no_evidence(p, v) ||
+/// compose_is_saturated(p, v)` per downstream consumer (which would
+/// inherit a drift class on the day a third orthogonal axis is added —
+/// every consumer would need to extend the composition in lockstep,
+/// exactly the structural seam this helper forecloses, mirroring the
+/// discipline the seven prior compose helpers established for the
+/// complementary gates).
+///
+/// Frontier lineage: SLSA L3+ admission policy gates surface the
+/// fail-closed reason as a structural disjunction "no required
+/// attestations present anywhere OR at least one freshness window
+/// expired" distinct from the bare admission bool, so a downstream
+/// auditor can branch on the structural reason the gate refused; this
+/// helper lifts the same fail-closed-disjunction surface at the
+/// two-axis typed-primitive level. Sigstore's policy controller emits
+/// the rejected-admission reason as the disjunction "no matched
+/// attestations OR freshness-window violation" preserving the named
+/// per-axis reason for downstream remediation; this helper lifts the
+/// same structural-reason discipline at the two-axis composition.
+/// Bazel's `--build_event_stream` / Buck2's build-event surface emit a
+/// per-stage "no actions completed successfully anywhere OR cache trust
+/// broken" fail-closed disjunction distinct from the bare admission
+/// bool — the fleet-wide structural-reason readout a downstream
+/// consumer branches on; this helper lifts the same structural-reason
+/// distinction at forge's two-axis surface.
+#[allow(dead_code)]
+pub fn compose_is_all_no_evidence_or_saturated(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    compose_is_all_no_evidence(probe, verification) || compose_is_saturated(probe, verification)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8239,6 +8362,411 @@ mod tests {
              no-evidence reading is structurally `false` on the \
              saturated-evidenced probe axis, foreclosing the composed \
              AND",
+        );
+    }
+
+    /// Pins the disjunction reading at the two structural fail-closed
+    /// reasons individually — the no-evidence floor arm AND the
+    /// saturation ceiling arm must each independently surface `true`.
+    /// Mirrors the relaxed gate's fail-closed decomposition: a state
+    /// where every counted record collapsed to no-evidence (the floor) OR
+    /// any axis reached its saturating-add ceiling (the trust break) is
+    /// fail-closed under the relaxed-staging admission gate.
+    #[test]
+    fn test_compose_is_all_no_evidence_or_saturated_at_floor_and_ceiling_arms_is_true() {
+        let probe_all_absent = ProbeCoverage { ran: 0, absent: 4 };
+        let probe_empty = ProbeCoverage { ran: 0, absent: 0 };
+        let verification_all_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 6,
+        };
+        let verification_empty = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        for probe in [probe_empty, probe_all_absent] {
+            for verification in [verification_empty, verification_all_unverified] {
+                assert!(
+                    compose_is_all_no_evidence_or_saturated(&probe, &verification),
+                    "relaxed-gate fail-closed disjunction must admit at \
+                     the no-evidence floor probe={probe:?} \
+                     verification={verification:?} — the first disjunct \
+                     (compose_is_all_no_evidence) surfaces `true` here",
+                );
+            }
+        }
+
+        let probe_saturated_evidence = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let probe_saturated_absent = ProbeCoverage {
+            ran: 0,
+            absent: usize::MAX,
+        };
+        let verification_saturated_evidence = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        let verification_saturated_absent = VerificationCoverage {
+            verified: 0,
+            unverified: usize::MAX,
+        };
+        let probe_evidenced_non_saturated = ProbeCoverage { ran: 3, absent: 1 };
+        let verification_evidenced_non_saturated = VerificationCoverage {
+            verified: 2,
+            unverified: 1,
+        };
+        for probe in [probe_saturated_evidence, probe_saturated_absent] {
+            assert!(
+                compose_is_all_no_evidence_or_saturated(
+                    &probe,
+                    &verification_evidenced_non_saturated,
+                ),
+                "relaxed-gate fail-closed disjunction must admit at the \
+                 probe-axis saturation ceiling probe={probe:?} — the \
+                 second disjunct (compose_is_saturated) surfaces `true` \
+                 here even when the verification axis is \
+                 trustworthy/evidenced",
+            );
+        }
+        for verification in [
+            verification_saturated_evidence,
+            verification_saturated_absent,
+        ] {
+            assert!(
+                compose_is_all_no_evidence_or_saturated(
+                    &probe_evidenced_non_saturated,
+                    &verification,
+                ),
+                "relaxed-gate fail-closed disjunction must admit at the \
+                 verification-axis saturation ceiling \
+                 verification={verification:?} — the second disjunct \
+                 (compose_is_saturated) surfaces `true` here even when \
+                 the probe axis is trustworthy/evidenced",
+            );
+        }
+    }
+
+    /// Pins the rejection reading at the relaxed-eligible states — every
+    /// `(probe, verification)` pair where AT LEAST ONE axis surfaced
+    /// positive evidence AND BOTH axes remain below the saturating-add
+    /// ceiling must read `false`. Forecloses the drift class where a
+    /// regression that swapped the outer combinator (OR → AND) would
+    /// silently classify the relaxed-eligible state as fail-closed
+    /// (collapsing the disjunction to the empty intersection of the
+    /// no-evidence floor and the saturation ceiling — structurally
+    /// impossible since the saturated component requires
+    /// `ran == usize::MAX || verified == usize::MAX` while
+    /// `compose_is_all_no_evidence` requires `ran == 0 && verified == 0`,
+    /// so the conjunction is `false` everywhere a regression would
+    /// surface).
+    #[test]
+    fn test_compose_is_all_no_evidence_or_saturated_at_relaxed_eligible_states_is_false() {
+        let probe_evidence_non_saturated = [
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage { ran: 1, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX - 1,
+                absent: 0,
+            },
+        ];
+        let verification_no_evidence_non_saturated = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 4,
+            },
+        ];
+        for probe in probe_evidence_non_saturated {
+            for verification in verification_no_evidence_non_saturated {
+                assert!(
+                    !compose_is_all_no_evidence_or_saturated(&probe, &verification),
+                    "relaxed-gate fail-closed disjunction must refuse \
+                     the probe-axis-evidenced trustworthy state at \
+                     probe={probe:?} verification={verification:?} — \
+                     evidence on at least one axis AND no saturation \
+                     anywhere is the load-bearing relaxed-eligible \
+                     reading",
+                );
+            }
+        }
+
+        let probe_no_evidence_non_saturated = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+        ];
+        let verification_evidence_non_saturated = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 4,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX - 1,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_no_evidence_non_saturated {
+            for verification in verification_evidence_non_saturated {
+                assert!(
+                    !compose_is_all_no_evidence_or_saturated(&probe, &verification),
+                    "relaxed-gate fail-closed disjunction must refuse \
+                     the verification-axis-evidenced trustworthy state \
+                     at probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+
+        for probe in probe_evidence_non_saturated {
+            for verification in verification_evidence_non_saturated {
+                assert!(
+                    !compose_is_all_no_evidence_or_saturated(&probe, &verification),
+                    "relaxed-gate fail-closed disjunction must refuse \
+                     the both-axes-evidenced trustworthy state at \
+                     probe={probe:?} verification={verification:?} — \
+                     this is the strict-eligible subset which must also \
+                     be relaxed-eligible by the prior-pinned strict ⇒ \
+                     relaxed ordering",
+                );
+            }
+        }
+    }
+
+    /// Pins the structural equivalence with the documented two-helper
+    /// disjunction composition across the cross product of representative
+    /// per-axis arms (empty, all-absent/all-unverified, mixed,
+    /// fully-covered/fully-verified, both saturated polarities). A
+    /// regression that swapped the outer combinator (OR ↔ AND) or
+    /// dropped either component helper would fail this pin at the
+    /// corresponding divergent cell.
+    #[test]
+    fn test_compose_is_all_no_evidence_or_saturated_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_is_all_no_evidence_or_saturated(&probe, &verification);
+                let composed = compose_is_all_no_evidence(&probe, &verification)
+                    || compose_is_saturated(&probe, &verification);
+                assert_eq!(
+                    direct, composed,
+                    "typed-primitive composition must equal the \
+                     documented two-helper disjunction composition at \
+                     probe={probe:?} verification={verification:?} — \
+                     a regression that swapped the outer combinator or \
+                     dropped either component would fail this pin at \
+                     the corresponding divergent cell",
+                );
+            }
+        }
+    }
+
+    /// Pins the load-bearing De Morgan equivalence
+    /// `compose_is_all_no_evidence_or_saturated(p, v) ==
+    /// !compose_admission_eligible_relaxed(p, v)` across the same cross
+    /// product of representative per-axis arms. The equivalence holds
+    /// because `compose_admission_eligible_relaxed == compose_has_evidence
+    /// && !compose_is_saturated`, so its negation expands to
+    /// `!compose_has_evidence || compose_is_saturated`, and by the
+    /// previously-pinned De Morgan equivalence
+    /// `!compose_has_evidence == compose_is_all_no_evidence` (commit
+    /// e652297) this reduces to `compose_is_all_no_evidence ||
+    /// compose_is_saturated`. Pinning this equivalence at the test
+    /// surface forecloses the drift class where a regression to either
+    /// helper would silently break the structural complement relation
+    /// the parallel-axis compose family relies on.
+    #[test]
+    fn test_compose_is_all_no_evidence_or_saturated_equals_negation_of_compose_admission_eligible_relaxed(
+    ) {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let fail_closed = compose_is_all_no_evidence_or_saturated(&probe, &verification);
+                let relaxed = compose_admission_eligible_relaxed(&probe, &verification);
+                assert_eq!(
+                    fail_closed, !relaxed,
+                    "load-bearing De Morgan equivalence \
+                     compose_is_all_no_evidence_or_saturated(p, v) == \
+                     !compose_admission_eligible_relaxed(p, v) must \
+                     hold at probe={probe:?} verification={verification:?} \
+                     — a regression to either helper that broke the \
+                     structural complement relation would fail this pin \
+                     at the corresponding divergent cell",
+                );
+            }
+        }
+    }
+
+    /// Pins the saturation-robust reading at the two named saturation
+    /// arms across both axes. The `{ran: usize::MAX, absent: 0}` /
+    /// `{verified: usize::MAX, unverified: 0}` saturated-fully-evidenced
+    /// arms — where every other relaxed-gate ratio surface would lose
+    /// past-ceiling increments — must read `true` honestly through the
+    /// second disjunct. The `{ran: 0, absent: usize::MAX}` /
+    /// `{verified: 0, unverified: usize::MAX}` saturated-all-absent /
+    /// saturated-all-unverified arms must read `true` honestly through
+    /// EITHER disjunct (both `compose_is_all_no_evidence` and
+    /// `compose_is_saturated` surface `true` independently). Forecloses
+    /// the drift class where a regression dropped the second disjunct
+    /// (silently admitting the saturated-evidenced state as relaxed-
+    /// eligible) and the dual drift where a regression dropped the
+    /// first disjunct (silently admitting the no-evidence non-saturated
+    /// floor as relaxed-eligible).
+    #[test]
+    fn test_compose_is_all_no_evidence_or_saturated_stays_robust_at_saturated_states() {
+        let probe_saturated_evidence = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let verification_saturated_evidence = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        assert!(
+            compose_is_all_no_evidence_or_saturated(
+                &probe_saturated_evidence,
+                &verification_saturated_evidence,
+            ),
+            "saturated-fully-evidenced both axes must read `true` — \
+             every relaxed-gate ratio surface loses past-ceiling \
+             increments here so the gate refuses through the saturation \
+             disjunct, even though both axes carry positive evidence",
+        );
+        let verification_non_saturated_evidence = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        assert!(
+            compose_is_all_no_evidence_or_saturated(
+                &probe_saturated_evidence,
+                &verification_non_saturated_evidence,
+            ),
+            "one-axis-saturated-evidenced must read `true` — the \
+             saturation disjunct admits through the saturated probe \
+             axis even though the verification axis is trustworthy",
+        );
+
+        let probe_saturated_no_evidence = ProbeCoverage {
+            ran: 0,
+            absent: usize::MAX,
+        };
+        let verification_saturated_no_evidence = VerificationCoverage {
+            verified: 0,
+            unverified: usize::MAX,
+        };
+        assert!(
+            compose_is_all_no_evidence_or_saturated(
+                &probe_saturated_no_evidence,
+                &verification_saturated_no_evidence,
+            ),
+            "saturated-all-absent / saturated-all-unverified both axes \
+             must read `true` — both disjuncts independently surface \
+             `true` (compose_is_all_no_evidence because ran == 0 / \
+             verified == 0, compose_is_saturated because absent / \
+             unverified == usize::MAX), the load-bearing both-disjuncts-\
+             surface arm",
+        );
+
+        let probe_evidence_non_saturated = ProbeCoverage { ran: 3, absent: 0 };
+        let verification_evidence_non_saturated = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        assert!(
+            !compose_is_all_no_evidence_or_saturated(
+                &probe_evidence_non_saturated,
+                &verification_evidence_non_saturated,
+            ),
+            "fully-evidenced non-saturated both axes must read `false` \
+             — neither disjunct surfaces `true` (evidence on both axes \
+             AND no saturation anywhere is the relaxed-eligible state \
+             the gate admits, the structural witness the De Morgan \
+             equivalence with !compose_admission_eligible_relaxed pins)",
         );
     }
 }
