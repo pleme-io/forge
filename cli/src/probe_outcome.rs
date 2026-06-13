@@ -973,30 +973,27 @@ impl VerificationCoverage {
     ///
     /// The four reachable arms of [`VerificationCoverage`] resolve as:
     ///
-    /// | `verified` | `unverified` | `is_empty()` | `is_fully_verified()` | `verification_ratio()`* |
-    /// |------------|--------------|--------------|-----------------------|-------------------------|
-    /// | `0`        | `0`          | `true`       | `false`               | `0.0`                   |
-    /// | `0`        | `N`          | `false`      | `false`               | `0.0`                   |
-    /// | `M`        | `N`          | `false`      | `false`               | `M/(M+N)`               |
-    /// | `M`        | `0`          | `false`      | `true`                | `1.0`                   |
-    ///
-    /// * `verification_ratio()` is a future follow-up — mirror of
-    ///   [`ProbeCoverage::coverage_ratio`] — not yet lifted at the typed-
-    ///   primitive surface; the matrix column documents the structural
-    ///   target the predicate-pair partitions ahead of the ratio lift.
+    /// | `verified` | `unverified` | `is_empty()` | `is_fully_verified()` | `verification_ratio()` |
+    /// |------------|--------------|--------------|-----------------------|------------------------|
+    /// | `0`        | `0`          | `true`       | `false`               | `0.0`                  |
+    /// | `0`        | `N`          | `false`      | `false`               | `0.0`                  |
+    /// | `M`        | `N`          | `false`      | `false`               | `M/(M+N)`              |
+    /// | `M`        | `0`          | `false`      | `true`                | `1.0`                  |
     ///
     /// The two-boolean discriminator pair `(is_empty, is_fully_verified)`
     /// is mutually exclusive and structurally disambiguates the empty-
     /// slice boundary (no verification-bearing outcomes counted) from the
     /// all-verified ceiling (every counted outcome substantiated a
-    /// positive verdict) — both of which sit at the edge of the future
-    /// `verification_ratio()`'s range but carry distinct operational
+    /// positive verdict) — both of which sit at the edge of
+    /// [`verification_ratio`]'s range but carry distinct operational
     /// meaning. A downstream verifier that conditioned only on
     /// `verification_ratio() == 1.0` would silently accept the empty-slice
     /// case (where the `total == 0` guard returns `0.0`, not `1.0`, but
     /// the symmetry pin matters); conditioning on `is_fully_verified()`
     /// instead forces the verifier through the typed discriminator the
     /// empty case cannot satisfy.
+    ///
+    /// [`verification_ratio`]: VerificationCoverage::verification_ratio
     ///
     /// THEORY §VI.1 one-oracle discipline: the predicate is derived at
     /// one site (here), not re-inlined as `verification.verified > 0 &&
@@ -1016,16 +1013,16 @@ impl VerificationCoverage {
     /// [`VerificationCoverage`] value with `total() == 0`, since
     /// `verified` and `unverified` are both `usize` and non-negative).
     /// Distinguishes "no verification-bearing outcomes counted" from
-    /// "every counted outcome unverified" — both will collapse to the
-    /// same `verification_ratio() == 0.0` arm the future ratio lift will
-    /// produce, but a downstream verifier that wants to disambiguate
-    /// (e.g., to treat the empty-slice case as a no-op while gating
-    /// against the all-unverified case) reads [`is_empty`] directly
-    /// rather than `verification.total() == 0` at each call site.
+    /// "every counted outcome unverified" — both collapse to the same
+    /// [`verification_ratio`] == 0.0 arm, but a downstream verifier
+    /// that wants to disambiguate (e.g., to treat the empty-slice case
+    /// as a no-op while gating against the all-unverified case) reads
+    /// [`is_empty`] directly rather than `verification.total() == 0` at
+    /// each call site.
     ///
     /// The structural complement of [`is_fully_verified`]'s edge case:
-    /// the two predicates partition the future `verification_ratio == 0.0`
-    /// / `verification_ratio == 1.0` boundary into the four mutually-
+    /// the two predicates partition the [`verification_ratio`] == 0.0 /
+    /// [`verification_ratio`] == 1.0 boundary into the four mutually-
     /// exclusive arms tabulated on [`is_fully_verified`]. Mirrors the
     /// standard-collection [`Vec::is_empty`] / [`HashMap::is_empty`]
     /// idiom every pleme-io consumer already reaches for, and the
@@ -1034,10 +1031,85 @@ impl VerificationCoverage {
     ///
     /// [`is_empty`]: VerificationCoverage::is_empty
     /// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
+    /// [`verification_ratio`]: VerificationCoverage::verification_ratio
     /// [`Vec::is_empty`]: std::vec::Vec::is_empty
     /// [`HashMap::is_empty`]: std::collections::HashMap::is_empty
     pub fn is_empty(&self) -> bool {
         self.total() == 0
+    }
+
+    /// Fraction of counted verification-bearing outcomes that
+    /// substantiated a positive verdict — `verified as f64 / total as
+    /// f64` when `total > 0`, and `0.0` when `total == 0` (the empty-
+    /// slice boundary case [`verification_coverage`] returns
+    /// `VerificationCoverage { verified: 0, unverified: 0 }` for). The
+    /// orthogonal-axis peer of [`ProbeCoverage::coverage_ratio`]: where
+    /// `coverage_ratio` projects the no-evidence dimension over the full
+    /// seventeen-outcome attestation pipeline, `verification_ratio`
+    /// projects the verification-trustworthiness dimension over the
+    /// five-outcome [`VerifiedOutcome`] subset.
+    ///
+    /// The structural distinction between "no verification-bearing
+    /// outcomes counted" and "every counted outcome unverified" is
+    /// preserved at the [`total`] field, not flattened into the ratio:
+    /// a consumer that wants to disambiguate "no outcomes counted
+    /// because the slice was empty" from "no outcomes counted because
+    /// every outcome failed verification" reads `total() == 0` vs.
+    /// `total() > 0 && verification_ratio() == 0.0` — the same
+    /// disambiguator pattern [`ProbeCoverage::coverage_ratio`] admits at
+    /// the orthogonal axis.
+    ///
+    /// The bare-f64 surface is the largest common shape a future
+    /// telemetry emission site at `commands::attestation` cheaply
+    /// admits — `tracing`'s `Visit` API records `f64` directly without
+    /// the per-emission `unwrap_or` an `Option<f64>` surface would force
+    /// at every call site (and without the structurally-divergent
+    /// sentinel — `f64::NAN`, `-1.0`, `Empty` — each call site would
+    /// otherwise pick). The empty-slice 0.0 collapse documented above is
+    /// the load-bearing decision the test suite pins; the structural
+    /// disambiguator stays at `total()`. Symmetric to
+    /// [`ProbeCoverage::coverage_ratio`]'s decision at the orthogonal
+    /// axis: the two ratio surfaces compose without a structural seam
+    /// at the empty-input boundary.
+    ///
+    /// Lifts the derivation `verified as f64 / total as f64` from the
+    /// downstream verifier the prior matrix-column reference gestured
+    /// at to the composition site, so a future
+    /// `*_verification_coverage_ratio` field a `sekiban` admission
+    /// verifier (THEORY §V.4 / §VII.1 honesty channel) / Prometheus
+    /// alert rule reads with one field-name pattern across build /
+    /// chart / deployment attestation records — the same emission
+    /// shape `*_probe_coverage_ratio` already carries at the orthogonal
+    /// axis. THEORY §VI.1 one-oracle discipline: the ratio is derived
+    /// at one site (here), not re-inlined as `verification.verified as
+    /// f64 / verification.total() as f64` per consumer (which would
+    /// admit the `verification.total() == 0` panic the `if total == 0`
+    /// guard forecloses here, AND would force every consumer to
+    /// re-derive the f64 cast).
+    ///
+    /// Saturation drift mirrors [`ProbeCoverage::coverage_ratio`]'s at
+    /// the orthogonal axis: at the post-saturation state `{verified:
+    /// usize::MAX, unverified: usize::MAX}` (reachable asymptotically
+    /// via the saturating monoid [`Add`](std::ops::Add) impl), the true
+    /// 0.5 ratio reads as 1.0 through the f64 division because [`total`]
+    /// saturates at `usize::MAX` and the division collapses against the
+    /// clamped ceiling. A future [`is_saturated`]-style flag (peer of
+    /// [`ProbeCoverage::is_saturated`]) is the load-bearing
+    /// trustworthiness signal a downstream verifier reads alongside
+    /// this field; gating on
+    /// `!is_saturated() && verification_ratio() >= 0.9` forecloses the
+    /// post-saturation drift at the typed-primitive surface the same
+    /// way the [`ProbeCoverage`] analogue already does.
+    ///
+    /// [`is_saturated`]: ProbeCoverage::is_saturated
+    /// [`total`]: VerificationCoverage::total
+    pub fn verification_ratio(&self) -> f64 {
+        let total = self.total();
+        if total == 0 {
+            0.0
+        } else {
+            self.verified as f64 / total as f64
+        }
     }
 }
 
@@ -3385,5 +3457,166 @@ mod tests {
                 "is_empty and is_fully_verified must be mutually exclusive at {c:?}",
             );
         }
+    }
+
+    /// `verification_ratio()` returns `0.0` for the empty-slice boundary
+    /// case `verification_coverage` over an empty iterator produces. The
+    /// structural distinction between "no outcomes counted" and "every
+    /// outcome unverified" is preserved at `total()` (which returns `0`
+    /// here vs. `N` for the all-unverified floor), not flattened into
+    /// the ratio. A future regression that hand-rolled the division
+    /// without guarding the `total == 0` denominator would emit
+    /// `f64::NAN` and fail this pin, surfacing the boundary case at the
+    /// typed-primitive site rather than at a downstream tracing-field
+    /// emission. Mirrors `test_coverage_ratio_empty_returns_zero` at
+    /// the orthogonal axis.
+    #[test]
+    fn test_verification_ratio_empty_returns_zero() {
+        let coverage = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert_eq!(coverage.total(), 0);
+        assert_eq!(coverage.verification_ratio(), 0.0);
+    }
+
+    /// `verification_ratio()` returns `1.0` when every counted outcome
+    /// substantiated a positive verdict — the all-verified ceiling.
+    /// Pinned across the three load-bearing total counts (2 for Phase 1
+    /// flux-source + helm-release-signature, 3 for Phase 2
+    /// helm-provenance + cosign + network-policy, 5 for the full
+    /// Phase 1 + Phase 2 aggregate) so a future regression that
+    /// hardcoded the denominator to one specific total would fail
+    /// against the other two. Mirrors
+    /// `test_coverage_ratio_all_ran_is_one` at the orthogonal axis.
+    #[test]
+    fn test_verification_ratio_all_verified_is_one() {
+        assert_eq!(
+            VerificationCoverage {
+                verified: 2,
+                unverified: 0
+            }
+            .verification_ratio(),
+            1.0
+        );
+        assert_eq!(
+            VerificationCoverage {
+                verified: 3,
+                unverified: 0
+            }
+            .verification_ratio(),
+            1.0
+        );
+        assert_eq!(
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0
+            }
+            .verification_ratio(),
+            1.0
+        );
+    }
+
+    /// `verification_ratio()` returns `0.0` when every counted outcome
+    /// failed verification — the all-unverified floor today's
+    /// `compose_product_certification` call-site state sits at before
+    /// the five `Verified`-bearing outcomes wire real substantiations
+    /// at their probe sites. The structural disambiguator from the
+    /// empty-slice case is `total() > 0` here vs. `total() == 0` for
+    /// the empty boundary; both produce `verification_ratio() == 0.0`
+    /// but a consumer can recover the kind-of-claim from the `total`
+    /// field. Mirrors `test_coverage_ratio_all_absent_is_zero` at the
+    /// orthogonal axis.
+    #[test]
+    fn test_verification_ratio_all_unverified_is_zero() {
+        let coverage = VerificationCoverage {
+            verified: 0,
+            unverified: 5,
+        };
+        assert_eq!(coverage.total(), 5);
+        assert_eq!(coverage.verification_ratio(), 0.0);
+    }
+
+    /// `verification_ratio()` returns the arithmetic fraction for the
+    /// mixed split — the realistic Phase 1 + Phase 2
+    /// verification-trustworthiness intermediate state a follow-up that
+    /// wires positive verdicts at some-but-not-all of the five sites
+    /// will produce. The half-and-half (1, 1) corner pins `0.5`
+    /// exactly under IEEE-754 (no floating-point rounding to chase);
+    /// the 2-of-5 split exercises the realistic Phase 1
+    /// flux-source-verified + helm-release-signature-failed +
+    /// Phase 2 three-of-three-failed shape. A regression that swapped
+    /// `verified` and `unverified` in the numerator would flip `2/5`
+    /// to `3/5` and fail this pin. Mirrors
+    /// `test_coverage_ratio_mixed_split_arithmetic` at the orthogonal
+    /// axis.
+    #[test]
+    fn test_verification_ratio_mixed_split_arithmetic() {
+        assert_eq!(
+            VerificationCoverage {
+                verified: 1,
+                unverified: 1
+            }
+            .verification_ratio(),
+            0.5
+        );
+        assert_eq!(
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3
+            }
+            .verification_ratio(),
+            2.0 / 5.0
+        );
+        assert_eq!(
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2
+            }
+            .verification_ratio(),
+            1.0 / 3.0
+        );
+    }
+
+    /// `verification_ratio()` does not panic at the post-saturation
+    /// state `{verified: usize::MAX, unverified: usize::MAX}` — it
+    /// routes through `total()`, which saturates at `usize::MAX` rather
+    /// than overflowing on `verified + unverified`. The float
+    /// arithmetic `usize::MAX as f64 / usize::MAX as f64` is `1.0` in
+    /// IEEE-754 (both numerator and denominator round identically to
+    /// the same `f64`), which the pin asserts directly. A future
+    /// regression that reverted `total()` to the unchecked `+` would
+    /// panic at this call site in debug and produce a nonsensical
+    /// wrapped ratio in release — both arms closed here. Mirrors
+    /// `test_coverage_ratio_does_not_panic_at_saturated_state` at the
+    /// orthogonal axis: the monoid totality is upheld at every method
+    /// a future telemetry emission site reads, not just at `Add`.
+    #[test]
+    fn test_verification_ratio_does_not_panic_at_saturated_state() {
+        let saturated = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: usize::MAX,
+        };
+        assert_eq!(saturated.verification_ratio(), 1.0);
+    }
+
+    /// `verification_ratio()` is deterministic — repeated calls on the
+    /// same `VerificationCoverage` value return bit-identical `f64`s.
+    /// Pins that the method is a pure function of `verified` /
+    /// `unverified` with no hidden state (e.g. a stray `rand` or a
+    /// cached interior-mutable field), the load-bearing invariant a
+    /// downstream `sekiban` admission verifier reconciliation depends
+    /// on when comparing two telemetry emissions of the same
+    /// `VerificationCoverage` for equality. Mirrors
+    /// `test_coverage_ratio_is_deterministic` at the orthogonal axis.
+    #[test]
+    fn test_verification_ratio_is_deterministic() {
+        let coverage = VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        };
+        let first = coverage.verification_ratio();
+        let second = coverage.verification_ratio();
+        assert_eq!(first.to_bits(), second.to_bits());
     }
 }
