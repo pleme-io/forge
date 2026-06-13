@@ -2141,6 +2141,145 @@ pub fn compose_has_evidence(probe: &ProbeCoverage, verification: &VerificationCo
     probe.has_evidence() || verification.has_evidence()
 }
 
+/// Parallel-composed relaxed-staging admission predicate over the two
+/// orthogonal typed-primitive surfaces — the two-bool conjunction
+/// `compose_has_evidence(p, v) && !compose_is_saturated(p, v)` collapsed
+/// to one bool at one site. Reads `true` iff AT LEAST ONE counted record
+/// on AT LEAST ONE orthogonal axis surfaced its honest-positive arm AND
+/// the derived-ratio surfaces on BOTH axes remain trustworthy (neither
+/// component reached the `usize::saturating_add` ceiling).
+///
+/// The structural relaxed-vs-strict peer of
+/// [`compose_admission_eligible_strict`] at the
+/// dev/staging-vs-production admission boundary: where the strict gate
+/// (commit 7d818bd) integrates "complete AND trustworthy on BOTH axes"
+/// — the Phase 2 prod admission precondition — this integrates
+/// "evidence on AT LEAST ONE axis AND trustworthy on BOTH axes" — the
+/// Phase 1 dev/staging admission precondition the [`crate::commands::
+/// attestation`] composition site reads to admit records that have made
+/// partial progress toward the strict gate without yet clearing every
+/// axis. The six-member compose family now closes the strict/relaxed
+/// pair against the three structural-boundary helpers
+/// ([`compose_is_empty`], [`compose_is_fully_complete`],
+/// [`compose_is_saturated`]) and the two relaxed-precondition helpers
+/// ([`compose_has_evidence`]) the prior five commits landed.
+///
+/// The load-bearing structural ordering
+/// `compose_admission_eligible_strict(p, v) =>
+/// compose_admission_eligible_relaxed(p, v)` holds at every reachable
+/// `(probe, verification)` pair because strict admission requires
+/// `is_fully_complete && !is_saturated` and `is_fully_complete =>
+/// has_evidence` (every both-axes-complete state carries `ran > 0` AND
+/// `verified > 0`, structurally implying `has_evidence` on both axes);
+/// the trustworthiness clamp `!compose_is_saturated` is shared verbatim
+/// across the two gates. Pinned at
+/// [`tests::test_compose_admission_eligible_strict_implies_compose_admission_eligible_relaxed`].
+/// The relaxed gate is the strictly weaker discriminator: there exist
+/// `(probe, verification)` pairs (e.g., the one-axis-evidenced state
+/// where the opposite axis carries every-absent records) where
+/// `compose_admission_eligible_relaxed` admits and
+/// `compose_admission_eligible_strict` refuses — the structural witness
+/// the Phase 1 / Phase 2 distinction exists to surface.
+///
+/// Conjunction (not disjunction) is structurally load-bearing on the
+/// trustworthiness clamp: the relaxed gate inherits the saturating-add
+/// trustworthiness factor identically to the strict gate, so a regression
+/// that dropped the `!compose_is_saturated` factor (e.g., a body that
+/// returned `compose_has_evidence(p, v)` alone) would silently admit the
+/// post-saturation state `{ran: usize::MAX, absent: 0}` /
+/// `{verified: usize::MAX, unverified: 0}` where past-ceiling increments
+/// are lost so the derived ratios are no longer trustworthy — the drift
+/// class this helper exists to foreclose. Symmetrically, a regression
+/// that dropped the `compose_has_evidence` factor would silently admit
+/// the both-no-evidence floor `({ran: 0, absent: N}, {verified: 0,
+/// unverified: M})` where every counted record on both axes collapsed
+/// to its no-evidence arm — the relaxed gate refuses this state at the
+/// load-bearing fail-closed boundary.
+///
+/// The orthogonal-axis peer of the inline relaxed-staging gate every
+/// downstream consumer would otherwise retype as
+/// `(probe.has_evidence() || verification.has_evidence()) &&
+///  !probe.is_saturated() && !verification.is_saturated()` (the
+/// six-arm shape after fully expanding both compose helpers): this
+/// helper collapses the two-bool consumer composition to one bool at
+/// one site, so a downstream `sekiban` Phase 1 admission verifier (or
+/// the relaxed-staging tier the [`compose_admission_eligible_strict`]
+/// docstring names) reads one bool — `compose_admission_eligible_relaxed
+/// (&probe, &verification)` — rather than composing the six-arm
+/// expansion at every consumer. Before this helper, every relaxed-
+/// staging admission gate had to retype the two-bool helper conjunction
+/// (with the drift class a regression that dropped one factor silently
+/// admits the state the documented gate refuses); after this helper,
+/// the gate reads one bool and the parallel-axis composition is sealed
+/// at the typed-primitive surface so a future third orthogonal axis
+/// (e.g., a compliance-dimensions axis the
+/// [`crate::compliance_dimensions`] family hints at) extends both
+/// admission gates here in lockstep with their three structural-
+/// boundary peers, not at every downstream consumer.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented two-helper composition exactly — the
+/// structural equivalence
+/// `compose_admission_eligible_relaxed(p, v) == (compose_has_evidence(p,
+/// v) && !compose_is_saturated(p, v))`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_admission_eligible_relaxed_equals_documented_composition`].
+///
+/// THEORY.md §V.4 two-phase signature composition: the relaxed-staging
+/// admission predicate is the typed-primitive surface for the Phase 1
+/// dev/staging admission precondition — Phase 1 signatures are produced
+/// the moment the artifact is rendered (evidence present on at least
+/// one orthogonal axis), and the derived-ratio surfaces must remain
+/// trustworthy (the saturating-add ceiling clamp) before any Phase 1
+/// admission tier can read the per-axis ratios honestly. The strict
+/// admission predicate is the typed-primitive surface for the Phase 2
+/// production admission precondition — Phase 2 requires the full
+/// completeness arm on every orthogonal axis (every counted record
+/// surfaced its honest-positive arm) alongside the same trustworthiness
+/// clamp; the relaxed-vs-strict ordering this helper pins
+/// (`strict => relaxed`) mirrors V.4's "Phase 2 admits where Phase 1
+/// admits AND every compliance attestation cleared" decomposition at
+/// the two-axis typed-primitive surface. THEORY.md §VI.1 one-oracle
+/// discipline: the two-helper conjunction is derived at one site
+/// (here), not re-inlined as `compose_has_evidence(p, v) &&
+/// !compose_is_saturated(p, v)` per downstream consumer (which would
+/// inherit a drift class on the day a third orthogonal axis is added —
+/// every consumer would need to extend their composition in lockstep,
+/// exactly the structural seam this helper forecloses, mirroring the
+/// discipline [`compose_admission_eligible_strict`],
+/// [`compose_is_saturated`], [`compose_is_empty`],
+/// [`compose_is_fully_complete`], and [`compose_has_evidence`] already
+/// established for the complementary gates).
+///
+/// Frontier lineage: SLSA L3+'s build-provenance admission policy
+/// distinguishes the "any required attestation present AND every
+/// present attestation is trustworthy" relaxed precondition the
+/// staging tier admits from the "every required attestation present
+/// AND every present attestation is trustworthy" strict precondition
+/// the production tier admits; this helper lifts the same relaxed-vs-
+/// strict decomposition across the two-axis typed-primitive surface
+/// with the trustworthiness factor sealed identically across both
+/// tiers. Sigstore's policy controller surfaces the same partition
+/// across its keyless-vs-keyed admission tiers — the keyless tier
+/// admits on "at least one matched attestation present AND trustworthy
+/// freshness window" (the relaxed staging precondition), the keyed
+/// tier admits on "every matched attestation present AND trustworthy
+/// freshness window" (the strict production precondition); this
+/// helper lifts the same discipline at the two-axis composition.
+/// Bazel's `--build_event_stream` / Buck2's build-event surface emit a
+/// per-stage "any action completed successfully AND every completion
+/// is fresh" relaxed event (the staging trigger) distinct from the
+/// "every action completed successfully AND every completion is fresh"
+/// strict event (the release trigger); this helper lifts the same
+/// staging-vs-release decomposition at the two-axis surface.
+#[allow(dead_code)]
+pub fn compose_admission_eligible_relaxed(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    compose_has_evidence(probe, verification) && !compose_is_saturated(probe, verification)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6984,6 +7123,365 @@ mod tests {
             "any phase contributing `verified > 0` on the verification \
              axis lifts the aggregate off the no-evidence floor — \
              verification={verification_aggregate_evidenced:?}",
+        );
+    }
+
+    /// Parallel-composed relaxed-staging admission predicate admits
+    /// every evidenced-and-trustworthy state — the structural arms
+    /// where `compose_admission_eligible_relaxed` must read `true`:
+    /// each axis carries at least one honest-positive arm
+    /// (`ran > 0` / `verified > 0`) AND neither axis has reached the
+    /// `usize::saturating_add` ceiling. Walks the cross product of the
+    /// honest one-axis-evidenced / two-axes-evidenced representatives
+    /// AND the four-arm (any-positive × trustworthy) shape so the
+    /// honest-admit reading is pinned across the Phase 1 dev/staging
+    /// admission tier the helper exists to surface.
+    #[test]
+    fn test_compose_admission_eligible_relaxed_at_evidenced_trustworthy_states_is_true() {
+        let probe_evidenced_trustworthy = [
+            ProbeCoverage { ran: 1, absent: 0 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        let verification_evidenced_trustworthy = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+        ];
+        for probe in probe_evidenced_trustworthy {
+            for verification in verification_evidenced_trustworthy {
+                assert!(
+                    compose_admission_eligible_relaxed(&probe, &verification),
+                    "both-axes-evidenced-trustworthy state must admit \
+                     the relaxed staging gate at probe={probe:?} \
+                     verification={verification:?} — a regression that \
+                     dropped either factor would fail this pin at the \
+                     load-bearing honest-admit arm",
+                );
+            }
+        }
+
+        let probe_evidence_only = ProbeCoverage { ran: 2, absent: 0 };
+        let verification_no_records = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert!(
+            compose_admission_eligible_relaxed(&probe_evidence_only, &verification_no_records),
+            "one-axis-evidenced state must admit the relaxed staging \
+             gate even when the opposite axis carries zero records — \
+             the Phase 1 / Phase 2 partial-progress state the relaxed \
+             gate exists to admit",
+        );
+
+        let probe_no_records = ProbeCoverage { ran: 0, absent: 0 };
+        let verification_evidence_only = VerificationCoverage {
+            verified: 1,
+            unverified: 0,
+        };
+        assert!(
+            compose_admission_eligible_relaxed(&probe_no_records, &verification_evidence_only),
+            "one-axis-evidenced state must admit the relaxed staging \
+             gate symmetrically when only the verification axis \
+             surfaced a positive arm",
+        );
+    }
+
+    /// Parallel-composed relaxed-staging admission predicate rejects
+    /// every both-no-evidence state — the structural arms where
+    /// `compose_admission_eligible_relaxed` must read `false` through
+    /// the `compose_has_evidence` factor: the both-empty boundary and
+    /// the both-no-evidence floor (all-absent paired with
+    /// all-unverified). Pins the load-bearing fail-closed boundary the
+    /// Phase 1 dev/staging admission gate refuses through the
+    /// has-evidence factor — at these states zero honest-positive arms
+    /// surfaced on either axis, so the relaxed precondition has
+    /// nothing to admit.
+    #[test]
+    fn test_compose_admission_eligible_relaxed_at_no_evidence_arms_is_false() {
+        let empty_probe = ProbeCoverage { ran: 0, absent: 0 };
+        let empty_verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert!(
+            !compose_admission_eligible_relaxed(&empty_probe, &empty_verification),
+            "both-axes-empty boundary must read no-admit at \
+             ({empty_probe:?}, {empty_verification:?}) — the \
+             fail-closed boundary the relaxed staging admission gate \
+             rejects through the has-evidence factor",
+        );
+
+        let probe_no_evidence = [
+            ProbeCoverage { ran: 0, absent: 1 },
+            ProbeCoverage { ran: 0, absent: 5 },
+        ];
+        let verification_no_evidence = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 1,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 4,
+            },
+        ];
+        for probe in probe_no_evidence {
+            for verification in verification_no_evidence {
+                assert!(
+                    !compose_admission_eligible_relaxed(&probe, &verification),
+                    "both-axes-no-evidence floor must read no-admit at \
+                     probe={probe:?} verification={verification:?} — \
+                     zero counted record on either axis surfaced an \
+                     honest-positive arm; the relaxed staging gate \
+                     fails closed through the has-evidence factor",
+                );
+            }
+        }
+    }
+
+    /// Parallel-composed relaxed-staging admission predicate rejects
+    /// every saturated state on either axis — the structural arms
+    /// where `compose_admission_eligible_relaxed` must read `false`
+    /// through the `!compose_is_saturated` trustworthiness clamp. At
+    /// these states, the per-axis component has reached the
+    /// `usize::saturating_add` ceiling so past-ceiling increments are
+    /// lost and the derived-ratio surfaces are no longer trustworthy
+    /// against the true counts — the clamp the strict gate inherits
+    /// identically. Walks the three saturated-on-one-axis arms
+    /// (probe-ran-saturated, probe-absent-saturated, verification-
+    /// verified-saturated, verification-unverified-saturated) paired
+    /// with evidenced honest opposites so each rejection is pinned
+    /// against a baseline that would otherwise admit. A regression
+    /// that dropped the saturation factor (returning
+    /// `compose_has_evidence(p, v)` alone) would fail at exactly
+    /// these cells.
+    #[test]
+    fn test_compose_admission_eligible_relaxed_at_saturated_states_is_false() {
+        let saturated_probes = [
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 1,
+            },
+            ProbeCoverage {
+                ran: 1,
+                absent: usize::MAX,
+            },
+        ];
+        let honest_verification = VerificationCoverage {
+            verified: 3,
+            unverified: 2,
+        };
+        for probe in saturated_probes {
+            assert!(
+                !compose_admission_eligible_relaxed(&probe, &honest_verification),
+                "probe-axis-saturated state must read no-admit at \
+                 probe={probe:?} verification={honest_verification:?} \
+                 — past-ceiling increments are lost; the relaxed \
+                 staging gate refuses the untrustworthy axis through \
+                 the saturation factor",
+            );
+        }
+
+        let saturated_verifications = [
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 1,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: usize::MAX,
+            },
+        ];
+        let honest_probe = ProbeCoverage { ran: 5, absent: 1 };
+        for verification in saturated_verifications {
+            assert!(
+                !compose_admission_eligible_relaxed(&honest_probe, &verification),
+                "verification-axis-saturated state must read no-admit \
+                 at probe={honest_probe:?} verification={verification:?} \
+                 — past-ceiling increments are lost; the relaxed \
+                 staging gate refuses the untrustworthy axis through \
+                 the saturation factor",
+            );
+        }
+    }
+
+    /// Structural equivalence with the documented two-helper consumer
+    /// composition `compose_has_evidence(p, v) &&
+    /// !compose_is_saturated(p, v)`. Pins the one-oracle invariant the
+    /// typed primitive carries — a regression that hand-rolled the
+    /// body (e.g., returned `compose_has_evidence(p, v)` alone,
+    /// dropping the trustworthiness clamp, or returned
+    /// `compose_admission_eligible_strict` and silently rejected
+    /// the one-axis-evidenced partial-progress state the relaxed gate
+    /// exists to admit) would fail at the corresponding divergent
+    /// cells. Walks the cross product of four per-axis representatives
+    /// (empty, no-evidence, mixed, fully-positive) plus the saturated
+    /// per-axis representatives so every (probe-arm × verification-arm)
+    /// cell — honest AND saturated — is pinned against the documented
+    /// composition.
+    #[test]
+    fn test_compose_admission_eligible_relaxed_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_admission_eligible_relaxed(&probe, &verification);
+                let composed = compose_has_evidence(&probe, &verification)
+                    && !compose_is_saturated(&probe, &verification);
+                assert_eq!(
+                    direct, composed,
+                    "typed-primitive composition must equal the \
+                     documented two-helper consumer composition at \
+                     probe={probe:?} verification={verification:?} — \
+                     a regression that dropped either factor would \
+                     fail this pin at the corresponding divergent cell",
+                );
+            }
+        }
+    }
+
+    /// The load-bearing relaxed-vs-strict ordering pin: every state
+    /// the strict-production admission gate admits is also admitted by
+    /// the relaxed-staging admission gate. Pins the structural
+    /// implication
+    /// `compose_admission_eligible_strict(p, v) =>
+    ///  compose_admission_eligible_relaxed(p, v)`
+    /// across the cross product of the three per-axis honest
+    /// fully-covered probe representatives × three per-axis honest
+    /// fully-verified verification representatives (the strict-admitted
+    /// subset, deliberately excluding the saturated representatives
+    /// the strict gate refuses through its own `!is_saturated()` clamp).
+    /// Mirrors the Phase 1 / Phase 2 ordering THEORY.md §V.4
+    /// establishes — Phase 2 admits where Phase 1 admits AND every
+    /// compliance attestation cleared. A regression that broke either
+    /// helper's structural reading (e.g., a relaxed body that
+    /// decoupled the trustworthiness clamp from the strict version, or
+    /// a strict body that admitted the no-evidence floor) would fail
+    /// this pin at the both-axes-complete cells where the strict gate
+    /// admits but the relaxed gate would erroneously reject (or vice
+    /// versa for the no-evidence floor).
+    #[test]
+    fn test_compose_admission_eligible_strict_implies_compose_admission_eligible_relaxed() {
+        let probe_fully_covered_honest = [
+            ProbeCoverage { ran: 1, absent: 0 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX - 1,
+                absent: 0,
+            },
+        ];
+        let verification_fully_verified_honest = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX - 1,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_fully_covered_honest {
+            for verification in verification_fully_verified_honest {
+                assert!(
+                    compose_admission_eligible_strict(&probe, &verification),
+                    "strict admission precondition must admit at \
+                     probe={probe:?} verification={verification:?}",
+                );
+                assert!(
+                    compose_admission_eligible_relaxed(&probe, &verification),
+                    "strict admission must imply relaxed admission at \
+                     probe={probe:?} verification={verification:?} — \
+                     the Phase 1 / Phase 2 ordering THEORY §V.4 \
+                     establishes is structurally load-bearing",
+                );
+            }
+        }
+
+        let probe_evidence_only = ProbeCoverage { ran: 0, absent: 3 };
+        let verification_evidence_only = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        assert!(
+            !compose_admission_eligible_strict(&probe_evidence_only, &verification_evidence_only),
+            "strict admission must refuse the one-axis-incomplete \
+             state at probe={probe_evidence_only:?} \
+             verification={verification_evidence_only:?}",
+        );
+        assert!(
+            compose_admission_eligible_relaxed(&probe_evidence_only, &verification_evidence_only),
+            "relaxed admission must admit the one-axis-incomplete \
+             evidenced state — the structural witness the relaxed gate \
+             is strictly weaker than the strict gate at the Phase 1 / \
+             Phase 2 partial-progress boundary",
         );
     }
 }
