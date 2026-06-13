@@ -1049,6 +1049,91 @@ impl VerificationCoverage {
         self.total() == 0
     }
 
+    /// True iff at least one counted verification-bearing outcome
+    /// substantiated a positive verdict — `verified > 0`. The
+    /// orthogonal-axis peer of [`ProbeCoverage::has_evidence`] at the
+    /// verification-trustworthiness dimension: where the no-evidence-axis
+    /// peer lifts the relaxed-staging gate's two-arm disjunction
+    /// `is_mixed() || is_fully_covered()` over the `(ran, absent)` axis
+    /// to one bool, this lifts the equivalent two-arm disjunction "mixed
+    /// verification OR fully verified" over the `(verified, unverified)`
+    /// axis to one bool. Before this predicate, a downstream
+    /// `sekiban` admission verifier wanting to admit "any positive
+    /// verification verdict was substantiated" (the relaxed-staging gate
+    /// that admits both the some-verified-some-unverified intermediate
+    /// arm AND the all-verified ceiling arm while rejecting the empty and
+    /// all-unverified floors) had to compose
+    /// `verification.verified > 0 && !verification.is_empty()` or
+    /// equivalently `verification.verified > 0` at the consumer surface;
+    /// after this predicate, the verifier reads one bool —
+    /// `verification.has_evidence()` — and the integer-arithmetic body
+    /// `self.verified > 0` collapses the disjunction at the typed-
+    /// primitive surface.
+    ///
+    /// The structural complement of `!has_evidence()` is "no counted
+    /// verification-bearing outcome substantiated a positive verdict" —
+    /// the disjunction of the two `verified == 0` arms ([`is_empty`] at
+    /// `(0, 0)` and the all-unverified floor at `(0, N)`), the
+    /// operational floor today's
+    /// [`crate::commands::attestation::compose_product_certification`] /
+    /// [`crate::commands::attestation::compute_chart_attestation`] /
+    /// [`crate::commands::attestation::compute_build_attestation`] call
+    /// sites sit at before the five `Verified`-bearing typed outcomes
+    /// wire real substantiations at their probe sites (every counted
+    /// outcome currently surfaces an `Unverified` or `VerifyFailed` arm,
+    /// so `verified == 0` uniformly). The relaxed-staging policy
+    /// fails closed at `!has_evidence()` and admits everything above; the
+    /// strict-production policy gates the additional ratio-and-
+    /// trustworthiness composition `!is_saturated() &&
+    /// is_fully_verified()` one layer up at
+    /// [`is_admission_eligible_strict`].
+    ///
+    /// Symmetric to [`is_saturated`] in the orthogonality dimension:
+    /// every reachable `VerificationCoverage` value carries an
+    /// `(has_evidence, is_saturated)` two-bool pair the strict-production
+    /// admission gate reads as `(true, false)` to admit, where the
+    /// relaxed-staging gate reads only `has_evidence == true`.
+    /// Saturation-robust by construction: the body is integer arithmetic
+    /// against `verified` alone, so the post-saturation state
+    /// `{verified: usize::MAX, unverified: 0}` correctly reads
+    /// `has_evidence() == true` (every counted verification — even the
+    /// dropped past-ceiling increments — cleared), and the post-
+    /// saturation state `{verified: 0, unverified: usize::MAX}` correctly
+    /// reads `has_evidence() == false` (no counted verification cleared).
+    /// Mirrors [`ProbeCoverage::has_evidence`]'s saturation-robust
+    /// discipline at the orthogonal axis exactly: both surfaces compose
+    /// without a structural seam at the saturated state, the load-
+    /// bearing precondition the future
+    /// [`compose_has_evidence`](self)-style two-axis parallel-composed
+    /// disjunction the [`compose_is_empty`] sibling already establishes
+    /// the structural complement of (`compose_is_empty` is the AND of
+    /// per-axis emptiness; the natural De Morgan dual is the OR of
+    /// per-axis `has_evidence`, the precondition the fleet-wide
+    /// relaxed-staging admission gate consults across both orthogonal
+    /// axes).
+    ///
+    /// [`is_admission_eligible_strict`]: VerificationCoverage::is_admission_eligible_strict
+    /// [`is_empty`]: VerificationCoverage::is_empty
+    /// [`is_saturated`]: VerificationCoverage::is_saturated
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the predicate is derived
+    /// at one site (here), not re-inlined as `verification.verified > 0`
+    /// per downstream consumer (which would inherit a drift class on the
+    /// day a third intermediate arm is added — every consumer would need
+    /// to extend their composition in lockstep, exactly the structural
+    /// seam this helper forecloses, mirroring the discipline
+    /// [`ProbeCoverage::has_evidence`] already establishes at the
+    /// orthogonal axis). THEORY.md §V.4 / §VII.1 honesty channel: the
+    /// discriminator names "at least one counted verification-bearing
+    /// probe substantiated a positive verdict," the load-bearing
+    /// precondition the relaxed-staging admission gate admits and the
+    /// all-unverified-floor / empty-boundary failure case rejects,
+    /// mirroring the no-evidence-axis peer's discipline at the
+    /// orthogonal axis exactly.
+    pub fn has_evidence(&self) -> bool {
+        self.verified > 0
+    }
+
     /// Fraction of counted verification-bearing outcomes that
     /// substantiated a positive verdict — `verified as f64 / total as
     /// f64` when `total > 0`, and `0.0` when `total == 0` (the empty-
@@ -6125,5 +6210,243 @@ mod tests {
              verification axis breaks the both-axes-complete state — \
              verification={verification_aggregate_broken:?}",
         );
+    }
+
+    /// `VerificationCoverage::has_evidence()` returns `true` iff at
+    /// least one counted verification cleared — `verified > 0`. Pinned
+    /// across the fully-verified ceiling (2, 3, 5 — the load-bearing
+    /// Phase 1 / Phase 2 / aggregate counts) AND the realistic
+    /// intermediate mixed shapes the relaxed-staging admission gate
+    /// admits (half-and-half corner, 2-of-5 and 3-of-5 splits) so a
+    /// regression that hardcoded the predicate to one specific value (or
+    /// accidentally gated on `unverified == 0` as well) would fail
+    /// across the others. The typed-primitive surface the relaxed-
+    /// staging admission gate reads directly at the verification axis —
+    /// every value where `has_evidence()` is `true` is an admissible
+    /// relaxed-staging verification-coverage record. Mirrors
+    /// `test_has_evidence_when_any_probe_ran_is_true` at the
+    /// orthogonal axis exactly.
+    #[test]
+    fn test_verification_has_evidence_when_any_verified_is_true() {
+        assert!(VerificationCoverage {
+            verified: 2,
+            unverified: 0
+        }
+        .has_evidence());
+        assert!(VerificationCoverage {
+            verified: 3,
+            unverified: 0
+        }
+        .has_evidence());
+        assert!(VerificationCoverage {
+            verified: 5,
+            unverified: 0
+        }
+        .has_evidence());
+        assert!(VerificationCoverage {
+            verified: 1,
+            unverified: 1
+        }
+        .has_evidence());
+        assert!(VerificationCoverage {
+            verified: 2,
+            unverified: 3
+        }
+        .has_evidence());
+        assert!(VerificationCoverage {
+            verified: 3,
+            unverified: 2
+        }
+        .has_evidence());
+    }
+
+    /// `VerificationCoverage::has_evidence()` returns `false` for both
+    /// `verified == 0` arms — the empty floor `(0, 0)` and the
+    /// all-unverified floor `(0, N)`. Pinned across both arms (and
+    /// across three sizes of the all-unverified floor: 2, 3, 5 — the
+    /// per-phase Phase 1 / Phase 2 / aggregate counts the prior pins
+    /// use) so a future regression that relaxed the predicate to
+    /// `total() > 0` (the structural sibling that admits the all-
+    /// unverified floor) would flip the all-unverified floor to `true`
+    /// and fail this pin. Today's `compose_product_certification` /
+    /// `compute_chart_attestation` / `compute_build_attestation` call-
+    /// site state sits at exactly the all-unverified floor at the
+    /// verification axis — the relaxed-staging admission gate correctly
+    /// refuses this state because `has_evidence() == false`. Mirrors
+    /// `test_has_evidence_at_no_ran_arms_is_false` at the orthogonal
+    /// axis exactly.
+    #[test]
+    fn test_verification_has_evidence_at_no_verified_arms_is_false() {
+        assert!(!VerificationCoverage {
+            verified: 0,
+            unverified: 0
+        }
+        .has_evidence());
+        assert!(!VerificationCoverage {
+            verified: 0,
+            unverified: 2
+        }
+        .has_evidence());
+        assert!(!VerificationCoverage {
+            verified: 0,
+            unverified: 3
+        }
+        .has_evidence());
+        assert!(!VerificationCoverage {
+            verified: 0,
+            unverified: 5
+        }
+        .has_evidence());
+    }
+
+    /// `VerificationCoverage::has_evidence()` is structurally equivalent
+    /// to the disjunction `!is_empty() && !is_fully_verified()` OR
+    /// `is_fully_verified()` — i.e., the two `verified > 0` arms of the
+    /// four-arm matrix the docstring on
+    /// [`VerificationCoverage::is_fully_verified`] tabulates (the
+    /// some-verified-some-unverified intermediate arm at `verified > 0
+    /// && unverified > 0` AND the fully-verified ceiling at `verified > 0
+    /// && unverified == 0`). Pinned across the four arms of that matrix
+    /// so a future regression that decoupled `has_evidence` from those
+    /// two arms (e.g., hand-rolled the body as `total() > 0`, which
+    /// would admit the all-unverified floor that neither the mixed arm
+    /// nor the fully-verified arm admits) would fail this pin at the
+    /// all-unverified arm. The structural equivalence is what makes the
+    /// typed primitive the proper one-oracle surface for the relaxed-
+    /// staging admission gate at the verification axis: a verifier
+    /// reading `has_evidence()` reads exactly what the two-arm
+    /// `verified > 0` disjunction reads, with no behavioural seam.
+    /// Mirrors `test_has_evidence_equals_disjunction_of_mixed_and_
+    /// fully_covered` at the orthogonal axis exactly.
+    #[test]
+    fn test_verification_has_evidence_equals_two_verified_arm_disjunction() {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            }, // empty
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            }, // all-unverified
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            }, // mixed
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            }, // fully-verified
+            VerificationCoverage {
+                verified: 1,
+                unverified: 1,
+            }, // half-and-half corner
+            VerificationCoverage {
+                verified: 3,
+                unverified: 0,
+            }, // Phase 2 ceiling
+            VerificationCoverage {
+                verified: 0,
+                unverified: 2,
+            }, // Phase 1 all-unverified
+        ];
+        for c in cases {
+            let mixed_arm = c.verified > 0 && c.unverified > 0;
+            let fully_verified_arm = c.is_fully_verified();
+            assert_eq!(
+                c.has_evidence(),
+                mixed_arm || fully_verified_arm,
+                "has_evidence must equal the two-verified-arm \
+                 disjunction at {c:?}",
+            );
+        }
+    }
+
+    /// `VerificationCoverage::has_evidence()` composes with the monoid
+    /// `Add` shape exactly the way a downstream fleet-wide aggregator
+    /// depends on: a per-phase no-evidence verification-coverage summed
+    /// with any per-phase has-evidence verification-coverage produces a
+    /// has-evidence aggregate (one phase contributing `verified > 0`
+    /// lifts the aggregate off the no-evidence floor). Mirrors the
+    /// structural intuition: a product certification has positive
+    /// verification evidence iff any phase contributed a positive
+    /// verdict. A future regression that swapped `verified` and
+    /// `unverified` in the impl body of `Add` would silently flip a
+    /// has-evidence Phase 1 verification into a no-evidence aggregate;
+    /// this pin closes that arm at the typed-primitive surface. Mirrors
+    /// `test_has_evidence_composes_under_monoid_add` at the orthogonal
+    /// axis exactly.
+    #[test]
+    fn test_verification_has_evidence_composes_under_monoid_add() {
+        let phase_1_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 2,
+        };
+        let phase_2_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 3,
+        };
+        let aggregate_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 5,
+        };
+        let phase_1_verified = VerificationCoverage {
+            verified: 1,
+            unverified: 1,
+        };
+        assert!(!phase_1_unverified.has_evidence());
+        assert!(!phase_2_unverified.has_evidence());
+        assert!(!aggregate_unverified.has_evidence());
+        assert!(phase_1_verified.has_evidence());
+        assert!(!(phase_1_unverified + phase_2_unverified).has_evidence());
+        assert!((phase_1_unverified + phase_1_verified).has_evidence());
+        assert!((phase_1_verified + phase_2_unverified).has_evidence());
+        assert!((phase_1_unverified + phase_1_verified + phase_2_unverified).has_evidence());
+    }
+
+    /// `VerificationCoverage::has_evidence()` stays saturation-robust:
+    /// the body `verified > 0` reads against the `verified` component
+    /// itself, not against any derived ratio. At the post-saturation
+    /// state `{verified: usize::MAX, unverified: 0}` it correctly reads
+    /// `true` (every counted verification — even the dropped past-
+    /// ceiling increments — cleared); at the post-saturation state
+    /// `{verified: 0, unverified: usize::MAX}` it correctly reads
+    /// `false` (no counted verification cleared). The symmetric saturated
+    /// state `{verified: MAX, unverified: MAX}` reads `true` (both
+    /// components are non-zero), matching the two-verified-arm
+    /// disjunction's reading at that state. Mirrors the saturation-
+    /// robust discipline
+    /// `test_has_evidence_stays_robust_at_saturated_state` pins for the
+    /// orthogonal-axis peer one impl group up; the two surfaces compose
+    /// without a structural seam at the saturated state, the
+    /// load-bearing precondition the future
+    /// `compose_has_evidence`-style two-axis parallel-composed
+    /// disjunction (the natural De Morgan dual of `compose_is_empty`)
+    /// will rely on at the composed-axis surface.
+    #[test]
+    fn test_verification_has_evidence_stays_robust_at_saturated_state() {
+        let saturated_verified_only = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        assert!(saturated_verified_only.has_evidence());
+        assert!(saturated_verified_only.is_saturated());
+        assert!(saturated_verified_only.is_fully_verified());
+
+        let saturated_unverified_only = VerificationCoverage {
+            verified: 0,
+            unverified: usize::MAX,
+        };
+        assert!(!saturated_unverified_only.has_evidence());
+        assert!(saturated_unverified_only.is_saturated());
+        assert!(!saturated_unverified_only.is_fully_verified());
+
+        let saturated_both = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: usize::MAX,
+        };
+        assert!(saturated_both.has_evidence());
+        assert!(saturated_both.is_saturated());
+        assert!(!saturated_both.is_fully_verified());
     }
 }
