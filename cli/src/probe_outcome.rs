@@ -959,6 +959,86 @@ impl VerificationCoverage {
     pub fn total(&self) -> usize {
         self.verified.saturating_add(self.unverified)
     }
+
+    /// True iff every counted verification-bearing outcome substantiated a
+    /// positive verification verdict — `verified > 0 && unverified == 0`.
+    /// The orthogonal-axis peer of [`ProbeCoverage::is_fully_covered`]: the
+    /// typed discriminator for the strict-production `sekiban` admission
+    /// verifier gate (THEORY §VII.1: attestation-gated deployments are
+    /// structural, not policy overlays) at the verification-trustworthiness
+    /// dimension. A downstream reconciliation that fails-closed unless
+    /// every verification-bearing probe substantiated its claim reads one
+    /// bool here rather than re-deriving `verification.verified > 0 &&
+    /// verification.unverified == 0` per call site.
+    ///
+    /// The four reachable arms of [`VerificationCoverage`] resolve as:
+    ///
+    /// | `verified` | `unverified` | `is_empty()` | `is_fully_verified()` | `verification_ratio()`* |
+    /// |------------|--------------|--------------|-----------------------|-------------------------|
+    /// | `0`        | `0`          | `true`       | `false`               | `0.0`                   |
+    /// | `0`        | `N`          | `false`      | `false`               | `0.0`                   |
+    /// | `M`        | `N`          | `false`      | `false`               | `M/(M+N)`               |
+    /// | `M`        | `0`          | `false`      | `true`                | `1.0`                   |
+    ///
+    /// * `verification_ratio()` is a future follow-up — mirror of
+    ///   [`ProbeCoverage::coverage_ratio`] — not yet lifted at the typed-
+    ///   primitive surface; the matrix column documents the structural
+    ///   target the predicate-pair partitions ahead of the ratio lift.
+    ///
+    /// The two-boolean discriminator pair `(is_empty, is_fully_verified)`
+    /// is mutually exclusive and structurally disambiguates the empty-
+    /// slice boundary (no verification-bearing outcomes counted) from the
+    /// all-verified ceiling (every counted outcome substantiated a
+    /// positive verdict) — both of which sit at the edge of the future
+    /// `verification_ratio()`'s range but carry distinct operational
+    /// meaning. A downstream verifier that conditioned only on
+    /// `verification_ratio() == 1.0` would silently accept the empty-slice
+    /// case (where the `total == 0` guard returns `0.0`, not `1.0`, but
+    /// the symmetry pin matters); conditioning on `is_fully_verified()`
+    /// instead forces the verifier through the typed discriminator the
+    /// empty case cannot satisfy.
+    ///
+    /// THEORY §VI.1 one-oracle discipline: the predicate is derived at
+    /// one site (here), not re-inlined as `verification.verified > 0 &&
+    /// verification.unverified == 0` per consumer. THEORY §V.4 / §VII.1
+    /// honesty channel: the discriminator names "every verification-
+    /// bearing probe substantiated a positive verdict," the load-bearing
+    /// precondition the Phase 1 / Phase 2 strict admission gate
+    /// fails-closed on at the orthogonal axis to [`ProbeCoverage::
+    /// is_fully_covered`]'s "every probe produced evidence."
+    pub fn is_fully_verified(&self) -> bool {
+        self.verified > 0 && self.unverified == 0
+    }
+
+    /// True iff zero verification-bearing outcomes were counted —
+    /// `total() == 0`. The structural boundary case
+    /// [`verification_coverage`] over an empty iterator produces (the only
+    /// [`VerificationCoverage`] value with `total() == 0`, since
+    /// `verified` and `unverified` are both `usize` and non-negative).
+    /// Distinguishes "no verification-bearing outcomes counted" from
+    /// "every counted outcome unverified" — both will collapse to the
+    /// same `verification_ratio() == 0.0` arm the future ratio lift will
+    /// produce, but a downstream verifier that wants to disambiguate
+    /// (e.g., to treat the empty-slice case as a no-op while gating
+    /// against the all-unverified case) reads [`is_empty`] directly
+    /// rather than `verification.total() == 0` at each call site.
+    ///
+    /// The structural complement of [`is_fully_verified`]'s edge case:
+    /// the two predicates partition the future `verification_ratio == 0.0`
+    /// / `verification_ratio == 1.0` boundary into the four mutually-
+    /// exclusive arms tabulated on [`is_fully_verified`]. Mirrors the
+    /// standard-collection [`Vec::is_empty`] / [`HashMap::is_empty`]
+    /// idiom every pleme-io consumer already reaches for, and the
+    /// orthogonal-axis peer [`ProbeCoverage::is_empty`] one impl group
+    /// up.
+    ///
+    /// [`is_empty`]: VerificationCoverage::is_empty
+    /// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
+    /// [`Vec::is_empty`]: std::vec::Vec::is_empty
+    /// [`HashMap::is_empty`]: std::collections::HashMap::is_empty
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
 }
 
 /// Componentwise `usize::saturating_add` over [`VerificationCoverage`] —
@@ -3105,5 +3185,205 @@ mod tests {
         let aggregate: VerificationCoverage = empty.into_iter().sum();
         assert_eq!(aggregate, VerificationCoverage::default());
         assert_eq!(aggregate.total(), 0);
+    }
+
+    /// `is_fully_verified()` returns `true` iff every counted
+    /// verification-bearing outcome substantiated a positive verdict —
+    /// `verified > 0 && unverified == 0`. Pinned across the three
+    /// load-bearing total counts (2 for Phase 1 flux-source +
+    /// helm-release-signature, 3 for Phase 2 helm-provenance + cosign +
+    /// network-policy, 5 for the full Phase 1 + Phase 2 aggregate) so a
+    /// future regression that hardcoded the unverified-count check to
+    /// one specific N would fail against the other two. The typed
+    /// discriminator a downstream `sekiban` strict-production admission
+    /// verifier reads at the orthogonal axis to
+    /// [`ProbeCoverage::is_fully_covered`] — the empty-slice boundary
+    /// (`verified: 0, unverified: 0`) does NOT satisfy this predicate,
+    /// structurally separating the all-verified ceiling from the
+    /// empty boundary the future `verification_ratio()` collapses with
+    /// the all-unverified floor (sibling pin
+    /// `test_is_fully_verified_empty_returns_false` closes that arm).
+    #[test]
+    fn test_is_fully_verified_all_verified_is_true() {
+        assert!(VerificationCoverage {
+            verified: 2,
+            unverified: 0
+        }
+        .is_fully_verified());
+        assert!(VerificationCoverage {
+            verified: 3,
+            unverified: 0
+        }
+        .is_fully_verified());
+        assert!(VerificationCoverage {
+            verified: 5,
+            unverified: 0
+        }
+        .is_fully_verified());
+    }
+
+    /// `is_fully_verified()` returns `false` for the empty-slice
+    /// boundary case `verification_coverage` over an empty iterator
+    /// produces (`verified: 0, unverified: 0`). The structural
+    /// discriminator from the all-verified ceiling arm one pin up: both
+    /// the empty case and the all-unverified floor will collapse to the
+    /// future `verification_ratio() == 0.0` arm the ratio lift will
+    /// produce, but the empty case must not satisfy `is_fully_verified`.
+    /// A future regression that relaxed the predicate to `unverified ==
+    /// 0` alone (dropping the `verified > 0` conjunct) would silently
+    /// flip the empty case to `true` and pass the strict-production gate
+    /// vacuously; this pin closes that arm. Mirrors
+    /// `test_is_fully_covered_empty_returns_false` at the orthogonal
+    /// axis.
+    #[test]
+    fn test_is_fully_verified_empty_returns_false() {
+        let empty = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert!(!empty.is_fully_verified());
+        assert!(empty.is_empty());
+    }
+
+    /// `is_fully_verified()` returns `false` when any counted outcome
+    /// failed to substantiate a positive verdict — the all-unverified
+    /// floor (today's `compose_product_certification` call-site state
+    /// before the five `Verified`-bearing outcomes wire real verification
+    /// substantiations at their probe sites) and the mixed-split
+    /// intermediate states a follow-up that wires positive verdicts at
+    /// some-but-not-all of the five sites will produce. Pinned across
+    /// the all-unverified floor and three realistic mixed-split shapes
+    /// (1-of-2, 3-of-5, 2-of-3) so a future regression that hardcoded
+    /// the predicate to one specific `unverified` value would fail across
+    /// the others. Mirrors `test_is_fully_covered_any_absent_is_false`
+    /// at the orthogonal axis.
+    #[test]
+    fn test_is_fully_verified_any_unverified_is_false() {
+        assert!(!VerificationCoverage {
+            verified: 0,
+            unverified: 5
+        }
+        .is_fully_verified());
+        assert!(!VerificationCoverage {
+            verified: 1,
+            unverified: 1
+        }
+        .is_fully_verified());
+        assert!(!VerificationCoverage {
+            verified: 3,
+            unverified: 2
+        }
+        .is_fully_verified());
+        assert!(!VerificationCoverage {
+            verified: 2,
+            unverified: 1
+        }
+        .is_fully_verified());
+    }
+
+    /// `is_fully_verified()` composes with the monoid `Add` shape exactly
+    /// the way a downstream fleet-wide aggregator depends on: summing a
+    /// fully-verified Phase 1 coverage with an any-unverified Phase 2
+    /// coverage produces an any-unverified aggregate (one unverified
+    /// outcome in any phase poisons the strict-production gate). Mirrors
+    /// the structural intuition: a product certification is fully
+    /// verified only when every phase is fully verified, the orthogonal
+    /// peer of `test_is_fully_covered_sums_under_monoid_add`.
+    #[test]
+    fn test_is_fully_verified_sums_under_monoid_add() {
+        let phase_1 = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        let phase_2_partial = VerificationCoverage {
+            verified: 1,
+            unverified: 2,
+        };
+        let phase_2_fully_verified = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        assert!(phase_1.is_fully_verified());
+        assert!(!phase_2_partial.is_fully_verified());
+        assert!(phase_2_fully_verified.is_fully_verified());
+        assert!(!(phase_1 + phase_2_partial).is_fully_verified());
+        assert!((phase_1 + phase_2_fully_verified).is_fully_verified());
+        assert!(!(phase_1 + phase_2_partial + phase_2_fully_verified).is_fully_verified());
+    }
+
+    /// `is_empty()` returns `true` for the empty-slice boundary case
+    /// `verification_coverage` over an empty iterator produces
+    /// (`verified: 0, unverified: 0`), and `false` for every reachable
+    /// non-empty `VerificationCoverage` value. The structural
+    /// disambiguator a downstream verifier reads to separate "no
+    /// verification-bearing outcomes counted" from "every counted
+    /// outcome unverified" — both will collapse to the future
+    /// `verification_ratio() == 0.0` arm the ratio lift will produce,
+    /// but only the former satisfies `is_empty()`. Pinned across the
+    /// all-unverified floor (`verified: 0, unverified: N`) and three
+    /// mixed splits to close the "regression that hardcoded
+    /// `is_empty` to `verified == 0`" arm (which would silently satisfy
+    /// the all-unverified case). Mirrors `test_is_empty_pins_empty_
+    /// boundary` at the orthogonal axis.
+    #[test]
+    fn test_verification_is_empty_pins_empty_boundary() {
+        assert!(VerificationCoverage::default().is_empty());
+        assert!(VerificationCoverage {
+            verified: 0,
+            unverified: 0
+        }
+        .is_empty());
+        assert!(!VerificationCoverage {
+            verified: 0,
+            unverified: 5
+        }
+        .is_empty());
+        assert!(!VerificationCoverage {
+            verified: 2,
+            unverified: 3
+        }
+        .is_empty());
+        assert!(!VerificationCoverage {
+            verified: 5,
+            unverified: 0
+        }
+        .is_empty());
+    }
+
+    /// `is_empty()` and `is_fully_verified()` are mutually exclusive — no
+    /// reachable `VerificationCoverage` value satisfies both. The empty
+    /// case fails `is_fully_verified` (the `verified > 0` conjunct
+    /// excludes it), and the fully-verified case fails `is_empty`
+    /// (`verified > 0 && unverified == 0` implies `total() > 0`). Pinned
+    /// across the four-arm decision matrix the docstring on
+    /// [`VerificationCoverage::is_fully_verified`] tabulates so a
+    /// regression that decoupled the two predicates would fail the
+    /// mutual-exclusion invariant here. Mirrors
+    /// `test_is_empty_and_is_fully_covered_are_mutually_exclusive` at
+    /// the orthogonal axis.
+    #[test]
+    fn test_verification_is_empty_and_is_fully_verified_are_mutually_exclusive() {
+        let empty = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        let all_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 5,
+        };
+        let mixed = VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        };
+        let fully_verified = VerificationCoverage {
+            verified: 5,
+            unverified: 0,
+        };
+        for c in [empty, all_unverified, mixed, fully_verified] {
+            assert!(
+                !(c.is_empty() && c.is_fully_verified()),
+                "is_empty and is_fully_verified must be mutually exclusive at {c:?}",
+            );
+        }
     }
 }
