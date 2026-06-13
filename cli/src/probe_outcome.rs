@@ -1101,8 +1101,17 @@ impl VerificationCoverage {
     /// post-saturation drift at the typed-primitive surface the same
     /// way the [`ProbeCoverage`] analogue already does.
     ///
+    /// The integer-percent peer is [`verification_ratio_pct`]: the
+    /// `u8` surface every Prometheus `*_verification_coverage_ratio_pct
+    /// >= 90` alert rule / typed-policy threshold gate admits cheaply
+    /// (integer arithmetic against an integer threshold, no IEEE-754
+    /// epsilon drift at the `>= 0.9` decision boundary), mirroring the
+    /// [`ProbeCoverage::coverage_ratio`] / [`ProbeCoverage::
+    /// coverage_ratio_pct`] split at the no-evidence axis.
+    ///
     /// [`is_saturated`]: VerificationCoverage::is_saturated
     /// [`total`]: VerificationCoverage::total
+    /// [`verification_ratio_pct`]: VerificationCoverage::verification_ratio_pct
     pub fn verification_ratio(&self) -> f64 {
         let total = self.total();
         if total == 0 {
@@ -1165,19 +1174,97 @@ impl VerificationCoverage {
     /// §V.4 / §VII.1 honesty channel: the verification-axis honesty
     /// signal surfaces both the verification ratio AND its
     /// trustworthiness — a downstream verifier that gated only on
-    /// `verification_ratio() >= 0.9` would silently accept the
+    /// `verification_ratio() >= 0.9` (or its integer peer
+    /// [`verification_ratio_pct`] `>= 90`) would silently accept the
     /// `{verified: MAX, unverified: MAX}` post-saturation state (true
-    /// 0.5 ratio reading as 1.0); gating on `!is_saturated() &&
-    /// verification_ratio() >= 0.9` instead forecloses that drift
-    /// class at the typed-primitive surface, mirroring
-    /// [`ProbeCoverage::is_saturated`]'s discipline at the orthogonal
-    /// axis.
+    /// 0.5 ratio reading as 1.0 / 100); gating on `!is_saturated() &&
+    /// verification_ratio() >= 0.9` (or the integer-form
+    /// `!is_saturated() && verification_ratio_pct() >= 90`) instead
+    /// forecloses that drift class at the typed-primitive surface,
+    /// mirroring [`ProbeCoverage::is_saturated`]'s discipline at the
+    /// orthogonal axis.
     ///
     /// [`is_empty`]: VerificationCoverage::is_empty
     /// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
     /// [`verification_ratio`]: VerificationCoverage::verification_ratio
+    /// [`verification_ratio_pct`]: VerificationCoverage::verification_ratio_pct
     pub fn is_saturated(&self) -> bool {
         self.verified == usize::MAX || self.unverified == usize::MAX
+    }
+
+    /// Verification fraction as an integer percent in `0..=100`. Returns
+    /// `0` for the empty-slice boundary case (`total() == 0`), and
+    /// `(verified * 100) / total()` (Euclidean floor) for every
+    /// reachable non-empty value. The orthogonal-axis peer of
+    /// [`ProbeCoverage::coverage_ratio_pct`]: where the no-evidence-axis
+    /// peer projects the `(ran, absent)` percent over the seventeen-
+    /// outcome attestation pipeline, this projects the
+    /// `(verified, unverified)` percent over the five-outcome
+    /// [`VerifiedOutcome`] subset.
+    ///
+    /// The companion of [`verification_ratio`]: the float surface is the
+    /// largest common shape every `tracing::Visit::record_f64` consumer
+    /// admits cheaply, the integer surface is the largest common shape
+    /// every Prometheus `*_verification_coverage_ratio_pct >= 90` alert
+    /// rule / typed-policy threshold gate admits cheaply (integer
+    /// arithmetic against an integer threshold, no IEEE-754 epsilon
+    /// drift at the decision boundary `>= 0.9` floats imprecisely
+    /// surface — `0.9_f64` is `0.8999...` under the binary fraction, so
+    /// a fleet-wide aggregator summing per-record ratios across N
+    /// records reads `N * 0.9_f64` against an `N * 0.9_f64 + epsilon`
+    /// threshold and may admit or reject the same evidence depending on
+    /// N). The integer surface forecloses that drift class at the
+    /// typed-primitive site, parallel to
+    /// [`ProbeCoverage::coverage_ratio_pct`]'s discipline one impl group
+    /// up.
+    ///
+    /// Routes through `u128` arithmetic to foreclose overflow at the
+    /// `verified * 100` multiplication — `usize::MAX * 100` overflows
+    /// `u128` only at `u128::MAX / 100 ≈ 3.4e34`, well above the
+    /// `usize::MAX ≈ 1.8e19` (64-bit) reach of the saturating monoid
+    /// `Add`, so the integer arithmetic is total over every reachable
+    /// `VerificationCoverage` value. The post-saturation state
+    /// `{verified: MAX, unverified: MAX}` reads `100` here (the true
+    /// 0.5 ratio is dropped past the saturating clamp, same drift as
+    /// [`verification_ratio`]'s float reading of `1.0`); the orthogonal
+    /// [`is_saturated`] flag is the load-bearing trustworthiness signal
+    /// a downstream verifier reads alongside this field to gate on
+    /// `!is_saturated() && verification_ratio_pct() >= 90` against the
+    /// post-saturation drift, mirroring
+    /// [`ProbeCoverage::coverage_ratio_pct`]'s discipline at the
+    /// orthogonal axis.
+    ///
+    /// The cast to `u8` is structurally lossless: the quotient
+    /// `(verified * 100) / total <= 100` by construction (`verified <=
+    /// total` since `total = verified + unverified` componentwise with
+    /// both components non-negative), so the result always fits in
+    /// `u8`. A regression that hand-rolled the body with `* 100` BEFORE
+    /// the division (the post-overflow form `(self.verified * 100) /
+    /// self.total()` in `usize` arithmetic) would panic at any
+    /// `verified > usize::MAX / 100` in debug and silently wrap in
+    /// release — both arms closed at the `u128` cast.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the percent form is
+    /// derived at one site (here), not re-inlined as `(verification.
+    /// verified as f64 / verification.total() as f64 * 100.0) as u8`
+    /// per consumer (which would inherit the float-imprecision drift at
+    /// the `0.9_f64` boundary the no-evidence-axis peer's docstring
+    /// names). THEORY.md §V.4 / §VII.1 honesty channel: the
+    /// verification-axis honesty signal now surfaces both the float and
+    /// the integer ratio forms — a downstream verifier reads whichever
+    /// shape its admission gate's threshold representation aligns with,
+    /// without re-deriving the conversion at the consumer surface.
+    ///
+    /// [`is_saturated`]: VerificationCoverage::is_saturated
+    /// [`verification_ratio`]: VerificationCoverage::verification_ratio
+    pub fn verification_ratio_pct(&self) -> u8 {
+        let total = self.total();
+        if total == 0 {
+            return 0;
+        }
+        let verified = self.verified as u128;
+        let total = total as u128;
+        ((verified * 100) / total) as u8
     }
 }
 
@@ -3862,5 +3949,259 @@ mod tests {
         assert!((flux_saturated + helm_release_normal).is_saturated());
         assert!((helm_release_normal + helm_provenance_normal + flux_saturated).is_saturated());
         assert!(!(helm_release_normal + helm_provenance_normal).is_saturated());
+    }
+
+    /// `verification_ratio_pct()` returns `0` for the empty-slice
+    /// boundary case `verification_coverage` over an empty iterator
+    /// produces. The structural distinction between "no outcomes
+    /// counted" and "every outcome unverified" stays at `total()`
+    /// (which returns `0` here vs. `N` for the all-unverified floor),
+    /// not flattened into the integer percent. Mirrors
+    /// `test_coverage_ratio_pct_empty_returns_zero` at the orthogonal
+    /// axis and `test_verification_ratio_empty_returns_zero` for the
+    /// float surface.
+    #[test]
+    fn test_verification_ratio_pct_empty_returns_zero() {
+        let empty = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert_eq!(empty.total(), 0);
+        assert_eq!(empty.verification_ratio_pct(), 0);
+    }
+
+    /// `verification_ratio_pct()` returns `100` for the all-verified
+    /// ceiling. Pinned across the three load-bearing total counts (2
+    /// for Phase 1 flux-source + helm-release-signature, 3 for Phase 2
+    /// helm-provenance + cosign + network-policy, 5 for the full
+    /// Phase 1 + Phase 2 aggregate) so a future regression that
+    /// hardcoded the denominator to one specific total would fail
+    /// against the other two. The integer-form ceiling the typed
+    /// admission gate `*_verification_coverage_ratio_pct >= 100` reads
+    /// against, dual of the float-form `verification_ratio() == 1.0`
+    /// ceiling. Mirrors `test_coverage_ratio_pct_all_ran_is_hundred` at
+    /// the orthogonal axis.
+    #[test]
+    fn test_verification_ratio_pct_all_verified_is_hundred() {
+        assert_eq!(
+            VerificationCoverage {
+                verified: 2,
+                unverified: 0,
+            }
+            .verification_ratio_pct(),
+            100
+        );
+        assert_eq!(
+            VerificationCoverage {
+                verified: 3,
+                unverified: 0,
+            }
+            .verification_ratio_pct(),
+            100
+        );
+        assert_eq!(
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            }
+            .verification_ratio_pct(),
+            100
+        );
+    }
+
+    /// `verification_ratio_pct()` returns `0` when every counted
+    /// outcome failed verification — the all-unverified floor today's
+    /// `compose_product_certification` call-site state sits at before
+    /// the five `Verified`-bearing outcomes wire real substantiations.
+    /// The structural disambiguator from the empty-slice case is
+    /// `total() > 0` here vs. `total() == 0` for the empty boundary;
+    /// both produce `verification_ratio_pct() == 0` but a consumer can
+    /// recover the kind-of-claim from the `total` field. Mirrors
+    /// `test_coverage_ratio_pct_all_absent_is_zero` at the orthogonal
+    /// axis.
+    #[test]
+    fn test_verification_ratio_pct_all_unverified_is_zero() {
+        let all_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 5,
+        };
+        assert_eq!(all_unverified.total(), 5);
+        assert_eq!(all_unverified.verification_ratio_pct(), 0);
+    }
+
+    /// `verification_ratio_pct()` floors `(verified * 100) / total` to
+    /// the nearest integer percent (Euclidean division, no rounding).
+    /// Pinned across the half-and-half `(1, 1)` corner, the realistic
+    /// Phase 1 + Phase 2 two-of-five split, and the just-below-90%
+    /// state so a future regression that swapped `verified` and
+    /// `unverified` in the numerator would flip `2/5 = 40` to
+    /// `3/5 = 60` and fail this pin. The floor discipline is
+    /// load-bearing for the admission threshold: a verifier gating `>=
+    /// 90` against `(verified: 89, unverified: 11)` reads
+    /// `verification_ratio_pct() == 89` (the floor of `89.0/100 = 89%`,
+    /// dropping the 0.0 fractional), correctly refusing the
+    /// just-below state, where a round-half-up form would silently
+    /// admit the just-below-90% state. Mirrors
+    /// `test_coverage_ratio_pct_mixed_split_arithmetic` at the
+    /// orthogonal axis.
+    #[test]
+    fn test_verification_ratio_pct_mixed_split_arithmetic() {
+        assert_eq!(
+            VerificationCoverage {
+                verified: 1,
+                unverified: 1,
+            }
+            .verification_ratio_pct(),
+            50
+        );
+        assert_eq!(
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            }
+            .verification_ratio_pct(),
+            40
+        );
+        assert_eq!(
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            }
+            .verification_ratio_pct(),
+            33
+        );
+        assert_eq!(
+            VerificationCoverage {
+                verified: 89,
+                unverified: 11,
+            }
+            .verification_ratio_pct(),
+            89,
+            "the just-below-90% state floors to 89 — the strict \
+             admission threshold `>= 90` correctly refuses this state"
+        );
+    }
+
+    /// `verification_ratio_pct()` does not panic at the post-saturation
+    /// state `{verified: usize::MAX, unverified: usize::MAX}` — the
+    /// `u128` cast at the multiplication forecloses the `verified *
+    /// 100` overflow `usize::MAX * 100` would surface in the unchecked
+    /// `usize` arithmetic. The `MAX * 100 / MAX` reading is `100`
+    /// (every saturated component dropped equal evidence past the
+    /// ceiling), the same drift `verification_ratio()`'s float reading
+    /// of `1.0` against the true `0.5` surfaces — the orthogonal
+    /// [`VerificationCoverage::is_saturated`] flag is the trust-
+    /// worthiness signal a downstream verifier reads alongside this
+    /// field to foreclose the drift class at the wire level. Mirrors
+    /// `test_coverage_ratio_pct_does_not_panic_at_saturated_state` at
+    /// the orthogonal axis: the monoid totality is upheld at the
+    /// integer-percent surface as well.
+    #[test]
+    fn test_verification_ratio_pct_does_not_panic_at_saturated_state() {
+        let saturated = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: usize::MAX,
+        };
+        assert_eq!(saturated.verification_ratio_pct(), 100);
+        assert!(saturated.is_saturated());
+    }
+
+    /// `verification_ratio_pct()` is in `0..=100` for every reachable
+    /// `VerificationCoverage` value — the invariant the `u8` return
+    /// type surfaces structurally. The cast `((verified * 100) /
+    /// total) as u8` is structurally lossless because `verified <=
+    /// total` (componentwise) implies `(verified * 100) / total <=
+    /// 100`. Pinned across the four arms of the matrix the docstring
+    /// on [`VerificationCoverage::is_fully_verified`] tabulates
+    /// (empty, all-unverified, mixed, fully-verified) AND the
+    /// saturated boundary so a future regression that decoupled the
+    /// `<= 100` bound would fail this pin at one of the arms it
+    /// over-shot. Mirrors `test_coverage_ratio_pct_is_in_range_0_to_100`
+    /// at the orthogonal axis.
+    #[test]
+    fn test_verification_ratio_pct_is_in_range_0_to_100() {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+        ];
+        for c in cases {
+            let pct = c.verification_ratio_pct();
+            assert!(
+                pct <= 100,
+                "verification_ratio_pct must be in 0..=100 at {c:?} — got {pct}",
+            );
+        }
+    }
+
+    /// `verification_ratio_pct()` floors to the same integer the
+    /// f64-multiplied `verification_ratio() * 100.0` form reads at
+    /// every non-saturated value. Pinned across the four arms of the
+    /// matrix plus a near-boundary just-below-threshold case so a
+    /// regression that drifted between the float and integer surfaces
+    /// (e.g., hand-rolled the integer body via the f64 round-trip
+    /// `(self.verification_ratio() * 100.0) as u8`, which would
+    /// inherit the IEEE-754 imprecision the docstring names) would
+    /// fail this pin at the just-below state where the float form
+    /// rounds differently than the integer floor. Mirrors
+    /// `test_coverage_ratio_pct_matches_floor_of_float_ratio_times_hundred`
+    /// at the orthogonal axis.
+    #[test]
+    fn test_verification_ratio_pct_matches_floor_of_float_ratio_times_hundred() {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 1,
+            },
+            VerificationCoverage {
+                verified: 89,
+                unverified: 11,
+            },
+        ];
+        for c in cases {
+            let pct = c.verification_ratio_pct();
+            let expected = (c.verification_ratio() * 100.0).floor() as u8;
+            assert_eq!(
+                pct, expected,
+                "integer floor must match floor(f64_ratio * 100) at {c:?}",
+            );
+        }
     }
 }
