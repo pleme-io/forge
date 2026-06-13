@@ -2676,6 +2676,175 @@ pub fn compose_is_all_no_evidence_or_saturated(
     compose_is_all_no_evidence(probe, verification) || compose_is_saturated(probe, verification)
 }
 
+/// Parallel-composed strict-gate fail-closed disjunction over the two
+/// orthogonal typed-primitive surfaces — the two-bool disjunction
+/// `!compose_is_fully_complete(probe, verification) ||
+///  compose_is_saturated(probe, verification)` collapsed to one bool
+/// at one site. Reads `true` iff AT LEAST ONE counted axis failed to
+/// surface its fully-covered / fully-verified arm (the incompleteness
+/// floor: some counted record collapsed to its no-evidence arm, or no
+/// records were counted on at least one axis) OR AT LEAST ONE axis
+/// reached its `usize::saturating_add` ceiling (the trustworthiness
+/// break: a derived-ratio axis can no longer be read honestly against
+/// past-ceiling increments). The structural fail-closed reason a
+/// strict-staging admission gate ([`compose_admission_eligible_strict`])
+/// refuses on — under De Morgan the negation of the strict gate
+/// decomposes exactly as
+/// `!compose_admission_eligible_strict(p, v) ==
+///  !compose_is_fully_complete(p, v) || compose_is_saturated(p, v)`
+/// because `!(compose_is_fully_complete && !compose_is_saturated) ==
+///  !compose_is_fully_complete || compose_is_saturated`
+/// (the load-bearing decomposition
+/// `compose_admission_eligible_strict(p, v) == compose_is_fully_complete(p,
+///  v) && !compose_is_saturated(p, v)` the prior commit 078826b pinned).
+///
+/// The structural complement of [`compose_admission_eligible_strict`] at
+/// the two-axis surface: where the strict gate (commit 7d818bd)
+/// integrates "complete on BOTH axes AND trustworthy on BOTH axes" —
+/// the load-bearing Phase 2 production admission precondition the
+/// `commands::attestation` fleet-wide certify step reads — this
+/// surfaces the disjunction of the two structural fail-closed reasons
+/// (the incompleteness floor OR the saturation ceiling) the gate
+/// refuses on with the kind-of-claim preserved (rather than the bare
+/// bool the De Morgan negation
+/// `!compose_admission_eligible_strict(p, v)` would surface). A
+/// downstream `sekiban` admission verifier wanting to surface the
+/// fleet-wide structural fail-closed reason — distinguishing
+/// "incomplete on at least one axis" from "trust broken on at least
+/// one axis" at the typed-primitive surface — reads one bool from
+/// this helper and branches on the two component helpers individually
+/// rather than re-deriving the disjunction at the consumer surface
+/// (or, equivalently but with the kind-of-claim erased,
+/// `!compose_admission_eligible_strict(p, v)`).
+///
+/// The structural peer of [`compose_is_all_no_evidence_or_saturated`]
+/// at the strict-gate tier: where the relaxed-gate helper (commit
+/// 86d81f7) surfaces the relaxed-gate fail-closed disjunction
+/// `compose_is_all_no_evidence || compose_is_saturated` (the De Morgan
+/// negation of [`compose_admission_eligible_relaxed`]), this surfaces
+/// the strict-gate fail-closed disjunction
+/// `!compose_is_fully_complete || compose_is_saturated` (the De Morgan
+/// negation of [`compose_admission_eligible_strict`]). Both helpers
+/// share the trustworthiness-broken second disjunct verbatim — the
+/// saturation factor is shared between the relaxed and strict gates
+/// (commit 2ea2240's `compose_is_saturated` is the one-oracle source).
+/// The discriminator is the first disjunct: the relaxed-gate floor is
+/// "no evidence anywhere" (the negation of `compose_has_evidence` by
+/// commit e652297's De Morgan pin), the strict-gate floor is
+/// "incomplete on at least one axis" (the negation of
+/// `compose_is_fully_complete` directly). The strict floor is
+/// strictly weaker — every state the relaxed gate refuses on the
+/// strict gate also refuses on (the structural witness of the
+/// strict ⇒ relaxed ordering pinned at
+/// [`tests::test_compose_admission_eligible_strict_implies_compose_admission_eligible_relaxed`]
+/// commit c5f8 / e6810b2). The dual implication
+/// `compose_is_all_no_evidence_or_saturated(p, v) =>
+///  compose_is_incomplete_or_saturated(p, v)`
+/// — the contrapositive of the strict ⇒ relaxed ordering — pins the
+/// structural ordering at the fail-closed surface and is pinned by
+/// [`tests::test_compose_is_all_no_evidence_or_saturated_implies_compose_is_incomplete_or_saturated`].
+///
+/// Disjunction (not conjunction) is structurally load-bearing on the
+/// outer combinator: the strict gate refuses iff EITHER fail-closed
+/// reason holds — at least one axis failed to surface its
+/// fully-complete arm OR at least one axis hit its saturating-add
+/// ceiling. A regression that composed the conjunction
+/// `!compose_is_fully_complete(p, v) && compose_is_saturated(p, v)`
+/// would silently admit the load-bearing "incomplete but trustworthy"
+/// state (e.g., `({ran: 3, absent: 4}, {verified: 2, unverified: 3})`)
+/// as strict-eligible, dropping the completeness factor the strict
+/// gate integrates; symmetrically it would silently admit the
+/// "complete but saturated" state (e.g.,
+/// `({ran: usize::MAX, absent: 0}, {verified: usize::MAX, unverified: 0})`)
+/// as strict-eligible, dropping the trustworthiness factor the
+/// strict gate clamps to.
+///
+/// The nine-member parallel-axis compose family now closes the
+/// structural complements the two-axis admission decomposition
+/// surfaces at BOTH tiers: AND of completeness, AND of strict
+/// admission, OR of saturation, AND of emptiness, OR of has-evidence,
+/// OR of admission eligibility (relaxed), AND of no-evidence floor,
+/// OR of no-evidence-OR-saturated (relaxed-refuse), OR of
+/// incomplete-OR-saturated (strict-refuse). The strict-gate
+/// decomposition
+/// `compose_admission_eligible_strict(p, v) ==
+///  !compose_is_incomplete_or_saturated(p, v)` is the De Morgan peer
+/// the natural-language description of the strict gate ("admit iff
+/// complete on every axis and trust intact" ↔ "refuse iff incomplete
+/// on at least one axis or trust broken") makes auditable at the
+/// typed-primitive surface — pinned by
+/// [`tests::test_compose_is_incomplete_or_saturated_equals_negation_of_compose_admission_eligible_strict`].
+///
+/// Saturation-robust by construction: the second disjunct
+/// `compose_is_saturated` explicitly reads the saturating-add ceiling
+/// across both axes, so the post-saturation state every other strict-
+/// gate ratio surface would lose past-ceiling increments at is
+/// structurally classified as fail-closed here. The first disjunct
+/// `!compose_is_fully_complete` reads the `is_fully_covered` /
+/// `is_fully_verified` per-axis component itself (not against any
+/// derived ratio), so the saturated-fully-evidenced arm
+/// `({ran: usize::MAX, absent: 0}, {verified: usize::MAX, unverified: 0})`
+/// — where `compose_is_fully_complete` reads `true` honestly through
+/// the `absent == 0 && unverified == 0` factor — reads `true` here
+/// only through the second disjunct (the saturation ceiling break),
+/// preserving the strict gate's fail-closed verdict on the
+/// saturated-fully-evidenced state the strict gate refuses through
+/// the trustworthiness clamp.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented two-helper composition exactly — the
+/// structural equivalence
+/// `compose_is_incomplete_or_saturated(p, v) ==
+/// (!compose_is_fully_complete(p, v) || compose_is_saturated(p, v))`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_is_incomplete_or_saturated_equals_documented_composition`].
+///
+/// THEORY.md §V.4 honesty channel: the strict-gate fail-closed
+/// disjunction surface reads one bool naming "the fleet-wide aggregate
+/// has either failed to surface completeness on at least one axis
+/// (some counted record collapsed to its no-evidence arm, or no
+/// records were counted) or lost trust (a derived-ratio axis hit the
+/// saturating-add ceiling)" — the structural fail-closed reason the
+/// Phase 2 production admission gate refuses on, decomposable into
+/// its two named per-helper components at the consumer surface.
+/// THEORY.md §VI.1 one-oracle discipline: the two-helper disjunction
+/// is derived at one site (here), not re-inlined as
+/// `!compose_is_fully_complete(p, v) || compose_is_saturated(p, v)`
+/// per downstream consumer (which would inherit a drift class on the
+/// day a third orthogonal axis is added — every consumer would need
+/// to extend the composition in lockstep, exactly the structural
+/// seam this helper forecloses, mirroring the discipline the eight
+/// prior compose helpers established for the complementary gates).
+///
+/// Frontier lineage: SLSA L3+ admission policy gates surface the
+/// strict-tier fail-closed reason as a structural disjunction
+/// "required attestation missing on at least one input OR provenance
+/// freshness window expired on at least one source" distinct from
+/// the relaxed-tier fail-closed disjunction, so a downstream auditor
+/// can branch on the strict-tier structural reason the gate refused;
+/// this helper lifts the same fail-closed-disjunction surface at the
+/// two-axis typed-primitive level. Sigstore's policy controller emits
+/// the strict-rejected-admission reason as the disjunction "no
+/// matched attestations on at least one required predicate OR
+/// freshness-window violation" preserving the named per-axis reason
+/// for downstream remediation; this helper lifts the same
+/// structural-reason discipline at the two-axis composition. Bazel's
+/// `--build_event_stream` / Buck2's build-event surface emit a
+/// per-stage "incomplete actions on at least one input OR cache
+/// trust broken" strict-tier fail-closed disjunction distinct from
+/// the relaxed-tier "no actions completed anywhere OR cache trust
+/// broken" disjunction — the fleet-wide structural-reason readout a
+/// downstream consumer branches on at the strict tier; this helper
+/// lifts the same structural-reason distinction at forge's two-axis
+/// surface.
+#[allow(dead_code)]
+pub fn compose_is_incomplete_or_saturated(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    !compose_is_fully_complete(probe, verification) || compose_is_saturated(probe, verification)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8767,6 +8936,543 @@ mod tests {
              AND no saturation anywhere is the relaxed-eligible state \
              the gate admits, the structural witness the De Morgan \
              equivalence with !compose_admission_eligible_relaxed pins)",
+        );
+    }
+
+    /// Pins the disjunction reading at the two structural fail-closed
+    /// reasons individually — the incompleteness floor arm AND the
+    /// saturation ceiling arm must each independently surface `true`.
+    /// Mirrors the strict gate's fail-closed decomposition: a state
+    /// where at least one axis failed to surface its fully-complete arm
+    /// (the incompleteness floor: empty axis, all-no-evidence axis, or
+    /// mixed axis) OR any axis reached its saturating-add ceiling (the
+    /// trust break) is fail-closed under the strict-staging admission
+    /// gate. The structural peer of
+    /// `test_compose_is_all_no_evidence_or_saturated_at_floor_and_ceiling_arms_is_true`
+    /// at the strict tier.
+    #[test]
+    fn test_compose_is_incomplete_or_saturated_at_fail_closed_arms_is_true() {
+        let probe_incomplete = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 5 },
+            ProbeCoverage { ran: 3, absent: 4 },
+        ];
+        let verification_fully_verified = VerificationCoverage {
+            verified: 5,
+            unverified: 0,
+        };
+        for probe in probe_incomplete {
+            assert!(
+                compose_is_incomplete_or_saturated(&probe, &verification_fully_verified),
+                "strict-gate fail-closed disjunction must admit at the \
+                 probe-axis incompleteness floor probe={probe:?} — the \
+                 first disjunct (!compose_is_fully_complete) surfaces \
+                 `true` here even when the verification axis is fully \
+                 verified",
+            );
+        }
+
+        let probe_fully_covered = ProbeCoverage { ran: 7, absent: 0 };
+        let verification_incomplete = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+        ];
+        for verification in verification_incomplete {
+            assert!(
+                compose_is_incomplete_or_saturated(&probe_fully_covered, &verification),
+                "strict-gate fail-closed disjunction must admit at the \
+                 verification-axis incompleteness floor \
+                 verification={verification:?} — the first disjunct \
+                 (!compose_is_fully_complete) surfaces `true` here even \
+                 when the probe axis is fully covered",
+            );
+        }
+
+        let probe_saturated_evidence = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let probe_saturated_absent = ProbeCoverage {
+            ran: 0,
+            absent: usize::MAX,
+        };
+        let verification_saturated_evidence = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        let verification_saturated_absent = VerificationCoverage {
+            verified: 0,
+            unverified: usize::MAX,
+        };
+        let probe_evidenced_non_saturated = ProbeCoverage { ran: 3, absent: 0 };
+        let verification_evidenced_non_saturated = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        for probe in [probe_saturated_evidence, probe_saturated_absent] {
+            assert!(
+                compose_is_incomplete_or_saturated(&probe, &verification_evidenced_non_saturated,),
+                "strict-gate fail-closed disjunction must admit at the \
+                 probe-axis saturation ceiling probe={probe:?} — the \
+                 second disjunct (compose_is_saturated) surfaces `true` \
+                 here even when the verification axis is fully-verified \
+                 trustworthy",
+            );
+        }
+        for verification in [
+            verification_saturated_evidence,
+            verification_saturated_absent,
+        ] {
+            assert!(
+                compose_is_incomplete_or_saturated(&probe_evidenced_non_saturated, &verification,),
+                "strict-gate fail-closed disjunction must admit at the \
+                 verification-axis saturation ceiling \
+                 verification={verification:?} — the second disjunct \
+                 (compose_is_saturated) surfaces `true` here even when \
+                 the probe axis is fully-covered trustworthy",
+            );
+        }
+    }
+
+    /// Pins the rejection reading at the strict-eligible states — every
+    /// `(probe, verification)` pair where BOTH axes surfaced their
+    /// fully-complete arm AND BOTH axes remain below the saturating-add
+    /// ceiling must read `false`. Forecloses the drift class where a
+    /// regression that swapped the outer combinator (OR → AND) would
+    /// silently classify the strict-eligible state as fail-closed
+    /// (collapsing the disjunction to the empty intersection of the
+    /// incompleteness floor and the saturation ceiling — structurally
+    /// impossible since `!compose_is_fully_complete` requires at least
+    /// one axis to be non-fully-covered/non-fully-verified while
+    /// `compose_is_saturated` requires
+    /// `ran == usize::MAX || absent == usize::MAX || verified ==
+    ///  usize::MAX || unverified == usize::MAX`,
+    /// and the fully-evidenced saturated state
+    /// `{ran: usize::MAX, absent: 0}` reads `is_fully_covered == true`
+    /// honestly through the `absent == 0` factor — so a regression
+    /// would silently admit the strict-eligible state as fail-closed).
+    /// The structural peer of
+    /// `test_compose_is_all_no_evidence_or_saturated_at_relaxed_eligible_states_is_false`
+    /// at the strict tier.
+    #[test]
+    fn test_compose_is_incomplete_or_saturated_at_strict_eligible_states_is_false() {
+        let probe_strict_eligible = [
+            ProbeCoverage { ran: 1, absent: 0 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX - 1,
+                absent: 0,
+            },
+        ];
+        let verification_strict_eligible = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX - 1,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_strict_eligible {
+            for verification in verification_strict_eligible {
+                assert!(
+                    !compose_is_incomplete_or_saturated(&probe, &verification),
+                    "strict-gate fail-closed disjunction must refuse the \
+                     both-axes-complete trustworthy state at \
+                     probe={probe:?} verification={verification:?} — \
+                     completeness on both axes AND no saturation \
+                     anywhere is the load-bearing strict-eligible reading",
+                );
+            }
+        }
+    }
+
+    /// Pins the structural equivalence with the documented two-helper
+    /// disjunction composition across the cross product of representative
+    /// per-axis arms (empty, all-absent/all-unverified, mixed,
+    /// fully-covered/fully-verified, both saturated polarities). A
+    /// regression that swapped the outer combinator (OR ↔ AND) or
+    /// dropped either component helper would fail this pin at the
+    /// corresponding divergent cell. The structural peer of
+    /// `test_compose_is_all_no_evidence_or_saturated_equals_documented_composition`
+    /// at the strict tier.
+    #[test]
+    fn test_compose_is_incomplete_or_saturated_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_is_incomplete_or_saturated(&probe, &verification);
+                let composed = !compose_is_fully_complete(&probe, &verification)
+                    || compose_is_saturated(&probe, &verification);
+                assert_eq!(
+                    direct, composed,
+                    "typed-primitive composition must equal the \
+                     documented two-helper disjunction composition at \
+                     probe={probe:?} verification={verification:?} — \
+                     a regression that swapped the outer combinator or \
+                     dropped either component would fail this pin at \
+                     the corresponding divergent cell",
+                );
+            }
+        }
+    }
+
+    /// Pins the load-bearing De Morgan equivalence
+    /// `compose_is_incomplete_or_saturated(p, v) ==
+    /// !compose_admission_eligible_strict(p, v)` across the same cross
+    /// product of representative per-axis arms. The equivalence holds
+    /// because `compose_admission_eligible_strict == compose_is_fully_complete
+    /// && !compose_is_saturated` (the load-bearing decomposition pinned at
+    /// `test_compose_is_fully_complete_decomposes_strict_admission`, commit
+    /// 078826b), so its negation expands directly to
+    /// `!compose_is_fully_complete || compose_is_saturated`. Pinning this
+    /// equivalence at the test surface forecloses the drift class where a
+    /// regression to either helper would silently break the structural
+    /// complement relation the parallel-axis compose family relies on.
+    /// The structural peer of
+    /// `test_compose_is_all_no_evidence_or_saturated_equals_negation_of_compose_admission_eligible_relaxed`
+    /// at the strict tier.
+    #[test]
+    fn test_compose_is_incomplete_or_saturated_equals_negation_of_compose_admission_eligible_strict(
+    ) {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let fail_closed = compose_is_incomplete_or_saturated(&probe, &verification);
+                let strict = compose_admission_eligible_strict(&probe, &verification);
+                assert_eq!(
+                    fail_closed, !strict,
+                    "load-bearing De Morgan equivalence \
+                     compose_is_incomplete_or_saturated(p, v) == \
+                     !compose_admission_eligible_strict(p, v) must \
+                     hold at probe={probe:?} verification={verification:?} \
+                     — a regression to either helper that broke the \
+                     structural complement relation would fail this pin \
+                     at the corresponding divergent cell",
+                );
+            }
+        }
+    }
+
+    /// Pins the structural ordering between the two tier-level
+    /// fail-closed disjunctions: every state the relaxed-gate
+    /// fail-closed disjunction admits, the strict-gate fail-closed
+    /// disjunction also admits — the contrapositive of the
+    /// strict ⇒ relaxed admission ordering pinned at commit e6810b2's
+    /// `test_compose_admission_eligible_strict_implies_compose_admission_eligible_relaxed`.
+    /// Equivalently:
+    /// `compose_is_all_no_evidence_or_saturated(p, v) =>
+    ///  compose_is_incomplete_or_saturated(p, v)`
+    /// because the relaxed-gate floor `compose_is_all_no_evidence` is
+    /// strictly stronger than the strict-gate floor
+    /// `!compose_is_fully_complete` (every state with no positive
+    /// evidence anywhere is also a state with at least one axis not
+    /// fully complete — the all-absent axis is not fully covered), and
+    /// the saturation disjunct is shared verbatim between both tiers.
+    /// The dual implication does NOT hold: the strict-gate fail-closed
+    /// disjunction admits the mixed-evidence state
+    /// `({ran: 3, absent: 4}, {verified: 2, unverified: 3})` (the
+    /// completeness factor is broken) while the relaxed-gate
+    /// fail-closed disjunction refuses it (positive evidence on both
+    /// axes AND no saturation). Pinning this ordering forecloses the
+    /// drift class where a regression to either tier-level helper
+    /// would silently invert the ordering at the fail-closed surface,
+    /// breaking the structural witness the two-tier admission decision
+    /// surface (Phase 1 relaxed → Phase 2 strict) relies on.
+    #[test]
+    fn test_compose_is_all_no_evidence_or_saturated_implies_compose_is_incomplete_or_saturated() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        let mut saw_strict_only_fail_closed = false;
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let relaxed_fail_closed =
+                    compose_is_all_no_evidence_or_saturated(&probe, &verification);
+                let strict_fail_closed = compose_is_incomplete_or_saturated(&probe, &verification);
+                if relaxed_fail_closed {
+                    assert!(
+                        strict_fail_closed,
+                        "relaxed-gate fail-closed must imply \
+                         strict-gate fail-closed at probe={probe:?} \
+                         verification={verification:?} — the \
+                         contrapositive of the strict ⇒ relaxed \
+                         admission ordering pinned at \
+                         test_compose_admission_eligible_strict_implies_compose_admission_eligible_relaxed",
+                    );
+                }
+                if strict_fail_closed && !relaxed_fail_closed {
+                    saw_strict_only_fail_closed = true;
+                }
+            }
+        }
+        assert!(
+            saw_strict_only_fail_closed,
+            "test corpus must surface at least one state where the \
+             strict-gate fail-closed disjunction admits but the \
+             relaxed-gate fail-closed disjunction refuses (the \
+             mixed-evidence partial-completeness state \
+             `((ran: 2, absent: 4), (verified: 1, unverified: 2))` is \
+             the structural witness the dual implication does NOT hold)",
+        );
+
+        let mixed_probe = ProbeCoverage { ran: 2, absent: 4 };
+        let mixed_verification = VerificationCoverage {
+            verified: 1,
+            unverified: 2,
+        };
+        assert!(
+            compose_is_incomplete_or_saturated(&mixed_probe, &mixed_verification),
+            "mixed-evidence partial-completeness state must read `true` \
+             through the strict-gate fail-closed disjunction (the \
+             completeness factor is broken on both axes)",
+        );
+        assert!(
+            !compose_is_all_no_evidence_or_saturated(&mixed_probe, &mixed_verification),
+            "mixed-evidence partial-completeness state must read \
+             `false` through the relaxed-gate fail-closed disjunction \
+             (positive evidence on both axes AND no saturation \
+             anywhere — the load-bearing structural witness the \
+             strict-gate floor is strictly weaker than the relaxed-\
+             gate floor)",
+        );
+    }
+
+    /// Pins the saturation-robust reading at the two named saturation
+    /// arms across both axes. The `{ran: usize::MAX, absent: 0}` /
+    /// `{verified: usize::MAX, unverified: 0}` saturated-fully-evidenced
+    /// arms — where the strict gate refuses through the trustworthiness
+    /// clamp even though the completeness factor reads `true` honestly
+    /// — must read `true` through the second disjunct (the saturation
+    /// ceiling) while the first disjunct (`!compose_is_fully_complete`)
+    /// reads `false` (the structural witness the trustworthiness clamp
+    /// is the strict gate's load-bearing failure mode at the saturated-
+    /// fully-evidenced arm, not the completeness factor). The
+    /// `{ran: 0, absent: usize::MAX}` / `{verified: 0, unverified:
+    ///  usize::MAX}` saturated-all-absent / saturated-all-unverified
+    /// arms must read `true` through BOTH disjuncts independently. The
+    /// structural peer of
+    /// `test_compose_is_all_no_evidence_or_saturated_stays_robust_at_saturated_states`
+    /// at the strict tier.
+    #[test]
+    fn test_compose_is_incomplete_or_saturated_stays_robust_at_saturated_states() {
+        let probe_saturated_evidence = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let verification_saturated_evidence = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        assert!(
+            compose_is_incomplete_or_saturated(
+                &probe_saturated_evidence,
+                &verification_saturated_evidence,
+            ),
+            "saturated-fully-evidenced both axes must read `true` — the \
+             trustworthiness clamp `compose_is_saturated` surfaces \
+             `true` honestly through the second disjunct even though \
+             the completeness factor `compose_is_fully_complete` reads \
+             `true` here (the load-bearing structural witness the \
+             strict-gate trustworthiness clamp is the failure mode at \
+             the saturated-fully-evidenced arm)",
+        );
+        assert!(
+            compose_is_fully_complete(&probe_saturated_evidence, &verification_saturated_evidence,),
+            "saturated-fully-evidenced both axes must read \
+             `compose_is_fully_complete == true` — the completeness \
+             factor reads `is_fully_covered / is_fully_verified` \
+             honestly through the `absent == 0 && unverified == 0` \
+             factor at the saturated-fully-evidenced arm (the \
+             structural witness the first disjunct of \
+             `compose_is_incomplete_or_saturated` does NOT surface \
+             `true` here, so the second disjunct \
+             `compose_is_saturated` is load-bearing)",
+        );
+
+        let verification_non_saturated_evidence = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        assert!(
+            compose_is_incomplete_or_saturated(
+                &probe_saturated_evidence,
+                &verification_non_saturated_evidence,
+            ),
+            "one-axis-saturated-evidenced must read `true` — the \
+             saturation disjunct admits through the saturated probe \
+             axis even though the verification axis is fully-covered \
+             trustworthy",
+        );
+
+        let probe_saturated_no_evidence = ProbeCoverage {
+            ran: 0,
+            absent: usize::MAX,
+        };
+        let verification_saturated_no_evidence = VerificationCoverage {
+            verified: 0,
+            unverified: usize::MAX,
+        };
+        assert!(
+            compose_is_incomplete_or_saturated(
+                &probe_saturated_no_evidence,
+                &verification_saturated_no_evidence,
+            ),
+            "saturated-all-absent / saturated-all-unverified both axes \
+             must read `true` — both disjuncts independently surface \
+             `true` (!compose_is_fully_complete because absent / \
+             unverified == usize::MAX implies not fully covered / \
+             verified, compose_is_saturated because absent / \
+             unverified == usize::MAX), the load-bearing both-disjuncts-\
+             surface arm",
+        );
+
+        let probe_strict_eligible = ProbeCoverage { ran: 3, absent: 0 };
+        let verification_strict_eligible = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        assert!(
+            !compose_is_incomplete_or_saturated(
+                &probe_strict_eligible,
+                &verification_strict_eligible,
+            ),
+            "fully-evidenced non-saturated both axes must read `false` \
+             — neither disjunct surfaces `true` (completeness on both \
+             axes AND no saturation anywhere is the strict-eligible \
+             state the gate admits, the structural witness the De \
+             Morgan equivalence with !compose_admission_eligible_strict \
+             pins)",
         );
     }
 }
