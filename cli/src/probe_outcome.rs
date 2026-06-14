@@ -3333,6 +3333,94 @@ pub enum AdmissionTier {
     Strict,
 }
 
+impl AdmissionTier {
+    /// True iff this tier admits the relaxed (Phase 1) gate — i.e.,
+    /// `self >= AdmissionTier::StagingOnly` under the derived [`Ord`]
+    /// instance. The typed-method peer of the
+    /// `tier >= AdmissionTier::StagingOnly` reading the
+    /// [`compose_admission_tier`] consumer already calls against the
+    /// ladder constants; this method hoists the comparison to a
+    /// named predicate so a downstream branch reads "this tier
+    /// admits the relaxed gate" rather than retyping the
+    /// `>= StagingOnly` literal per consumer.
+    ///
+    /// The drift class the typed-method peer forecloses: on the day
+    /// a fourth tier is added between [`AdmissionTier::Refused`] and
+    /// [`AdmissionTier::StagingOnly`] (a `Pending` band that admits
+    /// neither gate, say), every literal `tier >= StagingOnly`
+    /// reading at the consumer surface inherits the silent
+    /// re-classification — the new `Pending` tier compares strictly
+    /// less than `StagingOnly`, reading `false` at every consumer
+    /// that previously read `true` for the new tier (correct), AND
+    /// every consumer that previously read `false` for `Refused`
+    /// continues to (correct), but a future fourth tier added
+    /// strictly between `StagingOnly` and `Strict` would flip the
+    /// reading at every literal-comparison consumer that read the
+    /// `>= Strict` ladder. The named predicate localises the
+    /// ladder-position semantics at one site so a future tier
+    /// addition that needs to refine "admits the relaxed gate"
+    /// updates one method body, not every consumer.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the relaxed-tier admit
+    /// reading is named at one site (here), not re-typed as
+    /// `tier >= AdmissionTier::StagingOnly` per downstream consumer.
+    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// "this tier admits the Phase 1 gate" — the load-bearing
+    /// reading the relaxed-gate fleet-wide aggregator consults to
+    /// decide whether the per-tier service advances to staging.
+    ///
+    /// The structural equivalence
+    /// [`tests::test_admission_tier_admits_relaxed_equals_geq_staging_only`]
+    /// pins `tier.admits_relaxed() == (tier >= AdmissionTier::StagingOnly)`
+    /// at every variant; the consumer-level equivalence
+    /// [`tests::test_compose_admission_tier_admits_relaxed_equals_compose_admission_eligible_relaxed`]
+    /// pins the per-axis composition at every reachable
+    /// `(probe, verification)` pair across the 6×6 cross product.
+    #[allow(dead_code)]
+    pub fn admits_relaxed(&self) -> bool {
+        *self >= Self::StagingOnly
+    }
+
+    /// True iff this tier admits the strict (Phase 2) gate — i.e.,
+    /// `self >= AdmissionTier::Strict` under the derived [`Ord`]
+    /// instance. The typed-method peer of [`admits_relaxed`]
+    /// (`Self::admits_relaxed`) at the strict-gate ceiling: the
+    /// dual reading the `>= Strict` literal at the consumer surface
+    /// hoists to a named predicate.
+    ///
+    /// Under the present three-variant ladder, `admits_strict`
+    /// reduces to `*self == Self::Strict` (since `Strict` is the
+    /// ceiling), but the `>=` form is the load-bearing one — it
+    /// preserves the ladder reading across a future tier addition
+    /// strictly above `Strict` (e.g., a `StrictPlusAttestation`
+    /// fifth tier that subsumes Strict), and surfaces the structural
+    /// equivalence with [`admits_relaxed`] under the tier-implication
+    /// invariant.
+    ///
+    /// The tier-implication invariant
+    /// `admits_strict() => admits_relaxed()` is pinned by
+    /// [`tests::test_admission_tier_admits_strict_implies_admits_relaxed`]:
+    /// every tier that admits the strict gate also admits the
+    /// relaxed gate — the structural pin the
+    /// [`compose_admission_eligible_strict`] /
+    /// [`compose_admission_eligible_relaxed`] implication invariant
+    /// at the per-axis bool surface (commit 7d818bd /
+    /// 9a9e97a / aa40b8f) hoists to the typed-sum-method surface.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the strict-tier admit
+    /// reading is named at one site (here), not re-typed as
+    /// `tier >= AdmissionTier::Strict` per downstream consumer.
+    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// "this tier admits the Phase 2 production gate" — the
+    /// load-bearing reading the strict-gate fleet-wide aggregator
+    /// consults to decide whether the per-tier service advances to
+    /// production.
+    #[allow(dead_code)]
+    pub fn admits_strict(&self) -> bool {
+        *self >= Self::Strict
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -11883,6 +11971,263 @@ mod tests {
                 assert_eq!(
                     tier_admits, bool_admits,
                     "compose_admission_tier >= Strict must equal \
+                     compose_admission_eligible_strict at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// [`AdmissionTier::admits_relaxed`] reads `false` at
+    /// [`AdmissionTier::Refused`] and `true` at the two admitting
+    /// tiers ([`AdmissionTier::StagingOnly`] and
+    /// [`AdmissionTier::Strict`]). The structural pin against the
+    /// three-variant ladder: a regression that hand-rolled the
+    /// method as `*self == Self::StagingOnly` (dropping the
+    /// `Strict` arm) would flip the reading at the ceiling, and a
+    /// regression that read `*self != Self::Refused` (inverted
+    /// floor) would survive the present pin but fail the
+    /// [`test_admission_tier_admits_relaxed_equals_geq_staging_only`]
+    /// equivalence below. Pinned at all three variants explicitly.
+    #[test]
+    fn test_admission_tier_admits_relaxed_at_each_variant() {
+        assert!(!AdmissionTier::Refused.admits_relaxed());
+        assert!(AdmissionTier::StagingOnly.admits_relaxed());
+        assert!(AdmissionTier::Strict.admits_relaxed());
+    }
+
+    /// [`AdmissionTier::admits_strict`] reads `true` only at
+    /// [`AdmissionTier::Strict`], and `false` at the two
+    /// non-ceiling tiers. The peer of the
+    /// `admits_relaxed_at_each_variant` pin one row up — the dual
+    /// reading at the strict-gate ceiling. A regression that
+    /// hand-rolled the method as `*self != Self::Refused` would
+    /// flip the reading at `StagingOnly` (true vs. false), and a
+    /// regression that read `*self == Self::StagingOnly` (wrong
+    /// variant) would flip both `StagingOnly` and `Strict`. Pinned
+    /// at all three variants explicitly.
+    #[test]
+    fn test_admission_tier_admits_strict_at_each_variant() {
+        assert!(!AdmissionTier::Refused.admits_strict());
+        assert!(!AdmissionTier::StagingOnly.admits_strict());
+        assert!(AdmissionTier::Strict.admits_strict());
+    }
+
+    /// The tier-implication invariant
+    /// `admits_strict() => admits_relaxed()` holds at every
+    /// [`AdmissionTier`] variant. The typed-sum-method peer of the
+    /// per-axis bool implication
+    /// [`compose_admission_eligible_strict`] =>
+    /// [`compose_admission_eligible_relaxed`] (the structural pin
+    /// commits 7d818bd / 9a9e97a / aa40b8f sealed at the per-axis
+    /// surface). Walks all three variants so a regression that
+    /// flipped the relaxed-gate reading at `Strict` (e.g., a
+    /// hand-rolled `*self == Self::StagingOnly` that refused
+    /// `Strict`) would surface here.
+    #[test]
+    fn test_admission_tier_admits_strict_implies_admits_relaxed() {
+        for tier in [
+            AdmissionTier::Refused,
+            AdmissionTier::StagingOnly,
+            AdmissionTier::Strict,
+        ] {
+            if tier.admits_strict() {
+                assert!(
+                    tier.admits_relaxed(),
+                    "admits_strict must imply admits_relaxed at tier={tier:?}",
+                );
+            }
+        }
+    }
+
+    /// The typed-method reading
+    /// `tier.admits_relaxed()` equals the literal-comparison
+    /// reading `tier >= AdmissionTier::StagingOnly` at every
+    /// variant. The structural equivalence the typed-method peer
+    /// preserves against the existing
+    /// [`test_compose_admission_tier_geq_staging_only_equals_compose_admission_eligible_relaxed`]
+    /// pin: any future regression that broke the equivalence
+    /// (e.g., hand-rolled the method body as `*self ==
+    /// Self::Strict` only, dropping the `StagingOnly` arm) would
+    /// fail here at the typed-method surface AND at the consumer-
+    /// level 6×6 pin below.
+    #[test]
+    fn test_admission_tier_admits_relaxed_equals_geq_staging_only() {
+        for tier in [
+            AdmissionTier::Refused,
+            AdmissionTier::StagingOnly,
+            AdmissionTier::Strict,
+        ] {
+            assert_eq!(
+                tier.admits_relaxed(),
+                tier >= AdmissionTier::StagingOnly,
+                "admits_relaxed must equal >= StagingOnly at tier={tier:?}",
+            );
+        }
+    }
+
+    /// The typed-method reading
+    /// `tier.admits_strict()` equals the literal-comparison reading
+    /// `tier >= AdmissionTier::Strict` at every variant. The peer
+    /// of the relaxed-gate equivalence one row up — the dual pin
+    /// at the strict-gate ceiling. Together the two equivalences
+    /// seal the typed-method surface against the literal-comparison
+    /// surface at both of the two admission gates, so the
+    /// [`compose_admission_tier`] consumer that branches on
+    /// `tier.admits_relaxed()` / `tier.admits_strict()` reads the
+    /// same partition the existing
+    /// [`tests::test_compose_admission_tier_geq_*_equals_*`] pins
+    /// already sealed against the bool surface.
+    #[test]
+    fn test_admission_tier_admits_strict_equals_geq_strict() {
+        for tier in [
+            AdmissionTier::Refused,
+            AdmissionTier::StagingOnly,
+            AdmissionTier::Strict,
+        ] {
+            assert_eq!(
+                tier.admits_strict(),
+                tier >= AdmissionTier::Strict,
+                "admits_strict must equal >= Strict at tier={tier:?}",
+            );
+        }
+    }
+
+    /// The typed-method reading at the consumer surface
+    /// `compose_admission_tier(&p, &v).admits_relaxed()` equals the
+    /// per-axis bool reading
+    /// [`compose_admission_eligible_relaxed`] at every reachable
+    /// `(probe, verification)` pair — pinned across the 6×6 cross
+    /// product of per-axis representatives (36 cells). The
+    /// load-bearing structural pin the typed-method peer surfaces:
+    /// a regression that broke either the
+    /// [`compose_admission_tier`] constructor (e.g., reordered the
+    /// priority branches in a way that violated the
+    /// strict-implies-relaxed invariant) OR the
+    /// [`AdmissionTier::admits_relaxed`] method body (e.g.,
+    /// hand-rolled the predicate without the `>=` form) would
+    /// surface here as a per-cell mismatch against the bool
+    /// surface. The dual of
+    /// [`test_compose_admission_tier_geq_staging_only_equals_compose_admission_eligible_relaxed`]
+    /// at the typed-method surface — same 6×6 cross product, same
+    /// per-axis representatives.
+    #[test]
+    fn test_compose_admission_tier_admits_relaxed_equals_compose_admission_eligible_relaxed() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let method_admits = compose_admission_tier(&probe, &verification).admits_relaxed();
+                let bool_admits = compose_admission_eligible_relaxed(&probe, &verification);
+                assert_eq!(
+                    method_admits, bool_admits,
+                    "compose_admission_tier.admits_relaxed must equal \
+                     compose_admission_eligible_relaxed at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// The typed-method reading at the consumer surface
+    /// `compose_admission_tier(&p, &v).admits_strict()` equals the
+    /// per-axis bool reading [`compose_admission_eligible_strict`]
+    /// at every reachable `(probe, verification)` pair — pinned
+    /// across the 6×6 cross product. The peer of the relaxed-gate
+    /// 6×6 pin one row up — the dual equivalence at the strict-gate
+    /// ceiling. Together the two 6×6 pins seal the typed-method
+    /// surface against the per-axis bool surface at every reachable
+    /// admission state, sealing the structural equivalence the
+    /// [`compose_admission_tier`] consumer relies on when branching
+    /// on `tier.admits_strict()` instead of retyping the
+    /// `tier >= AdmissionTier::Strict` literal at every call site.
+    #[test]
+    fn test_compose_admission_tier_admits_strict_equals_compose_admission_eligible_strict() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let method_admits = compose_admission_tier(&probe, &verification).admits_strict();
+                let bool_admits = compose_admission_eligible_strict(&probe, &verification);
+                assert_eq!(
+                    method_admits, bool_admits,
+                    "compose_admission_tier.admits_strict must equal \
                      compose_admission_eligible_strict at \
                      probe={probe:?} verification={verification:?}",
                 );
