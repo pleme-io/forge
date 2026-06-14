@@ -72,6 +72,79 @@ impl RetryPolicy {
         }
     }
 
+    /// The boolean-conditional retry-policy constructor: the canonical
+    /// [`Self::network`] schedule when `retry_on_transient` is `true`,
+    /// the no-retry [`Self::immediate`] shape when `false`.
+    ///
+    /// Lifts the verbatim five-line stanza
+    /// ```text
+    /// let policy = if safe_mode {
+    ///     RetryPolicy::network()
+    /// } else {
+    ///     RetryPolicy::immediate()
+    /// };
+    /// ```
+    /// that two retry-driven external-CLI sites in
+    /// `commands/github_runner_ci.rs` — `attic_command_with_retry`
+    /// and `push_with_retry` — carry verbatim modulo per-site comments.
+    /// Two identically-shaped bodies past the duplication threshold the
+    /// forge command-module surface enforces (≥2; PRIME DIRECTIVE) —
+    /// this primitive is the law-redeeming consolidation for the
+    /// safe-mode-conditional retry-policy shape, sibling of
+    /// [`Self::network`] (the canonical exponential schedule),
+    /// [`Self::immediate`] (the no-retry shape), and
+    /// [`Self::with_max_attempts`] (the canonical-schedule + caller-
+    /// budget builder).
+    ///
+    /// # Why the two-factory partition is load-bearing
+    ///
+    /// Under safe mode the retry-driven CI surface MUST retry transient
+    /// network/server failures (HTTP 5xx, connection-level errors, I/O
+    /// timeouts, EOF) so a registry/cache CDN hiccup does not fail a
+    /// long-running CI job; under non-safe mode the operator wants a
+    /// fail-fast loop (no retry budget burn against a deliberately
+    /// short-circuited CI). The two factory constructors carry the two
+    /// schedules; this constructor is the named dispatch between them
+    /// at one site so a future safe-mode-only schedule refinement
+    /// (e.g., a different cap, a different factor) gets named here, not
+    /// retyped per consumer.
+    ///
+    /// The parameter is named `retry_on_transient` — not `safe_mode` —
+    /// to keep the typed-primitive surface abstract from the call-site-
+    /// specific safe-mode concept. The boolean's semantics is "should
+    /// transient failures be retried under the canonical network
+    /// schedule?", not "is the CI surface in safe mode?". A future
+    /// retry-driven consumer that drives the partition off a different
+    /// flag (e.g., `--allow-retry`, a config knob) consumes this
+    /// primitive without retyping the conditional.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the safe-mode-conditional
+    /// retry-policy partition is named at one site (here), not retyped
+    /// as the inline five-line `if` stanza per consumer. THEORY.md §V.4
+    /// honesty channel: the named constructor surfaces "this is the
+    /// boolean-conditional dispatch between the canonical network
+    /// schedule and the no-retry shape" as the load-bearing structural
+    /// reading at the consumer site, making the choice between the two
+    /// factory constructors explicit at the named-primitive surface
+    /// rather than implicit at the inline `if` body.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason [`Self::network`] and
+    /// [`Self::immediate`] are: the dispatch is a pure function of the
+    /// boolean argument, and a const constructor admits the same
+    /// `const`-context call shapes the two sibling factory constructors
+    /// admit (e.g., a `const POLICY: RetryPolicy =
+    /// RetryPolicy::network_or_immediate(SAFE_MODE_DEFAULT);` table at
+    /// a future call site).
+    pub const fn network_or_immediate(retry_on_transient: bool) -> Self {
+        if retry_on_transient {
+            Self::network()
+        } else {
+            Self::immediate()
+        }
+    }
+
     /// Custom policy. `max_attempts` is clamped to `>= 1` so a degenerate
     /// `0` cannot silently turn the loop into a no-op.
     pub fn new(
@@ -1705,6 +1778,158 @@ mod tests {
         assert_eq!(p.initial_backoff, net.initial_backoff);
         assert_eq!(p.factor, net.factor);
         assert_eq!(p.max_backoff, net.max_backoff);
+    }
+
+    /// `network_or_immediate(true)` returns the canonical
+    /// [`RetryPolicy::network`] shape verbatim — same schedule, same
+    /// budget, same cap. The load-bearing pin: a regression that
+    /// perturbed the `true` arm (e.g., dropped to a 1-attempt policy
+    /// silently) would silently turn every safe-mode retry-driven CI
+    /// surface into a fail-fast loop, invisible except as a regression
+    /// in attempt-count telemetry. Pinning every schedule field at the
+    /// primitive boundary catches that here.
+    #[test]
+    fn test_network_or_immediate_true_returns_network() {
+        let p = RetryPolicy::network_or_immediate(true);
+        let net = RetryPolicy::network();
+        assert_eq!(
+            p.max_attempts, net.max_attempts,
+            "true arm must inherit network()'s max_attempts"
+        );
+        assert_eq!(
+            p.initial_backoff, net.initial_backoff,
+            "true arm must inherit network()'s initial_backoff"
+        );
+        assert_eq!(
+            p.factor, net.factor,
+            "true arm must inherit network()'s factor"
+        );
+        assert_eq!(
+            p.max_backoff, net.max_backoff,
+            "true arm must inherit network()'s max_backoff"
+        );
+    }
+
+    /// `network_or_immediate(false)` returns the no-retry
+    /// [`RetryPolicy::immediate`] shape verbatim. The load-bearing pin:
+    /// a regression that perturbed the `false` arm (e.g., promoted it to
+    /// `network()` so the partition collapsed to "always retry") would
+    /// silently make every non-safe-mode CI surface a five-attempt
+    /// retry loop against the registry/cache, exactly the failure mode
+    /// the safe-mode partition exists to suppress. Pinning every
+    /// schedule field at the primitive boundary catches that here.
+    #[test]
+    fn test_network_or_immediate_false_returns_immediate() {
+        let p = RetryPolicy::network_or_immediate(false);
+        let imm = RetryPolicy::immediate();
+        assert_eq!(
+            p.max_attempts, imm.max_attempts,
+            "false arm must inherit immediate()'s max_attempts"
+        );
+        assert_eq!(
+            p.initial_backoff, imm.initial_backoff,
+            "false arm must inherit immediate()'s initial_backoff"
+        );
+        assert_eq!(
+            p.factor, imm.factor,
+            "false arm must inherit immediate()'s factor"
+        );
+        assert_eq!(
+            p.max_backoff, imm.max_backoff,
+            "false arm must inherit immediate()'s max_backoff"
+        );
+    }
+
+    /// The two arms partition the two canonical factory constructors
+    /// exactly — `true` arm equals `network()`, `false` arm equals
+    /// `immediate()`, and the two factories are structurally distinct
+    /// (different `max_attempts`, different `initial_backoff`,
+    /// different `max_backoff`). The structural-witness pin a
+    /// regression that fused both arms onto one factory would fail
+    /// against: if both arms returned `network()`, the `false` arm
+    /// would mis-match `immediate()`; if both arms returned
+    /// `immediate()`, the `true` arm would mis-match `network()`. The
+    /// derived `PartialEq` over [`RetryPolicy`] (via its struct field
+    /// `PartialEq`s — `u32`, `Duration`, `u32`, `Duration`, all
+    /// `Eq`-bound primitives) makes the partition pin a direct
+    /// equality check rather than a per-field cascade.
+    #[test]
+    fn test_network_or_immediate_partitions_two_factories() {
+        let true_arm = RetryPolicy::network_or_immediate(true);
+        let false_arm = RetryPolicy::network_or_immediate(false);
+        let net = RetryPolicy::network();
+        let imm = RetryPolicy::immediate();
+        assert_eq!(true_arm.max_attempts, net.max_attempts);
+        assert_eq!(true_arm.initial_backoff, net.initial_backoff);
+        assert_eq!(true_arm.factor, net.factor);
+        assert_eq!(true_arm.max_backoff, net.max_backoff);
+        assert_eq!(false_arm.max_attempts, imm.max_attempts);
+        assert_eq!(false_arm.initial_backoff, imm.initial_backoff);
+        assert_eq!(false_arm.factor, imm.factor);
+        assert_eq!(false_arm.max_backoff, imm.max_backoff);
+        // The two arms are structurally distinct — the partition is
+        // non-degenerate.
+        assert_ne!(
+            true_arm.max_attempts, false_arm.max_attempts,
+            "the partition must be non-degenerate: max_attempts differs"
+        );
+        assert_ne!(
+            true_arm.initial_backoff, false_arm.initial_backoff,
+            "the partition must be non-degenerate: initial_backoff differs"
+        );
+        assert_ne!(
+            true_arm.max_backoff, false_arm.max_backoff,
+            "the partition must be non-degenerate: max_backoff differs"
+        );
+    }
+
+    /// `network_or_immediate` is callable in a `const` context — the
+    /// same const-fn discipline [`RetryPolicy::network`] and
+    /// [`RetryPolicy::immediate`] carry. Pins that a future regression
+    /// that dropped the `const` qualifier (e.g., to add a non-const
+    /// runtime branch) would surface here as a compile-error rather
+    /// than as a silent loss of a `const POLICY: RetryPolicy = ...`
+    /// table at a future call site.
+    #[test]
+    fn test_network_or_immediate_is_const_fn() {
+        const TRUE_ARM: RetryPolicy = RetryPolicy::network_or_immediate(true);
+        const FALSE_ARM: RetryPolicy = RetryPolicy::network_or_immediate(false);
+        assert_eq!(TRUE_ARM.max_attempts, RetryPolicy::network().max_attempts);
+        assert_eq!(
+            FALSE_ARM.max_attempts,
+            RetryPolicy::immediate().max_attempts
+        );
+    }
+
+    /// `network_or_immediate` composes with [`RetryPolicy::with_max_attempts`]
+    /// — both arms admit the canonical builder override without a
+    /// special case. Pins the structural composition the post-migration
+    /// safe-mode-conditional retry-driven consumers can reach for: a
+    /// caller that wants the safe-mode-conditional dispatch AND a
+    /// caller-supplied budget override reads
+    /// `RetryPolicy::network_or_immediate(safe_mode).with_max_attempts(retries)`
+    /// at one site rather than retyping the inline conditional. A
+    /// regression that broke either constructor's composition with the
+    /// builder would surface here.
+    #[test]
+    fn test_network_or_immediate_composes_with_with_max_attempts() {
+        let true_arm = RetryPolicy::network_or_immediate(true).with_max_attempts(7);
+        assert_eq!(true_arm.max_attempts, 7);
+        // Schedule still comes from network() — only max_attempts is
+        // overridden.
+        let net = RetryPolicy::network();
+        assert_eq!(true_arm.initial_backoff, net.initial_backoff);
+        assert_eq!(true_arm.factor, net.factor);
+        assert_eq!(true_arm.max_backoff, net.max_backoff);
+
+        let false_arm = RetryPolicy::network_or_immediate(false).with_max_attempts(7);
+        assert_eq!(false_arm.max_attempts, 7);
+        // Schedule still comes from immediate() — every backoff is zero
+        // regardless of max_attempts.
+        let imm = RetryPolicy::immediate();
+        assert_eq!(false_arm.initial_backoff, imm.initial_backoff);
+        assert_eq!(false_arm.max_backoff, imm.max_backoff);
+        assert_eq!(false_arm.compute_delay(2), Duration::ZERO);
     }
 
     /// Success on the first call must not retry. `op` is invoked exactly
