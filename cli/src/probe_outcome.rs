@@ -2336,6 +2336,141 @@ pub fn compose_has_evidence(probe: &ProbeCoverage, verification: &VerificationCo
     probe.has_evidence() || verification.has_evidence()
 }
 
+/// Parallel-composed both-axes-interior predicate over the two
+/// orthogonal typed-primitive surfaces — the two-bool conjunction
+/// `probe.is_mixed() && verification.is_mixed()` collapsed to one bool
+/// at one site. Reads `true` iff EVERY counted axis sits at its
+/// four-arm interior: the no-evidence axis ([`ProbeCoverage`]) has
+/// `ran > 0 && absent > 0` AND the verification-trustworthiness axis
+/// ([`VerificationCoverage`]) has `verified > 0 && unverified > 0`.
+/// The structural "Phase 2 deployment-attestation in progress" arm
+/// where the build / chart / deployment probes have wired some real
+/// evidence on the no-evidence axis AND the helm-release-signature /
+/// flux-source-verification / helm-provenance / cosign-image-signature
+/// / network-policy-admission probes have wired some real positive
+/// substantiations on the verification axis, but NEITHER axis has
+/// reached its full-coverage ceiling and NEITHER axis sits at its
+/// no-evidence floor.
+///
+/// The structural interior-arm peer of [`compose_is_empty`] (both-
+/// axes empty arm), [`compose_is_fully_complete`] (both-axes ceiling
+/// arm), and [`compose_is_all_no_evidence`] (both-axes no-evidence
+/// floor) at the four-arm matrix the per-axis [`ProbeCoverage::
+/// is_mixed`] / [`VerificationCoverage::is_mixed`] predicates close.
+/// Where the three prior compose helpers name the three extreme arms
+/// of the both-axes shape (vacuous-on-both, ceiling-on-both,
+/// floor-on-both), this names the interior arm — the structurally
+/// fourth named arm of the four-arm both-axes partition. Conjunction
+/// (not disjunction) is structurally load-bearing on the outer
+/// combinator: the both-axes interior arm requires BOTH axes to sit
+/// at their interior, otherwise at least one axis sits at one of the
+/// three extreme arms (empty, all-no-evidence, fully-complete) and
+/// the four-arm partition reads that extreme arm at the typed
+/// surface. A regression that composed the disjunction
+/// `probe.is_mixed() || verification.is_mixed()` would silently
+/// classify the one-axis-mixed / one-axis-extreme state as both-axes-
+/// interior, conflating the partial-progress-on-one-axis state with
+/// the partial-progress-on-both-axes state — exactly the drift class
+/// the typed-primitive surface forecloses.
+///
+/// The orthogonal-axis peer of the inline both-axes interior arm a
+/// downstream consumer would otherwise retype as
+/// `probe.is_mixed() && verification.is_mixed()`: this collapses the
+/// two-bool consumer composition to one bool at one site, so a
+/// downstream `sekiban` admission verifier wanting to surface the
+/// "every axis has partial progress" interior state reads one bool
+/// — `compose_is_mixed(&probe, &verification)` — rather than
+/// composing the two-bool per-axis surface at every consumer. Before
+/// this helper, every both-axes-interior emitter had to retype the
+/// two-bool consumer composition (with the drift class a regression
+/// that disjuncted the per-axis flags silently admits the
+/// one-axis-mixed-one-axis-extreme state as both-axes interior);
+/// after this helper, the emitter reads one bool and the parallel-
+/// axis composition is sealed at the typed-primitive surface so a
+/// future third orthogonal axis (e.g., a compliance-dimensions axis
+/// the [`crate::compliance_dimensions`] family hints at) extends the
+/// composition here, not at every downstream consumer in lockstep.
+///
+/// Saturation-robust by construction: each per-axis `is_mixed()`
+/// reads its two integer components themselves (`ran > 0 && absent >
+/// 0` / `verified > 0 && unverified > 0`), not any derived ratio. The
+/// post-saturation state `{ran: usize::MAX, absent: usize::MAX}` /
+/// `{verified: usize::MAX, unverified: usize::MAX}` is structurally
+/// `is_mixed() == true` on its respective axis (both components are
+/// strictly positive even after the `usize::saturating_add` clamp),
+/// so the saturated-but-interior arm reads `true` honestly at the
+/// composed surface, mirroring the saturation-robust discipline
+/// [`ProbeCoverage::is_mixed`] and [`VerificationCoverage::is_mixed`]
+/// already establish at the per-axis surface.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented two-axis composition exactly — the
+/// structural equivalence
+/// `compose_is_mixed(p, v) == (p.is_mixed() && v.is_mixed())`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_is_mixed_equals_documented_composition`].
+///
+/// The strictly-stronger ordering pin
+/// `compose_is_mixed(p, v) => compose_has_evidence(p, v)` holds at
+/// every reachable pair: every both-axes-interior state strictly
+/// carries `ran > 0` AND `verified > 0`, structurally implying
+/// `has_evidence` on both axes (and therefore on the disjunction
+/// [`compose_has_evidence`] composes). The converse fails — the
+/// one-axis-evidenced / one-axis-empty pair admits `has_evidence` but
+/// refuses `compose_is_mixed`, the structural witness that the
+/// interior-arm predicate is the strictly stronger discriminator.
+/// Pinned at
+/// [`tests::test_compose_is_mixed_implies_compose_has_evidence`].
+///
+/// THEORY.md §VI.1 one-oracle discipline: the two-axis both-axes-
+/// interior conjunction is derived at one site (here), not re-inlined
+/// as `probe.is_mixed() && verification.is_mixed()` per downstream
+/// consumer (which would inherit a drift class on the day a third
+/// orthogonal axis is added — every consumer would need to extend
+/// the composition in lockstep, exactly the structural seam this
+/// helper forecloses, mirroring the discipline
+/// [`compose_admission_eligible_strict`], [`compose_is_saturated`],
+/// [`compose_is_empty`], [`compose_is_fully_complete`],
+/// [`compose_has_evidence`], and [`compose_is_all_no_evidence`]
+/// established for the complementary arm-predicates).
+/// THEORY.md §V.4 / §VII.1 honesty channel: the discriminator names
+/// "every counted axis has surfaced SOME honest-positive arm AND
+/// SOME no-evidence / unverified arm" — the load-bearing
+/// intermediate-progress state a fleet-wide-aggregate admission
+/// verifier reads to distinguish "partial progress on every axis"
+/// from "partial progress on only one axis" (where the strict gate
+/// refuses but the relaxed gate admits across the asymmetric arm).
+/// THEORY.md §V.1: the four-arm both-axes partition (compose_is_empty,
+/// compose_is_all_no_evidence, compose_is_fully_complete,
+/// compose_is_mixed) is now closed by typed names — a future fifth
+/// arm cannot be introduced without surfacing as a partition-count
+/// assertion failure at the cross-product equivalence pin.
+///
+/// Frontier lineage: SLSA L3+ build-provenance gates surface the
+/// "every required attestation has partial evidence" intermediate
+/// state distinct from the "every required attestation has full
+/// evidence" ceiling and the "no required attestation has any
+/// evidence" floor — a downstream auditor reads the intermediate
+/// state as a typed name rather than composing the per-axis interior
+/// predicates per consumer; this helper lifts the same intermediate-
+/// state surface at forge's two-axis composition. Sigstore's policy
+/// controller emits the "every matched signature has partial
+/// verification progress" intermediate state distinct from the
+/// matched-and-cleared ceiling and the matched-but-unverified floor;
+/// this helper lifts the same partition discipline at the two-axis
+/// surface. Bazel's `--build_event_stream` / Buck2's build-event
+/// surface emit a "every action has partial progress" intermediate
+/// reading distinct from the "every action completed" ceiling and
+/// the "no action made progress" floor — the same four-arm partition
+/// at the per-event surface this helper lifts at the two-axis
+/// composition.
+///
+/// [`is_mixed`]: ProbeCoverage::is_mixed
+#[allow(dead_code)]
+pub fn compose_is_mixed(probe: &ProbeCoverage, verification: &VerificationCoverage) -> bool {
+    probe.is_mixed() && verification.is_mixed()
+}
+
 /// Parallel-composed relaxed-staging admission predicate over the two
 /// orthogonal typed-primitive surfaces — the two-bool conjunction
 /// `compose_has_evidence(p, v) && !compose_is_saturated(p, v)` collapsed
@@ -8500,6 +8635,470 @@ mod tests {
             "any phase contributing `verified > 0` on the verification \
              axis lifts the aggregate off the no-evidence floor — \
              verification={verification_aggregate_evidenced:?}",
+        );
+    }
+
+    /// Parallel-composed both-axes-interior predicate admits every
+    /// both-axes-mixed state — the structural arm where
+    /// `compose_is_mixed` reads `true`: each axis sits at its
+    /// four-arm interior (`ran > 0 && absent > 0` /
+    /// `verified > 0 && unverified > 0`). Walks the cross product of
+    /// the small / medium / mostly-positive / mostly-negative interior
+    /// representatives so the honest both-axes-interior reading is
+    /// pinned across realistic Phase-2-in-progress shapes.
+    #[test]
+    fn test_compose_is_mixed_at_both_axes_mixed_arm_is_true() {
+        let probe_mixed = [
+            ProbeCoverage { ran: 1, absent: 1 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 2 },
+            ProbeCoverage {
+                ran: 89,
+                absent: 11,
+            },
+        ];
+        let verification_mixed = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 1,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 1,
+            },
+            VerificationCoverage {
+                verified: 11,
+                unverified: 89,
+            },
+        ];
+        for probe in probe_mixed {
+            for verification in verification_mixed {
+                assert!(
+                    compose_is_mixed(&probe, &verification),
+                    "both-axes-interior state must read mixed at \
+                     probe={probe:?} verification={verification:?} — \
+                     a regression that hand-rolled a single-axis check \
+                     would fail at the mirror-axis representative",
+                );
+            }
+        }
+    }
+
+    /// Parallel-composed both-axes-interior predicate rejects every
+    /// extreme-arm state on either axis — the three extreme arms per
+    /// axis (empty floor, all-no-evidence floor, fully-complete
+    /// ceiling) paired against the mixed interior on the other axis.
+    /// Pins the load-bearing fail-closed boundary: a regression that
+    /// composed the disjunction `probe.is_mixed() ||
+    /// verification.is_mixed()` would silently classify the
+    /// one-axis-mixed / one-axis-extreme state as both-axes-interior,
+    /// conflating partial-progress-on-one-axis with partial-progress-
+    /// on-both-axes. Walks both asymmetric arms (probe-extreme /
+    /// verification-mixed, probe-mixed / verification-extreme) so the
+    /// fail-closed reading is pinned at every extreme-arm cell.
+    #[test]
+    fn test_compose_is_mixed_at_extreme_arms_is_false() {
+        let probe_extremes = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 5 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        let verification_mixed = VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        };
+        for probe in probe_extremes {
+            assert!(
+                !compose_is_mixed(&probe, &verification_mixed),
+                "probe-axis extreme arm must reject both-axes-interior \
+                 at probe={probe:?} verification={verification_mixed:?}",
+            );
+        }
+
+        let probe_mixed = ProbeCoverage { ran: 3, absent: 4 };
+        let verification_extremes = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 7,
+                unverified: 0,
+            },
+        ];
+        for verification in verification_extremes {
+            assert!(
+                !compose_is_mixed(&probe_mixed, &verification),
+                "verification-axis extreme arm must reject both-axes-\
+                 interior at probe={probe_mixed:?} \
+                 verification={verification:?}",
+            );
+        }
+
+        let probe_extreme = ProbeCoverage { ran: 0, absent: 5 };
+        let verification_extreme = VerificationCoverage {
+            verified: 7,
+            unverified: 0,
+        };
+        assert!(
+            !compose_is_mixed(&probe_extreme, &verification_extreme),
+            "both-axes-extreme state (probe all-absent, verification \
+             fully-verified) must read false — neither axis sits at \
+             its interior arm",
+        );
+    }
+
+    /// Structural equivalence with the documented two-axis consumer
+    /// composition `probe.is_mixed() && verification.is_mixed()`. Pins
+    /// the one-oracle invariant the typed primitive carries — a
+    /// regression that hand-rolled the body (e.g., returned the
+    /// disjunction `probe.is_mixed() || verification.is_mixed()`,
+    /// which would silently admit the one-axis-mixed-one-axis-
+    /// extreme state, the drift class this helper exists to
+    /// foreclose) would fail at the corresponding asymmetric cells.
+    /// Walks the cross product of four per-axis representatives
+    /// (empty, all-no-evidence, mixed, fully-complete) so every
+    /// (probe-arm × verification-arm) cell is pinned.
+    #[test]
+    fn test_compose_is_mixed_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 5 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_is_mixed(&probe, &verification);
+                let composed = probe.is_mixed() && verification.is_mixed();
+                assert_eq!(
+                    direct, composed,
+                    "typed-primitive composition must equal the \
+                     documented two-axis consumer composition at \
+                     probe={probe:?} verification={verification:?} — \
+                     a regression that replaced the conjunction with \
+                     a disjunction would fail this pin at the \
+                     asymmetric cells",
+                );
+            }
+        }
+    }
+
+    /// Mutual-exclusion pin: at every cell where `compose_is_mixed`
+    /// reads `true` (both axes sit at their four-arm interior), the
+    /// three sibling extreme-arm composes (`compose_is_empty`,
+    /// `compose_is_all_no_evidence`, `compose_is_fully_complete`)
+    /// must all read `false` — the structural pin that the both-axes
+    /// interior arm is mutually exclusive with each of the three
+    /// both-axes extreme arms. Symmetrically, at the three both-axes
+    /// extreme-arm cells (`(empty, empty)`, `(all-absent, all-
+    /// unverified)`, `(fully-covered, fully-verified)`),
+    /// `compose_is_mixed` must read `false`. Pins the load-bearing
+    /// structural fact that the interior-arm predicate is the
+    /// structurally fourth named arm of the both-axes-matching
+    /// classification — distinct from each of the three extreme
+    /// arms the prior compose helpers named. A regression that
+    /// conflated the interior arm with an extreme arm (e.g., a body
+    /// that classified a both-axes-mixed cell as also fully-complete
+    /// at the composed surface) would surface here as a mutual-
+    /// exclusion violation.
+    #[test]
+    fn test_compose_is_mixed_mutually_exclusive_with_extreme_arms() {
+        let mixed_cells: [(ProbeCoverage, VerificationCoverage); 3] = [
+            (
+                ProbeCoverage { ran: 1, absent: 1 },
+                VerificationCoverage {
+                    verified: 1,
+                    unverified: 1,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 3, absent: 4 },
+                VerificationCoverage {
+                    verified: 2,
+                    unverified: 3,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 7, absent: 2 },
+                VerificationCoverage {
+                    verified: 5,
+                    unverified: 1,
+                },
+            ),
+        ];
+        for (probe, verification) in mixed_cells {
+            assert!(
+                compose_is_mixed(&probe, &verification),
+                "both-axes-interior cell must read mixed at \
+                 probe={probe:?} verification={verification:?}",
+            );
+            assert!(
+                !compose_is_empty(&probe, &verification),
+                "both-axes-interior cell must reject both-empty at \
+                 probe={probe:?} verification={verification:?} — \
+                 the interior arm carries ran > 0 AND verified > 0",
+            );
+            assert!(
+                !compose_is_all_no_evidence(&probe, &verification),
+                "both-axes-interior cell must reject all-no-evidence \
+                 at probe={probe:?} verification={verification:?} — \
+                 the interior arm carries ran > 0 AND verified > 0",
+            );
+            assert!(
+                !compose_is_fully_complete(&probe, &verification),
+                "both-axes-interior cell must reject fully-complete \
+                 at probe={probe:?} verification={verification:?} — \
+                 the interior arm carries absent > 0 AND \
+                 unverified > 0",
+            );
+        }
+
+        let extreme_cells: [(ProbeCoverage, VerificationCoverage); 3] = [
+            (
+                ProbeCoverage { ran: 0, absent: 0 },
+                VerificationCoverage {
+                    verified: 0,
+                    unverified: 0,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 0, absent: 5 },
+                VerificationCoverage {
+                    verified: 0,
+                    unverified: 3,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 7, absent: 0 },
+                VerificationCoverage {
+                    verified: 5,
+                    unverified: 0,
+                },
+            ),
+        ];
+        for (probe, verification) in extreme_cells {
+            assert!(
+                !compose_is_mixed(&probe, &verification),
+                "both-axes-extreme cell must reject mixed at \
+                 probe={probe:?} verification={verification:?}",
+            );
+        }
+    }
+
+    /// The strictly-stronger ordering pin: every both-axes-interior
+    /// state strictly carries `ran > 0` AND `verified > 0`,
+    /// structurally implying `compose_has_evidence` (any-axis
+    /// disjunction). The converse fails — the one-axis-evidenced /
+    /// one-axis-empty pair admits `compose_has_evidence` but
+    /// refuses `compose_is_mixed`, the structural witness the
+    /// interior-arm predicate is the strictly stronger
+    /// discriminator. A regression that defined `compose_is_mixed`
+    /// against the disjunction (mirroring `compose_has_evidence`'s
+    /// outer combinator) would silently relax the interior-arm
+    /// surface to the any-axis-evidence surface, dropping the
+    /// "every axis sits at its interior" load-bearing precondition
+    /// the helper exists to seal.
+    #[test]
+    fn test_compose_is_mixed_implies_compose_has_evidence() {
+        let probe_mixed = [
+            ProbeCoverage { ran: 1, absent: 1 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 2 },
+        ];
+        let verification_mixed = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 1,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 1,
+            },
+        ];
+        for probe in probe_mixed {
+            for verification in verification_mixed {
+                assert!(
+                    compose_is_mixed(&probe, &verification),
+                    "both-axes-interior precondition must read true \
+                     at probe={probe:?} verification={verification:?}",
+                );
+                assert!(
+                    compose_has_evidence(&probe, &verification),
+                    "both-axes-interior state must imply any-axis \
+                     has-evidence at probe={probe:?} \
+                     verification={verification:?} — the strictly-\
+                     stronger ordering pin is load-bearing",
+                );
+            }
+        }
+
+        let probe_only_evidenced = ProbeCoverage { ran: 3, absent: 0 };
+        let verification_empty = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert!(compose_has_evidence(
+            &probe_only_evidenced,
+            &verification_empty
+        ));
+        assert!(
+            !compose_is_mixed(&probe_only_evidenced, &verification_empty),
+            "one-axis-evidenced / one-axis-empty pair must refuse \
+             both-axes-interior — the structural witness that \
+             compose_is_mixed is the strictly stronger discriminator",
+        );
+    }
+
+    /// Saturation-robust pin: the body reads against the per-axis
+    /// components themselves (`ran > 0 && absent > 0` /
+    /// `verified > 0 && unverified > 0`), not against any derived
+    /// ratio. At the both-axes-saturated state
+    /// `({ran: usize::MAX, absent: usize::MAX}, {verified: usize::MAX,
+    /// unverified: usize::MAX})`, both `compose_is_mixed` AND
+    /// `compose_is_saturated` read `true` honestly — the
+    /// saturated-but-interior arm is structurally distinct from the
+    /// saturated-but-extreme arms (`{ran: MAX, absent: 0}` etc.). A
+    /// regression that read against a post-saturation derived ratio
+    /// (where `coverage_ratio` / `verification_ratio` drift to `1.0`
+    /// at the both-MAX state against the true 0.5 ratio) would
+    /// silently flip the saturated-but-interior reading.
+    #[test]
+    fn test_compose_is_mixed_stays_robust_at_saturated_states() {
+        let probe_saturated_mixed = ProbeCoverage {
+            ran: usize::MAX,
+            absent: usize::MAX,
+        };
+        let verification_saturated_mixed = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: usize::MAX,
+        };
+        assert!(
+            compose_is_mixed(&probe_saturated_mixed, &verification_saturated_mixed),
+            "saturated-but-interior arm must read mixed honestly at \
+             probe={probe_saturated_mixed:?} \
+             verification={verification_saturated_mixed:?} — \
+             integer-arithmetic body reads against the components \
+             themselves",
+        );
+        assert!(
+            compose_is_saturated(&probe_saturated_mixed, &verification_saturated_mixed),
+            "the same state must read saturated — the two surfaces \
+             are structurally orthogonal at the both-MAX cell",
+        );
+
+        let probe_saturated_extreme = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let verification_mixed = VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        };
+        assert!(
+            !compose_is_mixed(&probe_saturated_extreme, &verification_mixed),
+            "saturated-but-extreme probe arm must refuse both-axes-\
+             interior at probe={probe_saturated_extreme:?} \
+             verification={verification_mixed:?} — absent == 0 \
+             collapses the probe axis to the ceiling arm, not the \
+             interior",
+        );
+    }
+
+    /// The composed both-axes-interior predicate respects monoid
+    /// `Add` on each axis: a fleet-wide aggregate `[phase_a,
+    /// phase_b].iter().sum::<_>()` reads both-axes-interior iff the
+    /// summed components on both axes carry the strictly-positive
+    /// pair `(ran > 0 && absent > 0)` / `(verified > 0 &&
+    /// unverified > 0)`. Two extreme-arm phases (all-no-evidence +
+    /// fully-complete) compose to the both-axes-interior arm under
+    /// `Add` — pins the load-bearing structural fact that the
+    /// monoid-aggregate four-arm classification is determined by
+    /// the SUMMED components, not by any per-phase arm
+    /// classification — the both-axes-interior reading emerges from
+    /// the summed components even when no individual phase sat at
+    /// the interior arm.
+    #[test]
+    fn test_compose_is_mixed_respects_monoid_add_on_both_axes() {
+        let probe_all_absent = ProbeCoverage { ran: 0, absent: 5 };
+        let probe_fully_covered = ProbeCoverage { ran: 7, absent: 0 };
+        let verification_all_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 3,
+        };
+        let verification_fully_verified = VerificationCoverage {
+            verified: 4,
+            unverified: 0,
+        };
+
+        let probe_aggregate = probe_all_absent + probe_fully_covered;
+        let verification_aggregate = verification_all_unverified + verification_fully_verified;
+
+        assert!(
+            !probe_all_absent.is_mixed(),
+            "phase A is at the all-absent extreme arm, not interior",
+        );
+        assert!(
+            !probe_fully_covered.is_mixed(),
+            "phase B is at the fully-covered extreme arm, not interior",
+        );
+        assert!(
+            probe_aggregate.is_mixed(),
+            "the summed probe components ran=7 absent=5 sit at the \
+             interior arm — probe={probe_aggregate:?}",
+        );
+        assert!(
+            verification_aggregate.is_mixed(),
+            "the summed verification components verified=4 \
+             unverified=3 sit at the interior arm — \
+             verification={verification_aggregate:?}",
+        );
+        assert!(
+            compose_is_mixed(&probe_aggregate, &verification_aggregate),
+            "the aggregate-level both-axes-interior reading emerges \
+             from the summed components even when no per-phase arm \
+             sat at the interior — probe={probe_aggregate:?} \
+             verification={verification_aggregate:?}",
+        );
+
+        let probe_no_evidence_phase_a = ProbeCoverage { ran: 0, absent: 2 };
+        let probe_no_evidence_phase_b = ProbeCoverage { ran: 0, absent: 3 };
+        let probe_aggregate_no_evidence = probe_no_evidence_phase_a + probe_no_evidence_phase_b;
+        assert!(
+            !compose_is_mixed(&probe_aggregate_no_evidence, &verification_aggregate),
+            "two no-evidence probe phases compose to an all-absent \
+             aggregate (ran=0) — both-axes-interior must refuse at \
+             probe={probe_aggregate_no_evidence:?}",
         );
     }
 
