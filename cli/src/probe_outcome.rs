@@ -4850,6 +4850,136 @@ pub fn per_axis_admission_tier_is_uniform(
     probe.admission_tier() == verification.admission_tier()
 }
 
+/// The per-axis-bracket-non-degenerate predicate over the per-axis
+/// admission-tier lattice pair: `true` when the two per-axis surfaces
+/// project to distinct [`AdmissionTier`] readings (the prior-commit
+/// lattice bracket `[per_axis_admission_tier_floor,
+/// per_axis_admission_tier_ceiling]` is non-trivially-bracketed),
+/// `false` when they collapse to a single point. Reads
+/// `probe.admission_tier() != verification.admission_tier()` at one
+/// named site, returning the structural-witness boolean "the per-axis
+/// verdicts diverge" — the named negation peer of
+/// [`per_axis_admission_tier_is_uniform`].
+///
+/// The named-typed-primitive lift of the equivalent inline three-form
+/// idioms a downstream consumer would otherwise retype at every
+/// per-axis-divergence query site:
+/// * the direct per-axis disequality
+///   `probe.admission_tier() != verification.admission_tier()`,
+/// * the `is_uniform` negation
+///   `!per_axis_admission_tier_is_uniform(p, v)`,
+/// * the strict-bracket reading
+///   `per_axis_admission_tier_floor(p, v) <
+///    per_axis_admission_tier_ceiling(p, v)`
+///   (which, paired with the total-order bracket `floor <= ceiling`
+///   pinned by
+///   [`tests::test_per_axis_admission_tier_floor_le_ceiling_across_cross_product`],
+///   forces `floor < ceiling`).
+/// The three readings are STRUCTURALLY EQUIVALENT on the per-axis
+/// admission-tier lattice; the cross-product equivalence pin
+/// [`tests::test_per_axis_admission_tier_diverges_equals_not_is_uniform_across_cross_product`]
+/// seals all three readings against this function at every reachable
+/// arm.
+///
+/// The structural-witness arms a downstream consumer relies on, all
+/// pinned in tests:
+/// * the both-axes-fully-evidenced ceiling-collapse arm (both per-axis
+///   tiers read [`AdmissionTier::Strict`]): this function reads
+///   `false` — pinned by
+///   [`tests::test_per_axis_admission_tier_diverges_at_both_axes_strict_ceiling`].
+/// * the both-axes-no-evidence floor-collapse arm (both per-axis tiers
+///   read [`AdmissionTier::Refused`]): this function reads `false`
+///   — pinned by
+///   [`tests::test_per_axis_admission_tier_diverges_at_both_axes_no_evidence_floor`].
+/// * the evidence-asymmetric divergence arm
+///   (`probe = {ran: N, absent: 0}` strict-eligible per-axis AND
+///   `verification = {verified: 0, unverified: 0}` refused per-axis on
+///   the no-evidence floor): this function reads `true`, surfacing the
+///   load-bearing structural distinction that the floor reads
+///   [`AdmissionTier::Refused`] while the ceiling reads
+///   [`AdmissionTier::Strict`]. Pinned by
+///   [`tests::test_per_axis_admission_tier_diverges_at_evidence_asymmetric_arm`].
+/// * the (Strict, StagingOnly) per-axis interior divergence arm: this
+///   function reads `true`, surfacing the staging-band per-axis
+///   asymmetry. Pinned by
+///   [`tests::test_per_axis_admission_tier_diverges_at_per_axis_staging_band_interior_arm`].
+///
+/// The named negation peer of [`per_axis_admission_tier_is_uniform`]:
+/// the two predicates partition the per-axis tier-pair cross product
+/// into the collapsed and non-degenerate arms with no overlap and no
+/// gap. The structural-witness invariant `is_uniform XOR diverges`
+/// holds at every reachable arm and is pinned by
+/// [`tests::test_per_axis_admission_tier_diverges_xor_is_uniform_across_cross_product`].
+/// Where `is_uniform` surfaces "the per-axis lattice bracket is
+/// degenerate (consult either floor or ceiling, the readings agree)",
+/// `diverges` surfaces "the per-axis lattice bracket is non-trivially-
+/// bracketed (the consumer must choose between conservative AND-floor
+/// and optimistic OR-ceiling)". The two readings are STRUCTURALLY DUAL
+/// load-bearing surfaces on the per-axis tier-pair lattice: the
+/// consumer reaches for whichever reading aligns with the question
+/// being asked at the call site, without needing to invert the other.
+///
+/// THEORY.md §VI.1 one-oracle discipline: the per-axis-divergence
+/// predicate is named at one site (here), not re-typed as the inline
+/// `probe.admission_tier() != verification.admission_tier()` or
+/// `!per_axis_admission_tier_is_uniform(p, v)` or
+/// `per_axis_admission_tier_floor(p, v) <
+///  per_axis_admission_tier_ceiling(p, v)` boilerplate per downstream
+/// consumer. The drift class the lift forecloses: a future regression
+/// to the `is_uniform` predicate, the per-axis-floor lift, the
+/// per-axis-ceiling lift, or the [`AdmissionTier`]/[`PartialEq`]
+/// derived instance surfaces at the cross-product equivalence pin
+/// rather than silently flipping the sign at one consumer call site.
+///
+/// THEORY.md §V.4 honesty channel: the named predicate surfaces "are
+/// the per-axis verdicts ambiguous, so the consumer must choose
+/// between the conservative AND-floor and the optimistic OR-ceiling
+/// readings?" as the load-bearing affirmative reading at the consumer
+/// site. Where `is_uniform` reads `false`, the consumer would
+/// otherwise need to invert the boolean at every divergence-gated
+/// branch — the named affirmative peer removes the `!`-inversion
+/// boilerplate at every consumer-of-divergence call site, matching
+/// the established admits/refuses peer-pair pattern at the
+/// [`AdmissionTier`] surface ([`AdmissionTier::admits_relaxed`] vs.
+/// [`AdmissionTier::refuses_relaxed`],
+/// [`AdmissionTier::admits_strict`] vs.
+/// [`AdmissionTier::refuses_strict`]) and at the parallel-axis surface
+/// ([`compose_admission_eligible_strict`] vs.
+/// [`compose_refuses_admission_strict`]).
+///
+/// THEORY.md §VII.1 honesty channel: the structural witness that the
+/// per-axis lattice bracket is non-degenerate (`floor < ceiling`) at
+/// the arms where the per-axis surfaces disagree — every interior arm
+/// of the tier ladder (Strict-vs-Refused, Strict-vs-StagingOnly,
+/// StagingOnly-vs-Refused) — is observable through this predicate as
+/// the load-bearing "ambiguous per-axis verdict" reading at the
+/// consumer site.
+///
+/// Frontier inspiration: SLSA L3+ provenance verifiers emit a per-
+/// source "sources disagree on tier" structural witness alongside the
+/// "all sources agree" reading — the affirmative-divergence predicate
+/// the verifier consults to decide whether to raise the per-source
+/// disagreement to the operator vs. proceed with a single per-source
+/// tier; sigstore policy-controller emits a per-attestation-axis
+/// "attestations diverge" structural witness as a typed boolean
+/// adjacent to the per-attestation collapse predicate, so a downstream
+/// auditor reads the per-attestation lattice-non-degenerate predicate
+/// at one named site rather than recomposing the per-attestation
+/// pair-disequality inline. Translated here as: lift the inline
+/// per-axis disequality / `is_uniform` negation / strict-bracket
+/// reading to one named typed predicate that returns the structural-
+/// witness boolean "are the per-axis surfaces ambiguous?" directly,
+/// closing the named-typed-primitive surface against the per-axis-
+/// floor, per-axis-ceiling, and per-axis-`is_uniform` lattice
+/// siblings.
+#[allow(dead_code)]
+pub fn per_axis_admission_tier_diverges(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    probe.admission_tier() != verification.admission_tier()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -16857,6 +16987,272 @@ mod tests {
             !per_axis_admission_tier_is_uniform(&probe, &verification),
             "per_axis_admission_tier_is_uniform at the per-axis \
              (Strict, StagingOnly) interior arm reads false — the \
+             per-axis surfaces disagree even though both admit on \
+             their own, so the lattice bracket [StagingOnly, Strict] \
+             is non-degenerate",
+        );
+    }
+
+    /// Pin the load-bearing structural equivalence
+    /// `per_axis_admission_tier_diverges(p, v) ==
+    ///     !per_axis_admission_tier_is_uniform(p, v)`
+    /// at every reachable arm of the 6×6 cross product of per-axis
+    /// representatives (36 cells). The load-bearing seal that the
+    /// named predicate is the structural negation peer of the
+    /// lattice-collapse predicate. A future regression that broke
+    /// either the `is_uniform` predicate, the [`AdmissionTier`] /
+    /// [`PartialEq`] derived instance, or the per-axis disequality
+    /// would surface here as the equivalence failing at some
+    /// interior arm. Paired with the strict-bracket equivalence pin
+    /// against `floor < ceiling` below, this pin closes the named
+    /// negation peer against all three equivalent inline forms.
+    #[test]
+    fn test_per_axis_admission_tier_diverges_equals_not_is_uniform_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let named = per_axis_admission_tier_diverges(&probe, &verification);
+                let uniform = per_axis_admission_tier_is_uniform(&probe, &verification);
+                let floor = per_axis_admission_tier_floor(&probe, &verification);
+                let ceiling = per_axis_admission_tier_ceiling(&probe, &verification);
+                assert_eq!(
+                    named, !uniform,
+                    "per_axis_admission_tier_diverges must equal the \
+                     `is_uniform` negation at every reachable arm — \
+                     got named={named} uniform={uniform} at \
+                     probe={probe:?} verification={verification:?}",
+                );
+                assert_eq!(
+                    named,
+                    probe.admission_tier() != verification.admission_tier(),
+                    "per_axis_admission_tier_diverges must equal the \
+                     direct per-axis disequality at every reachable \
+                     arm — got named={named} probe.tier={:?} \
+                     verification.tier={:?} at probe={probe:?} \
+                     verification={verification:?}",
+                    probe.admission_tier(),
+                    verification.admission_tier(),
+                );
+                assert_eq!(
+                    named,
+                    floor < ceiling,
+                    "per_axis_admission_tier_diverges must equal the \
+                     strict-bracket reading (floor < ceiling) at \
+                     every reachable arm — got named={named} \
+                     floor={floor:?} ceiling={ceiling:?} at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Pin the load-bearing partition invariant
+    /// `per_axis_admission_tier_diverges(p, v) XOR
+    ///  per_axis_admission_tier_is_uniform(p, v)`
+    /// at every reachable arm of the 6×6 cross product. The
+    /// structural-witness seal that the two predicates form a
+    /// complementary partition of the per-axis tier-pair cross
+    /// product into the collapsed and non-degenerate arms with no
+    /// overlap and no gap — the named pair carries the closed-world
+    /// guarantee that every reachable arm reads exactly one of
+    /// `uniform = true` (lattice bracket degenerate) or
+    /// `diverges = true` (lattice bracket non-trivially-bracketed).
+    /// A future regression that introduced a third arm — or made
+    /// either predicate misread its complement at some interior arm
+    /// — would surface here as the XOR failing at some cell.
+    #[test]
+    fn test_per_axis_admission_tier_diverges_xor_is_uniform_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let diverges = per_axis_admission_tier_diverges(&probe, &verification);
+                let uniform = per_axis_admission_tier_is_uniform(&probe, &verification);
+                assert!(
+                    diverges ^ uniform,
+                    "per_axis_admission_tier_diverges and \
+                     per_axis_admission_tier_is_uniform must XOR to \
+                     true at every reachable arm — got \
+                     diverges={diverges} uniform={uniform} at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Pin the both-axes-fully-evidenced ceiling-collapse arm: at
+    /// `(probe = {ran: 5, absent: 0}, verification = {verified: 3,
+    /// unverified: 0})` both per-axis surfaces read
+    /// [`AdmissionTier::Strict`], so the lattice bracket is degenerate
+    /// at the top of the tier ladder and the divergence predicate
+    /// reads `false`. The structural-witness dual of
+    /// [`test_per_axis_admission_tier_is_uniform_at_both_axes_strict_ceiling`]
+    /// at the named negation peer.
+    #[test]
+    fn test_per_axis_admission_tier_diverges_at_both_axes_strict_ceiling() {
+        let probe = ProbeCoverage { ran: 5, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        assert!(
+            !per_axis_admission_tier_diverges(&probe, &verification),
+            "per_axis_admission_tier_diverges at the both-axes-strict \
+             ceiling reads false — both per-axis surfaces collapse to \
+             AdmissionTier::Strict, so the lattice bracket is \
+             degenerate at the top of the tier ladder",
+        );
+    }
+
+    /// Pin the both-axes-no-evidence floor-collapse arm: at
+    /// `(probe = {ran: 0, absent: 0}, verification = {verified: 0,
+    /// unverified: 0})` both per-axis surfaces read
+    /// [`AdmissionTier::Refused`], so the lattice bracket is
+    /// degenerate at the bottom of the tier ladder and the divergence
+    /// predicate reads `false`. The structural-witness dual of
+    /// [`test_per_axis_admission_tier_is_uniform_at_both_axes_no_evidence_floor`]
+    /// at the named negation peer.
+    #[test]
+    fn test_per_axis_admission_tier_diverges_at_both_axes_no_evidence_floor() {
+        let probe = ProbeCoverage { ran: 0, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert!(
+            !per_axis_admission_tier_diverges(&probe, &verification),
+            "per_axis_admission_tier_diverges at the both-axes-no-\
+             evidence floor reads false — both per-axis surfaces \
+             collapse to AdmissionTier::Refused, so the lattice \
+             bracket is degenerate at the bottom of the tier ladder",
+        );
+    }
+
+    /// Pin the load-bearing evidence-asymmetric divergence arm: at
+    /// `(probe = {ran: 3, absent: 0}, verification = {verified: 0,
+    /// unverified: 0})` the probe axis reads
+    /// [`AdmissionTier::Strict`] (strict-eligible on its own) while
+    /// the verification axis reads [`AdmissionTier::Refused`] (no
+    /// evidence at all), so the lattice bracket [Refused, Strict] is
+    /// non-degenerate and the divergence predicate reads `true`. The
+    /// structural-witness affirmative reading at the named negation
+    /// peer, dual to
+    /// [`test_per_axis_admission_tier_is_uniform_at_evidence_asymmetric_arm_diverges`]
+    /// at the `is_uniform` surface.
+    #[test]
+    fn test_per_axis_admission_tier_diverges_at_evidence_asymmetric_arm() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert!(
+            per_axis_admission_tier_diverges(&probe, &verification),
+            "per_axis_admission_tier_diverges at the evidence-\
+             asymmetric arm reads true — the probe axis reads Strict \
+             and the verification axis reads Refused, so the lattice \
+             bracket [Refused, Strict] is non-degenerate",
+        );
+    }
+
+    /// Pin the per-axis (Strict, StagingOnly) interior divergence
+    /// arm: at `(probe = {ran: 3, absent: 0}, verification =
+    /// {verified: 2, unverified: 3})` the probe axis reads
+    /// [`AdmissionTier::Strict`] while the verification axis reads
+    /// [`AdmissionTier::StagingOnly`], so the lattice bracket
+    /// [StagingOnly, Strict] is non-degenerate and the divergence
+    /// predicate reads `true`. The structural-witness pin at the
+    /// staging-band interior, dual to
+    /// [`test_per_axis_admission_tier_is_uniform_at_per_axis_staging_band_interior_arm_diverges`]
+    /// at the `is_uniform` surface.
+    #[test]
+    fn test_per_axis_admission_tier_diverges_at_per_axis_staging_band_interior_arm() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        };
+        assert!(
+            per_axis_admission_tier_diverges(&probe, &verification),
+            "per_axis_admission_tier_diverges at the per-axis \
+             (Strict, StagingOnly) interior arm reads true — the \
              per-axis surfaces disagree even though both admit on \
              their own, so the lattice bracket [StagingOnly, Strict] \
              is non-degenerate",
