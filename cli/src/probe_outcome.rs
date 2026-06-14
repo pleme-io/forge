@@ -4615,6 +4615,111 @@ pub fn per_axis_admission_tier_floor(
     probe.admission_tier().min(verification.admission_tier())
 }
 
+/// The per-axis-OR admission-tier ceiling — the best per-axis tier
+/// across the two orthogonal admission axes. Reads
+/// `probe.admission_tier().max(verification.admission_tier())` at one
+/// named site, returning the [`AdmissionTier`] at least one per-axis
+/// surface admits at: a fleet-wide consumer asking "what is the best
+/// tier any axis admits on its own?" reads this value, and a downstream
+/// optimistic-rollout gate that promotes if any per-axis surface admits
+/// at a given tier (rather than requiring every axis to admit, the
+/// per-axis-AND floor [`per_axis_admission_tier_floor`] returns) reads
+/// `>= AdmissionTier::Strict` or `>= AdmissionTier::StagingOnly` here.
+///
+/// The structural dual of [`per_axis_admission_tier_floor`] at the
+/// typed-sum surface: where the floor lifts `Ord::min` to surface the
+/// worst per-axis tier (per-axis-AND aggregation — every axis must admit
+/// on its own), this lifts `Ord::max` to surface the best per-axis tier
+/// (per-axis-OR aggregation — at least one axis admits on its own). The
+/// two readings are STRUCTURALLY DISTINCT lattice operations on the
+/// per-axis tier surfaces, not equivalent: they collapse at the
+/// both-axes-fully-evidenced ceiling (where every reading reads
+/// [`AdmissionTier::Strict`]) and at the both-axes-no-evidence floor
+/// (where every reading reads [`AdmissionTier::Refused`]), but diverge
+/// at every interior arm where the per-axis tiers disagree.
+///
+/// The named function replaces the inline four-line idiom
+/// ```ignore
+/// [probe.admission_tier(), verification.admission_tier()]
+///     .into_iter()
+///     .max()
+///     .expect("non-empty iterator")
+/// ```
+/// at every per-axis-ceiling consumer site, eliminating the `.expect`
+/// guard (the two-element array is statically non-empty, but the
+/// `Iterator::max` signature returns `Option<AdmissionTier>` because the
+/// general iterator may be empty — the `.expect` is a boilerplate
+/// witness to a statically-discharged invariant). The body uses
+/// [`Ord::max`] directly on the two scalar values, returning
+/// [`AdmissionTier`] without the `Option` wrapper.
+///
+/// The structural distinction from the per-axis-floor lift, the load-
+/// bearing pin a downstream consumer relies on to decide which lattice
+/// reading to consult: at the evidence-asymmetric arm
+/// (`probe = {ran: N, absent: 0}` strict-eligible per-axis AND
+/// `verification = {verified: 0, unverified: 0}` refused per-axis on the
+/// no-evidence floor), this function reads [`AdmissionTier::Strict`]
+/// (the best per-axis tier — the probe axis admits strictly on its own),
+/// while [`per_axis_admission_tier_floor`] reads
+/// [`AdmissionTier::Refused`] (the worst per-axis tier — the verification
+/// axis refuses on its own). The lattice-dual divergence at this arm is
+/// pinned by
+/// [`tests::test_per_axis_admission_tier_ceiling_diverges_from_floor_at_evidence_asymmetric_arm`].
+/// The collapse at the both-axes-no-evidence floor — where the two
+/// surfaces agree on [`AdmissionTier::Refused`] — is pinned by
+/// [`tests::test_per_axis_admission_tier_ceiling_agrees_with_floor_at_both_axes_no_evidence_floor`].
+///
+/// The total-order identity the lift relies on: at every reachable
+/// `(probe, verification)` pair, the per-axis-floor reading is bounded
+/// above by the per-axis-ceiling reading
+/// (`per_axis_admission_tier_floor(p, v) <= per_axis_admission_tier_ceiling(p, v)`),
+/// pinned by
+/// [`tests::test_per_axis_admission_tier_floor_le_ceiling_across_cross_product`]
+/// — the load-bearing total-order bracket that names every per-axis
+/// reading as falling between the worst and best per-axis tiers.
+///
+/// THEORY.md §VI.1 one-oracle discipline: the per-axis-ceiling reading
+/// is named at one site (here), not re-typed as the `[probe.admission_tier(),
+/// verification.admission_tier()].into_iter().max().expect(...)`
+/// boilerplate per downstream consumer (which would inherit a drift
+/// class on the day a third axis is added: every inline-max consumer
+/// would need to extend its array literal in lockstep, exactly the
+/// structural seam this helper forecloses by routing the per-axis-
+/// ceiling reading through one function the third axis is added to
+/// once). The dual of the prior-commit (2702e0e) per-axis-floor lift
+/// closes the lattice-operation matrix at the parallel-axis surface: the
+/// min-fold and max-fold over the per-axis tier surfaces are now both
+/// named typed-primitives at one site each.
+///
+/// THEORY.md §V.4 honesty channel: the named function surfaces "the best
+/// per-axis admission tier across both axes" as the load-bearing reading
+/// distinct from the per-axis-AND floor — the two readings carry
+/// different semantics (optimistic OR-of-axes vs. conservative AND-of-
+/// axes) and the named-function surface makes the choice between them
+/// explicit at the consumer site.
+///
+/// Frontier inspiration: SLSA L3+ provenance gates surface the best-
+/// per-source-axis tier ceiling as a typed reduction over the per-source
+/// tier readings ("the highest production-readiness tier any source
+/// material achieves") — the per-source-OR ceiling the gate consults
+/// distinct from the per-source-AND floor; sigstore policy-controller
+/// reduces per-attestation-axis tier verdicts through a named per-axis-
+/// ceiling function so the verifier reads the best per-attestation tier
+/// at one named site rather than recomposing the per-attestation matrix
+/// inline. Translated here as: lift the inline `max` over per-axis
+/// admission-tier readings to one named typed-primitive that returns
+/// the per-axis-OR-ceiling [`AdmissionTier`] directly, eliminating the
+/// `.expect`-guarded iterator boilerplate at every consumer and closing
+/// the lattice-operation matrix at the named-typed-primitive surface
+/// against the per-axis-floor sibling.
+#[allow(dead_code)]
+pub fn per_axis_admission_tier_ceiling(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> AdmissionTier {
+    probe.admission_tier().max(verification.admission_tier())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -16083,5 +16188,297 @@ mod tests {
              StagingOnly) interior arm reads StagingOnly — the worst \
              per-axis tier across the two axes",
         );
+    }
+
+    /// Pin the load-bearing structural equivalence
+    /// `per_axis_admission_tier_ceiling(p, v) ==
+    /// [p.admission_tier(), v.admission_tier()].into_iter().max().expect(...)`
+    /// at every reachable `(probe, verification)` pair across the 6×6
+    /// cross product of per-axis representatives (36 cells). The named
+    /// function lifts the inline-max idiom (the `.expect("non-empty
+    /// iterator")`-guarded reading) to one named typed-primitive at the
+    /// parallel-axis surface; this pin seals the structural equivalence
+    /// at every reachable arm of the 6×6 cross product, so the named
+    /// function cannot drift from the inline form across a future
+    /// regression that altered either the per-axis `admission_tier`
+    /// constructor or the `max`-of-admission-tier reduction.
+    #[test]
+    fn test_per_axis_admission_tier_ceiling_equals_inline_max_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let named = per_axis_admission_tier_ceiling(&probe, &verification);
+                let inline = [probe.admission_tier(), verification.admission_tier()]
+                    .into_iter()
+                    .max()
+                    .expect("non-empty iterator");
+                assert_eq!(
+                    named, inline,
+                    "per_axis_admission_tier_ceiling must equal the inline \
+                     max-of-per-axis-tier reading at probe={probe:?} \
+                     verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// At the evidence-asymmetric arm, the named per-axis-ceiling
+    /// function and the per-axis-floor sibling diverge — the
+    /// lattice-dual divergence pin at the named-typed-primitive surface.
+    /// The ceiling reads [`AdmissionTier::Strict`] (the best per-axis
+    /// tier — the probe axis admits strictly on its own), while the
+    /// floor reads [`AdmissionTier::Refused`] (the worst per-axis tier
+    /// — the verification axis refuses on its own). The divergence pin
+    /// makes the structural distinction between the per-axis-OR ceiling
+    /// and the per-axis-AND floor auditable at the named typed-primitive
+    /// surface.
+    #[test]
+    fn test_per_axis_admission_tier_ceiling_diverges_from_floor_at_evidence_asymmetric_arm() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        let ceiling = per_axis_admission_tier_ceiling(&probe, &verification);
+        let floor = per_axis_admission_tier_floor(&probe, &verification);
+        assert_eq!(
+            ceiling,
+            AdmissionTier::Strict,
+            "per_axis_admission_tier_ceiling at the evidence-asymmetric \
+             arm reads Strict — the probe axis admits strictly on its own",
+        );
+        assert_eq!(
+            floor,
+            AdmissionTier::Refused,
+            "per_axis_admission_tier_floor at the evidence-asymmetric arm \
+             reads Refused — the verification axis refuses on its own",
+        );
+        assert_ne!(
+            ceiling, floor,
+            "the lattice-dual structural-witness pin at the named-function \
+             surface: per_axis_admission_tier_ceiling and \
+             per_axis_admission_tier_floor diverge at the \
+             evidence-asymmetric arm, the load-bearing distinction \
+             between the per-axis-OR ceiling and the per-axis-AND floor",
+        );
+    }
+
+    /// At the both-axes-no-evidence floor (both [`ProbeCoverage`] and
+    /// [`VerificationCoverage`] empty), the per-axis-ceiling collapses
+    /// to the per-axis-floor reading [`AdmissionTier::Refused`] — the
+    /// structural floor of the tier ladder at the lattice-dual surfaces.
+    /// The collapse pin distinct from the asymmetric-arm divergence
+    /// above: when every per-axis surface refuses, the per-axis-OR
+    /// ceiling and the per-axis-AND floor agree on Refused — the
+    /// lattice-dual surfaces collapse at the floor of the ladder.
+    #[test]
+    fn test_per_axis_admission_tier_ceiling_agrees_with_floor_at_both_axes_no_evidence_floor() {
+        let probe = ProbeCoverage { ran: 0, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        let ceiling = per_axis_admission_tier_ceiling(&probe, &verification);
+        let floor = per_axis_admission_tier_floor(&probe, &verification);
+        assert_eq!(
+            ceiling,
+            AdmissionTier::Refused,
+            "per_axis_admission_tier_ceiling at the both-axes-empty floor \
+             reads Refused — the structural floor of the tier ladder",
+        );
+        assert_eq!(
+            floor,
+            AdmissionTier::Refused,
+            "per_axis_admission_tier_floor at the both-axes-empty floor \
+             reads Refused — the structural floor of the tier ladder",
+        );
+        assert_eq!(
+            ceiling, floor,
+            "the lattice-dual collapse pin: per_axis_admission_tier_ceiling \
+             and per_axis_admission_tier_floor agree at the both-axes-empty \
+             floor, the dual of the asymmetric-arm divergence",
+        );
+    }
+
+    /// At the both-axes-fully-evidenced ceiling, the per-axis-ceiling
+    /// reads [`AdmissionTier::Strict`] — the top of the ladder, where
+    /// the lattice-dual surfaces collapse with the per-axis-floor on
+    /// `Strict`. The dual-ceiling pin of the dual-floor pin above:
+    /// surfaces the load-bearing reading the per-axis-ceiling function
+    /// returns when every per-axis surface admits strictly.
+    #[test]
+    fn test_per_axis_admission_tier_ceiling_agrees_with_floor_at_both_axes_strict_ceiling() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        let ceiling = per_axis_admission_tier_ceiling(&probe, &verification);
+        let floor = per_axis_admission_tier_floor(&probe, &verification);
+        assert_eq!(
+            ceiling,
+            AdmissionTier::Strict,
+            "per_axis_admission_tier_ceiling at the both-axes-strict \
+             ceiling reads Strict — the top of the tier ladder",
+        );
+        assert_eq!(
+            floor,
+            AdmissionTier::Strict,
+            "per_axis_admission_tier_floor at the both-axes-strict ceiling \
+             reads Strict — the top of the tier ladder",
+        );
+        assert_eq!(
+            ceiling, floor,
+            "the lattice-dual collapse pin: per_axis_admission_tier_ceiling \
+             and per_axis_admission_tier_floor agree at the both-axes-strict \
+             ceiling, the dual of the both-axes-empty floor collapse",
+        );
+    }
+
+    /// At a per-axis-staging interior arm — one axis reads
+    /// [`AdmissionTier::Strict`], the other reads
+    /// [`AdmissionTier::StagingOnly`] — the named per-axis-ceiling
+    /// function reads [`AdmissionTier::Strict`] (the best per-axis
+    /// tier). Paired with the
+    /// [`test_per_axis_admission_tier_floor_at_per_axis_staging_band_interior_arm`]
+    /// pin above (which fixes the floor reading at StagingOnly), this
+    /// pin closes the lattice-bracket reading at the (Strict, StagingOnly)
+    /// interior arm: every per-axis tier reading at this arm falls in
+    /// the half-open interval [StagingOnly, Strict] with floor at
+    /// StagingOnly and ceiling at Strict.
+    #[test]
+    fn test_per_axis_admission_tier_ceiling_at_per_axis_staging_band_interior_arm() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        };
+        assert_eq!(
+            probe.admission_tier(),
+            AdmissionTier::Strict,
+            "probe at the fully-covered arm reads per-axis Strict",
+        );
+        assert_eq!(
+            verification.admission_tier(),
+            AdmissionTier::StagingOnly,
+            "verification at the mixed arm reads per-axis StagingOnly \
+             (evidence present, but completeness fails)",
+        );
+        assert_eq!(
+            per_axis_admission_tier_ceiling(&probe, &verification),
+            AdmissionTier::Strict,
+            "per_axis_admission_tier_ceiling at the per-axis (Strict, \
+             StagingOnly) interior arm reads Strict — the best per-axis \
+             tier across the two axes",
+        );
+    }
+
+    /// Pin the load-bearing total-order bracket
+    /// `per_axis_admission_tier_floor(p, v) <=
+    /// per_axis_admission_tier_ceiling(p, v)` at every reachable
+    /// `(probe, verification)` pair across the 6×6 cross product of
+    /// per-axis representatives (36 cells). The structural invariant
+    /// every consumer relies on to reason about per-axis tier readings:
+    /// the per-axis-AND floor is bounded above by the per-axis-OR
+    /// ceiling at every reachable arm — a `min/max` pair over a total-
+    /// ordered codomain (the [`AdmissionTier`] tier-ladder) always
+    /// brackets every element of the codomain between them. A future
+    /// regression that broke either the [`AdmissionTier`] total order or
+    /// the [`Ord::min`]/[`Ord::max`] lift would surface here as the
+    /// bracket relation failing at some interior arm.
+    #[test]
+    fn test_per_axis_admission_tier_floor_le_ceiling_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let floor = per_axis_admission_tier_floor(&probe, &verification);
+                let ceiling = per_axis_admission_tier_ceiling(&probe, &verification);
+                assert!(
+                    floor <= ceiling,
+                    "per_axis_admission_tier_floor must be <= \
+                     per_axis_admission_tier_ceiling at probe={probe:?} \
+                     verification={verification:?} — got floor={floor:?} \
+                     ceiling={ceiling:?}",
+                );
+            }
+        }
     }
 }
