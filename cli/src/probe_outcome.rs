@@ -4980,6 +4980,141 @@ pub fn per_axis_admission_tier_diverges(
     probe.admission_tier() != verification.admission_tier()
 }
 
+/// `true` when the probe axis is STRICTLY more admissive than the
+/// verification axis (under the [`AdmissionTier`] total order
+/// `Refused < StagingOnly < Strict`); `false` when the two per-axis
+/// surfaces agree OR the verification axis is strictly more admissive.
+/// The named typed-primitive lift of the inline disequality form
+/// `probe.admission_tier() > verification.admission_tier()` at one
+/// site, returning the structural-witness boolean for "is the probe
+/// axis the per-axis ceiling?" directly.
+///
+/// The directional peer of [`per_axis_admission_tier_diverges`]:
+/// where `_diverges` (commit c82c399) reads `true` whenever the per-
+/// axis tier-pair lattice bracket is non-degenerate WITHOUT naming
+/// which axis is on top, this names the affirmative-direction reading
+/// "the per-axis ceiling sits at the PROBE axis" so a downstream
+/// consumer that branches on the dominance direction reads it at one
+/// named surface rather than recomposing the inline `>` against the
+/// two per-axis tier surfaces. Equivalently:
+///
+/// * the structural-witness reading
+///   `per_axis_admission_tier_ceiling(p, v) == probe.admission_tier()
+///    && per_axis_admission_tier_diverges(p, v)` — the per-axis
+///   ceiling sits at the probe axis AND the lattice bracket is non-
+///   degenerate. Pinned by
+///   [`tests::test_per_axis_admission_tier_probe_dominates_equals_ceiling_at_probe_and_diverges_across_cross_product`].
+/// * the implication reading
+///   `per_axis_admission_tier_probe_dominates(p, v) =>
+///    per_axis_admission_tier_diverges(p, v)` — strict dominance is
+///   non-degenerate by construction. Pinned by
+///   [`tests::test_per_axis_admission_tier_probe_dominates_implies_diverges_across_cross_product`].
+/// * the trichotomy partition reading
+///   `per_axis_admission_tier_probe_dominates(p, v)
+///    XOR (probe.admission_tier() < verification.admission_tier())
+///    XOR per_axis_admission_tier_is_uniform(p, v)` — every reachable
+///   arm of the 6×6 per-axis cross product reads exactly one of the
+///   three [`Ord`] trichotomy arms (probe-dominates, verification-
+///   dominates, or uniform). Pinned by
+///   [`tests::test_per_axis_admission_tier_probe_dominates_trichotomy_partition_across_cross_product`].
+///
+/// At the load-bearing boundary arms:
+///
+/// * the both-axes-fully-evidenced ceiling-collapse arm: this function
+///   reads `false` (both per-axis surfaces read
+///   [`AdmissionTier::Strict`], no strict dominance). Pinned by
+///   [`tests::test_per_axis_admission_tier_probe_dominates_at_both_axes_strict_ceiling`].
+/// * the both-axes-no-evidence floor-collapse arm: this function
+///   reads `false` (both per-axis surfaces read
+///   [`AdmissionTier::Refused`], no strict dominance). Pinned by
+///   [`tests::test_per_axis_admission_tier_probe_dominates_at_both_axes_no_evidence_floor`].
+/// * the probe-dominant evidence-asymmetric arm (`probe = {ran: 3,
+///   absent: 0}` strict-eligible per-axis, `verification = {verified:
+///   0, unverified: 0}` refused per-axis): this function reads
+///   `true` — the probe axis sits at
+///   [`AdmissionTier::Strict`] and the verification axis at
+///   [`AdmissionTier::Refused`], so the lattice bracket [Refused,
+///   Strict] is non-degenerate with its ceiling at the probe axis.
+///   Pinned by
+///   [`tests::test_per_axis_admission_tier_probe_dominates_at_probe_strict_verification_refused_arm`].
+/// * the verification-dominant evidence-asymmetric arm (`probe =
+///   {ran: 0, absent: 0}` refused, `verification = {verified: 5,
+///   unverified: 0}` strict-eligible): this function reads `false` —
+///   the directional reading routes the dominance to the verification
+///   axis, NOT the probe axis. Pinned by
+///   [`tests::test_per_axis_admission_tier_probe_dominates_at_probe_refused_verification_strict_arm`].
+/// * the per-axis (Strict, StagingOnly) interior arm: this function
+///   reads `true`, surfacing the staging-band probe-dominance even
+///   when both axes admit on their own. Pinned by
+///   [`tests::test_per_axis_admission_tier_probe_dominates_at_probe_strict_verification_staging_band_arm`].
+///
+/// THEORY.md §VI.1 one-oracle discipline: the per-axis-probe-dominates
+/// reading is named at one site (here), not re-typed as the inline
+/// `probe.admission_tier() > verification.admission_tier()` or
+/// `per_axis_admission_tier_ceiling(p, v) == probe.admission_tier()
+///  && per_axis_admission_tier_diverges(p, v)` boilerplate per
+/// downstream consumer. The drift class the lift forecloses: a future
+/// regression to the per-axis-ceiling lift, the
+/// [`per_axis_admission_tier_diverges`] predicate, the
+/// [`ProbeCoverage::admission_tier`] / [`VerificationCoverage::admission_tier`]
+/// surfaces, or the [`AdmissionTier`] / [`PartialOrd`] derived total
+/// order surfaces at the cross-product equivalence and trichotomy-
+/// partition pins rather than silently flipping the direction at one
+/// downstream consumer call site.
+///
+/// THEORY.md §V.4 honesty channel: the named predicate surfaces "is
+/// the probe axis the per-axis ceiling of a non-degenerate per-axis
+/// tier-pair lattice bracket?" — the load-bearing directional reading
+/// distinct from the symmetric [`per_axis_admission_tier_diverges`]
+/// reading at the per-axis lattice-bracket surface. Where `_diverges`
+/// surfaces "are the per-axis verdicts ambiguous?" without naming the
+/// dominance direction, this surfaces "and is the probe axis the
+/// dominant one?" so a deploy-orchestrator gate that branches on the
+/// dominant axis reads the affirmative direction at the named surface
+/// rather than recomposing the per-axis-ceiling collapse pin against
+/// the probe-side tier reading inline.
+///
+/// THEORY.md §VII.1 honesty channel: the structural witness that the
+/// per-axis lattice bracket's ceiling sits at the probe axis (and the
+/// bracket is non-degenerate) at every reachable per-axis tier-pair
+/// arm where the probe axis strictly dominates — the asymmetric subset
+/// of the per-axis-diverges arms — is observable through this
+/// predicate as the load-bearing "probe axis dominates" reading at
+/// the consumer site, complementary to the dual reading
+/// "verification axis dominates" (the structural negation peer for a
+/// future commit) which together with `is_uniform` partition the
+/// per-axis cross product into the three [`Ord`] trichotomy arms.
+///
+/// Frontier inspiration: SLSA L3+ provenance verifiers emit a per-
+/// source "source A strictly outranks source B on tier" directional
+/// witness alongside the symmetric "sources disagree" reading — the
+/// affirmative-direction predicate the verifier consults to decide
+/// which per-source attestation chain to consult as authoritative
+/// when the per-source tier verdicts diverge; sigstore policy-
+/// controller emits a per-attestation-axis "axis A strictly dominates
+/// axis B" directional witness as a typed boolean adjacent to the
+/// symmetric per-attestation-divergence predicate, so a downstream
+/// auditor reads the per-attestation lattice-dominance direction at
+/// one named site rather than recomposing the per-attestation
+/// ceiling-collapse against the per-attestation tier surfaces
+/// inline. Translated here as: lift the inline per-axis strict-
+/// disequality `probe.admission_tier() >
+/// verification.admission_tier()` to one named typed predicate that
+/// returns the structural-witness boolean "is the probe axis the
+/// per-axis ceiling of a non-degenerate lattice bracket?" directly,
+/// closing the directional-witness surface against the symmetric
+/// [`per_axis_admission_tier_diverges`] sibling and adding the first
+/// of the two [`Ord::cmp`] strict-direction lifts at the per-axis
+/// lattice algebra (the dual `verification_dominates_probe` peer is
+/// the natural sibling for a future commit).
+#[allow(dead_code)]
+pub fn per_axis_admission_tier_probe_dominates(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    probe.admission_tier() > verification.admission_tier()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17256,6 +17391,406 @@ mod tests {
              per-axis surfaces disagree even though both admit on \
              their own, so the lattice bracket [StagingOnly, Strict] \
              is non-degenerate",
+        );
+    }
+
+    /// Pin the load-bearing structural-equivalence invariant:
+    /// `per_axis_admission_tier_probe_dominates(p, v)` agrees verbatim
+    /// with the inline strict-disequality form
+    /// `probe.admission_tier() > verification.admission_tier()` at
+    /// every cell of the 6×6 cross product of per-axis representatives
+    /// (36 cells: empty / all-no-evidence / mixed / fully-evidenced /
+    /// saturated-evidenced / saturated-no-evidence on each axis), AND
+    /// agrees verbatim with the structural-witness reading "the per-
+    /// axis ceiling sits at the probe axis AND the lattice bracket is
+    /// non-degenerate" via
+    /// `per_axis_admission_tier_ceiling(p, v) == probe.admission_tier()
+    ///  && per_axis_admission_tier_diverges(p, v)`. The load-bearing
+    /// seal that the named directional-witness predicate is the
+    /// affirmative-direction peer of the symmetric divergence
+    /// predicate, anchored at every reachable arm of the per-axis
+    /// tier-pair cross product. A future regression that broke either
+    /// the per-axis-ceiling lift, the [`per_axis_admission_tier_diverges`]
+    /// predicate, the per-axis [`ProbeCoverage::admission_tier`] /
+    /// [`VerificationCoverage::admission_tier`] surfaces, or the
+    /// [`AdmissionTier`] / [`PartialOrd`] derived total order would
+    /// surface here as the equivalence failing at some cell.
+    #[test]
+    fn test_per_axis_admission_tier_probe_dominates_equals_ceiling_at_probe_and_diverges_across_cross_product(
+    ) {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let named = per_axis_admission_tier_probe_dominates(&probe, &verification);
+                let inline_gt = probe.admission_tier() > verification.admission_tier();
+                let ceiling = per_axis_admission_tier_ceiling(&probe, &verification);
+                let diverges = per_axis_admission_tier_diverges(&probe, &verification);
+                let ceiling_at_probe_and_diverges = ceiling == probe.admission_tier() && diverges;
+                assert_eq!(
+                    named, inline_gt,
+                    "per_axis_admission_tier_probe_dominates must \
+                     equal the inline strict-disequality \
+                     `probe.admission_tier() > verification.admission_tier()` \
+                     at every reachable arm — got named={named} \
+                     inline_gt={inline_gt} at probe={probe:?} \
+                     verification={verification:?}",
+                );
+                assert_eq!(
+                    named,
+                    ceiling_at_probe_and_diverges,
+                    "per_axis_admission_tier_probe_dominates must \
+                     equal the structural-witness reading \
+                     `ceiling == probe.admission_tier() && diverges` \
+                     at every reachable arm — got named={named} \
+                     ceiling_at_probe_and_diverges={ceiling_at_probe_and_diverges} \
+                     ceiling={ceiling:?} diverges={diverges} \
+                     probe.tier={:?} at probe={probe:?} \
+                     verification={verification:?}",
+                    probe.admission_tier(),
+                );
+            }
+        }
+    }
+
+    /// Pin the implication invariant
+    /// `per_axis_admission_tier_probe_dominates(p, v)
+    ///  => per_axis_admission_tier_diverges(p, v)`
+    /// at every reachable arm of the 6×6 cross product. The structural-
+    /// witness seal that strict per-axis probe-dominance is non-
+    /// degenerate by construction — every dominance arm sits inside
+    /// the divergence cone. A future regression that broke either
+    /// predicate's body, or the [`AdmissionTier`] / [`PartialOrd`] /
+    /// [`PartialEq`] derived consistency (where `a > b` would no
+    /// longer imply `a != b`), would surface here as the implication
+    /// failing at some cell. Complement to the trichotomy-partition
+    /// pin below — the implication direction names the load-bearing
+    /// containment, the partition names the closed-world decomposition.
+    #[test]
+    fn test_per_axis_admission_tier_probe_dominates_implies_diverges_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let dominates = per_axis_admission_tier_probe_dominates(&probe, &verification);
+                let diverges = per_axis_admission_tier_diverges(&probe, &verification);
+                assert!(
+                    !dominates || diverges,
+                    "per_axis_admission_tier_probe_dominates must \
+                     imply per_axis_admission_tier_diverges at every \
+                     reachable arm — strict dominance is non-\
+                     degenerate by construction; got dominates=\
+                     {dominates} diverges={diverges} at probe={probe:?} \
+                     verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Pin the [`Ord`] trichotomy partition invariant
+    /// `per_axis_admission_tier_probe_dominates(p, v) XOR
+    ///  (probe.admission_tier() < verification.admission_tier()) XOR
+    ///  per_axis_admission_tier_is_uniform(p, v)`
+    /// at every reachable arm of the 6×6 cross product. The
+    /// structural-witness closed-world seal that the three [`Ord`]
+    /// trichotomy arms (probe strictly dominates / verification
+    /// strictly dominates / per-axis tiers agree) form a complementary
+    /// partition of the per-axis tier-pair cross product with no
+    /// overlap and no gap — every reachable arm reads exactly one of
+    /// the three arms. A future regression that broke either
+    /// predicate, the [`AdmissionTier`] / [`PartialOrd`] derived total
+    /// order, or the per-axis [`ProbeCoverage::admission_tier`] /
+    /// [`VerificationCoverage::admission_tier`] surfaces would
+    /// surface here as the XOR failing at some cell. The dual
+    /// `verification_dominates_probe` peer is implicit in this pin
+    /// (via the second XOR arm) and is the natural sibling for a
+    /// future commit to lift as a named typed-primitive.
+    #[test]
+    fn test_per_axis_admission_tier_probe_dominates_trichotomy_partition_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let probe_dominates =
+                    per_axis_admission_tier_probe_dominates(&probe, &verification);
+                let verification_dominates = probe.admission_tier() < verification.admission_tier();
+                let uniform = per_axis_admission_tier_is_uniform(&probe, &verification);
+                assert!(
+                    probe_dominates ^ verification_dominates ^ uniform,
+                    "the Ord trichotomy partition \
+                     `probe_dominates XOR verification_dominates XOR \
+                     uniform` must hold at every reachable arm — got \
+                     probe_dominates={probe_dominates} \
+                     verification_dominates={verification_dominates} \
+                     uniform={uniform} at probe={probe:?} \
+                     verification={verification:?}",
+                );
+                let exactly_one =
+                    (probe_dominates as u8) + (verification_dominates as u8) + (uniform as u8);
+                assert_eq!(
+                    exactly_one, 1,
+                    "the Ord trichotomy arms must be MUTUALLY \
+                     EXCLUSIVE — exactly one of probe_dominates / \
+                     verification_dominates / uniform reads true at \
+                     every reachable arm; got count={exactly_one} at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Pin the both-axes-fully-evidenced ceiling-collapse arm: at
+    /// `(probe = {ran: 5, absent: 0}, verification = {verified: 3,
+    /// unverified: 0})` both per-axis surfaces read
+    /// [`AdmissionTier::Strict`], so the lattice bracket is degenerate
+    /// at the top of the tier ladder and probe-dominance reads
+    /// `false`. The structural-witness pin at the ceiling-collapse
+    /// boundary, dual to
+    /// [`test_per_axis_admission_tier_diverges_at_both_axes_strict_ceiling`]
+    /// at the directional peer surface — strict dominance requires a
+    /// non-degenerate bracket, and the degenerate-bracket arm reads
+    /// `false` at the directional surface.
+    #[test]
+    fn test_per_axis_admission_tier_probe_dominates_at_both_axes_strict_ceiling() {
+        let probe = ProbeCoverage { ran: 5, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        assert!(
+            !per_axis_admission_tier_probe_dominates(&probe, &verification),
+            "per_axis_admission_tier_probe_dominates at the both-axes-\
+             strict ceiling reads false — both per-axis surfaces \
+             collapse to AdmissionTier::Strict, so the lattice bracket \
+             is degenerate and strict dominance is impossible",
+        );
+    }
+
+    /// Pin the both-axes-no-evidence floor-collapse arm: at
+    /// `(probe = {ran: 0, absent: 0}, verification = {verified: 0,
+    /// unverified: 0})` both per-axis surfaces read
+    /// [`AdmissionTier::Refused`], so the lattice bracket is
+    /// degenerate at the bottom of the tier ladder and probe-dominance
+    /// reads `false`. The structural-witness pin at the floor-collapse
+    /// boundary, dual to
+    /// [`test_per_axis_admission_tier_diverges_at_both_axes_no_evidence_floor`]
+    /// at the directional peer surface.
+    #[test]
+    fn test_per_axis_admission_tier_probe_dominates_at_both_axes_no_evidence_floor() {
+        let probe = ProbeCoverage { ran: 0, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert!(
+            !per_axis_admission_tier_probe_dominates(&probe, &verification),
+            "per_axis_admission_tier_probe_dominates at the both-axes-\
+             no-evidence floor reads false — both per-axis surfaces \
+             collapse to AdmissionTier::Refused, so the lattice \
+             bracket is degenerate and strict dominance is impossible",
+        );
+    }
+
+    /// Pin the load-bearing probe-dominant evidence-asymmetric arm:
+    /// at `(probe = {ran: 3, absent: 0}, verification = {verified: 0,
+    /// unverified: 0})` the probe axis reads
+    /// [`AdmissionTier::Strict`] and the verification axis reads
+    /// [`AdmissionTier::Refused`], so the lattice bracket [Refused,
+    /// Strict] is non-degenerate with its ceiling at the probe axis
+    /// — probe-dominance reads `true`. The affirmative-direction pin
+    /// at the canonical evidence-asymmetric arm where the probe axis
+    /// carries evidence and the verification axis carries none.
+    #[test]
+    fn test_per_axis_admission_tier_probe_dominates_at_probe_strict_verification_refused_arm() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert!(
+            per_axis_admission_tier_probe_dominates(&probe, &verification),
+            "per_axis_admission_tier_probe_dominates at the probe-\
+             strict / verification-refused arm reads true — the probe \
+             axis sits at AdmissionTier::Strict and the verification \
+             axis at AdmissionTier::Refused, so the lattice bracket \
+             [Refused, Strict] is non-degenerate with its ceiling at \
+             the probe axis",
+        );
+    }
+
+    /// Pin the load-bearing verification-dominant evidence-asymmetric
+    /// arm: at `(probe = {ran: 0, absent: 0}, verification =
+    /// {verified: 5, unverified: 0})` the probe axis reads
+    /// [`AdmissionTier::Refused`] and the verification axis reads
+    /// [`AdmissionTier::Strict`], so the lattice bracket [Refused,
+    /// Strict] is non-degenerate but its ceiling sits at the
+    /// VERIFICATION axis — probe-dominance reads `false`, NOT `true`.
+    /// The negation-direction pin at the dual evidence-asymmetric arm
+    /// where the verification axis carries evidence and the probe axis
+    /// carries none: the load-bearing asymmetry the directional
+    /// predicate names that the symmetric
+    /// [`per_axis_admission_tier_diverges`] reading does not. A future
+    /// regression that hand-rolled the body as `probe.admission_tier()
+    /// != verification.admission_tier()` (the symmetric divergence
+    /// form) instead of `>` would surface here as the pin reading
+    /// `true` at the verification-dominant arm rather than `false`.
+    #[test]
+    fn test_per_axis_admission_tier_probe_dominates_at_probe_refused_verification_strict_arm() {
+        let probe = ProbeCoverage { ran: 0, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 5,
+            unverified: 0,
+        };
+        assert!(
+            !per_axis_admission_tier_probe_dominates(&probe, &verification),
+            "per_axis_admission_tier_probe_dominates at the probe-\
+             refused / verification-strict arm reads false — the \
+             lattice bracket is non-degenerate but the ceiling sits at \
+             the VERIFICATION axis; the directional predicate routes \
+             the dominance reading correctly to false at this arm",
+        );
+    }
+
+    /// Pin the probe-dominant per-axis (Strict, StagingOnly) interior
+    /// arm: at `(probe = {ran: 3, absent: 0}, verification =
+    /// {verified: 2, unverified: 3})` the probe axis reads
+    /// [`AdmissionTier::Strict`] and the verification axis reads
+    /// [`AdmissionTier::StagingOnly`], so the lattice bracket
+    /// [StagingOnly, Strict] is non-degenerate with its ceiling at the
+    /// probe axis — probe-dominance reads `true`. The structural-
+    /// witness pin at the staging-band interior, surfacing the per-
+    /// axis probe-dominance even when both surfaces admit on their
+    /// own.
+    #[test]
+    fn test_per_axis_admission_tier_probe_dominates_at_probe_strict_verification_staging_band_arm()
+    {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        };
+        assert!(
+            per_axis_admission_tier_probe_dominates(&probe, &verification),
+            "per_axis_admission_tier_probe_dominates at the per-axis \
+             (Strict, StagingOnly) interior arm reads true — the \
+             probe axis sits at AdmissionTier::Strict and the \
+             verification axis at AdmissionTier::StagingOnly, so the \
+             lattice bracket [StagingOnly, Strict] is non-degenerate \
+             with its ceiling at the probe axis",
         );
     }
 }
