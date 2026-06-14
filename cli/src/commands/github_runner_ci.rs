@@ -613,11 +613,7 @@ pub async fn execute(
 /// `CommandAttemptFailure` from the loop is mapped to `anyhow::Error` at
 /// the public boundary so existing call sites remain unchanged.
 async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: bool) -> Result<()> {
-    let policy = if safe_mode {
-        RetryPolicy::network()
-    } else {
-        RetryPolicy::immediate()
-    };
+    let policy = RetryPolicy::network_or_immediate(safe_mode);
     let max_attempts = policy.max_attempts;
     let attic = get_tool_path("ATTIC_BIN", "attic");
     let op = operation.to_string();
@@ -713,11 +709,7 @@ async fn push_with_retry(
     // two: when `safe_mode` was on, the outer loop never terminated
     // (the `attempts < retries || safe_mode` guard was always true).
     // The migration fixes that bug by construction.
-    let policy = if safe_mode {
-        RetryPolicy::network()
-    } else {
-        RetryPolicy::immediate()
-    };
+    let policy = RetryPolicy::network_or_immediate(safe_mode);
     let max_attempts = policy.max_attempts;
     let op = format!("push {}:{}", registry, tag);
 
