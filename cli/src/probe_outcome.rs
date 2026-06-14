@@ -1038,6 +1038,114 @@ impl ProbeCoverage {
     pub fn refuses_admission_relaxed(&self) -> bool {
         !self.is_admission_eligible_relaxed()
     }
+
+    /// Lift the four-bool per-axis admission surface
+    /// ([`is_admission_eligible_strict`](Self::is_admission_eligible_strict) /
+    /// [`is_admission_eligible_relaxed`](Self::is_admission_eligible_relaxed) /
+    /// [`refuses_admission_strict`](Self::refuses_admission_strict) /
+    /// [`refuses_admission_relaxed`](Self::refuses_admission_relaxed)) to
+    /// one [`AdmissionTier`] value the per-axis consumer reads through an
+    /// exhaustive `match`. The typed-sum per-axis peer of
+    /// [`compose_admission_tier`] (commit e9bfe1a) at the parallel-axis
+    /// surface: where the parallel-axis constructor reads the three-bool
+    /// parallel-axis partition
+    /// (`compose_admission_eligible_strict` XOR
+    ///  `compose_relaxed_eligible_strict_refused` XOR
+    ///  `!compose_admission_eligible_relaxed`)
+    /// against the asymmetric "evidence-OR & trust-AND" aggregation, this
+    /// reads the three-bool per-axis partition against the per-axis
+    /// admit/refuse × relaxed/strict typed-method matrix the four prior
+    /// commits (e25a22e, 6f6ef14, ebddec5, b314679) established at one
+    /// inherent-method site per predicate.
+    ///
+    /// The priority-ordered branch reads the strict gate first, then the
+    /// relaxed gate, then falls through to `Refused`:
+    ///
+    /// 1. [`is_admission_eligible_strict`](Self::is_admission_eligible_strict)
+    ///    reads `true` — return [`AdmissionTier::Strict`] (Phase 2
+    ///    production-eligible at this axis).
+    /// 2. Else [`is_admission_eligible_relaxed`](Self::is_admission_eligible_relaxed)
+    ///    reads `true` — return [`AdmissionTier::StagingOnly`] (Phase 1
+    ///    staging-eligible at this axis but Phase 2 holds).
+    /// 3. Else — return [`AdmissionTier::Refused`] (relaxed gate refuses
+    ///    on this axis).
+    ///
+    /// The branch order relies on the per-axis strict-implies-relaxed
+    /// invariant pinned by
+    /// [`tests::test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_probe_axis`]:
+    /// because per-axis strict eligibility is a subset of per-axis
+    /// relaxed eligibility, the staging-only band is the asymmetric set
+    /// difference at the relaxed-admitted ring, and the three branches
+    /// are mutually exclusive exactly when read in this order. A
+    /// regression that reordered the branches (checking relaxed before
+    /// strict) would still produce a correct partition under the
+    /// implication invariant — but the priority-order pin
+    /// [`tests::test_probe_coverage_admission_tier_strict_branch_takes_priority_over_relaxed_branch`]
+    /// nails the order so a future regression that broke the implication
+    /// invariant (separately) would surface here rather than silently
+    /// misclassifying the strict-eligible state as staging-only at the
+    /// per-axis surface.
+    ///
+    /// The structural distinction from the parallel-axis lift the
+    /// per-axis tier surface exposes: at the evidence-asymmetric arm
+    /// (`probe = {ran: N, absent: 0}` strict-eligible AND
+    /// `verification = {verified: 0, unverified: 0}` refused), the
+    /// per-axis min `min(probe.admission_tier(),
+    /// verification.admission_tier()) == AdmissionTier::Refused` because
+    /// the verification axis refuses on its own, but the parallel-axis
+    /// constructor `compose_admission_tier(probe, verification) ==
+    /// AdmissionTier::StagingOnly` because the parallel-axis relaxed gate
+    /// uses the evidence-OR aggregation (the probe axis carries evidence,
+    /// the parallel-axis trust factor reads true on both axes). The two
+    /// readings diverge structurally — the per-axis tier reads the
+    /// per-axis-floor floor, the parallel-axis tier reads the
+    /// evidence-OR-floor floor — and the divergence at the
+    /// evidence-asymmetric arm is pinned by
+    /// [`tests::test_per_axis_admission_tier_min_diverges_from_compose_admission_tier_at_evidence_asymmetric_arm`].
+    /// The pin makes the structural distinction between the per-axis-AND
+    /// floor (per-axis min) and the evidence-OR floor (parallel-axis
+    /// compose) auditable at the typed-primitive surface — exactly the
+    /// asymmetry the prior commit (585ec00) noted at
+    /// [`compose_refuses_admission_strict`]'s docstring.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-axis admission-tier
+    /// reading is named at one site (here) through the priority-ordered
+    /// branch over the four per-axis admit/refuse predicates, not
+    /// re-derived as a nested if-else cascade against the four bools per
+    /// consumer (which would inherit a drift class on the day a fourth
+    /// per-axis tier is added). THEORY.md §V.4 honesty channel: the
+    /// per-axis tier surface reads one typed value naming the per-axis
+    /// three-tier decision (Strict / StagingOnly / Refused) at this axis
+    /// alone — the load-bearing reading a downstream per-axis
+    /// attributor consults to surface "which axis refused at which
+    /// tier" rather than the bare parallel-axis verdict.
+    ///
+    /// At every per-axis representative state, the constructor agrees
+    /// with the four-bool partition exactly:
+    ///
+    /// - [`AdmissionTier::Strict`] iff
+    ///   [`is_admission_eligible_strict`](Self::is_admission_eligible_strict)
+    ///   — pinned by
+    ///   [`tests::test_probe_coverage_admission_tier_strict_equals_is_admission_eligible_strict`].
+    /// - [`AdmissionTier::Refused`] iff
+    ///   [`refuses_admission_relaxed`](Self::refuses_admission_relaxed) —
+    ///   pinned by
+    ///   [`tests::test_probe_coverage_admission_tier_refused_equals_refuses_admission_relaxed`].
+    /// - [`AdmissionTier::StagingOnly`] iff
+    ///   [`is_admission_eligible_relaxed`](Self::is_admission_eligible_relaxed)
+    ///   `&& `[`refuses_admission_strict`](Self::refuses_admission_strict)
+    ///   — pinned by
+    ///   [`tests::test_probe_coverage_admission_tier_staging_only_equals_relaxed_admit_and_strict_refuse`].
+    #[allow(dead_code)]
+    pub fn admission_tier(&self) -> AdmissionTier {
+        if self.is_admission_eligible_strict() {
+            AdmissionTier::Strict
+        } else if self.is_admission_eligible_relaxed() {
+            AdmissionTier::StagingOnly
+        } else {
+            AdmissionTier::Refused
+        }
+    }
 }
 
 /// Identity element of the [`Add`](std::ops::Add) impl below: the empty-
@@ -2136,6 +2244,68 @@ impl VerificationCoverage {
     /// peer's discipline at the orthogonal axis.
     pub fn refuses_admission_relaxed(&self) -> bool {
         !self.is_admission_eligible_relaxed()
+    }
+
+    /// Lift the four-bool per-axis admission surface
+    /// ([`is_admission_eligible_strict`](Self::is_admission_eligible_strict) /
+    /// [`is_admission_eligible_relaxed`](Self::is_admission_eligible_relaxed) /
+    /// [`refuses_admission_strict`](Self::refuses_admission_strict) /
+    /// [`refuses_admission_relaxed`](Self::refuses_admission_relaxed)) to
+    /// one [`AdmissionTier`] value the per-axis consumer reads through an
+    /// exhaustive `match`. The orthogonal-axis peer of
+    /// [`ProbeCoverage::admission_tier`] at the verification-trustworthiness
+    /// axis: both per-axis surfaces project to the same [`AdmissionTier`]
+    /// typed sum the parallel-axis surface ([`compose_admission_tier`])
+    /// already returns, so a downstream per-axis attributor reads the
+    /// uniform three-surface typed-sum family (per-axis probe /
+    /// per-axis verification / parallel-axis compose) as one consistent
+    /// `match` shape rather than three differently-shaped surfaces.
+    ///
+    /// The priority-ordered branch mirrors [`ProbeCoverage::admission_tier`]
+    /// at the orthogonal axis: strict first, then relaxed, then fall
+    /// through to `Refused`. The per-axis strict-implies-relaxed invariant
+    /// is pinned by
+    /// [`tests::test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_verification_axis`];
+    /// the priority-order pin
+    /// [`tests::test_verification_coverage_admission_tier_strict_branch_takes_priority_over_relaxed_branch`]
+    /// nails the order against a future regression that broke the
+    /// implication invariant.
+    ///
+    /// At every per-axis representative state, the constructor agrees
+    /// with the four-bool partition exactly:
+    ///
+    /// - [`AdmissionTier::Strict`] iff
+    ///   [`is_admission_eligible_strict`](Self::is_admission_eligible_strict)
+    ///   — pinned by
+    ///   [`tests::test_verification_coverage_admission_tier_strict_equals_is_admission_eligible_strict`].
+    /// - [`AdmissionTier::Refused`] iff
+    ///   [`refuses_admission_relaxed`](Self::refuses_admission_relaxed) —
+    ///   pinned by
+    ///   [`tests::test_verification_coverage_admission_tier_refused_equals_refuses_admission_relaxed`].
+    /// - [`AdmissionTier::StagingOnly`] iff
+    ///   [`is_admission_eligible_relaxed`](Self::is_admission_eligible_relaxed)
+    ///   `&& `[`refuses_admission_strict`](Self::refuses_admission_strict)
+    ///   — pinned by
+    ///   [`tests::test_verification_coverage_admission_tier_staging_only_equals_relaxed_admit_and_strict_refuse`].
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-axis verification
+    /// admission-tier reading is named at one site (here), not re-derived
+    /// as a nested if-else cascade against the four bools per consumer.
+    /// THEORY.md §V.4 honesty channel: the per-axis tier surface reads
+    /// one typed value naming the verification-axis three-tier decision —
+    /// the load-bearing reading a per-axis attributor consults to surface
+    /// "verification axis refused at strict tier" / "verification axis
+    /// admits at staging tier" rather than the bare parallel-axis
+    /// verdict.
+    #[allow(dead_code)]
+    pub fn admission_tier(&self) -> AdmissionTier {
+        if self.is_admission_eligible_strict() {
+            AdmissionTier::Strict
+        } else if self.is_admission_eligible_relaxed() {
+            AdmissionTier::StagingOnly
+        } else {
+            AdmissionTier::Refused
+        }
     }
 }
 
@@ -15181,6 +15351,422 @@ mod tests {
              at the De Morgan fail-closed surface as well — the \
              surface-naming equivalence pin demands the two helpers \
              agree at this saturated arm",
+        );
+    }
+
+    /// Per-axis [`ProbeCoverage::admission_tier`] returns
+    /// [`AdmissionTier::Strict`] iff
+    /// [`ProbeCoverage::is_admission_eligible_strict`] reads `true` —
+    /// pinned across six per-axis representatives spanning the empty,
+    /// all-absent, mixed, fully-covered, and both saturation arms. The
+    /// load-bearing structural equivalence the per-axis typed-sum
+    /// surface lifts from the per-axis bool surface.
+    #[test]
+    fn test_probe_coverage_admission_tier_strict_equals_is_admission_eligible_strict() {
+        let reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        for probe in reps {
+            let tier_says_strict = probe.admission_tier() == AdmissionTier::Strict;
+            let bool_says_strict = probe.is_admission_eligible_strict();
+            assert_eq!(
+                tier_says_strict, bool_says_strict,
+                "probe.admission_tier() == Strict must equal \
+                 probe.is_admission_eligible_strict() at probe={probe:?}",
+            );
+        }
+    }
+
+    /// Per-axis [`ProbeCoverage::admission_tier`] returns
+    /// [`AdmissionTier::Refused`] iff
+    /// [`ProbeCoverage::refuses_admission_relaxed`] reads `true` —
+    /// pinned across six per-axis representatives. The load-bearing
+    /// structural equivalence the per-axis typed-sum surface lifts at
+    /// the floor of the per-axis tier ladder.
+    #[test]
+    fn test_probe_coverage_admission_tier_refused_equals_refuses_admission_relaxed() {
+        let reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        for probe in reps {
+            let tier_says_refused = probe.admission_tier() == AdmissionTier::Refused;
+            let bool_says_refused = probe.refuses_admission_relaxed();
+            assert_eq!(
+                tier_says_refused, bool_says_refused,
+                "probe.admission_tier() == Refused must equal \
+                 probe.refuses_admission_relaxed() at probe={probe:?}",
+            );
+        }
+    }
+
+    /// Per-axis [`ProbeCoverage::admission_tier`] returns
+    /// [`AdmissionTier::StagingOnly`] iff
+    /// [`ProbeCoverage::is_admission_eligible_relaxed`] AND
+    /// [`ProbeCoverage::refuses_admission_strict`] both read `true` —
+    /// pinned across six per-axis representatives. The load-bearing
+    /// structural equivalence at the per-axis staging-only band.
+    #[test]
+    fn test_probe_coverage_admission_tier_staging_only_equals_relaxed_admit_and_strict_refuse() {
+        let reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        for probe in reps {
+            let tier_says_staging = probe.admission_tier() == AdmissionTier::StagingOnly;
+            let bool_says_staging =
+                probe.is_admission_eligible_relaxed() && probe.refuses_admission_strict();
+            assert_eq!(
+                tier_says_staging, bool_says_staging,
+                "probe.admission_tier() == StagingOnly must equal \
+                 (is_admission_eligible_relaxed && refuses_admission_strict) \
+                 at probe={probe:?}",
+            );
+        }
+    }
+
+    /// Per-axis branch order pin: the strict branch reads first, so
+    /// the strict-eligible per-axis state surfaces as
+    /// [`AdmissionTier::Strict`] even though the relaxed gate also
+    /// admits there (the per-axis strict-implies-relaxed invariant).
+    /// A regression that swapped the branch order would silently
+    /// classify the strict-eligible per-axis state as
+    /// [`AdmissionTier::StagingOnly`], flattening the per-axis
+    /// partition at the production-tier ceiling.
+    #[test]
+    fn test_probe_coverage_admission_tier_strict_branch_takes_priority_over_relaxed_branch() {
+        let reps = [
+            ProbeCoverage { ran: 1, absent: 0 },
+            ProbeCoverage { ran: 3, absent: 0 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        for probe in reps {
+            assert!(
+                probe.is_admission_eligible_strict(),
+                "fixture must hit the per-axis strict-eligible region at probe={probe:?}",
+            );
+            assert!(
+                probe.is_admission_eligible_relaxed(),
+                "per-axis strict-eligible implies per-axis relaxed-eligible at probe={probe:?}",
+            );
+            assert_eq!(
+                probe.admission_tier(),
+                AdmissionTier::Strict,
+                "the strict branch must take priority over the relaxed \
+                 branch at the per-axis tier surface at probe={probe:?}",
+            );
+        }
+    }
+
+    /// Orthogonal-axis peer of
+    /// [`test_probe_coverage_admission_tier_strict_equals_is_admission_eligible_strict`]:
+    /// the verification axis surfaces [`AdmissionTier::Strict`] iff
+    /// [`VerificationCoverage::is_admission_eligible_strict`] reads
+    /// `true`, pinned across six per-axis representatives.
+    #[test]
+    fn test_verification_coverage_admission_tier_strict_equals_is_admission_eligible_strict() {
+        let reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for verification in reps {
+            let tier_says_strict = verification.admission_tier() == AdmissionTier::Strict;
+            let bool_says_strict = verification.is_admission_eligible_strict();
+            assert_eq!(
+                tier_says_strict, bool_says_strict,
+                "verification.admission_tier() == Strict must equal \
+                 verification.is_admission_eligible_strict() at \
+                 verification={verification:?}",
+            );
+        }
+    }
+
+    /// Orthogonal-axis peer of
+    /// [`test_probe_coverage_admission_tier_refused_equals_refuses_admission_relaxed`]:
+    /// the verification axis surfaces [`AdmissionTier::Refused`] iff
+    /// [`VerificationCoverage::refuses_admission_relaxed`] reads `true`,
+    /// pinned across six per-axis representatives.
+    #[test]
+    fn test_verification_coverage_admission_tier_refused_equals_refuses_admission_relaxed() {
+        let reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for verification in reps {
+            let tier_says_refused = verification.admission_tier() == AdmissionTier::Refused;
+            let bool_says_refused = verification.refuses_admission_relaxed();
+            assert_eq!(
+                tier_says_refused, bool_says_refused,
+                "verification.admission_tier() == Refused must equal \
+                 verification.refuses_admission_relaxed() at \
+                 verification={verification:?}",
+            );
+        }
+    }
+
+    /// Orthogonal-axis peer of
+    /// [`test_probe_coverage_admission_tier_staging_only_equals_relaxed_admit_and_strict_refuse`]:
+    /// the verification axis surfaces [`AdmissionTier::StagingOnly`]
+    /// iff [`VerificationCoverage::is_admission_eligible_relaxed`] AND
+    /// [`VerificationCoverage::refuses_admission_strict`] both read
+    /// `true`, pinned across six per-axis representatives.
+    #[test]
+    fn test_verification_coverage_admission_tier_staging_only_equals_relaxed_admit_and_strict_refuse(
+    ) {
+        let reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for verification in reps {
+            let tier_says_staging = verification.admission_tier() == AdmissionTier::StagingOnly;
+            let bool_says_staging = verification.is_admission_eligible_relaxed()
+                && verification.refuses_admission_strict();
+            assert_eq!(
+                tier_says_staging, bool_says_staging,
+                "verification.admission_tier() == StagingOnly must equal \
+                 (is_admission_eligible_relaxed && refuses_admission_strict) \
+                 at verification={verification:?}",
+            );
+        }
+    }
+
+    /// Orthogonal-axis peer of
+    /// [`test_probe_coverage_admission_tier_strict_branch_takes_priority_over_relaxed_branch`]:
+    /// the verification axis pins the strict-before-relaxed branch
+    /// order at the verification-tier surface.
+    #[test]
+    fn test_verification_coverage_admission_tier_strict_branch_takes_priority_over_relaxed_branch()
+    {
+        let reps = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 3,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+        ];
+        for verification in reps {
+            assert!(
+                verification.is_admission_eligible_strict(),
+                "fixture must hit the per-axis strict-eligible region at \
+                 verification={verification:?}",
+            );
+            assert!(
+                verification.is_admission_eligible_relaxed(),
+                "per-axis strict-eligible implies per-axis relaxed-eligible at \
+                 verification={verification:?}",
+            );
+            assert_eq!(
+                verification.admission_tier(),
+                AdmissionTier::Strict,
+                "the strict branch must take priority over the relaxed \
+                 branch at the verification-tier surface at \
+                 verification={verification:?}",
+            );
+        }
+    }
+
+    /// The structural distinction between the per-axis tier surface
+    /// (per-axis-AND-of-admits floor — every axis must admit on its own)
+    /// and the parallel-axis tier surface (evidence-OR & trust-AND
+    /// floor — at least one axis carries evidence AND every axis trusts)
+    /// is auditable at the evidence-asymmetric arm:
+    /// `probe = {ran: 3, absent: 0}` surfaces
+    /// [`AdmissionTier::Strict`] per-axis, but
+    /// `verification = {verified: 0, unverified: 0}` surfaces
+    /// [`AdmissionTier::Refused`] per-axis (empty / no evidence). The
+    /// per-axis min reads [`AdmissionTier::Refused`] (the worst per-axis
+    /// tier), but the parallel-axis [`compose_admission_tier`] reads
+    /// [`AdmissionTier::StagingOnly`] (the parallel-axis relaxed gate
+    /// admits via evidence-OR; the strict gate refuses via per-axis-AND).
+    /// The divergence at this arm is the structural-witness pin that
+    /// the per-axis tier and parallel-axis tier surfaces compose
+    /// asymmetrically — exactly the asymmetry the
+    /// [`compose_refuses_admission_strict`] docstring notes at the
+    /// relaxed-gate parallel-axis surface.
+    #[test]
+    fn test_per_axis_admission_tier_min_diverges_from_compose_admission_tier_at_evidence_asymmetric_arm(
+    ) {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert_eq!(
+            probe.admission_tier(),
+            AdmissionTier::Strict,
+            "probe axis with full coverage and no absents must surface \
+             as per-axis Strict",
+        );
+        assert_eq!(
+            verification.admission_tier(),
+            AdmissionTier::Refused,
+            "verification axis with no evidence must surface as per-axis \
+             Refused (the no-evidence relaxed-floor)",
+        );
+        let per_axis_min = [probe.admission_tier(), verification.admission_tier()]
+            .into_iter()
+            .min()
+            .expect("non-empty iterator");
+        assert_eq!(
+            per_axis_min,
+            AdmissionTier::Refused,
+            "per-axis min reads the worst per-axis tier — Refused here \
+             because the verification axis refuses on its own",
+        );
+        let compose_tier = compose_admission_tier(&probe, &verification);
+        assert_eq!(
+            compose_tier,
+            AdmissionTier::StagingOnly,
+            "parallel-axis compose reads StagingOnly — the parallel-axis \
+             relaxed gate admits via evidence-OR (probe carries evidence, \
+             trust intact on both axes), the strict gate refuses via \
+             per-axis-AND (verification fails the conjunction)",
+        );
+        assert_ne!(
+            per_axis_min, compose_tier,
+            "the structural-witness pin: per-axis min and parallel-axis \
+             compose diverge at the evidence-asymmetric arm, exposing \
+             the per-axis-AND vs. evidence-OR aggregation asymmetry the \
+             two surfaces lift",
+        );
+    }
+
+    /// At the fully-evidenced both-axes ceiling, the per-axis min and
+    /// the parallel-axis compose agree on [`AdmissionTier::Strict`] —
+    /// the structural-witness pin that the two surfaces collapse to the
+    /// same reading when every per-axis surface admits strictly on its
+    /// own. The dual of the asymmetric-arm divergence pin one row up.
+    #[test]
+    fn test_per_axis_admission_tier_min_agrees_with_compose_at_fully_evidenced_ceiling() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        let per_axis_min = [probe.admission_tier(), verification.admission_tier()]
+            .into_iter()
+            .min()
+            .expect("non-empty iterator");
+        let compose_tier = compose_admission_tier(&probe, &verification);
+        assert_eq!(
+            per_axis_min,
+            AdmissionTier::Strict,
+            "per-axis min at the both-axes-strict ceiling reads Strict",
+        );
+        assert_eq!(
+            compose_tier,
+            AdmissionTier::Strict,
+            "parallel-axis compose at the both-axes-strict ceiling reads Strict",
+        );
+        assert_eq!(
+            per_axis_min, compose_tier,
+            "the structural-witness pin: per-axis min and parallel-axis \
+             compose agree at the fully-evidenced both-axes ceiling, the \
+             dual of the evidence-asymmetric arm where they diverge",
         );
     }
 }
