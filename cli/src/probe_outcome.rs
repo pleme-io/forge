@@ -2998,6 +2998,155 @@ pub fn compose_relaxed_eligible_strict_refused(
         && !compose_admission_eligible_strict(probe, verification)
 }
 
+/// Typed sum lifting the three-bool admission-tier surface
+/// ([`compose_admission_eligible_strict`] /
+/// [`compose_relaxed_eligible_strict_refused`] / negated
+/// [`compose_admission_eligible_relaxed`]) to one variant the deploy
+/// orchestrator's tier-branching consumer reads through an exhaustive
+/// `match`. The ten-member parallel-axis compose family (commits
+/// 7d818bd, 2ea2240, a50a371, 078826b, 0d8a3c5, e6810b2, e652297,
+/// 86d81f7, 9a9e97a, aa40b8f) pins the disjoint three-way partition at
+/// the bool surface; this enum hoists the partition to a single typed
+/// value so a regression that hand-rolled the tier branch as a nested
+/// if-else cascade — inheriting a drift class on the day a third tier
+/// is added between staging and production — is structurally impossible:
+/// the compiler refuses the missing arm at the consumer site.
+///
+/// The three variants partition the `(ProbeCoverage,
+/// VerificationCoverage)` state space exactly:
+///
+/// - [`AdmissionTier::Strict`] — the Phase 2 production-ready state.
+///   Reads `Strict` iff [`compose_admission_eligible_strict`] reads
+///   `true`: every counted probe ran, every counted verification
+///   succeeded, AND trust is intact on both axes. The deploy
+///   orchestrator advances to production.
+/// - [`AdmissionTier::StagingOnly`] — the Phase 1 admit / Phase 2 hold
+///   band. Reads `StagingOnly` iff
+///   [`compose_relaxed_eligible_strict_refused`] reads `true`: evidence
+///   surfaced on at least one axis, trust intact on both axes, AND
+///   completeness failed on at least one axis. The deploy orchestrator
+///   advances to staging but holds production.
+/// - [`AdmissionTier::Refused`] — the relaxed-gate fail-closed state.
+///   Reads `Refused` iff [`compose_admission_eligible_relaxed`] reads
+///   `false`: no evidence on either axis OR saturation on at least one
+///   axis. The deploy orchestrator holds at every tier.
+///
+/// The structural pin the deploy orchestrator's tier-branching surface
+/// relies on is the exhaustiveness check the compiler enforces at every
+/// `match` against an [`AdmissionTier`] value: a downstream consumer
+/// that fails to handle one of the three variants is rejected at compile
+/// time, foreclosing the drift class where a hand-rolled if-else cascade
+/// against the three bools silently drops one tier. The `non_exhaustive`
+/// attribute is deliberately NOT applied: the three-way partition is a
+/// closed structural decomposition of the admission state space (a
+/// future fourth tier would extend the partition here, AND every
+/// downstream `match` arm would surface as a missing-arm compile error,
+/// which is exactly the discipline the typed-primitive surface lifts).
+///
+/// THEORY.md §V.4 honesty channel: the admission-tier surface reads one
+/// typed value naming the deploy orchestrator's three-tier decision (
+/// Strict = promote to production; StagingOnly = promote to staging,
+/// hold production; Refused = hold at every tier), decomposable into
+/// its three load-bearing per-tier bool components at the consumer
+/// surface for telemetry. THEORY.md §VI.1 one-oracle discipline: the
+/// three-way partition is encoded at one site (this enum + the
+/// [`compose_admission_tier`] constructor) — not re-derived as a nested
+/// if-else cascade against the three underlying bools per consumer
+/// (which would inherit a drift class on the day a third admission tier
+/// is added; every consumer would need to extend the cascade in
+/// lockstep, exactly the structural seam this enum forecloses).
+///
+/// Frontier lineage: SLSA L3+ admission policy gates surface the
+/// promotion-tier decision as a typed sum (Production / Staging /
+/// Refused) so the downstream auditor's tier-branching surface is
+/// exhaustive by construction; sigstore's policy controller emits the
+/// promotion verdict as a typed enum the verifier `match`es against;
+/// Bazel's `--build_event_stream` / Buck2's build-event surface emits a
+/// typed `BuildResult` variant the downstream consumer pattern-matches
+/// over rather than reading three independent bools. This enum lifts
+/// the same typed-sum discipline at forge's two-axis composition
+/// surface.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdmissionTier {
+    /// Production-ready: strict gate admits — promote to production.
+    Strict,
+    /// Phase 1 admits / Phase 2 holds — promote to staging, hold
+    /// production.
+    StagingOnly,
+    /// Relaxed gate refuses — hold at every tier.
+    Refused,
+}
+
+/// Lift the three-bool admission-tier surface
+/// ([`compose_admission_eligible_strict`] /
+/// [`compose_relaxed_eligible_strict_refused`] / negated
+/// [`compose_admission_eligible_relaxed`]) to one [`AdmissionTier`]
+/// value the deploy orchestrator's tier-branching consumer reads through
+/// an exhaustive `match`. The disjoint three-way partition
+/// `compose_admission_eligible_strict(p, v) XOR
+/// compose_relaxed_eligible_strict_refused(p, v) XOR
+/// !compose_admission_eligible_relaxed(p, v)` the prior commit (aa40b8f)
+/// pinned at the bool surface is hoisted here to the typed-sum surface,
+/// so a downstream consumer that branches on the admission tier cannot
+/// drop a tier silently — the compiler refuses the missing arm.
+///
+/// The constructor reads the three predicates in priority order:
+///
+/// 1. If [`compose_admission_eligible_strict`] reads `true`, return
+///    [`AdmissionTier::Strict`].
+/// 2. Else if [`compose_admission_eligible_relaxed`] reads `true`,
+///    return [`AdmissionTier::StagingOnly`] (the relaxed-admitted
+///    subset minus the strict-admitted subset).
+/// 3. Else, return [`AdmissionTier::Refused`].
+///
+/// The priority ordering relies on the strict-implies-relaxed invariant
+/// pinned by
+/// [`tests::test_compose_admission_eligible_strict_implies_compose_admission_eligible_relaxed`]:
+/// because strict eligibility is a subset of relaxed eligibility, the
+/// staging-only band is the asymmetric set difference at the
+/// relaxed-admitted ring, and the three branches are mutually exclusive
+/// exactly when read in this order. A regression that reordered the
+/// branches (checking relaxed before strict) would still produce a
+/// correct partition under the implication invariant — but the
+/// load-bearing structural pin
+/// [`tests::test_compose_admission_tier_strict_branch_takes_priority_over_relaxed_branch`]
+/// nails the priority order so a future regression that broke the
+/// implication invariant (separately) would surface here rather than
+/// silently misclassifying the strict-eligible state as staging-only.
+///
+/// At every reachable `(probe, verification)` pair, the constructor
+/// agrees with the three-bool partition exactly:
+///
+/// - [`AdmissionTier::Strict`] iff
+///   [`compose_admission_eligible_strict`] — pinned by
+///   [`tests::test_compose_admission_tier_strict_equals_compose_admission_eligible_strict`].
+/// - [`AdmissionTier::StagingOnly`] iff
+///   [`compose_relaxed_eligible_strict_refused`] — pinned by
+///   [`tests::test_compose_admission_tier_staging_only_equals_compose_relaxed_eligible_strict_refused`].
+/// - [`AdmissionTier::Refused`] iff
+///   `!compose_admission_eligible_relaxed` — pinned by
+///   [`tests::test_compose_admission_tier_refused_equals_negation_of_compose_admission_eligible_relaxed`].
+///
+/// The three equivalences pin the typed-sum constructor against the
+/// three-bool partition at every reachable arm of the 6×6 cross product
+/// of per-axis representatives — sealing the structural equivalence
+/// between the typed-sum surface and the bool surface at the
+/// typed-primitive site.
+#[allow(dead_code)]
+pub fn compose_admission_tier(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> AdmissionTier {
+    if compose_admission_eligible_strict(probe, verification) {
+        AdmissionTier::Strict
+    } else if compose_admission_eligible_relaxed(probe, verification) {
+        AdmissionTier::StagingOnly
+    } else {
+        AdmissionTier::Refused
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10075,6 +10224,470 @@ mod tests {
                      the disjoint-union structure is the load-bearing \
                      structural pin the deploy orchestrator's tier-\
                      branching surface relies on",
+                );
+            }
+        }
+    }
+
+    /// The three `AdmissionTier` variants are distinct under `Eq` — the
+    /// load-bearing structural pin every consumer's exhaustive `match`
+    /// relies on. A regression that conflated two variants (e.g.,
+    /// derived `PartialEq` on a single-field tuple struct rather than on
+    /// the unit enum) would silently merge two tiers at the consumer
+    /// surface, dropping the three-way partition the typed-sum exists to
+    /// surface.
+    #[test]
+    fn test_admission_tier_variants_are_distinct() {
+        assert_ne!(AdmissionTier::Strict, AdmissionTier::StagingOnly);
+        assert_ne!(AdmissionTier::StagingOnly, AdmissionTier::Refused);
+        assert_ne!(AdmissionTier::Refused, AdmissionTier::Strict);
+    }
+
+    /// Every strict-eligible state — both axes fully-covered /
+    /// fully-verified, no saturation — returns
+    /// [`AdmissionTier::Strict`]. The Phase 2 production-ready ceiling
+    /// the deploy orchestrator promotes to production at. A regression
+    /// that reordered the constructor branches without preserving the
+    /// strict-implies-relaxed invariant would surface here as a
+    /// `StagingOnly` misclassification of the production-ready state.
+    #[test]
+    fn test_compose_admission_tier_at_strict_eligible_returns_strict() {
+        let probe_reps = [
+            ProbeCoverage { ran: 3, absent: 0 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage { ran: 1, absent: 0 },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 3,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 7,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                assert_eq!(
+                    compose_admission_tier(&probe, &verification),
+                    AdmissionTier::Strict,
+                    "the strict-eligible state must surface as Strict at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Every partial-progress band — relaxed-admitted, strict-refused
+    /// — returns [`AdmissionTier::StagingOnly`]. The Phase 1 admit /
+    /// Phase 2 hold band the deploy orchestrator promotes to staging
+    /// without releasing production at. The three reps cross both
+    /// asymmetric arms (probe-complete / verification-mixed,
+    /// probe-mixed / verification-complete, mixed / mixed) so a
+    /// regression that hand-rolled the band as a single-axis check
+    /// (e.g., "probe complete AND verification incomplete" alone) would
+    /// fail at the mirror-asymmetric arm.
+    #[test]
+    fn test_compose_admission_tier_at_partial_progress_returns_staging_only() {
+        let pairs = [
+            (
+                ProbeCoverage { ran: 2, absent: 1 },
+                VerificationCoverage {
+                    verified: 1,
+                    unverified: 2,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 2, absent: 1 },
+                VerificationCoverage {
+                    verified: 3,
+                    unverified: 0,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 3, absent: 0 },
+                VerificationCoverage {
+                    verified: 1,
+                    unverified: 2,
+                },
+            ),
+        ];
+        for (probe, verification) in pairs {
+            assert_eq!(
+                compose_admission_tier(&probe, &verification),
+                AdmissionTier::StagingOnly,
+                "the partial-progress band must surface as StagingOnly \
+                 at probe={probe:?} verification={verification:?}",
+            );
+        }
+    }
+
+    /// Every relaxed-refused state — both-axes no-evidence floor OR
+    /// any-axis saturated — returns [`AdmissionTier::Refused`]. Pins
+    /// the load-bearing structural floor the relaxed gate establishes:
+    /// the no-evidence floor (empty / all-absent / all-unverified) AND
+    /// the saturation ceiling (any axis past `usize::MAX`) both
+    /// collapse to the same `Refused` arm at the typed-sum surface, so
+    /// the deploy orchestrator holds at every tier.
+    #[test]
+    fn test_compose_admission_tier_at_refused_returns_refused() {
+        let pairs = [
+            (
+                ProbeCoverage { ran: 0, absent: 0 },
+                VerificationCoverage {
+                    verified: 0,
+                    unverified: 0,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 0, absent: 4 },
+                VerificationCoverage {
+                    verified: 0,
+                    unverified: 3,
+                },
+            ),
+            (
+                ProbeCoverage {
+                    ran: usize::MAX,
+                    absent: 0,
+                },
+                VerificationCoverage {
+                    verified: 5,
+                    unverified: 0,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 3, absent: 0 },
+                VerificationCoverage {
+                    verified: usize::MAX,
+                    unverified: 0,
+                },
+            ),
+        ];
+        for (probe, verification) in pairs {
+            assert_eq!(
+                compose_admission_tier(&probe, &verification),
+                AdmissionTier::Refused,
+                "the relaxed-refused state must surface as Refused at \
+                 probe={probe:?} verification={verification:?}",
+            );
+        }
+    }
+
+    /// The strict branch reads as `Strict` iff
+    /// [`compose_admission_eligible_strict`] reads `true` — pinned
+    /// across the 6×6 cross product of per-axis representatives. The
+    /// load-bearing structural equivalence the typed-sum surface lifts
+    /// from the bool surface: the strict-eligible state at the bool
+    /// surface (production-tier promote) is exactly the `Strict`
+    /// variant at the typed-sum surface, with no asymmetric drift class.
+    #[test]
+    fn test_compose_admission_tier_strict_equals_compose_admission_eligible_strict() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let tier_says_strict =
+                    compose_admission_tier(&probe, &verification) == AdmissionTier::Strict;
+                let bool_says_strict = compose_admission_eligible_strict(&probe, &verification);
+                assert_eq!(
+                    tier_says_strict, bool_says_strict,
+                    "compose_admission_tier == Strict must equal \
+                     compose_admission_eligible_strict at probe={probe:?} \
+                     verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// The staging-only branch reads as `StagingOnly` iff
+    /// [`compose_relaxed_eligible_strict_refused`] reads `true` —
+    /// pinned across the 6×6 cross product. The load-bearing
+    /// structural equivalence the typed-sum surface lifts from the
+    /// staging-only band the prior commit (aa40b8f) named at the bool
+    /// surface.
+    #[test]
+    fn test_compose_admission_tier_staging_only_equals_compose_relaxed_eligible_strict_refused() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let tier_says_staging =
+                    compose_admission_tier(&probe, &verification) == AdmissionTier::StagingOnly;
+                let bool_says_staging =
+                    compose_relaxed_eligible_strict_refused(&probe, &verification);
+                assert_eq!(
+                    tier_says_staging, bool_says_staging,
+                    "compose_admission_tier == StagingOnly must equal \
+                     compose_relaxed_eligible_strict_refused at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// The refused branch reads as `Refused` iff
+    /// `!compose_admission_eligible_relaxed` reads `true` — pinned
+    /// across the 6×6 cross product. The load-bearing structural
+    /// equivalence the typed-sum surface lifts from the relaxed-gate
+    /// fail-closed state at the bool surface.
+    #[test]
+    fn test_compose_admission_tier_refused_equals_negation_of_compose_admission_eligible_relaxed() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let tier_says_refused =
+                    compose_admission_tier(&probe, &verification) == AdmissionTier::Refused;
+                let bool_says_refused = !compose_admission_eligible_relaxed(&probe, &verification);
+                assert_eq!(
+                    tier_says_refused, bool_says_refused,
+                    "compose_admission_tier == Refused must equal \
+                     !compose_admission_eligible_relaxed at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// The constructor's branch order — strict before relaxed — pins
+    /// the `Strict` variant at the strict-eligible state even though
+    /// the relaxed gate also admits there (the strict-implies-relaxed
+    /// invariant). A regression that swapped the branch order would
+    /// silently classify every strict-eligible state as `StagingOnly`,
+    /// flattening the typed-sum partition. The three reps span the
+    /// strict-eligible region (both axes fully complete) so the priority
+    /// ordering is pinned at every reachable arm of the production-tier
+    /// promote state.
+    #[test]
+    fn test_compose_admission_tier_strict_branch_takes_priority_over_relaxed_branch() {
+        let pairs = [
+            (
+                ProbeCoverage { ran: 1, absent: 0 },
+                VerificationCoverage {
+                    verified: 1,
+                    unverified: 0,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 3, absent: 0 },
+                VerificationCoverage {
+                    verified: 3,
+                    unverified: 0,
+                },
+            ),
+            (
+                ProbeCoverage { ran: 7, absent: 0 },
+                VerificationCoverage {
+                    verified: 5,
+                    unverified: 0,
+                },
+            ),
+        ];
+        for (probe, verification) in pairs {
+            assert!(
+                compose_admission_eligible_strict(&probe, &verification),
+                "fixture must hit the strict-eligible region at \
+                 probe={probe:?} verification={verification:?}",
+            );
+            assert!(
+                compose_admission_eligible_relaxed(&probe, &verification),
+                "strict-eligible implies relaxed-eligible at \
+                 probe={probe:?} verification={verification:?}",
+            );
+            assert_eq!(
+                compose_admission_tier(&probe, &verification),
+                AdmissionTier::Strict,
+                "the strict branch must take priority over the relaxed \
+                 branch at probe={probe:?} verification={verification:?}",
+            );
+        }
+    }
+
+    /// The typed-sum surface and the three-bool partition agree on every
+    /// reachable `(probe, verification)` pair — pinned across the 6×6
+    /// cross product (36 cells). The load-bearing structural pin the
+    /// typed-sum surface relies on: a `match` against
+    /// [`compose_admission_tier`] reaches the same arm the consumer's
+    /// nested if-else cascade against the three bools reaches, at every
+    /// reachable state — so the typed-sum constructor is a faithful
+    /// lift of the bool partition with no asymmetric drift class.
+    #[test]
+    fn test_compose_admission_tier_equals_documented_three_way_partition() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let tier = compose_admission_tier(&probe, &verification);
+                let expected = if compose_admission_eligible_strict(&probe, &verification) {
+                    AdmissionTier::Strict
+                } else if compose_relaxed_eligible_strict_refused(&probe, &verification) {
+                    AdmissionTier::StagingOnly
+                } else {
+                    AdmissionTier::Refused
+                };
+                assert_eq!(
+                    tier, expected,
+                    "compose_admission_tier must equal the three-bool \
+                     partition's typed lift at probe={probe:?} \
+                     verification={verification:?}",
                 );
             }
         }
