@@ -213,8 +213,10 @@ const TRANSIENT_HTTP_STATUS_CODES: &[&str] = &["500", "502", "503", "504", "429"
 /// These are matched as plain substrings (case-sensitive on the
 /// canonical capitalization the tools emit) because each is a
 /// distinctive multi-word phrase or lowercase idiom with no
-/// false-positive ambiguity — unlike the bare numeric status codes,
-/// which match token-wise via [`TRANSIENT_HTTP_STATUS_CODES`].
+/// false-positive ambiguity — unlike the bare numeric status codes
+/// (matched token-wise via [`TRANSIENT_HTTP_STATUS_CODES`]) and the
+/// bare `EOF` acronym (matched token-wise via
+/// [`TRANSIENT_NETWORK_STDERR_TOKEN_MARKERS`]).
 const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // HTTP 5xx — named forms (attic / curl emit named).
     "Internal Server Error",
@@ -236,10 +238,30 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     "i/o timeout",
     "TLS handshake timeout",
     "timeout",
-    // Mid-stream TCP drops (servers closing under load).
+    // Mid-stream TCP drops — multi-word Go form. The bare `EOF` acronym
+    // (`io.EOF`) is matched token-wise via
+    // [`TRANSIENT_NETWORK_STDERR_TOKEN_MARKERS`].
     "unexpected EOF",
-    "EOF",
 ];
+
+/// Named markers matched token-wise rather than as bare substrings.
+///
+/// Like the numeric status codes in [`TRANSIENT_HTTP_STATUS_CODES`], a
+/// short acronym is dangerous as a bare substring: `stderr.contains("EOF")`
+/// fires on any identifier with `E-O-F` adjacent — `GEOFFREY`,
+/// `GEOFENCE`, `NEOFOLD`, `SOMEOFFICIAL`, an env var like `GEOFENCE_API`,
+/// a hostname / service-name component, or a Brazilian-named build target
+/// — converting a terminal failure (auth-denied, manifest-invalid) into a
+/// five-attempt retry storm. The legitimate signal is Go's `io.EOF`
+/// emitted as a standalone diagnostic word (`"read body: EOF"`,
+/// `"connection terminated: EOF"`); requiring `EOF` to appear as a
+/// maximal ASCII-alphanumeric token keeps the signal while dropping the
+/// substring-buried false positives.
+///
+/// The multi-word Go form `"unexpected EOF"` (`io.ErrUnexpectedEOF`)
+/// remains in [`TRANSIENT_NETWORK_STDERR_MARKERS`] as a distinctive
+/// substring with no false-positive ambiguity.
+const TRANSIENT_NETWORK_STDERR_TOKEN_MARKERS: &[&str] = &["EOF"];
 
 /// Heuristic classifier: does `stderr` indicate a transient network or
 /// upstream-server failure that should be retried, vs a terminal failure
@@ -257,11 +279,14 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
 /// `LocalImageNotFound` whose record carries no stderr short-circuits
 /// without burning retry budget.
 ///
-/// The numeric status codes match token-wise — a maximal ASCII-
-/// alphanumeric run must equal the code exactly — so a terminal
-/// failure whose diagnostic merely *contains* those digits (a content
-/// digest, a byte count, a port, a duration) is not misread as a
-/// retryable HTTP status. See [`TRANSIENT_HTTP_STATUS_CODES`].
+/// Short ASCII markers match token-wise — a maximal ASCII-alphanumeric
+/// run must equal the marker exactly — so a terminal failure whose
+/// diagnostic merely *contains* the marker letters (a content digest, a
+/// byte count, a port, a duration, an identifier like `GEOFENCE` or
+/// `NEOFOLD` whose interior happens to spell `EOF`) is not misread as a
+/// retryable signal. The numeric status codes
+/// ([`TRANSIENT_HTTP_STATUS_CODES`]) and the bare `EOF` acronym
+/// ([`TRANSIENT_NETWORK_STDERR_TOKEN_MARKERS`]) are matched this way.
 ///
 /// This is the typed lift of the substring-classifier the pre-existing
 /// `commands/github_runner_ci.rs::attic_command_with_retry` carried
@@ -279,12 +304,17 @@ pub fn is_transient_network_stderr(stderr: &str) -> bool {
     {
         return true;
     }
-    // Numeric HTTP status codes match only as a maximal ASCII-alphanumeric
-    // token, never as a bare substring — a "500" buried inside a digest,
-    // byte count, port, or duration is not an HTTP status.
+    // Short ASCII markers (numeric HTTP status codes, the bare `EOF`
+    // acronym) match only as a maximal ASCII-alphanumeric token, never
+    // as a bare substring — a "500" buried inside a digest or an "EOF"
+    // buried inside an identifier (`GEOFENCE`, `NEOFOLD`) is not the
+    // retryable signal.
     stderr
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|tok| TRANSIENT_HTTP_STATUS_CODES.contains(&tok))
+        .any(|tok| {
+            TRANSIENT_HTTP_STATUS_CODES.contains(&tok)
+                || TRANSIENT_NETWORK_STDERR_TOKEN_MARKERS.contains(&tok)
+        })
 }
 
 /// Captured `(exit_code, stderr)` of a failed external-command attempt.
@@ -1313,10 +1343,65 @@ mod tests {
     }
 
     /// Mid-stream EOF (TCP drop while a response is streaming) is transient.
+    /// The bare `EOF` acronym is matched token-wise — a maximal ASCII-
+    /// alphanumeric run must equal `EOF` exactly — so the legitimate
+    /// Go-style `io.EOF` diagnostic still classifies in every realistic
+    /// surrounding-punctuation dialect skopeo/regctl/attic/curl emit.
     #[test]
     fn test_transient_classifier_matches_eof() {
+        // Multi-word Go form (`io.ErrUnexpectedEOF`) — substring marker.
         assert!(is_transient_network_stderr("post manifest: unexpected EOF"));
+        // Bare `io.EOF` — token-wise marker, with the punctuation dialects
+        // every retried CLI actually emits.
         assert!(is_transient_network_stderr("read body: EOF"));
+        assert!(is_transient_network_stderr("connection terminated: EOF"));
+        assert!(is_transient_network_stderr("upload aborted (EOF)"));
+        assert!(is_transient_network_stderr("EOF mid-stream"));
+        assert!(is_transient_network_stderr("error: EOF"));
+    }
+
+    /// The bare `EOF` acronym matches token-wise, never as a bare
+    /// substring buried inside a larger identifier. Without this
+    /// discipline, `stderr.contains("EOF")` fires on every diagnostic
+    /// whose interior happens to spell `E-O-F` adjacent —
+    /// service / repo / env-var / branch identifiers like `GEOFENCE`,
+    /// `GEOFFREY`, `NEOFOLD`, `SOMEOFFICIAL` — converting a terminal
+    /// failure (auth-denied, manifest-invalid, 404) into a five-attempt
+    /// retry storm against the registry/cache.
+    ///
+    /// Fail-before: the bare-substring matcher tripped on every one of
+    /// these (`"GEOFENCE".contains("EOF") == true`, etc.), silently
+    /// converting each terminal failure into a five-attempt retry storm.
+    /// Pass-after: each diagnostic short-circuits via the typed-error
+    /// fail-fast path.
+    #[test]
+    fn test_transient_classifier_eof_does_not_match_buried_substring() {
+        // Service / repo identifiers carrying `EOF` interior — terminal.
+        assert!(!is_transient_network_stderr(
+            "service \"GEOFENCE-MAP\" not found: 404"
+        ));
+        assert!(!is_transient_network_stderr(
+            "manifest unknown: ghcr.io/pleme-io/GEOFFREY-runner"
+        ));
+        // Env / config identifiers — terminal.
+        assert!(!is_transient_network_stderr(
+            "GEOFENCE_API_URL not configured: 401"
+        ));
+        assert!(!is_transient_network_stderr(
+            "build target NEOFOLD failed: pre-receive hook declined"
+        ));
+        // Larger word containing `EOF` — terminal.
+        assert!(!is_transient_network_stderr(
+            "SOMEOFFICIAL deprecation warning: 403 Forbidden"
+        ));
+        // Token-adjacency edge cases — `EOFTOKEN` is one alphanumeric token,
+        // not two. The whole token must equal `EOF` for the match to fire.
+        assert!(!is_transient_network_stderr(
+            "EOFTOKEN expired: bad credentials"
+        ));
+        assert!(!is_transient_network_stderr(
+            "validation failed: TRAILEOF marker present"
+        ));
     }
 
     /// Empty stderr must NOT be classified transient. A typed error whose
