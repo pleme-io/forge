@@ -3066,16 +3066,46 @@ pub fn compose_relaxed_eligible_strict_refused(
 /// over rather than reading three independent bools. This enum lifts
 /// the same typed-sum discipline at forge's two-axis composition
 /// surface.
+///
+/// The variants are declared in tier-ladder order — `Refused`
+/// (worst) < `StagingOnly` < `Strict` (best) — so the derived
+/// [`Ord`] / [`PartialOrd`] instances pin the structural fact that
+/// the three tiers form a total order with `Refused` at the floor
+/// and `Strict` at the ceiling. The fleet-wide aggregate
+/// `tiers.into_iter().min()` reads the worst-case tier across a
+/// fleet of services — exactly the gating-floor a deploy
+/// orchestrator consults to decide "every service must sit at
+/// `>= AdmissionTier::StagingOnly` before the fleet-wide release
+/// proceeds"; the fleet-wide `tiers.into_iter().max()` reads the
+/// best-case tier — the structural ceiling a per-fleet rollout
+/// reporter surfaces as "at least one service has reached the
+/// production-ready ceiling." A consumer that wants the
+/// tier-or-higher reading (`>= StagingOnly` for "admits at any
+/// tier", `>= Strict` for "admits to production") reads it as a
+/// comparison against the typed sum rather than re-deriving the
+/// disjunction against the bool surface. The
+/// [`tests::test_compose_admission_tier_geq_staging_only_equals_compose_admission_eligible_relaxed`]
+/// and
+/// [`tests::test_compose_admission_tier_geq_strict_equals_compose_admission_eligible_strict`]
+/// pins seal the structural equivalence between the
+/// tier-or-higher reading at the typed-sum surface and the
+/// per-tier admit predicate at the bool surface.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AdmissionTier {
-    /// Production-ready: strict gate admits — promote to production.
-    Strict,
-    /// Phase 1 admits / Phase 2 holds — promote to staging, hold
-    /// production.
-    StagingOnly,
-    /// Relaxed gate refuses — hold at every tier.
+    /// Relaxed gate refuses — hold at every tier. The structural floor
+    /// of the tier ladder: every other variant compares strictly
+    /// greater under the derived [`Ord`] instance.
     Refused,
+    /// Phase 1 admits / Phase 2 holds — promote to staging, hold
+    /// production. The intermediate band of the tier ladder, sitting
+    /// strictly between [`AdmissionTier::Refused`] and
+    /// [`AdmissionTier::Strict`] under the derived [`Ord`] instance.
+    StagingOnly,
+    /// Production-ready: strict gate admits — promote to production.
+    /// The structural ceiling of the tier ladder: every other variant
+    /// compares strictly less under the derived [`Ord`] instance.
+    Strict,
 }
 
 /// Lift the three-bool admission-tier surface
@@ -10688,6 +10718,257 @@ mod tests {
                     "compose_admission_tier must equal the three-bool \
                      partition's typed lift at probe={probe:?} \
                      verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// The three [`AdmissionTier`] variants form a total order under
+    /// the derived [`Ord`] / [`PartialOrd`] instances —
+    /// `Refused < StagingOnly < Strict`. The load-bearing structural
+    /// pin every fleet-wide tier-aggregation surface relies on: a
+    /// regression that reordered the variants in the declaration (e.g.,
+    /// putting `Strict` first to read "Production-ready before
+    /// everything else") would silently flip the ladder, classifying
+    /// the production-tier ceiling as the structural floor and
+    /// inverting every fleet-wide `.min()` / `.max()` aggregation at
+    /// the consumer surface.
+    #[test]
+    fn test_admission_tier_total_order_is_refused_lt_staging_only_lt_strict() {
+        assert!(AdmissionTier::Refused < AdmissionTier::StagingOnly);
+        assert!(AdmissionTier::StagingOnly < AdmissionTier::Strict);
+        assert!(AdmissionTier::Refused < AdmissionTier::Strict);
+        assert!(AdmissionTier::Strict > AdmissionTier::StagingOnly);
+        assert!(AdmissionTier::StagingOnly > AdmissionTier::Refused);
+        assert!(AdmissionTier::Strict > AdmissionTier::Refused);
+    }
+
+    /// The derived [`Ord`] is reflexive and antisymmetric — every
+    /// variant compares equal to itself and strictly distinct from
+    /// every other variant. The load-bearing structural pin the
+    /// total-order property relies on: a regression that derived
+    /// `PartialOrd` without `Ord` (or that hand-rolled a non-total
+    /// comparator returning `None` at one cell) would fail here at
+    /// the reflexivity row.
+    #[test]
+    fn test_admission_tier_ord_is_reflexive_and_antisymmetric() {
+        let tiers = [
+            AdmissionTier::Refused,
+            AdmissionTier::StagingOnly,
+            AdmissionTier::Strict,
+        ];
+        for tier in tiers {
+            assert_eq!(tier.cmp(&tier), std::cmp::Ordering::Equal);
+            assert!(tier <= tier);
+            assert!(tier >= tier);
+        }
+        for (lhs, rhs) in tiers.iter().zip(tiers.iter().skip(1)) {
+            assert_eq!(lhs.cmp(rhs), std::cmp::Ordering::Less);
+            assert_eq!(rhs.cmp(lhs), std::cmp::Ordering::Greater);
+        }
+    }
+
+    /// Fleet-wide minimum across a slice of [`AdmissionTier`] values
+    /// reads the worst-case tier — exactly the gating-floor a deploy
+    /// orchestrator consults to decide "every service in the fleet
+    /// must sit at `>= AdmissionTier::StagingOnly` before the
+    /// fleet-wide release proceeds." The load-bearing structural pin
+    /// the fleet-wide aggregation surface relies on: a regression
+    /// that swapped the variant declaration order (or hand-rolled
+    /// the fleet-wide floor as a fold over the three bools per
+    /// consumer) would surface here as a flipped min, classifying
+    /// the production-tier ceiling as the floor.
+    #[test]
+    fn test_admission_tier_min_is_fleet_wide_worst_case_tier() {
+        assert_eq!(
+            [
+                AdmissionTier::Strict,
+                AdmissionTier::StagingOnly,
+                AdmissionTier::Refused,
+            ]
+            .into_iter()
+            .min(),
+            Some(AdmissionTier::Refused),
+        );
+        assert_eq!(
+            [AdmissionTier::Strict, AdmissionTier::StagingOnly]
+                .into_iter()
+                .min(),
+            Some(AdmissionTier::StagingOnly),
+        );
+        assert_eq!(
+            [AdmissionTier::Strict, AdmissionTier::Strict]
+                .into_iter()
+                .min(),
+            Some(AdmissionTier::Strict),
+        );
+        let empty: [AdmissionTier; 0] = [];
+        assert_eq!(empty.into_iter().min(), None);
+    }
+
+    /// Fleet-wide maximum across a slice of [`AdmissionTier`] values
+    /// reads the best-case tier — the structural ceiling a per-fleet
+    /// rollout reporter surfaces as "at least one service in the
+    /// fleet has reached the production-ready ceiling." The peer of
+    /// the fleet-wide min pin one row up — the dual aggregation at
+    /// the tier-ladder ceiling.
+    #[test]
+    fn test_admission_tier_max_is_fleet_wide_best_case_tier() {
+        assert_eq!(
+            [
+                AdmissionTier::Refused,
+                AdmissionTier::StagingOnly,
+                AdmissionTier::Strict,
+            ]
+            .into_iter()
+            .max(),
+            Some(AdmissionTier::Strict),
+        );
+        assert_eq!(
+            [AdmissionTier::Refused, AdmissionTier::StagingOnly]
+                .into_iter()
+                .max(),
+            Some(AdmissionTier::StagingOnly),
+        );
+        assert_eq!(
+            [AdmissionTier::Refused, AdmissionTier::Refused]
+                .into_iter()
+                .max(),
+            Some(AdmissionTier::Refused),
+        );
+        let empty: [AdmissionTier; 0] = [];
+        assert_eq!(empty.into_iter().max(), None);
+    }
+
+    /// The tier-or-higher reading at the typed-sum surface
+    /// (`tier >= AdmissionTier::StagingOnly`) equals the relaxed-tier
+    /// admit predicate at the bool surface
+    /// ([`compose_admission_eligible_relaxed`]) at every reachable
+    /// `(probe, verification)` pair — pinned across the 6×6 cross
+    /// product (36 cells). The load-bearing structural pin the
+    /// tier-or-higher consumer surface relies on: a regression that
+    /// reordered the variants in the declaration would flip the
+    /// ladder, silently inverting the tier-or-higher reading at every
+    /// downstream consumer that branches on
+    /// `compose_admission_tier(&p, &v) >= AdmissionTier::StagingOnly`.
+    #[test]
+    fn test_compose_admission_tier_geq_staging_only_equals_compose_admission_eligible_relaxed() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let tier_admits =
+                    compose_admission_tier(&probe, &verification) >= AdmissionTier::StagingOnly;
+                let bool_admits = compose_admission_eligible_relaxed(&probe, &verification);
+                assert_eq!(
+                    tier_admits, bool_admits,
+                    "compose_admission_tier >= StagingOnly must equal \
+                     compose_admission_eligible_relaxed at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// The tier-or-higher reading at the typed-sum surface
+    /// (`tier >= AdmissionTier::Strict`) equals the strict-tier admit
+    /// predicate at the bool surface
+    /// ([`compose_admission_eligible_strict`]) at every reachable
+    /// `(probe, verification)` pair — pinned across the 6×6 cross
+    /// product (36 cells). The peer of the relaxed-tier pin one row
+    /// up — the dual equivalence at the tier-ladder ceiling. Together
+    /// the two pins seal the tier-or-higher surface against the
+    /// per-tier bool surface at both of the two admission gates.
+    #[test]
+    fn test_compose_admission_tier_geq_strict_equals_compose_admission_eligible_strict() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let tier_admits =
+                    compose_admission_tier(&probe, &verification) >= AdmissionTier::Strict;
+                let bool_admits = compose_admission_eligible_strict(&probe, &verification);
+                assert_eq!(
+                    tier_admits, bool_admits,
+                    "compose_admission_tier >= Strict must equal \
+                     compose_admission_eligible_strict at \
+                     probe={probe:?} verification={verification:?}",
                 );
             }
         }
