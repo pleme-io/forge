@@ -159,6 +159,7 @@ macro_rules! emit_probe_coverage {
         mixed: $mixed:ident,
         has_evidence: $has_evidence:ident,
         admission_eligible_strict: $admission_strict:ident,
+        admission_eligible_relaxed: $admission_relaxed:ident,
         target: $target:literal,
         coverage: $coverage:expr,
         message: $msg:literal,
@@ -180,6 +181,7 @@ macro_rules! emit_probe_coverage {
             $mixed = __cov.is_mixed(),
             $has_evidence = __cov.has_evidence(),
             $admission_strict = __cov.is_admission_eligible_strict(),
+            $admission_relaxed = __cov.is_admission_eligible_relaxed(),
             $msg
         );
     }};
@@ -198,6 +200,7 @@ macro_rules! emit_probe_coverage {
             mixed: build_probes_mixed,
             has_evidence: build_probes_has_evidence,
             admission_eligible_strict: build_probes_admission_eligible_strict,
+            admission_eligible_relaxed: build_probes_admission_eligible_relaxed,
             $($rest)*
         )
     };
@@ -216,6 +219,7 @@ macro_rules! emit_probe_coverage {
             mixed: chart_probes_mixed,
             has_evidence: chart_probes_has_evidence,
             admission_eligible_strict: chart_probes_admission_eligible_strict,
+            admission_eligible_relaxed: chart_probes_admission_eligible_relaxed,
             $($rest)*
         )
     };
@@ -234,6 +238,7 @@ macro_rules! emit_probe_coverage {
             mixed: deployment_probes_mixed,
             has_evidence: deployment_probes_has_evidence,
             admission_eligible_strict: deployment_probes_admission_eligible_strict,
+            admission_eligible_relaxed: deployment_probes_admission_eligible_relaxed,
             $($rest)*
         )
     };
@@ -6160,7 +6165,7 @@ dependencies:
         }
     }
 
-    /// Names of the eleven probe-coverage fields the macro emits, in the
+    /// Names of the thirteen probe-coverage fields the macro emits, in the
     /// canonical order — the same order
     /// [`crate::probe_outcome::ProbeCoverage::is_fully_covered`]'s
     /// docstring four-arm matrix tabulates, extended with the orthogonal
@@ -6180,8 +6185,28 @@ dependencies:
     /// predicate at the eleventh, the typed primitive for the
     /// relaxed-staging admission gate `is_mixed() || is_fully_covered()`
     /// at one bool rather than the two-bool consumer-surface composition.
-    /// Returned with a phase prefix so each phase's pin can compare
-    /// against its own expected slice.
+    /// The twelfth `*_probes_admission_eligible_strict` field is the
+    /// Phase 2 strict-production admission gate predicate
+    /// [`crate::probe_outcome::ProbeCoverage::is_admission_eligible_strict`]
+    /// (`!is_saturated() && is_fully_covered()`) at one bool. The
+    /// thirteenth `*_probes_admission_eligible_relaxed` field is its
+    /// Phase 1 relaxed-staging peer
+    /// [`crate::probe_outcome::ProbeCoverage::is_admission_eligible_relaxed`]
+    /// (`has_evidence() && !is_saturated()`) at one bool — the Phase 1
+    /// admission gate sits adjacent to its Phase 2 sibling on the wire so
+    /// a downstream `sekiban` admission verifier reads its phase's gate
+    /// decision at one named bool rather than composing the two
+    /// component predicates (`*_probes_has_evidence == true &&
+    /// *_probes_saturated == false`) at the consumer surface. The
+    /// strict-implies-relaxed structural implication
+    /// [`crate::probe_outcome::tests::test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_probe_axis`]
+    /// holds at every reachable `ProbeCoverage` state — pinned at the
+    /// typed-primitive surface, surfaced here at the wire as the
+    /// invariant `*_probes_admission_eligible_strict == true =>
+    /// *_probes_admission_eligible_relaxed == true` a verifier can
+    /// assert across the two adjacent fields. Returned with a phase
+    /// prefix so each phase's pin can compare against its own expected
+    /// slice.
     fn expected_field_names(prefix: &str) -> Vec<String> {
         [
             "ran",
@@ -6196,6 +6221,7 @@ dependencies:
             "mixed",
             "has_evidence",
             "admission_eligible_strict",
+            "admission_eligible_relaxed",
         ]
         .iter()
         .map(|suffix| format!("{prefix}_probes_{suffix}"))
@@ -6234,7 +6260,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("build"),
-            "macro must emit the eleven build_probes_* fields in canonical \
+            "macro must emit the thirteen build_probes_* fields in canonical \
              order — a regression that dropped, re-ordered, or renamed a \
              field at the internal `@__shape` arm fails this pin",
         );
@@ -6305,6 +6331,28 @@ dependencies:
              `sekiban` admission verifier reads its phase's gate decision \
              at one bool",
         );
+        assert_eq!(
+            by_name["build_probes_admission_eligible_relaxed"], "true",
+            "the mixed `(ran: 2, absent: 1)` arm has `ran > 0` (so \
+             `has_evidence == true`, three assertions up) AND is not \
+             saturated (`is_saturated == false`, six assertions up), so \
+             the relaxed gate conjunction `has_evidence() && \
+             !is_saturated()` reads true — the typed primitive correctly \
+             ACCEPTS partial coverage at the Phase 1 staging admission \
+             gate, while `admission_eligible_strict` (the Phase 2 \
+             production gate one assertion up) REJECTS the same state. \
+             The two adjacent admission-gate fields on the wire surface \
+             the asymmetric Phase 1 / Phase 2 decision at exactly the \
+             mixed-arm corner where the two gates diverge — relaxed \
+             admits, strict refuses — so a downstream `sekiban` \
+             verifier reading its phase's gate decision reads one named \
+             bool rather than composing `has_evidence && !saturated` \
+             (Phase 1) or `!saturated && fully_covered` (Phase 2) at the \
+             consumer surface. The strict-implies-relaxed structural \
+             invariant the typed-primitive surface pins also reads at \
+             the wire: `admission_eligible_strict == false` admits the \
+             relaxed surface to read either, and at this arm reads true",
+        );
     }
 
     /// Phase 1 chart: same schema pin as the build sibling above, against
@@ -6340,7 +6388,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("chart"),
-            "macro must emit the eleven chart_probes_* fields in canonical \
+            "macro must emit the thirteen chart_probes_* fields in canonical \
              order — a regression that swapped a build/chart/deployment \
              dispatch arm's prefix mapping fails this pin",
         );
@@ -6408,6 +6456,26 @@ dependencies:
              `is_fully_covered` requires `ran > 0`) is pinned here at \
              the corner where both are simultaneously true",
         );
+        assert_eq!(
+            by_name["chart_probes_admission_eligible_relaxed"], "true",
+            "the fully-covered non-saturated ceiling at `(ran: 3, \
+             absent: 0)` has `has_evidence == true` (three assertions \
+             up) AND `is_saturated == false`, so the relaxed gate \
+             conjunction `has_evidence() && !is_saturated()` reads \
+             true. Pins the load-bearing strict-implies-relaxed \
+             invariant at the wire: `admission_eligible_strict == \
+             true` (one assertion up) at this state, and \
+             `admission_eligible_relaxed == true` here — the two \
+             adjacent admission-gate fields cannot drift apart in the \
+             direction `strict == true && relaxed == false` without a \
+             violation of the structural implication \
+             `is_admission_eligible_strict => \
+             is_admission_eligible_relaxed` the typed-primitive surface \
+             pins at every reachable `ProbeCoverage` state. At the \
+             fully-covered ceiling both gates agree at the admitting \
+             corner, dual of the mixed-arm corner where they diverge \
+             (relaxed admits / strict refuses) the build sibling pins",
+        );
     }
 
     /// Phase 2 deployment: same schema pin as the build/chart siblings,
@@ -6451,7 +6519,7 @@ dependencies:
         assert_eq!(
             probe_field_names,
             expected_field_names("deployment"),
-            "macro must emit the eleven deployment_probes_* fields in \
+            "macro must emit the thirteen deployment_probes_* fields in \
              canonical order",
         );
         let by_name: std::collections::HashMap<_, _> = captured.fields.iter().cloned().collect();
@@ -6532,6 +6600,27 @@ dependencies:
              Pins the implication `!has_evidence => !is_admission_eligible_strict` \
              at the floor where no evidence is collected: a state that \
              fails the relaxed gate cannot pass the stricter gate",
+        );
+        assert_eq!(
+            by_name["deployment_probes_admission_eligible_relaxed"], "false",
+            "the all-absent floor at `(ran: 0, absent: 7)` has \
+             `has_evidence == false` (`ran == 0`, three assertions up), \
+             so the relaxed gate conjunction `has_evidence() && \
+             !is_saturated()` reads false — today's \
+             `compose_product_certification` call-site state is REJECTED \
+             by the Phase 1 staging gate too, mirroring the Phase 2 \
+             rejection one assertion up. The all-absent floor is the \
+             both-gates-reject corner of the admission matrix, dual of \
+             the chart-sibling fully-covered ceiling where both gates \
+             admit: the two extremes of the admission decision agree at \
+             both the floor (here) and the ceiling (chart sibling), \
+             diverging only at the interior mixed arm (build sibling) \
+             where relaxed admits and strict refuses. The wire surface \
+             now carries both gate decisions at adjacent fields so a \
+             downstream `sekiban` verifier reading the Phase 1 / Phase 2 \
+             cascade reads two named bools rather than composing the \
+             four-component `has_evidence`/`saturated`/`fully_covered` \
+             matrix at the consumer surface per phase",
         );
     }
 
@@ -6663,6 +6752,29 @@ dependencies:
              gating on either ratio surface would silently accept the \
              drift; the strict gate's `!is_saturated()` factor \
              forecloses that admission at the typed-primitive surface",
+        );
+        assert_eq!(
+            by_name["build_probes_admission_eligible_relaxed"], "false",
+            "the relaxed gate `has_evidence() && !is_saturated()` reads \
+             false at the post-saturation state precisely because \
+             `is_saturated == true` (three assertions up) — even though \
+             `has_evidence == true` here (`ran == MAX > 0`, two \
+             assertions up), the saturation factor of the relaxed \
+             conjunction REJECTS the state. The load-bearing dual of \
+             the strict gate's saturation clamp one assertion up: \
+             `is_saturated == true` clamps BOTH admission gates to \
+             reject, regardless of the orthogonal completeness / \
+             evidence factors. The post-saturation state is the \
+             both-gates-reject corner of the admission matrix at the \
+             trust-broken ceiling, dual of the all-absent floor (the \
+             deployment-sibling both-gates-reject corner at the \
+             no-evidence floor): the saturation clamp and the \
+             no-evidence floor are the two structural fail-closed \
+             reasons either gate refuses on, surfaced uniformly across \
+             both gate predicates at adjacent wire fields. The \
+             saturation-robust trustworthiness discipline the typed \
+             primitive establishes at `is_saturated` (commit 23fc103) \
+             reaches both admission-gate surfaces at the wire here",
         );
     }
 }
