@@ -798,6 +798,68 @@ impl ProbeCoverage {
     pub fn is_admission_eligible_strict(&self) -> bool {
         !self.is_saturated() && self.is_fully_covered()
     }
+
+    /// Per-axis structural floor-refuse peer of
+    /// [`is_admission_eligible_strict`] over the no-evidence axis — the
+    /// negation `!self.is_admission_eligible_strict()` named at one
+    /// inherent-method site so downstream consumers reading the per-
+    /// axis "this coverage alone refuses the strict gate" surface do
+    /// not retype `!coverage.is_admission_eligible_strict()` per call
+    /// site. Reads `true` iff the no-evidence axis fails AT LEAST ONE
+    /// of the two strict-gate factors — either the trustworthiness
+    /// factor ([`is_saturated`] holds, dropping past-ceiling
+    /// increments through the saturating-add clamp) OR the
+    /// completeness factor ([`is_fully_covered`] fails: at least one
+    /// counted probe collapsed to its absent default, or no probes
+    /// were counted at all).
+    ///
+    /// The structural complement of [`is_admission_eligible_strict`]
+    /// at the typed-method surface: the strict gate's two-factor
+    /// conjunction `!is_saturated() && is_fully_covered()` (its admit
+    /// reading) negates by De Morgan to the two-factor disjunction
+    /// `is_saturated() || !is_fully_covered()` (its refuse reading),
+    /// and the typed-method peer surfaces both readings at one
+    /// inherent-method site each so a downstream consumer that
+    /// branches on the per-axis admit/refuse reading at the strict
+    /// gate reads one method, not the literal negation. Mirrors the
+    /// admit/refuse predicate pair on [`AdmissionTier`]
+    /// ([`AdmissionTier::admits_strict`] /
+    /// [`AdmissionTier::refuses_strict`]) at the per-axis no-evidence
+    /// surface, closing the typed-method admit/refuse duality at the
+    /// per-axis level it was previously open at while the typed-sum
+    /// [`AdmissionTier`] surface carried the closed pair.
+    ///
+    /// At every reachable `(ran, absent)` value, the predicate equals
+    /// the documented De Morgan complement exactly — the structural
+    /// equivalence
+    /// `refuses_admission_strict() == !is_admission_eligible_strict()`
+    /// is pinned across the empty / all-absent / mixed / fully-covered
+    /// arms AND each of the three saturated representatives by
+    /// [`tests::test_probe_coverage_refuses_admission_strict_equals_negation_of_is_admission_eligible_strict`],
+    /// and the disjoint-and-covering partition
+    /// `refuses_admission_strict() XOR is_admission_eligible_strict()
+    /// == true` is pinned across the same representatives by
+    /// [`tests::test_probe_coverage_refuses_admission_strict_xor_is_admission_eligible_strict_partitions`].
+    /// Together the two invariants pin the two predicates as exact
+    /// complements over every reachable per-axis state: no value
+    /// satisfies both, no value satisfies neither.
+    ///
+    /// [`is_admission_eligible_strict`]: ProbeCoverage::is_admission_eligible_strict
+    /// [`is_fully_covered`]: ProbeCoverage::is_fully_covered
+    /// [`is_saturated`]: ProbeCoverage::is_saturated
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-axis strict-
+    /// gate refuse predicate is named at one site (here), not re-
+    /// inlined as `!coverage.is_admission_eligible_strict()` per
+    /// downstream consumer. THEORY.md §V.4 / §VII.1 honesty channel:
+    /// the named predicate surfaces "this no-evidence axis alone
+    /// refuses the strict-production gate," the load-bearing per-axis
+    /// reading the deploy orchestrator's strict-gate decomposition
+    /// consults to attribute a strict-refuse aggregate verdict back
+    /// to the axis that broke the conjunction.
+    pub fn refuses_admission_strict(&self) -> bool {
+        !self.is_admission_eligible_strict()
+    }
 }
 
 /// Identity element of the [`Add`](std::ops::Add) impl below: the empty-
@@ -1644,6 +1706,74 @@ impl VerificationCoverage {
     /// surface.
     pub fn is_admission_eligible_strict(&self) -> bool {
         !self.is_saturated() && self.is_fully_verified()
+    }
+
+    /// Per-axis structural floor-refuse peer of
+    /// [`is_admission_eligible_strict`] over the verification-
+    /// trustworthiness axis — the negation
+    /// `!self.is_admission_eligible_strict()` named at one inherent-
+    /// method site so downstream consumers reading the per-axis "this
+    /// verification alone refuses the strict gate" surface do not
+    /// retype `!verification.is_admission_eligible_strict()` per call
+    /// site. The orthogonal-axis peer of
+    /// [`ProbeCoverage::refuses_admission_strict`]: where the no-
+    /// evidence axis floor-refuse predicate reads the two-factor
+    /// disjunction `is_saturated() || !is_fully_covered()`, this
+    /// reads the verification-axis disjunction `is_saturated() ||
+    /// !is_fully_verified()` — same structural shape, the per-axis
+    /// completeness factor swapped from `is_fully_covered()` to
+    /// `is_fully_verified()` to read against the verification axis's
+    /// component pair (`verified` / `unverified`) rather than the
+    /// no-evidence axis's pair (`ran` / `absent`).
+    ///
+    /// The structural complement of [`is_admission_eligible_strict`]
+    /// at the typed-method surface: the strict gate's two-factor
+    /// conjunction `!is_saturated() && is_fully_verified()` (its
+    /// admit reading) negates by De Morgan to the two-factor
+    /// disjunction `is_saturated() || !is_fully_verified()` (its
+    /// refuse reading), and the typed-method peer surfaces both
+    /// readings at one inherent-method site each so a downstream
+    /// consumer that branches on the per-axis admit/refuse reading at
+    /// the strict gate reads one method, not the literal negation.
+    /// Mirrors the admit/refuse predicate pair on [`AdmissionTier`]
+    /// ([`AdmissionTier::admits_strict`] /
+    /// [`AdmissionTier::refuses_strict`]) at the per-axis
+    /// verification-trustworthiness surface, closing the typed-method
+    /// admit/refuse duality at every per-axis level that the typed-
+    /// sum surface already carried at the typed-sum
+    /// [`AdmissionTier`] surface.
+    ///
+    /// At every reachable `(verified, unverified)` value, the
+    /// predicate equals the documented De Morgan complement exactly —
+    /// the structural equivalence
+    /// `refuses_admission_strict() == !is_admission_eligible_strict()`
+    /// is pinned across the empty / all-unverified / mixed / fully-
+    /// verified arms AND each of the three saturated representatives
+    /// by
+    /// [`tests::test_verification_refuses_admission_strict_equals_negation_of_is_admission_eligible_strict`],
+    /// and the disjoint-and-covering partition
+    /// `refuses_admission_strict() XOR is_admission_eligible_strict()
+    /// == true` is pinned across the same representatives by
+    /// [`tests::test_verification_refuses_admission_strict_xor_is_admission_eligible_strict_partitions`].
+    /// Together the two invariants pin the two predicates as exact
+    /// complements over every reachable per-axis state: no value
+    /// satisfies both, no value satisfies neither.
+    ///
+    /// [`is_admission_eligible_strict`]: VerificationCoverage::is_admission_eligible_strict
+    /// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
+    /// [`is_saturated`]: VerificationCoverage::is_saturated
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-axis strict-
+    /// gate refuse predicate is named at one site (here), not re-
+    /// inlined as `!verification.is_admission_eligible_strict()` per
+    /// downstream consumer. THEORY.md §V.4 / §VII.1 honesty channel:
+    /// the named predicate surfaces "this verification axis alone
+    /// refuses the strict-production gate," the load-bearing per-
+    /// axis reading the deploy orchestrator's strict-gate
+    /// decomposition consults to attribute a strict-refuse aggregate
+    /// verdict back to the axis that broke the conjunction.
+    pub fn refuses_admission_strict(&self) -> bool {
+        !self.is_admission_eligible_strict()
     }
 }
 
@@ -5039,6 +5169,146 @@ mod tests {
         );
     }
 
+    /// The per-axis strict-gate floor-refuse predicate
+    /// [`ProbeCoverage::refuses_admission_strict`] reads `true` at
+    /// every reachable per-axis arm that fails the strict gate at one
+    /// or both of its two factors — the empty, all-absent, mixed, and
+    /// every saturated representative — and `false` at the
+    /// non-saturated fully-covered admit arm. The single-pin matrix
+    /// the documented De Morgan complement
+    /// `!is_admission_eligible_strict()` already pins indirectly
+    /// across the same representatives in
+    /// `test_is_admission_eligible_strict_*`, hoisted to one explicit
+    /// per-representative pin so a regression that hand-rolled the
+    /// body (e.g., `self.is_saturated() && !self.is_fully_covered()`
+    /// — the wrong combinator on the inner disjunction) surfaces here
+    /// rather than only at the De Morgan-equivalence pin below.
+    #[test]
+    fn test_probe_coverage_refuses_admission_strict_at_each_representative() {
+        let refused_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        for c in refused_cases {
+            assert!(
+                c.refuses_admission_strict(),
+                "per-axis strict-gate floor-refuse predicate must read \
+                 true at {c:?} — every arm except the non-saturated \
+                 fully-covered admit arm refuses the strict gate at the \
+                 no-evidence axis",
+            );
+        }
+
+        let admit = ProbeCoverage { ran: 7, absent: 0 };
+        assert!(
+            !admit.refuses_admission_strict(),
+            "per-axis strict-gate floor-refuse predicate must read false \
+             at {admit:?} — the non-saturated fully-covered arm is the \
+             one reachable state that admits the strict gate at the \
+             no-evidence axis",
+        );
+    }
+
+    /// Structural De Morgan equivalence with
+    /// [`ProbeCoverage::is_admission_eligible_strict`] — pinned across
+    /// the same seven representatives the documented composition pin
+    /// `test_is_admission_eligible_strict_equals_documented_composition`
+    /// already walks (empty, all-absent non-saturated, all-absent
+    /// saturated, mixed non-saturated, mixed saturated, fully-covered
+    /// non-saturated, fully-covered saturated). The typed-method peer
+    /// is the exact De Morgan complement of the admit predicate at
+    /// every reachable per-axis state, sealing the typed-method
+    /// admit/refuse pair against drift at the per-axis no-evidence
+    /// surface.
+    #[test]
+    fn test_probe_coverage_refuses_admission_strict_equals_negation_of_is_admission_eligible_strict(
+    ) {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        for c in cases {
+            assert_eq!(
+                c.refuses_admission_strict(),
+                !c.is_admission_eligible_strict(),
+                "per-axis strict-gate refuse predicate must equal the \
+                 De Morgan complement of the admit predicate at {c:?} — \
+                 a regression that drifted the body would fail this pin",
+            );
+        }
+    }
+
+    /// Disjoint-and-covering partition: at every reachable per-axis
+    /// state, exactly one of [`ProbeCoverage::refuses_admission_strict`]
+    /// and [`ProbeCoverage::is_admission_eligible_strict`] reads
+    /// `true`. No value satisfies both (the two predicates are
+    /// disjoint); no value satisfies neither (the two predicates
+    /// together cover every reachable state). The XOR-partition pin
+    /// is the structural seal against the drift class a regression
+    /// that broke the De Morgan complement could otherwise admit
+    /// silently (e.g., a body that returned `false` uniformly would
+    /// pass the disjointness arm at every state but fail the
+    /// coverage arm everywhere except the non-saturated fully-covered
+    /// admit state).
+    #[test]
+    fn test_probe_coverage_refuses_admission_strict_xor_is_admission_eligible_strict_partitions() {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        for c in cases {
+            let refuses = c.refuses_admission_strict();
+            let admits = c.is_admission_eligible_strict();
+            assert!(
+                refuses ^ admits,
+                "per-axis admit/refuse pair must partition every \
+                 reachable state — XOR == true at {c:?}, got \
+                 refuses={refuses}, admits={admits}",
+            );
+        }
+    }
+
     /// Pin the load-bearing [`VerifiedOutcome`] trait invariant against
     /// the unit-variant form: only the `Verified` arm reads `true`, the
     /// negative-evidence and absent-probe arms read `false`. The macro-
@@ -7038,6 +7308,180 @@ mod tests {
             "any phase contributing an unverified record breaks the \
              aggregate's strict gate — {aggregate_with_unverified:?}",
         );
+    }
+
+    /// The per-axis strict-gate floor-refuse predicate
+    /// [`VerificationCoverage::refuses_admission_strict`] reads `true`
+    /// at every reachable per-axis arm that fails the strict gate at
+    /// one or both of its two factors — the empty, all-unverified,
+    /// mixed, and every saturated representative — and `false` at the
+    /// non-saturated fully-verified admit arm. Mirrors
+    /// `test_probe_coverage_refuses_admission_strict_at_each_representative`
+    /// at the verification-trustworthiness axis exactly: the same
+    /// structural seven-representative matrix, the per-axis component
+    /// pair `verified` / `unverified` swapped in for the no-evidence
+    /// axis's `ran` / `absent`.
+    #[test]
+    fn test_verification_refuses_admission_strict_at_each_representative() {
+        let refused_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for c in refused_cases {
+            assert!(
+                c.refuses_admission_strict(),
+                "per-axis strict-gate floor-refuse predicate must read \
+                 true at {c:?} — every arm except the non-saturated \
+                 fully-verified admit arm refuses the strict gate at \
+                 the verification-trustworthiness axis",
+            );
+        }
+
+        let admit = VerificationCoverage {
+            verified: 5,
+            unverified: 0,
+        };
+        assert!(
+            !admit.refuses_admission_strict(),
+            "per-axis strict-gate floor-refuse predicate must read false \
+             at {admit:?} — the non-saturated fully-verified arm is the \
+             one reachable state that admits the strict gate at the \
+             verification-trustworthiness axis",
+        );
+    }
+
+    /// Structural De Morgan equivalence with
+    /// [`VerificationCoverage::is_admission_eligible_strict`] — pinned
+    /// across the same seven representatives the documented
+    /// composition pin
+    /// `test_verification_is_admission_eligible_strict_equals_documented_composition`
+    /// already walks. The typed-method peer is the exact De Morgan
+    /// complement of the admit predicate at every reachable per-axis
+    /// state, sealing the typed-method admit/refuse pair against
+    /// drift at the per-axis verification-trustworthiness surface,
+    /// mirroring the no-evidence-axis peer.
+    #[test]
+    fn test_verification_refuses_admission_strict_equals_negation_of_is_admission_eligible_strict()
+    {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for c in cases {
+            assert_eq!(
+                c.refuses_admission_strict(),
+                !c.is_admission_eligible_strict(),
+                "per-axis strict-gate refuse predicate must equal the \
+                 De Morgan complement of the admit predicate at {c:?} — \
+                 a regression that drifted the body would fail this pin",
+            );
+        }
+    }
+
+    /// Disjoint-and-covering partition: at every reachable per-axis
+    /// state, exactly one of
+    /// [`VerificationCoverage::refuses_admission_strict`] and
+    /// [`VerificationCoverage::is_admission_eligible_strict`] reads
+    /// `true`. The orthogonal-axis peer of
+    /// `test_probe_coverage_refuses_admission_strict_xor_is_admission_eligible_strict_partitions`
+    /// at the verification-trustworthiness axis: with both axis
+    /// XOR-partition pins sealed, the typed-method admit/refuse
+    /// matrix at the strict gate closes the per-axis surface
+    /// against gaps and overlaps at both orthogonal axes
+    /// simultaneously — mirroring the same XOR-partition seal the
+    /// typed-sum [`AdmissionTier::refuses_strict`] peer (commit
+    /// aec7d7c) carries at the typed-sum surface.
+    #[test]
+    fn test_verification_refuses_admission_strict_xor_is_admission_eligible_strict_partitions() {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for c in cases {
+            let refuses = c.refuses_admission_strict();
+            let admits = c.is_admission_eligible_strict();
+            assert!(
+                refuses ^ admits,
+                "per-axis admit/refuse pair must partition every \
+                 reachable state at the verification-trustworthiness \
+                 axis — XOR == true at {c:?}, got refuses={refuses}, \
+                 admits={admits}",
+            );
+        }
     }
 
     /// Parallel-composed strict gate is `true` exactly when BOTH
