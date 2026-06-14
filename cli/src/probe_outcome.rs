@@ -4041,6 +4041,84 @@ impl AdmissionTier {
     pub fn refuses_strict(&self) -> bool {
         *self < Self::Strict
     }
+
+    /// True iff this tier names the staging-only middle band of the
+    /// tier ladder — i.e., the relaxed (Phase 1) gate admits AND the
+    /// strict (Phase 2) gate refuses. The typed-method peer of the
+    /// parallel-axis bool helper [`compose_relaxed_eligible_strict_refused`]
+    /// (commit aa40b8f) at the typed-sum surface: the
+    /// asymmetric-set-difference reading "relaxed admits MINUS
+    /// strict admits" — the deploy-to-staging-but-hold-production
+    /// band the prior commit named at the bool surface — hoisted
+    /// here to one inherent-method site on [`AdmissionTier`] so
+    /// downstream consumers reading "this tier holds at the
+    /// intermediate staging band" do not retype
+    /// `tier.admits_relaxed() && tier.refuses_strict()` (or
+    /// `*tier == AdmissionTier::StagingOnly` against the variant
+    /// directly) per call site.
+    ///
+    /// The structural decomposition
+    /// `is_staging_only() == admits_relaxed() && refuses_strict()`
+    /// is the load-bearing form, not the variant-equality
+    /// `*self == Self::StagingOnly` — because under the present
+    /// three-variant ladder both forms agree, but the
+    /// method-composition form preserves the band reading across a
+    /// future tier addition strictly between `Refused` and
+    /// `StagingOnly` (e.g., a `Pending` band that admits neither
+    /// gate, which would correctly read `is_staging_only() == false`
+    /// at the new variant under both forms) and across a future
+    /// fourth tier strictly above `Strict` that subsumes the strict
+    /// gate (which the variant-equality form would silently
+    /// misclassify by leaving the band at `StagingOnly` only,
+    /// dropping the new strict-admits ceiling). The
+    /// method-composition form rides the [`admits_relaxed`] /
+    /// [`refuses_strict`] ladder readings, so a future ladder
+    /// extension that updates the two method bodies coherently
+    /// updates [`is_staging_only`] coherently in turn — no
+    /// per-call-site drift.
+    ///
+    /// Closes the three-variant ladder at the named-predicate
+    /// surface: combined with [`admits_strict`] (commit 05f5071)
+    /// naming the `Strict` ceiling and [`refuses_relaxed`]
+    /// (commit bb0110e) naming the `Refused` floor, every ladder
+    /// position now carries an inherent-method predicate at the
+    /// typed-sum surface. The disjoint-and-covering XOR partition
+    /// `admits_strict() XOR is_staging_only() XOR refuses_relaxed()`
+    /// holds at every variant — pinned by
+    /// [`tests::test_admission_tier_is_staging_only_three_way_partition_covers_ladder`]
+    /// — so a downstream consumer that branches on the admission
+    /// tier (production-eligible / staging-only / refused) reads the
+    /// three predicates as a disjoint cover rather than a nested
+    /// if-else cascade that would inherit a drift class on the day
+    /// a fourth tier is added.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the staging-only band
+    /// reading is named at one site (here), not re-typed as
+    /// `tier.admits_relaxed() && tier.refuses_strict()` or
+    /// `*tier == AdmissionTier::StagingOnly` per downstream consumer.
+    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// "this tier holds at the intermediate staging band" — the
+    /// load-bearing reading the deploy orchestrator consults to
+    /// decide whether to advance the per-tier service to staging
+    /// but hold before production.
+    ///
+    /// The per-variant pin
+    /// [`tests::test_admission_tier_is_staging_only_at_each_variant`]
+    /// nails the predicate at all three variants; the structural
+    /// equivalence
+    /// [`tests::test_admission_tier_is_staging_only_equals_eq_staging_only`]
+    /// pins the variant-equality form under the present ladder; the
+    /// method-composition equivalence
+    /// [`tests::test_admission_tier_is_staging_only_equals_admits_relaxed_and_refuses_strict`]
+    /// pins the load-bearing decomposition; the consumer-level
+    /// equivalence
+    /// [`tests::test_compose_admission_tier_is_staging_only_equals_compose_relaxed_eligible_strict_refused`]
+    /// pins the per-axis composition at every reachable
+    /// `(probe, verification)` pair across the 6×6 cross product.
+    #[allow(dead_code)]
+    pub fn is_staging_only(&self) -> bool {
+        self.admits_relaxed() && self.refuses_strict()
+    }
 }
 
 /// Lift the three-bool admission-tier surface
@@ -14426,6 +14504,191 @@ mod tests {
                     method_refuses, bool_refuses,
                     "compose_admission_tier.refuses_strict must equal \
                      !compose_admission_eligible_strict at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// `AdmissionTier::is_staging_only` reads `true` only at the
+    /// `StagingOnly` variant and `false` at the two flanking
+    /// variants. The per-variant pin nails the staging-only band
+    /// predicate at all three ladder positions: a regression that
+    /// hand-rolled the method body as `*self == Self::Refused`
+    /// (wrong floor) would flip `Refused` and `StagingOnly`, and
+    /// a regression that hand-rolled it as `*self == Self::Strict`
+    /// (wrong ceiling) would flip `Strict` and `StagingOnly`.
+    /// Pinned at all three variants explicitly.
+    #[test]
+    fn test_admission_tier_is_staging_only_at_each_variant() {
+        assert!(!AdmissionTier::Refused.is_staging_only());
+        assert!(AdmissionTier::StagingOnly.is_staging_only());
+        assert!(!AdmissionTier::Strict.is_staging_only());
+    }
+
+    /// The typed-method reading `tier.is_staging_only()` equals the
+    /// literal-comparison reading `*tier == AdmissionTier::StagingOnly`
+    /// at every variant under the present three-variant ladder. The
+    /// structural equivalence the band-peer typed-method preserves
+    /// against the variant-equality surface: any future regression
+    /// that drifted the method body (e.g., hand-rolled the predicate
+    /// as `tier.admits_relaxed() && !tier.admits_strict()` — which
+    /// agrees with the load-bearing
+    /// `admits_relaxed() && refuses_strict()` composition under the
+    /// present ladder but expresses a different reading) would
+    /// survive the per-variant pin above and surface here at the
+    /// typed-method-equals-variant surface.
+    #[test]
+    fn test_admission_tier_is_staging_only_equals_eq_staging_only() {
+        for tier in [
+            AdmissionTier::Refused,
+            AdmissionTier::StagingOnly,
+            AdmissionTier::Strict,
+        ] {
+            assert_eq!(
+                tier.is_staging_only(),
+                tier == AdmissionTier::StagingOnly,
+                "is_staging_only must equal == StagingOnly at tier={tier:?}",
+            );
+        }
+    }
+
+    /// The load-bearing structural decomposition
+    /// `is_staging_only() == admits_relaxed() && refuses_strict()`
+    /// holds at every [`AdmissionTier`] variant. The asymmetric
+    /// set-difference reading the staging-only band the typed-method
+    /// names: the band is the relaxed-admitted ring MINUS the
+    /// strict-admitted subset, NOT the symmetric difference. A
+    /// regression that composed the body as the disjunction
+    /// `admits_relaxed() || refuses_strict()` (the symmetric
+    /// difference complement) would silently admit `Refused` AND
+    /// `Strict` as staging-only at the per-variant pin above — but
+    /// this pin is the structural one the method definition
+    /// commits to, and it pins the load-bearing composition that
+    /// rides the [`admits_relaxed`] / [`refuses_strict`] ladder
+    /// readings rather than the variant identity, so a future
+    /// fourth-tier addition between `Refused` and `StagingOnly`
+    /// (a `Pending` band) preserves the band semantics coherently
+    /// across the method bodies it composes from.
+    #[test]
+    fn test_admission_tier_is_staging_only_equals_admits_relaxed_and_refuses_strict() {
+        for tier in [
+            AdmissionTier::Refused,
+            AdmissionTier::StagingOnly,
+            AdmissionTier::Strict,
+        ] {
+            assert_eq!(
+                tier.is_staging_only(),
+                tier.admits_relaxed() && tier.refuses_strict(),
+                "is_staging_only must equal admits_relaxed && refuses_strict at tier={tier:?}",
+            );
+        }
+    }
+
+    /// The three-way partition invariant
+    /// `admits_strict() XOR is_staging_only() XOR refuses_relaxed()`
+    /// holds at every [`AdmissionTier`] variant. The structural pin
+    /// that nails the three predicates as exactly partitioning the
+    /// tier ladder at the three named-method surfaces — every
+    /// variant satisfies exactly one of the three, and no variant
+    /// satisfies more than one. Combined with [`admits_strict`]
+    /// (commit 05f5071) naming the `Strict` ceiling and
+    /// [`refuses_relaxed`] (commit bb0110e) naming the `Refused`
+    /// floor, this pin seals every ladder position at the named-
+    /// predicate surface: the [`compose_admission_tier`] consumer
+    /// that branches on the admission tier
+    /// (production-eligible / staging-only / refused) reads three
+    /// disjoint predicates rather than a nested if-else cascade
+    /// that would inherit a drift class on the day a fourth tier
+    /// is added. A regression that broke the partition (e.g., a
+    /// future tier addition between `Refused` and `StagingOnly`
+    /// that the band predicates classified inconsistently) would
+    /// surface here as a XOR-fails reading at the new variant.
+    #[test]
+    fn test_admission_tier_is_staging_only_three_way_partition_covers_ladder() {
+        for tier in [
+            AdmissionTier::Refused,
+            AdmissionTier::StagingOnly,
+            AdmissionTier::Strict,
+        ] {
+            assert!(
+                tier.admits_strict() ^ tier.is_staging_only() ^ tier.refuses_relaxed(),
+                "admits_strict XOR is_staging_only XOR refuses_relaxed must hold at tier={tier:?}",
+            );
+        }
+    }
+
+    /// The typed-method reading at the consumer surface
+    /// `compose_admission_tier(&p, &v).is_staging_only()` equals
+    /// the per-axis bool reading
+    /// [`compose_relaxed_eligible_strict_refused`] at every
+    /// reachable `(probe, verification)` pair — pinned across the
+    /// 6×6 cross product of per-axis representatives (36 cells).
+    /// The load-bearing structural pin the band-peer typed-method
+    /// surfaces at the consumer site: a regression that broke
+    /// either the [`compose_admission_tier`] constructor (e.g.,
+    /// reordered the priority branches in a way that violated the
+    /// strict-implies-relaxed invariant) OR the
+    /// [`AdmissionTier::is_staging_only`] method body (e.g.,
+    /// hand-rolled the predicate as `*self == Self::Refused`
+    /// directly against the variant rather than the
+    /// admits_relaxed && refuses_strict composition) would surface
+    /// here as a per-cell mismatch against the bool surface. The
+    /// typed-method-surface peer of
+    /// [`test_compose_admission_tier_staging_only_equals_compose_relaxed_eligible_strict_refused`]
+    /// — same 6×6 cross product, same per-axis representatives.
+    #[test]
+    fn test_compose_admission_tier_is_staging_only_equals_compose_relaxed_eligible_strict_refused()
+    {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let method_staging =
+                    compose_admission_tier(&probe, &verification).is_staging_only();
+                let bool_staging = compose_relaxed_eligible_strict_refused(&probe, &verification);
+                assert_eq!(
+                    method_staging, bool_staging,
+                    "compose_admission_tier.is_staging_only must equal \
+                     compose_relaxed_eligible_strict_refused at \
                      probe={probe:?} verification={verification:?}",
                 );
             }
