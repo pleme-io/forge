@@ -3562,6 +3562,165 @@ pub fn compose_is_incomplete_or_saturated(
     !compose_is_fully_complete(probe, verification) || compose_is_saturated(probe, verification)
 }
 
+/// Parallel-composed strict-gate refuse predicate over the two
+/// orthogonal typed-primitive surfaces — the two-bool disjunction
+/// `probe.refuses_admission_strict() ||
+///  verification.refuses_admission_strict()` collapsed to one bool at
+/// one site. Reads `true` iff AT LEAST ONE counted axis refuses the
+/// Phase 2 (strict) production gate on its own — the load-bearing
+/// any-axis-refuses-strict reading the fleet-wide aggregator consults
+/// to fail-closed at the strict tier with the kind-of-claim preserved
+/// at the named per-axis-refuse surface (rather than at the De Morgan
+/// fail-closed-disjunction surface [`compose_is_incomplete_or_saturated`]
+/// reads against the De Morgan-decomposed factors `compose_is_fully_complete`
+/// and `compose_is_saturated`).
+///
+/// The per-axis-refuse-disjunction form (not the De Morgan
+/// incomplete-OR-saturated form) is the load-bearing name at the
+/// parallel-axis surface. The two forms are structurally equivalent —
+/// both equal `!compose_admission_eligible_strict(p, v)` at every
+/// reachable `(probe, verification)` pair, because
+/// `compose_admission_eligible_strict ==
+/// p.is_admission_eligible_strict() && v.is_admission_eligible_strict()`
+/// (commit 7d818bd's per-axis conjunction form) and
+/// `p.refuses_admission_strict() == !p.is_admission_eligible_strict()`
+/// at each per-axis surface (commit 6f6ef14), so
+/// `compose_refuses_admission_strict == !(p.is_admission_eligible_strict()
+/// && v.is_admission_eligible_strict()) ==
+/// !compose_admission_eligible_strict`. But the surface naming is the
+/// load-bearing distinction: a downstream consumer attributing a
+/// strict-refuse aggregate verdict back to its contributing axis reads
+/// `compose_refuses_admission_strict` together with the per-axis
+/// [`ProbeCoverage::refuses_admission_strict`] /
+/// [`VerificationCoverage::refuses_admission_strict`] peers (commit
+/// 6f6ef14) and the typed-sum [`AdmissionTier::refuses_strict`] peer
+/// (commit aec7d7c) as a uniformly named cross-surface refuse family
+/// (per-axis / parallel-axis / typed-sum), not as a heterogeneous
+/// "named-refuse on the per-axis surface, De Morgan fail-closed on
+/// the parallel-axis surface, named-refuse on the typed-sum surface"
+/// pattern that would inherit a drift class on the day a third
+/// orthogonal axis is added — the per-axis refuse peer extends to the
+/// new axis at its inherent-method site, and this helper extends in
+/// lockstep by adding the new disjunct, mirroring the discipline the
+/// per-axis and typed-sum refuse peers already established.
+///
+/// The structural strict-gate peer at the parallel-axis surface that
+/// closes the surface-naming equivalence between the named-refuse
+/// form and the De Morgan fail-closed-disjunction form
+/// [`compose_is_incomplete_or_saturated`] (commit 9a9e97a). The
+/// relaxed-gate parallel-axis admit
+/// [`compose_admission_eligible_relaxed`] (commit e6810b2) uses the
+/// `has_evidence ANYWHERE && trust EVERYWHERE` aggregation — NOT the
+/// per-axis-AND-of-admits — so the per-axis-OR-of-refuses at the
+/// relaxed-gate threshold does NOT compose to a single named
+/// parallel-axis refuse equivalent to `!compose_admission_eligible_relaxed`.
+/// The strict-gate parallel-axis admit
+/// [`compose_admission_eligible_strict`] (commit 7d818bd), in
+/// contrast, IS the per-axis-AND-of-admits, so its De Morgan
+/// complement IS the per-axis-OR-of-refuses surfaced here. The
+/// asymmetry between the two gates at the parallel-axis surface is a
+/// structural property of the relaxed-gate's evidence-OR aggregation
+/// vs. the strict-gate's completeness-AND aggregation — this helper
+/// surfaces only the strict-gate side, where the surface-naming
+/// equivalence holds exactly.
+///
+/// Disjunction (not conjunction) is structurally load-bearing on the
+/// outer combinator: the strict gate refuses iff AT LEAST ONE axis
+/// refuses on its own — the per-axis refuse propagates to the
+/// parallel-axis refuse via OR, mirroring the dual where the
+/// parallel-axis admit conjuncts the per-axis admits via AND
+/// (commit 7d818bd). A regression that composed the conjunction
+/// `p.refuses_admission_strict() && v.refuses_admission_strict()`
+/// would silently admit every state where ONE axis refuses and the
+/// other admits (e.g., the mixed-arm probe with fully-verified
+/// verification: the probe axis refuses strict through the
+/// incompleteness disjunct but the verification axis admits, so the
+/// parallel-axis strict-refuse correctly reads `true`, but the
+/// conjunction regression would read `false` — silently admitting
+/// the one-axis-incomplete state as strict-eligible, exactly the
+/// drift class the named-disjunction form forecloses).
+///
+/// Saturation-robust by construction: each per-axis arm predicate
+/// inherits the saturation-robustness of the per-axis
+/// `refuses_admission_strict` peer (commit 6f6ef14), which in turn
+/// inherits from `is_saturated` (commit 70fa38a /
+/// VerificationCoverage::is_saturated). At the saturated-fully-
+/// evidenced arm `({ran: usize::MAX, absent: 0}, {verified:
+/// usize::MAX, unverified: 0})` — where every strict-gate ratio
+/// surface loses past-ceiling increments — each per-axis
+/// `refuses_admission_strict` reads `true` through the saturation
+/// disjunct (`is_saturated == true`), so the parallel-axis strict-
+/// refuse correctly reads `true` through either per-axis disjunct,
+/// mirroring the fail-closed verdict
+/// [`compose_is_incomplete_or_saturated`] reaches through its
+/// second disjunct.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented per-axis-refuse disjunction exactly — the
+/// structural equivalence
+/// `compose_refuses_admission_strict(p, v) ==
+/// p.refuses_admission_strict() || v.refuses_admission_strict()`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_refuses_admission_strict_equals_documented_composition`].
+/// The named-peer equivalence
+/// `compose_refuses_admission_strict(p, v) ==
+/// compose_is_incomplete_or_saturated(p, v)`
+/// is pinned across the same cross product by
+/// [`tests::test_compose_refuses_admission_strict_equals_compose_is_incomplete_or_saturated`]
+/// — sealing the surface-naming equivalence between the named-refuse
+/// form (here) and the De Morgan fail-closed-disjunction form (commit
+/// 9a9e97a). The De Morgan equivalence
+/// `compose_refuses_admission_strict(p, v) ==
+/// !compose_admission_eligible_strict(p, v)`
+/// is pinned by
+/// [`tests::test_compose_refuses_admission_strict_equals_negation_of_compose_admission_eligible_strict`].
+/// The disjoint-and-covering XOR partition
+/// `compose_refuses_admission_strict(p, v) XOR
+/// compose_admission_eligible_strict(p, v) == true` is pinned by
+/// [`tests::test_compose_refuses_admission_strict_xor_compose_admission_eligible_strict_partitions`].
+///
+/// THEORY.md §VI.1 one-oracle discipline: the parallel-axis
+/// strict-gate refuse predicate is named at one site (here) through
+/// the per-axis-refuse disjunction form, not re-inlined as
+/// `p.refuses_admission_strict() || v.refuses_admission_strict()`
+/// per downstream consumer.
+/// THEORY.md §V.4 two-phase signature composition: the parallel-axis
+/// strict-refuse predicate is the typed-primitive surface for the
+/// Phase 2 refuse decomposition (Phase 2 refuses iff some axis
+/// carries incomplete coverage OR saturated), the dual of the
+/// per-axis Phase 2 refuse peer carried at each per-axis surface and
+/// the typed-sum Phase 2 refuse peer carried on [`AdmissionTier`].
+/// THEORY.md §VII.1 honesty channel: the named predicate surfaces
+/// "at least one axis refuses the strict production gate" at the
+/// parallel-axis surface, the load-bearing aggregate reading the
+/// strict-gate decomposition consults to fail-closed at the strict
+/// tier — distinguishing the named per-axis-refuse propagation
+/// surface from the De Morgan fail-closed-disjunction surface
+/// [`compose_is_incomplete_or_saturated`] reads through.
+///
+/// Frontier lineage: SLSA L3+ build-provenance production admission
+/// surfaces the fleet-wide strict-tier refuse verdict as a
+/// per-attestation-axis-refuse disjunction
+/// (`builder.refuses_l3_production() || materials.refuses_l3_production()
+/// || ...`) — the named per-axis-refuse propagation surface a
+/// downstream auditor reads in lockstep with the per-axis-refuse
+/// predicates the L3+ controller emits. This helper lifts the same
+/// per-axis-refuse-disjunction discipline at the two-axis typed-
+/// primitive surface, sealing the surface-naming equivalence between
+/// the named-refuse form and the De Morgan fail-closed-disjunction
+/// form at the parallel-axis strict-gate tier.
+///
+/// [`AdmissionTier::refuses_strict`]: AdmissionTier::refuses_strict
+/// [`ProbeCoverage::refuses_admission_strict`]: ProbeCoverage::refuses_admission_strict
+/// [`VerificationCoverage::refuses_admission_strict`]: VerificationCoverage::refuses_admission_strict
+#[allow(dead_code)]
+pub fn compose_refuses_admission_strict(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    probe.refuses_admission_strict() || verification.refuses_admission_strict()
+}
+
 /// Parallel-composed fleet-wide staging-only admission band over the two
 /// orthogonal typed-primitive surfaces — the two-helper conjunction
 /// `compose_admission_eligible_relaxed(p, v) &&
@@ -14693,5 +14852,335 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Pins the load-bearing structural equivalence
+    /// `compose_refuses_admission_strict(p, v) ==
+    /// p.refuses_admission_strict() || v.refuses_admission_strict()`
+    /// at every reachable `(probe, verification)` pair across the
+    /// six-by-six cross product of per-axis representatives (empty /
+    /// all-no-evidence / mixed / fully-evidenced / saturated-evidenced
+    /// / saturated-no-evidence on each axis). Forecloses the drift
+    /// class where a regression swapped the outer combinator
+    /// (conjunction would silently admit the one-axis-refuses state)
+    /// or dropped either per-axis disjunct (silently admitting the
+    /// dropped axis's refuse state as parallel-axis-eligible).
+    #[test]
+    fn test_compose_refuses_admission_strict_equals_documented_composition() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let direct = compose_refuses_admission_strict(&probe, &verification);
+                let composed =
+                    probe.refuses_admission_strict() || verification.refuses_admission_strict();
+                assert_eq!(
+                    direct, composed,
+                    "parallel-axis strict-refuse composition must equal \
+                     the documented per-axis-refuse disjunction at \
+                     probe={probe:?} verification={verification:?} — a \
+                     regression that swapped the outer combinator or \
+                     dropped either per-axis disjunct would fail this \
+                     pin at the corresponding divergent cell",
+                );
+            }
+        }
+    }
+
+    /// Pins the surface-naming equivalence between the named-refuse
+    /// parallel-axis form (commit added here) and the De Morgan
+    /// fail-closed-disjunction form (commit 9a9e97a) at the strict
+    /// gate: `compose_refuses_admission_strict(p, v) ==
+    /// compose_is_incomplete_or_saturated(p, v)` across the six-by-six
+    /// cross product. The two helpers read the same bool at every cell
+    /// — the equivalence holds because both expand to
+    /// `!compose_admission_eligible_strict(p, v)` under De Morgan (the
+    /// named-refuse form through the per-axis-refuse disjunction, the
+    /// fail-closed form through the incomplete-OR-saturated
+    /// decomposition). Forecloses the drift class where a future
+    /// regression to either helper would silently break the
+    /// surface-naming equivalence relation the parallel-axis refuse
+    /// family relies on for cross-surface auditability.
+    #[test]
+    fn test_compose_refuses_admission_strict_equals_compose_is_incomplete_or_saturated() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let named = compose_refuses_admission_strict(&probe, &verification);
+                let fail_closed = compose_is_incomplete_or_saturated(&probe, &verification);
+                assert_eq!(
+                    named, fail_closed,
+                    "named-refuse parallel-axis form must equal the De \
+                     Morgan fail-closed-disjunction form at \
+                     probe={probe:?} verification={verification:?} — a \
+                     regression to either helper would silently break \
+                     the surface-naming equivalence relation",
+                );
+            }
+        }
+    }
+
+    /// Pins the load-bearing De Morgan equivalence
+    /// `compose_refuses_admission_strict(p, v) ==
+    /// !compose_admission_eligible_strict(p, v)` across the six-by-six
+    /// cross product. The equivalence holds because
+    /// `compose_admission_eligible_strict == p.is_admission_eligible_strict()
+    /// && v.is_admission_eligible_strict()` (commit 7d818bd's per-axis
+    /// AND form) and `p.refuses_admission_strict() ==
+    /// !p.is_admission_eligible_strict()` at each per-axis surface
+    /// (commit 6f6ef14), so the parallel-axis OR-of-refuses equals the
+    /// negation of the parallel-axis AND-of-admits by De Morgan.
+    /// Forecloses the drift class where a regression to either helper
+    /// would silently break the structural complement relation.
+    #[test]
+    fn test_compose_refuses_admission_strict_equals_negation_of_compose_admission_eligible_strict()
+    {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let refuse = compose_refuses_admission_strict(&probe, &verification);
+                let admit = compose_admission_eligible_strict(&probe, &verification);
+                assert_eq!(
+                    refuse, !admit,
+                    "De Morgan equivalence \
+                     compose_refuses_admission_strict(p, v) == \
+                     !compose_admission_eligible_strict(p, v) must hold \
+                     at probe={probe:?} verification={verification:?} — \
+                     a regression to either helper would surface the \
+                     divergent cell here",
+                );
+            }
+        }
+    }
+
+    /// Pins the disjoint-and-covering XOR partition
+    /// `compose_refuses_admission_strict(p, v) XOR
+    /// compose_admission_eligible_strict(p, v) == true` across the
+    /// same six-by-six cross product. Together with the De Morgan
+    /// equivalence pin, this seals the parallel-axis admit/refuse
+    /// predicate pair at the strict gate as exact complements — no
+    /// value satisfies both, no value satisfies neither — closing the
+    /// parallel-axis strict-gate predicate pair at the named-refuse
+    /// surface, mirroring the per-axis strict-gate XOR partition
+    /// (commit 6f6ef14) and the typed-sum strict-gate XOR partition
+    /// (commit aec7d7c) at the third orthogonal surface plane.
+    #[test]
+    fn test_compose_refuses_admission_strict_xor_compose_admission_eligible_strict_partitions() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let refuse = compose_refuses_admission_strict(&probe, &verification);
+                let admit = compose_admission_eligible_strict(&probe, &verification);
+                assert!(
+                    refuse ^ admit,
+                    "disjoint-and-covering XOR partition must hold at \
+                     probe={probe:?} verification={verification:?} — a \
+                     regression that broke either body would surface \
+                     as a partition gap (neither holds) or overlap \
+                     (both hold) at the corresponding cell",
+                );
+            }
+        }
+    }
+
+    /// Pins the saturation-robust reading at the saturated-fully-
+    /// evidenced both-axes arm. At `({ran: usize::MAX, absent: 0},
+    /// {verified: usize::MAX, unverified: 0})` every strict-gate
+    /// ratio surface loses past-ceiling increments, so each per-axis
+    /// `refuses_admission_strict` reads `true` through the saturation
+    /// disjunct and the parallel-axis strict-refuse correctly reads
+    /// `true` through both per-axis disjuncts. The structural
+    /// fail-closed verdict mirrors the
+    /// `compose_is_incomplete_or_saturated` reading through its
+    /// second disjunct at the same arm. Forecloses the drift class
+    /// where a regression dropped the per-axis saturation factor
+    /// (silently admitting the saturated-fully-evidenced state as
+    /// parallel-axis strict-eligible) at the named-refuse surface.
+    #[test]
+    fn test_compose_refuses_admission_strict_stays_robust_at_saturated_fully_evidenced_state() {
+        let probe_saturated_evidence = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let verification_saturated_evidence = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        assert!(
+            compose_refuses_admission_strict(
+                &probe_saturated_evidence,
+                &verification_saturated_evidence,
+            ),
+            "saturated-fully-evidenced both-axes arm must read `true` \
+             at the named-refuse surface — both per-axis \
+             refuses_admission_strict read `true` through the \
+             saturation disjunct, so the parallel-axis OR-of-refuses \
+             correctly reads `true` through either per-axis disjunct",
+        );
+        assert!(
+            compose_is_incomplete_or_saturated(
+                &probe_saturated_evidence,
+                &verification_saturated_evidence,
+            ),
+            "saturated-fully-evidenced both-axes arm must read `true` \
+             at the De Morgan fail-closed surface as well — the \
+             surface-naming equivalence pin demands the two helpers \
+             agree at this saturated arm",
+        );
     }
 }
