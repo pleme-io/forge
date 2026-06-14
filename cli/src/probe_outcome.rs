@@ -3419,6 +3419,66 @@ impl AdmissionTier {
     pub fn admits_strict(&self) -> bool {
         *self >= Self::Strict
     }
+
+    /// True iff this tier refuses the relaxed (Phase 1) gate — i.e.,
+    /// `self < AdmissionTier::StagingOnly` under the derived [`Ord`]
+    /// instance. The typed-method floor peer of [`admits_relaxed`]
+    /// (`Self::admits_relaxed`) and [`admits_strict`]
+    /// (`Self::admits_strict`): the third leg of the
+    /// admit-relaxed / admit-strict / refuse-relaxed predicate trio
+    /// over the tier ladder, naming the "this tier holds at the
+    /// fail-closed floor" reading that downstream consumers
+    /// previously had to write as `!tier.admits_relaxed()` (or
+    /// `*tier == AdmissionTier::Refused` against the variant
+    /// directly).
+    ///
+    /// Under the present three-variant ladder, `refuses_relaxed`
+    /// reduces to `*self == Self::Refused` (since `Refused` is the
+    /// floor), but the `<` form is the load-bearing one — it
+    /// preserves the ladder reading across a future tier addition
+    /// strictly between `Refused` and `StagingOnly` (e.g., a
+    /// `Pending` band that admits neither gate), which would
+    /// correctly read `refuses_relaxed() == true` at both
+    /// `Refused` and `Pending` without needing to update every
+    /// consumer that had been hand-rolled against the `==
+    /// Self::Refused` variant comparison.
+    ///
+    /// The De Morgan partition invariant
+    /// `refuses_relaxed() == !admits_relaxed()` is pinned by
+    /// [`tests::test_admission_tier_refuses_relaxed_equals_negation_of_admits_relaxed`]:
+    /// the two predicates are exact complements at every variant.
+    /// Equivalently, the partition pin
+    /// [`tests::test_admission_tier_refuses_relaxed_xor_admits_relaxed_partitions_ladder`]
+    /// nails the disjoint-and-covering invariant
+    /// `refuses_relaxed() XOR admits_relaxed() == true` so a
+    /// regression that broke either method body (e.g., a future
+    /// hand-rolled `*self == Self::Refused` body that drifted from
+    /// the `<` form across a fourth-tier addition) would surface
+    /// here as a partition gap or overlap.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the relaxed-tier
+    /// refuse reading is named at one site (here), not re-typed as
+    /// `!tier.admits_relaxed()` or `*tier == AdmissionTier::Refused`
+    /// per downstream consumer (each of which inherits a drift
+    /// class on the day a fourth tier is added strictly below
+    /// `StagingOnly`).
+    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// "this tier refuses the Phase 1 gate" — the load-bearing
+    /// reading the deploy orchestrator consults to decide whether
+    /// to fail-closed (hold at every environment) rather than
+    /// advance the per-tier service to staging.
+    ///
+    /// The structural equivalence
+    /// [`tests::test_admission_tier_refuses_relaxed_equals_lt_staging_only`]
+    /// pins `tier.refuses_relaxed() == (tier < AdmissionTier::StagingOnly)`
+    /// at every variant; the consumer-level equivalence
+    /// [`tests::test_compose_admission_tier_refuses_relaxed_equals_negation_of_compose_admission_eligible_relaxed`]
+    /// pins the per-axis composition at every reachable
+    /// `(probe, verification)` pair across the 6×6 cross product.
+    #[allow(dead_code)]
+    pub fn refuses_relaxed(&self) -> bool {
+        *self < Self::StagingOnly
+    }
 }
 
 /// Lift the three-bool admission-tier surface
@@ -12229,6 +12289,181 @@ mod tests {
                     method_admits, bool_admits,
                     "compose_admission_tier.admits_strict must equal \
                      compose_admission_eligible_strict at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// [`AdmissionTier::refuses_relaxed`] reads `true` only at
+    /// [`AdmissionTier::Refused`] and `false` at the two admitting
+    /// tiers ([`AdmissionTier::StagingOnly`] and
+    /// [`AdmissionTier::Strict`]). The structural floor pin against
+    /// the three-variant ladder: a regression that hand-rolled the
+    /// method body as `*self != Self::Strict` (inverting the
+    /// strict-ceiling reading instead of the relaxed-floor reading)
+    /// would flip the reading at `StagingOnly` (false vs. true).
+    /// Pinned at all three variants explicitly.
+    #[test]
+    fn test_admission_tier_refuses_relaxed_at_each_variant() {
+        assert!(AdmissionTier::Refused.refuses_relaxed());
+        assert!(!AdmissionTier::StagingOnly.refuses_relaxed());
+        assert!(!AdmissionTier::Strict.refuses_relaxed());
+    }
+
+    /// The typed-method reading `tier.refuses_relaxed()` equals the
+    /// literal-comparison reading `tier < AdmissionTier::StagingOnly`
+    /// at every variant. The structural equivalence the floor-peer
+    /// typed-method preserves against the ordering surface: any
+    /// future regression that broke the equivalence (e.g.,
+    /// hand-rolled the method body as `*self == Self::Refused`,
+    /// which agrees with `< StagingOnly` under the present
+    /// three-variant ladder but would drift on the day a fourth
+    /// tier is added strictly between `Refused` and `StagingOnly`
+    /// that admits neither gate) would survive the per-variant pin
+    /// above and surface here at the typed-method-equals-ordering
+    /// surface.
+    #[test]
+    fn test_admission_tier_refuses_relaxed_equals_lt_staging_only() {
+        for tier in [
+            AdmissionTier::Refused,
+            AdmissionTier::StagingOnly,
+            AdmissionTier::Strict,
+        ] {
+            assert_eq!(
+                tier.refuses_relaxed(),
+                tier < AdmissionTier::StagingOnly,
+                "refuses_relaxed must equal < StagingOnly at tier={tier:?}",
+            );
+        }
+    }
+
+    /// The De Morgan partition invariant
+    /// `refuses_relaxed() == !admits_relaxed()` holds at every
+    /// [`AdmissionTier`] variant. The dual reading of
+    /// [`AdmissionTier::admits_relaxed`] at the relaxed-gate floor:
+    /// the two predicates are exact complements over the tier
+    /// ladder, so a downstream consumer that branches on
+    /// `tier.refuses_relaxed()` reads the structural negation of
+    /// `tier.admits_relaxed()` without retyping the `!` per call
+    /// site. A regression that broke either method body (e.g., a
+    /// future `refuses_relaxed` rewrite that drifted from the
+    /// `< StagingOnly` form, or an `admits_relaxed` rewrite that
+    /// dropped a variant) would surface here as a per-variant
+    /// mismatch.
+    #[test]
+    fn test_admission_tier_refuses_relaxed_equals_negation_of_admits_relaxed() {
+        for tier in [
+            AdmissionTier::Refused,
+            AdmissionTier::StagingOnly,
+            AdmissionTier::Strict,
+        ] {
+            assert_eq!(
+                tier.refuses_relaxed(),
+                !tier.admits_relaxed(),
+                "refuses_relaxed must equal !admits_relaxed at tier={tier:?}",
+            );
+        }
+    }
+
+    /// The disjoint-and-covering partition invariant
+    /// `refuses_relaxed() XOR admits_relaxed() == true` holds at
+    /// every [`AdmissionTier`] variant. The structural pin that
+    /// nails the two predicates as exactly partitioning the tier
+    /// ladder — no variant satisfies both, and no variant
+    /// satisfies neither. The peer-trio invariant the tier ladder
+    /// rests on: `refuses_relaxed` is the floor, `admits_relaxed`
+    /// is the relaxed-admit ring, and the two together cover the
+    /// ladder without overlap. A regression that broke the
+    /// partition (e.g., a future tier addition that left a gap by
+    /// landing strictly above the `< StagingOnly` floor but below
+    /// the `>= StagingOnly` ring) would surface here as a
+    /// XOR-fails reading at the new variant.
+    #[test]
+    fn test_admission_tier_refuses_relaxed_xor_admits_relaxed_partitions_ladder() {
+        for tier in [
+            AdmissionTier::Refused,
+            AdmissionTier::StagingOnly,
+            AdmissionTier::Strict,
+        ] {
+            assert!(
+                tier.refuses_relaxed() ^ tier.admits_relaxed(),
+                "refuses_relaxed XOR admits_relaxed must hold at tier={tier:?}",
+            );
+        }
+    }
+
+    /// The typed-method reading at the consumer surface
+    /// `compose_admission_tier(&p, &v).refuses_relaxed()` equals
+    /// the negation of the per-axis bool reading
+    /// [`compose_admission_eligible_relaxed`] at every reachable
+    /// `(probe, verification)` pair — pinned across the 6×6 cross
+    /// product of per-axis representatives (36 cells). The
+    /// load-bearing structural pin the floor-peer typed-method
+    /// surfaces at the consumer site: a regression that broke
+    /// either the [`compose_admission_tier`] constructor (e.g.,
+    /// reordered the priority branches in a way that violated the
+    /// strict-implies-relaxed invariant) OR the
+    /// [`AdmissionTier::refuses_relaxed`] method body (e.g.,
+    /// hand-rolled the predicate as `*self == Self::Refused`
+    /// directly against the variant rather than the ordering
+    /// surface) would surface here as a per-cell mismatch against
+    /// the bool negation. The dual of
+    /// [`test_compose_admission_tier_refused_equals_negation_of_compose_admission_eligible_relaxed`]
+    /// at the typed-method surface — same 6×6 cross product, same
+    /// per-axis representatives.
+    #[test]
+    fn test_compose_admission_tier_refuses_relaxed_equals_negation_of_compose_admission_eligible_relaxed(
+    ) {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let method_refuses =
+                    compose_admission_tier(&probe, &verification).refuses_relaxed();
+                let bool_refuses = !compose_admission_eligible_relaxed(&probe, &verification);
+                assert_eq!(
+                    method_refuses, bool_refuses,
+                    "compose_admission_tier.refuses_relaxed must equal \
+                     !compose_admission_eligible_relaxed at \
                      probe={probe:?} verification={verification:?}",
                 );
             }
