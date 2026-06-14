@@ -5259,6 +5259,147 @@ pub fn per_axis_admission_tier_verification_dominates_probe(
     verification.admission_tier() > probe.admission_tier()
 }
 
+/// The typed-sum lift of the per-axis admission-tier [`Ord`] trichotomy
+/// at the parallel-axis surface. Returns
+/// [`std::cmp::Ordering`] — the canonical stdlib three-way partition —
+/// projecting `probe.admission_tier().cmp(&verification.admission_tier())`
+/// directly through the [`AdmissionTier`] total order. The three
+/// [`std::cmp::Ordering`] arms read:
+///
+/// * [`std::cmp::Ordering::Greater`] — the probe axis strictly
+///   dominates, i.e. `probe.admission_tier() >
+///   verification.admission_tier()`; the structural-witness peer of
+///   the [`per_axis_admission_tier_probe_dominates`] named bool.
+/// * [`std::cmp::Ordering::Less`] — the verification axis strictly
+///   dominates, i.e. `probe.admission_tier() <
+///   verification.admission_tier()`; the structural-witness peer of
+///   the [`per_axis_admission_tier_verification_dominates_probe`]
+///   named bool.
+/// * [`std::cmp::Ordering::Equal`] — the per-axis tiers agree, i.e.
+///   the lattice bracket from [`per_axis_admission_tier_floor`] to
+///   [`per_axis_admission_tier_ceiling`] collapses to a single point;
+///   the structural-witness peer of the
+///   [`per_axis_admission_tier_is_uniform`] named bool.
+///
+/// The named typed-sum lift of the three bool trichotomy predicates
+/// the prior commits (eb041c5 / bcf3f54 / a79a1a5) closed — exactly the
+/// projection pattern [`compose_admission_tier`] (commit e9bfe1a) and
+/// the per-axis [`ProbeCoverage::admission_tier`] /
+/// [`VerificationCoverage::admission_tier`] (commit 3471981) apply at
+/// the four-bool admit/refuse × relaxed/strict matrix: instead of
+/// re-deriving the three-way partition as a nested if-else cascade
+/// against three independent bools at every consumer surface, the
+/// downstream consumer reads one typed sum through an exhaustive
+/// [`std::cmp::Ordering`] `match`. Every reachable arm of the per-axis
+/// tier-pair cross product reads exactly one of the three
+/// [`std::cmp::Ordering`] variants — the closed-world partition is
+/// exhaustive by construction at the stdlib typed-sum surface.
+///
+/// Equivalently the named function reads
+/// `probe.admission_tier().cmp(&verification.admission_tier())`
+/// verbatim; the lift hoists the inline [`Ord::cmp`] call against the
+/// two per-axis tier surfaces to one named typed-primitive,
+/// foreclosing the drift class where a future regression altered any
+/// one of the per-axis [`ProbeCoverage::admission_tier`] /
+/// [`VerificationCoverage::admission_tier`] surfaces or the
+/// [`AdmissionTier`] / [`Ord`] derived total order at one downstream
+/// consumer call site silently. Pinned by
+/// [`tests::test_per_axis_admission_tier_cmp_equals_inline_cmp_across_cross_product`]
+/// at the 6×6 per-axis cross product, with the per-arm equivalences
+/// against the three named bool peers pinned by
+/// [`tests::test_per_axis_admission_tier_cmp_agrees_with_named_directional_predicates_across_cross_product`].
+///
+/// The antisymmetry seal
+/// `per_axis_admission_tier_cmp(p, v).reverse() ==
+///  verification.admission_tier().cmp(&probe.admission_tier())` is
+/// pinned by
+/// [`tests::test_per_axis_admission_tier_cmp_antisymmetric_under_axis_swap_across_cross_product`]:
+/// reversing the [`std::cmp::Ordering`] reading swaps the dominance
+/// direction at every reachable arm — a load-bearing consequence of
+/// the [`AdmissionTier`] total order's antisymmetry the stdlib
+/// [`std::cmp::Ordering::reverse`] reading hoists at the typed-sum
+/// surface.
+///
+/// At the load-bearing boundary arms:
+///
+/// * the both-axes-fully-evidenced ceiling-collapse arm: reads
+///   [`std::cmp::Ordering::Equal`] (both per-axis surfaces collapse to
+///   [`AdmissionTier::Strict`], the lattice bracket is degenerate at
+///   the tier-ladder ceiling). Pinned by
+///   [`tests::test_per_axis_admission_tier_cmp_at_both_axes_strict_ceiling`].
+/// * the both-axes-no-evidence floor-collapse arm: reads
+///   [`std::cmp::Ordering::Equal`] (both per-axis surfaces collapse to
+///   [`AdmissionTier::Refused`], the lattice bracket is degenerate at
+///   the tier-ladder floor). Pinned by
+///   [`tests::test_per_axis_admission_tier_cmp_at_both_axes_no_evidence_floor`].
+/// * the probe-dominant evidence-asymmetric arm (`probe = {ran: 3,
+///   absent: 0}` strict-eligible, `verification = {verified: 0,
+///   unverified: 0}` refused): reads
+///   [`std::cmp::Ordering::Greater`] — the lattice bracket [Refused,
+///   Strict] is non-degenerate with its ceiling at the probe axis.
+///   Pinned by
+///   [`tests::test_per_axis_admission_tier_cmp_at_probe_strict_verification_refused_arm`].
+/// * the verification-dominant evidence-asymmetric arm (`probe =
+///   {ran: 0, absent: 0}` refused, `verification = {verified: 5,
+///   unverified: 0}` strict-eligible): reads
+///   [`std::cmp::Ordering::Less`] — the lattice bracket [Refused,
+///   Strict] is non-degenerate with its ceiling at the verification
+///   axis. Pinned by
+///   [`tests::test_per_axis_admission_tier_cmp_at_probe_refused_verification_strict_arm`].
+///
+/// THEORY.md §VI.1 one-oracle discipline: the per-axis tier-pair
+/// three-way comparison is named at one site (here), not retyped as
+/// the inline `probe.admission_tier().cmp(&verification.admission_tier())`
+/// boilerplate per downstream consumer, and not re-derived as a
+/// nested if-else cascade against the three named bool predicates
+/// (which would inherit a drift class on the day a fourth tier is
+/// added — every consumer would need to extend the cascade in
+/// lockstep, exactly the structural seam this typed-sum lift
+/// forecloses).
+/// THEORY.md §V.4 honesty channel: the typed-sum lift surfaces the
+/// trichotomy partition at the stdlib [`std::cmp::Ordering`] enum so
+/// a downstream consumer that wants to route per-direction
+/// remediation (e.g., "verification axis stronger — re-run probes" vs.
+/// "probe axis stronger — re-attest verifications" vs. "axes agree
+/// — no asymmetric remediation needed") reads each arm through an
+/// exhaustive [`std::cmp::Ordering`] `match` rather than a nested
+/// bool cascade.
+/// THEORY.md §VII.1 honesty channel: the structural witness that the
+/// per-axis lattice bracket is fully classified by the three
+/// [`std::cmp::Ordering`] arms is observable through this single
+/// typed-sum surface; the trichotomy partition the three named bool
+/// predicates established at the bool surface is now anchored at one
+/// canonical stdlib typed sum the [`std::cmp::Ordering::reverse`] /
+/// [`std::cmp::Ordering::is_lt`] / [`std::cmp::Ordering::is_eq`] /
+/// [`std::cmp::Ordering::is_gt`] / [`std::cmp::Ordering::then`]
+/// algebra extends uniformly across.
+///
+/// Frontier inspiration: Bazel's `--build_event_stream` emits the
+/// per-axis verdict comparison as a typed three-way `Comparison`
+/// surface the downstream auditor pattern-matches over rather than
+/// reading the three independent bool components; SLSA L3+
+/// attestation verifiers project per-source-axis tier comparisons to
+/// the stdlib three-way ordering primitive the consumer reads through
+/// one exhaustive `match` rather than three nested bool branches;
+/// sigstore policy-controller lifts the per-attestation-axis
+/// strength comparison to the canonical Ord trichotomy enum.
+/// Translated here as: lift the inline
+/// `probe.admission_tier().cmp(&verification.admission_tier())`
+/// against the per-axis [`AdmissionTier`] surfaces to one named
+/// typed-primitive returning the canonical
+/// [`std::cmp::Ordering`] sum, completing the typed-sum projection of
+/// the per-axis [`Ord`] trichotomy at the most idiomatic Rust surface
+/// — the stdlib three-way comparison enum the entire trait family
+/// ([`Ord`], [`PartialOrd`], [`Reverse`], `BinaryHeap`, `BTreeMap`,
+/// `sort_by`) consumes.
+#[allow(dead_code)]
+pub fn per_axis_admission_tier_cmp(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> std::cmp::Ordering {
+    probe.admission_tier().cmp(&verification.admission_tier())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18425,6 +18566,370 @@ mod tests {
              and the verification axis at AdmissionTier::Strict, so \
              the lattice bracket [StagingOnly, Strict] is non-\
              degenerate with its ceiling at the verification axis",
+        );
+    }
+
+    /// Pin the load-bearing structural-equivalence invariant:
+    /// `per_axis_admission_tier_cmp(p, v)` agrees verbatim with the
+    /// inline `probe.admission_tier().cmp(&verification.admission_tier())`
+    /// at every cell of the 6×6 cross product of per-axis representatives
+    /// (36 cells: empty / all-no-evidence / mixed / fully-evidenced /
+    /// saturated-evidenced / saturated-no-evidence on each axis). The
+    /// load-bearing seal that the named typed-sum lift is the canonical
+    /// stdlib [`Ord::cmp`] projection at the per-axis tier-pair surface.
+    /// A future regression that broke the per-axis
+    /// [`ProbeCoverage::admission_tier`] /
+    /// [`VerificationCoverage::admission_tier`] surfaces or the
+    /// [`AdmissionTier`] / [`Ord`] derived total order would surface
+    /// here as the equivalence failing at some cell.
+    #[test]
+    fn test_per_axis_admission_tier_cmp_equals_inline_cmp_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let named = per_axis_admission_tier_cmp(&probe, &verification);
+                let inline = probe.admission_tier().cmp(&verification.admission_tier());
+                assert_eq!(
+                    named, inline,
+                    "per_axis_admission_tier_cmp must equal the inline \
+                     `probe.admission_tier().cmp(&verification.admission_tier())` \
+                     at every reachable arm — got named={named:?} \
+                     inline={inline:?} at probe={probe:?} \
+                     verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Pin the load-bearing per-arm agreement between the
+    /// [`std::cmp::Ordering`] typed-sum lift and the three named
+    /// directional bool peers at every cell of the 6×6 cross product:
+    /// `cmp == Less <=> verification_dominates_probe`,
+    /// `cmp == Equal <=> is_uniform`,
+    /// `cmp == Greater <=> probe_dominates`. The closed-world
+    /// exhaustiveness pin `exactly_one_of_three == 1` complements the
+    /// trichotomy-partition pin from commit a79a1a5 at the typed-sum
+    /// surface: every [`std::cmp::Ordering`] arm corresponds to
+    /// exactly one named bool peer, with no overlap and no gap. A
+    /// future regression that hand-rolled the cmp body as `then`-
+    /// chained partial orders against the per-axis component bools
+    /// (which would drift from the [`AdmissionTier`] derived total
+    /// order under a future fourth-tier addition) would surface here
+    /// as the per-arm equivalence failing at some cell.
+    #[test]
+    fn test_per_axis_admission_tier_cmp_agrees_with_named_directional_predicates_across_cross_product(
+    ) {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let cmp = per_axis_admission_tier_cmp(&probe, &verification);
+                let probe_dominates =
+                    per_axis_admission_tier_probe_dominates(&probe, &verification);
+                let verification_dominates =
+                    per_axis_admission_tier_verification_dominates_probe(&probe, &verification);
+                let uniform = per_axis_admission_tier_is_uniform(&probe, &verification);
+                assert_eq!(
+                    cmp == std::cmp::Ordering::Greater,
+                    probe_dominates,
+                    "per_axis_admission_tier_cmp == Greater must agree \
+                     with per_axis_admission_tier_probe_dominates at \
+                     every reachable arm — got cmp={cmp:?} \
+                     probe_dominates={probe_dominates} at probe={probe:?} \
+                     verification={verification:?}",
+                );
+                assert_eq!(
+                    cmp == std::cmp::Ordering::Less,
+                    verification_dominates,
+                    "per_axis_admission_tier_cmp == Less must agree \
+                     with per_axis_admission_tier_verification_dominates_probe \
+                     at every reachable arm — got cmp={cmp:?} \
+                     verification_dominates={verification_dominates} at \
+                     probe={probe:?} verification={verification:?}",
+                );
+                assert_eq!(
+                    cmp == std::cmp::Ordering::Equal,
+                    uniform,
+                    "per_axis_admission_tier_cmp == Equal must agree \
+                     with per_axis_admission_tier_is_uniform at every \
+                     reachable arm — got cmp={cmp:?} uniform={uniform} \
+                     at probe={probe:?} verification={verification:?}",
+                );
+                let exactly_one =
+                    (probe_dominates as u8) + (verification_dominates as u8) + (uniform as u8);
+                assert_eq!(
+                    exactly_one, 1,
+                    "the typed-sum trichotomy partition must be \
+                     EXHAUSTIVE at every reachable arm — exactly one \
+                     of the three Ordering arms reads at every cell; \
+                     got count={exactly_one} cmp={cmp:?} at \
+                     probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Pin the antisymmetry seal at the typed-sum surface:
+    /// `per_axis_admission_tier_cmp(p, v).reverse() ==
+    ///  verification.admission_tier().cmp(&probe.admission_tier())`
+    /// at every cell of the 6×6 cross product. The load-bearing
+    /// structural-witness that swapping the per-axis tier surfaces
+    /// reverses the [`std::cmp::Ordering`] reading — a load-bearing
+    /// consequence of the [`AdmissionTier`] total order's antisymmetry
+    /// the stdlib [`std::cmp::Ordering::reverse`] reading hoists at
+    /// the typed-sum surface. The typed-sum peer of the bool-surface
+    /// mutual-exclusion pin from commit a79a1a5: where the bool pin
+    /// reads "no reachable arm reads both dominance directions at
+    /// once", this reads the affirmative-direction structural witness
+    /// that reversing the comparison flips Less <-> Greater while
+    /// fixing Equal. A future regression that broke the
+    /// [`AdmissionTier`] [`PartialOrd`] / [`Ord`] antisymmetry would
+    /// surface here as the reversed reading disagreeing at some cell.
+    #[test]
+    fn test_per_axis_admission_tier_cmp_antisymmetric_under_axis_swap_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let cmp_forward = per_axis_admission_tier_cmp(&probe, &verification);
+                let reversed = cmp_forward.reverse();
+                let cmp_swapped = verification.admission_tier().cmp(&probe.admission_tier());
+                assert_eq!(
+                    reversed, cmp_swapped,
+                    "per_axis_admission_tier_cmp(p, v).reverse() must \
+                     equal verification.admission_tier().cmp(&probe.admission_tier()) \
+                     at every reachable arm — got \
+                     reversed={reversed:?} cmp_swapped={cmp_swapped:?} \
+                     forward={cmp_forward:?} at probe={probe:?} \
+                     verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Pin the both-axes-fully-evidenced ceiling-collapse arm: at
+    /// `(probe = {ran: 5, absent: 0}, verification = {verified: 3,
+    /// unverified: 0})` both per-axis surfaces read
+    /// [`AdmissionTier::Strict`], so the typed-sum lift reads
+    /// [`std::cmp::Ordering::Equal`] — the lattice bracket is
+    /// degenerate at the top of the tier ladder. The structural-
+    /// witness pin at the ceiling-collapse boundary on the typed-sum
+    /// surface.
+    #[test]
+    fn test_per_axis_admission_tier_cmp_at_both_axes_strict_ceiling() {
+        let probe = ProbeCoverage { ran: 5, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        assert_eq!(
+            per_axis_admission_tier_cmp(&probe, &verification),
+            std::cmp::Ordering::Equal,
+            "per_axis_admission_tier_cmp at the both-axes-strict \
+             ceiling reads Equal — both per-axis surfaces collapse to \
+             AdmissionTier::Strict, the lattice bracket is degenerate \
+             at the tier-ladder ceiling",
+        );
+    }
+
+    /// Pin the both-axes-no-evidence floor-collapse arm: at
+    /// `(probe = {ran: 0, absent: 0}, verification = {verified: 0,
+    /// unverified: 0})` both per-axis surfaces read
+    /// [`AdmissionTier::Refused`], so the typed-sum lift reads
+    /// [`std::cmp::Ordering::Equal`] — the lattice bracket is
+    /// degenerate at the bottom of the tier ladder. The structural-
+    /// witness pin at the floor-collapse boundary on the typed-sum
+    /// surface.
+    #[test]
+    fn test_per_axis_admission_tier_cmp_at_both_axes_no_evidence_floor() {
+        let probe = ProbeCoverage { ran: 0, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert_eq!(
+            per_axis_admission_tier_cmp(&probe, &verification),
+            std::cmp::Ordering::Equal,
+            "per_axis_admission_tier_cmp at the both-axes-no-evidence \
+             floor reads Equal — both per-axis surfaces collapse to \
+             AdmissionTier::Refused, the lattice bracket is degenerate \
+             at the tier-ladder floor",
+        );
+    }
+
+    /// Pin the load-bearing probe-dominant evidence-asymmetric arm:
+    /// at `(probe = {ran: 3, absent: 0}, verification = {verified: 0,
+    /// unverified: 0})` the probe axis reads
+    /// [`AdmissionTier::Strict`] and the verification axis reads
+    /// [`AdmissionTier::Refused`], so the typed-sum lift reads
+    /// [`std::cmp::Ordering::Greater`] — the lattice bracket is non-
+    /// degenerate with its ceiling at the probe axis. The directional-
+    /// witness pin at the canonical evidence-asymmetric arm where the
+    /// probe axis carries evidence and the verification axis carries
+    /// none: the load-bearing arm a future regression that hand-rolled
+    /// the body as the inverted form
+    /// `verification.admission_tier().cmp(&probe.admission_tier())`
+    /// would surface here as reading Less rather than Greater.
+    #[test]
+    fn test_per_axis_admission_tier_cmp_at_probe_strict_verification_refused_arm() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert_eq!(
+            per_axis_admission_tier_cmp(&probe, &verification),
+            std::cmp::Ordering::Greater,
+            "per_axis_admission_tier_cmp at the probe-strict / \
+             verification-refused arm reads Greater — the probe axis \
+             sits at AdmissionTier::Strict and the verification axis \
+             at AdmissionTier::Refused, so the lattice bracket \
+             [Refused, Strict] is non-degenerate with its ceiling at \
+             the probe axis",
+        );
+    }
+
+    /// Pin the load-bearing verification-dominant evidence-asymmetric
+    /// arm: at `(probe = {ran: 0, absent: 0}, verification =
+    /// {verified: 5, unverified: 0})` the probe axis reads
+    /// [`AdmissionTier::Refused`] and the verification axis reads
+    /// [`AdmissionTier::Strict`], so the typed-sum lift reads
+    /// [`std::cmp::Ordering::Less`] — the lattice bracket is non-
+    /// degenerate with its ceiling at the verification axis. The dual
+    /// directional-witness pin at the evidence-asymmetric arm where
+    /// the verification axis carries evidence and the probe axis
+    /// carries none.
+    #[test]
+    fn test_per_axis_admission_tier_cmp_at_probe_refused_verification_strict_arm() {
+        let probe = ProbeCoverage { ran: 0, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 5,
+            unverified: 0,
+        };
+        assert_eq!(
+            per_axis_admission_tier_cmp(&probe, &verification),
+            std::cmp::Ordering::Less,
+            "per_axis_admission_tier_cmp at the probe-refused / \
+             verification-strict arm reads Less — the probe axis sits \
+             at AdmissionTier::Refused and the verification axis at \
+             AdmissionTier::Strict, so the lattice bracket [Refused, \
+             Strict] is non-degenerate with its ceiling at the \
+             verification axis",
         );
     }
 }
