@@ -944,6 +944,100 @@ impl ProbeCoverage {
     pub fn is_admission_eligible_relaxed(&self) -> bool {
         !self.is_saturated() && self.has_evidence()
     }
+
+    /// Per-axis structural floor-refuse peer of
+    /// [`is_admission_eligible_relaxed`] over the no-evidence axis — the
+    /// negation `!self.is_admission_eligible_relaxed()` named at one
+    /// inherent-method site so downstream consumers reading the per-
+    /// axis "this coverage alone refuses the relaxed gate" surface do
+    /// not retype `!coverage.is_admission_eligible_relaxed()` per call
+    /// site. Reads `true` iff the no-evidence axis fails AT LEAST ONE
+    /// of the two relaxed-gate factors — either the trustworthiness
+    /// factor ([`is_saturated`] holds, dropping past-ceiling
+    /// increments through the saturating-add clamp) OR the
+    /// some-evidence factor ([`has_evidence`] fails: no probes ran at
+    /// all, the `ran == 0` axis-floor).
+    ///
+    /// The structural complement of [`is_admission_eligible_relaxed`]
+    /// at the typed-method surface: the relaxed gate's two-factor
+    /// conjunction `!is_saturated() && has_evidence()` (its admit
+    /// reading) negates by De Morgan to the two-factor disjunction
+    /// `is_saturated() || !has_evidence()` (its refuse reading), and
+    /// the typed-method peer surfaces both readings at one inherent-
+    /// method site each so a downstream consumer that branches on the
+    /// per-axis admit/refuse reading at the relaxed gate reads one
+    /// method, not the literal negation. The per-axis relaxed-gate
+    /// refuse peer of [`refuses_admission_strict`]: the strict-gate
+    /// refuse predicate reads the disjunction `is_saturated() ||
+    /// !is_fully_covered()`, this reads the disjunction
+    /// `is_saturated() || !has_evidence()` — same structural shape,
+    /// the completeness factor `!is_fully_covered()` swapped for the
+    /// strictly weaker some-evidence factor `!has_evidence()` so the
+    /// relaxed-gate refuse is structurally stronger (it refuses only
+    /// the strict subset where the axis carries NO evidence at all,
+    /// not the wider arm where some-but-not-all evidence is present).
+    /// Closes the per-axis four-corner admit/refuse × relaxed/strict
+    /// typed-method matrix at the no-evidence axis simultaneously
+    /// with the verification-axis peer
+    /// [`VerificationCoverage::refuses_admission_relaxed`], mirroring
+    /// the typed-sum four-corner pair
+    /// [`AdmissionTier::refuses_relaxed`] /
+    /// [`AdmissionTier::refuses_strict`] (commits bb0110e / aec7d7c)
+    /// at the per-axis level.
+    ///
+    /// The load-bearing structural ordering
+    /// `refuses_admission_relaxed() => refuses_admission_strict()`
+    /// holds at every reachable `(ran, absent)` value as the
+    /// contrapositive of the admit-side ordering
+    /// `is_admission_eligible_strict() => is_admission_eligible_relaxed()`
+    /// already pinned at
+    /// [`tests::test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_probe_axis`]:
+    /// every state the relaxed gate refuses, the strict gate also
+    /// refuses (the strict gate is strictly stronger). The all-absent
+    /// arm `(0, M)` with `M > 0` is the structural witness the
+    /// relaxed-gate refuse is strictly stronger than the strict-gate
+    /// refuse at the per-axis level: both gates refuse this arm, so
+    /// the implication direction is the load-bearing one (relaxed
+    /// refuse → strict refuse), while the mixed arm `(N, M)` with
+    /// both components positive is the structural witness the
+    /// converse fails — at the mixed arm the strict gate refuses
+    /// (`is_fully_covered == false`) but the relaxed gate admits
+    /// (`has_evidence == true`), so `refuses_admission_strict ==
+    /// true` AND `refuses_admission_relaxed == false`.
+    ///
+    /// At every reachable `(ran, absent)` value, the predicate equals
+    /// the documented De Morgan complement exactly — the structural
+    /// equivalence
+    /// `refuses_admission_relaxed() == !is_admission_eligible_relaxed()`
+    /// is pinned across the empty / all-absent / mixed / fully-covered
+    /// arms AND each of the three saturated representatives by
+    /// [`tests::test_probe_coverage_refuses_admission_relaxed_equals_negation_of_is_admission_eligible_relaxed`],
+    /// and the disjoint-and-covering partition
+    /// `refuses_admission_relaxed() XOR is_admission_eligible_relaxed()
+    /// == true` is pinned across the same representatives by
+    /// [`tests::test_probe_coverage_refuses_admission_relaxed_xor_is_admission_eligible_relaxed_partitions`].
+    /// Together the two invariants pin the two predicates as exact
+    /// complements over every reachable per-axis state: no value
+    /// satisfies both, no value satisfies neither.
+    ///
+    /// [`has_evidence`]: ProbeCoverage::has_evidence
+    /// [`is_admission_eligible_relaxed`]: ProbeCoverage::is_admission_eligible_relaxed
+    /// [`is_saturated`]: ProbeCoverage::is_saturated
+    /// [`refuses_admission_strict`]: ProbeCoverage::refuses_admission_strict
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-axis relaxed-
+    /// gate refuse predicate is named at one site (here), not re-
+    /// inlined as `!coverage.is_admission_eligible_relaxed()` per
+    /// downstream consumer. THEORY.md §V.4 / §VII.1 honesty channel:
+    /// the named predicate surfaces "this no-evidence axis alone
+    /// refuses the relaxed dev-staging gate," the load-bearing per-
+    /// axis reading the relaxed-gate decomposition consults to
+    /// attribute a relaxed-refuse aggregate verdict back to the axis
+    /// that broke the conjunction, mirroring the per-axis strict-gate
+    /// refuse peer's discipline at the relaxed-gate threshold.
+    pub fn refuses_admission_relaxed(&self) -> bool {
+        !self.is_admission_eligible_relaxed()
+    }
 }
 
 /// Identity element of the [`Add`](std::ops::Add) impl below: the empty-
@@ -1941,6 +2035,107 @@ impl VerificationCoverage {
     /// carries.
     pub fn is_admission_eligible_relaxed(&self) -> bool {
         !self.is_saturated() && self.has_evidence()
+    }
+
+    /// Per-axis structural floor-refuse peer of
+    /// [`is_admission_eligible_relaxed`] over the verification-
+    /// trustworthiness axis — the negation
+    /// `!self.is_admission_eligible_relaxed()` named at one inherent-
+    /// method site so downstream consumers reading the per-axis "this
+    /// verification alone refuses the relaxed gate" surface do not
+    /// retype `!verification.is_admission_eligible_relaxed()` per call
+    /// site. The orthogonal-axis peer of
+    /// [`ProbeCoverage::refuses_admission_relaxed`]: where the no-
+    /// evidence-axis relaxed-gate refuse predicate reads the two-
+    /// factor disjunction `is_saturated() || !has_evidence()` over the
+    /// `(ran, absent)` axis, this reads the same shape
+    /// `is_saturated() || !has_evidence()` over the `(verified,
+    /// unverified)` axis — same structural shape, the per-axis
+    /// component pair swapped from `(ran, absent)` to
+    /// `(verified, unverified)` so [`has_evidence`] reads against the
+    /// verification axis's `verified > 0` floor rather than the no-
+    /// evidence axis's `ran > 0` floor.
+    ///
+    /// The structural complement of [`is_admission_eligible_relaxed`]
+    /// at the typed-method surface: the relaxed gate's two-factor
+    /// conjunction `!is_saturated() && has_evidence()` (its admit
+    /// reading) negates by De Morgan to the two-factor disjunction
+    /// `is_saturated() || !has_evidence()` (its refuse reading), and
+    /// the typed-method peer surfaces both readings at one inherent-
+    /// method site each so a downstream consumer that branches on the
+    /// per-axis admit/refuse reading at the relaxed gate reads one
+    /// method, not the literal negation. The per-axis relaxed-gate
+    /// refuse peer of [`refuses_admission_strict`]: the strict-gate
+    /// refuse predicate reads the disjunction `is_saturated() ||
+    /// !is_fully_verified()`, this reads the disjunction
+    /// `is_saturated() || !has_evidence()` — same structural shape,
+    /// the completeness factor `!is_fully_verified()` swapped for the
+    /// strictly weaker some-verification factor `!has_evidence()` so
+    /// the relaxed-gate refuse is structurally stronger (it refuses
+    /// only the strict subset where the axis carries NO verification
+    /// at all, not the wider arm where some-but-not-all verification
+    /// is present). Closes the per-axis four-corner admit/refuse ×
+    /// relaxed/strict typed-method matrix at the verification-
+    /// trustworthiness axis simultaneously with the no-evidence-axis
+    /// peer [`ProbeCoverage::refuses_admission_relaxed`], mirroring
+    /// the typed-sum four-corner pair
+    /// [`AdmissionTier::refuses_relaxed`] /
+    /// [`AdmissionTier::refuses_strict`] (commits bb0110e / aec7d7c)
+    /// at the per-axis level.
+    ///
+    /// The load-bearing structural ordering
+    /// `refuses_admission_relaxed() => refuses_admission_strict()`
+    /// holds at every reachable `(verified, unverified)` value as the
+    /// contrapositive of the admit-side ordering
+    /// `is_admission_eligible_strict() => is_admission_eligible_relaxed()`
+    /// already pinned at
+    /// [`tests::test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_verification_axis`]:
+    /// every state the relaxed gate refuses, the strict gate also
+    /// refuses (the strict gate is strictly stronger). The all-
+    /// unverified arm `(0, M)` with `M > 0` is the structural witness
+    /// the relaxed-gate refuse is strictly stronger than the strict-
+    /// gate refuse at the per-axis level: both gates refuse this arm,
+    /// so the implication direction is the load-bearing one (relaxed
+    /// refuse → strict refuse), while the mixed arm `(N, M)` with
+    /// both components positive is the structural witness the
+    /// converse fails — at the mixed arm the strict gate refuses
+    /// (`is_fully_verified == false`) but the relaxed gate admits
+    /// (`has_evidence == true`), so `refuses_admission_strict ==
+    /// true` AND `refuses_admission_relaxed == false`.
+    ///
+    /// At every reachable `(verified, unverified)` value, the
+    /// predicate equals the documented De Morgan complement exactly —
+    /// the structural equivalence
+    /// `refuses_admission_relaxed() == !is_admission_eligible_relaxed()`
+    /// is pinned across the empty / all-unverified / mixed / fully-
+    /// verified arms AND each of the three saturated representatives
+    /// by
+    /// [`tests::test_verification_refuses_admission_relaxed_equals_negation_of_is_admission_eligible_relaxed`],
+    /// and the disjoint-and-covering partition
+    /// `refuses_admission_relaxed() XOR is_admission_eligible_relaxed()
+    /// == true` is pinned across the same representatives by
+    /// [`tests::test_verification_refuses_admission_relaxed_xor_is_admission_eligible_relaxed_partitions`].
+    /// Together the two invariants pin the two predicates as exact
+    /// complements over every reachable per-axis state: no value
+    /// satisfies both, no value satisfies neither.
+    ///
+    /// [`has_evidence`]: VerificationCoverage::has_evidence
+    /// [`is_admission_eligible_relaxed`]: VerificationCoverage::is_admission_eligible_relaxed
+    /// [`is_saturated`]: VerificationCoverage::is_saturated
+    /// [`refuses_admission_strict`]: VerificationCoverage::refuses_admission_strict
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-axis relaxed-
+    /// gate refuse predicate is named at one site (here), not re-
+    /// inlined as `!verification.is_admission_eligible_relaxed()` per
+    /// downstream consumer. THEORY.md §V.4 / §VII.1 honesty channel:
+    /// the named predicate surfaces "this verification axis alone
+    /// refuses the relaxed dev-staging gate," the load-bearing per-
+    /// axis reading the relaxed-gate decomposition consults to
+    /// attribute a relaxed-refuse aggregate verdict back to the axis
+    /// that broke the conjunction, mirroring the no-evidence-axis
+    /// peer's discipline at the orthogonal axis.
+    pub fn refuses_admission_relaxed(&self) -> bool {
+        !self.is_admission_eligible_relaxed()
     }
 }
 
@@ -5661,6 +5856,239 @@ mod tests {
         }
     }
 
+    /// The per-axis relaxed-gate floor-refuse predicate
+    /// [`ProbeCoverage::refuses_admission_relaxed`] reads `true` at
+    /// every reachable per-axis arm that fails the relaxed gate at
+    /// one or both of its two factors — the empty, all-absent, and
+    /// every saturated representative — and `false` at the two non-
+    /// saturated admit arms (mixed and fully-covered). The single-pin
+    /// matrix the documented De Morgan complement
+    /// `!is_admission_eligible_relaxed()` already pins indirectly
+    /// across the same representatives in
+    /// `test_is_admission_eligible_relaxed_*`, hoisted to one
+    /// explicit per-representative pin so a regression that hand-
+    /// rolled the body (e.g., `self.is_saturated() && !self.has_evidence()`
+    /// — the wrong combinator on the inner disjunction) surfaces here
+    /// rather than only at the De Morgan-equivalence pin below.
+    #[test]
+    fn test_probe_coverage_refuses_admission_relaxed_at_each_representative() {
+        let refused_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        for c in refused_cases {
+            assert!(
+                c.refuses_admission_relaxed(),
+                "per-axis relaxed-gate floor-refuse predicate must read \
+                 true at {c:?} — every arm with `ran == 0` (empty, all-\
+                 absent) or every saturated representative refuses the \
+                 relaxed gate at the no-evidence axis",
+            );
+        }
+
+        let admit_cases = [
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        for admit in admit_cases {
+            assert!(
+                !admit.refuses_admission_relaxed(),
+                "per-axis relaxed-gate floor-refuse predicate must read \
+                 false at {admit:?} — non-saturated arms with `ran > 0` \
+                 admit the relaxed gate at the no-evidence axis",
+            );
+        }
+    }
+
+    /// Structural De Morgan equivalence with
+    /// [`ProbeCoverage::is_admission_eligible_relaxed`] — pinned across
+    /// the same seven representatives the documented composition pin
+    /// `test_is_admission_eligible_relaxed_equals_documented_composition_at_probe_axis`
+    /// already walks. The typed-method peer is the exact De Morgan
+    /// complement of the admit predicate at every reachable per-axis
+    /// state, sealing the typed-method admit/refuse pair at the
+    /// relaxed gate against drift at the per-axis no-evidence
+    /// surface, mirroring the strict-gate peer
+    /// `test_probe_coverage_refuses_admission_strict_equals_negation_of_is_admission_eligible_strict`.
+    #[test]
+    fn test_probe_coverage_refuses_admission_relaxed_equals_negation_of_is_admission_eligible_relaxed(
+    ) {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        for c in cases {
+            assert_eq!(
+                c.refuses_admission_relaxed(),
+                !c.is_admission_eligible_relaxed(),
+                "per-axis relaxed-gate refuse predicate must equal the \
+                 De Morgan complement of the admit predicate at {c:?} — \
+                 a regression that drifted the body would fail this pin",
+            );
+        }
+    }
+
+    /// Disjoint-and-covering partition: at every reachable per-axis
+    /// state, exactly one of [`ProbeCoverage::refuses_admission_relaxed`]
+    /// and [`ProbeCoverage::is_admission_eligible_relaxed`] reads
+    /// `true`. No value satisfies both (the two predicates are
+    /// disjoint); no value satisfies neither (together they cover
+    /// every reachable state). The relaxed-gate peer of
+    /// `test_probe_coverage_refuses_admission_strict_xor_is_admission_eligible_strict_partitions`
+    /// at the same per-axis no-evidence surface — together the two
+    /// XOR-partition pins seal the typed-method admit/refuse four-
+    /// corner matrix at both relaxed AND strict gates against gaps
+    /// and overlaps, mirroring the typed-sum
+    /// [`AdmissionTier`] four-corner matrix the prior trio (commits
+    /// 05f5071 admits_*, bb0110e refuses_relaxed, aec7d7c
+    /// refuses_strict) already sealed at the typed-sum surface.
+    #[test]
+    fn test_probe_coverage_refuses_admission_relaxed_xor_is_admission_eligible_relaxed_partitions()
+    {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        for c in cases {
+            let refuses = c.refuses_admission_relaxed();
+            let admits = c.is_admission_eligible_relaxed();
+            assert!(
+                refuses ^ admits,
+                "per-axis relaxed-gate admit/refuse pair must partition \
+                 every reachable state at the no-evidence axis — XOR == \
+                 true at {c:?}, got refuses={refuses}, admits={admits}",
+            );
+        }
+    }
+
+    /// Load-bearing structural ordering
+    /// `refuses_admission_relaxed() => refuses_admission_strict()` at
+    /// the per-axis no-evidence surface — pinned across the same
+    /// seven representatives the documented composition pin walks.
+    /// The contrapositive of the admit-side ordering
+    /// `is_admission_eligible_strict() => is_admission_eligible_relaxed()`
+    /// already pinned at
+    /// `test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_probe_axis`:
+    /// every state the relaxed gate refuses, the strict gate also
+    /// refuses (the strict gate is strictly stronger). A regression
+    /// that collapsed the relaxed-gate refuse to the strict-gate
+    /// refuse (e.g., a body that returned
+    /// `self.refuses_admission_strict()` literally) would erroneously
+    /// refuse the mixed arm `(N, M)` at the relaxed gate and surface
+    /// at the dual mixed-arm decoupling test below.
+    #[test]
+    fn test_refuses_admission_relaxed_implies_refuses_admission_strict_at_probe_axis() {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        for c in cases {
+            let relaxed = c.refuses_admission_relaxed();
+            let strict = c.refuses_admission_strict();
+            assert!(
+                !relaxed || strict,
+                "relaxed-gate refuse must imply strict-gate refuse at \
+                 the no-evidence axis at {c:?} — got relaxed={relaxed}, \
+                 strict={strict}",
+            );
+        }
+    }
+
+    /// The mixed arm `(N, M)` with both components positive is the
+    /// structural witness that the relaxed-gate refuse is strictly
+    /// stronger than the strict-gate refuse at the per-axis no-
+    /// evidence surface: at this arm the strict gate refuses
+    /// (`refuses_admission_strict == true` since `is_fully_covered ==
+    /// false`) while the relaxed gate admits
+    /// (`refuses_admission_relaxed == false` since `has_evidence ==
+    /// true`, `is_saturated == false`). The dual of
+    /// `test_is_admission_eligible_relaxed_admits_mixed_arm_strict_refuses_at_probe_axis`
+    /// at the refuse-side: same load-bearing mixed-arm witness, the
+    /// strict-refuse / relaxed-admit decoupling read from the refuse-
+    /// predicate side. Pins the converse-fails arm of the
+    /// `refuses_admission_relaxed => refuses_admission_strict`
+    /// ordering above — a regression that strengthened the relaxed-
+    /// gate refuse to include the mixed arm would fail this pin.
+    #[test]
+    fn test_refuses_admission_relaxed_admits_mixed_arm_strict_refuses_at_probe_axis() {
+        let mixed_cases = [
+            ProbeCoverage { ran: 1, absent: 1 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage {
+                ran: 89,
+                absent: 11,
+            },
+        ];
+        for c in mixed_cases {
+            assert!(
+                !c.refuses_admission_relaxed(),
+                "mixed arm must NOT be refused by the relaxed gate at \
+                 the no-evidence axis at {c:?} — `has_evidence == true` \
+                 since `ran > 0`, `is_saturated == false`",
+            );
+            assert!(
+                c.refuses_admission_strict(),
+                "mixed arm must be refused by the strict gate at the \
+                 no-evidence axis at {c:?} — `is_fully_covered == false` \
+                 since `absent > 0`",
+            );
+        }
+    }
+
     /// Pin the load-bearing [`VerifiedOutcome`] trait invariant against
     /// the unit-variant form: only the `Verified` arm reads `true`, the
     /// negative-evidence and absent-probe arms read `false`. The macro-
@@ -8040,6 +8468,281 @@ mod tests {
             assert!(
                 !c.is_admission_eligible_strict(),
                 "mixed arm must refuse the strict gate at the \
+                 verification-trustworthiness axis at {c:?} — \
+                 `is_fully_verified == false` since `unverified > 0`",
+            );
+        }
+    }
+
+    /// The per-axis relaxed-gate floor-refuse predicate
+    /// [`VerificationCoverage::refuses_admission_relaxed`] reads
+    /// `true` at every reachable per-axis arm that fails the relaxed
+    /// gate at one or both of its two factors — the empty, all-
+    /// unverified, and every saturated representative — and `false`
+    /// at the two non-saturated admit arms (mixed and fully-
+    /// verified). Mirrors
+    /// `test_probe_coverage_refuses_admission_relaxed_at_each_representative`
+    /// at the verification-trustworthiness axis exactly: the same
+    /// structural matrix, the per-axis component pair `verified` /
+    /// `unverified` swapped in for the no-evidence axis's `ran` /
+    /// `absent`.
+    #[test]
+    fn test_verification_refuses_admission_relaxed_at_each_representative() {
+        let refused_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for c in refused_cases {
+            assert!(
+                c.refuses_admission_relaxed(),
+                "per-axis relaxed-gate floor-refuse predicate must read \
+                 true at {c:?} — every arm with `verified == 0` (empty, \
+                 all-unverified) or every saturated representative \
+                 refuses the relaxed gate at the verification-\
+                 trustworthiness axis",
+            );
+        }
+
+        let admit_cases = [
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+        ];
+        for admit in admit_cases {
+            assert!(
+                !admit.refuses_admission_relaxed(),
+                "per-axis relaxed-gate floor-refuse predicate must read \
+                 false at {admit:?} — non-saturated arms with `verified \
+                 > 0` admit the relaxed gate at the verification-\
+                 trustworthiness axis",
+            );
+        }
+    }
+
+    /// Structural De Morgan equivalence with
+    /// [`VerificationCoverage::is_admission_eligible_relaxed`] —
+    /// pinned across the same seven representatives the documented
+    /// composition pin
+    /// `test_is_admission_eligible_relaxed_equals_documented_composition_at_verification_axis`
+    /// already walks. The orthogonal-axis peer of
+    /// `test_probe_coverage_refuses_admission_relaxed_equals_negation_of_is_admission_eligible_relaxed`
+    /// at the verification-trustworthiness axis: the typed-method
+    /// peer is the exact De Morgan complement of the admit predicate
+    /// at every reachable per-axis state, sealing the typed-method
+    /// admit/refuse pair at the relaxed gate against drift at both
+    /// orthogonal axes simultaneously.
+    #[test]
+    fn test_verification_refuses_admission_relaxed_equals_negation_of_is_admission_eligible_relaxed(
+    ) {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for c in cases {
+            assert_eq!(
+                c.refuses_admission_relaxed(),
+                !c.is_admission_eligible_relaxed(),
+                "per-axis relaxed-gate refuse predicate must equal the \
+                 De Morgan complement of the admit predicate at {c:?} — \
+                 a regression that drifted the body would fail this pin",
+            );
+        }
+    }
+
+    /// Disjoint-and-covering partition: at every reachable per-axis
+    /// state, exactly one of
+    /// [`VerificationCoverage::refuses_admission_relaxed`] and
+    /// [`VerificationCoverage::is_admission_eligible_relaxed`] reads
+    /// `true`. The orthogonal-axis peer of
+    /// `test_probe_coverage_refuses_admission_relaxed_xor_is_admission_eligible_relaxed_partitions`
+    /// at the verification-trustworthiness axis: with both axis
+    /// XOR-partition pins sealed at the relaxed gate AND both axis
+    /// XOR-partition pins already sealed at the strict gate, the
+    /// typed-method admit/refuse four-corner matrix closes the per-
+    /// axis surface at both orthogonal axes AND both gates
+    /// simultaneously — the per-axis peer of the typed-sum
+    /// [`AdmissionTier`] four-corner matrix the prior trio (commits
+    /// 05f5071, bb0110e, aec7d7c) sealed at the typed-sum surface.
+    #[test]
+    fn test_verification_refuses_admission_relaxed_xor_is_admission_eligible_relaxed_partitions() {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for c in cases {
+            let refuses = c.refuses_admission_relaxed();
+            let admits = c.is_admission_eligible_relaxed();
+            assert!(
+                refuses ^ admits,
+                "per-axis relaxed-gate admit/refuse pair must partition \
+                 every reachable state at the verification-\
+                 trustworthiness axis — XOR == true at {c:?}, got \
+                 refuses={refuses}, admits={admits}",
+            );
+        }
+    }
+
+    /// Load-bearing structural ordering
+    /// `refuses_admission_relaxed() => refuses_admission_strict()` at
+    /// the per-axis verification-trustworthiness surface. The
+    /// orthogonal-axis peer of
+    /// `test_refuses_admission_relaxed_implies_refuses_admission_strict_at_probe_axis`:
+    /// the contrapositive of the admit-side ordering already pinned
+    /// at
+    /// `test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_verification_axis`.
+    #[test]
+    fn test_refuses_admission_relaxed_implies_refuses_admission_strict_at_verification_axis() {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for c in cases {
+            let relaxed = c.refuses_admission_relaxed();
+            let strict = c.refuses_admission_strict();
+            assert!(
+                !relaxed || strict,
+                "relaxed-gate refuse must imply strict-gate refuse at \
+                 the verification-trustworthiness axis at {c:?} — got \
+                 relaxed={relaxed}, strict={strict}",
+            );
+        }
+    }
+
+    /// The mixed arm `(N, M)` with both components positive is the
+    /// structural witness that the relaxed-gate refuse is strictly
+    /// stronger than the strict-gate refuse at the per-axis
+    /// verification-trustworthiness surface — mirrors
+    /// `test_refuses_admission_relaxed_admits_mixed_arm_strict_refuses_at_probe_axis`
+    /// at the orthogonal axis exactly. Pins the converse-fails arm
+    /// of the per-axis refuse-side ordering at the verification axis.
+    #[test]
+    fn test_refuses_admission_relaxed_admits_mixed_arm_strict_refuses_at_verification_axis() {
+        let mixed_cases = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 1,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 89,
+                unverified: 11,
+            },
+        ];
+        for c in mixed_cases {
+            assert!(
+                !c.refuses_admission_relaxed(),
+                "mixed arm must NOT be refused by the relaxed gate at \
+                 the verification-trustworthiness axis at {c:?} — \
+                 `has_evidence == true` since `verified > 0`, \
+                 `is_saturated == false`",
+            );
+            assert!(
+                c.refuses_admission_strict(),
+                "mixed arm must be refused by the strict gate at the \
                  verification-trustworthiness axis at {c:?} — \
                  `is_fully_verified == false` since `unverified > 0`",
             );
