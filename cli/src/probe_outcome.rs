@@ -1154,6 +1154,96 @@ impl VerificationCoverage {
         self.verified == 0 && self.unverified > 0
     }
 
+    /// True iff the counted verification-bearing outcomes split — some
+    /// substantiated a positive verdict, some surfaced the negative-
+    /// verdict / absent-probe arm — `verified > 0 && unverified > 0`.
+    /// The orthogonal-axis peer of [`ProbeCoverage::is_mixed`] at the
+    /// verification-trustworthiness dimension: where the no-evidence-
+    /// axis peer names the interior arm `(ran > 0, absent > 0)` of the
+    /// four-arm `(ran, absent)` matrix, this names the interior arm
+    /// `(verified > 0, unverified > 0)` of the four-arm `(verified,
+    /// unverified)` matrix the docstring on [`is_fully_verified`]
+    /// tabulates. The fourth and final named arm of that matrix, the
+    /// structural complement to the three extreme-arm predicates
+    /// ([`is_empty`] at `(0, 0)`, [`is_all_unverified`] at `(0, N)`,
+    /// [`is_fully_verified`] at `(M, 0)`). Before this predicate, the
+    /// mixed arm was only reachable by negation
+    /// (`!is_empty && !is_all_unverified && !is_fully_verified`); after
+    /// this predicate, every arm of the matrix carries a typed name at
+    /// the verification axis the way the orthogonal-axis peer already
+    /// did at the no-evidence axis.
+    ///
+    /// Names the realistic Phase 2 deployment-attestation intermediate
+    /// state at the verification axis — a fleet rollout where some
+    /// `Verified`-bearing typed probes (helm-release-signature, flux-
+    /// source-verification, helm-provenance, cosign-image-signature,
+    /// network-policy-admission) have wired their real positive
+    /// substantiations (`Verified` arm) and others still surface their
+    /// `Unverified` / `VerifyFailed` arm. A downstream `sekiban`
+    /// admission verifier wanting to gate "some verification progress
+    /// but not full verification yet" (the relaxed-staging-policy
+    /// `verification_ratio >= 0.5 && !is_fully_verified` threshold)
+    /// reads one bool here rather than composing the three-predicate
+    /// negation at the consumer surface.
+    ///
+    /// The two-condition body `verified > 0 && unverified > 0` is the
+    /// structural witness of "the counted verification-bearing outcomes
+    /// are heterogeneous": neither component is at the zero boundary,
+    /// so the slice mixes both surfaces of the
+    /// [`VerifiedOutcome::is_verified`] predicate. Symmetric to
+    /// [`is_fully_verified`] (which pins `unverified == 0` at the upper
+    /// edge) and [`is_all_unverified`] (which pins `verified == 0` at
+    /// the lower edge): the three extreme-arm predicates each pin one
+    /// of the matrix's edges, and `is_mixed` pins the interior.
+    ///
+    /// Orthogonal to [`is_saturated`]: the mixed arm at
+    /// `(verified: usize::MAX, unverified: usize::MAX)` is both
+    /// `is_mixed() == true` AND `is_saturated() == true`. The predicate
+    /// stays saturation-robust (the load-bearing tests are
+    /// `verified > 0` and `unverified > 0`, not arithmetic on the sum),
+    /// so a downstream verifier reading `is_mixed()` against the
+    /// saturated state cannot drift the way `verification_ratio() ==
+    /// 0.5` would (which reads as `1.0` at `{verified: MAX, unverified:
+    /// MAX}` against the true 0.5 ratio). Mirrors
+    /// [`ProbeCoverage::is_mixed`]'s saturation-robust discipline at
+    /// the orthogonal axis exactly.
+    ///
+    /// The structural complement at the [`has_evidence`] surface: a
+    /// future parallel-axis sibling
+    /// `compose_is_mixed(probe, verification)` returning
+    /// `probe.is_mixed() && verification.is_mixed()` (the both-axes
+    /// interior arm a fleet-wide-aggregate `sekiban` admission gate
+    /// consults to name "every axis has partial progress but neither
+    /// has reached the ceiling") depends on this typed name existing at
+    /// the verification axis — the structural precondition the
+    /// orthogonal-axis peer already established at the no-evidence
+    /// axis. Today the parallel-axis sibling cannot be lifted at all
+    /// because the verification-axis factor is missing; this commit
+    /// lands that factor so the next routine can compose the two-axis
+    /// surface.
+    ///
+    /// [`VerifiedOutcome::is_verified`]: crate::probe_outcome::VerifiedOutcome::is_verified
+    /// [`has_evidence`]: VerificationCoverage::has_evidence
+    /// [`is_all_unverified`]: VerificationCoverage::is_all_unverified
+    /// [`is_empty`]: VerificationCoverage::is_empty
+    /// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
+    /// [`is_saturated`]: VerificationCoverage::is_saturated
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the predicate is derived
+    /// at one site (here), not re-inlined as `!verification.is_empty()
+    /// && !verification.is_all_unverified() && !verification.
+    /// is_fully_verified()` per consumer (a three-call composition the
+    /// typed name forecloses, mirroring [`ProbeCoverage::is_mixed`]'s
+    /// discipline at the orthogonal axis exactly). THEORY.md §V.4 /
+    /// §VII.1 honesty channel: the discriminator names "some counted
+    /// verification-bearing outcomes substantiated a positive verdict,
+    /// some did not," the load-bearing precondition the relaxed-
+    /// staging admission gate reads to admit partial-verification
+    /// progress without admitting the all-unverified floor.
+    pub fn is_mixed(&self) -> bool {
+        self.verified > 0 && self.unverified > 0
+    }
+
     /// True iff at least one counted verification-bearing outcome
     /// substantiated a positive verdict — `verified > 0`. The
     /// orthogonal-axis peer of [`ProbeCoverage::has_evidence`] at the
@@ -5572,6 +5662,233 @@ mod tests {
             unverified: usize::MAX,
         };
         assert!(!saturated_both.is_all_unverified());
+    }
+
+    /// `VerificationCoverage::is_mixed()` returns `true` whenever both
+    /// components are non-zero — pinned across the half-and-half corner
+    /// `(1, 1)`, the three-of-five split, the two-of-three split, and
+    /// the 89-of-100 mostly-verified shape, so a future regression that
+    /// hardcoded one specific shape would fail across the others. The
+    /// typed-primitive surface a downstream `sekiban` admission verifier
+    /// reads to admit relaxed-staging partial-verification progress
+    /// (`is_mixed() || is_fully_verified()`) without admitting the
+    /// all-unverified floor. Mirrors
+    /// `test_is_mixed_when_both_components_non_zero_is_true` at the
+    /// orthogonal axis exactly.
+    #[test]
+    fn test_verification_is_mixed_when_both_components_non_zero_is_true() {
+        assert!(VerificationCoverage {
+            verified: 1,
+            unverified: 1
+        }
+        .is_mixed());
+        assert!(VerificationCoverage {
+            verified: 3,
+            unverified: 2
+        }
+        .is_mixed());
+        assert!(VerificationCoverage {
+            verified: 2,
+            unverified: 1
+        }
+        .is_mixed());
+        assert!(VerificationCoverage {
+            verified: 89,
+            unverified: 11
+        }
+        .is_mixed());
+    }
+
+    /// `VerificationCoverage::is_mixed()` returns `false` for every
+    /// extreme-arm representative — the empty floor `(0, 0)`, the
+    /// all-unverified floor `(0, N)`, and the fully-verified ceiling
+    /// `(M, 0)`. The structural mirror of the three sibling extreme-arm
+    /// predicates: each fails at its own extreme and the other two
+    /// extremes. A future regression that relaxed the predicate to
+    /// `verified > 0` alone (dropping the `unverified > 0` conjunct)
+    /// would silently flip the fully-verified ceiling to `true` and
+    /// conflate the mixed arm with the ceiling; similarly a regression
+    /// that relaxed to `unverified > 0` alone would flip the all-
+    /// unverified floor to `true`. Both arms closed here. Mirrors
+    /// `test_is_mixed_at_extreme_arms_is_false` at the orthogonal axis
+    /// exactly.
+    #[test]
+    fn test_verification_is_mixed_at_extreme_arms_is_false() {
+        assert!(!VerificationCoverage {
+            verified: 0,
+            unverified: 0
+        }
+        .is_mixed());
+        assert!(!VerificationCoverage {
+            verified: 0,
+            unverified: 5
+        }
+        .is_mixed());
+        assert!(!VerificationCoverage {
+            verified: 3,
+            unverified: 0
+        }
+        .is_mixed());
+        assert!(!VerificationCoverage {
+            verified: 5,
+            unverified: 0
+        }
+        .is_mixed());
+        assert!(!VerificationCoverage {
+            verified: 7,
+            unverified: 0
+        }
+        .is_mixed());
+    }
+
+    /// `VerificationCoverage::is_mixed()` composes with the monoid
+    /// `Add` shape exactly the way a downstream fleet-wide aggregator
+    /// depends on: summing two fully-verified phases stays fully-
+    /// verified (not mixed); summing a fully-verified phase with an
+    /// all-unverified phase yields a mixed aggregate (the fully-
+    /// verified phase contributed `verified > 0`, the all-unverified
+    /// phase contributed `unverified > 0`); summing two all-unverified
+    /// phases stays all-unverified (not mixed). Mirrors
+    /// `test_is_mixed_composes_under_monoid_add` at the orthogonal
+    /// axis: a product certification's verification aggregate is mixed
+    /// only when at least one phase substantiated a positive verdict
+    /// AND at least one phase surfaced (or contributed) an unverified
+    /// arm.
+    #[test]
+    fn test_verification_is_mixed_composes_under_monoid_add() {
+        let phase1_verified = VerificationCoverage {
+            verified: 2,
+            unverified: 0,
+        };
+        let phase2_verified = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        let phase_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 5,
+        };
+        assert!(!phase1_verified.is_mixed());
+        assert!(!phase2_verified.is_mixed());
+        assert!(!phase_unverified.is_mixed());
+        assert!(!(phase1_verified + phase2_verified).is_mixed());
+        assert!((phase1_verified + phase_unverified).is_mixed());
+        assert!((phase1_verified + phase2_verified + phase_unverified).is_mixed());
+        assert!(!(phase_unverified + phase_unverified).is_mixed());
+    }
+
+    /// `VerificationCoverage::is_mixed()` stays saturation-robust at
+    /// the `(verified: usize::MAX, unverified: usize::MAX)` arm — both
+    /// `is_mixed` AND `is_saturated` are `true`, the discriminator does
+    /// not silently flip the way `verification_ratio() == 0.5` would at
+    /// that state (which reads as `1.0` against the true 0.5 ratio).
+    /// The integer-arithmetic body `verified > 0 && unverified > 0`
+    /// reads against the components themselves, not against the post-
+    /// saturation derived ratio, so the predicate stays robust where
+    /// the f64 surface drifts. Mirrors
+    /// `test_is_mixed_stays_robust_at_saturated_state` at the
+    /// orthogonal axis exactly: the saturation-robust discipline holds
+    /// at every named arm-predicate, not just the extreme-arm three.
+    #[test]
+    fn test_verification_is_mixed_stays_robust_at_saturated_state() {
+        let saturated_both = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: usize::MAX,
+        };
+        assert!(saturated_both.is_mixed());
+        assert!(saturated_both.is_saturated());
+        assert!(!saturated_both.is_empty());
+        assert!(!saturated_both.is_fully_verified());
+        assert!(!saturated_both.is_all_unverified());
+        assert_eq!(saturated_both.verification_ratio(), 1.0);
+        assert_eq!(saturated_both.verification_ratio_pct(), 100);
+
+        let saturated_verified_only = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        assert!(!saturated_verified_only.is_mixed());
+        assert!(saturated_verified_only.is_fully_verified());
+
+        let saturated_unverified_only = VerificationCoverage {
+            verified: 0,
+            unverified: usize::MAX,
+        };
+        assert!(!saturated_unverified_only.is_mixed());
+        assert!(saturated_unverified_only.is_all_unverified());
+    }
+
+    /// `VerificationCoverage::is_mixed()` partitions the four-arm
+    /// `(verified, unverified)` matrix together with the three
+    /// extreme-arm predicates ([`VerificationCoverage::is_empty`],
+    /// [`VerificationCoverage::is_all_unverified`],
+    /// [`VerificationCoverage::is_fully_verified`]): exactly one of the
+    /// four predicates returns `true` at every reachable
+    /// [`VerificationCoverage`] value. The structural pin that the four
+    /// arm-predicates are mutually exclusive AND exhaustive. A
+    /// regression that relaxed `is_mixed` (e.g., dropped the
+    /// `verified > 0` conjunct so the all-unverified floor flipped to
+    /// `true`) would fail this pin at the all-unverified arm; a
+    /// regression that broke exhaustiveness (e.g., introduced a fifth
+    /// arm that none of the four predicates flagged) would surface as a
+    /// missed assertion. Mirrors
+    /// `test_arm_predicates_partition_the_matrix` at the orthogonal
+    /// axis exactly: every reachable arm carries one and only one typed
+    /// name across both axes.
+    #[test]
+    fn test_verification_arm_predicates_partition_the_matrix() {
+        let arms = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            }, // empty
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            }, // all-unverified
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            }, // fully-verified
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            }, // mixed
+            VerificationCoverage {
+                verified: 1,
+                unverified: 1,
+            }, // mixed half-and-half corner
+            VerificationCoverage {
+                verified: 3,
+                unverified: 0,
+            }, // fully-verified Phase 2 ceiling
+            VerificationCoverage {
+                verified: 0,
+                unverified: 2,
+            }, // all-unverified Phase 1 floor
+        ];
+        for c in arms {
+            let e = c.is_empty();
+            let u = c.is_all_unverified();
+            let f = c.is_fully_verified();
+            let m = c.is_mixed();
+            let flags = [e, u, f, m];
+            let count = flags.iter().filter(|b| **b).count();
+            assert_eq!(
+                count, 1,
+                "exactly one arm-predicate must hold at {c:?}, got \
+                 (empty: {e}, all_unverified: {u}, fully_verified: {f}, \
+                 mixed: {m})",
+            );
+        }
+        let mixed = VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        };
+        assert!(mixed.is_mixed());
+        assert!(!mixed.is_empty());
+        assert!(!mixed.is_all_unverified());
+        assert!(!mixed.is_fully_verified());
     }
 
     /// `verification_ratio()` returns `0.0` for the empty-slice boundary
