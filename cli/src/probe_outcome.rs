@@ -860,6 +860,90 @@ impl ProbeCoverage {
     pub fn refuses_admission_strict(&self) -> bool {
         !self.is_admission_eligible_strict()
     }
+
+    /// True iff at least one counted probe ran AND the coverage signal is
+    /// trustworthy — the typed primitive for the relaxed-staging
+    /// admission gate at the per-axis no-evidence surface. The per-axis
+    /// admit peer of [`is_admission_eligible_strict`] at the relaxed-gate
+    /// threshold: the strict gate composes `!is_saturated() &&
+    /// is_fully_covered()` (complete AND trustworthy), this composes
+    /// `!is_saturated() && has_evidence()` (some AND trustworthy). Before
+    /// this predicate, every per-axis relaxed-staging gate had to retype
+    /// the two-bool conjunction `!coverage.is_saturated() &&
+    /// coverage.has_evidence()` at every consumer site. After this
+    /// predicate, the gate reads one bool —
+    /// `coverage.is_admission_eligible_relaxed()` — and the per-axis
+    /// two-bool composition is sealed at the typed-primitive surface.
+    ///
+    /// Mirrors [`AdmissionTier::admits_relaxed`] (commit 05f5071) at the
+    /// typed-sum surface and [`compose_admission_eligible_relaxed`]
+    /// (commit e6810b2) at the parallel-axis two-axis surface — the
+    /// per-axis surface previously carried the strict-gate admit peer at
+    /// the per-axis level but only the parallel-composed peer at the
+    /// relaxed-gate threshold; this closes the per-axis admit surface at
+    /// both gates symmetrically. The relaxed-gate per-axis admit peer is
+    /// the strictly weaker discriminator than [`is_admission_eligible_strict`]:
+    /// every fully-covered non-saturated state satisfies both, but the
+    /// mixed non-saturated arm (`ran > 0 && absent > 0`) admits the
+    /// relaxed gate (`has_evidence == true`) while refusing the strict
+    /// gate (`is_fully_covered == false`) — the structural witness the
+    /// Phase 1 / Phase 2 distinction surfaces at the per-axis level.
+    ///
+    /// The load-bearing structural ordering
+    /// `is_admission_eligible_strict() => is_admission_eligible_relaxed()`
+    /// holds at every reachable `(ran, absent)` value because
+    /// `is_fully_covered() => has_evidence()` (every fully-covered state
+    /// carries `ran > 0`, structurally implying `has_evidence`); the
+    /// trustworthiness clamp `!is_saturated()` is shared verbatim across
+    /// the two gates. Pinned at
+    /// [`tests::test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_probe_axis`].
+    ///
+    /// Saturation-robust by construction: `has_evidence()` reads
+    /// `ran > 0` against the component itself (never against derived
+    /// arithmetic), so the post-saturation state `{ran: usize::MAX,
+    /// absent: 0}` is structurally `has_evidence() == true` BUT
+    /// `is_saturated() == true`, so the conjunction correctly rejects
+    /// (`true && !true == false`) — the saturated state cannot pass the
+    /// relaxed gate even though probes ran (up to the ceiling). The
+    /// `!is_saturated()` factor is the same load-bearing trustworthiness
+    /// clamp [`is_admission_eligible_strict`] inherits — a regression
+    /// that dropped the clamp (e.g., a body that returned `has_evidence()`
+    /// alone) would silently admit the post-saturation states
+    /// `{ran: MAX, absent: 0}` and `{ran: MAX, absent: MAX}` where
+    /// past-ceiling increments are lost so the derived ratios cannot be
+    /// trusted.
+    ///
+    /// At every reachable `(ran, absent)` value, the predicate equals the
+    /// documented consumer composition exactly — the structural
+    /// equivalence
+    /// `is_admission_eligible_relaxed() == (!is_saturated() &&
+    /// has_evidence())`
+    /// is pinned across the empty / all-absent / mixed / fully-covered
+    /// arms AND each of the three saturated representatives by
+    /// [`tests::test_is_admission_eligible_relaxed_equals_documented_composition_at_probe_axis`].
+    ///
+    /// [`compose_admission_eligible_relaxed`]: crate::probe_outcome::compose_admission_eligible_relaxed
+    /// [`has_evidence`]: ProbeCoverage::has_evidence
+    /// [`is_admission_eligible_strict`]: ProbeCoverage::is_admission_eligible_strict
+    /// [`is_saturated`]: ProbeCoverage::is_saturated
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-axis relaxed-
+    /// staging admission predicate is derived at one site (here), not
+    /// re-inlined as `!coverage.is_saturated() && coverage.has_evidence()`
+    /// per downstream consumer. THEORY.md §V.4 / §VII.1 honesty channel:
+    /// the named predicate surfaces "some AND trustworthy evidence" at
+    /// the per-axis no-evidence surface — the load-bearing Phase 1 / dev-
+    /// staging admission precondition the relaxed gate admits, mirroring
+    /// the same naming discipline the strict-gate per-axis peer
+    /// [`is_admission_eligible_strict`] already established at the
+    /// per-axis production-admission surface. THEORY.md §V.4 two-phase
+    /// signature composition: this is the per-axis typed-primitive surface
+    /// for the Phase 1 precondition (evidence present AND derived ratios
+    /// trustworthy), the dual of the per-axis Phase 2 surface
+    /// [`is_admission_eligible_strict`] carries.
+    pub fn is_admission_eligible_relaxed(&self) -> bool {
+        !self.is_saturated() && self.has_evidence()
+    }
 }
 
 /// Identity element of the [`Add`](std::ops::Add) impl below: the empty-
@@ -1774,6 +1858,89 @@ impl VerificationCoverage {
     /// verdict back to the axis that broke the conjunction.
     pub fn refuses_admission_strict(&self) -> bool {
         !self.is_admission_eligible_strict()
+    }
+
+    /// True iff at least one counted verification-bearing probe
+    /// substantiated a positive verification verdict AND the verification
+    /// signal is trustworthy — the typed primitive for the relaxed-
+    /// staging admission gate at the per-axis verification-
+    /// trustworthiness surface. The per-axis admit peer of
+    /// [`is_admission_eligible_strict`] at the relaxed-gate threshold:
+    /// the strict gate composes `!is_saturated() && is_fully_verified()`
+    /// (complete AND trustworthy), this composes `!is_saturated() &&
+    /// has_evidence()` (some AND trustworthy). Before this predicate,
+    /// every per-axis relaxed-staging gate at the verification-
+    /// trustworthiness axis had to retype the two-bool conjunction
+    /// `!verification.is_saturated() && verification.has_evidence()` at
+    /// every consumer site. After this predicate, the gate reads one
+    /// bool — `verification.is_admission_eligible_relaxed()` — and the
+    /// per-axis two-bool composition is sealed at the typed-primitive
+    /// surface.
+    ///
+    /// The orthogonal-axis peer of
+    /// [`ProbeCoverage::is_admission_eligible_relaxed`]: where the
+    /// no-evidence-axis peer reads `!is_saturated() && has_evidence()`
+    /// over the seventeen-outcome attestation pipeline (the `(ran,
+    /// absent)` axis), this reads `!is_saturated() && has_evidence()`
+    /// over the five-outcome [`VerifiedOutcome`] subset (the `(verified,
+    /// unverified)` axis). The two relaxed gates compose in parallel
+    /// against the same record at the same emission site — the relaxed-
+    /// staging admission verifier reads `probe.is_admission_eligible_relaxed()
+    /// || verification.is_admission_eligible_relaxed()` for the Phase 1
+    /// "any axis admits the relaxed gate" decomposition (the two-axis
+    /// surface [`compose_admission_eligible_relaxed`] seals at one
+    /// site).
+    ///
+    /// The load-bearing structural ordering
+    /// `is_admission_eligible_strict() => is_admission_eligible_relaxed()`
+    /// holds at every reachable `(verified, unverified)` value because
+    /// `is_fully_verified() => has_evidence()` (every fully-verified state
+    /// carries `verified > 0`, structurally implying `has_evidence`); the
+    /// trustworthiness clamp `!is_saturated()` is shared verbatim across
+    /// the two gates. Pinned at
+    /// [`tests::test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_verification_axis`].
+    ///
+    /// Saturation-robust by construction: `has_evidence()` reads
+    /// `verified > 0` against the component itself (never against derived
+    /// arithmetic), so the post-saturation state `{verified: usize::MAX,
+    /// unverified: 0}` is structurally `has_evidence() == true` BUT
+    /// `is_saturated() == true`, so the conjunction correctly rejects
+    /// (`true && !true == false`) — the saturated state cannot pass the
+    /// relaxed gate even though verifications cleared (up to the
+    /// ceiling), mirroring the no-evidence-axis peer's discipline at the
+    /// orthogonal axis exactly.
+    ///
+    /// At every reachable `(verified, unverified)` value, the predicate
+    /// equals the documented consumer composition exactly — the
+    /// structural equivalence
+    /// `is_admission_eligible_relaxed() == (!is_saturated() &&
+    /// has_evidence())`
+    /// is pinned across the empty / all-unverified / mixed / fully-
+    /// verified arms AND each of the three saturated representatives by
+    /// [`tests::test_is_admission_eligible_relaxed_equals_documented_composition_at_verification_axis`].
+    ///
+    /// [`compose_admission_eligible_relaxed`]: crate::probe_outcome::compose_admission_eligible_relaxed
+    /// [`has_evidence`]: VerificationCoverage::has_evidence
+    /// [`is_admission_eligible_strict`]: VerificationCoverage::is_admission_eligible_strict
+    /// [`is_saturated`]: VerificationCoverage::is_saturated
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-axis relaxed-
+    /// staging verification-axis admission predicate is derived at one
+    /// site (here), not re-inlined as `!verification.is_saturated() &&
+    /// verification.has_evidence()` per downstream consumer. THEORY.md
+    /// §V.4 / §VII.1 honesty channel: the named predicate surfaces "some
+    /// AND trustworthy verification" at the per-axis verification-
+    /// trustworthiness surface — the load-bearing Phase 1 / dev-staging
+    /// admission precondition the relaxed gate admits at the
+    /// verification axis, mirroring the no-evidence-axis peer's
+    /// discipline at the orthogonal axis. THEORY.md §V.4 two-phase
+    /// signature composition: this is the per-axis typed-primitive
+    /// surface for the Phase 1 precondition at the verification axis
+    /// (verification present AND derived ratios trustworthy), the dual
+    /// of the per-axis Phase 2 surface [`is_admission_eligible_strict`]
+    /// carries.
+    pub fn is_admission_eligible_relaxed(&self) -> bool {
+        !self.is_saturated() && self.has_evidence()
     }
 }
 
@@ -5309,6 +5476,191 @@ mod tests {
         }
     }
 
+    /// Structural equivalence with the documented consumer composition
+    /// `!is_saturated() && has_evidence()` at the no-evidence axis. Pins
+    /// the one-oracle invariant the per-axis relaxed-gate typed
+    /// primitive carries — a regression that hand-rolled the body (e.g.,
+    /// `has_evidence() && !is_empty()` — the wrong inner negation) would
+    /// fail at the saturated `{MAX, 0}` arm where `has_evidence() ==
+    /// true` AND `is_empty() == false` AND `is_saturated() == true`, so
+    /// the divergent composition would erroneously admit a state the
+    /// documented relaxed gate refuses. Walks every cell of the cross
+    /// product `({empty, all_absent, mixed, fully_covered} × {saturated,
+    /// non_saturated})` (the empty arm is structurally non-saturated
+    /// only, since both components are 0; the other three each admit
+    /// both saturation states).
+    #[test]
+    fn test_is_admission_eligible_relaxed_equals_documented_composition_at_probe_axis() {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        for c in cases {
+            let direct = c.is_admission_eligible_relaxed();
+            let composed = !c.is_saturated() && c.has_evidence();
+            assert_eq!(
+                direct, composed,
+                "per-axis relaxed-gate typed primitive must equal the \
+                 documented consumer composition at {c:?} — a regression \
+                 that hand-rolled the body would fail this pin at the \
+                 saturated `{{MAX, 0}}` arm where the discriminators \
+                 decouple",
+            );
+        }
+    }
+
+    /// Per-axis relaxed-gate admit at every reachable state at the no-
+    /// evidence axis. Reads `true` at the two non-saturated arms with
+    /// `ran > 0` (mixed and fully-covered) — the relaxed gate is
+    /// strictly weaker than the strict gate so it admits the mixed arm
+    /// the strict gate refuses. Reads `false` at every other
+    /// representative: empty (`ran == 0`), all-absent (`ran == 0`), and
+    /// every saturated representative (the trustworthiness clamp
+    /// refuses regardless of the `has_evidence` factor). The single-pin
+    /// matrix the documented composition test above already pins
+    /// indirectly across the same representatives, hoisted to one
+    /// explicit per-representative pin so a regression with the wrong
+    /// inner factor surfaces here rather than only at the documented
+    /// composition pin.
+    #[test]
+    fn test_is_admission_eligible_relaxed_at_each_representative_at_probe_axis() {
+        let admit_cases = [
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        for c in admit_cases {
+            assert!(
+                c.is_admission_eligible_relaxed(),
+                "per-axis relaxed-gate admit predicate must read true at \
+                 {c:?} — non-saturated arms with `ran > 0` admit the \
+                 relaxed gate at the no-evidence axis",
+            );
+        }
+
+        let refuse_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        for c in refuse_cases {
+            assert!(
+                !c.is_admission_eligible_relaxed(),
+                "per-axis relaxed-gate admit predicate must read false at \
+                 {c:?} — every arm with `ran == 0` (empty, all-absent) or \
+                 every saturated representative refuses the relaxed gate \
+                 at the no-evidence axis",
+            );
+        }
+    }
+
+    /// Load-bearing structural ordering
+    /// `is_admission_eligible_strict() => is_admission_eligible_relaxed()`
+    /// at the per-axis no-evidence surface — pinned across the same
+    /// seven representatives the documented composition pin walks. The
+    /// strict gate is strictly stronger than the relaxed gate at every
+    /// reachable per-axis state because `is_fully_covered() =>
+    /// has_evidence()` (every fully-covered state carries `ran > 0`,
+    /// structurally implying `has_evidence`), and the trustworthiness
+    /// clamp `!is_saturated()` is shared verbatim across the two gates.
+    /// Pins the per-axis peer of
+    /// `test_compose_admission_eligible_strict_implies_compose_admission_eligible_relaxed`
+    /// at the parallel-axis two-axis surface and
+    /// `test_admission_tier_admits_strict_implies_admits_relaxed` at the
+    /// typed-sum [`AdmissionTier`] surface.
+    #[test]
+    fn test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_probe_axis() {
+        let cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 7 },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: usize::MAX,
+            },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+        ];
+        for c in cases {
+            let strict = c.is_admission_eligible_strict();
+            let relaxed = c.is_admission_eligible_relaxed();
+            assert!(
+                !strict || relaxed,
+                "strict-gate admit must imply relaxed-gate admit at {c:?} — \
+                 got strict={strict}, relaxed={relaxed}",
+            );
+        }
+    }
+
+    /// The mixed arm `(N, M)` with both components positive is the
+    /// structural witness that the relaxed gate is strictly weaker than
+    /// the strict gate at the per-axis no-evidence surface: at this arm
+    /// the relaxed gate admits (`has_evidence == true` since `ran > 0`,
+    /// `is_saturated == false`) while the strict gate refuses
+    /// (`is_fully_covered == false` since `absent > 0`). Pins the load-
+    /// bearing decoupling of the two gates: a regression that collapsed
+    /// the relaxed gate to the strict gate (e.g., a body that returned
+    /// `self.is_admission_eligible_strict()` literally) would refuse the
+    /// mixed arm and fail this pin. Mirrors the Phase 1 / Phase 2
+    /// distinction at the per-axis level — the mixed-evidence dev-
+    /// staging arm Phase 1 admits where Phase 2 refuses.
+    #[test]
+    fn test_is_admission_eligible_relaxed_admits_mixed_arm_strict_refuses_at_probe_axis() {
+        let mixed_cases = [
+            ProbeCoverage { ran: 1, absent: 1 },
+            ProbeCoverage { ran: 3, absent: 4 },
+            ProbeCoverage {
+                ran: 89,
+                absent: 11,
+            },
+        ];
+        for c in mixed_cases {
+            assert!(
+                c.is_admission_eligible_relaxed(),
+                "mixed arm must admit the relaxed gate at the no-evidence \
+                 axis at {c:?} — `has_evidence == true` since `ran > 0`, \
+                 `is_saturated == false`",
+            );
+            assert!(
+                !c.is_admission_eligible_strict(),
+                "mixed arm must refuse the strict gate at the no-evidence \
+                 axis at {c:?} — `is_fully_covered == false` since \
+                 `absent > 0`",
+            );
+        }
+    }
+
     /// Pin the load-bearing [`VerifiedOutcome`] trait invariant against
     /// the unit-variant form: only the `Verified` arm reads `true`, the
     /// negative-evidence and absent-probe arms read `false`. The macro-
@@ -7480,6 +7832,216 @@ mod tests {
                  reachable state at the verification-trustworthiness \
                  axis — XOR == true at {c:?}, got refuses={refuses}, \
                  admits={admits}",
+            );
+        }
+    }
+
+    /// Structural equivalence with the documented consumer composition
+    /// `!is_saturated() && has_evidence()` at the verification-
+    /// trustworthiness axis. Mirrors
+    /// `test_is_admission_eligible_relaxed_equals_documented_composition_at_probe_axis`
+    /// at the orthogonal axis exactly: same seven-representative matrix,
+    /// the per-axis component pair `verified` / `unverified` swapped in
+    /// for the no-evidence axis's `ran` / `absent`. A regression that
+    /// hand-rolled the body (e.g., `has_evidence() && !is_empty()` — the
+    /// wrong inner negation) would fail at the saturated `{MAX, 0}` arm
+    /// where the discriminators decouple.
+    #[test]
+    fn test_is_admission_eligible_relaxed_equals_documented_composition_at_verification_axis() {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for c in cases {
+            let direct = c.is_admission_eligible_relaxed();
+            let composed = !c.is_saturated() && c.has_evidence();
+            assert_eq!(
+                direct, composed,
+                "per-axis relaxed-gate typed primitive at the verification \
+                 axis must equal the documented consumer composition at \
+                 {c:?} — a regression that hand-rolled the body would \
+                 fail this pin at the saturated `{{MAX, 0}}` arm where \
+                 the discriminators decouple",
+            );
+        }
+    }
+
+    /// Per-axis relaxed-gate admit at every reachable state at the
+    /// verification-trustworthiness axis. Mirrors
+    /// `test_is_admission_eligible_relaxed_at_each_representative_at_probe_axis`
+    /// at the orthogonal axis exactly: the mixed and fully-verified non-
+    /// saturated arms admit (`has_evidence == true`, `is_saturated ==
+    /// false`); the empty, all-unverified, and every saturated
+    /// representative refuses.
+    #[test]
+    fn test_is_admission_eligible_relaxed_at_each_representative_at_verification_axis() {
+        let admit_cases = [
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+        ];
+        for c in admit_cases {
+            assert!(
+                c.is_admission_eligible_relaxed(),
+                "per-axis relaxed-gate admit predicate must read true at \
+                 {c:?} — non-saturated arms with `verified > 0` admit the \
+                 relaxed gate at the verification-trustworthiness axis",
+            );
+        }
+
+        let refuse_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for c in refuse_cases {
+            assert!(
+                !c.is_admission_eligible_relaxed(),
+                "per-axis relaxed-gate admit predicate must read false at \
+                 {c:?} — every arm with `verified == 0` (empty, all-\
+                 unverified) or every saturated representative refuses \
+                 the relaxed gate at the verification-trustworthiness axis",
+            );
+        }
+    }
+
+    /// Load-bearing structural ordering
+    /// `is_admission_eligible_strict() => is_admission_eligible_relaxed()`
+    /// at the per-axis verification-trustworthiness surface — mirrors
+    /// `test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_probe_axis`
+    /// at the orthogonal axis exactly. The strict gate is strictly
+    /// stronger than the relaxed gate at every reachable per-axis state
+    /// because `is_fully_verified() => has_evidence()` (every fully-
+    /// verified state carries `verified > 0`); the trustworthiness clamp
+    /// `!is_saturated()` is shared verbatim across the two gates.
+    #[test]
+    fn test_is_admission_eligible_strict_implies_is_admission_eligible_relaxed_at_verification_axis(
+    ) {
+        let cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 5,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: usize::MAX,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+        ];
+        for c in cases {
+            let strict = c.is_admission_eligible_strict();
+            let relaxed = c.is_admission_eligible_relaxed();
+            assert!(
+                !strict || relaxed,
+                "strict-gate admit must imply relaxed-gate admit at the \
+                 verification axis at {c:?} — got strict={strict}, \
+                 relaxed={relaxed}",
+            );
+        }
+    }
+
+    /// The mixed arm `(N, M)` with both components positive is the
+    /// structural witness that the relaxed gate is strictly weaker than
+    /// the strict gate at the per-axis verification-trustworthiness
+    /// surface — mirrors
+    /// `test_is_admission_eligible_relaxed_admits_mixed_arm_strict_refuses_at_probe_axis`
+    /// at the orthogonal axis exactly. Pins the load-bearing decoupling
+    /// of the two gates at the verification axis.
+    #[test]
+    fn test_is_admission_eligible_relaxed_admits_mixed_arm_strict_refuses_at_verification_axis() {
+        let mixed_cases = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 1,
+            },
+            VerificationCoverage {
+                verified: 2,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 89,
+                unverified: 11,
+            },
+        ];
+        for c in mixed_cases {
+            assert!(
+                c.is_admission_eligible_relaxed(),
+                "mixed arm must admit the relaxed gate at the \
+                 verification-trustworthiness axis at {c:?} — `has_evidence \
+                 == true` since `verified > 0`, `is_saturated == false`",
+            );
+            assert!(
+                !c.is_admission_eligible_strict(),
+                "mixed arm must refuse the strict gate at the \
+                 verification-trustworthiness axis at {c:?} — \
+                 `is_fully_verified == false` since `unverified > 0`",
             );
         }
     }
