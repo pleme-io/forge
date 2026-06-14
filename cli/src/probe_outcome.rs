@@ -1106,7 +1106,13 @@ impl ProbeCoverage {
     /// floor (per-axis min) and the evidence-OR floor (parallel-axis
     /// compose) auditable at the typed-primitive surface — exactly the
     /// asymmetry the prior commit (585ec00) noted at
-    /// [`compose_refuses_admission_strict`]'s docstring.
+    /// [`compose_refuses_admission_strict`]'s docstring. The named
+    /// [`per_axis_admission_tier_floor`] helper lifts the inline
+    /// `min`-of-per-axis-tier reading to one typed-primitive at the
+    /// parallel-axis surface, so a downstream consumer reads the
+    /// per-axis-AND floor at one named site rather than retyping the
+    /// `[probe.admission_tier(), verification.admission_tier()]
+    /// .into_iter().min().expect(..)` boilerplate inline.
     ///
     /// THEORY.md §VI.1 one-oracle discipline: the per-axis admission-tier
     /// reading is named at one site (here) through the priority-ordered
@@ -4517,6 +4523,96 @@ pub fn compose_admission_tier(
     } else {
         AdmissionTier::Refused
     }
+}
+
+/// The per-axis-AND admission-tier floor — the worst per-axis tier
+/// across the two orthogonal admission axes. Reads
+/// `probe.admission_tier().min(verification.admission_tier())` at one
+/// named site, returning the [`AdmissionTier`] every per-axis surface
+/// admits at least at: a fleet-wide consumer asking "what is the floor
+/// tier every axis admits on its own?" reads this value, and a downstream
+/// gate that requires per-axis admittance at every axis (rather than
+/// parallel-axis admittance under the asymmetric "evidence-OR &
+/// trust-AND" aggregation [`compose_admission_tier`] returns) reads
+/// `>= AdmissionTier::Strict` or `>= AdmissionTier::StagingOnly` here.
+///
+/// The per-axis peer of [`compose_admission_tier`] at the parallel-axis
+/// surface: where the parallel-axis constructor lifts the asymmetric
+/// "evidence-OR ∧ trust-AND" aggregation (Phase 1 admits when at least
+/// one axis carries evidence AND every axis trusts, Phase 2 admits when
+/// every axis admits strictly), this lifts the per-axis-AND aggregation
+/// (every axis must admit on its own). The two floors are STRUCTURALLY
+/// DISTINCT readings of the per-axis admission-tier surfaces, not
+/// equivalent: they collapse at the both-axes-fully-evidenced ceiling
+/// and at the both-axes-floor, but diverge at the
+/// evidence-asymmetric arm where one axis carries evidence and the
+/// other reads `Refused` on the no-evidence relaxed-floor.
+///
+/// The named function replaces the inline four-line idiom
+/// ```ignore
+/// [probe.admission_tier(), verification.admission_tier()]
+///     .into_iter()
+///     .min()
+///     .expect("non-empty iterator")
+/// ```
+/// at every per-axis-floor consumer site, eliminating the `.expect`
+/// guard (the two-element array is statically non-empty, but the
+/// `Iterator::min` signature returns `Option<AdmissionTier>` because the
+/// general iterator may be empty — the `.expect` is a boilerplate
+/// witness to a statically-discharged invariant). The body uses
+/// [`Ord::min`] directly on the two scalar values, returning
+/// [`AdmissionTier`] without the `Option` wrapper.
+///
+/// The structural distinction from the parallel-axis lift, the load-
+/// bearing pin a downstream consumer relies on to decide which floor
+/// reading to consult: at the evidence-asymmetric arm
+/// (`probe = {ran: N, absent: 0}` strict-eligible per-axis AND
+/// `verification = {verified: 0, unverified: 0}` refused per-axis on the
+/// no-evidence floor), this function reads [`AdmissionTier::Refused`]
+/// (the worst per-axis tier — the verification axis refuses on its own),
+/// but [`compose_admission_tier`] reads [`AdmissionTier::StagingOnly`]
+/// (the parallel-axis relaxed gate admits via evidence-OR — the probe
+/// axis carries evidence, the parallel-axis trust factor reads true on
+/// both axes; the strict gate refuses via per-axis-AND — the verification
+/// axis fails the conjunction). The divergence at this arm is pinned by
+/// [`tests::test_per_axis_admission_tier_floor_diverges_from_compose_at_evidence_asymmetric_arm`].
+/// The dual at the both-axes-fully-evidenced ceiling — where the two
+/// surfaces agree on [`AdmissionTier::Strict`] — is pinned by
+/// [`tests::test_per_axis_admission_tier_floor_agrees_with_compose_at_fully_evidenced_ceiling`].
+///
+/// THEORY.md §VI.1 one-oracle discipline: the per-axis-floor reading is
+/// named at one site (here), not re-typed as the `[probe.admission_tier(),
+/// verification.admission_tier()].into_iter().min().expect(...)` boilerplate
+/// per downstream consumer (which would inherit a drift class on the day
+/// a third axis is added: every inline-min consumer would need to extend
+/// its array literal in lockstep, exactly the structural seam this
+/// helper forecloses by routing the per-axis-floor reading through one
+/// function the third axis is added to once).
+///
+/// THEORY.md §V.4 honesty channel: the named function surfaces "the
+/// worst per-axis admission tier across both axes" as the load-bearing
+/// reading distinct from the parallel-axis evidence-OR floor — the two
+/// readings carry different semantics and the named-function surface
+/// makes the choice between them explicit at the consumer site.
+///
+/// Frontier inspiration: SLSA L3+ provenance gates surface the per-
+/// source-axis tier floor as a typed reduction over the per-source tier
+/// readings ("the lowest production-readiness tier across every source
+/// material") — the per-source-AND floor the gate consults distinct
+/// from the parallel-axis evidence-OR floor; sigstore policy-controller
+/// reduces per-attestation-axis tier verdicts through a named per-axis-
+/// floor function so the verifier reads the worst per-attestation tier
+/// at one named site rather than recomposing the per-attestation matrix
+/// inline. Translated here as: lift the inline `min` over per-axis
+/// admission-tier readings to one named typed-primitive that returns
+/// the per-axis-AND-floor [`AdmissionTier`] directly, eliminating the
+/// `.expect`-guarded iterator boilerplate at every consumer.
+#[allow(dead_code)]
+pub fn per_axis_admission_tier_floor(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> AdmissionTier {
+    probe.admission_tier().min(verification.admission_tier())
 }
 
 #[cfg(test)]
@@ -15767,6 +15863,225 @@ mod tests {
             "the structural-witness pin: per-axis min and parallel-axis \
              compose agree at the fully-evidenced both-axes ceiling, the \
              dual of the evidence-asymmetric arm where they diverge",
+        );
+    }
+
+    /// Pin the load-bearing structural equivalence
+    /// `per_axis_admission_tier_floor(p, v) ==
+    /// [p.admission_tier(), v.admission_tier()].into_iter().min().expect(...)`
+    /// at every reachable `(probe, verification)` pair across the 6×6
+    /// cross product of per-axis representatives (36 cells). The named
+    /// function lifts the inline-min idiom (the `.expect("non-empty
+    /// iterator")`-guarded reading the existing
+    /// [`test_per_axis_admission_tier_min_diverges_from_compose_admission_tier_at_evidence_asymmetric_arm`]
+    /// and
+    /// [`test_per_axis_admission_tier_min_agrees_with_compose_at_fully_evidenced_ceiling`]
+    /// already pin at the asymmetric and ceiling arms) to one named
+    /// typed-primitive at the parallel-axis surface; this pin seals the
+    /// structural equivalence at every reachable arm of the 6×6 cross
+    /// product, so the named function cannot drift from the inline form
+    /// across a future regression that altered either the per-axis
+    /// `admission_tier` constructor or the `min`-of-admission-tier
+    /// reduction.
+    #[test]
+    fn test_per_axis_admission_tier_floor_equals_inline_min_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let named = per_axis_admission_tier_floor(&probe, &verification);
+                let inline = [probe.admission_tier(), verification.admission_tier()]
+                    .into_iter()
+                    .min()
+                    .expect("non-empty iterator");
+                assert_eq!(
+                    named, inline,
+                    "per_axis_admission_tier_floor must equal the inline \
+                     min-of-per-axis-tier reading at probe={probe:?} \
+                     verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// At the evidence-asymmetric arm, the named per-axis-floor function
+    /// and the parallel-axis [`compose_admission_tier`] diverge — the
+    /// named-function surface peer of
+    /// [`test_per_axis_admission_tier_min_diverges_from_compose_admission_tier_at_evidence_asymmetric_arm`]
+    /// at the inline-min surface. The named function reads
+    /// [`AdmissionTier::Refused`] (the worst per-axis tier — the
+    /// verification axis refuses on its own), while the parallel-axis
+    /// constructor reads [`AdmissionTier::StagingOnly`] (the
+    /// parallel-axis relaxed gate admits via evidence-OR). The
+    /// divergence pin makes the structural distinction between the
+    /// per-axis-AND floor and the evidence-OR floor auditable at the
+    /// named typed-primitive surface.
+    #[test]
+    fn test_per_axis_admission_tier_floor_diverges_from_compose_at_evidence_asymmetric_arm() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        let floor = per_axis_admission_tier_floor(&probe, &verification);
+        let compose_tier = compose_admission_tier(&probe, &verification);
+        assert_eq!(
+            floor,
+            AdmissionTier::Refused,
+            "per_axis_admission_tier_floor at the evidence-asymmetric arm \
+             reads Refused — the verification axis refuses on its own",
+        );
+        assert_eq!(
+            compose_tier,
+            AdmissionTier::StagingOnly,
+            "compose_admission_tier at the evidence-asymmetric arm reads \
+             StagingOnly — the parallel-axis relaxed gate admits via \
+             evidence-OR",
+        );
+        assert_ne!(
+            floor, compose_tier,
+            "the structural-witness pin at the named-function surface: \
+             per_axis_admission_tier_floor and compose_admission_tier \
+             diverge at the evidence-asymmetric arm, the load-bearing \
+             distinction between the per-axis-AND floor and the \
+             evidence-OR floor",
+        );
+    }
+
+    /// At the both-axes-fully-evidenced ceiling, the named per-axis-floor
+    /// function and the parallel-axis [`compose_admission_tier`] agree on
+    /// [`AdmissionTier::Strict`] — the named-function surface peer of
+    /// [`test_per_axis_admission_tier_min_agrees_with_compose_at_fully_evidenced_ceiling`]
+    /// at the inline-min surface. The dual of the asymmetric-arm
+    /// divergence pin above: when every per-axis surface admits strictly,
+    /// the per-axis-AND floor and the evidence-OR floor collapse to the
+    /// same reading.
+    #[test]
+    fn test_per_axis_admission_tier_floor_agrees_with_compose_at_fully_evidenced_ceiling() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 3,
+            unverified: 0,
+        };
+        let floor = per_axis_admission_tier_floor(&probe, &verification);
+        let compose_tier = compose_admission_tier(&probe, &verification);
+        assert_eq!(
+            floor,
+            AdmissionTier::Strict,
+            "per_axis_admission_tier_floor at the both-axes-strict \
+             ceiling reads Strict",
+        );
+        assert_eq!(
+            compose_tier,
+            AdmissionTier::Strict,
+            "compose_admission_tier at the both-axes-strict ceiling reads \
+             Strict",
+        );
+        assert_eq!(
+            floor, compose_tier,
+            "the structural-witness pin at the named-function surface: \
+             per_axis_admission_tier_floor and compose_admission_tier \
+             agree at the both-axes-strict ceiling, the dual of the \
+             evidence-asymmetric arm divergence",
+        );
+    }
+
+    /// At the both-axes-no-evidence floor (both [`ProbeCoverage`] and
+    /// [`VerificationCoverage`] empty), every surface reads
+    /// [`AdmissionTier::Refused`] — the per-axis floor agrees with the
+    /// parallel-axis floor on the structural floor of the tier ladder.
+    /// The both-axes-empty boundary case the named function must surface
+    /// as Refused so a downstream Phase 1 gate that reads
+    /// `floor >= StagingOnly` correctly refuses promotion at the
+    /// no-evidence boundary rather than admitting the empty-aggregate
+    /// arm.
+    #[test]
+    fn test_per_axis_admission_tier_floor_at_both_axes_no_evidence_floor() {
+        let probe = ProbeCoverage { ran: 0, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        assert_eq!(
+            per_axis_admission_tier_floor(&probe, &verification),
+            AdmissionTier::Refused,
+            "per_axis_admission_tier_floor at the both-axes-empty floor \
+             reads Refused — the structural floor of the tier ladder",
+        );
+    }
+
+    /// At a per-axis-staging interior arm — one axis reads
+    /// [`AdmissionTier::Strict`], the other reads
+    /// [`AdmissionTier::StagingOnly`] — the named per-axis-floor function
+    /// reads [`AdmissionTier::StagingOnly`] (the worst per-axis tier).
+    /// The interior-band pin distinct from the floor and ceiling pins
+    /// above: surfaces the load-bearing reading the per-axis-floor
+    /// function returns when one axis admits strictly and the other only
+    /// at the staging band — the gate-floor reading a fleet-wide Phase 1
+    /// admission gate consults to admit at staging when at least one
+    /// axis incomplete-but-evidenced.
+    #[test]
+    fn test_per_axis_admission_tier_floor_at_per_axis_staging_band_interior_arm() {
+        let probe = ProbeCoverage { ran: 3, absent: 0 };
+        let verification = VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        };
+        assert_eq!(
+            probe.admission_tier(),
+            AdmissionTier::Strict,
+            "probe at the fully-covered arm reads per-axis Strict",
+        );
+        assert_eq!(
+            verification.admission_tier(),
+            AdmissionTier::StagingOnly,
+            "verification at the mixed arm reads per-axis StagingOnly \
+             (evidence present, but completeness fails)",
+        );
+        assert_eq!(
+            per_axis_admission_tier_floor(&probe, &verification),
+            AdmissionTier::StagingOnly,
+            "per_axis_admission_tier_floor at the per-axis (Strict, \
+             StagingOnly) interior arm reads StagingOnly — the worst \
+             per-axis tier across the two axes",
         );
     }
 }
