@@ -2845,6 +2845,159 @@ pub fn compose_is_incomplete_or_saturated(
     !compose_is_fully_complete(probe, verification) || compose_is_saturated(probe, verification)
 }
 
+/// Parallel-composed fleet-wide staging-only admission band over the two
+/// orthogonal typed-primitive surfaces — the two-helper conjunction
+/// `compose_admission_eligible_relaxed(p, v) &&
+///  !compose_admission_eligible_strict(p, v)` collapsed to one bool at one
+/// site. Reads `true` iff the Phase 1 relaxed staging gate admits AND the
+/// Phase 2 strict production gate refuses — the load-bearing partial-
+/// progress band where deploy proceeds to staging but holds before
+/// production. The structural gap between the two admission tiers the
+/// nine prior compose helpers established at the gate / refuse surfaces:
+/// the strict gate (`compose_admission_eligible_strict`, commit 7d818bd)
+/// names the Phase 2 production-ready state, the relaxed gate
+/// (`compose_admission_eligible_relaxed`, commit e6810b2) names the
+/// Phase 1 staging-ready state, the strict-refuse disjunction
+/// (`compose_is_incomplete_or_saturated`, commit 9a9e97a) names the
+/// strict-tier fail-closed reason, the relaxed-refuse disjunction
+/// (`compose_is_all_no_evidence_or_saturated`, commit 86d81f7) names the
+/// relaxed-tier fail-closed reason — but the band BETWEEN the two
+/// gates, the staging-only state, has been re-derived at every consumer
+/// surface as `relaxed && !strict`. After this helper, the staging-only
+/// band carries a typed name and the structural three-way partition
+/// the two-tier admission gate establishes — `strict_eligible XOR
+/// staging_only XOR refused` — is sealed at the typed-primitive surface.
+///
+/// Equivalent three-factor decomposition: because relaxed eligibility
+/// requires `!compose_is_saturated`, the band collapses structurally to
+/// `compose_has_evidence(p, v) && !compose_is_saturated(p, v) &&
+///  !compose_is_fully_complete(p, v)` — "evidence on at least one axis
+/// AND trust intact on both axes AND incomplete on at least one axis."
+/// The disjunctive disjunct of the strict-refuse predicate
+/// (`compose_is_saturated`) is foreclosed by the relaxed gate's
+/// trustworthiness clamp, so the band reduces to the incompleteness
+/// factor alone within the relaxed-admitted subset. A regression that
+/// hand-rolled the band as `compose_has_evidence(p, v) &&
+/// !compose_is_fully_complete(p, v)` (dropping the trust-intact factor)
+/// would silently admit the saturated-incomplete state as staging-only,
+/// breaking the load-bearing structural decomposition.
+///
+/// The structural complement of `compose_admission_eligible_strict` and
+/// `compose_is_incomplete_or_saturated` at the relaxed-admitted subset:
+/// among states the relaxed gate admits, this distinguishes the
+/// strict-eligible band (`compose_admission_eligible_strict` reads
+/// `true` — promote to production) from the staging-only band (this
+/// helper reads `true` — hold at staging). The disjoint three-way
+/// partition `compose_admission_eligible_strict(p, v) XOR
+/// compose_relaxed_eligible_strict_refused(p, v) XOR
+/// !compose_admission_eligible_relaxed(p, v)` covers every reachable
+/// `(probe, verification)` pair exactly once — the load-bearing
+/// structural pin
+/// [`tests::test_compose_admission_three_way_partition_covers_every_state`]
+/// surfaces. A downstream deploy orchestrator wanting to branch on the
+/// admission tier (production-eligible / staging-only / refused) reads
+/// the three predicates as a disjoint cover rather than a nested
+/// if-else cascade that would inherit a drift class on the day a third
+/// tier is added between staging and production.
+///
+/// Conjunction (not disjunction) is structurally load-bearing on the
+/// outer combinator: the staging-only band admits iff BOTH "relaxed
+/// admits" AND "strict refuses" hold — the band is the asymmetric set
+/// difference of the relaxed-admitted set minus the strict-admitted
+/// subset, NOT the symmetric difference. A regression that composed the
+/// disjunction `compose_admission_eligible_relaxed(p, v) ||
+/// !compose_admission_eligible_strict(p, v)` would silently admit
+/// "every refused state where strict gate refuses" as staging-only —
+/// flattening the relaxed-tier floor and dropping the structural
+/// distinction this helper names.
+///
+/// The ten-member parallel-axis compose family now closes the
+/// structural complements the two-axis admission decomposition
+/// surfaces at BOTH gate tiers AND at the gap between them: AND of
+/// completeness, AND of strict admission, OR of saturation, AND of
+/// emptiness, OR of has-evidence, AND of relaxed admission, AND of
+/// no-evidence floor, OR of relaxed-refuse, OR of strict-refuse, AND
+/// of staging-only band. The staging-only band's decomposition
+/// `compose_relaxed_eligible_strict_refused(p, v) ==
+/// compose_admission_eligible_relaxed(p, v) &&
+/// !compose_admission_eligible_strict(p, v)` is the structural
+/// definition the natural-language description of the two-tier
+/// admission gap ("Phase 1 admits and Phase 2 refuses" ↔ "advance to
+/// staging, hold from production") makes auditable at the typed-
+/// primitive surface — pinned by
+/// [`tests::test_compose_relaxed_eligible_strict_refused_equals_documented_composition`].
+///
+/// Saturation-robust by construction: the band requires
+/// `!compose_is_saturated` via the relaxed gate's trustworthiness
+/// clamp, so the saturated-anywhere state — the post-saturation state
+/// every other admission-band ratio surface would lose past-ceiling
+/// increments at — is structurally classified as NOT-staging-only here
+/// (refused, not staging-only); the saturated-fully-evidenced arm
+/// `({ran: usize::MAX, absent: 0}, {verified: usize::MAX, unverified:
+/// 0})` reads `false` honestly through the relaxed gate's saturation
+/// clamp even though the completeness factor reads `true` (the
+/// structural witness the staging-only band is the gap WITHIN the
+/// trust-intact admission space, not across the saturation ceiling).
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented two-helper conjunction exactly — the
+/// structural equivalence
+/// `compose_relaxed_eligible_strict_refused(p, v) ==
+/// (compose_admission_eligible_relaxed(p, v) &&
+///  !compose_admission_eligible_strict(p, v))`
+/// is pinned across the cross product of per-axis representatives by
+/// [`tests::test_compose_relaxed_eligible_strict_refused_equals_documented_composition`].
+///
+/// THEORY.md §V.4 honesty channel: the staging-only band surface reads
+/// one bool naming "the fleet-wide aggregate has surfaced positive
+/// evidence on at least one axis AND trust intact on both axes AND
+/// failed to surface completeness on at least one axis" — the
+/// structural Phase 1 admit / Phase 2 hold state a two-tier deploy
+/// gate consults to advance staging without releasing production,
+/// decomposable into its three named per-factor components at the
+/// consumer surface for telemetry. THEORY.md §VI.1 one-oracle
+/// discipline: the band is derived at one site (here), not re-inlined
+/// as `compose_admission_eligible_relaxed(p, v) &&
+/// !compose_admission_eligible_strict(p, v)` per downstream consumer
+/// (which would inherit a drift class on the day a third admission
+/// tier is added between staging and production — every consumer
+/// would need to extend the band in lockstep, exactly the structural
+/// seam this helper forecloses, mirroring the discipline the nine
+/// prior compose helpers established for the complementary gates).
+///
+/// Frontier lineage: SLSA L3+ admission policy gates surface the
+/// staging-only band as a structural conjunction "Phase 1 attestation
+/// floor met AND Phase 2 provenance freshness not yet established" —
+/// the band between the two tier-level gates a downstream auditor
+/// branches on to advance the artifact through staging-tier
+/// promotion while holding production-tier promotion; this helper
+/// lifts the same staging-tier band surface at the two-axis typed-
+/// primitive level. Sigstore's policy controller emits the
+/// intermediate-tier admit reason as the conjunction "matched
+/// attestations on at least one required predicate AND freshness-
+/// window not yet established on every predicate" — the structural
+/// partial-progress band between the two-tier admit / refuse surfaces.
+/// Bazel's `--build_event_stream` / Buck2's build-event surface emit
+/// a per-stage "actions completed on at least one input AND
+/// incomplete actions on at least one input AND cache trust intact"
+/// intermediate-tier band distinct from the bare admit / refuse
+/// bools — the fleet-wide partial-progress readout a downstream
+/// consumer branches on to surface the staging-tier admission; this
+/// helper lifts the same structural-distinction discipline at
+/// forge's two-axis composition. Tekton's `PipelineRun` tiered
+/// admission gate surfaces the staging-tier band as the structural
+/// conjunction "task-level success on at least one task AND not all
+/// tasks succeeded AND no retries exhausted" — the intermediate
+/// admit-to-staging band the production-promote step gates on.
+#[allow(dead_code)]
+pub fn compose_relaxed_eligible_strict_refused(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    compose_admission_eligible_relaxed(probe, verification)
+        && !compose_admission_eligible_strict(probe, verification)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9474,5 +9627,456 @@ mod tests {
              Morgan equivalence with !compose_admission_eligible_strict \
              pins)",
         );
+    }
+
+    /// Pins the positive band reading at every state where the relaxed
+    /// gate admits and the strict gate refuses — the staging-only
+    /// partial-progress band. Covers the cross product of the
+    /// representative per-axis evidenced-incomplete arms (mixed
+    /// `(ran > 0, absent > 0)` / mixed `(verified > 0, unverified > 0)`)
+    /// against the representative per-axis fully-evidenced arms on the
+    /// opposite axis, plus the symmetric one-axis-incomplete-other-axis-
+    /// fully-evidenced arms. Every combination must read `true`,
+    /// pinning the structural witness the staging-only band carries a
+    /// typed name at the parallel-axis surface for the load-bearing
+    /// partial-progress state where the deploy orchestrator advances to
+    /// staging but holds before production.
+    #[test]
+    fn test_compose_relaxed_eligible_strict_refused_at_partial_progress_arms_is_true() {
+        let probe_mixed_evidence = ProbeCoverage { ran: 2, absent: 3 };
+        let probe_fully_covered = ProbeCoverage { ran: 4, absent: 0 };
+        let verification_mixed_evidence = VerificationCoverage {
+            verified: 1,
+            unverified: 2,
+        };
+        let verification_fully_verified = VerificationCoverage {
+            verified: 5,
+            unverified: 0,
+        };
+
+        let partial_progress_pairs = [
+            (probe_mixed_evidence, verification_mixed_evidence),
+            (probe_mixed_evidence, verification_fully_verified),
+            (probe_fully_covered, verification_mixed_evidence),
+        ];
+        for (probe, verification) in partial_progress_pairs {
+            assert!(
+                compose_relaxed_eligible_strict_refused(&probe, &verification),
+                "staging-only band must admit at probe={probe:?} \
+                 verification={verification:?} — relaxed gate admits \
+                 (evidence on at least one axis AND trust intact on both) \
+                 AND strict gate refuses (incomplete on at least one \
+                 axis), the load-bearing partial-progress state the \
+                 two-tier admission gate establishes",
+            );
+            assert!(
+                compose_admission_eligible_relaxed(&probe, &verification),
+                "relaxed gate must admit the staging-only state at \
+                 probe={probe:?} verification={verification:?} — \
+                 structural sanity check the band sits inside the \
+                 relaxed-admitted set",
+            );
+            assert!(
+                !compose_admission_eligible_strict(&probe, &verification),
+                "strict gate must refuse the staging-only state at \
+                 probe={probe:?} verification={verification:?} — \
+                 structural sanity check the band sits outside the \
+                 strict-admitted subset",
+            );
+        }
+    }
+
+    /// Pins the rejection reading at every strict-eligible state — the
+    /// production-ready states the strict gate admits must read `false`
+    /// through the staging-only band (they are production-eligible, NOT
+    /// staging-only). Covers the cross product of the three per-axis
+    /// fully-covered probe representatives × three per-axis fully-
+    /// verified verification representatives. Forecloses the drift
+    /// class where a regression that swapped the inner negation
+    /// (`!compose_admission_eligible_strict` → `compose_admission_
+    /// eligible_strict`) would silently classify the production-ready
+    /// state as staging-only, flattening the structural distinction
+    /// between the two admission tiers.
+    #[test]
+    fn test_compose_relaxed_eligible_strict_refused_at_strict_eligible_states_is_false() {
+        let probe_fully_covered_honest = [
+            ProbeCoverage { ran: 1, absent: 0 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX - 1,
+                absent: 0,
+            },
+        ];
+        let verification_fully_verified_honest = [
+            VerificationCoverage {
+                verified: 1,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX - 1,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_fully_covered_honest {
+            for verification in verification_fully_verified_honest {
+                assert!(
+                    !compose_relaxed_eligible_strict_refused(&probe, &verification),
+                    "staging-only band must refuse the strict-eligible \
+                     state at probe={probe:?} verification={verification:?} \
+                     — production-ready states sit in the strict-admitted \
+                     subset (promote to production), NOT in the staging-\
+                     only band (hold at staging), the structural witness \
+                     the band excludes the strict-admitted subset",
+                );
+            }
+        }
+    }
+
+    /// Pins the rejection reading at every both-axes no-evidence state
+    /// — the relaxed-tier fail-closed floor must read `false` through
+    /// the staging-only band (they are refused, NOT staging-only).
+    /// Covers the cross product of the two per-axis no-evidence arms
+    /// (`is_empty` at `(0, 0)`, `is_all_absent` / `is_all_unverified`
+    /// at `(0, N>0)`) on each axis. Forecloses the drift class where a
+    /// regression that hand-rolled the band as `!compose_admission_
+    /// eligible_strict` alone (dropping the relaxed-admitted floor)
+    /// would silently classify the both-axes no-evidence floor as
+    /// staging-only, flattening the relaxed-tier admission floor.
+    #[test]
+    fn test_compose_relaxed_eligible_strict_refused_at_no_evidence_floor_is_false() {
+        let probe_empty = ProbeCoverage { ran: 0, absent: 0 };
+        let probe_all_absent = ProbeCoverage { ran: 0, absent: 4 };
+        let verification_empty = VerificationCoverage {
+            verified: 0,
+            unverified: 0,
+        };
+        let verification_all_unverified = VerificationCoverage {
+            verified: 0,
+            unverified: 6,
+        };
+        for probe in [probe_empty, probe_all_absent] {
+            for verification in [verification_empty, verification_all_unverified] {
+                assert!(
+                    !compose_relaxed_eligible_strict_refused(&probe, &verification),
+                    "staging-only band must refuse the both-axes no-\
+                     evidence floor at probe={probe:?} \
+                     verification={verification:?} — the relaxed gate \
+                     refuses (no evidence on either axis), so the band \
+                     reads `false` honestly through the conjunction's \
+                     first factor, the structural witness the band sits \
+                     inside the relaxed-admitted set",
+                );
+            }
+        }
+    }
+
+    /// Pins the rejection reading at every saturated state — the
+    /// trustworthiness-broken states must read `false` through the
+    /// staging-only band (they are refused, NOT staging-only). The
+    /// relaxed gate's saturation clamp forecloses every saturated state
+    /// from admission regardless of completeness; this test pins that
+    /// the staging-only band inherits the clamp honestly. Critically
+    /// pins the saturated-fully-evidenced arm `({ran: usize::MAX,
+    /// absent: 0}, {verified: usize::MAX, unverified: 0})` where the
+    /// completeness factor reads `true` — a regression that hand-rolled
+    /// the band as `compose_has_evidence && !compose_is_fully_complete`
+    /// (dropping the trust-intact factor) would silently misclassify
+    /// the saturated-completed state as staging-only. The saturated-
+    /// incomplete arms must also read `false` — the saturation clamp
+    /// applies BEFORE the completeness factor is consulted.
+    #[test]
+    fn test_compose_relaxed_eligible_strict_refused_at_saturated_states_is_false() {
+        let probe_saturated_evidence = ProbeCoverage {
+            ran: usize::MAX,
+            absent: 0,
+        };
+        let probe_saturated_no_evidence = ProbeCoverage {
+            ran: 0,
+            absent: usize::MAX,
+        };
+        let verification_saturated_evidence = VerificationCoverage {
+            verified: usize::MAX,
+            unverified: 0,
+        };
+        let verification_saturated_no_evidence = VerificationCoverage {
+            verified: 0,
+            unverified: usize::MAX,
+        };
+        let probe_evidenced_non_saturated = ProbeCoverage { ran: 3, absent: 2 };
+        let verification_evidenced_non_saturated = VerificationCoverage {
+            verified: 2,
+            unverified: 3,
+        };
+
+        let saturated_pairs = [
+            (probe_saturated_evidence, verification_saturated_evidence),
+            (probe_saturated_evidence, verification_saturated_no_evidence),
+            (probe_saturated_no_evidence, verification_saturated_evidence),
+            (
+                probe_saturated_no_evidence,
+                verification_saturated_no_evidence,
+            ),
+            (
+                probe_saturated_evidence,
+                verification_evidenced_non_saturated,
+            ),
+            (
+                probe_evidenced_non_saturated,
+                verification_saturated_evidence,
+            ),
+            (
+                probe_saturated_no_evidence,
+                verification_evidenced_non_saturated,
+            ),
+            (
+                probe_evidenced_non_saturated,
+                verification_saturated_no_evidence,
+            ),
+        ];
+        for (probe, verification) in saturated_pairs {
+            assert!(
+                !compose_relaxed_eligible_strict_refused(&probe, &verification),
+                "staging-only band must refuse the saturated state at \
+                 probe={probe:?} verification={verification:?} — the \
+                 relaxed gate's trustworthiness clamp foreclosed the \
+                 admission floor, so the band reads `false` honestly \
+                 through the conjunction's first factor; a regression \
+                 that dropped the trust-intact factor would silently \
+                 misclassify the saturated state as staging-only",
+            );
+        }
+    }
+
+    /// Pins the load-bearing structural equivalence with the documented
+    /// two-helper conjunction across the cross product of representative
+    /// per-axis arms (empty, all-absent / all-unverified, mixed-evidence,
+    /// fully-covered / fully-verified, both saturated polarities). The
+    /// structural drift class this pin forecloses: a regression that
+    /// re-wrote the body as the symmetric difference
+    /// `compose_admission_eligible_relaxed(p, v) ^
+    ///  compose_admission_eligible_strict(p, v)` would pass the smoke
+    /// tests for the strict-eligible subset (the strict-relaxed AND
+    /// reduces to strict, the symmetric difference reads `false`) but
+    /// fail at the refused subset (the conjunction reads `false`, the
+    /// symmetric difference reads `false` — both are equivalent at the
+    /// refused subset by accident); this exhaustive cross product pins
+    /// the equivalence at every reachable arm not just the smoke arms.
+    #[test]
+    fn test_compose_relaxed_eligible_strict_refused_equals_documented_composition() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let documented = compose_admission_eligible_relaxed(&probe, &verification)
+                    && !compose_admission_eligible_strict(&probe, &verification);
+                assert_eq!(
+                    compose_relaxed_eligible_strict_refused(&probe, &verification),
+                    documented,
+                    "compose_relaxed_eligible_strict_refused must equal \
+                     the two-helper conjunction `compose_admission_\
+                     eligible_relaxed(p, v) && !compose_admission_\
+                     eligible_strict(p, v)` at probe={probe:?} \
+                     verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// Pins the equivalent three-factor decomposition the staging-only
+    /// band collapses to within the trust-intact admission space:
+    /// `compose_relaxed_eligible_strict_refused(p, v) ==
+    ///  compose_has_evidence(p, v) && !compose_is_saturated(p, v) &&
+    ///  !compose_is_fully_complete(p, v)`. The disjunctive disjunct of
+    /// the strict-refuse predicate (`compose_is_saturated`) is
+    /// foreclosed by the relaxed gate's trustworthiness clamp, so the
+    /// band reduces to the incompleteness factor alone within the
+    /// relaxed-admitted subset. Forecloses the drift class where a
+    /// regression that hand-rolled the band as the two-factor
+    /// `compose_has_evidence && !compose_is_fully_complete` (dropping
+    /// the trust-intact factor) would silently misclassify the
+    /// saturated-completed state as staging-only.
+    #[test]
+    fn test_compose_relaxed_eligible_strict_refused_decomposes_into_three_factors() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let three_factor = compose_has_evidence(&probe, &verification)
+                    && !compose_is_saturated(&probe, &verification)
+                    && !compose_is_fully_complete(&probe, &verification);
+                assert_eq!(
+                    compose_relaxed_eligible_strict_refused(&probe, &verification),
+                    three_factor,
+                    "compose_relaxed_eligible_strict_refused must equal \
+                     the three-factor decomposition `compose_has_evidence \
+                     && !compose_is_saturated && !compose_is_fully_complete` \
+                     at probe={probe:?} verification={verification:?} — \
+                     the load-bearing structural equivalence the relaxed \
+                     gate's trustworthiness clamp establishes by \
+                     collapsing the disjunctive disjunct of the strict-\
+                     refuse predicate within the relaxed-admitted subset",
+                );
+            }
+        }
+    }
+
+    /// Pins the load-bearing disjoint three-way partition the two-tier
+    /// admission gate establishes: every reachable `(probe,
+    /// verification)` pair satisfies exactly one of
+    /// `compose_admission_eligible_strict`,
+    /// `compose_relaxed_eligible_strict_refused`,
+    /// `!compose_admission_eligible_relaxed` — the production-eligible
+    /// / staging-only / refused tier-decomposition the typed-primitive
+    /// surface seals at one site. Forecloses the drift class where a
+    /// regression that broke any one of the three predicates would
+    /// silently break the disjoint cover (e.g., a regression that
+    /// broke the staging-only band's first factor would surface a state
+    /// classified as both refused AND staging-only, OR neither). The
+    /// XOR (exclusive-or) reading is the load-bearing structural pin —
+    /// a downstream deploy orchestrator branching on the admission
+    /// tier relies on the disjoint cover to avoid a nested if-else
+    /// cascade that would inherit a drift class on the day a third
+    /// tier is added.
+    #[test]
+    fn test_compose_admission_three_way_partition_covers_every_state() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let strict_eligible = compose_admission_eligible_strict(&probe, &verification);
+                let staging_only = compose_relaxed_eligible_strict_refused(&probe, &verification);
+                let refused = !compose_admission_eligible_relaxed(&probe, &verification);
+                let exactly_one = (strict_eligible as u8) + (staging_only as u8) + (refused as u8);
+                assert_eq!(
+                    exactly_one, 1,
+                    "the three-way admission partition must cover every \
+                     state exactly once at probe={probe:?} \
+                     verification={verification:?} — \
+                     strict_eligible={strict_eligible}, \
+                     staging_only={staging_only}, refused={refused}; \
+                     the disjoint-union structure is the load-bearing \
+                     structural pin the deploy orchestrator's tier-\
+                     branching surface relies on",
+                );
+            }
+        }
     }
 }
