@@ -525,6 +525,41 @@ impl CapturedFailure {
             Some(Self::from_output(output))
         }
     }
+
+    /// True iff the captured stderr matches a transient network/server
+    /// failure marker (HTTP 5xx, 429, connection-level, I/O timeout,
+    /// EOF). Empty stderr is terminal by construction — same discipline
+    /// the free [`is_transient_network_stderr`] classifier and the
+    /// sibling peer [`CommandAttemptFailure::is_transient`] encode.
+    ///
+    /// Typed-method peer of [`CommandAttemptFailure::is_transient`].
+    /// Both typed records at the retry surface carry a `stderr: String`
+    /// field consumed by one canonical classifier; pinning that
+    /// classifier at both typed-record surfaces means a consumer that
+    /// holds a `CapturedFailure` (the typed-error producer surface:
+    /// `GitError::OpFailed`, `NixBuildError::BuildFailed`,
+    /// `AtticError::PushFailed`/`LoginFailed`,
+    /// `RegistryError::PushFailed`) reads transient/terminal as
+    /// `cf.is_transient()` — same call shape as a consumer that holds
+    /// a `CommandAttemptFailure` (the retry-call-site surface) —
+    /// instead of routing through the free function with the
+    /// per-site `is_transient_network_stderr(&cf.stderr)` cascade.
+    /// Closes the typed-method symmetry the
+    /// `PartialEq`/`Eq` derive lift (commits 604884b/c6a47f2)
+    /// established at the structural-equality surface, here applied
+    /// at the transient/terminal predicate surface — every typed
+    /// primitive at the retry boundary now speaks the same
+    /// `is_transient()` language.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the
+    /// transient/terminal classification rule is named at one site
+    /// ([`is_transient_network_stderr`]) and surfaced through one
+    /// typed-method per record carrying `stderr`. A future addition
+    /// to the transient-marker list lights up at every typed-method
+    /// peer in the same commit.
+    pub fn is_transient(&self) -> bool {
+        is_transient_network_stderr(&self.stderr)
+    }
 }
 
 /// Classify an external-CLI invocation's `io::Result<Output>` into one of
@@ -3015,6 +3050,56 @@ mod tests {
         // ultimately consumes.
         assert!(is_transient_network_stderr(&stderr));
         assert!(exit_code.is_some());
+    }
+
+    /// `CapturedFailure::is_transient` must return `true` on stderr
+    /// matching a canonical 5xx / 429 / connection / timeout / EOF
+    /// marker — the typed-method peer of
+    /// `CommandAttemptFailure::is_transient`. Pins the typed-record
+    /// surface that every typed-error producer (`GitError::OpFailed`,
+    /// `NixBuildError::BuildFailed`, `AtticError::PushFailed`,
+    /// `RegistryError::PushFailed`) consumes when it wants to
+    /// classify the captured failure without re-routing through the
+    /// free `is_transient_network_stderr` function.
+    #[test]
+    fn test_captured_failure_is_transient_on_5xx() {
+        let out = synth_output(false, b"", b"received unexpected HTTP status: 503");
+        let cf = CapturedFailure::from_output(&out);
+        assert!(cf.is_transient());
+    }
+
+    /// Terminal failures (auth, not-found, manifest mismatch) must
+    /// NOT be classified transient — same discipline the sibling peer
+    /// `CommandAttemptFailure::is_transient` encodes for the retry-
+    /// call-site surface. A typed-error producer that wraps a
+    /// terminal CLI failure (e.g. `AtticError::LoginFailed` from a
+    /// 401) consumes `cf.is_transient()` to short-circuit any future
+    /// retry-policy dispatch site without re-routing through the
+    /// free classifier.
+    #[test]
+    fn test_captured_failure_is_not_transient_on_terminal() {
+        let out = synth_output(false, b"", b"401 Unauthorized: bad token");
+        let cf = CapturedFailure::from_output(&out);
+        assert!(!cf.is_transient());
+    }
+
+    /// Empty stderr must be terminal under
+    /// `CapturedFailure::is_transient` — same construction the sibling
+    /// peer `CommandAttemptFailure::is_transient` encodes (empty stderr
+    /// short-circuits the classifier at the very first guard, so a
+    /// "no captured diagnostics" failure never burns retry budget).
+    /// Although `CapturedFailure::from_output` is only ever called on
+    /// a real `Output` (so the spawn-failure path that produces an
+    /// empty-stderr `CommandAttemptFailure` cannot arise here), a
+    /// CLI can still emit zero stderr on a non-zero exit — pinning
+    /// the empty-stderr case to terminal keeps the typed-method
+    /// peer behaviorally aligned with the sibling.
+    #[test]
+    fn test_captured_failure_is_not_transient_on_empty_stderr() {
+        let out = synth_output(false, b"silent failure on stdout", b"");
+        let cf = CapturedFailure::from_output(&out);
+        assert!(cf.stderr.is_empty());
+        assert!(!cf.is_transient());
     }
 
     /// `retry_command` returns the captured `Output` verbatim on the
