@@ -926,6 +926,70 @@ impl CommandAttemptFailure {
         is_transient_network_stderr(&self.stderr)
     }
 
+    /// True iff this record represents a terminal (fail-fast) failure —
+    /// the retry loop should NOT burn budget on it.
+    ///
+    /// Named complement of [`Self::is_transient`]: the two predicates
+    /// partition every [`CommandAttemptFailure`] record into exactly two
+    /// retry-dispatch shapes — `is_transient` (the canonical retry-
+    /// budget-consuming arm: HTTP 5xx / 429, connection-level, I/O
+    /// timeout, EOF) and `is_terminal` (every other shape: terminal 4xx
+    /// auth/not-found/manifest-invalid, empty-stderr spawn-failure,
+    /// non-matching diagnostic). Never both and never neither.
+    ///
+    /// # Why a named complement
+    ///
+    /// The canonical retry-loop dispatch site [`run_with_policy`] reads
+    /// the partition as `if !is_transient(&e) || attempt >= max` — the
+    /// negation against the transient predicate carries the "this error
+    /// is terminal, short-circuit the loop" meaning implicitly at the
+    /// load-bearing fail-fast arm. Consumer sites that branch in the
+    /// other direction (testing for terminal-first, then falling back to
+    /// a transient-retry path: e.g., a future post-retry telemetry
+    /// surface histogramming terminal-vs-transient counts; a future
+    /// fail-fast pre-loop skip for known-terminal records; a future
+    /// structured-attestation surface distinguishing "transient retry
+    /// exhausted" from "terminal classified at first attempt"
+    /// previously had to write `!failure.is_transient()` against the
+    /// negated transient predicate. The named peer hoists that reading
+    /// to a typed method, matching the structural-complement idiom the
+    /// recent spawn/op peer-pair ([`Self::is_spawn_failure`] /
+    /// [`Self::is_op_failure`], commit a4f4146) and the
+    /// [`crate::probe_outcome::AdmissionTier`] admit/refuse peer trio
+    /// (commits 05f5071 / bb0110e / aec7d7c / 585ec00) established:
+    /// every binary partition the typed primitive surfaces exposes both
+    /// arms as typed methods, so consumer sites never read through a
+    /// `!` against the wrong-direction predicate.
+    ///
+    /// # Spawn-failure is structurally terminal
+    ///
+    /// The spawn-failure shape ([`Self::is_spawn_failure`]: `exit_code:
+    /// None` + empty `stderr`) is unconditionally terminal under the
+    /// canonical [`is_transient_network_stderr`] classifier — empty
+    /// stderr matches no transient marker by construction. So
+    /// `is_spawn_failure()` implies `is_terminal()` at every record.
+    /// The reverse does not hold: an op-failure record with terminal
+    /// stderr (`Some(exit_code)` + `"401 Unauthorized"`) is terminal
+    /// but not a spawn-failure. The two partitions
+    /// (spawn-vs-op and transient-vs-terminal) are orthogonal —
+    /// `is_spawn_failure` discriminates on the structural shape the
+    /// record was constructed in; `is_terminal` discriminates on the
+    /// retry-dispatch class. Both partitions surface their named
+    /// complements at this typed-method surface for the canonical
+    /// 2×2 reading at any future post-retry classifier.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the transient/terminal
+    /// retry-dispatch partition is named at one typed-primitive site
+    /// with both arms exposed as typed methods, not as one method plus
+    /// an implicit `!` at every consumer. Same parallel-axis
+    /// named-complement peer idiom the
+    /// [`Self::is_spawn_failure`] / [`Self::is_op_failure`] pair
+    /// recently established at the structural-shape surface, here
+    /// applied at the retry-dispatch surface.
+    pub fn is_terminal(&self) -> bool {
+        !self.is_transient()
+    }
+
     /// True iff this record represents a process that could not be spawned
     /// (binary not on PATH, fork failed, permission denied), as opposed to
     /// a process that ran-but-exited-non-zero.
@@ -3103,6 +3167,243 @@ mod tests {
             assert!(
                 f.is_op_failure() ^ f.is_spawn_failure(),
                 "exactly one of is_op_failure / is_spawn_failure must hold for record {f:?}"
+            );
+        }
+    }
+
+    /// `is_terminal()` discriminates the retry-dispatch arms at every
+    /// canonical structural shape `from_capture` constructs. Terminal
+    /// stderr (auth 401), empty-stderr spawn-failure (`exit_code:
+    /// None` + empty `stderr`), and the non-matching diagnostic
+    /// (a free-form error message with no 5xx/timeout/EOF marker) all
+    /// discriminate as terminal; the 5xx / connection-refused /
+    /// timeout / EOF arms discriminate as NOT terminal. Pins the
+    /// load-bearing structural-shape reading at the retry-dispatch
+    /// surface against any future regression that perturbed the
+    /// predicate body.
+    #[test]
+    fn test_is_terminal_discriminates_terminal_from_transient() {
+        // Terminal: 4xx auth — must short-circuit retry.
+        let out = synth_output(false, b"", b"401 Unauthorized: bad token");
+        let f = CommandAttemptFailure::from_capture(Ok(out), "auth op", 1)
+            .expect_err("non-zero exit must produce a record");
+        assert!(f.is_terminal(), "401 auth must discriminate as terminal");
+
+        // Terminal: spawn-failure (empty stderr, no exit code).
+        let spawn_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let captured: Result<std::process::Output, std::io::Error> = Err(spawn_err);
+        let f = CommandAttemptFailure::from_capture(captured, "exec missing", 1)
+            .expect_err("spawn failure must produce a record");
+        assert!(
+            f.is_terminal(),
+            "spawn failure (empty stderr) must discriminate as terminal — empty stderr matches no transient marker"
+        );
+
+        // Terminal: non-matching diagnostic (manifest-invalid).
+        let out = synth_output(false, b"", b"manifest invalid: bad digest");
+        let f = CommandAttemptFailure::from_capture(Ok(out), "manifest op", 1)
+            .expect_err("non-zero exit must produce a record");
+        assert!(
+            f.is_terminal(),
+            "non-matching diagnostic must discriminate as terminal"
+        );
+
+        // NOT terminal: 5xx transient.
+        let out = synth_output(false, b"", b"received unexpected HTTP status: 503");
+        let f = CommandAttemptFailure::from_capture(Ok(out), "push op", 1)
+            .expect_err("non-zero exit must produce a record");
+        assert!(
+            !f.is_terminal(),
+            "5xx transient must NOT discriminate as terminal"
+        );
+
+        // NOT terminal: connection-refused transient.
+        let out = synth_output(false, b"", b"dial tcp 10.0.0.1:5000: connection refused");
+        let f = CommandAttemptFailure::from_capture(Ok(out), "connect op", 1)
+            .expect_err("non-zero exit must produce a record");
+        assert!(
+            !f.is_terminal(),
+            "connection-refused transient must NOT discriminate as terminal"
+        );
+
+        // NOT terminal: bare EOF token transient.
+        let out = synth_output(false, b"", b"read body: EOF");
+        let f = CommandAttemptFailure::from_capture(Ok(out), "read op", 1)
+            .expect_err("non-zero exit must produce a record");
+        assert!(
+            !f.is_terminal(),
+            "bare EOF token transient must NOT discriminate as terminal"
+        );
+    }
+
+    /// De Morgan partition invariant: `is_terminal()` and
+    /// `is_transient()` are exact structural complements at every
+    /// record `from_capture` constructs and at every hand-built record
+    /// an upstream consumer might synthesize. `is_terminal() ==
+    /// !is_transient()` at every shape including the spawn-failure
+    /// edge (empty stderr → terminal under both readings) and the
+    /// signal-killed-with-stderr edge (`exit_code: None` + transient
+    /// stderr → terminal-via-transient-classifier reads through). The
+    /// pin against a future regression that perturbed one predicate's
+    /// body without lifting the change to the other — e.g., broadened
+    /// the transient-marker list without re-tightening the terminal
+    /// body — which would silently break the canonical retry-loop
+    /// dispatch in [`run_with_policy`] and every downstream consumer
+    /// that branches on either predicate.
+    #[test]
+    fn test_is_terminal_equals_negation_of_is_transient() {
+        // Transient: 5xx.
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            stderr: "503 Service Unavailable".to_string(),
+            stdout: String::new(),
+        };
+        assert_eq!(f.is_terminal(), !f.is_transient());
+        assert!(!f.is_terminal());
+
+        // Terminal: 4xx auth.
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            stderr: "401 Unauthorized".to_string(),
+            stdout: String::new(),
+        };
+        assert_eq!(f.is_terminal(), !f.is_transient());
+        assert!(f.is_terminal());
+
+        // Spawn-failure: empty stderr, no exit code — terminal by
+        // construction (empty stderr matches no transient marker).
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: String::new(),
+            stdout: "failed to spawn process: no such file".to_string(),
+        };
+        assert_eq!(f.is_terminal(), !f.is_transient());
+        assert!(f.is_terminal());
+
+        // Edge: signal-killed with transient stderr — `exit_code:
+        // None` but stderr carries a transient marker. The transient
+        // classifier reads through the stderr regardless of the exit
+        // code, so this record is transient (and NOT terminal). The
+        // De Morgan equivalence must hold.
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: "i/o timeout".to_string(),
+            stdout: String::new(),
+        };
+        assert_eq!(f.is_terminal(), !f.is_transient());
+        assert!(!f.is_terminal());
+
+        // Edge: populated exit code with empty stderr (signal-killed
+        // with stderr already flushed) — terminal (empty stderr
+        // matches no transient marker).
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: Some(137),
+            stderr: String::new(),
+            stdout: String::new(),
+        };
+        assert_eq!(f.is_terminal(), !f.is_transient());
+        assert!(f.is_terminal());
+    }
+
+    /// Disjoint-and-covering partition: `is_terminal() XOR
+    /// is_transient() == true` at every record across the canonical
+    /// structural shapes. No record satisfies both predicates (a
+    /// transient stderr cannot simultaneously be terminal) and no
+    /// record satisfies neither (every record's stderr classifies
+    /// transient-or-not under [`is_transient_network_stderr`], and the
+    /// `is_terminal` body is the literal negation of that
+    /// classification with no third arm). The peer-pair lattice-
+    /// covering pin against any future regression that introduced an
+    /// intermediate retry-dispatch class — e.g., a "deferred-retry"
+    /// or "rate-limited-with-Retry-After" third arm — without
+    /// re-partitioning the predicate pair at this typed-method
+    /// surface. Same disjoint-and-covering discipline the recent
+    /// `is_op_failure` XOR `is_spawn_failure` peer-pair pin
+    /// (commit a4f4146) established at the structural-shape surface,
+    /// here applied at the retry-dispatch surface.
+    #[test]
+    fn test_is_terminal_xor_is_transient_partitions_records() {
+        let records = [
+            // Terminal: 4xx auth.
+            CommandAttemptFailure {
+                operation: "auth".to_string(),
+                attempt: 1,
+                exit_code: Some(1),
+                stderr: "401 Unauthorized".to_string(),
+                stdout: String::new(),
+            },
+            // Transient: 5xx.
+            CommandAttemptFailure {
+                operation: "push".to_string(),
+                attempt: 2,
+                exit_code: Some(2),
+                stderr: "503 Service Unavailable".to_string(),
+                stdout: String::new(),
+            },
+            // Terminal: spawn-failure (empty stderr, no exit code).
+            CommandAttemptFailure {
+                operation: "exec".to_string(),
+                attempt: 1,
+                exit_code: None,
+                stderr: String::new(),
+                stdout: "failed to spawn process: no such file".to_string(),
+            },
+            // Transient: connection-refused.
+            CommandAttemptFailure {
+                operation: "dial".to_string(),
+                attempt: 1,
+                exit_code: Some(1),
+                stderr: "dial tcp: connection refused".to_string(),
+                stdout: String::new(),
+            },
+            // Terminal: non-matching diagnostic (manifest-invalid).
+            CommandAttemptFailure {
+                operation: "manifest".to_string(),
+                attempt: 1,
+                exit_code: Some(1),
+                stderr: "manifest invalid: bad digest".to_string(),
+                stdout: String::new(),
+            },
+            // Transient: i/o timeout.
+            CommandAttemptFailure {
+                operation: "fetch".to_string(),
+                attempt: 1,
+                exit_code: Some(1),
+                stderr: "i/o timeout".to_string(),
+                stdout: String::new(),
+            },
+            // Transient: bare EOF token.
+            CommandAttemptFailure {
+                operation: "read".to_string(),
+                attempt: 1,
+                exit_code: Some(1),
+                stderr: "read body: EOF".to_string(),
+                stdout: String::new(),
+            },
+            // Terminal: signal-killed without stderr, populated exit
+            // code (137 / SIGKILL).
+            CommandAttemptFailure {
+                operation: "sigkill".to_string(),
+                attempt: 1,
+                exit_code: Some(137),
+                stderr: String::new(),
+                stdout: String::new(),
+            },
+        ];
+        for f in &records {
+            assert!(
+                f.is_terminal() ^ f.is_transient(),
+                "exactly one of is_terminal / is_transient must hold for record {f:?}"
             );
         }
     }
