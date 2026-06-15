@@ -33,7 +33,25 @@ use std::time::Duration;
 /// `compute_delay` is a pure function of `attempt` — the loop body owns
 /// the actual sleep — so callers and tests can reason about the schedule
 /// without driving the clock.
-#[derive(Debug, Clone)]
+///
+/// # Structural equality
+///
+/// `RetryPolicy` derives [`PartialEq`] and [`Eq`] through its four
+/// `Eq`-bound struct fields (`u32`, [`Duration`], `u32`, [`Duration`]),
+/// closing the structural-equality reading at the typed-primitive
+/// surface. Equality is field-wise extensional: two policies are equal
+/// iff their `max_attempts`, `initial_backoff`, `factor`, and
+/// `max_backoff` match exactly. The derive makes a downstream
+/// consumer's "this policy matches the canonical
+/// [`Self::network`] / [`Self::immediate`] / [`Self::network_or_immediate`]
+/// / [`Self::network_with_max_attempts`] / [`Self::with_max_attempts`]
+/// shape" reading a one-line `assert_eq!` or `==` against the
+/// reference factory at the consumer site, rather than a four-field
+/// cascade against each struct field independently — exactly the
+/// `THEORY §VI.1` one-oracle discipline lift the prior factory-
+/// constructor commits (75d495e / 85ccff4) applied at the
+/// construction surface, here applied at the comparison surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Maximum number of attempts (inclusive). `1` means no retry.
     pub max_attempts: u32,
@@ -2039,13 +2057,31 @@ mod tests {
     /// structural-witness pin against any regression that perturbed the
     /// named composition relative to the two-call inline form the two
     /// `infrastructure/` push-with-retries surfaces previously carried.
-    /// [`RetryPolicy`] does not derive `PartialEq`, so the equality is
-    /// asserted field-wise across the full struct shape.
+    /// [`RetryPolicy`] derives [`PartialEq`] via its four `Eq`-bound
+    /// struct fields, so the equality is also asserted at the typed-
+    /// primitive surface through one direct `assert_eq!(named, inline)`
+    /// in addition to the field-wise cascade — the field-wise reading
+    /// stays as the load-bearing per-field pin against any regression
+    /// that perturbed exactly one field, and the direct-equality
+    /// reading hoists the structural witness to the consumer-idiomatic
+    /// `==` surface.
     #[test]
     fn test_network_with_max_attempts_equals_inline_composition() {
         for &n in &[0u32, 1, 2, 5, 7, 100, u32::MAX] {
             let named = RetryPolicy::network_with_max_attempts(n);
             let inline = RetryPolicy::network().with_max_attempts(n);
+            // Direct-equality reading at the derived [`PartialEq`] surface
+            // — the consumer-idiomatic `==` form `assert_eq!(named, inline)`
+            // closed by the typed-primitive equality derive.
+            assert_eq!(
+                named, inline,
+                "network_with_max_attempts({n}) must equal network().with_max_attempts({n}) at the typed-primitive surface"
+            );
+            // Field-wise cascade — the per-field structural witness
+            // against any regression that perturbed exactly one field
+            // (preserved alongside the direct-equality reading because
+            // a four-field cross product silently agreeing modulo the
+            // derive is still possible if the derive is removed).
             assert_eq!(
                 named.max_attempts, inline.max_attempts,
                 "max_attempts must match inline composition for n = {n}"
@@ -2084,6 +2120,135 @@ mod tests {
         assert_eq!(p.compute_delay(4), net.compute_delay(4));
         // attempt 1 is always ZERO regardless of schedule
         assert_eq!(p.compute_delay(1), Duration::ZERO);
+    }
+
+    /// `RetryPolicy` derives [`PartialEq`] reflexively at every factory
+    /// constructor. The structural-witness pin against any regression
+    /// that broke the derive (e.g., a future migration to a custom
+    /// `PartialEq` impl that drifted from the field-wise extensional
+    /// reading) would surface here at the reflexivity arm — the
+    /// minimum-load-bearing [`PartialEq`] law `a == a`. Closed over a
+    /// representative cross product of the five factory constructors
+    /// the inherent-method matrix carries ([`Self::immediate`],
+    /// [`Self::network`], [`Self::network_or_immediate`],
+    /// [`Self::network_with_max_attempts`], [`Self::new`]) so a
+    /// regression that broke the derive at one constructor's struct
+    /// shape (e.g., a future field addition without an updated derive)
+    /// would fail this pin against every reachable arm.
+    #[test]
+    fn test_partial_eq_reflexive_across_factory_constructors() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::new(3, Duration::from_millis(100), 2, Duration::from_secs(10)),
+        ];
+        for p in &policies {
+            assert_eq!(
+                *p,
+                p.clone(),
+                "PartialEq must be reflexive at every factory"
+            );
+        }
+    }
+
+    /// `PartialEq` separates the canonical factory constructors at the
+    /// typed-primitive surface — [`Self::network`] and
+    /// [`Self::immediate`] read structurally distinct under `==`
+    /// without the field-wise cascade. The named pin a downstream
+    /// consumer that branches on `policy == RetryPolicy::network()` or
+    /// `policy == RetryPolicy::immediate()` relies on: the two factory
+    /// constructors must NOT collapse to one structural value, or the
+    /// safe-mode partition [`Self::network_or_immediate`] returns
+    /// silently degenerates to a single-arm policy at every reachable
+    /// call site. Pinned at the direct-equality surface so a regression
+    /// that perturbed either factory's struct shape would surface here
+    /// rather than at one downstream call site.
+    #[test]
+    fn test_partial_eq_separates_factory_constructors() {
+        let net = RetryPolicy::network();
+        let imm = RetryPolicy::immediate();
+        assert_ne!(
+            net, imm,
+            "network() and immediate() must be structurally distinct under PartialEq"
+        );
+        // network_with_max_attempts(5) equals network() at the canonical
+        // budget — the named composition preserves the structural equality
+        // at the typed-primitive surface.
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(5),
+            RetryPolicy::network(),
+            "network_with_max_attempts(5) must equal network() at the canonical 5-attempt budget"
+        );
+        // network_with_max_attempts(7) does NOT equal network() — the
+        // budget override surfaces at the direct-equality reading.
+        assert_ne!(
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network(),
+            "network_with_max_attempts(7) must differ from network() at the budget-override arm"
+        );
+    }
+
+    /// [`Self::network_or_immediate`] composes with [`PartialEq`] at the
+    /// two factory-constructor arms: the `true` arm equals
+    /// [`Self::network`] under `==`, the `false` arm equals
+    /// [`Self::immediate`] under `==`. The typed-primitive-equality
+    /// reading of the safe-mode partition the downstream consumer
+    /// previously had to assert field-wise at every call site (test
+    /// `test_network_or_immediate_partitions_two_factories` enumerates
+    /// `max_attempts` / `initial_backoff` / `factor` / `max_backoff`
+    /// across both arms by hand) now reads at one direct `==` per arm.
+    /// The structural-witness pin against any regression that broke the
+    /// derive at either arm's struct shape — a future regression that
+    /// flipped the `true` arm to [`Self::immediate`] or the `false` arm
+    /// to [`Self::network`] would silently misroute every safe-mode-
+    /// conditional retry consumer; the direct-equality surface catches
+    /// it here.
+    #[test]
+    fn test_partial_eq_network_or_immediate_dispatches_to_factories() {
+        assert_eq!(
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network(),
+            "network_or_immediate(true) must equal network() at the typed-primitive surface"
+        );
+        assert_eq!(
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy::immediate(),
+            "network_or_immediate(false) must equal immediate() at the typed-primitive surface"
+        );
+    }
+
+    /// `PartialEq` is symmetric and transitive across the named factory
+    /// constructors — the two remaining [`PartialEq`] laws `a == b =>
+    /// b == a` (symmetry) and `a == b && b == c => a == c`
+    /// (transitivity) closed at the consumer-facing arm where the
+    /// safe-mode partition's `true` arm, the canonical
+    /// [`Self::network`] factory, and the
+    /// `network_with_max_attempts(5)` composition all read as one
+    /// structural value at the typed-primitive surface. The
+    /// minimum-load-bearing pin a future regression that hand-rolled a
+    /// custom `PartialEq` impl could break — a custom impl that
+    /// silently asymmetric-routed equality under one direction would
+    /// fail symmetry here, and one that broke the transitive composition
+    /// at the three-way `network_or_immediate(true) ==
+    /// network_with_max_attempts(5) == network()` arm would fail
+    /// transitivity here.
+    #[test]
+    fn test_partial_eq_symmetric_and_transitive_across_factory_constructors() {
+        let a = RetryPolicy::network_or_immediate(true);
+        let b = RetryPolicy::network_with_max_attempts(5);
+        let c = RetryPolicy::network();
+        // Symmetry: a == b iff b == a, b == c iff c == b, a == c iff c == a.
+        assert_eq!(a == b, b == a);
+        assert_eq!(b == c, c == b);
+        assert_eq!(a == c, c == a);
+        // Transitivity: a == b && b == c => a == c.
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+        assert_eq!(a, c);
     }
 
     /// Success on the first call must not retry. `op` is invoked exactly
