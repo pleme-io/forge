@@ -212,7 +212,7 @@ impl RegistryClient {
             });
         }
 
-        let policy = RetryPolicy::network().with_max_attempts(retries);
+        let policy = RetryPolicy::network_with_max_attempts(retries);
         let max_attempts = policy.max_attempts;
         let op = format!("push {}:{}", registry, tag);
 

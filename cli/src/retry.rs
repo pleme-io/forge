@@ -212,6 +212,53 @@ impl RetryPolicy {
         self
     }
 
+    /// The canonical [`Self::network`] schedule with a caller-supplied
+    /// budget cap. Equivalent to `Self::network().with_max_attempts(
+    /// max_attempts)` and inherits the same clamping invariant (`>= 1`)
+    /// from [`Self::with_max_attempts`].
+    ///
+    /// Lifts the verbatim two-line stanza
+    /// ```text
+    /// let policy = RetryPolicy::network().with_max_attempts(retries);
+    /// ```
+    /// that the two typed-error producer sites
+    /// `infrastructure/attic.rs::push_with_retries` and
+    /// `infrastructure/registry.rs::push_with_retries` carry verbatim —
+    /// two identically-shaped bodies past the duplication threshold the
+    /// forge command-module surface enforces (≥2; PRIME DIRECTIVE) — so
+    /// the named composition is redeemed at one typed-primitive site,
+    /// sibling of [`Self::network`] (the canonical schedule),
+    /// [`Self::immediate`] (the no-retry shape),
+    /// [`Self::network_or_immediate`] (the safe-mode-conditional
+    /// dispatch), and [`Self::with_max_attempts`] (the budget-override
+    /// builder).
+    ///
+    /// # Why the named composition is load-bearing
+    ///
+    /// The canonical network-schedule + caller-budget shape is the
+    /// reference policy for the two typed-error push surfaces in
+    /// forge's `infrastructure/` layer: both expose a `retries: u32`
+    /// parameter that overrides only the attempt budget while
+    /// preserving the canonical exponential schedule
+    /// (`initial_backoff` 250ms, `factor` 2, `max_backoff` 30s). A
+    /// future refinement to either the canonical schedule (e.g., a
+    /// jittered backoff, a different cap) or the clamping discipline
+    /// (e.g., an upper bound to prevent caller-supplied retry-storm
+    /// budgets) gets named at this one typed-primitive site instead of
+    /// retyped per consumer — exactly the structural seam
+    /// THEORY §VI.1 one-oracle discipline forecloses.
+    ///
+    /// Not marked `const fn`: the `.max(1)` clamp via the `Ord` trait
+    /// is not const-callable. Same discipline as the sibling
+    /// [`Self::with_max_attempts`] and [`Self::new`] constructors —
+    /// every factory that clamps the caller-supplied budget is
+    /// non-const; every factory that takes only field literals
+    /// ([`Self::immediate`], [`Self::network`],
+    /// [`Self::network_or_immediate`]) is const.
+    pub fn network_with_max_attempts(max_attempts: u32) -> Self {
+        Self::network().with_max_attempts(max_attempts)
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -1930,6 +1977,113 @@ mod tests {
         assert_eq!(false_arm.initial_backoff, imm.initial_backoff);
         assert_eq!(false_arm.max_backoff, imm.max_backoff);
         assert_eq!(false_arm.compute_delay(2), Duration::ZERO);
+    }
+
+    /// `network_with_max_attempts(n)` inherits every schedule field of
+    /// [`RetryPolicy::network`] verbatim and overrides only
+    /// `max_attempts`. The load-bearing pin: a regression that
+    /// perturbed any schedule field (`initial_backoff`, `factor`,
+    /// `max_backoff`) would silently break the canonical
+    /// exponential-backoff schedule the two `infrastructure/`
+    /// push-with-retries surfaces (`attic::push_with_retries`,
+    /// `registry::push_with_retries`) depend on for transient-network
+    /// recovery — visible only as a degraded retry trajectory under
+    /// load (e.g., fixed-200ms instead of 250ms × 2^n exponential),
+    /// not in the typed-error surface. Pinning every schedule field
+    /// at the primitive boundary catches that here.
+    #[test]
+    fn test_network_with_max_attempts_inherits_network_schedule() {
+        let p = RetryPolicy::network_with_max_attempts(7);
+        let net = RetryPolicy::network();
+        assert_eq!(
+            p.initial_backoff, net.initial_backoff,
+            "schedule must inherit network()'s initial_backoff"
+        );
+        assert_eq!(
+            p.factor, net.factor,
+            "schedule must inherit network()'s factor"
+        );
+        assert_eq!(
+            p.max_backoff, net.max_backoff,
+            "schedule must inherit network()'s max_backoff"
+        );
+        assert_eq!(p.max_attempts, 7, "max_attempts must reflect caller arg");
+    }
+
+    /// The clamping discipline of [`RetryPolicy::with_max_attempts`]
+    /// propagates verbatim: `network_with_max_attempts(0)` produces a
+    /// `max_attempts: 1` policy, not a degenerate `0` that
+    /// [`run_with_policy`]'s `attempt >= max` predicate would short-
+    /// circuit on the first call. Without this pin, a public-API caller
+    /// passing `0` to `RegistryClient::push_with_retries` or
+    /// `AtticClient::push_with_retries` would silently produce a no-op
+    /// retry loop that returned the first error without consuming any
+    /// budget — a regression visible only in attempt-count telemetry.
+    #[test]
+    fn test_network_with_max_attempts_clamps_zero_to_one() {
+        let p = RetryPolicy::network_with_max_attempts(0);
+        assert_eq!(
+            p.max_attempts, 1,
+            "zero must clamp to 1 — inherited from with_max_attempts"
+        );
+        // Schedule still comes from network().
+        let net = RetryPolicy::network();
+        assert_eq!(p.initial_backoff, net.initial_backoff);
+        assert_eq!(p.factor, net.factor);
+        assert_eq!(p.max_backoff, net.max_backoff);
+    }
+
+    /// `network_with_max_attempts(n)` equals the inline composition
+    /// `RetryPolicy::network().with_max_attempts(n)` at every `n` in a
+    /// representative sweep, including the clamp boundary at `0`. The
+    /// structural-witness pin against any regression that perturbed the
+    /// named composition relative to the two-call inline form the two
+    /// `infrastructure/` push-with-retries surfaces previously carried.
+    /// [`RetryPolicy`] does not derive `PartialEq`, so the equality is
+    /// asserted field-wise across the full struct shape.
+    #[test]
+    fn test_network_with_max_attempts_equals_inline_composition() {
+        for &n in &[0u32, 1, 2, 5, 7, 100, u32::MAX] {
+            let named = RetryPolicy::network_with_max_attempts(n);
+            let inline = RetryPolicy::network().with_max_attempts(n);
+            assert_eq!(
+                named.max_attempts, inline.max_attempts,
+                "max_attempts must match inline composition for n = {n}"
+            );
+            assert_eq!(
+                named.initial_backoff, inline.initial_backoff,
+                "initial_backoff must match inline composition for n = {n}"
+            );
+            assert_eq!(
+                named.factor, inline.factor,
+                "factor must match inline composition for n = {n}"
+            );
+            assert_eq!(
+                named.max_backoff, inline.max_backoff,
+                "max_backoff must match inline composition for n = {n}"
+            );
+        }
+    }
+
+    /// The canonical exponential backoff schedule survives the budget
+    /// override: `compute_delay(2)` for any caller budget is still
+    /// `network()`'s 250ms initial backoff (no premature cap, no
+    /// schedule collapse). Pins that future regressions that fused
+    /// `max_attempts` with `initial_backoff` (a typo in the field
+    /// assignment) would surface here as a schedule mis-match rather
+    /// than a silent retry-cadence regression.
+    #[test]
+    fn test_network_with_max_attempts_preserves_compute_delay_schedule() {
+        let p = RetryPolicy::network_with_max_attempts(7);
+        let net = RetryPolicy::network();
+        // attempt 2: initial_backoff (250ms under network())
+        assert_eq!(p.compute_delay(2), net.compute_delay(2));
+        // attempt 3: initial_backoff * factor (500ms)
+        assert_eq!(p.compute_delay(3), net.compute_delay(3));
+        // attempt 4: initial_backoff * factor^2 (1s)
+        assert_eq!(p.compute_delay(4), net.compute_delay(4));
+        // attempt 1 is always ZERO regardless of schedule
+        assert_eq!(p.compute_delay(1), Duration::ZERO);
     }
 
     /// Success on the first call must not retry. `op` is invoked exactly
