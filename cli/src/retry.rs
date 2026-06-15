@@ -560,6 +560,53 @@ impl CapturedFailure {
     pub fn is_transient(&self) -> bool {
         is_transient_network_stderr(&self.stderr)
     }
+
+    /// True iff this captured failure represents a terminal (fail-fast)
+    /// failure — a future retry-policy site holding a `CapturedFailure`
+    /// should NOT burn budget on it.
+    ///
+    /// Named complement of [`Self::is_transient`]: the two predicates
+    /// partition every [`CapturedFailure`] record into exactly two
+    /// retry-dispatch shapes — `is_transient` (HTTP 5xx / 429,
+    /// connection-level, I/O timeout, EOF) and `is_terminal` (every
+    /// other shape: terminal 4xx auth/not-found/manifest-invalid,
+    /// empty-stderr "silent failure", non-matching diagnostic). Never
+    /// both and never neither.
+    ///
+    /// Typed-method peer of [`CommandAttemptFailure::is_terminal`]
+    /// (commit 6fa921b). Both typed records at the retry surface carry
+    /// a `stderr: String` field consumed by the one canonical
+    /// classifier [`is_transient_network_stderr`]; pinning both arms
+    /// of the partition at both typed-record surfaces means a consumer
+    /// that holds a `CapturedFailure` (the typed-error producer
+    /// surface: `GitError::OpFailed`, `NixBuildError::BuildFailed`,
+    /// `AtticError::PushFailed`/`LoginFailed`,
+    /// `RegistryError::PushFailed`) reads terminal/transient through
+    /// one typed method per arm — `cf.is_terminal()` /
+    /// `cf.is_transient()` — same call shape a consumer that holds a
+    /// `CommandAttemptFailure` (the retry-call-site surface) already
+    /// uses, instead of routing the terminal arm through
+    /// `!cf.is_transient()` against the negated predicate.
+    ///
+    /// Closes the typed-method symmetry the recent
+    /// [`CommandAttemptFailure::is_terminal`] peer (commit 6fa921b)
+    /// established at the retry-call-site surface, here applied at
+    /// the typed-error producer surface — every typed primitive at
+    /// the retry boundary now speaks the same `is_terminal()` /
+    /// `is_transient()` peer-pair language.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the transient/terminal
+    /// retry-dispatch partition is named at one typed-primitive site
+    /// with both arms exposed as typed methods, not as one method plus
+    /// an implicit `!` at every consumer. Same parallel-axis
+    /// named-complement peer idiom the
+    /// [`CommandAttemptFailure::is_terminal`] /
+    /// [`CommandAttemptFailure::is_transient`] pair established at
+    /// the retry-call-site surface, here applied at the typed-error
+    /// producer surface.
+    pub fn is_terminal(&self) -> bool {
+        !self.is_transient()
+    }
 }
 
 /// Classify an external-CLI invocation's `io::Result<Output>` into one of
@@ -3627,6 +3674,186 @@ mod tests {
         let cf = CapturedFailure::from_output(&out);
         assert!(cf.stderr.is_empty());
         assert!(!cf.is_transient());
+    }
+
+    /// `CapturedFailure::is_terminal` must discriminate every terminal
+    /// shape (4xx auth, empty-stderr silent failure, non-matching
+    /// diagnostic) as `true` and every canonical 5xx / 429 / connection
+    /// / timeout / EOF transient arm as `false`. The typed-method peer
+    /// of `CommandAttemptFailure::is_terminal` (commit 6fa921b) at the
+    /// typed-error producer surface. Pins the load-bearing
+    /// structural-shape reading at this surface against any future
+    /// regression that perturbed the predicate body.
+    #[test]
+    fn test_captured_failure_is_terminal_discriminates_terminal_from_transient() {
+        // Terminal: 4xx auth.
+        let out = synth_output(false, b"", b"401 Unauthorized: bad token");
+        let cf = CapturedFailure::from_output(&out);
+        assert!(cf.is_terminal(), "401 auth must discriminate as terminal");
+
+        // Terminal: empty stderr (silent CLI failure on stdout only).
+        let out = synth_output(false, b"silent failure on stdout", b"");
+        let cf = CapturedFailure::from_output(&out);
+        assert!(
+            cf.is_terminal(),
+            "empty stderr must discriminate as terminal — matches no transient marker"
+        );
+
+        // Terminal: non-matching diagnostic.
+        let out = synth_output(false, b"", b"manifest invalid: bad digest");
+        let cf = CapturedFailure::from_output(&out);
+        assert!(
+            cf.is_terminal(),
+            "non-matching diagnostic must discriminate as terminal"
+        );
+
+        // NOT terminal: 5xx transient.
+        let out = synth_output(false, b"", b"received unexpected HTTP status: 503");
+        let cf = CapturedFailure::from_output(&out);
+        assert!(
+            !cf.is_terminal(),
+            "5xx transient must NOT discriminate as terminal"
+        );
+
+        // NOT terminal: connection-refused transient.
+        let out = synth_output(false, b"", b"dial tcp 10.0.0.1:5000: connection refused");
+        let cf = CapturedFailure::from_output(&out);
+        assert!(
+            !cf.is_terminal(),
+            "connection-refused transient must NOT discriminate as terminal"
+        );
+
+        // NOT terminal: bare EOF token transient.
+        let out = synth_output(false, b"", b"read body: EOF");
+        let cf = CapturedFailure::from_output(&out);
+        assert!(
+            !cf.is_terminal(),
+            "bare EOF token transient must NOT discriminate as terminal"
+        );
+    }
+
+    /// De Morgan partition invariant at the typed-error producer
+    /// surface: `cf.is_terminal() == !cf.is_transient()` at every
+    /// record `from_output` constructs and at every hand-built record
+    /// an upstream consumer might synthesize. Mirrors the sibling pin
+    /// `test_is_terminal_equals_negation_of_is_transient` at the
+    /// retry-call-site surface (commit 6fa921b). The pin against a
+    /// future regression that perturbed one predicate's body without
+    /// lifting the change to the other — e.g., broadened the
+    /// transient-marker list at the free classifier without
+    /// re-tightening the terminal body — which would silently break
+    /// every downstream consumer that branches on either predicate.
+    #[test]
+    fn test_captured_failure_is_terminal_equals_negation_of_is_transient() {
+        // Transient: 5xx.
+        let cf = CapturedFailure {
+            exit_code: Some(1),
+            stderr: "503 Service Unavailable".to_string(),
+        };
+        assert_eq!(cf.is_terminal(), !cf.is_transient());
+        assert!(!cf.is_terminal());
+
+        // Terminal: 4xx auth.
+        let cf = CapturedFailure {
+            exit_code: Some(1),
+            stderr: "401 Unauthorized".to_string(),
+        };
+        assert_eq!(cf.is_terminal(), !cf.is_transient());
+        assert!(cf.is_terminal());
+
+        // Terminal: empty stderr — matches no transient marker.
+        let cf = CapturedFailure {
+            exit_code: Some(1),
+            stderr: String::new(),
+        };
+        assert_eq!(cf.is_terminal(), !cf.is_transient());
+        assert!(cf.is_terminal());
+
+        // Edge: signal-killed (`exit_code: None`) with transient stderr.
+        // The classifier reads through stderr regardless of exit code, so
+        // this record is transient (NOT terminal). The De Morgan
+        // equivalence must hold.
+        let cf = CapturedFailure {
+            exit_code: None,
+            stderr: "i/o timeout".to_string(),
+        };
+        assert_eq!(cf.is_terminal(), !cf.is_transient());
+        assert!(!cf.is_terminal());
+
+        // Edge: populated exit code with terminal stderr (manifest body).
+        let cf = CapturedFailure {
+            exit_code: Some(137),
+            stderr: "manifest invalid: bad digest".to_string(),
+        };
+        assert_eq!(cf.is_terminal(), !cf.is_transient());
+        assert!(cf.is_terminal());
+    }
+
+    /// Disjoint-and-covering partition at the typed-error producer
+    /// surface: `cf.is_terminal() XOR cf.is_transient() == true` at
+    /// every record across the canonical structural shapes. No record
+    /// satisfies both (a transient stderr cannot simultaneously be
+    /// terminal) and no record satisfies neither (every record's stderr
+    /// classifies transient-or-not under
+    /// [`is_transient_network_stderr`], and the `is_terminal` body is
+    /// the literal negation of that classification with no third arm).
+    /// The peer-pair lattice-covering pin against any future regression
+    /// that introduced an intermediate retry-dispatch class — e.g., a
+    /// "deferred-retry" or "rate-limited-with-Retry-After" third arm —
+    /// without re-partitioning the predicate pair at this typed-method
+    /// surface. Mirrors the sibling
+    /// `test_is_terminal_xor_is_transient_partitions_records` pin at
+    /// the retry-call-site surface (commit 6fa921b).
+    #[test]
+    fn test_captured_failure_is_terminal_xor_is_transient_partitions_records() {
+        let records = [
+            // Terminal: 4xx auth.
+            CapturedFailure {
+                exit_code: Some(1),
+                stderr: "401 Unauthorized".to_string(),
+            },
+            // Transient: 5xx.
+            CapturedFailure {
+                exit_code: Some(2),
+                stderr: "503 Service Unavailable".to_string(),
+            },
+            // Terminal: empty stderr (silent failure on stdout only).
+            CapturedFailure {
+                exit_code: Some(1),
+                stderr: String::new(),
+            },
+            // Transient: connection-refused.
+            CapturedFailure {
+                exit_code: Some(1),
+                stderr: "dial tcp: connection refused".to_string(),
+            },
+            // Terminal: non-matching diagnostic (manifest-invalid).
+            CapturedFailure {
+                exit_code: Some(1),
+                stderr: "manifest invalid: bad digest".to_string(),
+            },
+            // Transient: i/o timeout (signal-killed with transient stderr).
+            CapturedFailure {
+                exit_code: None,
+                stderr: "i/o timeout".to_string(),
+            },
+            // Transient: bare EOF token.
+            CapturedFailure {
+                exit_code: Some(1),
+                stderr: "read body: EOF".to_string(),
+            },
+            // Terminal: signal-killed (`Some(137)`) with empty stderr.
+            CapturedFailure {
+                exit_code: Some(137),
+                stderr: String::new(),
+            },
+        ];
+        for (i, cf) in records.iter().enumerate() {
+            assert!(
+                cf.is_terminal() ^ cf.is_transient(),
+                "record {i} must satisfy exactly one of (is_terminal, is_transient): {cf:?}"
+            );
+        }
     }
 
     /// `retry_command` returns the captured `Output` verbatim on the
