@@ -849,7 +849,23 @@ pub fn run_query_capture_sync(cmd: &str, args: &[&str]) -> anyhow::Result<String
 /// returned `Err`, or a tool was found but produced no stderr) is
 /// unconditionally terminal so the retry loop never burns budget on a
 /// "binary not on PATH" or "operating-system fork failed" precondition.
-#[derive(Debug, Clone)]
+///
+/// # Structural equality
+///
+/// Derives [`PartialEq`] and [`Eq`] field-wise. All five fields are
+/// `Eq`-bound stdlib primitives (`String`, `u32`, `Option<i32>`,
+/// `String`, `String`), so the derive is sound and reads extensional:
+/// two records are equal iff their `(operation, attempt, exit_code,
+/// stderr, stdout)` tuples match exactly. Closes the structural-
+/// equality reading at the typed-record surface against the sibling
+/// peer [`CapturedFailure`] (which already derived `PartialEq`/`Eq`)
+/// and the canonical schedule peer [`RetryPolicy`] (commit 604884b),
+/// so every typed primitive at the retry surface now speaks the same
+/// `==` / `assert_eq!` language at consumer sites — including the
+/// existing `test_command_attempt_failure_*` tests that previously
+/// asserted each field independently and any future retry-telemetry
+/// consumer comparing two records for structural agreement.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandAttemptFailure {
     /// Caller-supplied label for the failed operation
     /// (e.g. `"login to Attic"`, `"push ghcr.io/o/p:tag"`).
@@ -2482,6 +2498,107 @@ mod tests {
         assert!(s.contains("(no captured output)"));
         assert!(s.contains("noisy op"));
         assert!(s.contains("attempt 5"));
+    }
+
+    /// Field-wise extensional reflexivity at the typed-record surface:
+    /// `f == f.clone()` for a representative cross product of the
+    /// structural shapes `CommandAttemptFailure` admits (transient op,
+    /// terminal op, spawn failure). Pins the minimum-load-bearing
+    /// `PartialEq` law against any future regression that hand-rolled
+    /// a custom impl breaking reflexivity.
+    #[test]
+    fn test_command_attempt_failure_partial_eq_reflexive() {
+        let cases = [
+            CommandAttemptFailure {
+                operation: "push to Attic".to_string(),
+                attempt: 2,
+                exit_code: Some(1),
+                stderr: "503 Service Unavailable".to_string(),
+                stdout: String::new(),
+            },
+            CommandAttemptFailure {
+                operation: "login to Attic".to_string(),
+                attempt: 1,
+                exit_code: Some(1),
+                stderr: "401 Unauthorized".to_string(),
+                stdout: String::new(),
+            },
+            CommandAttemptFailure {
+                operation: "spawn skopeo".to_string(),
+                attempt: 1,
+                exit_code: None,
+                stderr: String::new(),
+                stdout: "failed to spawn process: no such file".to_string(),
+            },
+        ];
+        for f in &cases {
+            assert_eq!(*f, f.clone());
+        }
+    }
+
+    /// `PartialEq` separates records that disagree on any single field.
+    /// One reference record + five perturbed neighbors (one per field):
+    /// each neighbor must NOT equal the reference. The pin against a
+    /// future regression that silently dropped a field from the derive
+    /// (e.g. by hand-rolling a `PartialEq` impl that only compared
+    /// `(operation, exit_code, stderr)`), which would let two records
+    /// disagreeing on `attempt` or `stdout` read as structurally equal
+    /// at a downstream telemetry / replay / attestation consumer.
+    #[test]
+    fn test_command_attempt_failure_partial_eq_separates_per_field() {
+        let base = CommandAttemptFailure {
+            operation: "push image".to_string(),
+            attempt: 2,
+            exit_code: Some(1),
+            stderr: "503 Service Unavailable".to_string(),
+            stdout: "noise".to_string(),
+        };
+        let neighbors = [
+            CommandAttemptFailure {
+                operation: "different op".to_string(),
+                ..base.clone()
+            },
+            CommandAttemptFailure {
+                attempt: 3,
+                ..base.clone()
+            },
+            CommandAttemptFailure {
+                exit_code: Some(2),
+                ..base.clone()
+            },
+            CommandAttemptFailure {
+                stderr: "504 Gateway Timeout".to_string(),
+                ..base.clone()
+            },
+            CommandAttemptFailure {
+                stdout: "different noise".to_string(),
+                ..base.clone()
+            },
+        ];
+        for n in &neighbors {
+            assert_ne!(base, *n);
+        }
+    }
+
+    /// `from_capture` constructs the same structural record from
+    /// equivalent inputs — `assert_eq!` against a hand-built reference
+    /// reads the construction discipline as one expression at the
+    /// typed-primitive surface rather than five field-wise asserts.
+    /// Pins the structural-equality reading at the construction site,
+    /// not just at hand-written record literals.
+    #[test]
+    fn test_command_attempt_failure_from_capture_structural_equality() {
+        let out = synth_output(false, b"stdout bytes", b"503 Service Unavailable");
+        let from = CommandAttemptFailure::from_capture(Ok(out), "push image", 2)
+            .expect_err("non-zero exit must produce a record");
+        let reference = CommandAttemptFailure {
+            operation: "push image".to_string(),
+            attempt: 2,
+            exit_code: from.exit_code,
+            stderr: "503 Service Unavailable".to_string(),
+            stdout: "stdout bytes".to_string(),
+        };
+        assert_eq!(from, reference);
     }
 
     /// Classifier closure shaped like the one inside the migrated retry
