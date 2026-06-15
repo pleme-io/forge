@@ -607,6 +607,85 @@ impl CapturedFailure {
     pub fn is_terminal(&self) -> bool {
         !self.is_transient()
     }
+
+    /// True iff this captured failure represents a child process that was
+    /// killed by signal (no normal exit code) rather than a child process
+    /// that ran-to-completion-then-exited-non-zero.
+    ///
+    /// Equivalent to `self.exit_code.is_none()`. The Rust standard library
+    /// (`ExitStatus::code`) guarantees `None` exactly when the process was
+    /// terminated by signal — the canonical Unix discriminator between
+    /// "process exited via `exit(n)`" (`Some(n)`) and "process killed by
+    /// SIGKILL / SIGTERM / SIGSEGV / SIGPIPE / SIGOOM-from-cgroups"
+    /// (`None`). The typed primitive surfaces that discriminator as a
+    /// named method so consumer sites read the structural-shape partition
+    /// through `cf.is_signal_killed()` instead of through a raw
+    /// `cf.exit_code.is_none()` field access against the wrong-abstraction
+    /// level.
+    ///
+    /// Structural-shape peer of [`CommandAttemptFailure::is_spawn_failure`]
+    /// (commit 34c1a35) — the analogous structural-shape predicate at the
+    /// retry-call-site surface. The two predicates name *different*
+    /// structural shapes because the two typed records cover different
+    /// failure-mode universes:
+    ///
+    /// - [`CommandAttemptFailure`] is constructed from
+    ///   `Result<Output, io::Error>` so it covers three shapes (success,
+    ///   `Ok(non-success)` op-failure, `Err(spawn_err)` spawn-failure);
+    ///   `is_spawn_failure` discriminates the third shape with the
+    ///   conjunction `exit_code.is_none() && stderr.is_empty()` because at
+    ///   that surface `exit_code: None` is ambiguous between spawn-failure
+    ///   and signal-killed-with-stderr.
+    /// - [`CapturedFailure`] is constructed from `&std::process::Output`
+    ///   so it covers exactly one shape — the process DEFINITELY ran (we
+    ///   hold an `Output`); a spawn failure produces no `Output` and never
+    ///   reaches this typed primitive. So at the producer surface
+    ///   `exit_code: None` is unambiguously signal-killed, and the
+    ///   single-field predicate is the canonical discriminator with no
+    ///   conjunction.
+    ///
+    /// # Orthogonal to the transient/terminal partition
+    ///
+    /// The retry-dispatch partition ([`Self::is_transient`] /
+    /// [`Self::is_terminal`]) discriminates on `stderr` via the canonical
+    /// [`is_transient_network_stderr`] classifier; this structural-shape
+    /// partition discriminates on `exit_code`. The two axes are
+    /// orthogonal — a signal-killed record (`exit_code: None`) with a
+    /// transient stderr (`"i/o timeout"` flushed before the kill) is
+    /// signal-killed AND transient; a signal-killed record with empty
+    /// stderr (the SIGKILL / OOM-from-cgroups shape) is signal-killed AND
+    /// terminal; a normal-exit record with terminal stderr (`"401
+    /// Unauthorized"`) is NOT signal-killed AND terminal; a normal-exit
+    /// record with transient stderr (`"503 Service Unavailable"`) is NOT
+    /// signal-killed AND transient. Every quadrant of the 2×2 is
+    /// populated by canonical structural shapes forge's external CLIs
+    /// emit, so neither partition collapses into the other and both must
+    /// be surfaced at this typed-record surface for any future
+    /// post-classification consumer (telemetry histogramming OOM-kill
+    /// vs auth-denial vs transient-5xx; structured-attestation surface
+    /// distinguishing "killed by SIGTERM under deploy timeout" from
+    /// "exited-normally-with-error"; future remediation-policy site that
+    /// retries OOM-kills against a beefier builder while failing fast on
+    /// auth denials).
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the
+    /// exited-normally/signal-killed structural partition is named at one
+    /// typed-primitive site (here) instead of retyped as the inline
+    /// `cf.exit_code.is_none()` cascade at every consumer site that
+    /// branches on the structural shape. Same parallel-axis named
+    /// structural-shape peer idiom the
+    /// [`CommandAttemptFailure::is_spawn_failure`] /
+    /// [`CommandAttemptFailure::is_op_failure`] peer-pair (commit
+    /// a4f4146) established at the retry-call-site surface, here applied
+    /// at the typed-error producer surface — the typed-method shape every
+    /// `cf.exit_code` reader at the four producer sites
+    /// (`GitError::OpFailed`, `NixBuildError::BuildFailed`,
+    /// `AtticError::PushFailed` / `LoginFailed`,
+    /// `RegistryError::PushFailed`) can adopt without re-deriving the
+    /// `Option::is_none()` reading per call site.
+    pub fn is_signal_killed(&self) -> bool {
+        self.exit_code.is_none()
+    }
 }
 
 /// Classify an external-CLI invocation's `io::Result<Output>` into one of
@@ -3852,6 +3931,178 @@ mod tests {
             assert!(
                 cf.is_terminal() ^ cf.is_transient(),
                 "record {i} must satisfy exactly one of (is_terminal, is_transient): {cf:?}"
+            );
+        }
+    }
+
+    /// `is_signal_killed()` discriminates the structural-shape partition
+    /// at every canonical record `from_output` constructs and at every
+    /// hand-built shape an upstream consumer might synthesize.
+    /// `exit_code: None` (the canonical `ExitStatus::code` "killed by
+    /// signal" semantics — SIGKILL, SIGTERM, SIGSEGV, SIGPIPE, cgroups
+    /// OOM-kill) discriminates as signal-killed; `exit_code: Some(_)`
+    /// (any normal exit code, including the canonical 137 SIGKILL-from-
+    /// shell exit code preserved by `bash`) discriminates as NOT
+    /// signal-killed. Pins the load-bearing structural-shape reading
+    /// at the typed-error producer surface against any future regression
+    /// that perturbed the predicate body (e.g., a refactor that broadened
+    /// "signal-killed" to "exit code >= 128 OR None" without re-tightening
+    /// the typed-method body to match).
+    #[test]
+    fn test_captured_failure_is_signal_killed_discriminates_structural_shape() {
+        // Signal-killed: empty stderr (the canonical SIGKILL / OOM-kill
+        // shape — child process terminated before flushing diagnostics).
+        let cf = CapturedFailure {
+            exit_code: None,
+            stderr: String::new(),
+        };
+        assert!(
+            cf.is_signal_killed(),
+            "exit_code: None must discriminate as signal-killed"
+        );
+
+        // Signal-killed: populated stderr (the SIGTERM-graceful-shutdown
+        // shape — child caught the signal and flushed a final
+        // diagnostic before exiting).
+        let cf = CapturedFailure {
+            exit_code: None,
+            stderr: "i/o timeout".to_string(),
+        };
+        assert!(
+            cf.is_signal_killed(),
+            "exit_code: None with stderr must still discriminate as signal-killed"
+        );
+
+        // NOT signal-killed: populated exit code with empty stderr.
+        // 137 is the canonical shell-preserved SIGKILL code (128 + 9),
+        // but at the OS surface it's a normal exit — the Output struct
+        // distinguishes "killed by signal" from "exited with code 137"
+        // strictly through `ExitStatus::code`'s None/Some discriminator,
+        // not through the value of the code. Pins that the predicate
+        // reads through `Option::is_none`, not through a magic-code
+        // threshold.
+        let cf = CapturedFailure {
+            exit_code: Some(137),
+            stderr: String::new(),
+        };
+        assert!(
+            !cf.is_signal_killed(),
+            "exit_code: Some(_) MUST NOT discriminate as signal-killed regardless of code value"
+        );
+
+        // NOT signal-killed: typical non-zero-exit op-failure.
+        let cf = CapturedFailure {
+            exit_code: Some(1),
+            stderr: "401 Unauthorized".to_string(),
+        };
+        assert!(
+            !cf.is_signal_killed(),
+            "exit_code: Some(1) with op-failure stderr MUST NOT discriminate as signal-killed"
+        );
+    }
+
+    /// Structural-shape predicate is orthogonal to the retry-dispatch
+    /// partition (`is_transient` / `is_terminal`). Every quadrant of the
+    /// 2×2 (signal-killed × transient, signal-killed × terminal,
+    /// normal-exit × transient, normal-exit × terminal) is populated by a
+    /// canonical structural shape forge's external CLIs emit, so neither
+    /// partition collapses into the other. The pin against a future
+    /// regression that fused the two axes — e.g., redefined `is_transient`
+    /// to additionally inspect `exit_code` (breaking the stderr-only
+    /// classifier discipline) or redefined `is_signal_killed` to
+    /// additionally inspect `stderr` (breaking the structural-shape
+    /// discipline) — which would collapse the 2×2 into a 1D partition
+    /// and silently break the downstream classification surface every
+    /// post-failure consumer site relies on.
+    #[test]
+    fn test_captured_failure_is_signal_killed_orthogonal_to_transient() {
+        // Q1: signal-killed AND transient (SIGTERM-graceful with `"i/o
+        // timeout"` in stderr — the deploy-timeout-on-network-op shape).
+        let cf = CapturedFailure {
+            exit_code: None,
+            stderr: "i/o timeout".to_string(),
+        };
+        assert!(cf.is_signal_killed());
+        assert!(cf.is_transient());
+
+        // Q2: signal-killed AND terminal (SIGKILL / OOM-kill — empty
+        // stderr means the canonical classifier short-circuits to
+        // terminal regardless of structural shape).
+        let cf = CapturedFailure {
+            exit_code: None,
+            stderr: String::new(),
+        };
+        assert!(cf.is_signal_killed());
+        assert!(cf.is_terminal());
+
+        // Q3: normal-exit AND transient (the canonical retry-budget-
+        // consuming arm — `Some(1)` exit with 503 in stderr).
+        let cf = CapturedFailure {
+            exit_code: Some(1),
+            stderr: "503 Service Unavailable".to_string(),
+        };
+        assert!(!cf.is_signal_killed());
+        assert!(cf.is_transient());
+
+        // Q4: normal-exit AND terminal (the canonical fail-fast arm —
+        // `Some(1)` exit with 401 in stderr).
+        let cf = CapturedFailure {
+            exit_code: Some(1),
+            stderr: "401 Unauthorized".to_string(),
+        };
+        assert!(!cf.is_signal_killed());
+        assert!(cf.is_terminal());
+    }
+
+    /// Pin the structural definition: `is_signal_killed()` is exactly
+    /// `exit_code.is_none()` at every record. A future refactor that
+    /// shifted the predicate body to a synthetic discriminator (e.g.,
+    /// `stderr.contains("signal")`, a separate `killed_by_signal: bool`
+    /// field, a magic exit-code threshold) without preserving the
+    /// `exit_code.is_none()` equivalence would silently break every
+    /// downstream consumer that branches on `is_signal_killed` against
+    /// the canonical Rust `ExitStatus::code` semantics. Pinned across
+    /// hand-built records covering both the `None` and `Some(_)` arms
+    /// with the full spectrum of stderr shapes (empty, transient,
+    /// terminal) so the equivalence holds independently of the
+    /// retry-dispatch partition.
+    #[test]
+    fn test_captured_failure_is_signal_killed_equals_exit_code_is_none() {
+        let records = [
+            CapturedFailure {
+                exit_code: None,
+                stderr: String::new(),
+            },
+            CapturedFailure {
+                exit_code: None,
+                stderr: "i/o timeout".to_string(),
+            },
+            CapturedFailure {
+                exit_code: None,
+                stderr: "fatal: aborted".to_string(),
+            },
+            CapturedFailure {
+                exit_code: Some(0),
+                stderr: String::new(),
+            },
+            CapturedFailure {
+                exit_code: Some(1),
+                stderr: "401 Unauthorized".to_string(),
+            },
+            CapturedFailure {
+                exit_code: Some(137),
+                stderr: String::new(),
+            },
+            CapturedFailure {
+                exit_code: Some(255),
+                stderr: "503 Service Unavailable".to_string(),
+            },
+        ];
+        for (i, cf) in records.iter().enumerate() {
+            assert_eq!(
+                cf.is_signal_killed(),
+                cf.exit_code.is_none(),
+                "record {i} must satisfy is_signal_killed() == exit_code.is_none(): {cf:?}"
             );
         }
     }
