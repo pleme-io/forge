@@ -955,6 +955,68 @@ impl CommandAttemptFailure {
         self.exit_code.is_none() && self.stderr.is_empty()
     }
 
+    /// True iff this record represents a process that ran-but-exited-
+    /// non-zero (the CLI binary was found and invoked, but it rejected
+    /// the request) — as opposed to a process that could not be spawned
+    /// at all.
+    ///
+    /// Named complement of [`Self::is_spawn_failure`]: the two
+    /// predicates together partition every [`CommandAttemptFailure`]
+    /// record into exactly two structural shapes, never both and never
+    /// neither. The `is_spawn_failure` half names the spawn-error shape
+    /// (`exit_code: None` + empty stderr, with the spawn error in
+    /// stdout) the `Err(io::Error)` arm of [`Self::from_capture`]
+    /// produces; this half names the op-failure shape (`Some(_)` exit
+    /// code or non-empty stderr) the `Ok(non-success)` arm produces.
+    ///
+    /// # Why a named complement
+    ///
+    /// The canonical post-`retry_command` dispatch site
+    /// [`classify_attempt_failure`] reads the partition as
+    /// `if failure.is_spawn_failure() { on_spawn } else { on_op }` — the
+    /// `else` arm carries the op-failure meaning implicitly. Consumer
+    /// sites that branch in the other direction (testing for op-failure
+    /// first, then dispatching to a spawn-failure fallback) previously
+    /// had to write `!failure.is_spawn_failure()` against the negated
+    /// spawn predicate. The named peer hoists that reading to a typed
+    /// method, matching the structural-complement idiom the recent
+    /// peer-pairs at the typed-coverage surface
+    /// ([`crate::probe_outcome::AdmissionTier::admits_relaxed`] /
+    /// [`crate::probe_outcome::AdmissionTier::refuses_relaxed`],
+    /// [`crate::probe_outcome::AdmissionTier::admits_strict`] /
+    /// [`crate::probe_outcome::AdmissionTier::refuses_strict`])
+    /// established: every predicate the typed primitive surfaces has
+    /// its named complement at the same surface, so consumer sites
+    /// never read through a `!` against the wrong-direction predicate.
+    ///
+    /// # The partition invariant is load-bearing
+    ///
+    /// `from_capture` constructs records in exactly two shapes — the
+    /// `Ok(non-success)` arm always populates `(exit_code,
+    /// stderr, stdout)` from the captured `Output`, and the
+    /// `Err(io::Error)` arm always sets `exit_code: None`, empty
+    /// `stderr`, spawn-error message in `stdout`. The
+    /// `exit_code.is_none() && stderr.is_empty()` conjunction is
+    /// the structural discriminator across the two shapes; its
+    /// complement `exit_code.is_some() || !stderr.is_empty()` names
+    /// the op-failure side directly. A future regression that
+    /// constructed a record with `exit_code: None` AND non-empty
+    /// stderr (e.g., a signal-killed process whose stderr was
+    /// flushed before the signal) would correctly classify as
+    /// op-failure here — same discipline `is_spawn_failure` already
+    /// encodes for that edge case.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the spawn/op partition
+    /// is named at one typed-primitive site with both arms exposed as
+    /// typed methods, not as one method plus an implicit `else` at
+    /// every consumer. The same generation-over-composition
+    /// discipline the AdmissionTier admit/refuse peer trio
+    /// established at the typed-coverage surface, here applied at the
+    /// typed-attempt-failure surface.
+    pub fn is_op_failure(&self) -> bool {
+        !self.is_spawn_failure()
+    }
+
     /// Convert a `Command::output()` result into a typed
     /// `CommandAttemptFailure` or success `Output`. Lifts the
     /// `match { Ok success | Ok non-success | Err spawn }` body every
@@ -2879,6 +2941,170 @@ mod tests {
         };
         assert!(!f.is_transient());
         assert!(f.is_spawn_failure());
+    }
+
+    /// `is_op_failure()` discriminates the op-failure structural shape
+    /// (`Ok(non-success)` arm of `from_capture`): a non-zero exit with a
+    /// populated stderr returns `true`; a spawn-failure record
+    /// (`Err(io::Error)` arm: `exit_code: None` + empty stderr) returns
+    /// `false`. The named complement of [`is_spawn_failure`]: the same
+    /// records the spawn-failure predicate discriminates as `true` are
+    /// the records this predicate discriminates as `false`, and vice
+    /// versa. Pins the structural-shape reading at every variant
+    /// `from_capture` constructs.
+    #[test]
+    fn test_is_op_failure_discriminates_op_from_spawn() {
+        // Op-failure: produced by the `Ok(non-success)` arm — non-empty
+        // stderr + Some(_) exit code.
+        let out = synth_output(false, b"", b"401 Unauthorized");
+        let f = CommandAttemptFailure::from_capture(Ok(out), "auth op", 1)
+            .expect_err("non-zero exit must produce a record");
+        assert!(f.is_op_failure(), "op failure must discriminate true");
+
+        // Op-failure with transient stderr: still op-failure.
+        let out = synth_output(false, b"", b"503 Service Unavailable");
+        let f = CommandAttemptFailure::from_capture(Ok(out), "transient op", 1)
+            .expect_err("non-zero exit must produce a record");
+        assert!(f.is_op_failure());
+        assert!(f.is_transient(), "transient op must remain transient");
+
+        // Spawn-failure: produced by the `Err(io::Error)` arm —
+        // exit_code: None + empty stderr.
+        let spawn_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let captured: Result<std::process::Output, std::io::Error> = Err(spawn_err);
+        let f = CommandAttemptFailure::from_capture(captured, "exec missing", 1)
+            .expect_err("spawn failure must produce a record");
+        assert!(
+            !f.is_op_failure(),
+            "spawn failure (empty stderr + no exit code) must NOT discriminate as op"
+        );
+    }
+
+    /// De Morgan partition invariant: `is_op_failure()` and
+    /// `is_spawn_failure()` are exact structural complements over every
+    /// shape `from_capture` constructs and every hand-built record an
+    /// upstream consumer might synthesize. `is_op_failure() ==
+    /// !is_spawn_failure()` at every variant. The pin against a future
+    /// regression that perturbed one predicate's body without lifting
+    /// the change to the other (e.g., broadened `is_spawn_failure` to
+    /// `exit_code.is_none()` alone without re-tightening
+    /// `is_op_failure`'s body), which would silently break the
+    /// `classify_attempt_failure` dispatch surface and downstream
+    /// consumers that branch on either predicate.
+    #[test]
+    fn test_is_op_failure_equals_negation_of_is_spawn_failure() {
+        // Op-failure shape: non-zero exit + populated stderr.
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            stderr: "401 Unauthorized".to_string(),
+            stdout: String::new(),
+        };
+        assert_eq!(f.is_op_failure(), !f.is_spawn_failure());
+
+        // Spawn-failure shape: no exit code + empty stderr.
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: String::new(),
+            stdout: "failed to spawn process: no such file".to_string(),
+        };
+        assert_eq!(f.is_op_failure(), !f.is_spawn_failure());
+
+        // Edge: signal-killed with stderr — `exit_code: None` but
+        // non-empty stderr. By the conjunction discipline this is an
+        // op-failure (not a spawn-failure), and the De Morgan
+        // equivalence must hold.
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: "fatal: process aborted".to_string(),
+            stdout: String::new(),
+        };
+        assert_eq!(f.is_op_failure(), !f.is_spawn_failure());
+        assert!(f.is_op_failure());
+
+        // Edge: zero stderr but populated exit code — also op-failure
+        // (signal-killed Output where stderr was already flushed
+        // upstream, but the captured exit code is preserved).
+        let f = CommandAttemptFailure {
+            operation: "x".to_string(),
+            attempt: 1,
+            exit_code: Some(137),
+            stderr: String::new(),
+            stdout: String::new(),
+        };
+        assert_eq!(f.is_op_failure(), !f.is_spawn_failure());
+        assert!(f.is_op_failure());
+    }
+
+    /// Disjoint-and-covering partition: `is_op_failure() XOR
+    /// is_spawn_failure() == true` at every record. No record satisfies
+    /// both predicates (the two structural shapes are mutually
+    /// exclusive by construction); no record satisfies neither (the
+    /// conjunction `exit_code.is_none() && stderr.is_empty()` is the
+    /// canonical discriminator with no third arm). The peer-pair
+    /// structural pin against any future regression that introduced an
+    /// intermediate structural shape — e.g., a `Pending` variant or a
+    /// signal-aware third arm — without re-partitioning the predicate
+    /// pair at this typed-method surface. Same lattice-covering
+    /// discipline the `AdmissionTier::admits_X` / `refuses_X` peer
+    /// trio established at the tier-ladder surface.
+    #[test]
+    fn test_is_op_failure_xor_is_spawn_failure_partitions_records() {
+        let records = [
+            // Op-failure: non-zero exit, populated stderr.
+            CommandAttemptFailure {
+                operation: "auth".to_string(),
+                attempt: 1,
+                exit_code: Some(1),
+                stderr: "401 Unauthorized".to_string(),
+                stdout: String::new(),
+            },
+            // Op-failure: transient stderr.
+            CommandAttemptFailure {
+                operation: "push".to_string(),
+                attempt: 2,
+                exit_code: Some(2),
+                stderr: "503 Service Unavailable".to_string(),
+                stdout: String::new(),
+            },
+            // Spawn-failure: empty stderr, no exit code.
+            CommandAttemptFailure {
+                operation: "exec".to_string(),
+                attempt: 1,
+                exit_code: None,
+                stderr: String::new(),
+                stdout: "failed to spawn process: no such file".to_string(),
+            },
+            // Op-failure: signal-killed with stderr (`exit_code: None`
+            // but stderr present).
+            CommandAttemptFailure {
+                operation: "killed".to_string(),
+                attempt: 1,
+                exit_code: None,
+                stderr: "fatal: aborted".to_string(),
+                stdout: String::new(),
+            },
+            // Op-failure: signal-killed without stderr but with
+            // populated exit code.
+            CommandAttemptFailure {
+                operation: "sigkill".to_string(),
+                attempt: 1,
+                exit_code: Some(137),
+                stderr: String::new(),
+                stdout: String::new(),
+            },
+        ];
+        for f in &records {
+            assert!(
+                f.is_op_failure() ^ f.is_spawn_failure(),
+                "exactly one of is_op_failure / is_spawn_failure must hold for record {f:?}"
+            );
+        }
     }
 
     /// `from_capture` Display surfaces the same five-field tuple
