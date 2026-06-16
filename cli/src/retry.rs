@@ -1285,6 +1285,96 @@ impl CommandAttemptFailure {
         !self.is_spawn_failure()
     }
 
+    /// True iff this record represents a child process that ran but was
+    /// killed by signal mid-op — `exit_code: None` AND non-empty
+    /// `stderr` — as opposed to a process that could not be spawned at
+    /// all (also `exit_code: None` but with empty `stderr`) or a process
+    /// that ran-to-completion-then-exited-non-zero (`exit_code:
+    /// Some(_)`).
+    ///
+    /// Equivalent to the conjunction
+    /// `exit_code.is_none() && !stderr.is_empty()`. At the retry-call-
+    /// site surface ([`CommandAttemptFailure`]) `exit_code: None` is
+    /// ambiguous between two structural shapes that
+    /// [`Self::from_capture`] produces: the `Err(io::Error)` spawn-
+    /// failure arm (no `Output` ever existed, so `stderr` is empty by
+    /// construction) and the `Ok(non-success)` signal-killed-mid-op arm
+    /// (the child reached `exit()` only via signal — SIGKILL / SIGTERM
+    /// / SIGSEGV / SIGPIPE / cgroups OOM-kill — after flushing some
+    /// stderr). The conjunction discriminates between the two: empty
+    /// stderr is the structural witness for spawn-failure
+    /// ([`Self::is_spawn_failure`]); non-empty stderr with `exit_code:
+    /// None` is the structural witness for signal-killed-mid-op.
+    ///
+    /// # Structural-shape peer at the retry-call-site surface
+    ///
+    /// Mirrors [`CapturedFailure::is_signal_killed`] (commit 5b49d2c) at
+    /// the typed-error producer surface. The two predicates name the
+    /// same structural shape (the child was terminated by signal before
+    /// reaching a normal `exit(n)`) at two surfaces of the retry
+    /// boundary; the load-bearing difference is the conjunction shape.
+    /// The producer surface predicate has a single-field body
+    /// (`exit_code.is_none()`) because at that surface the process
+    /// definitely ran — [`CapturedFailure`] is constructed only from
+    /// `&std::process::Output`, so a spawn failure produces no `Output`
+    /// and never reaches the typed primitive. The call-site surface
+    /// predicate adds the `!stderr.is_empty()` conjunction because at
+    /// this surface the type is constructed from `Result<Output,
+    /// io::Error>` — the `exit_code: None` half of the structural-
+    /// shape universe is shared between the spawn-failure shape and
+    /// the signal-killed-mid-op shape, and the canonical discriminator
+    /// is the `stderr` field that [`Self::from_capture`] fixes empty
+    /// only on the spawn-failure arm.
+    ///
+    /// # Three-way structural-shape partition within op-failure
+    ///
+    /// The existing [`Self::is_spawn_failure`] / [`Self::is_op_failure`]
+    /// peer-pair (commit a4f4146) partitions every record into two
+    /// shapes — spawn-failure vs op-failure — collapsing the signal-
+    /// killed and exited-normally arms into one "op-failure" arm.
+    /// That collapse is load-bearing at the canonical post-
+    /// `retry_command` dispatch surface [`classify_attempt_failure`]
+    /// which routes `*::ExecFailed` (spawn) vs `*::OpFailed`/
+    /// `*::PushFailed`/`*::BuildFailed` (op). This finer-grained
+    /// predicate names the signal-killed sub-arm of op-failure
+    /// directly, so a future remediation-policy site that wants to
+    /// retry OOM-kills against a beefier builder while failing fast
+    /// on auth denials — or a future structured-attestation surface
+    /// that records "killed by SIGTERM under deploy timeout" as a
+    /// distinct provenance class from "exited normally with error" —
+    /// reads the signal-killed structural shape through one typed
+    /// method call instead of through the
+    /// `exit_code.is_none() && !stderr.is_empty()` conjunction at
+    /// every consumer.
+    ///
+    /// # Orthogonal to the retry-dispatch partition
+    ///
+    /// Same orthogonality the sibling [`CapturedFailure::is_signal_killed`]
+    /// holds at the producer surface: the structural-shape partition
+    /// discriminates on `exit_code` + the structural witness `stderr`;
+    /// the retry-dispatch partition ([`Self::is_transient`] /
+    /// [`Self::is_terminal`]) discriminates on `stderr` content via
+    /// the canonical [`is_transient_network_stderr`] classifier. A
+    /// signal-killed record with transient stderr (`"i/o timeout"`
+    /// flushed before SIGTERM-on-deploy-timeout) is signal-killed AND
+    /// transient; a signal-killed record with terminal stderr (`"fatal:
+    /// aborted"` flushed before a SIGSEGV / SIGABRT) is signal-killed
+    /// AND terminal. The two axes never collapse and the typed-method
+    /// peer makes both quadrants directly readable.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the signal-killed
+    /// structural shape is named at one typed-primitive site at each
+    /// surface of the retry boundary, not retyped as the
+    /// `exit_code.is_none() && !stderr.is_empty()` conjunction at
+    /// every consumer site that branches on the structural shape.
+    /// Same parallel-axis named structural-shape peer idiom commit
+    /// 5b49d2c established at the typed-error producer surface, here
+    /// applied at the retry-call-site surface where the conjunction
+    /// shape is load-bearing.
+    pub fn is_signal_killed(&self) -> bool {
+        self.exit_code.is_none() && !self.stderr.is_empty()
+    }
+
     /// Convert a `Command::output()` result into a typed
     /// `CommandAttemptFailure` or success `Output`. Lifts the
     /// `match { Ok success | Ok non-success | Err spawn }` body every
@@ -3371,6 +3461,304 @@ mod tests {
             assert!(
                 f.is_op_failure() ^ f.is_spawn_failure(),
                 "exactly one of is_op_failure / is_spawn_failure must hold for record {f:?}"
+            );
+        }
+    }
+
+    /// `is_signal_killed()` discriminates the signal-killed-mid-op
+    /// structural shape (`exit_code: None` + non-empty `stderr`) from
+    /// both sibling shapes `from_capture` constructs: the spawn-failure
+    /// arm (`exit_code: None` + empty `stderr`) and the exited-normally
+    /// op-failure arm (`exit_code: Some(_)`). The conjunction body is
+    /// load-bearing — the predicate MUST short-circuit to `false` on
+    /// spawn-failure even though both shapes share `exit_code: None`,
+    /// because at this surface (call-site, constructed from
+    /// `Result<Output, io::Error>`) `None` is ambiguous between the
+    /// two structural shapes and the canonical discriminator is the
+    /// `stderr` field that `from_capture` fixes empty only on the
+    /// spawn-failure arm.
+    #[test]
+    fn test_is_signal_killed_discriminates_three_way_structural_shape() {
+        // Spawn-failure: produced by the `Err(io::Error)` arm —
+        // exit_code: None + empty stderr. MUST NOT discriminate as
+        // signal-killed (the spawn-failure shape is structurally
+        // distinct — no child process ever ran).
+        let spawn_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let captured: Result<std::process::Output, std::io::Error> = Err(spawn_err);
+        let f = CommandAttemptFailure::from_capture(captured, "exec missing", 1)
+            .expect_err("spawn failure must produce a record");
+        assert!(
+            !f.is_signal_killed(),
+            "spawn-failure (None + empty stderr) MUST NOT discriminate as signal-killed"
+        );
+        assert!(
+            f.is_spawn_failure(),
+            "spawn-failure must still be discriminated by its own peer"
+        );
+
+        // Signal-killed-mid-op: `exit_code: None` + non-empty stderr
+        // (the SIGTERM-on-deploy-timeout / SIGSEGV-after-flushing-
+        // diagnostic shape — child caught the signal and flushed a
+        // final diagnostic before exiting). MUST discriminate as
+        // signal-killed.
+        let f = CommandAttemptFailure {
+            operation: "deploy".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: "fatal: aborted".to_string(),
+            stdout: String::new(),
+        };
+        assert!(
+            f.is_signal_killed(),
+            "None + non-empty stderr must discriminate as signal-killed"
+        );
+        assert!(
+            !f.is_spawn_failure(),
+            "signal-killed-mid-op MUST NOT collide with spawn-failure"
+        );
+
+        // Exited-normally op-failure: `exit_code: Some(_)` regardless
+        // of stderr. MUST NOT discriminate as signal-killed.
+        let out = synth_output(false, b"", b"401 Unauthorized");
+        let f = CommandAttemptFailure::from_capture(Ok(out), "auth op", 1)
+            .expect_err("non-zero exit must produce a record");
+        assert!(
+            !f.is_signal_killed(),
+            "exit_code: Some(_) MUST NOT discriminate as signal-killed"
+        );
+
+        // Exited-normally with shell-preserved 137 (canonical
+        // SIGKILL-from-shell code 128+9): at the OS surface it's a
+        // normal exit. MUST NOT discriminate as signal-killed —
+        // the predicate reads through `Option::is_none`, not through
+        // a magic-code threshold.
+        let f = CommandAttemptFailure {
+            operation: "killed".to_string(),
+            attempt: 1,
+            exit_code: Some(137),
+            stderr: String::new(),
+            stdout: String::new(),
+        };
+        assert!(
+            !f.is_signal_killed(),
+            "exit_code: Some(137) MUST NOT discriminate as signal-killed regardless of code value"
+        );
+    }
+
+    /// `is_signal_killed()` and `is_spawn_failure()` are mutually
+    /// exclusive at every canonical record — never both hold, because
+    /// the conjunction shapes share `exit_code.is_none()` but
+    /// disagree on `stderr.is_empty()`. The pin against a future
+    /// regression that broadened `is_signal_killed` to
+    /// `exit_code.is_none()` alone (collapsing the conjunction) which
+    /// would silently make every spawn-failure also classify as
+    /// signal-killed, breaking the canonical three-way structural-
+    /// shape partition forge's typed-error producer surfaces consume.
+    #[test]
+    fn test_is_signal_killed_mutually_exclusive_with_is_spawn_failure() {
+        let records = [
+            // Spawn-failure shape: None + empty stderr.
+            CommandAttemptFailure {
+                operation: "exec".to_string(),
+                attempt: 1,
+                exit_code: None,
+                stderr: String::new(),
+                stdout: "failed to spawn process: no such file".to_string(),
+            },
+            // Signal-killed-mid-op: None + non-empty stderr.
+            CommandAttemptFailure {
+                operation: "killed".to_string(),
+                attempt: 1,
+                exit_code: None,
+                stderr: "fatal: aborted".to_string(),
+                stdout: String::new(),
+            },
+            // Signal-killed-mid-op with transient stderr (i/o timeout
+            // flushed before SIGTERM): still mutually exclusive
+            // with spawn-failure.
+            CommandAttemptFailure {
+                operation: "deploy".to_string(),
+                attempt: 1,
+                exit_code: None,
+                stderr: "i/o timeout".to_string(),
+                stdout: String::new(),
+            },
+            // Exited-normally op-failure: Some + stderr.
+            CommandAttemptFailure {
+                operation: "auth".to_string(),
+                attempt: 1,
+                exit_code: Some(1),
+                stderr: "401 Unauthorized".to_string(),
+                stdout: String::new(),
+            },
+            // Exited-normally with empty stderr: Some + empty.
+            CommandAttemptFailure {
+                operation: "sigkill".to_string(),
+                attempt: 1,
+                exit_code: Some(137),
+                stderr: String::new(),
+                stdout: String::new(),
+            },
+        ];
+        for f in &records {
+            assert!(
+                !(f.is_signal_killed() && f.is_spawn_failure()),
+                "is_signal_killed and is_spawn_failure must be mutually exclusive at record {f:?}"
+            );
+        }
+    }
+
+    /// `is_signal_killed()` is orthogonal to the retry-dispatch
+    /// partition (`is_transient` / `is_terminal`). Both quadrants
+    /// reachable under the conjunction body — signal-killed AND
+    /// transient (deploy-timeout-on-network-op with i/o timeout in
+    /// stderr) and signal-killed AND terminal (SIGSEGV / SIGABRT with
+    /// a fatal diagnostic) — are populated by canonical structural
+    /// shapes forge's external CLIs emit. The pin against a future
+    /// regression that fused the two axes (e.g., redefined
+    /// `is_signal_killed` to additionally inspect the classifier's
+    /// transient verdict, or redefined `is_transient` to inspect
+    /// `exit_code` shape), which would collapse the 2×2 into a 1D
+    /// partition and silently break the post-retry classification
+    /// surface every downstream consumer depends on. Mirrors
+    /// `test_captured_failure_is_signal_killed_orthogonal_to_transient`
+    /// (commit 5b49d2c) at the producer surface; the only difference
+    /// is that the spawn-failure quadrant is structurally absent at
+    /// the call-site surface (spawn-failure does not satisfy
+    /// `is_signal_killed` here).
+    #[test]
+    fn test_is_signal_killed_orthogonal_to_is_transient() {
+        // Q1: signal-killed AND transient (deploy timeout while
+        // retrying — `i/o timeout` in stderr, then SIGTERM).
+        let f = CommandAttemptFailure {
+            operation: "deploy".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: "i/o timeout".to_string(),
+            stdout: String::new(),
+        };
+        assert!(f.is_signal_killed());
+        assert!(f.is_transient());
+
+        // Q2: signal-killed AND terminal (SIGSEGV / SIGABRT with a
+        // fatal diagnostic flushed before the signal).
+        let f = CommandAttemptFailure {
+            operation: "build".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: "fatal: aborted".to_string(),
+            stdout: String::new(),
+        };
+        assert!(f.is_signal_killed());
+        assert!(f.is_terminal());
+
+        // Q3: NOT signal-killed AND transient (the canonical retry-
+        // budget-consuming arm — Some(1) exit with 503 in stderr).
+        let f = CommandAttemptFailure {
+            operation: "push".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            stderr: "503 Service Unavailable".to_string(),
+            stdout: String::new(),
+        };
+        assert!(!f.is_signal_killed());
+        assert!(f.is_transient());
+
+        // Q4: NOT signal-killed AND terminal (the canonical fail-fast
+        // arm — Some(1) exit with 401 in stderr).
+        let f = CommandAttemptFailure {
+            operation: "auth".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            stderr: "401 Unauthorized".to_string(),
+            stdout: String::new(),
+        };
+        assert!(!f.is_signal_killed());
+        assert!(f.is_terminal());
+    }
+
+    /// Pin the structural definition: `is_signal_killed()` is exactly
+    /// `exit_code.is_none() && !stderr.is_empty()` at every record.
+    /// A future refactor that shifted the predicate body to a
+    /// synthetic discriminator (substring-match on stderr for "signal"
+    /// / "killed" / "SIG*", a separate `killed_by_signal: bool` field,
+    /// a magic exit-code threshold like `code >= 128`) without
+    /// preserving the conjunction equivalence would silently break the
+    /// canonical three-way structural-shape partition at this surface.
+    /// Mirrors `test_captured_failure_is_signal_killed_equals_exit_code_is_none`
+    /// (commit 5b49d2c) at the producer surface; the call-site
+    /// equivalence here additionally pins the `!stderr.is_empty()`
+    /// conjunction so the spawn-failure / signal-killed-mid-op
+    /// disambiguation is captured in the structural-definition test.
+    #[test]
+    fn test_is_signal_killed_equals_conjunction() {
+        let records = [
+            // None + empty: spawn-failure.
+            CommandAttemptFailure {
+                operation: "x".to_string(),
+                attempt: 1,
+                exit_code: None,
+                stderr: String::new(),
+                stdout: "failed to spawn process: no such file".to_string(),
+            },
+            // None + transient stderr: signal-killed-mid-op.
+            CommandAttemptFailure {
+                operation: "x".to_string(),
+                attempt: 1,
+                exit_code: None,
+                stderr: "i/o timeout".to_string(),
+                stdout: String::new(),
+            },
+            // None + terminal stderr: signal-killed-mid-op.
+            CommandAttemptFailure {
+                operation: "x".to_string(),
+                attempt: 1,
+                exit_code: None,
+                stderr: "fatal: aborted".to_string(),
+                stdout: String::new(),
+            },
+            // Some + empty: exited-normally (the shell-preserved 137
+            // shape — at OS surface a normal exit).
+            CommandAttemptFailure {
+                operation: "x".to_string(),
+                attempt: 1,
+                exit_code: Some(137),
+                stderr: String::new(),
+                stdout: String::new(),
+            },
+            // Some + terminal stderr: exited-normally.
+            CommandAttemptFailure {
+                operation: "x".to_string(),
+                attempt: 1,
+                exit_code: Some(1),
+                stderr: "401 Unauthorized".to_string(),
+                stdout: String::new(),
+            },
+            // Some + transient stderr: exited-normally.
+            CommandAttemptFailure {
+                operation: "x".to_string(),
+                attempt: 1,
+                exit_code: Some(1),
+                stderr: "503 Service Unavailable".to_string(),
+                stdout: String::new(),
+            },
+            // Some(0) + empty: degenerate-but-structurally-exited-
+            // normally (would not occur in practice — from_capture
+            // routes Ok(success) to Ok(Output) not Err — but the
+            // structural equivalence must hold for hand-built records).
+            CommandAttemptFailure {
+                operation: "x".to_string(),
+                attempt: 1,
+                exit_code: Some(0),
+                stderr: String::new(),
+                stdout: String::new(),
+            },
+        ];
+        for (i, f) in records.iter().enumerate() {
+            assert_eq!(
+                f.is_signal_killed(),
+                f.exit_code.is_none() && !f.stderr.is_empty(),
+                "record {i} must satisfy is_signal_killed() == (exit_code.is_none() && !stderr.is_empty()): {f:?}"
             );
         }
     }
