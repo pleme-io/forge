@@ -686,6 +686,84 @@ impl CapturedFailure {
     pub fn is_signal_killed(&self) -> bool {
         self.exit_code.is_none()
     }
+
+    /// True iff this captured failure represents a child process that
+    /// exited via `exit(n)` (any normal exit code, including the
+    /// canonical 137 SIGKILL-from-shell exit code preserved by `bash`)
+    /// rather than a child process killed by signal before reaching a
+    /// normal exit.
+    ///
+    /// Equivalent to `self.exit_code.is_some()`. Named complement of
+    /// [`Self::is_signal_killed`]: the two predicates partition every
+    /// [`CapturedFailure`] record into exactly two structural shapes —
+    /// the `exit_code: Some(_)` arm (the canonical `exit(n)` shape forge's
+    /// external CLIs produce on a typed rejection: skopeo's `Some(1)` on
+    /// manifest-invalid, attic's `Some(1)` on auth-denied, git's
+    /// `Some(128)` on remote-rejected, nix-build's `Some(1)` on
+    /// derivation-failed) and the `exit_code: None` arm (the
+    /// signal-killed shape — SIGKILL / SIGTERM / SIGSEGV / SIGPIPE /
+    /// cgroups OOM-kill). Never both and never neither, by the canonical
+    /// Rust `ExitStatus::code` `None`/`Some` discriminator.
+    ///
+    /// # Why a named complement
+    ///
+    /// The recent [`Self::is_signal_killed`] peer (commit 5b49d2c) named
+    /// the abnormal arm of the partition at this typed-error producer
+    /// surface; the normal arm previously only surfaced as
+    /// `!cf.is_signal_killed()` or as the raw field access
+    /// `cf.exit_code.is_some()` at consumer sites that branch in that
+    /// direction (a future post-classification surface routing
+    /// "exited-normally-with-error" to one telemetry counter and
+    /// "killed-by-signal" to another; a future remediation-policy site
+    /// that retries OOM-kills against a beefier builder while reporting
+    /// `exit(n)` failures verbatim; a future structured-attestation
+    /// surface that records the structural shape of every failure in
+    /// the SLSA provenance record). The named peer hoists that reading
+    /// to a typed method, matching the structural-complement idiom the
+    /// recent peer-pairs established:
+    /// [`CommandAttemptFailure::is_op_failure`] /
+    /// [`CommandAttemptFailure::is_spawn_failure`] (commit a4f4146) at
+    /// the retry-call-site surface, [`CommandAttemptFailure::is_terminal`]
+    /// / [`CommandAttemptFailure::is_transient`] (commit 6fa921b) at the
+    /// retry-dispatch surface, [`Self::is_terminal`] /
+    /// [`Self::is_transient`] (commit 6069a25) at this typed-error
+    /// producer surface. Every binary partition the typed primitive
+    /// surfaces now exposes both arms as typed methods, so consumer
+    /// sites never read through a `!` against the wrong-direction
+    /// predicate.
+    ///
+    /// # Orthogonal to the transient/terminal partition
+    ///
+    /// Same orthogonality the sibling [`Self::is_signal_killed`] holds:
+    /// `is_exited_normally` discriminates on `exit_code`;
+    /// [`Self::is_transient`] / [`Self::is_terminal`] discriminate on
+    /// `stderr` via the canonical [`is_transient_network_stderr`]
+    /// classifier. Every quadrant of the 2×2 — exited-normally ×
+    /// transient (`Some(1)` + `"503"`, the canonical retry-budget arm),
+    /// exited-normally × terminal (`Some(1)` + `"401"`, the canonical
+    /// fail-fast arm), signal-killed × transient (`None` + `"i/o
+    /// timeout"`, the deploy-timeout-on-network-op shape), signal-killed
+    /// × terminal (`None` + `""`, the SIGKILL / OOM-kill shape) — is
+    /// populated by a canonical structural shape forge's external CLIs
+    /// emit. Neither partition collapses into the other.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the exited-normally /
+    /// signal-killed structural partition is named at one typed-
+    /// primitive site with both arms exposed as typed methods, not as
+    /// one method plus an implicit `!` at every consumer. Same
+    /// parallel-axis named structural-shape peer idiom the
+    /// [`CommandAttemptFailure::is_op_failure`] /
+    /// [`CommandAttemptFailure::is_spawn_failure`] peer-pair (commit
+    /// a4f4146) established at the retry-call-site surface, here applied
+    /// at the typed-error producer surface — the typed-method shape every
+    /// `cf.exit_code` reader at the four producer sites
+    /// (`GitError::OpFailed`, `NixBuildError::BuildFailed`,
+    /// `AtticError::PushFailed` / `LoginFailed`,
+    /// `RegistryError::PushFailed`) can adopt without re-deriving the
+    /// `Option::is_some()` reading per call site.
+    pub fn is_exited_normally(&self) -> bool {
+        !self.is_signal_killed()
+    }
 }
 
 /// Classify an external-CLI invocation's `io::Result<Output>` into one of
@@ -4103,6 +4181,192 @@ mod tests {
                 cf.is_signal_killed(),
                 cf.exit_code.is_none(),
                 "record {i} must satisfy is_signal_killed() == exit_code.is_none(): {cf:?}"
+            );
+        }
+    }
+
+    /// `is_exited_normally()` discriminates the normal-exit arm of the
+    /// structural-shape partition at every canonical record `from_output`
+    /// constructs and at every hand-built shape an upstream consumer
+    /// might synthesize. `exit_code: Some(_)` (any normal exit code,
+    /// including the canonical 137 SIGKILL-from-shell exit code preserved
+    /// by `bash` — at the OS surface a normal exit, not a signal-kill)
+    /// discriminates as exited-normally; `exit_code: None` (the canonical
+    /// `ExitStatus::code` "killed by signal" semantics) discriminates as
+    /// NOT exited-normally. Mirrors
+    /// `test_captured_failure_is_signal_killed_discriminates_structural_shape`
+    /// from the other arm — the two predicates discriminate the same
+    /// partition through opposite-direction reads.
+    #[test]
+    fn test_captured_failure_is_exited_normally_discriminates_structural_shape() {
+        // Exited-normally: typical non-zero-exit op-failure (the
+        // canonical exit(1)-on-rejected-request shape every external
+        // CLI in forge emits on a typed rejection: skopeo manifest-
+        // invalid, attic auth-denied, git remote-rejected, nix-build
+        // derivation-failed).
+        let cf = CapturedFailure {
+            exit_code: Some(1),
+            stderr: "401 Unauthorized".to_string(),
+        };
+        assert!(
+            cf.is_exited_normally(),
+            "exit_code: Some(1) with op-failure stderr must discriminate as exited-normally"
+        );
+
+        // Exited-normally: populated exit code with empty stderr.
+        // 137 is the canonical shell-preserved SIGKILL code (128 + 9),
+        // but at the OS surface it's a normal exit — the Output struct
+        // distinguishes "killed by signal" from "exited with code 137"
+        // strictly through `ExitStatus::code`'s None/Some discriminator,
+        // not through the value of the code. Pins that the predicate
+        // reads through `Option::is_some`, not through a magic-code
+        // threshold.
+        let cf = CapturedFailure {
+            exit_code: Some(137),
+            stderr: String::new(),
+        };
+        assert!(
+            cf.is_exited_normally(),
+            "exit_code: Some(137) MUST discriminate as exited-normally regardless of code value"
+        );
+
+        // NOT exited-normally: signal-killed with empty stderr (the
+        // canonical SIGKILL / OOM-kill shape — child process terminated
+        // before flushing diagnostics).
+        let cf = CapturedFailure {
+            exit_code: None,
+            stderr: String::new(),
+        };
+        assert!(
+            !cf.is_exited_normally(),
+            "exit_code: None MUST NOT discriminate as exited-normally"
+        );
+
+        // NOT exited-normally: signal-killed with populated stderr
+        // (the SIGTERM-graceful-shutdown shape — child caught the
+        // signal and flushed a final diagnostic before exiting).
+        let cf = CapturedFailure {
+            exit_code: None,
+            stderr: "i/o timeout".to_string(),
+        };
+        assert!(
+            !cf.is_exited_normally(),
+            "exit_code: None with stderr MUST NOT discriminate as exited-normally"
+        );
+    }
+
+    /// Disjoint-and-covering partition at the typed-error producer
+    /// surface: `cf.is_exited_normally() XOR cf.is_signal_killed() == true`
+    /// at every record across the canonical structural shapes. No record
+    /// satisfies both (`exit_code` is canonically either `Some(_)` or
+    /// `None`, never both) and no record satisfies neither (every
+    /// `Option<i32>` is in exactly one of the two arms). The peer-pair
+    /// lattice-covering pin against any future regression that introduced
+    /// a third structural-shape class — e.g., a synthetic "abandoned"
+    /// or "in-flight" intermediate — without re-partitioning the
+    /// predicate pair at this typed-method surface. Mirrors the sibling
+    /// `test_is_op_failure_xor_is_spawn_failure_partitions_records` pin
+    /// at the retry-call-site surface (commit a4f4146) and the
+    /// `test_captured_failure_is_terminal_xor_is_transient_partitions_records`
+    /// pin for the retry-dispatch partition (commit 6069a25).
+    #[test]
+    fn test_captured_failure_is_exited_normally_xor_is_signal_killed_partitions_records() {
+        let records = [
+            // Exited-normally: 4xx auth (the canonical exit(1) op-failure).
+            CapturedFailure {
+                exit_code: Some(1),
+                stderr: "401 Unauthorized".to_string(),
+            },
+            // Exited-normally: 5xx (transient stderr but still normal exit).
+            CapturedFailure {
+                exit_code: Some(1),
+                stderr: "503 Service Unavailable".to_string(),
+            },
+            // Exited-normally: shell-preserved 137 (not a signal-kill at OS surface).
+            CapturedFailure {
+                exit_code: Some(137),
+                stderr: String::new(),
+            },
+            // Exited-normally: zero exit (degenerate but structurally exited-normally).
+            CapturedFailure {
+                exit_code: Some(0),
+                stderr: String::new(),
+            },
+            // Signal-killed: empty stderr (SIGKILL / OOM-kill shape).
+            CapturedFailure {
+                exit_code: None,
+                stderr: String::new(),
+            },
+            // Signal-killed: transient stderr (i/o timeout flushed before kill).
+            CapturedFailure {
+                exit_code: None,
+                stderr: "i/o timeout".to_string(),
+            },
+            // Signal-killed: terminal stderr (fatal aborted before kill).
+            CapturedFailure {
+                exit_code: None,
+                stderr: "fatal: aborted".to_string(),
+            },
+        ];
+        for (i, cf) in records.iter().enumerate() {
+            assert!(
+                cf.is_exited_normally() ^ cf.is_signal_killed(),
+                "record {i} must satisfy exactly one of (is_exited_normally, is_signal_killed): {cf:?}"
+            );
+        }
+    }
+
+    /// Pin the structural definition: `is_exited_normally()` is exactly
+    /// `exit_code.is_some()` at every record. A future refactor that
+    /// shifted the predicate body to a synthetic discriminator (e.g.,
+    /// `stderr.is_empty()`, a separate `exited_normally: bool` field,
+    /// a magic exit-code threshold like `code < 128`) without preserving
+    /// the `exit_code.is_some()` equivalence would silently break every
+    /// downstream consumer that branches on `is_exited_normally` against
+    /// the canonical Rust `ExitStatus::code` semantics. Pinned across
+    /// hand-built records covering both the `None` and `Some(_)` arms
+    /// with the full spectrum of stderr shapes (empty, transient,
+    /// terminal) so the equivalence holds independently of the
+    /// retry-dispatch partition. Mirrors
+    /// `test_captured_failure_is_signal_killed_equals_exit_code_is_none`
+    /// from the sibling arm.
+    #[test]
+    fn test_captured_failure_is_exited_normally_equals_exit_code_is_some() {
+        let records = [
+            CapturedFailure {
+                exit_code: None,
+                stderr: String::new(),
+            },
+            CapturedFailure {
+                exit_code: None,
+                stderr: "i/o timeout".to_string(),
+            },
+            CapturedFailure {
+                exit_code: None,
+                stderr: "fatal: aborted".to_string(),
+            },
+            CapturedFailure {
+                exit_code: Some(0),
+                stderr: String::new(),
+            },
+            CapturedFailure {
+                exit_code: Some(1),
+                stderr: "401 Unauthorized".to_string(),
+            },
+            CapturedFailure {
+                exit_code: Some(137),
+                stderr: String::new(),
+            },
+            CapturedFailure {
+                exit_code: Some(255),
+                stderr: "503 Service Unavailable".to_string(),
+            },
+        ];
+        for (i, cf) in records.iter().enumerate() {
+            assert_eq!(
+                cf.is_exited_normally(),
+                cf.exit_code.is_some(),
+                "record {i} must satisfy is_exited_normally() == exit_code.is_some(): {cf:?}"
             );
         }
     }
