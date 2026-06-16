@@ -277,6 +277,86 @@ impl RetryPolicy {
         Self::network().with_max_attempts(max_attempts)
     }
 
+    /// True iff this policy never retries — every invocation under
+    /// [`run_with_policy`] / [`run_command_with_policy`] terminates after
+    /// exactly one attempt, regardless of the classifier's transient/
+    /// terminal verdict.
+    ///
+    /// Equivalent to `self.max_attempts <= 1`. The retry-loop body at
+    /// [`run_with_policy`] (line `let max = policy.max_attempts.max(1);
+    /// ... if !is_transient(&e) || attempt >= max { return Err(e); }`)
+    /// short-circuits on the first error whenever `max_attempts <= 1`
+    /// because the `attempt >= max` predicate fires at `attempt == 1`.
+    /// The `<= 1` body (rather than `== 1`) handles the degenerate
+    /// `max_attempts: 0` field-literal shape — every factory constructor
+    /// in forge clamps via [`Self::with_max_attempts`] / [`Self::new`]
+    /// so `0` cannot reach this surface through a sanctioned construction
+    /// path, but a hand-built `RetryPolicy { max_attempts: 0, .. }`
+    /// (e.g., the `test_compute_delay_exponential_growth` shape, the
+    /// `test_partial_eq_reflexive_across_factory_constructors` `0` arm)
+    /// is structurally a no-retry policy under the same retry-loop
+    /// invariant.
+    ///
+    /// # Why a named typed-method predicate
+    ///
+    /// The "does this policy ever burn retry budget?" reading is the
+    /// load-bearing structural-state partition at the typed-primitive
+    /// surface — a future post-loop telemetry consumer histogramming
+    /// no-retry-vs-retried invocations, a future structured-attestation
+    /// surface distinguishing "ran-immediately" from "ran-under-retry"
+    /// provenance classes, a future pre-loop fail-fast skip that wants
+    /// to short-circuit before constructing the closure when retry is
+    /// structurally impossible, a future config-validation surface that
+    /// warns the operator when a `--retries 0` flag silently produced
+    /// a no-retry policy (the clamp at [`Self::with_max_attempts`]
+    /// promotes `0` to `1`, both of which are no-retry under this
+    /// predicate) — previously all read the partition as
+    /// `policy.max_attempts <= 1` or `policy == RetryPolicy::immediate()`
+    /// at every consumer. The named typed-method peer hoists that reading
+    /// to the typed-primitive surface, matching the named-predicate idiom
+    /// the peer-pairs at the typed-failure surfaces established at the
+    /// retry boundary (the [`CapturedFailure::is_transient`] /
+    /// [`CapturedFailure::is_terminal`] retry-dispatch pair from commit
+    /// 6069a25, the [`CommandAttemptFailure::is_spawn_failure`] /
+    /// [`CommandAttemptFailure::is_op_failure`] structural pair from
+    /// commit a4f4146, the
+    /// [`CommandAttemptFailure::is_signal_killed`] /
+    /// [`CommandAttemptFailure::is_exited_normally`] three-way
+    /// partition closure at the call-site surface from commits cb0db50
+    /// / 5e07cc2): every binary partition the typed primitives at the
+    /// retry boundary surface exposes is now read through one named
+    /// typed method, not through the raw field access / direct-
+    /// equality cascade at every consumer.
+    ///
+    /// # Distinct from `== RetryPolicy::immediate()`
+    ///
+    /// Direct equality against [`Self::immediate`] discriminates on the
+    /// full struct shape — `max_attempts: 1` AND `initial_backoff:
+    /// ZERO` AND `factor: 1` AND `max_backoff: ZERO`. A policy that
+    /// inherits the canonical [`Self::network`] schedule but with a
+    /// caller-supplied `max_attempts: 1` (e.g.,
+    /// `RetryPolicy::network_with_max_attempts(1)`) is structurally
+    /// no-retry but NOT `== immediate()`, because its `initial_backoff`,
+    /// `factor`, and `max_backoff` carry the canonical Bazel/Buck2/SLSA
+    /// network schedule (250ms × factor=2 capped at 30s). The named
+    /// predicate names the retry-budget axis directly so a consumer
+    /// reading "does this policy ever retry?" is not silently coupled
+    /// to the schedule axis the direct-equality reading also
+    /// discriminates on.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the no-retry structural-
+    /// state partition is named at one typed-primitive site instead of
+    /// retyped as the inline `policy.max_attempts <= 1` cascade at
+    /// every consumer site that branches on the structural state. Same
+    /// generation-over-composition discipline the recent typed-method
+    /// peers established at the [`CapturedFailure`] /
+    /// [`CommandAttemptFailure`] surfaces of the retry boundary, here
+    /// applied to the [`RetryPolicy`] typed primitive that drives the
+    /// retry-loop budget.
+    pub const fn is_no_retry(&self) -> bool {
+        self.max_attempts <= 1
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -2816,6 +2896,167 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(b, c);
         assert_eq!(a, c);
+    }
+
+    /// [`RetryPolicy::is_no_retry`] discriminates the no-retry
+    /// structural-state arm at the typed-primitive surface across the
+    /// canonical factory constructors. [`Self::immediate`] is no-retry
+    /// (`max_attempts: 1`); [`Self::network`] is retry
+    /// (`max_attempts: 5`); the safe-mode partition routes via
+    /// [`Self::network_or_immediate`] (`true` → retry, `false` →
+    /// no-retry); [`Self::network_with_max_attempts(1)`] is no-retry
+    /// despite carrying the canonical network schedule — the predicate
+    /// names the retry-budget axis cleanly, NOT direct-equality
+    /// against [`Self::immediate`].
+    #[test]
+    fn test_retry_policy_is_no_retry_discriminates_canonical_factories() {
+        assert!(
+            RetryPolicy::immediate().is_no_retry(),
+            "immediate() is no-retry (max_attempts == 1)"
+        );
+        assert!(
+            !RetryPolicy::network().is_no_retry(),
+            "network() retries (max_attempts == 5)"
+        );
+        assert!(
+            !RetryPolicy::network_or_immediate(true).is_no_retry(),
+            "network_or_immediate(true) routes to network() — retries"
+        );
+        assert!(
+            RetryPolicy::network_or_immediate(false).is_no_retry(),
+            "network_or_immediate(false) routes to immediate() — no-retry"
+        );
+        assert!(
+            RetryPolicy::network_with_max_attempts(1).is_no_retry(),
+            "network_with_max_attempts(1) is no-retry despite the network schedule"
+        );
+        assert!(
+            !RetryPolicy::network_with_max_attempts(2).is_no_retry(),
+            "network_with_max_attempts(2) retries — budget exceeds 1"
+        );
+        // network_with_max_attempts(0) clamps to 1 — still no-retry.
+        assert!(
+            RetryPolicy::network_with_max_attempts(0).is_no_retry(),
+            "network_with_max_attempts(0) clamps to 1 — no-retry"
+        );
+    }
+
+    /// [`RetryPolicy::is_no_retry`] holds iff `max_attempts <= 1` —
+    /// structural-definition pin against a regression that swapped the
+    /// body for a synthetic discriminator (e.g., direct equality against
+    /// [`Self::immediate`] which would mis-classify
+    /// `network_with_max_attempts(1)` as retry; a strict `== 1`
+    /// comparator which would mis-classify a hand-built
+    /// `max_attempts: 0` field-literal record as retry; an `is_zero()`
+    /// on `initial_backoff` which would mis-classify
+    /// `immediate().with_max_attempts(4)` as no-retry). Covers the full
+    /// `max_attempts` × {ZERO, non-ZERO `initial_backoff`} cross-product
+    /// the retry-loop body discriminates.
+    #[test]
+    fn test_retry_policy_is_no_retry_equals_max_attempts_le_one() {
+        let cases = [
+            (0u32, true),
+            (1, true),
+            (2, false),
+            (5, false),
+            (100, false),
+            (u32::MAX, false),
+        ];
+        for (max_attempts, expected) in cases {
+            // Test against both schedule shapes (ZERO and non-ZERO
+            // initial_backoff) — the predicate must NOT couple to the
+            // schedule axis.
+            let with_zero_schedule = RetryPolicy {
+                max_attempts,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            };
+            let with_network_schedule = RetryPolicy {
+                max_attempts,
+                initial_backoff: Duration::from_millis(250),
+                factor: 2,
+                max_backoff: Duration::from_secs(30),
+            };
+            assert_eq!(
+                with_zero_schedule.is_no_retry(),
+                expected,
+                "max_attempts = {max_attempts}, zero schedule"
+            );
+            assert_eq!(
+                with_network_schedule.is_no_retry(),
+                expected,
+                "max_attempts = {max_attempts}, network schedule"
+            );
+        }
+    }
+
+    /// [`RetryPolicy::is_no_retry`] is the structural witness for the
+    /// retry-loop short-circuit behavior at [`run_with_policy`]: under
+    /// an always-transient classifier, a no-retry policy invokes `op`
+    /// exactly once; a retry policy invokes `op` exactly
+    /// `max_attempts` times. The load-bearing co-firing pin against
+    /// any future regression that decoupled the predicate from the
+    /// loop's `attempt >= max` short-circuit — e.g., a future
+    /// refactor that promoted the retry-loop's `max(1)` clamp to a
+    /// `max(2)` floor without updating the predicate, or a refactor
+    /// that broadened the predicate to cover an `initial_backoff:
+    /// ZERO` arm that the loop body did not treat as no-retry.
+    #[tokio::test]
+    async fn test_retry_policy_is_no_retry_co_fires_with_run_with_policy_short_circuit() {
+        // No-retry policies invoke op exactly once even under an
+        // always-transient classifier.
+        for p in &[
+            RetryPolicy::immediate(),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_or_immediate(false),
+        ] {
+            assert!(p.is_no_retry(), "precondition: {p:?} is no-retry");
+            let calls = Arc::new(AtomicU32::new(0));
+            let calls_clone = calls.clone();
+            let result: Result<(), &'static str> = run_with_policy(
+                p,
+                |_| true,
+                |_| {
+                    let calls = calls_clone.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Err::<(), &'static str>("err")
+                    }
+                },
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "no-retry policy must invoke op exactly once: {p:?}"
+            );
+        }
+        // Retry policies invoke op exactly max_attempts times under an
+        // always-transient classifier.
+        let p = RetryPolicy::new(3, Duration::ZERO, 1, Duration::ZERO);
+        assert!(!p.is_no_retry(), "precondition: {p:?} retries");
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result: Result<(), &'static str> = run_with_policy(
+            &p,
+            |_| true,
+            |_| {
+                let calls = calls_clone.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), &'static str>("err")
+                }
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "retry policy must invoke op max_attempts times"
+        );
     }
 
     /// Success on the first call must not retry. `op` is invoked exactly
