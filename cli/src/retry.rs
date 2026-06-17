@@ -357,6 +357,69 @@ impl RetryPolicy {
         self.max_attempts <= 1
     }
 
+    /// True iff this policy ever burns retry budget — under an
+    /// always-transient classifier, [`run_with_policy`] /
+    /// [`run_command_with_policy`] invokes `op` more than once.
+    ///
+    /// Defined as `!self.is_no_retry()` — the named-complement peer at
+    /// the typed-primitive surface, closing the binary partition of
+    /// the retry-budget axis. Equivalent to `self.max_attempts > 1`,
+    /// but read through one named typed method so a future consumer
+    /// branching on the "will-it-retry?" arm of the partition is not
+    /// silently coupled to the raw-field-access reading.
+    ///
+    /// # Why the named-complement peer
+    ///
+    /// Every binary partition the typed primitives at the retry
+    /// boundary surface previously exposed surfaces the named
+    /// complement as a peer typed method: the
+    /// [`CapturedFailure::is_transient`] /
+    /// [`CapturedFailure::is_terminal`] retry-dispatch pair from commit
+    /// 6069a25, the
+    /// [`CommandAttemptFailure::is_spawn_failure`] /
+    /// [`CommandAttemptFailure::is_op_failure`] structural pair from
+    /// commit a4f4146, the
+    /// [`CommandAttemptFailure::is_signal_killed`] /
+    /// [`CommandAttemptFailure::is_exited_normally`] three-way
+    /// partition closure at the call-site surface from commits cb0db50
+    /// / 5e07cc2, and the
+    /// [`AdmissionTier::admits_strict`] / [`AdmissionTier::refuses_strict`]
+    /// admit/refuse peer-pair at the typed-coverage surface from
+    /// commits 05f5071 / aec7d7c. The retry-budget axis at the
+    /// retry-policy surface now joins that idiom: any future consumer
+    /// reading the will-it-retry? arm (the natural retry-policy peer
+    /// of a no-retry-vs-retried branch — a future post-loop telemetry
+    /// histogram that buckets *retried* invocations against
+    /// *immediate-only* invocations, a future structured-attestation
+    /// surface that records the "ran-under-retry" provenance class
+    /// against the SLSA chain, a future budget-validation surface that
+    /// warns the operator when a CLI flag silently produced a
+    /// will-retry policy where caller-intent was no-retry) reads one
+    /// named typed method without re-typing the `max_attempts > 1` or
+    /// `!policy.is_no_retry()` cascade per consumer.
+    ///
+    /// # Equivalent to `!self.is_no_retry()`
+    ///
+    /// The complement law `self.will_retry() == !self.is_no_retry()`
+    /// holds for every [`RetryPolicy`] record — pinned by
+    /// [`test_retry_policy_will_retry_complements_is_no_retry`]. A future
+    /// regression that desynced the two predicates (e.g., one
+    /// promoting its threshold off `<= 1` without the other; one
+    /// reading a stale `initial_backoff.is_zero()` shortcut the other
+    /// did not) lights up that test.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the will-retry
+    /// structural-state partition is named at one typed-primitive site
+    /// instead of retyped as the inline `policy.max_attempts > 1` /
+    /// `!policy.is_no_retry()` cascade at every consumer site that
+    /// branches on the structural state. Same generation-over-
+    /// composition discipline the recent named-complement peers
+    /// established at the [`CapturedFailure`] / [`CommandAttemptFailure`]
+    /// surfaces of the retry boundary.
+    pub const fn will_retry(&self) -> bool {
+        !self.is_no_retry()
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -3057,6 +3120,164 @@ mod tests {
             3,
             "retry policy must invoke op max_attempts times"
         );
+    }
+
+    /// [`RetryPolicy::will_retry`] discriminates the will-retry
+    /// structural-state arm at the typed-primitive surface across the
+    /// canonical factory constructors — the complement of the
+    /// [`RetryPolicy::is_no_retry`] discrimination pinned above.
+    /// [`Self::immediate`] is no-retry → `will_retry()` false;
+    /// [`Self::network`] retries → `will_retry()` true;
+    /// [`Self::network_or_immediate`] routes by safe-mode flag;
+    /// [`Self::network_with_max_attempts(1)`] is no-retry despite the
+    /// network schedule (the predicate names the retry-budget axis,
+    /// NOT the schedule axis).
+    #[test]
+    fn test_retry_policy_will_retry_discriminates_canonical_factories() {
+        assert!(
+            !RetryPolicy::immediate().will_retry(),
+            "immediate() does not retry (max_attempts == 1)"
+        );
+        assert!(
+            RetryPolicy::network().will_retry(),
+            "network() retries (max_attempts == 5)"
+        );
+        assert!(
+            RetryPolicy::network_or_immediate(true).will_retry(),
+            "network_or_immediate(true) routes to network() — retries"
+        );
+        assert!(
+            !RetryPolicy::network_or_immediate(false).will_retry(),
+            "network_or_immediate(false) routes to immediate() — does not retry"
+        );
+        assert!(
+            !RetryPolicy::network_with_max_attempts(1).will_retry(),
+            "network_with_max_attempts(1) does not retry despite the network schedule"
+        );
+        assert!(
+            RetryPolicy::network_with_max_attempts(2).will_retry(),
+            "network_with_max_attempts(2) retries — budget exceeds 1"
+        );
+        // network_with_max_attempts(0) clamps to 1 — still no-retry.
+        assert!(
+            !RetryPolicy::network_with_max_attempts(0).will_retry(),
+            "network_with_max_attempts(0) clamps to 1 — does not retry"
+        );
+    }
+
+    /// [`RetryPolicy::will_retry`] is the named complement of
+    /// [`RetryPolicy::is_no_retry`]: `will_retry() == !is_no_retry()`
+    /// holds for every [`RetryPolicy`] record. Structural-complement
+    /// pin across the full `max_attempts` × `{ZERO, network}` schedule
+    /// cross-product — a future regression that desynced the two
+    /// predicates (e.g., one promoting its threshold off `<= 1`
+    /// without the other, one reading a stale
+    /// `initial_backoff.is_zero()` shortcut the other did not, a
+    /// custom impl that drifted from the canonical definition) lights
+    /// up this test.
+    #[test]
+    fn test_retry_policy_will_retry_complements_is_no_retry() {
+        let cases = [0u32, 1, 2, 5, 100, u32::MAX];
+        for max_attempts in cases {
+            let with_zero_schedule = RetryPolicy {
+                max_attempts,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            };
+            let with_network_schedule = RetryPolicy {
+                max_attempts,
+                initial_backoff: Duration::from_millis(250),
+                factor: 2,
+                max_backoff: Duration::from_secs(30),
+            };
+            assert_eq!(
+                with_zero_schedule.will_retry(),
+                !with_zero_schedule.is_no_retry(),
+                "will_retry must complement is_no_retry: max_attempts = {max_attempts}, zero schedule"
+            );
+            assert_eq!(
+                with_network_schedule.will_retry(),
+                !with_network_schedule.is_no_retry(),
+                "will_retry must complement is_no_retry: max_attempts = {max_attempts}, network schedule"
+            );
+        }
+    }
+
+    /// [`RetryPolicy::will_retry`] is the structural witness for the
+    /// retry-loop's *multi-invocation* arm at [`run_with_policy`]:
+    /// under an always-transient classifier, a `will_retry()` policy
+    /// invokes `op` more than once (exactly `max_attempts` times); a
+    /// `!will_retry()` policy invokes `op` exactly once. The
+    /// load-bearing co-firing pin against any future regression that
+    /// decoupled the predicate from the loop's `attempt >= max`
+    /// short-circuit at [`run_with_policy`].
+    #[tokio::test]
+    async fn test_retry_policy_will_retry_co_fires_with_run_with_policy_multi_invocation() {
+        // will_retry() policies invoke op more than once under an
+        // always-transient classifier.
+        let retry_policies = [
+            RetryPolicy::network(),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::new(2, Duration::ZERO, 1, Duration::ZERO),
+        ];
+        for p in &retry_policies {
+            assert!(p.will_retry(), "precondition: {p:?} will_retry");
+            let calls = Arc::new(AtomicU32::new(0));
+            let calls_clone = calls.clone();
+            let result: Result<(), &'static str> = run_with_policy(
+                p,
+                |_| true,
+                |_| {
+                    let calls = calls_clone.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Err::<(), &'static str>("err")
+                    }
+                },
+            )
+            .await;
+            assert!(result.is_err());
+            let observed = calls.load(Ordering::SeqCst);
+            assert!(
+                observed > 1,
+                "will_retry policy must invoke op more than once: {p:?} (observed {observed})"
+            );
+            assert_eq!(
+                observed, p.max_attempts,
+                "will_retry policy must invoke op exactly max_attempts times: {p:?}"
+            );
+        }
+        // !will_retry() policies invoke op exactly once.
+        let no_retry_policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_or_immediate(false),
+        ];
+        for p in &no_retry_policies {
+            assert!(!p.will_retry(), "precondition: {p:?} does not retry");
+            let calls = Arc::new(AtomicU32::new(0));
+            let calls_clone = calls.clone();
+            let result: Result<(), &'static str> = run_with_policy(
+                p,
+                |_| true,
+                |_| {
+                    let calls = calls_clone.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Err::<(), &'static str>("err")
+                    }
+                },
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "!will_retry policy must invoke op exactly once: {p:?}"
+            );
+        }
     }
 
     /// Success on the first call must not retry. `op` is invoked exactly
