@@ -3897,6 +3897,147 @@ pub fn compose_refuses_admission_strict(
     probe.refuses_admission_strict() || verification.refuses_admission_strict()
 }
 
+/// Parallel-composed fleet-wide relaxed-gate named-refuse predicate over
+/// the two orthogonal typed-primitive surfaces — the De Morgan
+/// complement `!compose_admission_eligible_relaxed(probe, verification)`
+/// surfaced as one bool at one site, routed through the named
+/// fail-closed-disjunction sibling
+/// [`compose_is_all_no_evidence_or_saturated`] (commit 86d81f7) so the
+/// underlying two-disjunct decomposition `compose_is_all_no_evidence(p,
+/// v) || compose_is_saturated(p, v)` is named at exactly one site
+/// (THEORY.md §VI.1 one-oracle discipline). Reads `true` iff the Phase 1
+/// relaxed staging admission gate refuses — i.e., no axis surfaced
+/// positive evidence OR at least one axis lost trust through the
+/// `usize::saturating_add` ceiling. The named-refuse-verb peer at the
+/// parallel-axis compose surface of:
+///
+/// - the per-axis named-refuse predicates
+///   [`ProbeCoverage::refuses_admission_relaxed`] /
+///   [`VerificationCoverage::refuses_admission_relaxed`] (commit b314679),
+/// - the typed-sum named-refuse predicate
+///   [`AdmissionTier::refuses_relaxed`] (commit bb0110e), and
+/// - the strict-gate parallel-axis named-refuse sibling
+///   [`compose_refuses_admission_strict`] (commit 585ec00).
+///
+/// # Why the De Morgan form, not the per-axis-OR-of-refuses form
+///
+/// The strict-gate parallel-axis admit
+/// [`compose_admission_eligible_strict`] (commit 7d818bd) IS the per-
+/// axis-AND-of-admits, so its De Morgan complement IS the per-axis-OR-
+/// of-refuses — that is the form [`compose_refuses_admission_strict`]
+/// names directly. The relaxed-gate parallel-axis admit
+/// [`compose_admission_eligible_relaxed`] (commit e6810b2), in
+/// contrast, integrates `compose_has_evidence ANYWHERE &&
+/// !compose_is_saturated EVERYWHERE` — NOT the per-axis-AND-of-admits —
+/// so the per-axis-OR-of-refuses
+/// `probe.refuses_admission_relaxed() || verification.refuses_admission_relaxed()`
+/// does NOT equal `!compose_admission_eligible_relaxed`. The
+/// [`compose_refuses_admission_strict`] docstring (commit 585ec00) calls
+/// out the asymmetry explicitly: the structural surface where the
+/// per-axis-OR-of-refuses form is honest is the strict-gate side only.
+///
+/// The relaxed-gate side is therefore named through the De Morgan
+/// fail-closed-disjunction form
+/// [`compose_is_all_no_evidence_or_saturated`] (commit 86d81f7) —
+/// which IS exactly `!compose_admission_eligible_relaxed`, pinned by
+/// [`tests::test_compose_is_all_no_evidence_or_saturated_equals_negation_of_compose_admission_eligible_relaxed`].
+/// This helper hoists the named-refuse VERB
+/// ("refuses_admission_relaxed") at the parallel-axis surface to match
+/// the per-axis and typed-sum naming idioms, while routing the body
+/// through the already-named fail-closed-disjunction so the
+/// decomposition is named at exactly one site.
+///
+/// The four-surface named-refuse family at the relaxed gate now closes
+/// the cross-surface naming symmetry:
+///
+/// - per-axis named-verb: [`ProbeCoverage::refuses_admission_relaxed`] /
+///   [`VerificationCoverage::refuses_admission_relaxed`] (commit b314679),
+/// - typed-sum named-verb: [`AdmissionTier::refuses_relaxed`] (commit bb0110e),
+/// - parallel-axis named-verb: this helper,
+/// - parallel-axis De Morgan fail-closed-disjunction:
+///   [`compose_is_all_no_evidence_or_saturated`] (commit 86d81f7).
+///
+/// A downstream `sekiban` admission verifier wanting to surface the
+/// fleet-wide named-refuse verdict at the Phase 1 staging gate reads one
+/// uniformly-named bool — `compose_refuses_admission_relaxed(probe,
+/// verification)` — at the parallel-axis surface, matching the
+/// cross-surface refuse family the per-axis / typed-sum / strict-gate
+/// parallel-axis peers established, rather than routing through
+/// `compose_is_all_no_evidence_or_saturated` (correct but kind-of-
+/// claim-erased at the named-refuse-verb surface) or the bare De Morgan
+/// negation `!compose_admission_eligible_relaxed` (correct but
+/// kind-of-claim-erased entirely). Before this helper, every fleet-wide
+/// relaxed-refuse consumer that wanted the named-refuse-verb surface had
+/// to route through one of the kind-of-claim-erased forms (with the
+/// drift class a regression that broke the De Morgan equivalence
+/// silently breaks); after this helper, the consumer reads one named
+/// bool and the named-verb naming uniformity is sealed across the four
+/// surfaces (per-axis / typed-sum / parallel-axis named-verb /
+/// parallel-axis De Morgan).
+///
+/// # Saturation-robust by construction
+///
+/// Inherits the saturation-robustness of the named
+/// [`compose_is_all_no_evidence_or_saturated`] body (commit 86d81f7),
+/// which combines the saturating-add ceiling clamp through its second
+/// disjunct (`compose_is_saturated`) and the no-evidence floor through
+/// its first disjunct (`compose_is_all_no_evidence`). At the
+/// saturated-fully-evidenced both-axes arm `({ran: usize::MAX, absent:
+/// 0}, {verified: usize::MAX, unverified: 0})` — where every relaxed-
+/// gate ratio surface loses past-ceiling increments — this reads
+/// `true` honestly through the second disjunct, mirroring the verdict
+/// the sibling [`compose_refuses_admission_strict`] reaches at the
+/// strict gate.
+///
+/// At every reachable `(probe, verification)` pair, the predicate
+/// equals the documented named-sibling composition exactly — the
+/// structural equivalence
+/// `compose_refuses_admission_relaxed(p, v) ==
+/// compose_is_all_no_evidence_or_saturated(p, v)` is pinned by
+/// [`tests::test_compose_refuses_admission_relaxed_equals_compose_is_all_no_evidence_or_saturated`].
+/// The De Morgan equivalence
+/// `compose_refuses_admission_relaxed(p, v) ==
+/// !compose_admission_eligible_relaxed(p, v)` is pinned by
+/// [`tests::test_compose_refuses_admission_relaxed_equals_negation_of_compose_admission_eligible_relaxed`].
+/// The disjoint-and-covering XOR partition
+/// `compose_refuses_admission_relaxed(p, v) XOR
+/// compose_admission_eligible_relaxed(p, v) == true` is pinned by
+/// [`tests::test_compose_refuses_admission_relaxed_xor_compose_admission_eligible_relaxed_partitions`].
+///
+/// THEORY.md §VI.1 generation-over-composition (one-oracle discipline):
+/// the parallel-axis relaxed-gate refuse verb is named at one site
+/// (here), routed through one already-named sibling helper, not
+/// re-typed as `!compose_admission_eligible_relaxed(p, v)` or
+/// `compose_is_all_no_evidence_or_saturated(p, v)` per downstream
+/// consumer.
+/// THEORY.md §V.4 two-phase signature composition: the parallel-axis
+/// relaxed-refuse predicate is the typed-primitive surface for the
+/// Phase 1 refuse decomposition (Phase 1 refuses iff no axis carries
+/// positive evidence OR some axis carries broken trust), the dual of
+/// the per-axis Phase 1 refuse peer carried at each per-axis surface
+/// and the typed-sum Phase 1 refuse peer carried on [`AdmissionTier`].
+///
+/// Frontier lineage: SLSA L1+ build-provenance staging admission
+/// surfaces the fleet-wide relaxed-tier refuse verdict as a named-verb
+/// `staging_admission.refused()` distinct from the per-component
+/// fail-closed-disjunction the upstream emits, so a downstream auditor
+/// reads the named-verb at one surface independent of how the
+/// decomposition composes the component refuses — exactly the naming-
+/// uniformity discipline this helper preserves at the relaxed-gate
+/// side of the parallel-axis compose surface, matching the strict-gate
+/// side's `compose_refuses_admission_strict` named-verb idiom.
+///
+/// [`AdmissionTier::refuses_relaxed`]: AdmissionTier::refuses_relaxed
+/// [`ProbeCoverage::refuses_admission_relaxed`]: ProbeCoverage::refuses_admission_relaxed
+/// [`VerificationCoverage::refuses_admission_relaxed`]: VerificationCoverage::refuses_admission_relaxed
+#[allow(dead_code)]
+pub fn compose_refuses_admission_relaxed(
+    probe: &ProbeCoverage,
+    verification: &VerificationCoverage,
+) -> bool {
+    compose_is_all_no_evidence_or_saturated(probe, verification)
+}
+
 /// Parallel-composed fleet-wide staging-only admission band over the two
 /// orthogonal typed-primitive surfaces — the two-helper conjunction
 /// `compose_admission_eligible_relaxed(p, v) &&
@@ -16233,6 +16374,224 @@ mod tests {
              surface-naming equivalence pin demands the two helpers \
              agree at this saturated arm",
         );
+    }
+
+    /// Pins the load-bearing surface-naming equivalence
+    /// `compose_refuses_admission_relaxed(p, v) ==
+    /// compose_is_all_no_evidence_or_saturated(p, v)` across the six-by-
+    /// six cross product of per-axis representatives. The two helpers
+    /// read the same bool at every cell — the named-refuse-verb form
+    /// (this commit) is defined as exactly the De Morgan
+    /// fail-closed-disjunction sibling (commit 86d81f7), so the
+    /// equivalence is structural-by-definition; pinning it surfaces a
+    /// future divergence (a regression that re-wrote the body off the
+    /// sibling — e.g., to the per-axis-OR-of-refuses
+    /// `p.refuses_admission_relaxed() || v.refuses_admission_relaxed()`
+    /// form which the relaxed-gate aggregation does NOT admit as
+    /// equivalent) at the corresponding divergent cell. Mirrors the
+    /// strict-gate sibling pin
+    /// `test_compose_refuses_admission_strict_equals_compose_is_incomplete_or_saturated`
+    /// (commit 585ec00) at the relaxed-gate side of the parallel-axis
+    /// named-refuse surface.
+    #[test]
+    fn test_compose_refuses_admission_relaxed_equals_compose_is_all_no_evidence_or_saturated() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let named = compose_refuses_admission_relaxed(&probe, &verification);
+                let fail_closed = compose_is_all_no_evidence_or_saturated(&probe, &verification);
+                assert_eq!(
+                    named, fail_closed,
+                    "named-refuse parallel-axis form must equal the De \
+                     Morgan fail-closed-disjunction form at \
+                     probe={probe:?} verification={verification:?} — a \
+                     regression to either helper would silently break \
+                     the surface-naming equivalence relation",
+                );
+            }
+        }
+    }
+
+    /// Pins the load-bearing De Morgan equivalence
+    /// `compose_refuses_admission_relaxed(p, v) ==
+    /// !compose_admission_eligible_relaxed(p, v)` across the six-by-six
+    /// cross product. Holds transitively: the body routes through the
+    /// named fail-closed-disjunction sibling
+    /// `compose_is_all_no_evidence_or_saturated`, which itself equals
+    /// `!compose_admission_eligible_relaxed` by the pre-existing pin
+    /// `test_compose_is_all_no_evidence_or_saturated_equals_negation_of_compose_admission_eligible_relaxed`.
+    /// Forecloses the drift class where a regression to either helper
+    /// would silently break the structural complement relation.
+    /// Mirrors the strict-gate De Morgan pin
+    /// `test_compose_refuses_admission_strict_equals_negation_of_compose_admission_eligible_strict`
+    /// (commit 585ec00) at the relaxed-gate side.
+    #[test]
+    fn test_compose_refuses_admission_relaxed_equals_negation_of_compose_admission_eligible_relaxed(
+    ) {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let refuse = compose_refuses_admission_relaxed(&probe, &verification);
+                let admit = compose_admission_eligible_relaxed(&probe, &verification);
+                assert_eq!(
+                    refuse, !admit,
+                    "De Morgan equivalence \
+                     compose_refuses_admission_relaxed(p, v) == \
+                     !compose_admission_eligible_relaxed(p, v) must hold \
+                     at probe={probe:?} verification={verification:?} — \
+                     a regression to either helper would surface the \
+                     divergent cell here",
+                );
+            }
+        }
+    }
+
+    /// Pins the disjoint-and-covering XOR partition
+    /// `compose_refuses_admission_relaxed(p, v) XOR
+    /// compose_admission_eligible_relaxed(p, v) == true` across the same
+    /// six-by-six cross product. Together with the De Morgan equivalence
+    /// pin, this seals the parallel-axis admit/refuse predicate pair at
+    /// the relaxed gate as exact complements — no value satisfies both,
+    /// no value satisfies neither — closing the parallel-axis relaxed-
+    /// gate predicate pair at the named-refuse-verb surface, mirroring
+    /// the per-axis relaxed-gate XOR partition (commit b314679), the
+    /// typed-sum relaxed-gate XOR partition (commit bb0110e), and the
+    /// strict-gate parallel-axis XOR partition (commit 585ec00) at the
+    /// fourth surface plane.
+    #[test]
+    fn test_compose_refuses_admission_relaxed_xor_compose_admission_eligible_relaxed_partitions() {
+        let probe_cases = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 3 },
+            ProbeCoverage { ran: 2, absent: 4 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_cases = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 3,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_cases {
+            for verification in verification_cases {
+                let refuse = compose_refuses_admission_relaxed(&probe, &verification);
+                let admit = compose_admission_eligible_relaxed(&probe, &verification);
+                assert!(
+                    refuse ^ admit,
+                    "disjoint-and-covering XOR partition must hold at \
+                     probe={probe:?} verification={verification:?} — a \
+                     regression that broke either body would surface \
+                     as a partition gap (neither holds) or overlap \
+                     (both hold) at the corresponding cell",
+                );
+            }
+        }
     }
 
     /// Per-axis [`ProbeCoverage::admission_tier`] returns
