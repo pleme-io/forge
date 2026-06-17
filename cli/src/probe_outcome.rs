@@ -1039,6 +1039,89 @@ impl ProbeCoverage {
         !self.is_admission_eligible_relaxed()
     }
 
+    /// True iff this probe-coverage state names the staging-only middle
+    /// band of the tier ladder at the probe axis alone — i.e., the
+    /// relaxed (Phase 1) gate admits AND the strict (Phase 2) gate
+    /// refuses at this axis. The per-axis named-band peer of
+    /// [`AdmissionTier::is_staging_only`] (commit e08b821) at the
+    /// probe-coverage surface: where the typed-sum surface names the
+    /// band over the three-variant ladder, this names the same band
+    /// over the per-axis bool surface as the conjunction
+    /// `is_admission_eligible_relaxed() && refuses_admission_strict()`
+    /// — the load-bearing decomposition the per-axis
+    /// [`admission_tier`](Self::admission_tier) typed-sum lift already
+    /// agrees with through
+    /// [`tests::test_probe_coverage_admission_tier_staging_only_equals_relaxed_admit_and_strict_refuse`].
+    ///
+    /// Closes the per-axis admit/refuse × relaxed/strict matrix at the
+    /// named-band surface: combined with
+    /// [`is_admission_eligible_strict`](Self::is_admission_eligible_strict)
+    /// naming the Phase 2 ceiling and
+    /// [`refuses_admission_relaxed`](Self::refuses_admission_relaxed)
+    /// naming the relaxed-gate floor, every per-axis ladder position
+    /// now carries a named predicate at the inherent-method surface.
+    /// The disjoint-and-covering XOR partition
+    /// `is_admission_eligible_strict() XOR is_staging_only() XOR
+    /// refuses_admission_relaxed()` holds at every reachable per-axis
+    /// state — pinned by
+    /// [`tests::test_probe_coverage_is_staging_only_three_way_partition_covers_ladder`]
+    /// — so a downstream per-axis consumer that branches on the
+    /// per-axis admission tier reads the three named predicates as a
+    /// disjoint cover rather than a nested if-else cascade that would
+    /// inherit a drift class on the day a fourth per-axis tier is
+    /// added.
+    ///
+    /// # Equivalent to the typed-sum reading
+    ///
+    /// The structural equivalence
+    /// `probe.is_staging_only() == (probe.admission_tier() ==
+    /// AdmissionTier::StagingOnly)` holds across every reachable
+    /// per-axis representative — pinned by
+    /// [`tests::test_probe_coverage_is_staging_only_equals_admission_tier_eq_staging_only`].
+    /// The two readings agree because the per-axis typed-sum lift
+    /// [`admission_tier`](Self::admission_tier) reads the
+    /// strict-then-relaxed priority order, and the staging-only band
+    /// is exactly the asymmetric set difference at the
+    /// relaxed-admitted ring. A downstream per-axis consumer that
+    /// reads the band predicate at the bool surface, the typed-sum
+    /// surface, or the parallel-axis bool surface
+    /// ([`compose_relaxed_eligible_strict_refused`], commit aa40b8f)
+    /// surfaces one consistent band reading regardless of which
+    /// surface it consults.
+    ///
+    /// The method-composition form
+    /// `is_admission_eligible_relaxed() && refuses_admission_strict()`
+    /// is the load-bearing body rather than the typed-sum reading
+    /// `self.admission_tier() == AdmissionTier::StagingOnly` because
+    /// the bool composition rides the per-axis admit/refuse method
+    /// bodies directly — a future ladder extension that adds a fourth
+    /// per-axis tier strictly between `Refused` and `StagingOnly` (a
+    /// `Pending` band that admits neither gate) updates the
+    /// underlying [`is_admission_eligible_relaxed`] /
+    /// [`refuses_admission_strict`] readings coherently, and this
+    /// band predicate inherits the refinement without a separate
+    /// per-tier branch update.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-axis
+    /// staging-only band reading is named at one site (here), not
+    /// re-typed as `probe.is_admission_eligible_relaxed() &&
+    /// probe.refuses_admission_strict()` or
+    /// `probe.admission_tier() == AdmissionTier::StagingOnly` per
+    /// downstream consumer (each of which inherits a drift class on
+    /// the day a fourth per-axis tier is added). Same named-band
+    /// idiom the [`AdmissionTier::is_staging_only`] typed-sum peer
+    /// (commit e08b821) established at the typed-sum surface, here
+    /// applied at the per-axis bool surface.
+    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// "this axis admits the relaxed gate but refuses the strict gate"
+    /// — the load-bearing reading the per-axis attributor consults
+    /// to surface "probe axis sits at the staging band" against the
+    /// per-axis tier decomposition.
+    #[allow(dead_code)]
+    pub fn is_staging_only(&self) -> bool {
+        self.is_admission_eligible_relaxed() && self.refuses_admission_strict()
+    }
+
     /// Lift the four-bool per-axis admission surface
     /// ([`is_admission_eligible_strict`](Self::is_admission_eligible_strict) /
     /// [`is_admission_eligible_relaxed`](Self::is_admission_eligible_relaxed) /
@@ -2250,6 +2333,70 @@ impl VerificationCoverage {
     /// peer's discipline at the orthogonal axis.
     pub fn refuses_admission_relaxed(&self) -> bool {
         !self.is_admission_eligible_relaxed()
+    }
+
+    /// True iff this verification-coverage state names the staging-only
+    /// middle band of the tier ladder at the verification axis alone —
+    /// i.e., the relaxed (Phase 1) gate admits AND the strict (Phase 2)
+    /// gate refuses at this axis. The orthogonal-axis peer of
+    /// [`ProbeCoverage::is_staging_only`] at the verification-
+    /// trustworthiness axis and the per-axis named-band peer of
+    /// [`AdmissionTier::is_staging_only`] (commit e08b821) at the
+    /// verification-coverage surface.
+    ///
+    /// Closes the per-axis admit/refuse × relaxed/strict matrix at the
+    /// named-band surface across BOTH per-axis surfaces — the
+    /// orthogonal-axis [`ProbeCoverage::is_staging_only`] peer at the
+    /// probe-coverage surface and this one at the verification-coverage
+    /// surface — so every per-axis tier-ladder position now carries a
+    /// named predicate at the inherent-method surface at both per-axis
+    /// surfaces. The disjoint-and-covering XOR partition
+    /// `is_admission_eligible_strict() XOR is_staging_only() XOR
+    /// refuses_admission_relaxed()` holds at every reachable per-axis
+    /// state — pinned by
+    /// [`tests::test_verification_coverage_is_staging_only_three_way_partition_covers_ladder`]
+    /// — so a downstream per-axis verification consumer that branches
+    /// on the per-axis admission tier reads the three named predicates
+    /// as a disjoint cover rather than a nested if-else cascade that
+    /// would inherit a drift class on the day a fourth per-axis tier
+    /// is added.
+    ///
+    /// # Equivalent to the typed-sum reading
+    ///
+    /// The structural equivalence
+    /// `verification.is_staging_only() == (verification.admission_tier()
+    /// == AdmissionTier::StagingOnly)` holds across every reachable
+    /// per-axis representative — pinned by
+    /// [`tests::test_verification_coverage_is_staging_only_equals_admission_tier_eq_staging_only`].
+    /// The method-composition form
+    /// `is_admission_eligible_relaxed() && refuses_admission_strict()`
+    /// is the load-bearing body rather than the typed-sum reading
+    /// `self.admission_tier() == AdmissionTier::StagingOnly` because
+    /// the bool composition rides the per-axis admit/refuse method
+    /// bodies directly — a future ladder extension that adds a fourth
+    /// per-axis tier inherits the refinement coherently through the
+    /// underlying [`is_admission_eligible_relaxed`] /
+    /// [`refuses_admission_strict`] method bodies.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-axis
+    /// verification staging-only band reading is named at one site
+    /// (here), not re-typed as `verification.is_admission_eligible_relaxed()
+    /// && verification.refuses_admission_strict()` or
+    /// `verification.admission_tier() == AdmissionTier::StagingOnly`
+    /// per downstream consumer. Same named-band idiom the
+    /// [`AdmissionTier::is_staging_only`] typed-sum peer (commit
+    /// e08b821) established at the typed-sum surface and the
+    /// [`ProbeCoverage::is_staging_only`] orthogonal-axis peer
+    /// established at the probe-coverage surface, here applied at the
+    /// verification-coverage surface.
+    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// "this verification axis admits the relaxed gate but refuses the
+    /// strict gate" — the load-bearing reading the per-axis attributor
+    /// consults to surface "verification axis sits at the staging
+    /// band" against the per-axis tier decomposition.
+    #[allow(dead_code)]
+    pub fn is_staging_only(&self) -> bool {
+        self.is_admission_eligible_relaxed() && self.refuses_admission_strict()
     }
 
     /// Lift the four-bool per-axis admission surface
@@ -16729,6 +16876,135 @@ mod tests {
         }
     }
 
+    /// The typed-method reading `probe.is_staging_only()` equals the
+    /// typed-sum reading `probe.admission_tier() ==
+    /// AdmissionTier::StagingOnly` at every per-axis representative —
+    /// pinned across six representatives spanning the empty,
+    /// all-absent, mixed, fully-covered, and both saturation arms.
+    /// The structural pin the per-axis named-band predicate preserves
+    /// against the typed-sum surface: any future regression that
+    /// drifted the per-axis method body (e.g., hand-rolled
+    /// `is_admission_eligible_relaxed() && !is_admission_eligible_strict()`,
+    /// which agrees with the load-bearing
+    /// `is_admission_eligible_relaxed() && refuses_admission_strict()`
+    /// composition under the present per-axis surface but expresses
+    /// a different reading) would surface here at the
+    /// typed-method-equals-typed-sum surface.
+    #[test]
+    fn test_probe_coverage_is_staging_only_equals_admission_tier_eq_staging_only() {
+        let reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        for probe in reps {
+            let band_says_staging = probe.is_staging_only();
+            let tier_says_staging = probe.admission_tier() == AdmissionTier::StagingOnly;
+            assert_eq!(
+                band_says_staging, tier_says_staging,
+                "probe.is_staging_only() must equal \
+                 (probe.admission_tier() == StagingOnly) at probe={probe:?}",
+            );
+        }
+    }
+
+    /// The load-bearing structural decomposition
+    /// `probe.is_staging_only() == probe.is_admission_eligible_relaxed()
+    /// && probe.refuses_admission_strict()` holds at every per-axis
+    /// representative. The asymmetric set-difference reading the
+    /// per-axis staging-only band names: the band is the relaxed-
+    /// admitted ring MINUS the strict-admitted subset, NOT the
+    /// symmetric difference. A regression that composed the body as
+    /// the disjunction (the symmetric-difference complement) would
+    /// silently admit `Refused` AND `Strict`-eligible per-axis states
+    /// as staging-only here. The bool-composition form is the
+    /// load-bearing one because it rides the per-axis admit/refuse
+    /// method bodies directly — a future per-axis ladder extension
+    /// updates the underlying methods coherently and this band
+    /// predicate inherits the refinement.
+    #[test]
+    fn test_probe_coverage_is_staging_only_equals_relaxed_admit_and_strict_refuse() {
+        let reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        for probe in reps {
+            assert_eq!(
+                probe.is_staging_only(),
+                probe.is_admission_eligible_relaxed() && probe.refuses_admission_strict(),
+                "probe.is_staging_only() must equal \
+                 (is_admission_eligible_relaxed && refuses_admission_strict) \
+                 at probe={probe:?}",
+            );
+        }
+    }
+
+    /// The three-way partition invariant
+    /// `is_admission_eligible_strict() XOR is_staging_only() XOR
+    /// refuses_admission_relaxed()` holds at every per-axis
+    /// representative. The structural pin that nails the three
+    /// per-axis predicates as exactly partitioning the per-axis tier
+    /// ladder at the three named-method surfaces: every per-axis
+    /// state satisfies exactly one of the three, and no state
+    /// satisfies more than one. Mirrors
+    /// [`test_admission_tier_is_staging_only_three_way_partition_covers_ladder`]
+    /// at the typed-sum surface (commit e08b821), here applied at the
+    /// per-axis probe-coverage surface — closing the per-axis ladder
+    /// at the named-band predicate surface.
+    #[test]
+    fn test_probe_coverage_is_staging_only_three_way_partition_covers_ladder() {
+        let reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        for probe in reps {
+            let strict = probe.is_admission_eligible_strict();
+            let staging = probe.is_staging_only();
+            let refused = probe.refuses_admission_relaxed();
+            assert!(
+                strict ^ staging ^ refused,
+                "three-way partition invariant strict XOR staging XOR refused \
+                 must hold at probe={probe:?} — a regression that broke any \
+                 of the three method bodies would surface here as a partition \
+                 gap (none holds) or overlap (more than one holds)",
+            );
+            let count = u8::from(strict) + u8::from(staging) + u8::from(refused);
+            assert_eq!(
+                count, 1,
+                "exactly one of (strict, staging, refused) must hold at probe={probe:?}",
+            );
+        }
+    }
+
     /// Orthogonal-axis peer of
     /// [`test_probe_coverage_admission_tier_strict_equals_is_admission_eligible_strict`]:
     /// the verification axis surfaces [`AdmissionTier::Strict`] iff
@@ -16904,6 +17180,151 @@ mod tests {
                 AdmissionTier::Strict,
                 "the strict branch must take priority over the relaxed \
                  branch at the verification-tier surface at \
+                 verification={verification:?}",
+            );
+        }
+    }
+
+    /// Orthogonal-axis peer of
+    /// [`test_probe_coverage_is_staging_only_equals_admission_tier_eq_staging_only`]:
+    /// the verification axis pins
+    /// `verification.is_staging_only() ==
+    /// (verification.admission_tier() == AdmissionTier::StagingOnly)`
+    /// at every per-axis representative.
+    #[test]
+    fn test_verification_coverage_is_staging_only_equals_admission_tier_eq_staging_only() {
+        let reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for verification in reps {
+            let band_says_staging = verification.is_staging_only();
+            let tier_says_staging = verification.admission_tier() == AdmissionTier::StagingOnly;
+            assert_eq!(
+                band_says_staging, tier_says_staging,
+                "verification.is_staging_only() must equal \
+                 (verification.admission_tier() == StagingOnly) at \
+                 verification={verification:?}",
+            );
+        }
+    }
+
+    /// Orthogonal-axis peer of
+    /// [`test_probe_coverage_is_staging_only_equals_relaxed_admit_and_strict_refuse`]:
+    /// the verification axis pins the load-bearing structural
+    /// decomposition
+    /// `verification.is_staging_only() ==
+    /// verification.is_admission_eligible_relaxed() &&
+    /// verification.refuses_admission_strict()` at every per-axis
+    /// representative.
+    #[test]
+    fn test_verification_coverage_is_staging_only_equals_relaxed_admit_and_strict_refuse() {
+        let reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for verification in reps {
+            assert_eq!(
+                verification.is_staging_only(),
+                verification.is_admission_eligible_relaxed()
+                    && verification.refuses_admission_strict(),
+                "verification.is_staging_only() must equal \
+                 (is_admission_eligible_relaxed && refuses_admission_strict) \
+                 at verification={verification:?}",
+            );
+        }
+    }
+
+    /// Orthogonal-axis peer of
+    /// [`test_probe_coverage_is_staging_only_three_way_partition_covers_ladder`]:
+    /// the verification axis pins the three-way partition invariant
+    /// `is_admission_eligible_strict() XOR is_staging_only() XOR
+    /// refuses_admission_relaxed()` at every per-axis representative.
+    #[test]
+    fn test_verification_coverage_is_staging_only_three_way_partition_covers_ladder() {
+        let reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for verification in reps {
+            let strict = verification.is_admission_eligible_strict();
+            let staging = verification.is_staging_only();
+            let refused = verification.refuses_admission_relaxed();
+            assert!(
+                strict ^ staging ^ refused,
+                "three-way partition invariant strict XOR staging XOR refused \
+                 must hold at verification={verification:?}",
+            );
+            let count = u8::from(strict) + u8::from(staging) + u8::from(refused);
+            assert_eq!(
+                count, 1,
+                "exactly one of (strict, staging, refused) must hold at \
                  verification={verification:?}",
             );
         }
