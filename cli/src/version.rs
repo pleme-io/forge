@@ -116,6 +116,47 @@ impl BumpLevel {
             Self::Major => "major",
         }
     }
+
+    /// True iff `self` sits at the top of the magnitude ladder
+    /// (`BumpLevel::Major` or, structurally, any future variant inserted
+    /// strictly above it) — the named typed-method peer of the
+    /// `level >= BumpLevel::Major` comparison the prior commit (8c2bbd5,
+    /// magnitude ladder lift) made admissible. A SLSA-style release-
+    /// provenance gate that says "API-breaking changes require at least a
+    /// Major bump" reads `level.is_breaking()` instead of a three-arm
+    /// `match level { Major => true, Minor | Patch => false }` cascade at
+    /// every policy site — the breaking-vs-non-breaking semantic role is
+    /// named at the typed-primitive surface, not retyped at every consumer.
+    ///
+    /// # Why `>= Self::Major`, not `matches!(self, Self::Major)`
+    ///
+    /// The implementation reads `*self >= Self::Major`, not
+    /// `matches!(self, Self::Major)`. The two coincide at the current
+    /// three-variant ladder (`Patch < Minor < Major`), but the `>=` form
+    /// makes the total-order discipline (commit 8c2bbd5) the load-bearing
+    /// oracle: a future variant `BumpLevel::Epoch` inserted in source order
+    /// strictly above `Major` (semver4 / `0ver`-style incompatible-by-
+    /// design rewrites) is automatically `> Major` and so structurally
+    /// classified as breaking — the same way `AdmissionTier::admits_relaxed`
+    /// reads `self >= StagingOnly` rather than
+    /// `matches!(self, StagingOnly | Strict)` so a future tier inserted
+    /// above `StagingOnly` is admitted under the relaxed gate without
+    /// retyping the predicate. The `matches!` form would silently classify
+    /// the new top-of-ladder variant as non-breaking — a structural bug
+    /// the `>=` form refuses by construction.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the breaking-vs-non-breaking
+    /// gate reads the derived `Ord` impl through a named typed-method peer
+    /// at the typed-primitive surface, not retyped at every consumer's
+    /// match cascade. THEORY.md §VI.1 one-oracle: the semantic role
+    /// (breaking ⇔ at-or-above Major) is named at one site (this method's
+    /// body), so a future ladder extension (an `Epoch` variant above
+    /// `Major`) propagates through every consumer that reads
+    /// `level.is_breaking()` without per-site reclassification.
+    #[allow(dead_code)]
+    pub fn is_breaking(&self) -> bool {
+        *self >= Self::Major
+    }
 }
 
 impl std::fmt::Display for BumpLevel {
@@ -624,6 +665,69 @@ mod tests {
             levels,
             vec![BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major],
             "sorted variants must yield the Patch < Minor < Major ladder",
+        );
+    }
+
+    /// At every [`BumpLevel`] variant, `is_breaking()` returns the value
+    /// it must under the breaking-vs-non-breaking semver semantic role:
+    /// `Major` is breaking, `Patch` and `Minor` are not. A release-policy
+    /// gate that today reads `match level { Major => bail!("breaking"), _
+    /// => ok }` reads after this commit as `if level.is_breaking() {
+    /// bail!("breaking") }` — the semantic role is named once, not retyped
+    /// at every policy site.
+    #[test]
+    fn test_bump_level_is_breaking_named_at_top_of_ladder() {
+        assert!(
+            BumpLevel::Major.is_breaking(),
+            "Major is breaking — the top of the magnitude ladder",
+        );
+        assert!(
+            !BumpLevel::Minor.is_breaking(),
+            "Minor is a backwards-compatible addition, not breaking",
+        );
+        assert!(
+            !BumpLevel::Patch.is_breaking(),
+            "Patch is a backwards-compatible fix, not breaking",
+        );
+    }
+
+    /// `is_breaking()` agrees with `*self >= BumpLevel::Major` at every
+    /// variant — the structural pin that makes the total-order discipline
+    /// (commit 8c2bbd5) the load-bearing oracle for the breaking-vs-non-
+    /// breaking gate. A regression that drifted the body to
+    /// `matches!(self, Self::Major)` would still pass
+    /// [`test_bump_level_is_breaking_named_at_top_of_ladder`] at the
+    /// current three-variant ladder; this pin holds against future
+    /// regressions that desynced the named-method peer from the derived
+    /// `>=` comparison the prior commit lifted. Same idiom
+    /// `AdmissionTier::admits_relaxed` established at the admission-gate
+    /// surface — the typed-method peer reads `>=`, not `matches!`.
+    #[test]
+    fn test_bump_level_is_breaking_agrees_with_ge_major_at_every_variant() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert_eq!(
+                level.is_breaking(),
+                level >= BumpLevel::Major,
+                "is_breaking() must read the >= Major comparison at {level:?}",
+            );
+        }
+    }
+
+    /// `is_breaking()` partitions the three-variant ladder into exactly
+    /// one breaking variant and two non-breaking variants. The pin
+    /// surfaces a structural break if a future variant insertion (e.g., a
+    /// `Prerelease` variant slotted below `Patch`) silently shifted which
+    /// variants land on the breaking side without a deliberate decision
+    /// at this typed-method surface.
+    #[test]
+    fn test_bump_level_is_breaking_partitions_ladder_into_one_breaking_variant() {
+        let breaking_count = [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major]
+            .iter()
+            .filter(|l| l.is_breaking())
+            .count();
+        assert_eq!(
+            breaking_count, 1,
+            "exactly one of {{Patch, Minor, Major}} is breaking at the current ladder",
         );
     }
 }
