@@ -104,6 +104,72 @@ pub enum BumpLevel {
 }
 
 impl BumpLevel {
+    /// Every [`BumpLevel`] variant, listed in magnitude-ladder order
+    /// (`Patch < Minor < Major`) — the single-source enumeration of the
+    /// typed sum. The named typed-primitive peer of the array-literal
+    /// `[BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major]` that
+    /// previously appeared at 17 sites inside this module's test cases
+    /// (the per-variant `for level in [...] { ... }` traversal idiom).
+    /// A consumer that needs to iterate every variant — exhaustive-cover
+    /// property tests, CLI shell-completion tables, telemetry-label
+    /// enumeration — reads `BumpLevel::ALL` once instead of restating the
+    /// variant list at the call site.
+    ///
+    /// # Why the named const, not the array literal
+    ///
+    /// The array literal `[Patch, Minor, Major]` is a structural
+    /// duplication of the enum's variant declaration: every time a
+    /// caller restates it, a future variant insertion (`Prerelease`
+    /// below `Patch`, `Epoch` above `Major`) leaves silent gaps at
+    /// every restatement site — the literal carries no compile-time
+    /// signal that it must be extended. A `for level in
+    /// [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major]` traversal
+    /// that drove a fail-before / pass-after property test would
+    /// continue to pass after the variant insertion, but only against
+    /// the three legacy variants — the new variant would never be
+    /// exercised by the property, and the property would silently
+    /// degrade to a partial cover.
+    ///
+    /// Routing every traversal through [`BumpLevel::ALL`] makes the
+    /// enumeration single-source: a future variant insertion forces
+    /// the author to extend this one const (the test
+    /// [`tests::test_bump_level_all_contains_every_variant`] uses an
+    /// exhaustive `match` against the variant axis to refuse compilation
+    /// until the new variant is added to `ALL`), and every property test
+    /// that iterates `BumpLevel::ALL` automatically picks up the new
+    /// variant without per-site edits. Same THEORY.md §VI.1
+    /// generation-over-composition / three-times-rule discipline the
+    /// prior typed-method-peer lifts established (`is_breaking` /
+    /// `is_non_breaking` / `is_fix_only` / `is_minor_only` over the
+    /// magnitude ladder), here applied to the variant-enumeration
+    /// duplication that recurs across the per-variant traversal call
+    /// sites: 17 occurrences of `[Patch, Minor, Major]` in the test
+    /// module is far past the three-times threshold for
+    /// archetype/backend extraction.
+    ///
+    /// # Ladder-order invariant
+    ///
+    /// The element order of [`BumpLevel::ALL`] coincides with the
+    /// derived [`Ord`] ladder: `ALL[0] < ALL[1] < ALL[2]`. The pin
+    /// [`tests::test_bump_level_all_is_canonical_ladder_order`] asserts
+    /// `ALL.to_vec()` equals the result of `ALL.to_vec().sort()` so a
+    /// future variant insertion or reordering that desynced the array
+    /// from the source-order ladder lights up. A consumer that depends
+    /// on iterating from least-to-greatest magnitude (e.g., a release-
+    /// pipeline policy report enumerating bump levels in escalating
+    /// review-stringency order) reads `BumpLevel::ALL` directly without
+    /// a per-call-site sort.
+    ///
+    /// THEORY.md §V.4 typed primitives: the variant enumeration is a
+    /// typed-primitive surface on `BumpLevel` itself (one named const),
+    /// not a `&[BumpLevel]` shape restated at every traversal site that
+    /// re-derives the enumeration. THEORY.md §VI.1 generation over
+    /// composition (three-times rule): a structural pattern that recurs
+    /// three or more times becomes a named primitive at one site —
+    /// here, 17 array-literal restatements collapse to one const.
+    #[allow(dead_code)]
+    pub const ALL: [Self; 3] = [Self::Patch, Self::Minor, Self::Major];
+
     /// The canonical lowercase string each variant renders as under
     /// [`Display`](std::fmt::Display) and parses from under [`FromStr`].
     /// Const-callable so a `const ARGNAME: &str = BumpLevel::Patch.as_str();`
@@ -749,7 +815,7 @@ mod tests {
     /// regression that drifted either side desynchronises this pin.
     #[test]
     fn test_bump_level_display_round_trips_through_from_str() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             let s = level.to_string();
             assert_eq!(
                 s.parse::<BumpLevel>().unwrap(),
@@ -813,7 +879,7 @@ mod tests {
     /// `bump_semver` lacked at the `_ => bail!` arm.
     #[test]
     fn test_bump_semver_typed_total_over_bump_level_domain() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert!(
                 bump_semver_typed("0.0.0", level).is_ok(),
                 "bump_semver_typed must be total at {level:?} on 0.0.0",
@@ -849,7 +915,7 @@ mod tests {
     /// from ordering lights up.
     #[test]
     fn test_bump_level_ordering_reflexive_at_every_variant() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert!(level <= level, "{level:?} must be <= itself");
             assert!(level >= level, "{level:?} must be >= itself");
             assert_eq!(
@@ -873,8 +939,104 @@ mod tests {
         levels.sort();
         assert_eq!(
             levels,
-            vec![BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major],
+            BumpLevel::ALL.to_vec(),
             "sorted variants must yield the Patch < Minor < Major ladder",
+        );
+    }
+
+    /// [`BumpLevel::ALL`] lists the three variants in the source-order
+    /// ladder `[Patch, Minor, Major]`. The fixed-shape pin: the const
+    /// matches the canonical ladder at every position, so a downstream
+    /// consumer that iterates `BumpLevel::ALL` reads from least-to-
+    /// greatest magnitude without a per-site sort.
+    #[test]
+    fn test_bump_level_all_matches_canonical_ladder() {
+        assert_eq!(
+            BumpLevel::ALL,
+            [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major],
+            "ALL must list Patch, Minor, Major in source-order ladder",
+        );
+    }
+
+    /// [`BumpLevel::ALL`] is already in ascending [`Ord`] order: sorting
+    /// the array yields the array itself. The structural pin that ties
+    /// `ALL`'s element order to the derived [`Ord`] ladder (rather than
+    /// to an arbitrary author-chosen order), so a future variant
+    /// insertion that placed the new variant out of ladder order in
+    /// `ALL` would light up here without depending on the more brittle
+    /// fixed-shape pin in
+    /// [`test_bump_level_all_matches_canonical_ladder`]. Same total-
+    /// order discipline `test_bump_level_sort_yields_canonical_ladder`
+    /// established for the unordered three-variant `Vec`, here lifted
+    /// to the canonical `ALL` enumeration.
+    #[test]
+    fn test_bump_level_all_is_canonical_ladder_order() {
+        let mut sorted = BumpLevel::ALL.to_vec();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            BumpLevel::ALL.to_vec(),
+            "ALL must already be in ascending Ord order — sort is a no-op",
+        );
+    }
+
+    /// Every [`BumpLevel`] variant appears in [`BumpLevel::ALL`]. The
+    /// load-bearing structural pin: the test reads every variant
+    /// through an exhaustive `match` (so the compiler refuses to compile
+    /// the test until a future variant is added to the match), and the
+    /// match body asserts the variant is contained in `ALL` — so a
+    /// future variant insertion that forgot to extend `ALL` lights up
+    /// at this one site. The compiler-enforced exhaustiveness is what
+    /// makes the variant-enumeration single-source: a forgotten variant
+    /// in `ALL` is structurally surfaced rather than silently degrading
+    /// every property test that iterates the const.
+    #[test]
+    fn test_bump_level_all_contains_every_variant() {
+        fn must_appear_in_all(level: BumpLevel) {
+            match level {
+                BumpLevel::Patch => {
+                    assert!(
+                        BumpLevel::ALL.contains(&BumpLevel::Patch),
+                        "Patch must be in ALL",
+                    );
+                }
+                BumpLevel::Minor => {
+                    assert!(
+                        BumpLevel::ALL.contains(&BumpLevel::Minor),
+                        "Minor must be in ALL",
+                    );
+                }
+                BumpLevel::Major => {
+                    assert!(
+                        BumpLevel::ALL.contains(&BumpLevel::Major),
+                        "Major must be in ALL",
+                    );
+                }
+            }
+        }
+        for level in BumpLevel::ALL {
+            must_appear_in_all(level);
+        }
+    }
+
+    /// [`BumpLevel::ALL`] lists each variant exactly once — no
+    /// duplicates. Pairs with
+    /// [`test_bump_level_all_contains_every_variant`] (which pins the
+    /// "every variant appears" direction) to seal the bijection between
+    /// the enum's variant set and the `ALL` const: a future copy-paste
+    /// regression that duplicated a variant entry in `ALL` (e.g., a
+    /// `[Patch, Minor, Minor]` typo on a variant insertion) lights up
+    /// here as a length-vs-distinct mismatch, even though the
+    /// exhaustive-match pin would still pass.
+    #[test]
+    fn test_bump_level_all_variants_distinct() {
+        let mut sorted = BumpLevel::ALL.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            BumpLevel::ALL.len(),
+            "ALL must list each variant exactly once — no duplicates",
         );
     }
 
@@ -914,7 +1076,7 @@ mod tests {
     /// surface — the typed-method peer reads `>=`, not `matches!`.
     #[test]
     fn test_bump_level_is_breaking_agrees_with_ge_major_at_every_variant() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert_eq!(
                 level.is_breaking(),
                 level >= BumpLevel::Major,
@@ -931,7 +1093,7 @@ mod tests {
     /// at this typed-method surface.
     #[test]
     fn test_bump_level_is_breaking_partitions_ladder_into_one_breaking_variant() {
-        let breaking_count = [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major]
+        let breaking_count = BumpLevel::ALL
             .iter()
             .filter(|l| l.is_breaking())
             .count();
@@ -980,7 +1142,7 @@ mod tests {
     /// reads `<`, not `matches!`.
     #[test]
     fn test_bump_level_is_non_breaking_agrees_with_lt_major_at_every_variant() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert_eq!(
                 level.is_non_breaking(),
                 level < BumpLevel::Major,
@@ -1002,7 +1164,7 @@ mod tests {
     /// fourth-variant addition) lights up here.
     #[test]
     fn test_bump_level_is_non_breaking_equals_negation_of_is_breaking() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert_eq!(
                 level.is_non_breaking(),
                 !level.is_breaking(),
@@ -1024,7 +1186,7 @@ mod tests {
     /// over the magnitude ladder is sealed against gaps and overlaps.
     #[test]
     fn test_bump_level_is_non_breaking_xor_is_breaking_partitions_ladder() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert!(
                 level.is_non_breaking() ^ level.is_breaking(),
                 "is_non_breaking XOR is_breaking must hold at {level:?}",
@@ -1072,7 +1234,7 @@ mod tests {
     /// surface, not a hand-rolled `matches!` cascade.
     #[test]
     fn test_bump_level_is_fix_only_agrees_with_eq_patch_at_every_variant() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert_eq!(
                 level.is_fix_only(),
                 level == BumpLevel::Patch,
@@ -1097,7 +1259,7 @@ mod tests {
     /// surface (fix-only implies non-breaking).
     #[test]
     fn test_bump_level_is_fix_only_implies_is_non_breaking() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert!(
                 !level.is_fix_only() || level.is_non_breaking(),
                 "is_fix_only() must imply is_non_breaking() at {level:?}",
@@ -1119,7 +1281,7 @@ mod tests {
     /// version-bump-magnitude surface.
     #[test]
     fn test_bump_level_is_fix_only_disjoint_from_is_breaking() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert!(
                 !(level.is_fix_only() && level.is_breaking()),
                 "is_fix_only() AND is_breaking() must be empty at {level:?}",
@@ -1168,7 +1330,7 @@ mod tests {
     /// inserted below `Patch`).
     #[test]
     fn test_bump_level_is_minor_only_agrees_with_eq_minor_at_every_variant() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert_eq!(
                 level.is_minor_only(),
                 level == BumpLevel::Minor,
@@ -1190,7 +1352,7 @@ mod tests {
     /// at the middle band of the version-bump-magnitude ladder.
     #[test]
     fn test_bump_level_is_minor_only_implies_is_non_breaking() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert!(
                 !level.is_minor_only() || level.is_non_breaking(),
                 "is_minor_only() must imply is_non_breaking() at {level:?}",
@@ -1207,7 +1369,7 @@ mod tests {
     /// between `is_fix_only` and `is_breaking`.
     #[test]
     fn test_bump_level_is_minor_only_disjoint_from_is_fix_only() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert!(
                 !(level.is_minor_only() && level.is_fix_only()),
                 "is_minor_only() AND is_fix_only() must be empty at {level:?}",
@@ -1224,7 +1386,7 @@ mod tests {
     /// place between `is_fix_only` and `is_breaking`.
     #[test]
     fn test_bump_level_is_minor_only_disjoint_from_is_breaking() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert!(
                 !(level.is_minor_only() && level.is_breaking()),
                 "is_minor_only() AND is_breaking() must be empty at {level:?}",
@@ -1248,7 +1410,7 @@ mod tests {
     /// covered lights up here.
     #[test]
     fn test_bump_level_named_trio_xor_partitions_ladder() {
-        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+        for level in BumpLevel::ALL {
             assert!(
                 level.is_fix_only() ^ level.is_minor_only() ^ level.is_breaking(),
                 "fix-only XOR minor-only XOR breaking must hold at {level:?}",
