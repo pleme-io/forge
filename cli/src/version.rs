@@ -290,6 +290,83 @@ impl BumpLevel {
     pub fn is_fix_only(&self) -> bool {
         *self == Self::Patch
     }
+
+    /// True iff `self` is exactly [`BumpLevel::Minor`] — the named typed-
+    /// method peer at the middle band of the version-bump magnitude ladder.
+    /// The "this bump is a backwards-compatible-addition minor bump" reading
+    /// downstream consumers previously had to write as `matches!(level,
+    /// BumpLevel::Minor)` or `*level == BumpLevel::Minor` per call site. A
+    /// SLSA-style release-provenance gate that says "minor-only releases
+    /// follow the additive-API attestation channel (distinct from the
+    /// fix-only fast path and the breaking-change review queue)" reads
+    /// `level.is_minor_only()` instead of `matches!(level, BumpLevel::Minor)`
+    /// or a single-arm `match level { Minor => additive_channel, _ => bail }`
+    /// at every policy site — the minor-only semantic role is named at the
+    /// typed-primitive surface, not retyped at every consumer.
+    ///
+    /// # Why `== Self::Minor`, not `is_non_breaking() && !is_fix_only()`
+    ///
+    /// Like [`is_fix_only`] (which reads `*self == Self::Patch` so a future
+    /// `Prerelease` variant inserted below `Patch` is structurally NOT a
+    /// fix), the minor-only band names a single variant by intent — not the
+    /// non-fix half of the non-breaking range. The decomposition form
+    /// `is_non_breaking() && !is_fix_only()` would coincide with
+    /// `*self == Self::Minor` at the present three-variant ladder, but a
+    /// future variant inserted below `Patch` (e.g., a `Prerelease` release-
+    /// candidate / staging-channel bump shape) would silently misclassify
+    /// under the decomposition: `Prerelease` is non-breaking (`< Major`) and
+    /// is NOT fix-only (`!= Patch`), so the decomposition would read it as
+    /// minor-only — a structural bug. The `*self == Self::Minor` form
+    /// refuses by construction; the future variant gets no classification
+    /// from this predicate and so forces a deliberate decision at the
+    /// typed-primitive surface rather than drifting silently through every
+    /// consumer that branches on `is_minor_only()`. Same single-variant
+    /// naming idiom [`is_fix_only`] established at the ladder floor and
+    /// [`crate::probe_outcome::AdmissionTier::is_staging_only`] established
+    /// at the admission-gate surface, here at the middle band of the
+    /// version-bump-magnitude ladder.
+    ///
+    /// # Trio partition: fix-only / minor-only / breaking covers the ladder
+    ///
+    /// At the present three-variant ladder, the named-method trio
+    /// `is_fix_only() XOR is_minor_only() XOR is_breaking()` is a disjoint
+    /// cover — exactly one predicate reads `true` at every variant. Pinned
+    /// by [`tests::test_bump_level_named_trio_xor_partitions_ladder`]: a
+    /// regression that drifted any of the three method bodies such that
+    /// some level read `true` for two predicates (overlap) or `false` for
+    /// all three (gap) lights up. Same disjoint-XOR-cover seal
+    /// `AdmissionTier::admits_strict XOR is_staging_only XOR
+    /// refuses_relaxed` placed at the admission-gate surface (commit
+    /// e08b821), here at the version-bump-magnitude surface.
+    ///
+    /// The disjoint pair `!(is_minor_only() && is_fix_only())` is pinned by
+    /// [`tests::test_bump_level_is_minor_only_disjoint_from_is_fix_only`]:
+    /// Patch and Minor are distinct ladder positions, so the floor and
+    /// middle bands never overlap. The disjoint pair `!(is_minor_only() &&
+    /// is_breaking())` is pinned by
+    /// [`tests::test_bump_level_is_minor_only_disjoint_from_is_breaking`]:
+    /// the middle band sits strictly below the breaking threshold. The
+    /// implication `is_minor_only() => is_non_breaking()` is pinned by
+    /// [`tests::test_bump_level_is_minor_only_implies_is_non_breaking`]:
+    /// every Minor bump is structurally below Major, so a downstream
+    /// release-policy gate that admits non-breaking automatically admits
+    /// every minor-only bump.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the version-bump-magnitude
+    /// ladder is consumed at named typed-method surfaces, not retyped at
+    /// every consumer's match cascade — the middle-band predicate sits at
+    /// the typed-primitive surface alongside the floor and threshold
+    /// predicates. THEORY.md §VI.1 one-oracle: the minor-only semantic role
+    /// (this bump is exactly the additive-API minor variant) is named at
+    /// one site (this method's body), so a downstream policy gate that
+    /// previously read `matches!(level, BumpLevel::Minor)` reads
+    /// `level.is_minor_only()` once and is automatically refused — by the
+    /// `==` form — across a future variant insertion either side of the
+    /// `Minor` position that the gate should NOT classify as minor-only.
+    #[allow(dead_code)]
+    pub fn is_minor_only(&self) -> bool {
+        *self == Self::Minor
+    }
 }
 
 impl std::fmt::Display for BumpLevel {
@@ -1046,6 +1123,135 @@ mod tests {
             assert!(
                 !(level.is_fix_only() && level.is_breaking()),
                 "is_fix_only() AND is_breaking() must be empty at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant, `is_minor_only()` returns the value
+    /// it must under the minor-only semver semantic role: `Minor` is
+    /// minor-only; `Patch` and `Major` are not. A release-policy gate that
+    /// today reads `match level { Minor => additive_api_channel, _ =>
+    /// other }` reads after this commit as `if level.is_minor_only() {
+    /// additive_api_channel } else { other }` — the minor-only semantic
+    /// role is named once at the typed-primitive surface, not retyped at
+    /// every policy site.
+    #[test]
+    fn test_bump_level_is_minor_only_named_at_ladder_middle() {
+        assert!(
+            BumpLevel::Minor.is_minor_only(),
+            "Minor is the additive-API middle band of the magnitude ladder",
+        );
+        assert!(
+            !BumpLevel::Patch.is_minor_only(),
+            "Patch is the fix-only floor, not minor-only",
+        );
+        assert!(
+            !BumpLevel::Major.is_minor_only(),
+            "Major is the breaking ceiling, not minor-only",
+        );
+    }
+
+    /// `is_minor_only()` agrees with `*self == BumpLevel::Minor` at every
+    /// variant — the structural pin that makes the derived
+    /// `PartialEq`/`Eq` impl (the magnitude-ladder typed-sum surface,
+    /// commit b842b21) the load-bearing oracle for the minor-only band
+    /// reading. A regression that drifted the body to `matches!(self,
+    /// Self::Minor)` would still pass
+    /// [`test_bump_level_is_minor_only_named_at_ladder_middle`] at the
+    /// current three-variant ladder; this pin holds against future
+    /// regressions that desynced the named-method peer from the derived
+    /// `==` reading. Same idiom [`is_fix_only`] established at the ladder
+    /// floor — the typed-method peer for a single band variant reads
+    /// through the structural equality surface, not a hand-rolled
+    /// `matches!` cascade or the `is_non_breaking() && !is_fix_only()`
+    /// decomposition (which would silently misclassify a future variant
+    /// inserted below `Patch`).
+    #[test]
+    fn test_bump_level_is_minor_only_agrees_with_eq_minor_at_every_variant() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert_eq!(
+                level.is_minor_only(),
+                level == BumpLevel::Minor,
+                "is_minor_only() must read the == Minor comparison at {level:?}",
+            );
+        }
+    }
+
+    /// The implication invariant `is_minor_only() => is_non_breaking()`
+    /// holds at every variant — every minor-only bump is structurally a
+    /// non-breaking bump (every `Minor` is strictly below `Major` on the
+    /// magnitude ladder), but not every non-breaking bump is minor-only
+    /// (`Patch` is non-breaking yet not minor-only). The pin makes the
+    /// subset relation between the middle predicate and the below-threshold
+    /// predicate structurally load-bearing: a downstream release-policy
+    /// gate that admits `is_non_breaking()` automatically admits every
+    /// `is_minor_only()` bump. Same subset-invariant pin shape
+    /// `is_fix_only() => is_non_breaking()` established at the floor, here
+    /// at the middle band of the version-bump-magnitude ladder.
+    #[test]
+    fn test_bump_level_is_minor_only_implies_is_non_breaking() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert!(
+                !level.is_minor_only() || level.is_non_breaking(),
+                "is_minor_only() must imply is_non_breaking() at {level:?}",
+            );
+        }
+    }
+
+    /// The disjoint invariant `!(is_minor_only() && is_fix_only())` holds
+    /// at every variant — no bump is simultaneously minor-only AND fix-only.
+    /// The middle band (`Minor`) and the floor band (`Patch`) are distinct
+    /// ladder positions: their conjunction is empty at every level. The pin
+    /// closes the floor / middle named-band pair against accidental overlap,
+    /// complementing the floor / ceiling disjoint pin already in place
+    /// between `is_fix_only` and `is_breaking`.
+    #[test]
+    fn test_bump_level_is_minor_only_disjoint_from_is_fix_only() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert!(
+                !(level.is_minor_only() && level.is_fix_only()),
+                "is_minor_only() AND is_fix_only() must be empty at {level:?}",
+            );
+        }
+    }
+
+    /// The disjoint invariant `!(is_minor_only() && is_breaking())` holds
+    /// at every variant — no bump is simultaneously minor-only AND breaking.
+    /// The middle band (`Minor`) sits strictly below the breaking threshold
+    /// (`>= Major`): their conjunction is empty at every level. The pin
+    /// closes the middle / ceiling named-band pair against accidental
+    /// overlap, complementing the floor / ceiling disjoint pin already in
+    /// place between `is_fix_only` and `is_breaking`.
+    #[test]
+    fn test_bump_level_is_minor_only_disjoint_from_is_breaking() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert!(
+                !(level.is_minor_only() && level.is_breaking()),
+                "is_minor_only() AND is_breaking() must be empty at {level:?}",
+            );
+        }
+    }
+
+    /// The disjoint-and-covering trio partition invariant
+    /// `is_fix_only() XOR is_minor_only() XOR is_breaking() == true` holds
+    /// at every variant — exactly one of the three named typed-method peers
+    /// reads `true` at every level. The pin surfaces a structural break if
+    /// any of the three method bodies drifted such that some level read
+    /// `true` for two predicates (overlap) or `false` for all three (gap):
+    /// same disjoint-XOR-cover seal `AdmissionTier::admits_strict XOR
+    /// is_staging_only XOR refuses_relaxed` placed at the admission-gate
+    /// surface (commit e08b821), here at the version-bump-magnitude
+    /// surface. With this pin, the fix-only / minor-only / breaking
+    /// named-method trio over the magnitude ladder is sealed against gaps
+    /// and overlaps at the present three-variant ladder, and a future
+    /// variant insertion that left some position uncovered or doubly-
+    /// covered lights up here.
+    #[test]
+    fn test_bump_level_named_trio_xor_partitions_ladder() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert!(
+                level.is_fix_only() ^ level.is_minor_only() ^ level.is_breaking(),
+                "fix-only XOR minor-only XOR breaking must hold at {level:?}",
             );
         }
     }
