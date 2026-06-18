@@ -64,7 +64,31 @@ pub fn parse_semver(version: &str) -> Result<(u64, u64, u64)> {
 /// THEORY.md §VI.1 one-oracle discipline: the level grammar is named at
 /// one site (the [`FromStr`] impl), not retyped at every caller's
 /// `match level { ... }` cascade.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// # The magnitude ladder
+///
+/// [`BumpLevel`] carries a total order — `Patch < Minor < Major` — encoding
+/// the **magnitude of the bump**: a major bump strictly subsumes a minor
+/// bump, which strictly subsumes a patch bump, in the sense that the
+/// release-pipeline policy "this change requires at least X" is a single
+/// `>=` comparison rather than a three-arm disjunction at every caller. A
+/// SLSA-style provenance gate that says "API-breaking changes require at
+/// least a Major bump" reads `level >= BumpLevel::Major`; a public-surface
+/// gate that says "any public addition requires at least a Minor bump"
+/// reads `level >= BumpLevel::Minor`. The variant declaration order
+/// (`Patch`, `Minor`, `Major`) is load-bearing — `#[derive(PartialOrd,
+/// Ord)]` derives the ladder from the source order, so a future variant
+/// extension (e.g., a `Prerelease` variant inserted between or beside
+/// these) must consider where in the ladder it sits.
+///
+/// Same THEORY.md §V.5 total-order discipline the
+/// [`crate::probe_outcome::AdmissionTier`] surface established at the
+/// `Refused < StagingOnly < Strict` admission ladder, here applied to the
+/// version-bump-magnitude axis. The compiler refuses any future
+/// `match level { ... }` cascade that drops a variant, and the ladder is
+/// derived from one source ordering rather than retyped at every
+/// comparison site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BumpLevel {
     /// Increment the patch component (Z in X.Y.Z), preserving major and
     /// minor. Maps to the canonical lowercase string `"patch"` under
@@ -548,5 +572,58 @@ mod tests {
                 "bump_semver_typed must be total at {level:?} on 9.9.9",
             );
         }
+    }
+
+    /// The magnitude ladder `Patch < Minor < Major` holds at every
+    /// adjacent and end-to-end pair. The structural pin that lets a
+    /// release-pipeline policy read `level >= BumpLevel::Minor` instead of
+    /// a three-arm match cascade at every site. Same total-order
+    /// discipline `AdmissionTier` (Refused < StagingOnly < Strict)
+    /// established at the admission-gate surface, here at the
+    /// version-bump-magnitude surface.
+    #[test]
+    fn test_bump_level_magnitude_ladder() {
+        assert!(BumpLevel::Patch < BumpLevel::Minor);
+        assert!(BumpLevel::Minor < BumpLevel::Major);
+        assert!(BumpLevel::Patch < BumpLevel::Major);
+        assert!(BumpLevel::Major > BumpLevel::Minor);
+        assert!(BumpLevel::Minor > BumpLevel::Patch);
+        assert!(BumpLevel::Major > BumpLevel::Patch);
+    }
+
+    /// The total order on [`BumpLevel`] is reflexive at every variant —
+    /// `level <= level` and `level >= level` and `level == level`. The
+    /// `PartialOrd` / `Ord` derive must agree with `PartialEq` / `Eq`,
+    /// pinned here so a future hand-rolled impl that desynced equality
+    /// from ordering lights up.
+    #[test]
+    fn test_bump_level_ordering_reflexive_at_every_variant() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert!(level <= level, "{level:?} must be <= itself");
+            assert!(level >= level, "{level:?} must be >= itself");
+            assert_eq!(
+                level.cmp(&level),
+                std::cmp::Ordering::Equal,
+                "{level:?}.cmp(&{level:?}) must be Equal",
+            );
+        }
+    }
+
+    /// The ladder is consistent with the canonical sort order: collecting
+    /// the three variants into a `Vec` and sorting them yields
+    /// `[Patch, Minor, Major]` — the source-order ladder. A regression
+    /// that reordered the enum variants (and so reordered the derived
+    /// ladder) lights up here. The pin makes the source-order load-
+    /// bearing: future variant insertions are forced to consider their
+    /// ladder position.
+    #[test]
+    fn test_bump_level_sort_yields_canonical_ladder() {
+        let mut levels = vec![BumpLevel::Major, BumpLevel::Patch, BumpLevel::Minor];
+        levels.sort();
+        assert_eq!(
+            levels,
+            vec![BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major],
+            "sorted variants must yield the Patch < Minor < Major ladder",
+        );
     }
 }
