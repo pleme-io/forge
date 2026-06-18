@@ -223,6 +223,73 @@ impl BumpLevel {
     pub fn is_non_breaking(&self) -> bool {
         *self < Self::Major
     }
+
+    /// True iff `self` is exactly [`BumpLevel::Patch`] — the named typed-
+    /// method peer at the floor of the version-bump magnitude ladder. The
+    /// "this bump is a fix-only patch" reading downstream consumers
+    /// previously had to write as `matches!(level, BumpLevel::Patch)` or
+    /// `*level == BumpLevel::Patch` per call site. A SLSA-style release-
+    /// provenance gate that says "fix-only releases bypass the API-review
+    /// queue and ship directly to the stable channel" reads
+    /// `level.is_fix_only()` instead of `matches!(level, BumpLevel::Patch)`
+    /// or a single-arm `match level { Patch => allow, _ => bail }` at every
+    /// policy site — the fix-only semantic role is named at the typed-
+    /// primitive surface, not retyped at every consumer.
+    ///
+    /// # Why `== Self::Patch`, not `<= Self::Patch` or `matches!`
+    ///
+    /// Unlike [`is_breaking`] (which reads `>= Self::Major` so a future
+    /// `Epoch` variant inserted above `Major` is automatically classified
+    /// as breaking) and [`is_non_breaking`] (which reads `< Self::Major`
+    /// so a future `Prerelease` variant inserted below `Patch` is
+    /// automatically classified as non-breaking), the fix-only band names
+    /// a single variant by intent, not a half-open ray. A future
+    /// `BumpLevel::Prerelease` variant inserted strictly below `Patch`
+    /// (release-candidate / staging-channel bump shapes) is structurally
+    /// NOT a fix — it is its own bump category — and so must NOT read as
+    /// fix-only. The `<= Self::Patch` form would silently misclassify the
+    /// new floor variant; the `*self == Self::Patch` form refuses by
+    /// construction. The choice mirrors
+    /// [`crate::probe_outcome::AdmissionTier::is_staging_only`] (commit
+    /// e08b821) at the admission-gate surface, where naming a single
+    /// middle band variant likewise reads through equality rather than a
+    /// half-open ray to refuse silent reclassification across future
+    /// ladder insertions either side of the band.
+    ///
+    /// # Implication into `is_non_breaking`, disjoint from `is_breaking`
+    ///
+    /// The implication invariant `is_fix_only() => is_non_breaking()` is
+    /// pinned by
+    /// [`tests::test_bump_level_is_fix_only_implies_is_non_breaking`]: a
+    /// fix-only bump is structurally a non-breaking bump (every Patch is
+    /// strictly below Major), so a downstream release-policy gate that
+    /// already reads `is_non_breaking()` will admit every `is_fix_only()`
+    /// bump automatically. The disjoint invariant `!(is_fix_only() &&
+    /// is_breaking())` is pinned by
+    /// [`tests::test_bump_level_is_fix_only_disjoint_from_is_breaking`]:
+    /// no bump is simultaneously fix-only AND breaking — the two named
+    /// predicates partition the magnitude ladder into non-overlapping
+    /// extremes. With this and its sibling pins, the breaking /
+    /// non-breaking / fix-only typed-method peer trio over the magnitude
+    /// ladder is sealed against accidental overlap at the present three-
+    /// variant ladder and against silent misclassification across future
+    /// ladder extensions either side of the breaking-change threshold.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the version-bump-magnitude
+    /// ladder is consumed at named typed-method surfaces, not retyped at
+    /// every consumer's match cascade — the floor predicate sits at the
+    /// typed-primitive surface alongside the threshold and ceiling
+    /// predicates. THEORY.md §VI.1 one-oracle: the fix-only semantic role
+    /// (this bump is exactly the patch-level fix variant) is named at one
+    /// site (this method's body), so a downstream policy gate that
+    /// previously read `matches!(level, BumpLevel::Patch)` reads
+    /// `level.is_fix_only()` once and is automatically refused — by the
+    /// `==` form — across a future `Prerelease` insertion below `Patch`
+    /// that the gate should NOT classify as fix-only.
+    #[allow(dead_code)]
+    pub fn is_fix_only(&self) -> bool {
+        *self == Self::Patch
+    }
 }
 
 impl std::fmt::Display for BumpLevel {
@@ -884,6 +951,101 @@ mod tests {
             assert!(
                 level.is_non_breaking() ^ level.is_breaking(),
                 "is_non_breaking XOR is_breaking must hold at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant, `is_fix_only()` returns the value
+    /// it must under the fix-only semver semantic role: `Patch` is
+    /// fix-only; `Minor` and `Major` are not. A release-policy gate that
+    /// today reads `match level { Patch => allow_direct_ship, _ =>
+    /// queue_for_review }` reads after this commit as `if
+    /// level.is_fix_only() { allow_direct_ship } else { queue_for_review }`
+    /// — the fix-only semantic role is named once at the typed-primitive
+    /// surface, not retyped at every policy site.
+    #[test]
+    fn test_bump_level_is_fix_only_named_at_ladder_floor() {
+        assert!(
+            BumpLevel::Patch.is_fix_only(),
+            "Patch is the fix-only floor of the magnitude ladder",
+        );
+        assert!(
+            !BumpLevel::Minor.is_fix_only(),
+            "Minor is a backwards-compatible addition, not fix-only",
+        );
+        assert!(
+            !BumpLevel::Major.is_fix_only(),
+            "Major is a breaking bump, not fix-only",
+        );
+    }
+
+    /// `is_fix_only()` agrees with `*self == BumpLevel::Patch` at every
+    /// variant — the structural pin that makes the derived
+    /// `PartialEq`/`Eq` impl (the magnitude-ladder typed-sum surface,
+    /// commit b842b21) the load-bearing oracle for the fix-only band
+    /// reading. A regression that drifted the body to `matches!(self,
+    /// Self::Patch)` would still pass
+    /// [`test_bump_level_is_fix_only_named_at_ladder_floor`] at the
+    /// current three-variant ladder; this pin holds against future
+    /// regressions that desynced the named-method peer from the derived
+    /// `==` reading. Same idiom
+    /// [`crate::probe_outcome::AdmissionTier::is_staging_only`] established
+    /// at the admission-gate surface — the typed-method peer for a single
+    /// band variant reads through the structural equality / decomposition
+    /// surface, not a hand-rolled `matches!` cascade.
+    #[test]
+    fn test_bump_level_is_fix_only_agrees_with_eq_patch_at_every_variant() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert_eq!(
+                level.is_fix_only(),
+                level == BumpLevel::Patch,
+                "is_fix_only() must read the == Patch comparison at {level:?}",
+            );
+        }
+    }
+
+    /// The implication invariant `is_fix_only() => is_non_breaking()`
+    /// holds at every variant — every fix-only bump is structurally a
+    /// non-breaking bump (every `Patch` is strictly below `Major` on the
+    /// magnitude ladder), but not every non-breaking bump is fix-only
+    /// (`Minor` is non-breaking yet not fix-only). The pin makes the
+    /// subset relation between the floor predicate and the
+    /// below-threshold predicate structurally load-bearing: a downstream
+    /// release-policy gate that admits `is_non_breaking()` automatically
+    /// admits every `is_fix_only()` bump, with no per-site reclassification
+    /// of the implication. Same subset-invariant pin
+    /// `AdmissionTier::admits_strict() => AdmissionTier::admits_relaxed()`
+    /// established at the admission-gate surface (strict eligibility
+    /// implies relaxed eligibility), here at the version-bump-magnitude
+    /// surface (fix-only implies non-breaking).
+    #[test]
+    fn test_bump_level_is_fix_only_implies_is_non_breaking() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert!(
+                !level.is_fix_only() || level.is_non_breaking(),
+                "is_fix_only() must imply is_non_breaking() at {level:?}",
+            );
+        }
+    }
+
+    /// The disjoint invariant `!(is_fix_only() && is_breaking())` holds
+    /// at every variant — no bump is simultaneously fix-only AND breaking.
+    /// The fix-only floor (`Patch`) and the breaking threshold (`>= Major`)
+    /// are disjoint extremes of the magnitude ladder: their conjunction is
+    /// empty at every level. The pin closes the named-method trio over
+    /// the ladder against accidental overlap, complementing the De Morgan
+    /// pin between `is_breaking` and `is_non_breaking` already in place.
+    /// A future variant insertion that drifted the floor or the threshold
+    /// such that some level read true for both predicates lights up here
+    /// — same disjoint-extremes pin `AdmissionTier::refuses_relaxed XOR
+    /// admits_strict` placed at the admission-gate surface, here at the
+    /// version-bump-magnitude surface.
+    #[test]
+    fn test_bump_level_is_fix_only_disjoint_from_is_breaking() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert!(
+                !(level.is_fix_only() && level.is_breaking()),
+                "is_fix_only() AND is_breaking() must be empty at {level:?}",
             );
         }
     }
