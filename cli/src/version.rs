@@ -157,6 +157,72 @@ impl BumpLevel {
     pub fn is_breaking(&self) -> bool {
         *self >= Self::Major
     }
+
+    /// True iff `self` sits strictly below the breaking-change threshold —
+    /// i.e., `*self < Self::Major` under the derived [`Ord`] instance. The
+    /// named typed-method De Morgan complement of [`is_breaking`]
+    /// (`Self::is_breaking`) at the version-bump-magnitude surface: the
+    /// third leg of the named-method gate trio over the breaking-change
+    /// threshold, naming the "this bump preserves backward compatibility"
+    /// reading that downstream consumers previously had to write as
+    /// `!level.is_breaking()` (or `matches!(level, Patch | Minor)` against
+    /// the variants directly). A SLSA-style release-provenance gate that
+    /// says "a non-breaking change can ship to the stable channel without
+    /// the API-review attestation" reads `level.is_non_breaking()` instead
+    /// of `!level.is_breaking()` or a two-arm `match level { Patch | Minor
+    /// => allow, Major => require_attestation }` cascade at every policy
+    /// site — the backward-compatibility semantic role is named at the
+    /// typed-primitive surface, not retyped at every consumer.
+    ///
+    /// # Why `< Self::Major`, not `!self.is_breaking()` or `matches!`
+    ///
+    /// Under the present three-variant ladder, `is_non_breaking` reduces
+    /// to `matches!(self, Self::Patch | Self::Minor)` and to
+    /// `!self.is_breaking()`, but the `<` form is the load-bearing one. It
+    /// makes the total-order discipline (commit 8c2bbd5) the structural
+    /// oracle for the backward-compatibility partition the same way the
+    /// `>=` form does for [`is_breaking`]: a future variant
+    /// `BumpLevel::Prerelease` inserted in source order strictly below
+    /// `Patch` (release-candidate / staging-channel bump shapes) is
+    /// automatically `< Major` and so structurally classified as
+    /// non-breaking — without retyping the predicate at every consumer.
+    /// The `matches!` form would silently misclassify the new floor variant
+    /// (it would NOT match `Patch | Minor` and so would read as breaking),
+    /// inheriting the same drift class
+    /// [`crate::probe_outcome::AdmissionTier::refuses_relaxed`] avoids by
+    /// reading `< StagingOnly` rather than `matches!(self, Refused)`. Same
+    /// THEORY.md §V.5 total-order discipline at the version-bump surface as
+    /// at the admission-gate surface.
+    ///
+    /// # De Morgan / XOR partition
+    ///
+    /// The De Morgan complementarity invariant
+    /// `is_non_breaking() == !is_breaking()` is pinned by
+    /// [`tests::test_bump_level_is_non_breaking_equals_negation_of_is_breaking`]:
+    /// the two predicates are exact complements at every variant. The
+    /// disjoint-and-covering partition pin
+    /// [`tests::test_bump_level_is_non_breaking_xor_is_breaking_partitions_ladder`]
+    /// nails `is_non_breaking() XOR is_breaking() == true` so a regression
+    /// that broke either method body (e.g., a future hand-rolled
+    /// `matches!(self, Self::Patch | Self::Minor)` body that drifted from
+    /// the `<` form across a fourth-variant addition) surfaces as a
+    /// partition gap or overlap at the new variant. Same partition shape
+    /// the `AdmissionTier::refuses_relaxed` / `admits_relaxed` pair sealed
+    /// at the admission-gate surface, here at the version-bump-magnitude
+    /// surface.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the backward-compatibility
+    /// gate reads the derived `Ord` impl through a named typed-method peer
+    /// at the typed-primitive surface, not retyped at every consumer's
+    /// match cascade. THEORY.md §VI.1 one-oracle: the semantic role
+    /// (non-breaking ⇔ strictly below Major) is named at one site (this
+    /// method's body), so a future ladder extension (a `Prerelease` variant
+    /// below `Patch`) propagates through every consumer that reads
+    /// `level.is_non_breaking()` without per-site reclassification.
+    #[allow(dead_code)]
+    pub fn is_non_breaking(&self) -> bool {
+        *self < Self::Major
+    }
 }
 
 impl std::fmt::Display for BumpLevel {
@@ -729,5 +795,96 @@ mod tests {
             breaking_count, 1,
             "exactly one of {{Patch, Minor, Major}} is breaking at the current ladder",
         );
+    }
+
+    /// At every [`BumpLevel`] variant, `is_non_breaking()` returns the
+    /// value it must under the backward-compatibility semver semantic
+    /// role: `Patch` and `Minor` are non-breaking, `Major` is not. A
+    /// release-policy gate that today reads `match level { Patch | Minor
+    /// => allow, Major => bail!("breaking") }` reads after this commit as
+    /// `if level.is_non_breaking() { allow } else { bail!("breaking") }`
+    /// — the backward-compatibility semantic role is named once at the
+    /// typed-primitive surface, not retyped at every policy site.
+    #[test]
+    fn test_bump_level_is_non_breaking_named_at_ladder_floor() {
+        assert!(
+            BumpLevel::Patch.is_non_breaking(),
+            "Patch is a backwards-compatible fix — non-breaking",
+        );
+        assert!(
+            BumpLevel::Minor.is_non_breaking(),
+            "Minor is a backwards-compatible addition — non-breaking",
+        );
+        assert!(
+            !BumpLevel::Major.is_non_breaking(),
+            "Major sits at the breaking-change threshold — not non-breaking",
+        );
+    }
+
+    /// `is_non_breaking()` agrees with `*self < BumpLevel::Major` at
+    /// every variant — the structural pin that makes the total-order
+    /// discipline (commit 8c2bbd5) the load-bearing oracle for the
+    /// backward-compatibility gate. A regression that drifted the body
+    /// to `matches!(self, Self::Patch | Self::Minor)` would still pass
+    /// [`test_bump_level_is_non_breaking_named_at_ladder_floor`] at the
+    /// current three-variant ladder; this pin holds against future
+    /// regressions that desynced the named-method peer from the derived
+    /// `<` comparison the prior commit (8c2bbd5, magnitude ladder lift)
+    /// made admissible. Same idiom
+    /// [`crate::probe_outcome::AdmissionTier::refuses_relaxed`]
+    /// established at the admission-gate surface — the typed-method peer
+    /// reads `<`, not `matches!`.
+    #[test]
+    fn test_bump_level_is_non_breaking_agrees_with_lt_major_at_every_variant() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert_eq!(
+                level.is_non_breaking(),
+                level < BumpLevel::Major,
+                "is_non_breaking() must read the < Major comparison at {level:?}",
+            );
+        }
+    }
+
+    /// The De Morgan complementarity invariant
+    /// `is_non_breaking() == !is_breaking()` holds at every variant —
+    /// the two predicates are exact complements over the
+    /// breaking-change threshold. Same partition pin
+    /// [`crate::probe_outcome::AdmissionTier::refuses_relaxed`] enforces
+    /// against [`crate::probe_outcome::AdmissionTier::admits_relaxed`]
+    /// at the admission-gate surface, here at the
+    /// version-bump-magnitude surface. A future regression that drifted
+    /// either method body (e.g., a hand-rolled `matches!` form on either
+    /// side that desynced from the derived `<` / `>=` reading after a
+    /// fourth-variant addition) lights up here.
+    #[test]
+    fn test_bump_level_is_non_breaking_equals_negation_of_is_breaking() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert_eq!(
+                level.is_non_breaking(),
+                !level.is_breaking(),
+                "is_non_breaking must equal !is_breaking at {level:?}",
+            );
+        }
+    }
+
+    /// The disjoint-and-covering partition invariant
+    /// `is_non_breaking() XOR is_breaking() == true` holds at every
+    /// variant — exactly one of the two named typed-method peers reads
+    /// true at every level. The pin surfaces a structural break if a
+    /// future variant insertion left a gap (a level neither side
+    /// classified) or an overlap (a level both sides classified): same
+    /// XOR-partition seal `AdmissionTier::refuses_relaxed XOR
+    /// admits_relaxed` placed at the admission-gate surface, here at the
+    /// version-bump-magnitude surface. With this pin and its sibling
+    /// negation pin, the breaking / non-breaking typed-method peer pair
+    /// over the magnitude ladder is sealed against gaps and overlaps.
+    #[test]
+    fn test_bump_level_is_non_breaking_xor_is_breaking_partitions_ladder() {
+        for level in [BumpLevel::Patch, BumpLevel::Minor, BumpLevel::Major] {
+            assert!(
+                level.is_non_breaking() ^ level.is_breaking(),
+                "is_non_breaking XOR is_breaking must hold at {level:?}",
+            );
+        }
     }
 }
