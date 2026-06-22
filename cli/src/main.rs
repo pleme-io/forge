@@ -1093,6 +1093,7 @@ async fn main() -> Result<()> {
             amd64_image,
             arm64_image,
             working_dir,
+            no_verify_elf,
         } => {
             commands::image_release::execute(
                 &name,
@@ -1102,6 +1103,7 @@ async fn main() -> Result<()> {
                 amd64_image.as_deref(),
                 arm64_image.as_deref(),
                 &working_dir,
+                !no_verify_elf,
             )
             .await?;
         }
