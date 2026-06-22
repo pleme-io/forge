@@ -1338,6 +1338,13 @@ pub enum Commands {
         /// Working directory
         #[arg(long, default_value = ".")]
         working_dir: String,
+
+        /// Skip the pre-push image-loader verification. Verification is ON by
+        /// default — each image's declared architecture is checked against the
+        /// arch it is being tagged under (catches the `exec format error` class
+        /// of shipping a wrong-arch binary). Pass this only to bypass the gate.
+        #[arg(long = "no-verify-elf", default_value_t = false)]
+        no_verify_elf: bool,
     },
 
     /// Crossplane package SDLC (Function/Configuration packages, render, validate)

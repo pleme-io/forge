@@ -5,6 +5,7 @@
 //! and creates a multi-arch manifest index.
 
 use anyhow::{bail, Context, Result};
+use std::fmt;
 use std::path::Path;
 use std::process::Command;
 use tracing::info;
@@ -17,6 +18,11 @@ use crate::tools::get_tool_path;
 ///
 /// If `--amd64-attr` or `--arm64-attr` are provided, the image is built via `nix build` first.
 /// Otherwise, `--amd64-image` / `--arm64-image` must point to pre-built image tarballs.
+///
+/// When `verify_elf` is true (the default), each resolved image is gated through
+/// [`verify_image_arch`] *before* push — so an image whose binary can't run on the
+/// arch it is being tagged under is refused at the gate, never shipped to crashloop
+/// with `exec format error` (the hanabi 2026-06-14 amd64-tag-holding-aarch64 class).
 pub async fn execute(
     name: &str,
     registry: &str,
@@ -25,6 +31,7 @@ pub async fn execute(
     amd64_image: Option<&str>,
     arm64_image: Option<&str>,
     working_dir: &str,
+    verify_elf: bool,
 ) -> Result<()> {
     let sha = git::get_short_sha()?;
     let skopeo = get_tool_path("skopeo");
@@ -43,7 +50,11 @@ pub async fn execute(
         (None, None) => None,
     };
 
-    // Push amd64
+    // Push amd64 — gate the loader before the push (default on).
+    if verify_elf {
+        info!("Verifying {} (amd64) image loader before push...", name);
+        verify_image_arch(&skopeo, &amd64_path, "amd64")?;
+    }
     let amd64_tag = format!("amd64-{}", sha);
     info!("Pushing {} (amd64) as {}:{}...", name, registry, amd64_tag);
     push_image(&skopeo, &amd64_path, registry, &amd64_tag)?;
@@ -51,6 +62,10 @@ pub async fn execute(
 
     // Push arm64 if available
     if let Some(ref arm64) = arm64_path {
+        if verify_elf {
+            info!("Verifying {} (arm64) image loader before push...", name);
+            verify_image_arch(&skopeo, arm64, "arm64")?;
+        }
         let arm64_tag = format!("arm64-{}", sha);
         info!("Pushing {} (arm64) as {}:{}...", name, registry, arm64_tag);
         push_image(&skopeo, arm64, registry, &arm64_tag)?;
@@ -161,4 +176,140 @@ fn push_image(skopeo: &str, image_path: &str, registry: &str, tag: &str) -> Resu
     }
 
     Ok(())
+}
+
+// --- Loader verification (pre-push gate) ---
+
+/// Why an image cannot be proven runnable on the arch it is being tagged under.
+///
+/// `ArchMismatch` / `MissingArchitecture` are implemented today — the cheap,
+/// high-value guard that catches the "amd64 tag holding an aarch64 binary"
+/// class (hanabi 2026-06-14 `exec format error`) from `skopeo inspect`'s
+/// declared `Architecture` alone, reusing the skopeo forge already shells to.
+///
+/// THE DESTINATION (named next milestone, not yet built): a full ELF-loader
+/// check that extracts the entrypoint binary from the image layers, parses its
+/// `PT_INTERP` + `DT_NEEDED` (via the `object` crate, not a string-grep of
+/// `ldd`), and confirms each is present in the image's layer closure — the
+/// gaveta r19/r20 glibc-loader-not-in-the-minimal-image class. That needs
+/// `object` + tar/flate2 layer-walking; it lands as the `MissingInterpreter`
+/// / `MissingNeededLib` / `NotAnElf` variants below. Reserved here so the
+/// gate's typed surface already names the full failure set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoaderError {
+    /// The image declares an architecture other than the tag it is about to be
+    /// pushed under (e.g. an `arm64` image about to become `amd64-<sha>`).
+    ArchMismatch { expected: String, found: String },
+    /// `skopeo inspect` returned no usable `Architecture` field.
+    MissingArchitecture,
+}
+
+impl fmt::Display for LoaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoaderError::ArchMismatch { expected, found } => write!(
+                f,
+                "image architecture mismatch: about to push as '{expected}' but the image \
+                 declares '{found}' — pushing it would crashloop with `exec format error`. \
+                 Build the '{expected}' image attribute on a native-'{expected}' runner."
+            ),
+            LoaderError::MissingArchitecture => write!(
+                f,
+                "`skopeo inspect` returned no Architecture field — not a usable single-arch OCI image"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LoaderError {}
+
+/// Pure arch check over `skopeo inspect` JSON. Factored out from the skopeo
+/// invocation so it is unit-testable without a registry or a real tarball.
+fn check_inspect_arch(inspect_json: &[u8], expected_arch: &str) -> Result<(), LoaderError> {
+    let v: serde_json::Value =
+        serde_json::from_slice(inspect_json).map_err(|_| LoaderError::MissingArchitecture)?;
+    let found = v
+        .get("Architecture")
+        .and_then(|a| a.as_str())
+        .ok_or(LoaderError::MissingArchitecture)?;
+    if found == expected_arch {
+        Ok(())
+    } else {
+        Err(LoaderError::ArchMismatch {
+            expected: expected_arch.to_string(),
+            found: found.to_string(),
+        })
+    }
+}
+
+/// Verify that `image_path` (a docker-archive tarball) declares `expected_arch`
+/// before it is pushed under an `<expected_arch>-<sha>` tag. Reuses the same
+/// `skopeo` forge already shells to; bails with the typed [`LoaderError`] so a
+/// wrong-arch image is refused at the gate instead of shipped to crashloop.
+fn verify_image_arch(skopeo: &str, image_path: &str, expected_arch: &str) -> Result<()> {
+    let output = Command::new(skopeo)
+        .args(["inspect", &format!("docker-archive:{}", image_path)])
+        .output()
+        .with_context(|| format!("Failed to run skopeo inspect on {}", image_path))?;
+
+    if !output.status.success() {
+        bail!(
+            "skopeo inspect failed for {}: {}",
+            image_path,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    check_inspect_arch(&output.stdout, expected_arch)
+        .map_err(|e| anyhow::anyhow!("{} (image: {})", e, image_path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arch_match_passes() {
+        let json = br#"{"Name":"x","Architecture":"amd64","Os":"linux"}"#;
+        assert!(check_inspect_arch(json, "amd64").is_ok());
+    }
+
+    #[test]
+    fn arch_mismatch_is_typed() {
+        // The hanabi class: an arm64 image about to be tagged amd64-<sha>.
+        let json = br#"{"Architecture":"arm64","Os":"linux"}"#;
+        let err = check_inspect_arch(json, "amd64").unwrap_err();
+        assert_eq!(
+            err,
+            LoaderError::ArchMismatch {
+                expected: "amd64".to_string(),
+                found: "arm64".to_string(),
+            }
+        );
+        // Display names the runtime symptom so the gate message is actionable.
+        assert!(err.to_string().contains("exec format error"));
+    }
+
+    #[test]
+    fn arm64_match_passes() {
+        let json = br#"{"Architecture":"arm64"}"#;
+        assert!(check_inspect_arch(json, "arm64").is_ok());
+    }
+
+    #[test]
+    fn missing_architecture_field_is_typed() {
+        let json = br#"{"Name":"x","Os":"linux"}"#;
+        assert_eq!(
+            check_inspect_arch(json, "amd64").unwrap_err(),
+            LoaderError::MissingArchitecture
+        );
+    }
+
+    #[test]
+    fn non_json_inspect_output_is_typed() {
+        assert_eq!(
+            check_inspect_arch(b"not json at all", "amd64").unwrap_err(),
+            LoaderError::MissingArchitecture
+        );
+    }
 }
