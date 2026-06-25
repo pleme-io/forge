@@ -4449,6 +4449,76 @@ pub enum AdmissionTier {
 }
 
 impl AdmissionTier {
+    /// Every [`AdmissionTier`] variant, listed in tier-ladder order
+    /// (`Refused < StagingOnly < Strict`) — the single-source enumeration
+    /// of the typed sum. The named typed-primitive peer of the array-
+    /// literal `[AdmissionTier::Refused, AdmissionTier::StagingOnly,
+    /// AdmissionTier::Strict]` that previously appeared at 14 sites
+    /// inside this module's test cases (the per-variant `for tier in
+    /// [...] { ... }` traversal idiom). A consumer that needs to iterate
+    /// every variant — exhaustive-cover property tests, fleet-wide
+    /// aggregate-floor/ceiling readers, CLI shell-completion tables,
+    /// telemetry-label enumeration — reads `AdmissionTier::ALL` once
+    /// instead of restating the variant list at the call site.
+    ///
+    /// # Why the named const, not the array literal
+    ///
+    /// The array literal `[Refused, StagingOnly, Strict]` is a
+    /// structural duplication of the enum's variant declaration: every
+    /// time a caller restates it, a future variant insertion (a
+    /// `Pending` band strictly between `Refused` and `StagingOnly`
+    /// admitting neither gate, a `StrictPlusAttestation` ceiling
+    /// strictly above `Strict`) leaves silent gaps at every restatement
+    /// site — the literal carries no compile-time signal that it must
+    /// be extended. A `for tier in [Refused, StagingOnly, Strict]`
+    /// traversal that drove a fail-before / pass-after property test
+    /// would continue to pass after the variant insertion, but only
+    /// against the three legacy variants — the new variant would never
+    /// be exercised by the property, and the property would silently
+    /// degrade to a partial cover.
+    ///
+    /// Routing every traversal through [`AdmissionTier::ALL`] makes the
+    /// enumeration single-source: a future variant insertion forces
+    /// the author to extend this one const (the test
+    /// [`tests::test_admission_tier_all_contains_every_variant`] uses an
+    /// exhaustive `match` against the variant axis to refuse compilation
+    /// until the new variant is added to `ALL`), and every property test
+    /// that iterates `AdmissionTier::ALL` automatically picks up the new
+    /// variant without per-site edits. Same THEORY.md §VI.1
+    /// generation-over-composition / three-times-rule discipline the
+    /// prior typed-method-peer lifts established at this surface
+    /// (`admits_relaxed` / `admits_strict` / `refuses_relaxed` /
+    /// `refuses_strict` / `is_staging_only` over the tier ladder), here
+    /// applied to the variant-enumeration duplication that recurs across
+    /// the per-variant traversal call sites. The sibling lift the
+    /// [`crate::version::BumpLevel::ALL`] const (commit f891180)
+    /// established for the magnitude-ladder typed sum, here applied to
+    /// the admission-tier typed sum at the per-axis composition surface.
+    ///
+    /// # Ladder-order invariant
+    ///
+    /// The element order of [`AdmissionTier::ALL`] coincides with the
+    /// derived [`Ord`] ladder: `ALL[0] < ALL[1] < ALL[2]`. The pin
+    /// [`tests::test_admission_tier_all_is_canonical_ladder_order`]
+    /// asserts `ALL.to_vec()` equals the result of `ALL.to_vec().sort()`
+    /// so a future variant insertion or reordering that desynced the
+    /// array from the source-order ladder lights up. A consumer that
+    /// depends on iterating from worst-case to best-case tier (e.g., a
+    /// fleet-wide rollout reporter enumerating tiers in escalating
+    /// admission stringency) reads `AdmissionTier::ALL` directly without
+    /// a per-call-site sort.
+    ///
+    /// THEORY.md §V.4 typed primitives: the variant enumeration is a
+    /// typed-primitive surface on `AdmissionTier` itself (one named
+    /// const), not a `&[AdmissionTier]` shape restated at every
+    /// traversal site that re-derives the enumeration. THEORY.md §VI.1
+    /// generation over composition (three-times rule): a structural
+    /// pattern that recurs three or more times becomes a named
+    /// primitive at one site — here, 14 array-literal restatements
+    /// collapse to one const.
+    #[allow(dead_code)]
+    pub const ALL: [Self; 3] = [Self::Refused, Self::StagingOnly, Self::Strict];
+
     /// True iff this tier admits the relaxed (Phase 1) gate — i.e.,
     /// `self >= AdmissionTier::StagingOnly` under the derived [`Ord`]
     /// instance. The typed-method peer of the
@@ -14692,6 +14762,108 @@ mod tests {
         assert_ne!(AdmissionTier::Refused, AdmissionTier::Strict);
     }
 
+    /// [`AdmissionTier::ALL`] lists the three variants in the
+    /// source-order ladder `[Refused, StagingOnly, Strict]`. The
+    /// fixed-shape pin: the const matches the canonical ladder at every
+    /// position, so a downstream consumer that iterates
+    /// `AdmissionTier::ALL` reads from worst-case to best-case tier
+    /// without a per-site sort.
+    #[test]
+    fn test_admission_tier_all_matches_canonical_ladder() {
+        assert_eq!(
+            AdmissionTier::ALL,
+            [
+                AdmissionTier::Refused,
+                AdmissionTier::StagingOnly,
+                AdmissionTier::Strict,
+            ],
+            "ALL must list Refused, StagingOnly, Strict in source-order ladder",
+        );
+    }
+
+    /// [`AdmissionTier::ALL`] is already in ascending [`Ord`] order:
+    /// sorting the array yields the array itself. The structural pin
+    /// that ties `ALL`'s element order to the derived [`Ord`] ladder
+    /// (rather than to an arbitrary author-chosen order), so a future
+    /// variant insertion that placed the new variant out of ladder
+    /// order in `ALL` would light up here without depending on the
+    /// more brittle fixed-shape pin in
+    /// [`test_admission_tier_all_matches_canonical_ladder`]. Same
+    /// total-order discipline
+    /// [`test_admission_tier_total_order_is_refused_lt_staging_only_lt_strict`]
+    /// established for the per-variant chain, here lifted to the
+    /// canonical `ALL` enumeration.
+    #[test]
+    fn test_admission_tier_all_is_canonical_ladder_order() {
+        let mut sorted = AdmissionTier::ALL.to_vec();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            AdmissionTier::ALL.to_vec(),
+            "ALL must already be in ascending Ord order — sort is a no-op",
+        );
+    }
+
+    /// Every [`AdmissionTier`] variant appears in [`AdmissionTier::ALL`].
+    /// The load-bearing structural pin: the test reads every variant
+    /// through an exhaustive `match` (so the compiler refuses to compile
+    /// the test until a future variant is added to the match), and the
+    /// match body asserts the variant is contained in `ALL` — so a
+    /// future variant insertion that forgot to extend `ALL` lights up
+    /// at this one site. The compiler-enforced exhaustiveness is what
+    /// makes the variant-enumeration single-source: a forgotten variant
+    /// in `ALL` is structurally surfaced rather than silently degrading
+    /// every property test that iterates the const.
+    #[test]
+    fn test_admission_tier_all_contains_every_variant() {
+        fn must_appear_in_all(tier: AdmissionTier) {
+            match tier {
+                AdmissionTier::Refused => {
+                    assert!(
+                        AdmissionTier::ALL.contains(&AdmissionTier::Refused),
+                        "Refused must be in ALL",
+                    );
+                }
+                AdmissionTier::StagingOnly => {
+                    assert!(
+                        AdmissionTier::ALL.contains(&AdmissionTier::StagingOnly),
+                        "StagingOnly must be in ALL",
+                    );
+                }
+                AdmissionTier::Strict => {
+                    assert!(
+                        AdmissionTier::ALL.contains(&AdmissionTier::Strict),
+                        "Strict must be in ALL",
+                    );
+                }
+            }
+        }
+        for tier in AdmissionTier::ALL {
+            must_appear_in_all(tier);
+        }
+    }
+
+    /// [`AdmissionTier::ALL`] lists each variant exactly once — no
+    /// duplicates. Pairs with
+    /// [`test_admission_tier_all_contains_every_variant`] (which pins
+    /// the "every variant appears" direction) to seal the bijection
+    /// between the enum's variant set and the `ALL` const: a future
+    /// copy-paste regression that duplicated a variant entry in `ALL`
+    /// (e.g., a `[Refused, StagingOnly, StagingOnly]` typo on a variant
+    /// insertion) lights up here as a length-vs-distinct mismatch, even
+    /// though the exhaustive-match pin would still pass.
+    #[test]
+    fn test_admission_tier_all_variants_distinct() {
+        let mut sorted = AdmissionTier::ALL.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            AdmissionTier::ALL.len(),
+            "ALL must list each variant exactly once — no duplicates",
+        );
+    }
+
     /// Every strict-eligible state — both axes fully-covered /
     /// fully-verified, no saturation — returns
     /// [`AdmissionTier::Strict`]. The Phase 2 production-ready ceiling
@@ -15171,11 +15343,7 @@ mod tests {
     /// the reflexivity row.
     #[test]
     fn test_admission_tier_ord_is_reflexive_and_antisymmetric() {
-        let tiers = [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ];
+        let tiers = AdmissionTier::ALL;
         for tier in tiers {
             assert_eq!(tier.cmp(&tier), std::cmp::Ordering::Equal);
             assert!(tier <= tier);
@@ -15234,13 +15402,7 @@ mod tests {
     #[test]
     fn test_admission_tier_max_is_fleet_wide_best_case_tier() {
         assert_eq!(
-            [
-                AdmissionTier::Refused,
-                AdmissionTier::StagingOnly,
-                AdmissionTier::Strict,
-            ]
-            .into_iter()
-            .max(),
+            AdmissionTier::ALL.into_iter().max(),
             Some(AdmissionTier::Strict),
         );
         assert_eq!(
@@ -15441,11 +15603,7 @@ mod tests {
     /// `Strict`) would surface here.
     #[test]
     fn test_admission_tier_admits_strict_implies_admits_relaxed() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             if tier.admits_strict() {
                 assert!(
                     tier.admits_relaxed(),
@@ -15468,11 +15626,7 @@ mod tests {
     /// level 6×6 pin below.
     #[test]
     fn test_admission_tier_admits_relaxed_equals_geq_staging_only() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert_eq!(
                 tier.admits_relaxed(),
                 tier >= AdmissionTier::StagingOnly,
@@ -15495,11 +15649,7 @@ mod tests {
     /// already sealed against the bool surface.
     #[test]
     fn test_admission_tier_admits_strict_equals_geq_strict() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert_eq!(
                 tier.admits_strict(),
                 tier >= AdmissionTier::Strict,
@@ -15680,11 +15830,7 @@ mod tests {
     /// surface.
     #[test]
     fn test_admission_tier_refuses_relaxed_equals_lt_staging_only() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert_eq!(
                 tier.refuses_relaxed(),
                 tier < AdmissionTier::StagingOnly,
@@ -15708,11 +15854,7 @@ mod tests {
     /// mismatch.
     #[test]
     fn test_admission_tier_refuses_relaxed_equals_negation_of_admits_relaxed() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert_eq!(
                 tier.refuses_relaxed(),
                 !tier.admits_relaxed(),
@@ -15736,11 +15878,7 @@ mod tests {
     /// XOR-fails reading at the new variant.
     #[test]
     fn test_admission_tier_refuses_relaxed_xor_admits_relaxed_partitions_ladder() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert!(
                 tier.refuses_relaxed() ^ tier.admits_relaxed(),
                 "refuses_relaxed XOR admits_relaxed must hold at tier={tier:?}",
@@ -15858,11 +15996,7 @@ mod tests {
     /// ordering surface.
     #[test]
     fn test_admission_tier_refuses_strict_equals_lt_strict() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert_eq!(
                 tier.refuses_strict(),
                 tier < AdmissionTier::Strict,
@@ -15886,11 +16020,7 @@ mod tests {
     /// mismatch.
     #[test]
     fn test_admission_tier_refuses_strict_equals_negation_of_admits_strict() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert_eq!(
                 tier.refuses_strict(),
                 !tier.admits_strict(),
@@ -15919,11 +16049,7 @@ mod tests {
     /// and overlaps at both gates simultaneously.
     #[test]
     fn test_admission_tier_refuses_strict_xor_admits_strict_partitions_ladder() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert!(
                 tier.refuses_strict() ^ tier.admits_strict(),
                 "refuses_strict XOR admits_strict must hold at tier={tier:?}",
@@ -16038,11 +16164,7 @@ mod tests {
     /// typed-method-equals-variant surface.
     #[test]
     fn test_admission_tier_is_staging_only_equals_eq_staging_only() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert_eq!(
                 tier.is_staging_only(),
                 tier == AdmissionTier::StagingOnly,
@@ -16070,11 +16192,7 @@ mod tests {
     /// across the method bodies it composes from.
     #[test]
     fn test_admission_tier_is_staging_only_equals_admits_relaxed_and_refuses_strict() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert_eq!(
                 tier.is_staging_only(),
                 tier.admits_relaxed() && tier.refuses_strict(),
@@ -16104,11 +16222,7 @@ mod tests {
     /// surface here as a XOR-fails reading at the new variant.
     #[test]
     fn test_admission_tier_is_staging_only_three_way_partition_covers_ladder() {
-        for tier in [
-            AdmissionTier::Refused,
-            AdmissionTier::StagingOnly,
-            AdmissionTier::Strict,
-        ] {
+        for tier in AdmissionTier::ALL {
             assert!(
                 tier.admits_strict() ^ tier.is_staging_only() ^ tier.refuses_relaxed(),
                 "admits_strict XOR is_staging_only XOR refuses_relaxed must hold at tier={tier:?}",
