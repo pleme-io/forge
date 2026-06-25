@@ -4906,6 +4906,101 @@ impl std::fmt::Display for AdmissionTier {
     }
 }
 
+/// Parse the canonical lowercase / snake_case string each variant renders
+/// under [`AdmissionTier::as_str`] (and equivalently under the
+/// [`Display`](std::fmt::Display) impl that routes through it) back into
+/// the typed [`AdmissionTier`] sum. The named typed-primitive peer of the
+/// per-call-site `match s { "refused" => ..., "staging_only" => ...,
+/// "strict" => ..., _ => ... }` cascade a downstream CLI flag parser,
+/// telemetry-label rehydrator, or YAML-config deserializer would
+/// otherwise retype at every site that has to recover a tier from its
+/// canonical string label.
+///
+/// Sibling lift of [`crate::version::BumpLevel`]'s [`FromStr`] impl
+/// (which closes the `Display`↔`FromStr` round-trip at the
+/// version-bump-magnitude typed sum, pinned by
+/// [`crate::version::tests::test_bump_level_display_round_trips_through_from_str`]),
+/// here applied to the admission-tier typed sum. Together with
+/// [`AdmissionTier::as_str`] (commit 692ed22) and the [`Display`] impl
+/// (commit 6100b43) this closes the canonical-label round-trip at the
+/// per-axis composition surface: every `AdmissionTier ->
+/// to_string() -> FromStr` round-trip is the identity at every variant
+/// — pinned by
+/// [`tests::test_admission_tier_display_round_trips_through_from_str`].
+///
+/// # The round-trip invariant
+///
+/// For every [`AdmissionTier`] variant `t`,
+/// `t.to_string().parse::<AdmissionTier>().unwrap() == t`. The
+/// load-bearing structural pin the
+/// `Display`↔`FromStr` ↔ `as_str` triangle the
+/// [`crate::version::BumpLevel`] surface established at the magnitude
+/// ladder, here applied to the admission ladder. A regression that
+/// drifted either side of the canonical-label oracle (e.g., a future
+/// `as_str` extension that added an alias like `"refused_pending"` for
+/// [`AdmissionTier::Refused`] without a matching parser arm) lights up
+/// at one site rather than silently rendering through `Display` while
+/// failing through `FromStr`.
+///
+/// # Why the named parser, not a per-site match cascade
+///
+/// The per-site `match s { ... }` cascade is a structural duplication of
+/// the enum's variant declaration — every time a caller restates it, a
+/// future variant insertion (a `Pending` band strictly between
+/// [`AdmissionTier::Refused`] and [`AdmissionTier::StagingOnly`]
+/// admitting neither gate, a `StrictPlusAttestation` ceiling strictly
+/// above [`AdmissionTier::Strict`]) leaves silent gaps at every
+/// restatement site — the new variant's label parses to `Err` at every
+/// hand-rolled cascade that hasn't been updated, even though the
+/// canonical-label oracle ([`as_str`]) renders the new variant fine.
+/// Routing every consumer through [`FromStr`] makes the label→variant
+/// mapping single-source: a future variant insertion forces the author
+/// to extend exactly two sites (the [`as_str`] match body and this
+/// parser body), and every CLI / config / telemetry-rehydration consumer
+/// automatically picks up the new variant's canonical-label round-trip
+/// without per-site edits.
+///
+/// # String discipline
+///
+/// The parser is strict: no whitespace trimming, no case folding, no
+/// alias matrix. Only the three canonical lowercase / snake_case strings
+/// [`as_str`] emits parse — `"refused"`, `"staging_only"`, `"strict"`.
+/// Any other input — empty string, UpperCamel `"Refused"`, whitespace-
+/// padded `"  refused "`, unrelated tokens like `"invalid"` — errors
+/// with the same wording shape the [`crate::version::BumpLevel::from_str`]
+/// trap emits at the sibling typed sum: `"Invalid admission tier '<s>' —
+/// use refused, staging_only, or strict"`. A downstream caller that
+/// wants alias matrix or whitespace tolerance handles those concerns at
+/// its own surface (after trimming, normalising) and routes the
+/// normalised string through this canonical parser, so the canonical
+/// grammar is named at one site and surface-specific tolerances do not
+/// leak into the typed-primitive oracle.
+///
+/// THEORY.md §V.4 typed primitives: the label→variant rendering is a
+/// typed-primitive surface on [`AdmissionTier`] itself (one [`FromStr`]
+/// impl inverting one [`as_str`] match body), not a per-call-site
+/// cascade restated at every CLI / config / telemetry consumer that
+/// would otherwise re-derive the grammar. THEORY.md §VI.1 one-oracle
+/// discipline: the canonical-label grammar (which strings parse to
+/// which variant) is named at one site (this parser body), inverse to
+/// the one [`as_str`] site that emits them — every surface,
+/// [`Display`], the parser, future `Deserialize`, reads through one
+/// oracle.
+impl std::str::FromStr for AdmissionTier {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "refused" => Ok(Self::Refused),
+            "staging_only" => Ok(Self::StagingOnly),
+            "strict" => Ok(Self::Strict),
+            _ => Err(anyhow::anyhow!(
+                "Invalid admission tier '{s}' — use refused, staging_only, or strict",
+            )),
+        }
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -15051,6 +15146,101 @@ mod tests {
         for tier in AdmissionTier::ALL {
             assert_eq!(
                 tier.to_string(),
+                tier.as_str(),
+                "Display and as_str must agree at {tier:?}",
+            );
+        }
+    }
+
+    /// The three canonical lowercase / snake_case strings parse to the
+    /// three [`AdmissionTier`] variants exactly — the grammar oracle
+    /// inverse to [`AdmissionTier::as_str`] that every prior
+    /// `match s { "refused" | "staging_only" | "strict" | _ }` cascade
+    /// at a downstream CLI / config / telemetry rehydration consumer now
+    /// routes through. Mirrors the discipline
+    /// [`crate::version::tests::test_bump_level_from_str_canonical_strings`]
+    /// established at the sibling typed sum.
+    #[test]
+    fn test_admission_tier_from_str_canonical_strings() {
+        assert_eq!(
+            "refused".parse::<AdmissionTier>().unwrap(),
+            AdmissionTier::Refused,
+        );
+        assert_eq!(
+            "staging_only".parse::<AdmissionTier>().unwrap(),
+            AdmissionTier::StagingOnly,
+        );
+        assert_eq!(
+            "strict".parse::<AdmissionTier>().unwrap(),
+            AdmissionTier::Strict,
+        );
+    }
+
+    /// Any other string errors with wording that names the offending
+    /// input and echoes the canonical grammar — same shape the
+    /// [`crate::version::BumpLevel::from_str`] trap emits at the
+    /// sibling typed sum. The parser is strict: empty input, UpperCamel
+    /// rendering, whitespace padding, and unrelated tokens all reject.
+    /// A downstream surface that wants alias matrix or whitespace
+    /// tolerance handles those concerns before routing the normalised
+    /// string through this canonical parser.
+    #[test]
+    fn test_admission_tier_from_str_rejects_unknown() {
+        let err = "invalid".parse::<AdmissionTier>().unwrap_err().to_string();
+        assert!(
+            err.contains("Invalid admission tier 'invalid'"),
+            "error must name the offending input: {err}",
+        );
+        assert!(
+            err.contains("use refused, staging_only, or strict"),
+            "error must echo the canonical grammar: {err}",
+        );
+        assert!(
+            "".parse::<AdmissionTier>().is_err(),
+            "empty string is rejected",
+        );
+        assert!(
+            "Refused".parse::<AdmissionTier>().is_err(),
+            "UpperCamel is rejected — only canonical lowercase parses",
+        );
+        assert!(
+            "STRICT".parse::<AdmissionTier>().is_err(),
+            "uppercase is rejected — only canonical lowercase parses",
+        );
+        assert!(
+            "  refused ".parse::<AdmissionTier>().is_err(),
+            "whitespace is not trimmed at this surface — caller's responsibility",
+        );
+        assert!(
+            "stagingonly".parse::<AdmissionTier>().is_err(),
+            "snake_case is load-bearing — `stagingonly` without the underscore is rejected",
+        );
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`], the round-trip `tier -> Display ->
+    /// FromStr` is the identity — `tier.to_string().parse::<AdmissionTier>()
+    /// .unwrap() == tier`. The load-bearing structural pin that ties the
+    /// canonical-label oracle ([`as_str`]) to its inverse ([`FromStr`])
+    /// via the [`Display`] impl that routes through [`as_str`]: a
+    /// regression that drifted either side (e.g., a future variant
+    /// insertion that extended [`as_str`] without a matching parser
+    /// arm, or a parser-only alias extension that bypassed the [`as_str`]
+    /// canonical label) desynchronises this pin at one site.
+    /// Mirrors the discipline
+    /// [`crate::version::tests::test_bump_level_display_round_trips_through_from_str`]
+    /// established at the sibling typed sum.
+    #[test]
+    fn test_admission_tier_display_round_trips_through_from_str() {
+        for tier in AdmissionTier::ALL {
+            let s = tier.to_string();
+            assert_eq!(
+                s.parse::<AdmissionTier>().unwrap(),
+                tier,
+                "Display→FromStr must round-trip at {tier:?} (got {s:?})",
+            );
+            assert_eq!(
+                s.as_str(),
                 tier.as_str(),
                 "Display and as_str must agree at {tier:?}",
             );
