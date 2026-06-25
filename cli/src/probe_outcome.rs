@@ -4876,6 +4876,36 @@ impl AdmissionTier {
     }
 }
 
+/// Render an [`AdmissionTier`] through its canonical lowercase / snake_case
+/// label so `tier.to_string()`, `format!("{tier}")`, and `write!(f, "{tier}")`
+/// all surface the variant the same way [`AdmissionTier::as_str`] does. The
+/// `Display` impl routes through [`AdmissionTier::as_str`] so the variant→label
+/// mapping stays single-source: a future variant insertion (`Pending` band,
+/// `StrictPlusAttestation` ceiling) updates the [`as_str`] match body alone
+/// and every `format!` / `write!` consumer automatically inherits the new
+/// canonical label.
+///
+/// Sibling lift of [`crate::version::BumpLevel`]'s `Display` impl (which routes
+/// through [`crate::version::BumpLevel::as_str`]), here applied to the
+/// admission-tier typed sum. Together with [`AdmissionTier::as_str`] this
+/// closes the `to_string()` / `format!` surface a downstream telemetry or
+/// log-formatting consumer reads the tier through — no per-call-site `match`
+/// cascade that drifts when a fourth variant is inserted.
+///
+/// THEORY.md §V.4 typed primitives: the per-variant string rendering is a
+/// typed-primitive surface on [`AdmissionTier`] itself (one `Display` impl
+/// routing through one `as_str` match body), not a per-call-site cascade
+/// restated at every `format!("{:?}", tier)` site that would otherwise emit
+/// `Refused` / `StagingOnly` / `Strict` UpperCamel labels via the derived
+/// `Debug` rendering. THEORY.md §VI.1 one-oracle discipline: the canonical
+/// label is named at one site ([`AdmissionTier::as_str`]) and every
+/// surface — `as_str`, `Display`, future `Serialize` — reads through it.
+impl std::fmt::Display for AdmissionTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -14991,6 +15021,40 @@ mod tests {
             n,
             "as_str must be injective across ALL — no two variants share a label",
         );
+    }
+
+    /// [`AdmissionTier`]'s `Display` impl renders each variant as its
+    /// canonical lowercase / snake_case string — the same label
+    /// [`AdmissionTier::as_str`] returns. The fixed-shape pin: a regression
+    /// that drifted the `Display` impl off [`as_str`] (e.g., a hand-written
+    /// `match self { Refused => write!(f, "Refused") }` cascade slipping in
+    /// and re-introducing UpperCamel labels through `to_string()`) lights
+    /// up here at one site, preventing the drift from leaking to every
+    /// `format!("{tier}")` / `to_string()` consumer that surfaces the tier.
+    #[test]
+    fn test_admission_tier_display_canonical_strings() {
+        assert_eq!(AdmissionTier::Refused.to_string(), "refused");
+        assert_eq!(AdmissionTier::StagingOnly.to_string(), "staging_only");
+        assert_eq!(AdmissionTier::Strict.to_string(), "strict");
+    }
+
+    /// At every [`AdmissionTier`] variant, the `Display` rendering agrees
+    /// byte-for-byte with [`AdmissionTier::as_str`]. The structural pin
+    /// that ties the `Display` impl to the single-source `as_str` match
+    /// body, so a future variant insertion automatically inherits both
+    /// surfaces from the one site. Mirrors the discipline
+    /// [`crate::version::tests::test_bump_level_display_round_trips_through_from_str`]
+    /// established at the sibling typed sum: `Display` must agree with
+    /// `as_str` at every variant the `ALL` const enumerates.
+    #[test]
+    fn test_admission_tier_display_agrees_with_as_str() {
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                tier.to_string(),
+                tier.as_str(),
+                "Display and as_str must agree at {tier:?}",
+            );
+        }
     }
 
     /// Every strict-eligible state — both axes fully-covered /
