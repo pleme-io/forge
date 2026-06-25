@@ -4519,6 +4519,68 @@ impl AdmissionTier {
     #[allow(dead_code)]
     pub const ALL: [Self; 3] = [Self::Refused, Self::StagingOnly, Self::Strict];
 
+    /// The canonical lowercase / snake_case string each variant renders
+    /// as for telemetry labels, log lines, structured-failure-replay
+    /// payloads, and CLI shell-completion tables. The named typed-
+    /// primitive peer of the per-variant `match tier { Refused =>
+    /// "refused", StagingOnly => "staging_only", Strict => "strict" }`
+    /// cascade a downstream telemetry/logging consumer would otherwise
+    /// retype at every call site that surfaces the tier as a string.
+    ///
+    /// Sibling lift of [`crate::version::BumpLevel::as_str`] (the named
+    /// canonical-string peer of [`crate::version::BumpLevel::ALL`] at
+    /// the magnitude-ladder typed sum), here applied to the
+    /// admission-tier typed sum at the per-axis composition surface.
+    /// Const-callable so a `const TIER_LABEL: &str = AdmissionTier::
+    /// Refused.as_str();` table at a future CLI / telemetry-config site
+    /// is admissible.
+    ///
+    /// # Why the named method, not a per-site match cascade
+    ///
+    /// The per-site `match` cascade is a structural duplication of the
+    /// enum's variant declaration: every time a caller restates it, a
+    /// future variant insertion (a `Pending` band strictly between
+    /// `Refused` and `StagingOnly` admitting neither gate, a
+    /// `StrictPlusAttestation` ceiling strictly above `Strict`) leaves
+    /// the consumer with an unhandled arm that either fails to compile
+    /// (if the cascade is exhaustive) or silently mis-labels the new
+    /// variant (if the cascade falls through a wildcard `_ =>
+    /// "unknown"` arm). Routing every per-variant string rendering
+    /// through [`as_str`](Self::as_str) makes the variant→label mapping
+    /// single-source: a future variant insertion forces the author to
+    /// extend exactly one site (the `match` body here), and every
+    /// telemetry/log/CLI consumer automatically picks up the new
+    /// variant's canonical label without per-site edits.
+    ///
+    /// # String discipline
+    ///
+    /// Lowercase + snake_case at every variant — matches the discipline
+    /// [`crate::version::BumpLevel::as_str`] established at the sibling
+    /// typed sum (`"patch"` / `"minor"` / `"major"`), and matches the
+    /// `serde(rename_all = "snake_case")` convention the deploy
+    /// orchestrator's `ProductionStrategy` enum (cli/src/config/
+    /// deployment.rs) routes its YAML surface through. A downstream
+    /// telemetry/log consumer can assume canonical-snake-case labels
+    /// across the repo's typed sums without per-enum casing rules.
+    ///
+    /// THEORY.md §V.4 typed primitives: the variant→label rendering is
+    /// a typed-primitive surface on [`AdmissionTier`] itself (one named
+    /// method), not a per-call-site `match` cascade restated at every
+    /// telemetry/log/CLI site that re-derives the labels. THEORY.md
+    /// §VI.1 generation over composition (three-times rule): the
+    /// variant→label mapping recurs at every consumer that surfaces
+    /// the tier as a string; centralising it at the typed-primitive
+    /// surface forecloses the drift class where two telemetry sites
+    /// drift to different labels for the same variant.
+    #[allow(dead_code)]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Refused => "refused",
+            Self::StagingOnly => "staging_only",
+            Self::Strict => "strict",
+        }
+    }
+
     /// True iff this tier admits the relaxed (Phase 1) gate — i.e.,
     /// `self >= AdmissionTier::StagingOnly` under the derived [`Ord`]
     /// instance. The typed-method peer of the
@@ -14861,6 +14923,73 @@ mod tests {
             sorted.len(),
             AdmissionTier::ALL.len(),
             "ALL must list each variant exactly once — no duplicates",
+        );
+    }
+
+    /// Each [`AdmissionTier`] variant renders to its canonical lowercase
+    /// snake_case string under [`AdmissionTier::as_str`]. The fixed-
+    /// shape pin a telemetry/log consumer reads through: a regression
+    /// that drifted any variant's label (e.g., a typo `"staging-only"`
+    /// substituting the canonical `"staging_only"`, or an UpperCamel
+    /// `"StagingOnly"` slipping in) lights up here at exactly one site,
+    /// preventing the drift from leaking to every consumer that
+    /// surfaces the tier as a string. Pins the canonical labels at the
+    /// typed-primitive surface so the downstream telemetry/log/CLI
+    /// fleet reads through one named contract.
+    #[test]
+    fn test_admission_tier_as_str_canonical_strings() {
+        assert_eq!(AdmissionTier::Refused.as_str(), "refused");
+        assert_eq!(AdmissionTier::StagingOnly.as_str(), "staging_only");
+        assert_eq!(AdmissionTier::Strict.as_str(), "strict");
+    }
+
+    /// Every [`AdmissionTier`] variant's [`as_str`](AdmissionTier::as_str)
+    /// rendering is lowercase + snake_case (lowercase ASCII letters,
+    /// digits, or underscores only — no hyphens, no whitespace, no
+    /// uppercase). Matches the discipline
+    /// [`crate::version::BumpLevel::as_str`] established at the sibling
+    /// typed sum and the `serde(rename_all = "snake_case")` convention
+    /// the deploy orchestrator's `ProductionStrategy` enum routes its
+    /// YAML surface through. Iterates [`AdmissionTier::ALL`] so a future
+    /// variant insertion automatically inherits the discipline pin —
+    /// a new variant labelled `"strict-plus-attestation"` (kebab-case)
+    /// or `"StrictPlusAttestation"` (UpperCamel) would light up here.
+    #[test]
+    fn test_admission_tier_as_str_lowercase_snake_case() {
+        for tier in AdmissionTier::ALL {
+            let s = tier.as_str();
+            assert!(!s.is_empty(), "as_str must not be empty at {tier:?}",);
+            assert!(
+                s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "as_str must be lowercase snake_case at {tier:?} (got {s:?})",
+            );
+        }
+    }
+
+    /// Every [`AdmissionTier`] variant's [`as_str`](AdmissionTier::as_str)
+    /// rendering is distinct from every other variant's — the
+    /// variant→label mapping is injective across [`AdmissionTier::ALL`].
+    /// Pairs with [`test_admission_tier_as_str_canonical_strings`]
+    /// (which pins the canonical labels) to seal the bijection between
+    /// the variant axis and the label axis: a future variant insertion
+    /// that collided with an existing label (e.g., a `Pending` variant
+    /// labelled `"refused"`) would silently re-classify every
+    /// telemetry/log consumer that branched on the label — this test
+    /// surfaces the collision at the one source-of-truth site.
+    #[test]
+    fn test_admission_tier_as_str_distinct() {
+        let mut labels: Vec<&'static str> = AdmissionTier::ALL
+            .iter()
+            .map(AdmissionTier::as_str)
+            .collect();
+        let n = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(
+            labels.len(),
+            n,
+            "as_str must be injective across ALL — no two variants share a label",
         );
     }
 
