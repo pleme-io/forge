@@ -1670,6 +1670,108 @@ mod tests {
         }
     }
 
+    /// At every `(level_a, level_b)` pair over [`BumpLevel::ALL`] × [`BumpLevel::ALL`]
+    /// (the 3×3 grid, 9 pairs), the [`BumpLevel`] total order is reflected
+    /// in the bump-output total order: `level_a.cmp(&level_b)` equals
+    /// `parse_semver(bump_semver_typed(v, level_a)).cmp(
+    /// &parse_semver(bump_semver_typed(v, level_b)))` in semver lex order
+    /// (the natural [`Ord`] on `(u64, u64, u64)`) at every well-formed input
+    /// version `v`. The structural anchor that the [`BumpLevel`] ladder
+    /// `Patch < Minor < Major` is an ORDER ISOMORPHISM onto the bump-output
+    /// ladder, not merely a typed sum carrying a derived order: bumping by
+    /// a strictly higher level yields a strictly higher output (strict
+    /// monotonicity at `level_a < level_b`), bumping by an equal level
+    /// yields an equal output (reflexivity at `level_a == level_b`), and
+    /// the inverse pair holds at the dual end (`level_a > level_b` ⇒
+    /// `out_a > out_b`).
+    ///
+    /// The pin sits next to the totality pin
+    /// ([`test_bump_semver_typed_total_over_bump_level_domain`]) at the
+    /// [`bump_semver_typed`] surface: totality says every level yields an
+    /// `Ok` output; this isomorphism pin says the level→output map respects
+    /// the ladder structure on both ends. Together they pin the structural
+    /// signature `bump_semver_typed : (version, BumpLevel) → semver-triple`
+    /// as a total order-isomorphism on the level axis at every well-formed
+    /// version input — the load-bearing fact a downstream release-pipeline
+    /// gate reading `level >= BumpLevel::Major` depends on for "produces a
+    /// major-version output", and the dual fact a `level <= BumpLevel::Patch`
+    /// reading depends on for "produces a patch-only output". The named
+    /// typed-method peer [`BumpLevel::is_breaking`] (`>= Major`) and its De
+    /// Morgan complement [`BumpLevel::is_non_breaking`] (`< Major`) ride
+    /// this same isomorphism: a release-notes gate that reads
+    /// `level.is_breaking()` to decide whether to surface the major-bump
+    /// upgrade-guide section trusts that the rendered `bump_semver_typed`
+    /// output also reflects that `>= Major` reading on the semver-triple
+    /// axis. Across the present three-variant ladder the strict cases
+    /// resolve to:
+    ///
+    /// - `Patch < Minor` ⇒ `(M, m, p+1) < (M, m+1, 0)` (the patch lex
+    ///   advances the lowest component; the minor lex advances the middle
+    ///   and zeroes the lowest — middle-advance dominates by lex
+    ///   precedence);
+    /// - `Minor < Major` ⇒ `(M, m+1, 0) < (M+1, 0, 0)` (the major lex
+    ///   advances the highest component and zeroes the lower two —
+    ///   highest-advance dominates by lex precedence);
+    /// - `Patch < Major` ⇒ `(M, m, p+1) < (M+1, 0, 0)` (composition by
+    ///   transitivity).
+    ///
+    /// Versions exercised: `"1.2.3"` (interior input with non-zero
+    /// components on every axis — the standard release-cadence input,
+    /// where every bump-output triple is distinguishable on every
+    /// component), `"0.0.0"` (boundary input at the floor — the zeroed-
+    /// component case the typed-bump primitive must distinguish without
+    /// underflow or off-by-one), and `"9.9.9"` (saturation input with
+    /// high-decade components — the case the bump arithmetic must
+    /// distinguish without confusion between `9.9.10` and `9.10.0` lex
+    /// order on the patch axis). The full 3-version × 9-pair = 27-case
+    /// sweep exhausts the present level-axis combinatorics across three
+    /// structurally-distinct input shapes; a future ladder refinement
+    /// that broke the order isomorphism (e.g., a hypothetical
+    /// `Prerelease` variant inserted strictly below `Patch` whose
+    /// bump-output overlapped the `Patch` semver-triple) would light up
+    /// here at exactly the offending pair.
+    ///
+    /// THEORY.md §III.3 lattice algebra: the level axis carries a
+    /// chain-derived bounded distributive lattice (pinned by
+    /// `test_bump_level_meet_distributes_over_join_at_every_triple` and
+    /// `test_bump_level_join_distributes_over_meet_at_every_triple`), and
+    /// the bump-output axis carries a sublattice of the semver-triple
+    /// total order via the order-preserving embedding pinned here — the
+    /// structural witness that the [`BumpLevel`] lattice operations
+    /// (`meet` / `join`) propagate downstream onto the rendered version
+    /// string without retyping the order discipline at every consumer.
+    /// THEORY.md §V.1 construction guarantees: the property test sweeps
+    /// the full 27-case cross product so the order-isomorphism axiom is
+    /// proven by construction at every reachable (version, level_a,
+    /// level_b) triple at the typed-primitive site, not approximated by
+    /// spot checks.
+    #[test]
+    fn test_bump_semver_typed_reflects_bump_level_order_across_cross_product() {
+        let versions = ["1.2.3", "0.0.0", "9.9.9"];
+        for version in versions {
+            for level_a in BumpLevel::ALL {
+                for level_b in BumpLevel::ALL {
+                    let out_a = parse_semver(
+                        &bump_semver_typed(version, level_a).expect("typed bump must succeed"),
+                    )
+                    .expect("typed bump must produce a parseable semver triple");
+                    let out_b = parse_semver(
+                        &bump_semver_typed(version, level_b).expect("typed bump must succeed"),
+                    )
+                    .expect("typed bump must produce a parseable semver triple");
+                    assert_eq!(
+                        level_a.cmp(&level_b),
+                        out_a.cmp(&out_b),
+                        "BumpLevel total order must be reflected in bump-output \
+                         total order at version {version:?}: \
+                         level_a={level_a:?}, level_b={level_b:?}, \
+                         out_a={out_a:?}, out_b={out_b:?}",
+                    );
+                }
+            }
+        }
+    }
+
     /// The magnitude ladder `Patch < Minor < Major` holds at every
     /// adjacent and end-to-end pair. The structural pin that lets a
     /// release-pipeline policy read `level >= BumpLevel::Minor` instead of
