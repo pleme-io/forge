@@ -5262,6 +5262,122 @@ impl AdmissionTier {
     pub fn meet(self, other: Self) -> Self {
         self.min(other)
     }
+
+    /// The lattice join over the admission-tier ladder — the
+    /// [`AdmissionTier`] AT LEAST ONE of `self` and `other` admits at the
+    /// per-axis-OR ceiling. Reads `self.max(other)` at one named site,
+    /// returning the higher of the two variants on the derived [`Ord`]
+    /// ladder (`Refused < StagingOnly < Strict`). The named typed-method
+    /// peer of the [`Ord::max`] reduction at the [`AdmissionTier`]
+    /// surface, the structural mirror of
+    /// [`crate::version::BumpLevel::join`] at the version-bump-magnitude
+    /// ladder, the lattice-dual of [`meet`](Self::meet) at the same
+    /// admission-tier ladder, and the per-axis-OR surface oracle
+    /// [`per_axis_admission_tier_ceiling`] routes through.
+    ///
+    /// # The per-axis-OR-ceiling reading
+    ///
+    /// A consumer that walks a heterogeneous slice of admission tiers —
+    /// the per-axis-OR ceiling across the probe and verification axes, a
+    /// SLSA-style best-attained-tier across N attestation sources, a
+    /// fleet-wide rollout reporter folding per-service tiers into the
+    /// best tier any service admits — reads the join-fold
+    /// `tiers.iter().fold(AdmissionTier::Refused, |acc, t| acc.join(*t))`
+    /// through one named oracle, with [`AdmissionTier::Refused`] as the
+    /// identity element (any tier joins with `Refused` to itself) and
+    /// [`AdmissionTier::Strict`] as the absorbing element (any tier
+    /// joined with `Strict` collapses to `Strict`). The duals of the
+    /// [`meet`](Self::meet) identity / absorbing-element pair on the same
+    /// ladder, and the structural mirror of the
+    /// [`crate::version::BumpLevel::join`] identity / absorbing-element
+    /// pair on the magnitude ladder.
+    ///
+    /// # Why a named method, not raw `Ord::max`
+    ///
+    /// The body reads `self.max(other)`, and at every reachable
+    /// `(self, other)` pair the two readings agree (pinned by
+    /// [`tests::test_admission_tier_join_agrees_with_max_at_every_pair`]).
+    /// The named [`join`](Self::join) surface carries TWO load-bearing
+    /// pieces of content the bare [`Ord::max`] call does not:
+    ///
+    /// 1. The per-axis-OR-ceiling semantic role: a per-axis-ceiling
+    ///    consumer reading
+    ///    `probe.admission_tier().join(verification.admission_tier())`
+    ///    reads "the tier at least one axis admits at the per-axis-OR
+    ///    ceiling" at the call site, where the same consumer reading
+    ///    `probe.admission_tier().max(verification.admission_tier())`
+    ///    reads "the larger of the two tiers" — the `max` form is a
+    ///    general lattice op shared with arbitrary comparable types, the
+    ///    `join` form names the per-axis-OR-ceiling reading at the
+    ///    typed-primitive surface. Same THEORY.md §V.4 honesty-channel
+    ///    discipline [`meet`](Self::meet) established at the per-axis-AND
+    ///    floor surface, here at the lattice-dual per-axis-OR ceiling
+    ///    surface.
+    /// 2. A one-oracle anchor for a future ladder refinement. The lattice
+    ///    join over a total order coincides with [`Ord::max`] by
+    ///    definition, but a future ladder extension that introduces
+    ///    structural distinctions inside the admission axis (a
+    ///    `StrictPlusAttestation` variant strictly above `Strict` with
+    ///    refined per-axis-OR-ceiling semantics — does
+    ///    `StrictPlusAttestation.join(Strict) == StrictPlusAttestation`?
+    ///    does it propagate up to a refined ceiling distinct from the
+    ///    canonical strict ceiling?) extends this method body once,
+    ///    instead of retyping the per-axis-OR-ceiling oracle at every
+    ///    consumer's inline `.max()` call.
+    ///
+    /// # Algebraic invariants
+    ///
+    /// The lattice join over a total order is idempotent, commutative,
+    /// and associative, with the ladder floor
+    /// ([`AdmissionTier::Refused`]) as the identity element and the
+    /// ladder ceiling ([`AdmissionTier::Strict`]) as the absorbing
+    /// element — the duals of the [`meet`](Self::meet) invariants on the
+    /// same ladder. The join is bounded below by both arguments, pinned
+    /// by
+    /// [`tests::test_admission_tier_join_bounded_below_by_both_arguments`]
+    /// — the structural witness that the join of two tiers sits at or
+    /// above the strictest of the pair. Together with [`meet`](Self::meet)
+    /// the join closes the lattice-operation pair on the admission-tier
+    /// surface — the absorption laws
+    /// `a.join(a.meet(b)) == a` and `a.meet(a.join(b)) == a` at every
+    /// pair are pinned by
+    /// [`tests::test_admission_tier_meet_join_absorption_at_every_pair`],
+    /// the structural anchor that the meet/join pair forms a LATTICE in
+    /// the algebraic sense.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the per-axis-OR-ceiling
+    /// reading is a lattice operation (`max`) on the derived [`Ord`]
+    /// ladder, named at the typed-primitive surface so a downstream
+    /// consumer reads `tier_a.join(tier_b)` once and is automatically
+    /// updated across a future ladder refinement. THEORY.md §VI.1 one-
+    /// oracle / generation-over-composition: the per-axis-OR-ceiling
+    /// idiom is named at one site (this method's body), not retyped at
+    /// every consumer's inline `.max()` call. Same one-oracle discipline
+    /// [`meet`](Self::meet) established at the per-axis-AND floor surface,
+    /// here applied to the dual per-axis-OR ceiling surface.
+    ///
+    /// Frontier inspiration: SLSA L3+ provenance gates read the best-
+    /// attained source tier as the join (`max`) over per-source
+    /// attestation tiers — the "any source admits at this ceiling"
+    /// reading where the bound is the strongest tier any contributing
+    /// source achieves; sigstore policy-controller reduces per-
+    /// attestation-axis tier verdicts through a per-attestation-OR
+    /// ceiling over the per-attestation tiers, so the verifier reads
+    /// the best tier any attestation admits at one named site rather
+    /// than recomposing the per-attestation max-fold inline. Translated
+    /// here as: lift the inline `.max()` over per-axis admission-tier
+    /// readings to one named typed-primitive method at the
+    /// [`AdmissionTier`] sum surface so a downstream per-axis-OR-ceiling
+    /// consumer reads through one oracle, with the per-axis-OR-ceiling
+    /// free function [`per_axis_admission_tier_ceiling`] re-routed to
+    /// consume this named lattice operation, closing the lattice-
+    /// operation pair at the typed-primitive surface against the
+    /// per-axis-AND-floor sibling [`meet`](Self::meet) landed in
+    /// commit 0093064.
+    #[allow(dead_code)]
+    pub fn join(self, other: Self) -> Self {
+        self.max(other)
+    }
 }
 
 /// Render an [`AdmissionTier`] through its canonical lowercase / snake_case
@@ -5650,7 +5766,7 @@ pub fn per_axis_admission_tier_ceiling(
     probe: &ProbeCoverage,
     verification: &VerificationCoverage,
 ) -> AdmissionTier {
-    probe.admission_tier().max(verification.admission_tier())
+    probe.admission_tier().join(verification.admission_tier())
 }
 
 /// The per-axis-collapse predicate over the per-axis admission-tier
@@ -17713,6 +17829,317 @@ mod tests {
                 assert_eq!(
                     via_floor, via_meet,
                     "per_axis_admission_tier_floor must route through AdmissionTier::meet at \
+                     (probe={probe:?}, verification={verification:?})",
+                );
+            }
+        }
+    }
+
+    /// Exact-shape per-(a, b) pin over the 3×3 grid of admission-tier
+    /// pairs: every cell of the join matrix reads the best tier at least
+    /// one argument admits at the per-axis-OR ceiling under the derived
+    /// ladder (`Refused < StagingOnly < Strict`). Ceiling-sibling at the
+    /// lattice-join surface, the structural mirror of
+    /// `test_bump_level_join_named_at_release_aggregation_surface` at
+    /// the magnitude-ladder surface and the lattice-dual of
+    /// `test_admission_tier_meet_named_at_per_axis_and_floor_surface` at
+    /// the same admission-tier ladder.
+    #[test]
+    fn test_admission_tier_join_named_at_per_axis_or_ceiling_surface() {
+        use AdmissionTier::*;
+        let cells: &[(AdmissionTier, AdmissionTier, AdmissionTier)] = &[
+            (Refused, Refused, Refused),
+            (Refused, StagingOnly, StagingOnly),
+            (Refused, Strict, Strict),
+            (StagingOnly, Refused, StagingOnly),
+            (StagingOnly, StagingOnly, StagingOnly),
+            (StagingOnly, Strict, Strict),
+            (Strict, Refused, Strict),
+            (Strict, StagingOnly, Strict),
+            (Strict, Strict, Strict),
+        ];
+        for (a, b, expected) in cells.iter().copied() {
+            assert_eq!(
+                a.join(b),
+                expected,
+                "join({a:?}, {b:?}) must read {expected:?}",
+            );
+        }
+    }
+
+    /// Structural-equivalence pin against [`Ord::max`] at every
+    /// `(a, b)` over the 3×3 grid. Makes the `max` form the load-bearing
+    /// oracle, so a future variant insertion that desynced the method
+    /// body from the derived [`Ord`] ladder lights up here rather than
+    /// drifting silently. Lattice-dual of
+    /// `test_admission_tier_meet_agrees_with_min_at_every_pair`.
+    #[test]
+    fn test_admission_tier_join_agrees_with_max_at_every_pair() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                assert_eq!(
+                    a.join(b),
+                    a.max(b),
+                    "join({a:?}, {b:?}) must read self.max(other)",
+                );
+            }
+        }
+    }
+
+    /// Idempotence at every variant: `a.join(a) == a`. Sibling of the
+    /// reflexive-ordering pin at the derived-[`Ord`] surface, here at
+    /// the lattice-join surface, and the lattice-dual of the meet
+    /// idempotence pin.
+    #[test]
+    fn test_admission_tier_join_is_idempotent_at_every_variant() {
+        for a in AdmissionTier::ALL {
+            assert_eq!(a.join(a), a, "join({a:?}, {a:?}) must read {a:?}");
+        }
+    }
+
+    /// Commutativity at every `(a, b)`. The load-bearing fact a
+    /// per-axis-OR-ceiling fold relies on to be insensitive to per-axis
+    /// ORDER (e.g., a fleet-wide rollout reporter may iterate probe
+    /// before verification or vice versa without changing the ceiling
+    /// reading).
+    #[test]
+    fn test_admission_tier_join_is_commutative_at_every_pair() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                assert_eq!(
+                    a.join(b),
+                    b.join(a),
+                    "join({a:?}, {b:?}) must equal join({b:?}, {a:?})",
+                );
+            }
+        }
+    }
+
+    /// Associativity at every `(a, b, c)` over the 3×3×3 grid. The
+    /// structural anchor a per-axis-OR-ceiling fold relies on to be
+    /// insensitive to per-axis GROUPING (e.g., a future third axis added
+    /// to the per-axis-ceiling surface folds either left or right to the
+    /// same ceiling).
+    #[test]
+    fn test_admission_tier_join_is_associative_at_every_triple() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                for c in AdmissionTier::ALL {
+                    assert_eq!(
+                        a.join(b.join(c)),
+                        a.join(b).join(c),
+                        "join({a:?}, join({b:?}, {c:?})) must equal join(join({a:?}, {b:?}), {c:?})",
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`AdmissionTier::Refused`] is the identity element of the lattice
+    /// join: `Refused.join(a) == a.join(Refused) == a` at every variant.
+    /// The load-bearing fact a per-axis-OR-ceiling fold seeds at
+    /// `Refused` with (a fold seeded at `Refused` over a sequence returns
+    /// the join of the sequence, or `Refused` on an empty sequence — the
+    /// no-axes ceiling shape). The lattice-dual of the meet
+    /// Strict-identity pin.
+    #[test]
+    fn test_admission_tier_join_has_refused_as_identity() {
+        for a in AdmissionTier::ALL {
+            assert_eq!(
+                AdmissionTier::Refused.join(a),
+                a,
+                "Refused.join({a:?}) must read {a:?}",
+            );
+            assert_eq!(
+                a.join(AdmissionTier::Refused),
+                a,
+                "{a:?}.join(Refused) must read {a:?}",
+            );
+        }
+    }
+
+    /// [`AdmissionTier::Strict`] is the absorbing element of the lattice
+    /// join: `Strict.join(a) == a.join(Strict) == Strict` at every
+    /// variant. The load-bearing fact a per-axis-OR-ceiling fold can
+    /// early-exit on: once any per-axis tier reads `Strict`, the
+    /// per-axis-OR ceiling collapses to `Strict` regardless of the
+    /// remaining axes. The lattice-dual of the meet Refused-absorbing
+    /// pin.
+    #[test]
+    fn test_admission_tier_join_has_strict_as_absorbing_element() {
+        for a in AdmissionTier::ALL {
+            assert_eq!(
+                AdmissionTier::Strict.join(a),
+                AdmissionTier::Strict,
+                "Strict.join({a:?}) must read Strict",
+            );
+            assert_eq!(
+                a.join(AdmissionTier::Strict),
+                AdmissionTier::Strict,
+                "{a:?}.join(Strict) must read Strict",
+            );
+        }
+    }
+
+    /// The join is bounded below by both arguments:
+    /// `a.join(b) >= a && a.join(b) >= b` at every `(a, b)`. The
+    /// structural witness that the join sits at or above the strictest
+    /// of the input pair on the derived [`Ord`] ladder — a downstream
+    /// consumer that branches on "the per-axis-OR ceiling is at least as
+    /// strict as either axis" reads the bound through one named site.
+    /// The lattice-dual of the meet bounded-above pin.
+    #[test]
+    fn test_admission_tier_join_bounded_below_by_both_arguments() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                let j = a.join(b);
+                assert!(j >= a, "join({a:?}, {b:?}) = {j:?} must be >= {a:?}");
+                assert!(j >= b, "join({a:?}, {b:?}) = {j:?} must be >= {b:?}");
+            }
+        }
+    }
+
+    /// The lattice join over a total order is the identity-or-other
+    /// readback: `a.join(b) ∈ {a, b}` at every `(a, b)`. The structural
+    /// witness that the admission-tier join is the same operation
+    /// [`Ord::max`] surfaces, distinct from a free-lattice join that
+    /// could synthesize a fresh value not appearing in the input pair.
+    /// The lattice-dual of the meet returns-one-of-arguments pin.
+    #[test]
+    fn test_admission_tier_join_returns_one_of_the_arguments() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                let j = a.join(b);
+                assert!(
+                    j == a || j == b,
+                    "join({a:?}, {b:?}) = {j:?} must equal {a:?} or {b:?}",
+                );
+            }
+        }
+    }
+
+    /// The lattice-bracket pin: `a.meet(b) <= a.join(b)` at every
+    /// `(a, b)`. The load-bearing total-order witness that the meet/join
+    /// pair forms a non-empty lattice bracket at every input pair on the
+    /// derived [`Ord`] ladder, the typed-primitive mirror of
+    /// `test_per_axis_admission_tier_floor_le_ceiling_across_cross_product`
+    /// at the per-axis admission-tier surface, here at the
+    /// [`AdmissionTier`] sum and the structural mirror of
+    /// `test_bump_level_meet_le_join_at_every_pair` at the magnitude
+    /// ladder. Equality holds when the inputs coincide
+    /// (`a.meet(a) == a == a.join(a)`); strict inequality holds at every
+    /// asymmetric pair (the meet and join return the two distinct
+    /// arguments respectively).
+    #[test]
+    fn test_admission_tier_meet_le_join_at_every_pair() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                let m = a.meet(b);
+                let j = a.join(b);
+                assert!(
+                    m <= j,
+                    "meet({a:?}, {b:?}) = {m:?} must be <= join({a:?}, {b:?}) = {j:?}",
+                );
+            }
+        }
+    }
+
+    /// Absorption laws: `a.join(a.meet(b)) == a` and `a.meet(a.join(b))
+    /// == a` at every pair over the 3×3 grid. The structural anchor that
+    /// the meet/join pair forms a LATTICE in the algebraic sense — two
+    /// reductions over the same [`Ord`] ladder, related by the absorption
+    /// laws so that "join with one's own meet collapses" and "meet with
+    /// one's own join collapses." A future ladder refinement that broke
+    /// the absorption laws (e.g., a meet-irreducible variant inserted
+    /// where `a.meet(b)` returned a strict lower bound of both arguments)
+    /// would light up here, surfacing the structural distinction at the
+    /// lattice-pair site rather than at every consumer. The
+    /// admission-tier mirror of
+    /// `test_bump_level_meet_join_absorption_at_every_pair` at the
+    /// magnitude-ladder surface. The load-bearing fact a downstream
+    /// lattice-walk relies on to round-trip through the meet/join pair
+    /// without unbounded drift.
+    #[test]
+    fn test_admission_tier_meet_join_absorption_at_every_pair() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                assert_eq!(
+                    a.join(a.meet(b)),
+                    a,
+                    "join-meet absorption must hold: join({a:?}, meet({a:?}, {b:?})) must equal {a:?}",
+                );
+                assert_eq!(
+                    a.meet(a.join(b)),
+                    a,
+                    "meet-join absorption must hold: meet({a:?}, join({a:?}, {b:?})) must equal {a:?}",
+                );
+            }
+        }
+    }
+
+    /// [`per_axis_admission_tier_ceiling`] routes through the named
+    /// [`AdmissionTier::join`] oracle at every reachable
+    /// `(probe, verification)` pair. The structural pin that makes the
+    /// per-axis-OR-ceiling free function a one-line wrapper over the
+    /// typed-primitive lattice operation, so a future ladder refinement
+    /// to [`AdmissionTier::join`] (e.g., handling a
+    /// `StrictPlusAttestation` variant inserted strictly above `Strict`)
+    /// is automatically inherited by the per-axis-ceiling surface
+    /// without retyping. A regression that drifted the per-axis-ceiling
+    /// body back to a raw `.max()` call would still pass at the present
+    /// ladder; this pin holds against future regressions that desynced
+    /// the per-axis-ceiling surface from the named lattice-join oracle.
+    /// Lattice-dual of
+    /// `test_per_axis_admission_tier_floor_routes_through_meet_across_cross_product`.
+    #[test]
+    fn test_per_axis_admission_tier_ceiling_routes_through_join_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let via_ceiling = per_axis_admission_tier_ceiling(&probe, &verification);
+                let via_join = probe.admission_tier().join(verification.admission_tier());
+                assert_eq!(
+                    via_ceiling, via_join,
+                    "per_axis_admission_tier_ceiling must route through AdmissionTier::join at \
                      (probe={probe:?}, verification={verification:?})",
                 );
             }
