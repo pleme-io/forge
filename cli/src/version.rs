@@ -661,6 +661,128 @@ impl BumpLevel {
     pub fn is_feature_or_breaking(&self) -> bool {
         *self >= Self::Minor
     }
+
+    /// True iff `self` sits strictly below the feature-or-breaking
+    /// threshold — i.e., `*self < Self::Minor` under the derived [`Ord`]
+    /// instance. The named typed-method De Morgan complement of
+    /// [`is_feature_or_breaking`](Self::is_feature_or_breaking) at the
+    /// version-bump-magnitude surface: the second leg of the named-method
+    /// pair over the lower (Minor) threshold, naming the "this bump
+    /// introduces no user-visible change — an internal-only fix release
+    /// that does NOT require a user-facing changelog entry" reading that
+    /// downstream consumers previously had to write as
+    /// `!level.is_feature_or_breaking()` (or
+    /// `matches!(level, BumpLevel::Patch)` against the variant directly).
+    /// A SLSA-style release-provenance gate that says "internal-only fix
+    /// releases can ship under an abbreviated provenance trail without a
+    /// public changelog section" reads `level.is_below_feature_threshold()`
+    /// instead of `!level.is_feature_or_breaking()` or a single-arm
+    /// `match level { Patch => abbreviated, _ => full }` at every policy
+    /// site — the internal-only / no-user-visible-change semantic role is
+    /// named at the typed-primitive surface, not retyped at every
+    /// consumer.
+    ///
+    /// Sibling lift of [`is_non_breaking`](Self::is_non_breaking) (<Major)
+    /// at the upper threshold, here applied to the lower (Minor) threshold
+    /// of the magnitude ladder. Together with
+    /// [`is_feature_or_breaking`](Self::is_feature_or_breaking), the named
+    /// half-open-ray surface now carries BOTH legs of the De Morgan pair
+    /// at the lower threshold — closing the structural gap between the
+    /// [`BumpLevel`] sum and the four-method admit/refuse × relaxed/strict
+    /// gate matrix the [`crate::probe_outcome::AdmissionTier`] surface
+    /// carries over its two thresholds (`>= StagingOnly` /
+    /// `< StagingOnly`, `>= Strict` / `< Strict`). The [`BumpLevel`]
+    /// surface now carries the parallel admit/refuse-shaped pair at both
+    /// of its two thresholds: [`is_breaking`](Self::is_breaking) /
+    /// [`is_non_breaking`](Self::is_non_breaking) at the upper (Major)
+    /// threshold, and [`is_feature_or_breaking`](Self::is_feature_or_breaking)
+    /// / `is_below_feature_threshold` at the lower (Minor) threshold.
+    ///
+    /// # Why `< Self::Minor`, not `!self.is_feature_or_breaking()` or `matches!`
+    ///
+    /// Under the present three-variant ladder, `is_below_feature_threshold`
+    /// reduces to `*self == Self::Patch` (since `Patch` is the floor),
+    /// to `matches!(self, Self::Patch)`, and to
+    /// `!self.is_feature_or_breaking()`, but the `<` form is the
+    /// load-bearing one. It makes the derived [`Ord`] discipline the
+    /// structural oracle for the no-user-visible-change partition the
+    /// same way the `<` form does for [`is_non_breaking`] at the upper
+    /// threshold: a future variant `BumpLevel::Prerelease` inserted in
+    /// source order strictly below `Patch` (release-candidate /
+    /// staging-channel bump shapes) is automatically `< Minor` and so
+    /// structurally classified as below the feature threshold — without
+    /// retyping the predicate at every consumer. The `matches!(self,
+    /// Self::Patch)` form would silently misclassify the new floor
+    /// variant (it would NOT match `Patch` and so would read as
+    /// feature-or-breaking), inheriting the same drift class
+    /// [`crate::probe_outcome::AdmissionTier::refuses_relaxed`] avoids
+    /// by reading `< StagingOnly` rather than `matches!(self, Refused)`.
+    /// The `!self.is_feature_or_breaking()` form is byte-equivalent at
+    /// every variant under the De Morgan complementarity invariant
+    /// (pinned by
+    /// [`tests::test_bump_level_is_below_feature_threshold_equals_negation_of_is_feature_or_breaking`]),
+    /// but routing every consumer through a negated call surfaces a
+    /// drift class on the day a third predicate joins the lower-
+    /// threshold family (a future ladder refinement) where the negation
+    /// can no longer compose without parens / precedence vigilance at
+    /// every call site. Naming the positive role directly localises the
+    /// reading at one method body.
+    ///
+    /// # De Morgan / XOR partition / implication chain
+    ///
+    /// The De Morgan complementarity invariant
+    /// `is_below_feature_threshold() == !is_feature_or_breaking()` is
+    /// pinned by
+    /// [`tests::test_bump_level_is_below_feature_threshold_equals_negation_of_is_feature_or_breaking`]:
+    /// the two predicates are exact complements at every variant. The
+    /// disjoint-and-covering partition pin
+    /// [`tests::test_bump_level_is_below_feature_threshold_xor_is_feature_or_breaking_partitions_ladder`]
+    /// nails `is_below_feature_threshold() XOR is_feature_or_breaking()
+    /// == true` so a regression that broke either method body (e.g., a
+    /// future hand-rolled `matches!(self, Self::Patch)` body that
+    /// drifted from the `<` form across a fourth-variant addition below
+    /// `Patch`) surfaces here as a partition gap or overlap. Same
+    /// partition shape the
+    /// [`crate::probe_outcome::AdmissionTier::refuses_relaxed`] /
+    /// [`crate::probe_outcome::AdmissionTier::admits_relaxed`] pair
+    /// sealed at the admission-gate surface, here at the version-bump-
+    /// magnitude lower threshold.
+    ///
+    /// The implication invariant
+    /// `is_below_feature_threshold() => is_non_breaking()` is pinned by
+    /// [`tests::test_bump_level_is_below_feature_threshold_implies_is_non_breaking`]:
+    /// every bump strictly below the Minor threshold (every `< Minor`)
+    /// is structurally also strictly below the Major threshold (every
+    /// `< Major`), so a downstream provenance gate that admits
+    /// `is_non_breaking()` automatically admits every
+    /// `is_below_feature_threshold()` bump. Sibling pin of
+    /// [`tests::test_bump_level_is_breaking_implies_is_feature_or_breaking`]
+    /// at the dual implication chain (the implication runs upward at
+    /// the upper-threshold gate; here it runs downward at the lower-
+    /// threshold gate). The coincidence pin
+    /// [`tests::test_bump_level_is_below_feature_threshold_equals_is_fix_only_under_present_ladder`]
+    /// names the structural coincidence with [`is_fix_only`] under the
+    /// present three-variant ladder, mirroring
+    /// [`tests::test_bump_level_is_feature_or_breaking_equals_negation_of_is_fix_only_under_present_ladder`]
+    /// at the complement side of the same threshold.
+    ///
+    /// THEORY.md §V.1 make invalid states unrepresentable: the
+    /// no-user-visible-change band reads the derived [`Ord`] impl through
+    /// a named typed-method peer at the typed-primitive surface, not
+    /// retyped at every consumer's match cascade or De Morgan negation.
+    /// THEORY.md §VI.1 one-oracle / generation-over-composition: the
+    /// internal-only semantic role (below-feature-threshold ⇔ strictly
+    /// below Minor) is named at one site (this method's body), so a
+    /// downstream policy gate that previously read
+    /// `!level.is_feature_or_breaking()` reads
+    /// `level.is_below_feature_threshold()` once and is automatically
+    /// refined — by the `<` form — across a future `Prerelease`
+    /// insertion below `Patch` that the gate should classify as below
+    /// the feature threshold.
+    #[allow(dead_code)]
+    pub fn is_below_feature_threshold(&self) -> bool {
+        *self < Self::Minor
+    }
 }
 
 impl std::fmt::Display for BumpLevel {
@@ -1924,6 +2046,164 @@ mod tests {
                 level.is_feature_or_breaking(),
                 level.is_minor_only() || level.is_major_only(),
                 "under the present 3-variant ladder, is_feature_or_breaking() must decompose as is_minor_only() || is_major_only() at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant, `is_below_feature_threshold()`
+    /// returns the value a downstream provenance gate would have written
+    /// as `level < BumpLevel::Minor` at the consumer surface — `true`
+    /// only at [`BumpLevel::Patch`] (the structural floor), `false` at
+    /// the two strictly-greater variants (`Minor`, `Major`). The
+    /// exact-shape per-variant pin that makes a release-pipeline gate
+    /// saying "internal-only fix releases ship under an abbreviated
+    /// provenance trail" read `if level.is_below_feature_threshold() {
+    /// abbreviated_trail() }` at one site instead of
+    /// `if !level.is_feature_or_breaking() { ... }` or a single-arm
+    /// `match level { Patch => abbreviated, _ => full }` cascade.
+    /// Floor-sibling of [`test_bump_level_is_non_breaking_pins_below_major`]
+    /// at the upper threshold (if any), and complement-sibling of
+    /// [`test_bump_level_is_feature_or_breaking_named_at_lower_threshold`]
+    /// at the same threshold.
+    #[test]
+    fn test_bump_level_is_below_feature_threshold_named_at_lower_threshold() {
+        assert!(
+            BumpLevel::Patch.is_below_feature_threshold(),
+            "Patch sits strictly below the Minor threshold and must read as below-feature-threshold",
+        );
+        assert!(
+            !BumpLevel::Minor.is_below_feature_threshold(),
+            "Minor sits at the lower threshold and must NOT read as below-feature-threshold",
+        );
+        assert!(
+            !BumpLevel::Major.is_below_feature_threshold(),
+            "Major sits strictly above the Minor threshold and must NOT read as below-feature-threshold",
+        );
+    }
+
+    /// `is_below_feature_threshold()` agrees with `*self < BumpLevel::Minor`
+    /// at every variant — the structural pin that makes the `<` form
+    /// (not the `!is_feature_or_breaking()` decomposition or the
+    /// `matches!(self, Self::Patch)` arm) the load-bearing oracle for
+    /// the below-feature-threshold gate. A hand-rolled regression that
+    /// drifted the method body to either decomposition would still pass
+    /// [`test_bump_level_is_below_feature_threshold_named_at_lower_threshold`]
+    /// at the present three-variant ladder but break this structural-
+    /// equivalence pin at any future variant insertion below `Patch`
+    /// (a `Prerelease` variant the `matches!` form would silently
+    /// misclassify as NOT below the feature threshold). Same idiom
+    /// [`test_bump_level_is_feature_or_breaking_agrees_with_geq_minor_at_every_variant`]
+    /// established at the complement side of the same threshold.
+    #[test]
+    fn test_bump_level_is_below_feature_threshold_agrees_with_lt_minor_at_every_variant() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                level.is_below_feature_threshold(),
+                level < BumpLevel::Minor,
+                "is_below_feature_threshold() must read the < Minor comparison at {level:?}",
+            );
+        }
+    }
+
+    /// The De Morgan complementarity invariant
+    /// `is_below_feature_threshold() == !is_feature_or_breaking()` holds
+    /// at every variant — the two predicates are exact complements over
+    /// the lower (Minor) threshold of the magnitude ladder. The
+    /// structural pin that makes the two method bodies load-bearing
+    /// duals of each other so a regression in either side surfaces here
+    /// rather than drifting silently across the De Morgan boundary.
+    /// Sibling pin of
+    /// [`test_bump_level_is_non_breaking_equals_negation_of_is_breaking`]
+    /// at the upper threshold of the same ladder, here at the lower
+    /// threshold.
+    #[test]
+    fn test_bump_level_is_below_feature_threshold_equals_negation_of_is_feature_or_breaking() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                level.is_below_feature_threshold(),
+                !level.is_feature_or_breaking(),
+                "is_below_feature_threshold() must equal !is_feature_or_breaking() at {level:?}",
+            );
+        }
+    }
+
+    /// `is_below_feature_threshold()` XOR `is_feature_or_breaking()`
+    /// reads `true` at every variant — the disjoint-and-covering
+    /// partition over the lower (Minor) threshold: no variant is
+    /// simultaneously below the feature threshold AND
+    /// feature-or-breaking, and no variant is neither. A regression
+    /// that broke either method body (e.g., a future hand-rolled
+    /// `matches!(self, Self::Patch)` body for
+    /// `is_below_feature_threshold` that drifted from the `<` form
+    /// across a fourth-variant addition below `Patch`) would surface
+    /// here as a partition gap or overlap. Same partition shape
+    /// [`test_bump_level_is_non_breaking_xor_is_breaking_partitions_ladder`]
+    /// established at the upper threshold of the same ladder, here at
+    /// the lower threshold.
+    #[test]
+    fn test_bump_level_is_below_feature_threshold_xor_is_feature_or_breaking_partitions_ladder() {
+        for level in BumpLevel::ALL {
+            assert!(
+                level.is_below_feature_threshold() ^ level.is_feature_or_breaking(),
+                "is_below_feature_threshold() XOR is_feature_or_breaking() must read true at {level:?} \
+                 — the lower-threshold De Morgan pair must partition the ladder",
+            );
+        }
+    }
+
+    /// The implication invariant
+    /// `is_below_feature_threshold() => is_non_breaking()` holds at every
+    /// variant: every bump strictly below the Minor threshold (every
+    /// `< Minor`) is structurally also strictly below the Major
+    /// threshold (every `< Major`), so a downstream provenance gate that
+    /// admits `is_non_breaking()` automatically admits every
+    /// `is_below_feature_threshold()` bump with no per-site
+    /// reclassification. Sibling pin of
+    /// [`test_bump_level_is_breaking_implies_is_feature_or_breaking`]
+    /// at the dual implication: the implication runs upward at the
+    /// upper-threshold gate (`is_breaking() => is_feature_or_breaking()`,
+    /// every `>= Major` is `>= Minor`); here it runs downward at the
+    /// lower-threshold gate (`is_below_feature_threshold() =>
+    /// is_non_breaking()`, every `< Minor` is `< Major`). Together the
+    /// two implications carry the structural fact that the four
+    /// half-open-ray gates over the two thresholds form a nested chain
+    /// — `is_breaking() ⊂ is_feature_or_breaking()` at the upper end,
+    /// `is_below_feature_threshold() ⊂ is_non_breaking()` at the lower
+    /// end — that downstream gates can compose without per-site arith
+    /// over the variant identities.
+    #[test]
+    fn test_bump_level_is_below_feature_threshold_implies_is_non_breaking() {
+        for level in BumpLevel::ALL {
+            assert!(
+                !level.is_below_feature_threshold() || level.is_non_breaking(),
+                "is_below_feature_threshold() must imply is_non_breaking() at {level:?}",
+            );
+        }
+    }
+
+    /// Under the present three-variant ladder,
+    /// `is_below_feature_threshold()` and `is_fix_only()` coincide at
+    /// every variant: `Patch` reads both true (it is the floor AND it is
+    /// strictly below `Minor`), `Minor` and `Major` read both false (they
+    /// sit at or above the Minor threshold and they are not exactly
+    /// `Patch`). The coincidence depends on the present ladder having
+    /// only one variant strictly below `Minor` (`Patch`, which is also
+    /// exactly the `is_fix_only` floor); a future `Prerelease` variant
+    /// inserted strictly below `Patch` would surface the structural
+    /// distinction — `Prerelease` would read `is_below_feature_threshold()`
+    /// (it sits below the Minor threshold) AND NOT `is_fix_only()` (it
+    /// is not exactly `Patch`), so the coincidence would no longer hold
+    /// at the new variant. Same present-ladder-coincidence idiom
+    /// [`test_bump_level_is_feature_or_breaking_equals_negation_of_is_fix_only_under_present_ladder`]
+    /// established at the complement side of the same threshold, here
+    /// at the positive side.
+    #[test]
+    fn test_bump_level_is_below_feature_threshold_equals_is_fix_only_under_present_ladder() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                level.is_below_feature_threshold(),
+                level.is_fix_only(),
+                "under the present 3-variant ladder, is_below_feature_threshold() must equal is_fix_only() at {level:?}",
             );
         }
     }
