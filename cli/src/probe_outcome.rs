@@ -4963,6 +4963,122 @@ impl AdmissionTier {
     pub fn is_refused(&self) -> bool {
         *self == Self::Refused
     }
+
+    /// True iff `self` is exactly [`AdmissionTier::Strict`] — the named
+    /// typed-method peer at the ceiling of the admission-tier ladder. The
+    /// "this tier is exactly the canonical strict-production ceiling
+    /// variant" reading downstream consumers previously had to write as
+    /// `matches!(tier, AdmissionTier::Strict)` or
+    /// `*tier == AdmissionTier::Strict` per call site. A deploy-orchestrator
+    /// branch that says "the strict ceiling unlocks the production-rollout
+    /// path — promote the per-tier service to production and emit the
+    /// strict-admits telemetry payload" reads `tier.is_strict()` instead of
+    /// `matches!(tier, AdmissionTier::Strict)` or a single-arm
+    /// `match tier { Strict => promote, _ => hold }` cascade at every
+    /// rollout-coordinator site — the strict-ceiling semantic role is named
+    /// at the typed-primitive surface, not retyped at every consumer.
+    ///
+    /// Ceiling-identity peer of [`is_refused`](Self::is_refused) (commit
+    /// c60f27c) at the [`AdmissionTier`] sum surface. Closes the three-
+    /// position variant-identity trio at the named-method surface — the
+    /// floor identity ([`is_refused`](Self::is_refused)), the middle-band
+    /// identity ([`is_staging_only`](Self::is_staging_only), commit
+    /// e08b821), and the ceiling identity ([`is_strict`](Self::is_strict),
+    /// this commit) — every ladder position now carries a named
+    /// variant-identity reading distinct from the half-open-ray reading
+    /// at the same ladder position
+    /// ([`admits_strict`](Self::admits_strict),
+    /// [`admits_relaxed`](Self::admits_relaxed),
+    /// [`refuses_relaxed`](Self::refuses_relaxed),
+    /// [`refuses_strict`](Self::refuses_strict)).
+    ///
+    /// # Why `== Self::Strict`, not `>= Self::Strict` or `matches!`
+    ///
+    /// Unlike [`admits_strict`](Self::admits_strict) (which reads
+    /// `*self >= Self::Strict` so a future variant inserted strictly above
+    /// `Strict` is automatically classified as admitting the strict gate —
+    /// a half-open ray on the ladder), the strict-ceiling identity names a
+    /// single variant by intent, not a half-open ray. A future
+    /// `AdmissionTier::StrictPlusAttestation` variant inserted strictly
+    /// above `Strict` (a transparency-log-anchored strengthening of the
+    /// canonical strict gate — sigstore's attestation chain layered above
+    /// the per-axis verification gate) is structurally NOT the canonical
+    /// `Strict` variant — it is a strictly-stronger admission category
+    /// with its own attestation-coordinator semantics — and so must NOT
+    /// read as `is_strict()`. The `>= Self::Strict` form would silently
+    /// reclassify the new ceiling variant as the canonical strict tier; the
+    /// `*self == Self::Strict` form refuses by construction. The choice
+    /// mirrors [`is_refused`](Self::is_refused) at the ladder floor (commit
+    /// c60f27c) and [`is_staging_only`](Self::is_staging_only) at the
+    /// middle band, where naming a single variant likewise reads through
+    /// equality (or via the `admits_relaxed && refuses_strict` composition
+    /// at the middle band) rather than a half-open ray to refuse silent
+    /// reclassification across future ladder insertions adjacent to the
+    /// named variant.
+    ///
+    /// # Implication into `admits_strict`, disjoint from `refuses_relaxed`
+    ///
+    /// The implication invariant `is_strict() => admits_strict()` is pinned
+    /// by [`tests::test_admission_tier_is_strict_implies_admits_strict`]:
+    /// the strict ceiling is structurally a strict-admitting tier (`Strict
+    /// >= Strict` trivially), so a downstream gate that already reads
+    /// `admits_strict()` admits every `is_strict()` tier automatically. The
+    /// disjoint invariant `!(is_strict() && refuses_relaxed())` is pinned
+    /// by [`tests::test_admission_tier_is_strict_disjoint_from_refuses_relaxed`]:
+    /// no tier is simultaneously the strict ceiling AND refuses the relaxed
+    /// gate — the two named predicates partition the ladder into non-
+    /// overlapping extremes (ceiling-identity vs floor half-open ray).
+    /// Sibling pin of
+    /// [`tests::test_admission_tier_is_refused_disjoint_from_admits_relaxed`]
+    /// at the dual extreme: floor-identity vs ceiling half-open ray are
+    /// likewise disjoint.
+    ///
+    /// # Identity-trio partition of the ladder
+    ///
+    /// Together with [`is_refused`](Self::is_refused) and
+    /// [`is_staging_only`](Self::is_staging_only), the strict-ceiling
+    /// identity closes the disjoint-and-covering XOR partition
+    /// `is_refused() XOR is_staging_only() XOR is_strict()` across the
+    /// three-variant ladder — pinned by
+    /// [`tests::test_admission_tier_identity_trio_partitions_ladder`].
+    /// A downstream consumer that branches on the admission tier
+    /// (production-promote / staging-hold / fleet-hold) reads the three
+    /// identity predicates as a disjoint cover rather than a nested
+    /// if-else cascade that would inherit a drift class on the day a
+    /// fourth tier is added — every identity branch carries a single
+    /// variant by intent, and the partition pin lights up if any future
+    /// variant insertion is silently swept into one of the three named
+    /// extremes. The dual partition `admits_strict XOR is_staging_only
+    /// XOR refuses_relaxed` (commit e08b821, pinned by
+    /// [`tests::test_admission_tier_is_staging_only_three_way_partition_covers_ladder`])
+    /// rides the half-open-ray surface at the ceiling and floor; this
+    /// commit's identity-trio partition rides the variant-equality surface
+    /// at the ceiling and floor — together the two partitions seal the
+    /// ladder against both half-open-ray drift AND variant-identity drift
+    /// under future tier insertions adjacent to either extreme.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the admission-tier ladder is
+    /// consumed at named typed-method surfaces, not retyped at every
+    /// consumer's match cascade — the ceiling-identity predicate sits at
+    /// the typed-primitive surface alongside the floor-identity
+    /// ([`is_refused`](Self::is_refused)), the middle-band identity
+    /// ([`is_staging_only`](Self::is_staging_only)), and the half-open ray
+    /// predicates ([`admits_relaxed`](Self::admits_relaxed),
+    /// [`admits_strict`](Self::admits_strict),
+    /// [`refuses_relaxed`](Self::refuses_relaxed),
+    /// [`refuses_strict`](Self::refuses_strict)). THEORY.md §VI.1 one-
+    /// oracle: the strict-ceiling semantic role (this tier is exactly the
+    /// canonical strict-production ceiling variant) is named at one site
+    /// (this method's body), so a downstream consumer that previously
+    /// read `matches!(tier, AdmissionTier::Strict)` reads
+    /// `tier.is_strict()` once and is automatically refused — by the `==`
+    /// form — across a future `StrictPlusAttestation` insertion above
+    /// `Strict` that the consumer should NOT classify as the canonical
+    /// strict ceiling.
+    #[allow(dead_code)]
+    pub fn is_strict(&self) -> bool {
+        *self == Self::Strict
+    }
 }
 
 /// Render an [`AdmissionTier`] through its canonical lowercase / snake_case
@@ -16932,6 +17048,269 @@ mod tests {
                     tier.is_refused(),
                     tier.refuses_relaxed(),
                     "is_refused() must equal refuses_relaxed() under the present \
+                     three-variant ladder at probe={probe:?} verification={verification:?}",
+                );
+            }
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant, `is_strict()` returns the value
+    /// it must under the strict-ceiling semantic role: `Strict` is strict;
+    /// `Refused` and `StagingOnly` are not. A deploy-orchestrator branch
+    /// that today reads `match tier { Strict => promote_to_production, _
+    /// => hold }` reads after this commit as
+    /// `if tier.is_strict() { promote_to_production } else { hold }` —
+    /// the strict-ceiling semantic role is named once at the typed-
+    /// primitive surface, not retyped at every rollout-coordinator site.
+    /// Ceiling-identity sibling pin of
+    /// [`test_admission_tier_is_refused_named_at_ladder_floor`] at the
+    /// admission-tier ladder ceiling.
+    #[test]
+    fn test_admission_tier_is_strict_named_at_ladder_ceiling() {
+        assert!(
+            AdmissionTier::Strict.is_strict(),
+            "Strict is the strict-production ceiling of the admission-tier ladder",
+        );
+        assert!(
+            !AdmissionTier::StagingOnly.is_strict(),
+            "StagingOnly admits the relaxed gate only, not the strict ceiling",
+        );
+        assert!(
+            !AdmissionTier::Refused.is_strict(),
+            "Refused holds at the fail-closed floor, not the strict ceiling",
+        );
+    }
+
+    /// `is_strict()` agrees with `*self == AdmissionTier::Strict` at every
+    /// variant — the structural pin that makes the derived `PartialEq`/`Eq`
+    /// impl (the admission-tier typed-sum surface) the load-bearing oracle
+    /// for the strict-ceiling identity reading. A regression that drifted
+    /// the body to `matches!(self, Self::Strict)` would still pass
+    /// [`test_admission_tier_is_strict_named_at_ladder_ceiling`] at the
+    /// current three-variant ladder; this pin holds against future
+    /// regressions that desynced the named-method peer from the derived
+    /// `==` reading. Same idiom
+    /// [`test_admission_tier_is_refused_agrees_with_eq_refused_at_every_variant`]
+    /// established at the ladder floor — the typed-method peer for a
+    /// single ceiling variant reads through the structural equality
+    /// surface, not a hand-rolled `matches!` cascade.
+    #[test]
+    fn test_admission_tier_is_strict_agrees_with_eq_strict_at_every_variant() {
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                tier.is_strict(),
+                tier == AdmissionTier::Strict,
+                "is_strict() must read the == Strict comparison at {tier:?}",
+            );
+        }
+    }
+
+    /// The implication invariant `is_strict() => admits_strict()` holds at
+    /// every variant — every strict-ceiling tier is structurally a strict-
+    /// admitting tier (`Strict >= Strict` trivially under the derived
+    /// [`Ord`] instance), but not every strict-admitting tier is the
+    /// strict ceiling under a future ladder extension (a hypothetical
+    /// `StrictPlusAttestation` variant inserted strictly above `Strict`
+    /// would admit the strict gate yet not read as the canonical
+    /// `is_strict` ceiling). The pin makes the subset relation between the
+    /// ceiling identity and the at-or-above-threshold predicate
+    /// structurally load-bearing: a downstream rollout gate that admits
+    /// `admits_strict()` (e.g., "promote on any strict-gate admission")
+    /// automatically admits every `is_strict()` tier, with no per-site
+    /// reclassification of the implication. Ceiling-identity sibling pin
+    /// of [`test_admission_tier_is_refused_implies_refuses_relaxed`] at
+    /// the admission-tier ladder floor (refused implies relaxed-refused),
+    /// here at the ladder ceiling (strict implies strict-admits).
+    #[test]
+    fn test_admission_tier_is_strict_implies_admits_strict() {
+        for tier in AdmissionTier::ALL {
+            assert!(
+                !tier.is_strict() || tier.admits_strict(),
+                "is_strict() must imply admits_strict() at {tier:?}",
+            );
+        }
+    }
+
+    /// The disjoint invariant `!(is_strict() && refuses_relaxed())` holds
+    /// at every variant — no tier is simultaneously the strict ceiling AND
+    /// refuses the relaxed gate. The strict-ceiling identity (`Strict`)
+    /// and the relaxed-refuses half-open ray (`< StagingOnly`) are
+    /// disjoint regions of the admission-tier ladder: their conjunction
+    /// is empty at every tier. The pin closes the named-method trio over
+    /// the ladder against accidental overlap at the dual extreme to the
+    /// floor-identity / relaxed-admits pair (commit c60f27c). A future
+    /// variant insertion that drifted the ceiling or the threshold such
+    /// that some tier read true for both predicates lights up here —
+    /// ceiling-identity sibling pin of
+    /// [`test_admission_tier_is_refused_disjoint_from_admits_relaxed`] at
+    /// the dual extreme: ceiling-identity and relaxed-refuses are disjoint
+    /// extremes, just as floor-identity and relaxed-admits are.
+    #[test]
+    fn test_admission_tier_is_strict_disjoint_from_refuses_relaxed() {
+        for tier in AdmissionTier::ALL {
+            assert!(
+                !(tier.is_strict() && tier.refuses_relaxed()),
+                "is_strict() AND refuses_relaxed() must be empty at {tier:?}",
+            );
+        }
+    }
+
+    /// The identity-trio partition `is_refused() XOR is_staging_only() XOR
+    /// is_strict()` holds at every variant — every admission-tier value
+    /// reads true for exactly one of the three named variant-identity
+    /// predicates. The disjoint-and-covering pin that closes the three-
+    /// position variant-identity surface at the [`AdmissionTier`] sum: a
+    /// downstream consumer that branches on the admission tier
+    /// (production-promote / staging-hold / fleet-hold) reads the three
+    /// identity predicates as a disjoint cover rather than a nested
+    /// if-else cascade that would inherit a drift class on the day a
+    /// fourth tier is added. A regression that broke the partition (e.g.,
+    /// a future tier insertion adjacent to `Refused` or `Strict` that the
+    /// identity predicates classified inconsistently) would surface here
+    /// as a XOR-fails reading at the new variant. The dual partition pin
+    /// [`test_admission_tier_is_staging_only_three_way_partition_covers_ladder`]
+    /// (commit e08b821) rides the half-open-ray surface
+    /// (`admits_strict XOR is_staging_only XOR refuses_relaxed`); this
+    /// pin rides the variant-identity surface — together the two
+    /// partitions seal the ladder against both ray-form drift AND
+    /// identity-form drift under future tier insertions adjacent to
+    /// either extreme.
+    #[test]
+    fn test_admission_tier_identity_trio_partitions_ladder() {
+        for tier in AdmissionTier::ALL {
+            assert!(
+                tier.is_refused() ^ tier.is_staging_only() ^ tier.is_strict(),
+                "is_refused XOR is_staging_only XOR is_strict must hold at tier={tier:?}",
+            );
+        }
+    }
+
+    /// The typed-method reading at the consumer surface
+    /// `compose_admission_tier(&p, &v).is_strict()` equals the per-axis
+    /// bool reading `compose_admission_eligible_strict(&p, &v)` at every
+    /// reachable `(probe, verification)` pair — pinned across the 6×6
+    /// cross product of per-axis representatives (36 cells). The load-
+    /// bearing structural pin the ceiling-peer typed-method surfaces at
+    /// the consumer site: a regression that broke either the
+    /// [`compose_admission_tier`] constructor (e.g., reordered the
+    /// priority branches in a way that violated the strict-implies-
+    /// relaxed invariant) OR the [`AdmissionTier::is_strict`] method body
+    /// (e.g., hand-rolled the predicate as `*self >= Self::Strict`
+    /// against a future ladder extension above `Strict` that should NOT
+    /// classify as the canonical strict ceiling) would surface here as a
+    /// per-cell mismatch against the bool surface. The ceiling-identity-
+    /// sibling consumer pin of
+    /// [`test_compose_admission_tier_is_refused_equals_negation_of_compose_admission_eligible_relaxed`]
+    /// at the dual extreme — same 6×6 cross product, same per-axis
+    /// representatives.
+    #[test]
+    fn test_compose_admission_tier_is_strict_equals_compose_admission_eligible_strict() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let method_strict = compose_admission_tier(&probe, &verification).is_strict();
+                let bool_strict = compose_admission_eligible_strict(&probe, &verification);
+                assert_eq!(
+                    method_strict, bool_strict,
+                    "compose_admission_tier(probe={probe:?}, verification={verification:?}).is_strict() \
+                     must equal compose_admission_eligible_strict at every reachable pair",
+                );
+            }
+        }
+    }
+
+    /// The typed-method reading at the consumer surface
+    /// `compose_admission_tier(&p, &v).is_strict()` equals
+    /// `compose_admission_tier(&p, &v).admits_strict()` at every reachable
+    /// `(probe, verification)` pair — pinned across the 6×6 cross product
+    /// of per-axis representatives (36 cells). The load-bearing structural
+    /// pin that ties the ceiling-identity reading to the strict-admission
+    /// half-open ray reading at the present three-variant ladder: under
+    /// the current ladder, the only tier that admits the strict gate is
+    /// `Strict`, so the two predicates coincide. A future variant
+    /// insertion above `Strict` (the hypothetical
+    /// `StrictPlusAttestation`) would desync the two at the new variant —
+    /// `admits_strict()` would admit (half-open ray) but `is_strict()`
+    /// would refuse (`==` form) — surfacing the ladder extension as a
+    /// per-cell mismatch here. This pin makes that structural drift
+    /// explicit at the consumer surface, so the distinction between the
+    /// ceiling-identity peer and the ceiling half-open-ray peer carries
+    /// load even where the present ladder makes them numerically equal.
+    /// Ceiling sibling of
+    /// [`test_compose_admission_tier_is_refused_equals_refuses_relaxed_under_present_ladder`]
+    /// at the dual extreme.
+    #[test]
+    fn test_compose_admission_tier_is_strict_equals_admits_strict_under_present_ladder() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let tier = compose_admission_tier(&probe, &verification);
+                assert_eq!(
+                    tier.is_strict(),
+                    tier.admits_strict(),
+                    "is_strict() must equal admits_strict() under the present \
                      three-variant ladder at probe={probe:?} verification={verification:?}",
                 );
             }
