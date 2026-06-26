@@ -4874,6 +4874,95 @@ impl AdmissionTier {
     pub fn is_staging_only(&self) -> bool {
         self.admits_relaxed() && self.refuses_strict()
     }
+
+    /// True iff `self` is exactly [`AdmissionTier::Refused`] — the named
+    /// typed-method peer at the floor of the admission-tier ladder. The
+    /// "this tier is exactly the relaxed-refused floor variant" reading
+    /// downstream consumers previously had to write as
+    /// `matches!(tier, AdmissionTier::Refused)` or
+    /// `*tier == AdmissionTier::Refused` per call site. A deploy-orchestrator
+    /// branch that says "the refused floor short-circuits the rollout —
+    /// hold every per-tier service at its current revision and emit the
+    /// fail-closed telemetry payload" reads `tier.is_refused()` instead
+    /// of `matches!(tier, AdmissionTier::Refused)` or a single-arm
+    /// `match tier { Refused => hold, _ => proceed }` cascade at every
+    /// rollout-coordinator site — the refused-floor semantic role is
+    /// named at the typed-primitive surface, not retyped at every
+    /// consumer.
+    ///
+    /// Sibling lift of [`crate::version::BumpLevel::is_fix_only`] (commit
+    /// cab15a8) at the version-bump-magnitude ladder floor: same
+    /// variant-identity `==` form, same single-variant naming idiom,
+    /// here applied to the admission-tier ladder floor. Closes the
+    /// variant-identity trio at the [`AdmissionTier`] sum surface — the
+    /// floor identity ([`is_refused`](Self::is_refused)) joins the middle-
+    /// band identity ([`is_staging_only`](Self::is_staging_only), commit
+    /// e08b821) at the named-method surface — mirroring the
+    /// `is_fix_only` / `is_minor_only` floor / middle pair `BumpLevel`
+    /// already carries.
+    ///
+    /// # Why `== Self::Refused`, not `<= Self::Refused` or `matches!`
+    ///
+    /// Unlike [`refuses_relaxed`](Self::refuses_relaxed) (which reads
+    /// `*self < Self::StagingOnly` so a future variant inserted strictly
+    /// below `Refused` is automatically classified as refusing the
+    /// relaxed gate — a half-open ray on the ladder), the refused-floor
+    /// identity names a single variant by intent, not a half-open ray. A
+    /// future `AdmissionTier::RefusedPendingRetry` variant inserted
+    /// strictly below `Refused` (a transient-refusal state the deploy
+    /// orchestrator's retry-coordinator surfaces between the relaxed-gate
+    /// refusal and the strict-gate refusal, distinct from the canonical
+    /// terminal-refusal floor) is structurally NOT the canonical
+    /// `Refused` variant — it is its own refusal category with its own
+    /// retry semantics — and so must NOT read as `is_refused()`. The
+    /// `<= Self::Refused` form would silently misclassify the new floor
+    /// variant; the `*self == Self::Refused` form refuses by
+    /// construction. The choice mirrors
+    /// [`crate::version::BumpLevel::is_fix_only`] (commit cab15a8) at
+    /// the magnitude-ladder floor, where naming a single floor variant
+    /// likewise reads through equality rather than a half-open ray to
+    /// refuse silent reclassification across future ladder insertions
+    /// below the floor, and parallels
+    /// [`is_staging_only`](Self::is_staging_only) at the middle band.
+    ///
+    /// # Implication into `refuses_relaxed`, disjoint from `admits_relaxed`
+    ///
+    /// The implication invariant `is_refused() => refuses_relaxed()` is
+    /// pinned by
+    /// [`tests::test_admission_tier_is_refused_implies_refuses_relaxed`]:
+    /// the refused floor is structurally a relaxed-refusing tier (`Refused
+    /// < StagingOnly` under the derived [`Ord`] instance, commit 0aeec2b),
+    /// so a downstream gate that already reads `refuses_relaxed()` admits
+    /// every `is_refused()` tier automatically. The disjoint invariant
+    /// `!(is_refused() && admits_relaxed())` is pinned by
+    /// [`tests::test_admission_tier_is_refused_disjoint_from_admits_relaxed`]:
+    /// no tier is simultaneously refused AND admits-relaxed — the two
+    /// named predicates partition the ladder into non-overlapping
+    /// extremes. Same disjoint-extremes pin
+    /// `BumpLevel::is_fix_only XOR is_breaking` already seals at the
+    /// magnitude-ladder surface.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the admission-tier ladder
+    /// is consumed at named typed-method surfaces, not retyped at every
+    /// consumer's match cascade — the floor-identity predicate sits at
+    /// the typed-primitive surface alongside the middle-band identity
+    /// ([`is_staging_only`](Self::is_staging_only)) and the half-open
+    /// ray predicates ([`admits_relaxed`](Self::admits_relaxed),
+    /// [`admits_strict`](Self::admits_strict),
+    /// [`refuses_relaxed`](Self::refuses_relaxed),
+    /// [`refuses_strict`](Self::refuses_strict)). THEORY.md §VI.1 one-
+    /// oracle: the refused-floor semantic role (this tier is exactly the
+    /// canonical relaxed-refused floor variant) is named at one site
+    /// (this method's body), so a downstream consumer that previously
+    /// read `matches!(tier, AdmissionTier::Refused)` reads
+    /// `tier.is_refused()` once and is automatically refused — by the
+    /// `==` form — across a future `RefusedPendingRetry` insertion
+    /// below `Refused` that the consumer should NOT classify as the
+    /// canonical refused floor.
+    #[allow(dead_code)]
+    pub fn is_refused(&self) -> bool {
+        *self == Self::Refused
+    }
 }
 
 /// Render an [`AdmissionTier`] through its canonical lowercase / snake_case
@@ -16610,6 +16699,242 @@ mod tests {
                 tier.admits_strict() ^ tier.is_staging_only() ^ tier.refuses_relaxed(),
                 "admits_strict XOR is_staging_only XOR refuses_relaxed must hold at tier={tier:?}",
             );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant, `is_refused()` returns the
+    /// value it must under the refused-floor semantic role: `Refused` is
+    /// refused; `StagingOnly` and `Strict` are not. A deploy-orchestrator
+    /// branch that today reads
+    /// `match tier { Refused => hold_fleet, _ => proceed }` reads after
+    /// this commit as `if tier.is_refused() { hold_fleet } else { proceed }`
+    /// — the refused-floor semantic role is named once at the typed-
+    /// primitive surface, not retyped at every rollout-coordinator site.
+    /// Sibling pin of
+    /// [`crate::version::tests::test_bump_level_is_fix_only_named_at_ladder_floor`]
+    /// at the magnitude-ladder floor.
+    #[test]
+    fn test_admission_tier_is_refused_named_at_ladder_floor() {
+        assert!(
+            AdmissionTier::Refused.is_refused(),
+            "Refused is the relaxed-refused floor of the admission-tier ladder",
+        );
+        assert!(
+            !AdmissionTier::StagingOnly.is_refused(),
+            "StagingOnly admits the relaxed gate, not refused",
+        );
+        assert!(
+            !AdmissionTier::Strict.is_refused(),
+            "Strict admits both gates, not refused",
+        );
+    }
+
+    /// `is_refused()` agrees with `*self == AdmissionTier::Refused` at
+    /// every variant — the structural pin that makes the derived
+    /// `PartialEq`/`Eq` impl (the admission-tier typed-sum surface,
+    /// commit 0aeec2b's total-ordering predecessor) the load-bearing
+    /// oracle for the refused-floor identity reading. A regression that
+    /// drifted the body to `matches!(self, Self::Refused)` would still
+    /// pass [`test_admission_tier_is_refused_named_at_ladder_floor`] at
+    /// the current three-variant ladder; this pin holds against future
+    /// regressions that desynced the named-method peer from the derived
+    /// `==` reading. Same idiom
+    /// [`crate::version::tests::test_bump_level_is_fix_only_agrees_with_eq_patch_at_every_variant`]
+    /// established at the magnitude-ladder floor — the typed-method peer
+    /// for a single floor variant reads through the structural equality
+    /// surface, not a hand-rolled `matches!` cascade.
+    #[test]
+    fn test_admission_tier_is_refused_agrees_with_eq_refused_at_every_variant() {
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                tier.is_refused(),
+                tier == AdmissionTier::Refused,
+                "is_refused() must read the == Refused comparison at {tier:?}",
+            );
+        }
+    }
+
+    /// The implication invariant `is_refused() => refuses_relaxed()`
+    /// holds at every variant — every refused-floor tier is structurally
+    /// a relaxed-refusing tier (`Refused < StagingOnly` on the
+    /// admission-tier ladder under the derived [`Ord`] instance, commit
+    /// 0aeec2b), but not every relaxed-refusing tier is the refused
+    /// floor under a future ladder extension (a hypothetical
+    /// `RefusedPendingRetry` variant inserted strictly below `Refused`
+    /// would refuse the relaxed gate yet not read as the canonical
+    /// `is_refused` floor). The pin makes the subset relation between
+    /// the floor identity and the below-threshold predicate structurally
+    /// load-bearing: a downstream rollout gate that admits
+    /// `refuses_relaxed()` (e.g., "hold the fleet on any relaxed-gate
+    /// refusal") automatically admits every `is_refused()` tier, with
+    /// no per-site reclassification of the implication. Sibling pin of
+    /// [`crate::version::tests::test_bump_level_is_fix_only_implies_is_non_breaking`]
+    /// at the magnitude-ladder floor (fix-only implies non-breaking),
+    /// here at the admission-tier floor (refused implies relaxed-
+    /// refused).
+    #[test]
+    fn test_admission_tier_is_refused_implies_refuses_relaxed() {
+        for tier in AdmissionTier::ALL {
+            assert!(
+                !tier.is_refused() || tier.refuses_relaxed(),
+                "is_refused() must imply refuses_relaxed() at {tier:?}",
+            );
+        }
+    }
+
+    /// The disjoint invariant `!(is_refused() && admits_relaxed())`
+    /// holds at every variant — no tier is simultaneously the refused
+    /// floor AND admits the relaxed gate. The refused-floor identity
+    /// (`Refused`) and the relaxed-admits half-open ray (`>=
+    /// StagingOnly`) are disjoint regions of the admission-tier ladder:
+    /// their conjunction is empty at every tier. The pin closes the
+    /// named-method trio over the ladder against accidental overlap,
+    /// complementing the De Morgan pin between `admits_relaxed` and
+    /// `refuses_relaxed` already in place (commit 39cdc01's predecessor
+    /// trajectory). A future variant insertion that drifted the floor
+    /// or the threshold such that some tier read true for both
+    /// predicates lights up here — same disjoint-extremes pin
+    /// [`crate::version::tests::test_bump_level_is_fix_only_disjoint_from_is_breaking`]
+    /// placed at the magnitude-ladder surface (fix-only and breaking
+    /// are disjoint extremes), here at the admission-tier surface
+    /// (refused-floor and relaxed-admits are disjoint extremes).
+    #[test]
+    fn test_admission_tier_is_refused_disjoint_from_admits_relaxed() {
+        for tier in AdmissionTier::ALL {
+            assert!(
+                !(tier.is_refused() && tier.admits_relaxed()),
+                "is_refused() AND admits_relaxed() must be empty at {tier:?}",
+            );
+        }
+    }
+
+    /// The typed-method reading at the consumer surface
+    /// `compose_admission_tier(&p, &v).is_refused()` equals the per-axis
+    /// bool reading `!compose_admission_eligible_relaxed(&p, &v)` at
+    /// every reachable `(probe, verification)` pair — pinned across the
+    /// 6×6 cross product of per-axis representatives (36 cells). The
+    /// load-bearing structural pin the floor-peer typed-method surfaces
+    /// at the consumer site: a regression that broke either the
+    /// [`compose_admission_tier`] constructor (e.g., reordered the
+    /// priority branches in a way that violated the strict-implies-
+    /// relaxed invariant) OR the [`AdmissionTier::is_refused`] method
+    /// body (e.g., hand-rolled the predicate as `*self <= Self::Refused`
+    /// against a future ladder extension below `Refused` that should
+    /// NOT classify as the canonical refused floor) would surface here
+    /// as a per-cell mismatch against the bool surface. The typed-
+    /// method-surface peer of
+    /// [`test_compose_admission_tier_refused_equals_negation_of_compose_admission_eligible_relaxed`]
+    /// — same 6×6 cross product, same per-axis representatives.
+    #[test]
+    fn test_compose_admission_tier_is_refused_equals_negation_of_compose_admission_eligible_relaxed(
+    ) {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let method_refused = compose_admission_tier(&probe, &verification).is_refused();
+                let bool_refused = !compose_admission_eligible_relaxed(&probe, &verification);
+                assert_eq!(
+                    method_refused, bool_refused,
+                    "compose_admission_tier(probe={probe:?}, verification={verification:?}).is_refused() \
+                     must equal !compose_admission_eligible_relaxed at every reachable pair",
+                );
+            }
+        }
+    }
+
+    /// The typed-method reading at the consumer surface
+    /// `compose_admission_tier(&p, &v).is_refused()` equals
+    /// `compose_admission_tier(&p, &v).refuses_relaxed()` at every
+    /// reachable `(probe, verification)` pair — pinned across the 6×6
+    /// cross product of per-axis representatives (36 cells). The
+    /// load-bearing structural pin that ties the floor-identity reading
+    /// to the relaxed-refusal half-open ray reading at the present
+    /// three-variant ladder: under the current ladder, the only tier
+    /// that refuses the relaxed gate is `Refused`, so the two predicates
+    /// coincide. A future variant insertion below `Refused` (the
+    /// hypothetical `RefusedPendingRetry`) would desync the two at the
+    /// new variant — `is_refused()` would refuse (`==` form), but
+    /// `refuses_relaxed()` would admit (half-open ray) — surfacing the
+    /// ladder extension as a per-cell mismatch here. This pin makes
+    /// that structural drift explicit at the consumer surface, so the
+    /// distinction between the floor-identity peer and the floor half-
+    /// open-ray peer carries load even where the present ladder makes
+    /// them numerically equal.
+    #[test]
+    fn test_compose_admission_tier_is_refused_equals_refuses_relaxed_under_present_ladder() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let tier = compose_admission_tier(&probe, &verification);
+                assert_eq!(
+                    tier.is_refused(),
+                    tier.refuses_relaxed(),
+                    "is_refused() must equal refuses_relaxed() under the present \
+                     three-variant ladder at probe={probe:?} verification={verification:?}",
+                );
+            }
         }
     }
 
