@@ -519,6 +519,30 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     "i/o timeout",
     "TLS handshake timeout",
     "timeout",
+    // Connect-side TCP retransmit-budget exhaustion — the structural
+    // mirror of `broken pipe` (mid-stream WRITE drop) at the connect
+    // phase. `syscall.ETIMEDOUT` formats as `"connection timed out"`,
+    // curl emits `"Connection timed out"` / `"Operation timed out"` /
+    // `"connect() timed out"` from `CURLE_OPERATION_TIMEDOUT`, Python
+    // `socket.timeout` / `urllib3.exceptions.ConnectTimeoutError` and
+    // Java `SocketTimeoutException` emit `"connect timed out"` /
+    // `"timed out"`, hyper / reqwest forwards a `std::io::Error` whose
+    // Display impl includes `"timed out"`. The bare phrase `"timed out"`
+    // is NOT a substring of `"timeout"` (the letters are `t-i-m-e-d`
+    // then a space then `o-u-t`, not the contiguous `t-i-m-e-o-u-t` the
+    // `"timeout"` marker requires), so every dialect that emits the
+    // past-tense form silently short-circuited to terminal before this
+    // entry. forge's pipeline opens connections against GHCR / attic-
+    // server / git-over-HTTPS on every push, so SYN-without-ACK
+    // (kernel-level TCP retransmit budget exhausted, common during BGP
+    // convergence, registry rollover, or slow-start backpressure) is
+    // the more commonly emitted connect-side transient than the
+    // explicit `"i/o timeout"` form already carried above. One marker
+    // covers both Go's lowercase form and curl's capitalized form
+    // because the casing variance is on the leading word
+    // (`Connection` / `connection` / `Operation` / `connect`) — the
+    // `"timed out"` suffix is uniformly lowercase across emitters.
+    "timed out",
     // Mid-stream TCP drops — multi-word Go form. The bare `EOF` acronym
     // (`io.EOF`) is matched token-wise via
     // [`TRANSIENT_NETWORK_STDERR_TOKEN_MARKERS`].
@@ -2193,6 +2217,12 @@ mod tests {
     }
 
     /// I/O timeouts and TLS handshake timeouts are transient.
+    ///
+    /// The structural mirror at the connect side is `timed out` — the
+    /// past-tense form `syscall.ETIMEDOUT` / curl `CURLE_OPERATION_
+    /// TIMEDOUT` / Python `socket.timeout` / Java `SocketTimeoutException`
+    /// emit when the SYN-without-ACK kernel TCP retransmit budget is
+    /// exhausted (covered by [`test_transient_classifier_matches_timed_out`]).
     #[test]
     fn test_transient_classifier_matches_timeouts() {
         assert!(is_transient_network_stderr(
@@ -2203,6 +2233,61 @@ mod tests {
         ));
         // Bare "timeout" — the substring catches the broader class.
         assert!(is_transient_network_stderr("operation timeout reached"));
+    }
+
+    /// Connect-side TCP retransmit-budget exhaustion (`syscall.ETIMEDOUT`)
+    /// is transient — the structural mirror of `broken pipe`
+    /// (mid-stream WRITE drop) at the connect phase. The bare phrase
+    /// `"timed out"` is NOT covered by the `"timeout"` marker — the
+    /// letters `t-i-m-e-d` then a space then `o-u-t` do not contain
+    /// the contiguous `t-i-m-e-o-u-t` substring that `"timeout"`
+    /// matches — so every dialect that emits the past-tense form
+    /// silently short-circuited to terminal before this fix.
+    ///
+    /// Fail-before: the pre-fix marker set carried `"i/o timeout"` /
+    /// `"TLS handshake timeout"` / `"timeout"` but not `"timed out"`,
+    /// so every realistic skopeo / regctl / attic-client / curl /
+    /// hyper-reqwest connect-side timeout that emitted the past-tense
+    /// form short-circuited to terminal — the typed retry loop refused
+    /// to back off, burning the connect attempt against a transient
+    /// kernel-level event during BGP convergence / registry rollover /
+    /// slow-start backpressure.
+    /// Pass-after: every realistic dialect classifies transient and
+    /// the shared `retry_command` / `run_with_policy` driver backs off
+    /// and retries the connect.
+    #[test]
+    fn test_transient_classifier_matches_timed_out() {
+        // Go net (skopeo, regctl, attic-server, attic-client through
+        // its golang surface): `syscall.ETIMEDOUT.Error()` formats
+        // lowercase `connection timed out`.
+        assert!(is_transient_network_stderr(
+            "dial tcp 10.0.0.1:443: connect: connection timed out"
+        ));
+        assert!(is_transient_network_stderr(
+            "read tcp 10.0.0.1: connection timed out"
+        ));
+        // curl (git-over-HTTPS, container-registry probes, healthcheck
+        // surfaces): `CURLE_OPERATION_TIMEDOUT` formats capitalized.
+        assert!(is_transient_network_stderr(
+            "curl: (7) Failed to connect to ghcr.io port 443: Connection timed out"
+        ));
+        assert!(is_transient_network_stderr(
+            "curl: (28) Operation timed out after 30000 ms"
+        ));
+        assert!(is_transient_network_stderr(
+            "curl: (28) Resolving timed out after 30000 ms"
+        ));
+        // hyper / reqwest (attic-client Rust surface) and Java /
+        // jvm-style emitters that forge consumes through helm-cli,
+        // kubectl, and the OpenSearch / OpenTelemetry probe shells:
+        // the bare `timed out` phrase with varied leading word.
+        assert!(is_transient_network_stderr(
+            "error sending request for url: operation timed out"
+        ));
+        assert!(is_transient_network_stderr(
+            "java.net.SocketTimeoutException: connect timed out"
+        ));
+        assert!(is_transient_network_stderr("read timed out"));
     }
 
     /// Mid-stream EOF (TCP drop while a response is streaming) is transient.
