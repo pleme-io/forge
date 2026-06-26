@@ -5163,6 +5163,105 @@ impl AdmissionTier {
     pub fn is_strict(&self) -> bool {
         *self == Self::Strict
     }
+
+    /// The lattice meet over the admission-tier ladder — the
+    /// [`AdmissionTier`] both `self` and `other` admit at the per-axis-AND
+    /// floor. Reads `self.min(other)` at one named site, returning the
+    /// lower of the two variants on the derived [`Ord`] ladder
+    /// (`Refused < StagingOnly < Strict`). The named typed-method peer of
+    /// the [`Ord::min`] reduction at the [`AdmissionTier`] surface, the
+    /// structural mirror of [`crate::version::BumpLevel::meet`] at the
+    /// version-bump-magnitude ladder and the per-axis-AND surface oracle
+    /// [`per_axis_admission_tier_floor`] routes through.
+    ///
+    /// # The per-axis-AND-floor reading
+    ///
+    /// A consumer that walks a heterogeneous slice of admission tiers —
+    /// the per-axis-AND floor across the probe and verification axes, a
+    /// SLSA-style strictest-common-baseline across N attestation sources,
+    /// a fleet-wide rollout reporter folding per-service tiers into the
+    /// strictest tier every service admits — reads the meet-fold
+    /// `tiers.iter().fold(AdmissionTier::Strict, |acc, t| acc.meet(*t))`
+    /// through one named oracle, with [`AdmissionTier::Strict`] as the
+    /// identity element (any tier meets with `Strict` to itself) and
+    /// [`AdmissionTier::Refused`] as the absorbing element (any tier met
+    /// with `Refused` collapses to `Refused`). The duals of the
+    /// [`crate::version::BumpLevel::meet`] identity / absorbing-element
+    /// pair on the magnitude ladder, here at the admission-tier ladder.
+    ///
+    /// # Why a named method, not raw `Ord::min`
+    ///
+    /// The body reads `self.min(other)`, and at every reachable
+    /// `(self, other)` pair the two readings agree (pinned by
+    /// [`tests::test_admission_tier_meet_agrees_with_min_at_every_pair`]).
+    /// The named [`meet`](Self::meet) surface carries TWO load-bearing
+    /// pieces of content the bare [`Ord::min`] call does not:
+    ///
+    /// 1. The per-axis-AND-floor semantic role: a per-axis-floor consumer
+    ///    reading `probe.admission_tier().meet(verification.admission_tier())`
+    ///    reads "the tier both axes admit at the per-axis-AND floor" at
+    ///    the call site, where the same consumer reading
+    ///    `probe.admission_tier().min(verification.admission_tier())`
+    ///    reads "the smaller of the two tiers" — the `min` form is a
+    ///    general lattice op shared with arbitrary comparable types, the
+    ///    `meet` form names the per-axis-AND-floor reading at the typed-
+    ///    primitive surface. Same THEORY.md §V.4 honesty-channel
+    ///    discipline [`crate::version::BumpLevel::meet`] established at
+    ///    the magnitude-ladder surface, here at the admission-tier
+    ///    surface.
+    /// 2. A one-oracle anchor for a future ladder refinement. The lattice
+    ///    meet over a total order coincides with [`Ord::min`] by
+    ///    definition, but a future ladder extension that introduces
+    ///    structural distinctions inside the admission axis (a
+    ///    `RefusedPendingRetry` variant strictly below `Refused` with
+    ///    refined per-axis-AND-floor semantics — does
+    ///    `RefusedPendingRetry.meet(Refused) == RefusedPendingRetry`?
+    ///    does it propagate up to a refined floor distinct from a stable
+    ///    refusal?) extends this method body once, instead of retyping
+    ///    the per-axis-AND-floor oracle at every consumer's inline
+    ///    `.min()` call.
+    ///
+    /// # Algebraic invariants
+    ///
+    /// The lattice meet over a total order is idempotent, commutative,
+    /// and associative, with the ladder ceiling
+    /// ([`AdmissionTier::Strict`]) as the identity element and the
+    /// ladder floor ([`AdmissionTier::Refused`]) as the absorbing
+    /// element — the duals of the [`join`](Self::join) invariants on the
+    /// same ladder (the join lift this commit's pair-companion closes).
+    /// The meet is bounded above by both arguments, pinned by
+    /// [`tests::test_admission_tier_meet_bounded_above_by_both_arguments`]
+    /// — the structural witness that the meet of two tiers sits at or
+    /// below the strictest of the pair.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the per-axis-AND-floor
+    /// reading is a lattice operation (`min`) on the derived [`Ord`]
+    /// ladder, named at the typed-primitive surface so a downstream
+    /// consumer reads `tier_a.meet(tier_b)` once and is automatically
+    /// updated across a future ladder refinement. THEORY.md §VI.1 one-
+    /// oracle / generation-over-composition: the per-axis-AND-floor
+    /// idiom is named at one site (this method's body), not retyped at
+    /// every consumer's inline `.min()` call.
+    ///
+    /// Frontier inspiration: SLSA L3+ provenance gates read the
+    /// least-trusted source tier as the meet (`min`) over per-source
+    /// attestation tiers — the "every source admits at this floor"
+    /// reading where the bound is the strictest baseline every
+    /// contributing source honors; sigstore policy-controller reduces
+    /// per-attestation-axis tier verdicts through a per-attestation-AND
+    /// floor over the per-attestation tiers, so the verifier reads the
+    /// strictest tier every attestation honors at one named site rather
+    /// than recomposing the per-attestation min-fold inline. Translated
+    /// here as: lift the inline `.min()` over per-axis admission-tier
+    /// readings to one named typed-primitive method at the
+    /// [`AdmissionTier`] sum surface so a downstream per-axis-AND-floor
+    /// consumer reads through one oracle, with the per-axis-AND-floor
+    /// free function [`per_axis_admission_tier_floor`] re-routed to
+    /// consume this named lattice operation.
+    #[allow(dead_code)]
+    pub fn meet(self, other: Self) -> Self {
+        self.min(other)
+    }
 }
 
 /// Render an [`AdmissionTier`] through its canonical lowercase / snake_case
@@ -5446,7 +5545,7 @@ pub fn per_axis_admission_tier_floor(
     probe: &ProbeCoverage,
     verification: &VerificationCoverage,
 ) -> AdmissionTier {
-    probe.admission_tier().min(verification.admission_tier())
+    probe.admission_tier().meet(verification.admission_tier())
 }
 
 /// The per-axis-OR admission-tier ceiling — the best per-axis tier
@@ -17373,6 +17472,250 @@ mod tests {
                 tier.is_refused() ^ tier.is_staging_only() ^ tier.is_strict(),
                 "is_refused XOR is_staging_only XOR is_strict must hold at tier={tier:?}",
             );
+        }
+    }
+
+    /// Exact-shape per-(a, b) pin over the 3×3 grid of admission-tier
+    /// pairs: every cell of the meet matrix reads the strictest tier
+    /// both arguments admit at the per-axis-AND floor under the derived
+    /// ladder (`Refused < StagingOnly < Strict`). Floor-sibling at the
+    /// lattice-meet surface, the structural mirror of
+    /// `test_bump_level_meet_named_at_per_commit_floor_surface` at the
+    /// magnitude-ladder surface — same exact-shape grid, here at the
+    /// admission-tier surface.
+    #[test]
+    fn test_admission_tier_meet_named_at_per_axis_and_floor_surface() {
+        use AdmissionTier::*;
+        let cells: &[(AdmissionTier, AdmissionTier, AdmissionTier)] = &[
+            (Refused, Refused, Refused),
+            (Refused, StagingOnly, Refused),
+            (Refused, Strict, Refused),
+            (StagingOnly, Refused, Refused),
+            (StagingOnly, StagingOnly, StagingOnly),
+            (StagingOnly, Strict, StagingOnly),
+            (Strict, Refused, Refused),
+            (Strict, StagingOnly, StagingOnly),
+            (Strict, Strict, Strict),
+        ];
+        for (a, b, expected) in cells.iter().copied() {
+            assert_eq!(
+                a.meet(b),
+                expected,
+                "meet({a:?}, {b:?}) must read {expected:?}",
+            );
+        }
+    }
+
+    /// Structural-equivalence pin against [`Ord::min`] at every
+    /// `(a, b)` over the 3×3 grid. Makes the `min` form the load-bearing
+    /// oracle, so a future variant insertion that desynced the method
+    /// body from the derived [`Ord`] ladder lights up here rather than
+    /// drifting silently. Same idiom
+    /// `test_bump_level_meet_agrees_with_min_at_every_pair` rides at
+    /// the magnitude-ladder surface.
+    #[test]
+    fn test_admission_tier_meet_agrees_with_min_at_every_pair() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                assert_eq!(
+                    a.meet(b),
+                    a.min(b),
+                    "meet({a:?}, {b:?}) must read self.min(other)",
+                );
+            }
+        }
+    }
+
+    /// Idempotence at every variant: `a.meet(a) == a`. Sibling of the
+    /// reflexive-ordering pin at the derived-[`Ord`] surface, here at
+    /// the lattice-meet surface.
+    #[test]
+    fn test_admission_tier_meet_is_idempotent_at_every_variant() {
+        for a in AdmissionTier::ALL {
+            assert_eq!(a.meet(a), a, "meet({a:?}, {a:?}) must read {a:?}");
+        }
+    }
+
+    /// Commutativity at every `(a, b)`. The load-bearing fact a
+    /// per-axis-AND-floor fold relies on to be insensitive to per-axis
+    /// ORDER (e.g., the deploy orchestrator may iterate probe before
+    /// verification or vice versa without changing the floor reading).
+    #[test]
+    fn test_admission_tier_meet_is_commutative_at_every_pair() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                assert_eq!(
+                    a.meet(b),
+                    b.meet(a),
+                    "meet({a:?}, {b:?}) must equal meet({b:?}, {a:?})",
+                );
+            }
+        }
+    }
+
+    /// Associativity at every `(a, b, c)` over the 3×3×3 grid. The
+    /// structural anchor a per-axis-AND-floor fold relies on to be
+    /// insensitive to per-axis GROUPING (e.g., a future third axis
+    /// added to the per-axis-floor surface folds either left or right
+    /// to the same floor).
+    #[test]
+    fn test_admission_tier_meet_is_associative_at_every_triple() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                for c in AdmissionTier::ALL {
+                    assert_eq!(
+                        a.meet(b.meet(c)),
+                        a.meet(b).meet(c),
+                        "meet({a:?}, meet({b:?}, {c:?})) must equal meet(meet({a:?}, {b:?}), {c:?})",
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`AdmissionTier::Strict`] is the identity element of the lattice
+    /// meet: `Strict.meet(a) == a.meet(Strict) == a` at every variant.
+    /// The load-bearing fact a per-axis-AND-floor fold seeds at `Strict`
+    /// with (a fold seeded at `Strict` over a sequence returns the meet
+    /// of the sequence, or `Strict` on an empty sequence — the no-axes
+    /// floor shape).
+    #[test]
+    fn test_admission_tier_meet_has_strict_as_identity() {
+        for a in AdmissionTier::ALL {
+            assert_eq!(
+                AdmissionTier::Strict.meet(a),
+                a,
+                "Strict.meet({a:?}) must read {a:?}",
+            );
+            assert_eq!(
+                a.meet(AdmissionTier::Strict),
+                a,
+                "{a:?}.meet(Strict) must read {a:?}",
+            );
+        }
+    }
+
+    /// [`AdmissionTier::Refused`] is the absorbing element of the
+    /// lattice meet: `Refused.meet(a) == a.meet(Refused) == Refused` at
+    /// every variant. The load-bearing fact a per-axis-AND-floor fold
+    /// can early-exit on: once any per-axis tier reads `Refused`, the
+    /// per-axis-AND floor collapses to `Refused` regardless of the
+    /// remaining axes.
+    #[test]
+    fn test_admission_tier_meet_has_refused_as_absorbing_element() {
+        for a in AdmissionTier::ALL {
+            assert_eq!(
+                AdmissionTier::Refused.meet(a),
+                AdmissionTier::Refused,
+                "Refused.meet({a:?}) must read Refused",
+            );
+            assert_eq!(
+                a.meet(AdmissionTier::Refused),
+                AdmissionTier::Refused,
+                "{a:?}.meet(Refused) must read Refused",
+            );
+        }
+    }
+
+    /// The meet is bounded above by both arguments:
+    /// `a.meet(b) <= a && a.meet(b) <= b` at every `(a, b)`. The
+    /// structural witness that the meet sits at or below the strictest
+    /// of the input pair on the derived [`Ord`] ladder — a downstream
+    /// consumer that branches on "the per-axis-AND floor is at most as
+    /// strict as either axis" reads the bound through one named site.
+    #[test]
+    fn test_admission_tier_meet_bounded_above_by_both_arguments() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                let m = a.meet(b);
+                assert!(m <= a, "meet({a:?}, {b:?}) = {m:?} must be <= {a:?}");
+                assert!(m <= b, "meet({a:?}, {b:?}) = {m:?} must be <= {b:?}");
+            }
+        }
+    }
+
+    /// The lattice meet over a total order is the identity-or-other
+    /// readback: `a.meet(b) ∈ {a, b}` at every `(a, b)`. The structural
+    /// witness that the admission-tier meet is the same operation
+    /// [`Ord::min`] surfaces, distinct from a free-lattice meet that
+    /// could synthesize a fresh value not appearing in the input pair.
+    #[test]
+    fn test_admission_tier_meet_returns_one_of_the_arguments() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                let m = a.meet(b);
+                assert!(
+                    m == a || m == b,
+                    "meet({a:?}, {b:?}) = {m:?} must equal {a:?} or {b:?}",
+                );
+            }
+        }
+    }
+
+    /// [`per_axis_admission_tier_floor`] routes through the named
+    /// [`AdmissionTier::meet`] oracle at every reachable
+    /// `(probe, verification)` pair. The structural pin that makes the
+    /// per-axis-AND-floor free function a one-line wrapper over the
+    /// typed-primitive lattice operation, so a future ladder refinement
+    /// to [`AdmissionTier::meet`] (e.g., handling a `RefusedPendingRetry`
+    /// variant inserted strictly below `Refused`) is automatically
+    /// inherited by the per-axis-floor surface without retyping. A
+    /// regression that drifted the per-axis-floor body back to a raw
+    /// `.min()` call would still pass at the present ladder; this pin
+    /// holds against future regressions that desynced the per-axis-floor
+    /// surface from the named lattice-meet oracle.
+    #[test]
+    fn test_per_axis_admission_tier_floor_routes_through_meet_across_cross_product() {
+        let probe_reps = [
+            ProbeCoverage { ran: 0, absent: 0 },
+            ProbeCoverage { ran: 0, absent: 4 },
+            ProbeCoverage { ran: 2, absent: 3 },
+            ProbeCoverage { ran: 7, absent: 0 },
+            ProbeCoverage {
+                ran: usize::MAX,
+                absent: 0,
+            },
+            ProbeCoverage {
+                ran: 0,
+                absent: usize::MAX,
+            },
+        ];
+        let verification_reps = [
+            VerificationCoverage {
+                verified: 0,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: 6,
+            },
+            VerificationCoverage {
+                verified: 1,
+                unverified: 2,
+            },
+            VerificationCoverage {
+                verified: 5,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: usize::MAX,
+                unverified: 0,
+            },
+            VerificationCoverage {
+                verified: 0,
+                unverified: usize::MAX,
+            },
+        ];
+        for probe in probe_reps {
+            for verification in verification_reps {
+                let via_floor = per_axis_admission_tier_floor(&probe, &verification);
+                let via_meet = probe.admission_tier().meet(verification.admission_tier());
+                assert_eq!(
+                    via_floor, via_meet,
+                    "per_axis_admission_tier_floor must route through AdmissionTier::meet at \
+                     (probe={probe:?}, verification={verification:?})",
+                );
+            }
         }
     }
 
