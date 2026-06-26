@@ -433,6 +433,143 @@ impl BumpLevel {
     pub fn is_minor_only(&self) -> bool {
         *self == Self::Minor
     }
+
+    /// True iff `self` is exactly [`BumpLevel::Major`] — the named typed-
+    /// method peer at the ceiling of the version-bump magnitude ladder. The
+    /// "this bump is exactly the canonical breaking-change major variant"
+    /// reading downstream consumers previously had to write as
+    /// `matches!(level, BumpLevel::Major)` or `*level == BumpLevel::Major`
+    /// per call site. A release-notes generator that says "the canonical
+    /// major bump triggers the human-review queue and emits the breaking-
+    /// change attestation channel" reads `level.is_major_only()` instead of
+    /// `matches!(level, BumpLevel::Major)` or a single-arm `match level {
+    /// Major => breaking_channel, _ => other }` cascade at every policy
+    /// site — the major-only semantic role is named at the typed-primitive
+    /// surface, not retyped at every consumer.
+    ///
+    /// Ceiling-identity peer of [`is_fix_only`](Self::is_fix_only) and
+    /// [`is_minor_only`](Self::is_minor_only) at the [`BumpLevel`] sum
+    /// surface. Closes the three-position variant-identity trio at the
+    /// named-method surface — the floor identity
+    /// ([`is_fix_only`](Self::is_fix_only)), the middle-band identity
+    /// ([`is_minor_only`](Self::is_minor_only)), and the ceiling identity
+    /// ([`is_major_only`](Self::is_major_only), this commit) — every ladder
+    /// position now carries a named variant-identity reading distinct from
+    /// the half-open-ray reading at the same ladder position
+    /// ([`is_breaking`](Self::is_breaking),
+    /// [`is_non_breaking`](Self::is_non_breaking)).
+    ///
+    /// Sibling lift of
+    /// [`crate::probe_outcome::AdmissionTier::is_strict`] (commit 1775181)
+    /// at the admission-tier ladder ceiling: same variant-identity `==`
+    /// form, same single-variant naming idiom, here applied to the
+    /// magnitude-ladder ceiling. With this commit, both repo-internal tier
+    /// ladders ([`BumpLevel`] and
+    /// [`crate::probe_outcome::AdmissionTier`]) carry the full identity
+    /// trio at the named-method surface — establishing the third repo-
+    /// internal instance of the variant-identity-typed-method idiom at the
+    /// ladder ceiling and motivating the future lift to a shared
+    /// `pleme-actions` trait or `macro_rules!` over the two tier ladders.
+    ///
+    /// # Why `== Self::Major`, not `>= Self::Major` or `matches!`
+    ///
+    /// Unlike [`is_breaking`](Self::is_breaking) (which reads
+    /// `*self >= Self::Major` so a future variant inserted strictly above
+    /// `Major` is automatically classified as breaking — a half-open ray
+    /// on the ladder), the major-only ceiling identity names a single
+    /// variant by intent, not a half-open ray. A future `BumpLevel::Epoch`
+    /// variant inserted strictly above `Major` (a semver4-style API-
+    /// generation bump distinct from the canonical breaking-change major
+    /// variant — its own release coordinator, its own attestation channel)
+    /// is structurally NOT the canonical `Major` variant — it is a
+    /// strictly-stronger bump category — and so must NOT read as
+    /// `is_major_only()`. The `>= Self::Major` form would silently
+    /// reclassify the new ceiling variant as the canonical major bump; the
+    /// `*self == Self::Major` form refuses by construction. The choice
+    /// mirrors [`is_fix_only`](Self::is_fix_only) at the ladder floor and
+    /// [`is_minor_only`](Self::is_minor_only) at the middle band, where
+    /// naming a single variant likewise reads through equality rather than
+    /// a half-open ray to refuse silent reclassification across future
+    /// ladder insertions adjacent to the named variant.
+    ///
+    /// # Implication into `is_breaking`, disjoint from `is_fix_only`
+    ///
+    /// The implication invariant `is_major_only() => is_breaking()` is
+    /// pinned by
+    /// [`tests::test_bump_level_is_major_only_implies_is_breaking`]: the
+    /// major ceiling is structurally a breaking bump (`Major >= Major`
+    /// trivially), so a downstream release-policy gate that already reads
+    /// `is_breaking()` admits every `is_major_only()` bump automatically.
+    /// The disjoint invariant `!(is_major_only() && is_fix_only())` is
+    /// pinned by
+    /// [`tests::test_bump_level_is_major_only_disjoint_from_is_fix_only`]:
+    /// no bump is simultaneously the major ceiling AND the fix-only floor
+    /// — the two named predicates partition the ladder into non-
+    /// overlapping extremes (ceiling-identity vs floor-identity). Sibling
+    /// pin of
+    /// [`crate::probe_outcome::tests::test_admission_tier_is_strict_disjoint_from_refuses_relaxed`]
+    /// at the admission-tier surface.
+    ///
+    /// # Identity-trio partition of the ladder
+    ///
+    /// Together with [`is_fix_only`](Self::is_fix_only) and
+    /// [`is_minor_only`](Self::is_minor_only), the major-ceiling identity
+    /// closes the disjoint-and-covering XOR partition `is_fix_only() XOR
+    /// is_minor_only() XOR is_major_only()` across the three-variant
+    /// ladder — pinned by
+    /// [`tests::test_bump_level_identity_trio_partitions_ladder`]. A
+    /// downstream release-policy consumer that branches on the bump level
+    /// (fix-channel / additive-channel / breaking-channel) reads the three
+    /// identity predicates as a disjoint cover rather than a nested
+    /// if-else cascade that would inherit a drift class on the day a
+    /// fourth variant is added. The dual partition `is_fix_only XOR
+    /// is_minor_only XOR is_breaking` (commit c12f211, pinned by
+    /// [`tests::test_bump_level_named_trio_xor_partitions_ladder`]) rides
+    /// the half-open-ray surface at the ceiling; this commit's identity-
+    /// trio partition rides the variant-equality surface at the ceiling —
+    /// together the two partitions seal the ladder against both half-
+    /// open-ray drift AND variant-identity drift under future variant
+    /// insertions above `Major`. Same dual-partition seal
+    /// [`crate::probe_outcome::AdmissionTier`] already carries (the ray
+    /// partition `admits_strict XOR is_staging_only XOR refuses_relaxed`
+    /// at commit e08b821, the identity partition `is_refused XOR
+    /// is_staging_only XOR is_strict` at commit 1775181).
+    ///
+    /// # Coincidence with `is_breaking` under the present ladder
+    ///
+    /// Under the present three-variant ladder, `is_major_only()` and
+    /// `is_breaking()` coincide numerically at every variant: `Major` is
+    /// both the unique == ceiling variant AND the unique >= ceiling
+    /// variant. The coincidence is pinned by
+    /// [`tests::test_bump_level_is_major_only_equals_is_breaking_under_present_ladder`]
+    /// so the structural distinction between the two peers carries load
+    /// even where they're numerically equal today. A future `Epoch`
+    /// insertion above `Major` would surface the distinction: `Epoch` is
+    /// breaking (`>= Major`) but is NOT the canonical major variant
+    /// (`!= Major`), so `is_breaking()` would read `true` at `Epoch` while
+    /// `is_major_only()` would read `false`. Same present-coincidence pin
+    /// [`crate::probe_outcome::AdmissionTier::is_strict`] carries against
+    /// `admits_strict` under the three-variant admission-tier ladder.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the version-bump magnitude
+    /// ladder is consumed at named typed-method surfaces, not retyped at
+    /// every consumer's match cascade — the ceiling-identity predicate
+    /// sits at the typed-primitive surface alongside the floor-identity
+    /// ([`is_fix_only`](Self::is_fix_only)), the middle-band identity
+    /// ([`is_minor_only`](Self::is_minor_only)), and the half-open-ray
+    /// predicates ([`is_breaking`](Self::is_breaking),
+    /// [`is_non_breaking`](Self::is_non_breaking)). THEORY.md §VI.1 one-
+    /// oracle: the major-ceiling semantic role (this bump is exactly the
+    /// canonical breaking-change major variant) is named at one site
+    /// (this method's body), so a downstream policy gate that previously
+    /// read `matches!(level, BumpLevel::Major)` reads
+    /// `level.is_major_only()` once and is automatically refused — by the
+    /// `==` form — across a future `Epoch` insertion above `Major` that
+    /// the gate should NOT classify as the canonical major variant.
+    #[allow(dead_code)]
+    pub fn is_major_only(&self) -> bool {
+        *self == Self::Major
+    }
 }
 
 impl std::fmt::Display for BumpLevel {
@@ -1414,6 +1551,149 @@ mod tests {
             assert!(
                 level.is_fix_only() ^ level.is_minor_only() ^ level.is_breaking(),
                 "fix-only XOR minor-only XOR breaking must hold at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant, `is_major_only()` returns the value
+    /// it must under the major-ceiling semver semantic role: `Major` is
+    /// major-only; `Patch` and `Minor` are not. A release-policy gate that
+    /// today reads `match level { Major => breaking_review_queue, _ =>
+    /// other }` reads after this commit as `if level.is_major_only() {
+    /// breaking_review_queue } else { other }` — the major-only semantic
+    /// role is named once at the typed-primitive surface, not retyped at
+    /// every policy site. Ceiling-sibling of
+    /// [`test_bump_level_is_fix_only_named_at_ladder_floor`] at the dual
+    /// extreme.
+    #[test]
+    fn test_bump_level_is_major_only_named_at_ladder_ceiling() {
+        assert!(
+            BumpLevel::Major.is_major_only(),
+            "Major is the breaking-change ceiling of the magnitude ladder",
+        );
+        assert!(
+            !BumpLevel::Patch.is_major_only(),
+            "Patch is the fix-only floor, not major-only",
+        );
+        assert!(
+            !BumpLevel::Minor.is_major_only(),
+            "Minor is the additive-API middle band, not major-only",
+        );
+    }
+
+    /// `is_major_only()` agrees with `*self == BumpLevel::Major` at every
+    /// variant — the structural pin that makes the derived
+    /// `PartialEq`/`Eq` impl (the magnitude-ladder typed-sum surface,
+    /// commit b842b21) the load-bearing oracle for the major-ceiling
+    /// identity reading. A regression that drifted the body to
+    /// `matches!(self, Self::Major)` or to `self.is_breaking()` would still
+    /// pass [`test_bump_level_is_major_only_named_at_ladder_ceiling`] at
+    /// the current three-variant ladder; this pin holds against future
+    /// regressions that desynced the named-method peer from the derived
+    /// `==` reading. Same idiom [`is_fix_only`] and [`is_minor_only`]
+    /// established at the floor and middle, here at the ceiling.
+    #[test]
+    fn test_bump_level_is_major_only_agrees_with_eq_major_at_every_variant() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                level.is_major_only(),
+                level == BumpLevel::Major,
+                "is_major_only() must read the == Major comparison at {level:?}",
+            );
+        }
+    }
+
+    /// The implication invariant `is_major_only() => is_breaking()` holds
+    /// at every variant — every major-only bump is structurally a breaking
+    /// bump (`Major >= Major` trivially), so a downstream release-policy
+    /// gate that admits `is_breaking()` automatically admits every
+    /// `is_major_only()` bump, with no per-site reclassification of the
+    /// implication. Sibling pin of
+    /// [`test_bump_level_is_fix_only_implies_is_non_breaking`] at the
+    /// dual extreme (ceiling identity into ceiling ray, vs floor identity
+    /// into below-ceiling ray) and of
+    /// [`crate::probe_outcome::tests::test_admission_tier_is_strict_implies_admits_strict`]
+    /// at the admission-tier surface.
+    #[test]
+    fn test_bump_level_is_major_only_implies_is_breaking() {
+        for level in BumpLevel::ALL {
+            assert!(
+                !level.is_major_only() || level.is_breaking(),
+                "is_major_only() must imply is_breaking() at {level:?}",
+            );
+        }
+    }
+
+    /// The disjoint invariant `!(is_major_only() && is_fix_only())` holds
+    /// at every variant — no bump is simultaneously major-only AND
+    /// fix-only. The major ceiling (`Major`) and the fix-only floor
+    /// (`Patch`) are distinct ladder positions: their conjunction is empty
+    /// at every level. The pin closes the floor-identity / ceiling-
+    /// identity named-band pair against accidental overlap, complementing
+    /// the existing disjoint pins between the named-method peers. Same
+    /// disjoint-extremes pin
+    /// [`crate::probe_outcome::tests::test_admission_tier_is_strict_disjoint_from_refuses_relaxed`]
+    /// (ceiling identity vs floor ray) and
+    /// [`crate::probe_outcome::tests::test_admission_tier_is_refused_disjoint_from_admits_relaxed`]
+    /// (floor identity vs ceiling ray) at the admission-tier surface.
+    #[test]
+    fn test_bump_level_is_major_only_disjoint_from_is_fix_only() {
+        for level in BumpLevel::ALL {
+            assert!(
+                !(level.is_major_only() && level.is_fix_only()),
+                "is_major_only() AND is_fix_only() must be empty at {level:?}",
+            );
+        }
+    }
+
+    /// The disjoint-and-covering identity-trio partition invariant
+    /// `is_fix_only() XOR is_minor_only() XOR is_major_only() == true`
+    /// holds at every variant — exactly one of the three named variant-
+    /// identity peers reads `true` at every level. Distinct from the
+    /// ray-form trio
+    /// [`test_bump_level_named_trio_xor_partitions_ladder`] which rides
+    /// `is_breaking()` at the ceiling: under the present three-variant
+    /// ladder the two trios coincide numerically, but under a future
+    /// `Epoch` variant inserted above `Major` the ray-trio still
+    /// partitions (`Epoch` reads `is_breaking() == true`, the other two
+    /// false — exactly one true) while the identity-trio surfaces a gap
+    /// (`Epoch` reads false for all three identity predicates — zero
+    /// true). The dual partition sealing makes the structural drift class
+    /// — silent reclassification of a future ceiling variant as either
+    /// the canonical breaking ray reading OR the canonical major identity
+    /// reading — load-bearing at the typed-primitive surface. Same dual-
+    /// partition seal
+    /// [`crate::probe_outcome::AdmissionTier`] already carries (ray
+    /// partition at commit e08b821, identity partition at commit
+    /// 1775181).
+    #[test]
+    fn test_bump_level_identity_trio_partitions_ladder() {
+        for level in BumpLevel::ALL {
+            assert!(
+                level.is_fix_only() ^ level.is_minor_only() ^ level.is_major_only(),
+                "fix-only XOR minor-only XOR major-only must hold at {level:?}",
+            );
+        }
+    }
+
+    /// Under the present three-variant ladder, `is_major_only()` coincides
+    /// numerically with `is_breaking()` at every variant: `Major` is both
+    /// the unique == ceiling variant AND the unique >= ceiling variant.
+    /// The pin names the present coincidence explicitly so the structural
+    /// distinction between the two peers carries load even where they're
+    /// numerically equal today. A future `Epoch` insertion above `Major`
+    /// would surface the distinction at this pin: `is_breaking()` would
+    /// read `true` at `Epoch` (>= Major), while `is_major_only()` would
+    /// read `false` (!= Major). Sibling pin of
+    /// [`crate::probe_outcome::tests::test_admission_tier_is_strict_equals_admits_strict_under_present_ladder`]
+    /// at the admission-tier surface.
+    #[test]
+    fn test_bump_level_is_major_only_equals_is_breaking_under_present_ladder() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                level.is_major_only(),
+                level.is_breaking(),
+                "under the present 3-variant ladder, is_major_only() and is_breaking() must coincide at {level:?}",
             );
         }
     }
