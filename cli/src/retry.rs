@@ -523,6 +523,21 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // (`io.EOF`) is matched token-wise via
     // [`TRANSIENT_NETWORK_STDERR_TOKEN_MARKERS`].
     "unexpected EOF",
+    // Mid-stream TCP drop on WRITE — structural mirror of `unexpected EOF`
+    // (READ side). `syscall.EPIPE` formats as the bare phrase `broken pipe`
+    // across the dialects forge's external CLIs emit: Go net (`"write tcp
+    // 10.0.0.1:443: broken pipe"`, skopeo/regctl/attic-server), curl with
+    // OpenSSL (`"OpenSSL SSL_write: Broken pipe, errno 32"`, `"Send
+    // failure: Broken pipe"`, git-over-HTTPS), and hyper/reqwest
+    // (`std::io::Error` formatting `"Broken pipe"`, attic-client).
+    // forge's upload-heavy pipeline (image push to GHCR, store-path push
+    // to attic-server) emits this form more often than `unexpected EOF` —
+    // upstream closes the TCP connection mid-upload. Both casings carried
+    // because Go syscall.EPIPE.Error() emits lowercase while curl/hyper
+    // emit capitalized — same dual-case discipline `"Connection refused"`
+    // / `"connection refused"` carries.
+    "broken pipe",
+    "Broken pipe",
 ];
 
 /// Named markers matched token-wise rather than as bare substrings.
@@ -2194,7 +2209,9 @@ mod tests {
     /// The bare `EOF` acronym is matched token-wise — a maximal ASCII-
     /// alphanumeric run must equal `EOF` exactly — so the legitimate
     /// Go-style `io.EOF` diagnostic still classifies in every realistic
-    /// surrounding-punctuation dialect skopeo/regctl/attic/curl emit.
+    /// surrounding-punctuation dialect skopeo/regctl/attic/curl emit. The
+    /// structural mirror on the WRITE side is `broken pipe` (covered by
+    /// `test_transient_classifier_matches_broken_pipe`).
     #[test]
     fn test_transient_classifier_matches_eof() {
         // Multi-word Go form (`io.ErrUnexpectedEOF`) — substring marker.
@@ -2206,6 +2223,45 @@ mod tests {
         assert!(is_transient_network_stderr("upload aborted (EOF)"));
         assert!(is_transient_network_stderr("EOF mid-stream"));
         assert!(is_transient_network_stderr("error: EOF"));
+    }
+
+    /// Mid-stream TCP drop on WRITE (`syscall.EPIPE`) is transient — the
+    /// structural mirror of `unexpected EOF` (mid-stream drop on READ).
+    /// forge's pipeline is upload-heavy (image push to GHCR via skopeo /
+    /// regctl, Nix store-path push to attic-server via attic-client, git
+    /// push over HTTPS via curl), so this is the more commonly emitted
+    /// form than `unexpected EOF`.
+    ///
+    /// Fail-before: the pre-fix marker set carried `unexpected EOF` but
+    /// not `broken pipe`, so every realistic skopeo/regctl/attic-client/
+    /// curl write-side drop short-circuited to terminal — the upload
+    /// failed once and the typed retry loop refused to back off, burning
+    /// the push-pipeline against a transient kernel-level TCP event.
+    /// Pass-after: every realistic dialect classifies transient and the
+    /// shared `retry_command` / `run_with_policy` driver backs off and
+    /// retries the upload.
+    #[test]
+    fn test_transient_classifier_matches_broken_pipe() {
+        // Go net/http (skopeo, regctl, attic-server): syscall.EPIPE
+        // formats lowercase as `broken pipe`.
+        assert!(is_transient_network_stderr(
+            "write tcp 10.0.0.1:54321->1.2.3.4:443: broken pipe"
+        ));
+        assert!(is_transient_network_stderr("write: broken pipe"));
+        assert!(is_transient_network_stderr(
+            "Error pushing manifest: i/o error: broken pipe"
+        ));
+        // curl (git-over-HTTPS, container-registry probes): OpenSSL emits
+        // capitalized `Broken pipe` via `SSL_write` / `Send failure`.
+        assert!(is_transient_network_stderr(
+            "curl: (55) OpenSSL SSL_write: Broken pipe, errno 32"
+        ));
+        assert!(is_transient_network_stderr("Send failure: Broken pipe"));
+        // hyper / reqwest (attic-client): `std::io::Error` formats
+        // capitalized `Broken pipe` through the Display impl.
+        assert!(is_transient_network_stderr(
+            "error sending request for url: Broken pipe (os error 32)"
+        ));
     }
 
     /// The bare `EOF` acronym matches token-wise, never as a bare
