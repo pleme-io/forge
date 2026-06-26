@@ -907,6 +907,138 @@ impl BumpLevel {
     pub fn join(self, other: Self) -> Self {
         self.max(other)
     }
+
+    /// The lattice meet over the version-bump magnitude ladder — the
+    /// `BumpLevel` BOTH `self` and `other` share at the per-commit floor.
+    /// Reads `self.min(other)` at one named site, returning the lower of
+    /// the two variants on the derived [`Ord`] ladder (`Patch < Minor <
+    /// Major`). The named typed-method peer of the [`Ord::min`] reduction
+    /// at the [`BumpLevel`] surface, the structural mirror of
+    /// [`crate::probe_outcome::per_axis_admission_tier_floor`] at the
+    /// [`crate::probe_outcome::AdmissionTier`] surface and the dual of
+    /// [`join`](Self::join) at the same magnitude ladder.
+    ///
+    /// # The per-commit-floor reading
+    ///
+    /// Where [`join`](Self::join) names the release-aggregation idiom over
+    /// a sequence of per-commit bump levels (the release bump SUBSUMES
+    /// every per-commit bump), `meet` names the dual at the per-commit-
+    /// floor surface — the magnitude every commit in a sequence is at
+    /// least as large as. A SLSA-style strictest-common-baseline reading
+    /// over a sequence of per-commit bump magnitudes — "every commit in
+    /// this release is at least a feature change" — is the meet-fold
+    /// `commits.iter().fold(BumpLevel::Major, |acc, c| acc.meet(c.level))`,
+    /// with [`BumpLevel::Major`] as the identity element (any per-commit
+    /// bump meets with `Major` to itself, by the duality `min(Major, x) =
+    /// x`) and [`BumpLevel::Patch`] as the absorbing element (any per-
+    /// commit bump met with `Patch` collapses to `Patch`, by the duality
+    /// `min(Patch, x) = Patch`). The identity and absorbing-element
+    /// invariants are pinned by
+    /// [`tests::test_bump_level_meet_has_major_as_identity`] and
+    /// [`tests::test_bump_level_meet_has_patch_as_absorbing_element`] —
+    /// the load-bearing structural facts a per-commit-floor fold relies on
+    /// at the seed and the early-exit step, mirror duals of the
+    /// [`Patch`](BumpLevel::Patch)-identity / [`Major`](BumpLevel::Major)-
+    /// absorbing pair pinned at the [`join`](Self::join) surface.
+    ///
+    /// # Why a named method, not raw `Ord::min`
+    ///
+    /// The body reads `self.min(other)`, and at every reachable `(self,
+    /// other)` pair the two readings agree (pinned by
+    /// [`tests::test_bump_level_meet_agrees_with_min_at_every_pair`]). The
+    /// named [`meet`](Self::meet) surface carries TWO load-bearing pieces
+    /// of content the bare [`Ord::min`] call does not:
+    ///
+    /// 1. The per-commit-floor semantic role: a per-commit-floor consumer
+    ///    reading `level_a.meet(level_b)` reads "the bump magnitude both
+    ///    commits share at the floor" at the call site, where the same
+    ///    consumer reading `level_a.min(level_b)` reads "the smaller of
+    ///    the two magnitudes" — the `min` form is a general lattice op
+    ///    shared with arbitrary comparable types, the `meet` form names
+    ///    the per-commit-floor reading at the typed-primitive surface.
+    ///    Same THEORY.md §V.4 honesty-channel discipline the
+    ///    [`crate::probe_outcome::per_axis_admission_tier_floor`] lift
+    ///    established at the per-axis admission-tier surface: surfacing
+    ///    "the strictest tier every axis admits at" as the load-bearing
+    ///    reading distinct from a bare [`Ord::min`] reduction.
+    /// 2. A one-oracle anchor for a future ladder refinement. The lattice
+    ///    meet over a total order coincides with [`Ord::min`] by
+    ///    definition, but a future ladder extension that introduces
+    ///    structural distinctions inside the magnitude axis (a
+    ///    `Prerelease` variant strictly below `Patch` with refined per-
+    ///    commit-floor semantics — does `Prerelease.meet(Patch) ==
+    ///    Prerelease`? does it propagate down to a pre-release floor shape
+    ///    distinct from a stable floor?) extends this method body once,
+    ///    instead of retyping the per-commit-floor oracle at every
+    ///    consumer's inline `.min()` call. Same THEORY.md §VI.1 one-oracle
+    ///    discipline the prior typed-method-peer lifts established
+    ///    ([`is_breaking`](Self::is_breaking) /
+    ///    [`is_non_breaking`](Self::is_non_breaking) /
+    ///    [`is_feature_or_breaking`](Self::is_feature_or_breaking) /
+    ///    [`is_below_feature_threshold`](Self::is_below_feature_threshold))
+    ///    over the half-open-ray gates and [`join`](Self::join) at the
+    ///    lattice-join surface, here applied to the lattice-meet surface
+    ///    over the same total-order ladder — closing the lattice-operation
+    ///    pair at the [`BumpLevel`] surface.
+    ///
+    /// # Algebraic invariants
+    ///
+    /// The lattice meet over a total order is idempotent, commutative,
+    /// and associative, with the ladder ceiling ([`BumpLevel::Major`]) as
+    /// the identity element and the ladder floor ([`BumpLevel::Patch`])
+    /// as the absorbing element — the duals of the
+    /// [`join`](Self::join) invariants on the same ladder. The lattice
+    /// meet and join satisfy the absorption laws (`a.join(a.meet(b)) == a`
+    /// and `a.meet(a.join(b)) == a`), pinned by
+    /// [`tests::test_bump_level_meet_join_absorption_at_every_pair`] —
+    /// the structural anchor that the meet/join pair forms a lattice in
+    /// the algebraic sense, not merely two independent reductions over
+    /// the same [`Ord`] ladder. The meet is bounded above by both
+    /// arguments and below by the join over the same pair, pinned by
+    /// [`tests::test_bump_level_meet_bounded_above_by_both_arguments`]
+    /// and
+    /// [`tests::test_bump_level_meet_le_join_at_every_pair`] — the
+    /// structural witness that the meet–join interval brackets the
+    /// magnitude range of the input pair, the per-pair mirror of
+    /// `test_per_axis_admission_tier_floor_le_ceiling_across_cross_product`
+    /// at the per-axis admission-tier surface.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the per-commit-floor
+    /// reading is a lattice operation (`min`) on the derived [`Ord`]
+    /// ladder, named at the typed-primitive surface so a downstream
+    /// consumer reads `level_a.meet(level_b)` once and is automatically
+    /// updated across a future ladder refinement. THEORY.md §VI.1 one-
+    /// oracle / generation-over-composition: the per-commit-floor idiom
+    /// is named at one site (this method's body), not retyped at every
+    /// consumer's inline `.min()` call. Together with
+    /// [`join`](Self::join), this closes the lattice-operation pair at
+    /// the [`BumpLevel`] surface — the structural mirror of the
+    /// `per_axis_admission_tier_floor` /
+    /// `per_axis_admission_tier_ceiling` pair at the per-axis admission-
+    /// tier surface.
+    ///
+    /// Frontier inspiration: SLSA per-source attestation rules read the
+    /// least-trusted source tier as the meet (`min`) over per-source
+    /// tiers — the "every source admits at this floor" reading where
+    /// the bound is the strictest baseline every contributing source
+    /// honors; conventional-commits per-commit-floor analysis lifts a
+    /// sequence of per-commit type tokens (fix / feat / breaking) into a
+    /// floor magnitude via the same min-fold, with `fix` as the absorbing
+    /// element (the floor of any sequence containing a fix is `fix`) and
+    /// `breaking` as the identity element (a sequence of breaking changes
+    /// shares the breaking floor). Translation: forge's [`BumpLevel`] sum
+    /// now names the per-commit-floor meet at the typed-primitive surface
+    /// so a downstream per-commit-floor fold reads
+    /// `levels.fold(BumpLevel::Major, |acc, l| acc.meet(l))` through one
+    /// named oracle, rather than retyping `acc.min(l)` at every per-
+    /// commit-floor aggregation site, with the load-bearing algebraic
+    /// invariants (`Major`-identity, `Patch`-absorbing, idempotence,
+    /// commutativity, associativity, absorption with [`join`](Self::join))
+    /// pinned at the typed-primitive site.
+    #[allow(dead_code)]
+    pub fn meet(self, other: Self) -> Self {
+        self.min(other)
+    }
 }
 
 impl std::fmt::Display for BumpLevel {
@@ -2523,6 +2655,254 @@ mod tests {
                 assert!(
                     j == a || j == b,
                     "join({a:?}, {b:?}) = {j:?} must be in {{ {a:?}, {b:?} }}",
+                );
+            }
+        }
+    }
+
+    /// Exact-shape per-(a, b) pin over the 3×3 grid for [`BumpLevel::meet`]
+    /// — the structural mirror of
+    /// [`test_bump_level_join_named_at_release_aggregation_surface`] at
+    /// the dual lattice-meet surface, naming the per-commit-floor reading
+    /// at the typed-primitive site. Floor-sibling of the per-variant
+    /// witness pins at the half-open-ray gate surface, the surface-witness
+    /// pin a regression in the method body surfaces against.
+    #[test]
+    fn test_bump_level_meet_named_at_per_commit_floor_surface() {
+        use BumpLevel::*;
+        let cases = [
+            (Patch, Patch, Patch),
+            (Patch, Minor, Patch),
+            (Patch, Major, Patch),
+            (Minor, Patch, Patch),
+            (Minor, Minor, Minor),
+            (Minor, Major, Minor),
+            (Major, Patch, Patch),
+            (Major, Minor, Minor),
+            (Major, Major, Major),
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(
+                a.meet(b),
+                expected,
+                "meet({a:?}, {b:?}) must return {expected:?}",
+            );
+        }
+    }
+
+    /// Structural-equivalence pin: `meet` agrees with [`Ord::min`] at
+    /// every pair over the 3×3 grid. The pin that makes the `min` form
+    /// (not a hand-rolled match cascade) the load-bearing oracle, so a
+    /// future variant insertion that desynced the method body from the
+    /// derived [`Ord`] ladder would light up here rather than drifting
+    /// silently through the lattice-meet surface. Dual of
+    /// [`test_bump_level_join_agrees_with_max_at_every_pair`] at the
+    /// lattice-join surface.
+    #[test]
+    fn test_bump_level_meet_agrees_with_min_at_every_pair() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                assert_eq!(
+                    a.meet(b),
+                    a.min(b),
+                    "meet({a:?}, {b:?}) must equal min({a:?}, {b:?})",
+                );
+            }
+        }
+    }
+
+    /// Idempotence invariant: `a.meet(a) == a` at every variant. The
+    /// load-bearing structural fact a per-commit-floor fold over
+    /// duplicate per-commit bump levels relies on (the floor of a
+    /// sequence of patch commits is still a patch floor). Dual of
+    /// [`test_bump_level_join_is_idempotent_at_every_variant`] at the
+    /// lattice-join surface.
+    #[test]
+    fn test_bump_level_meet_is_idempotent_at_every_variant() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                level.meet(level),
+                level,
+                "meet must be idempotent at {level:?}",
+            );
+        }
+    }
+
+    /// Commutativity invariant: `a.meet(b) == b.meet(a)` at every pair
+    /// over the 3×3 grid. The load-bearing structural fact a per-commit-
+    /// floor fold relies on to be insensitive to per-commit ORDER —
+    /// the per-commit-floor for [fix, feat] equals the per-commit-floor
+    /// for [feat, fix]. Dual of
+    /// [`test_bump_level_join_is_commutative_at_every_pair`] at the
+    /// lattice-join surface.
+    #[test]
+    fn test_bump_level_meet_is_commutative_at_every_pair() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                assert_eq!(
+                    a.meet(b),
+                    b.meet(a),
+                    "meet must be commutative: meet({a:?}, {b:?}) vs meet({b:?}, {a:?})",
+                );
+            }
+        }
+    }
+
+    /// Associativity invariant: `a.meet(b.meet(c)) == a.meet(b).meet(c)`
+    /// at every triple over the 3×3×3 grid. The load-bearing structural
+    /// anchor a per-commit-floor fold relies on to be insensitive to
+    /// per-commit GROUPING. Dual of
+    /// [`test_bump_level_join_is_associative_at_every_triple`] at the
+    /// lattice-join surface.
+    #[test]
+    fn test_bump_level_meet_is_associative_at_every_triple() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                for c in BumpLevel::ALL {
+                    assert_eq!(
+                        a.meet(b.meet(c)),
+                        a.meet(b).meet(c),
+                        "meet must be associative at ({a:?}, {b:?}, {c:?})",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Identity-element invariant: `Major` is the meet identity at every
+    /// variant — `Major.meet(a) == a.meet(Major) == a`. The load-bearing
+    /// structural fact a per-commit-floor fold seeds with: a fold seeded
+    /// at `BumpLevel::Major` over a sequence of per-commit bump levels
+    /// returns the min of the sequence (or `Major` if the sequence is
+    /// empty — the no-commits floor shape, dual to the empty-release
+    /// `Patch` shape at the join surface).
+    #[test]
+    fn test_bump_level_meet_has_major_as_identity() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                BumpLevel::Major.meet(level),
+                level,
+                "Major must be left-identity for meet at {level:?}",
+            );
+            assert_eq!(
+                level.meet(BumpLevel::Major),
+                level,
+                "Major must be right-identity for meet at {level:?}",
+            );
+        }
+    }
+
+    /// Absorbing-element invariant: `Patch` is the meet absorber at every
+    /// variant — `Patch.meet(a) == a.meet(Patch) == Patch`. The load-
+    /// bearing structural fact a per-commit-floor fold can early-exit on:
+    /// once any per-commit bump reads `Patch`, the per-commit-floor
+    /// collapses to `Patch` regardless of the remaining commits. The dual
+    /// at the meet surface of the `Major`-absorbing fact at the join
+    /// surface.
+    #[test]
+    fn test_bump_level_meet_has_patch_as_absorbing_element() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                BumpLevel::Patch.meet(level),
+                BumpLevel::Patch,
+                "Patch must be left-absorbing for meet at {level:?}",
+            );
+            assert_eq!(
+                level.meet(BumpLevel::Patch),
+                BumpLevel::Patch,
+                "Patch must be right-absorbing for meet at {level:?}",
+            );
+        }
+    }
+
+    /// Upper-bound invariant: `a.meet(b) <= a && a.meet(b) <= b` at every
+    /// pair over the 3×3 grid. The load-bearing structural anchor a
+    /// downstream per-commit-floor reader consumes ("the per-commit floor
+    /// is at or below every contributing commit") through one named site,
+    /// derived directly from the lattice-meet surface rather than re-
+    /// derived at every inline `.min()` call. A regression in the method
+    /// body that returned a value above either argument lights up here as
+    /// a bound-violation. Dual of
+    /// [`test_bump_level_join_bounded_below_by_both_arguments`].
+    #[test]
+    fn test_bump_level_meet_bounded_above_by_both_arguments() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                let m = a.meet(b);
+                assert!(m <= a, "meet({a:?}, {b:?}) = {m:?} must be <= {a:?}",);
+                assert!(m <= b, "meet({a:?}, {b:?}) = {m:?} must be <= {b:?}",);
+            }
+        }
+    }
+
+    /// Total-order witness: `a.meet(b) ∈ {a, b}` at every pair over the
+    /// 3×3 grid. The structural witness that the lattice meet over a
+    /// total order is the identity-or-other readback — distinct from a
+    /// free-lattice meet that could return a third element. Dual of
+    /// [`test_bump_level_join_returns_one_of_the_arguments`] at the
+    /// lattice-meet surface.
+    #[test]
+    fn test_bump_level_meet_returns_one_of_the_arguments() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                let m = a.meet(b);
+                assert!(
+                    m == a || m == b,
+                    "meet({a:?}, {b:?}) = {m:?} must be in {{ {a:?}, {b:?} }}",
+                );
+            }
+        }
+    }
+
+    /// Cross-surface order pin: `a.meet(b) <= a.join(b)` at every pair
+    /// over the 3×3 grid. The structural witness that the meet-join
+    /// interval brackets the magnitude range of the input pair — the
+    /// per-pair mirror of
+    /// `test_per_axis_admission_tier_floor_le_ceiling_across_cross_product`
+    /// at the per-axis admission-tier surface, here at the [`BumpLevel`]
+    /// magnitude ladder. Equality holds when the inputs coincide
+    /// (`a.meet(a) == a == a.join(a)`); strict inequality holds at every
+    /// asymmetric pair (the meet and join return the two distinct
+    /// arguments respectively).
+    #[test]
+    fn test_bump_level_meet_le_join_at_every_pair() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                let m = a.meet(b);
+                let j = a.join(b);
+                assert!(
+                    m <= j,
+                    "meet({a:?}, {b:?}) = {m:?} must be <= join({a:?}, {b:?}) = {j:?}",
+                );
+            }
+        }
+    }
+
+    /// Absorption laws: `a.join(a.meet(b)) == a` and `a.meet(a.join(b))
+    /// == a` at every pair over the 3×3 grid. The structural anchor that
+    /// the meet/join pair forms a LATTICE in the algebraic sense — two
+    /// reductions over the same [`Ord`] ladder, related by the absorption
+    /// laws so that "join with one's own meet collapses" and "meet with
+    /// one's own join collapses." A future ladder refinement that broke
+    /// the absorption laws (e.g., a meet-irreducible variant inserted
+    /// where `a.meet(b)` returned a strict lower bound of both arguments)
+    /// would light up here, surfacing the structural distinction at the
+    /// lattice-pair site rather than at every consumer. The load-bearing
+    /// fact a downstream lattice-walk relies on to round-trip through the
+    /// meet/join pair without unbounded drift.
+    #[test]
+    fn test_bump_level_meet_join_absorption_at_every_pair() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                assert_eq!(
+                    a.join(a.meet(b)),
+                    a,
+                    "join-meet absorption must hold: join({a:?}, meet({a:?}, {b:?})) must equal {a:?}",
+                );
+                assert_eq!(
+                    a.meet(a.join(b)),
+                    a,
+                    "meet-join absorption must hold: meet({a:?}, join({a:?}, {b:?})) must equal {a:?}",
                 );
             }
         }
