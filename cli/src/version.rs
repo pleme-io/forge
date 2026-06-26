@@ -783,6 +783,130 @@ impl BumpLevel {
     pub fn is_below_feature_threshold(&self) -> bool {
         *self < Self::Minor
     }
+
+    /// The lattice join over the version-bump magnitude ladder — the
+    /// `BumpLevel` required to subsume BOTH `self` and `other`
+    /// simultaneously. Reads `self.max(other)` at one named site, returning
+    /// the higher of the two variants on the derived [`Ord`] ladder
+    /// (`Patch < Minor < Major`). The named typed-method peer of the
+    /// [`Ord::max`] reduction at the [`BumpLevel`] surface, the structural
+    /// mirror of [`crate::probe_outcome::per_axis_admission_tier_ceiling`]
+    /// at the [`crate::probe_outcome::AdmissionTier`] surface.
+    ///
+    /// # The release-aggregation reading
+    ///
+    /// A release containing changes at multiple per-commit bump magnitudes
+    /// requires a release bump at least as large as the largest per-commit
+    /// magnitude: a release that ships both a backward-compatible fix
+    /// ([`BumpLevel::Patch`]) AND a backward-compatible feature
+    /// ([`BumpLevel::Minor`]) requires a Minor release bump; a release that
+    /// adds both a feature ([`BumpLevel::Minor`]) AND an API-breaking
+    /// change ([`BumpLevel::Major`]) requires a Major release bump. The
+    /// canonical release-pipeline aggregation idiom over a sequence of
+    /// per-commit [`BumpLevel`] readings is the lattice join — the fold
+    /// `commits.iter().fold(BumpLevel::Patch, |acc, c| acc.join(c.level))`
+    /// returns the release-bump magnitude, with [`BumpLevel::Patch`] as
+    /// the identity element (any per-commit bump joins with `Patch` to
+    /// itself) and [`BumpLevel::Major`] as the absorbing element (any
+    /// per-commit bump joined with `Major` collapses to `Major`). The
+    /// identity and absorbing-element invariants are pinned by
+    /// [`tests::test_bump_level_join_has_patch_as_identity`] and
+    /// [`tests::test_bump_level_join_has_major_as_absorbing_element`] —
+    /// the load-bearing structural facts a release-pipeline fold relies on
+    /// at the seed and the early-exit step.
+    ///
+    /// # Why a named method, not raw `Ord::max`
+    ///
+    /// The body reads `self.max(other)`, and at every reachable `(self,
+    /// other)` pair the two readings agree (pinned by
+    /// [`tests::test_bump_level_join_agrees_with_max_at_every_pair`]). The
+    /// named [`join`](Self::join) surface carries TWO load-bearing pieces
+    /// of content the bare [`Ord::max`] call does not:
+    ///
+    /// 1. The release-aggregation semantic role: a release-pipeline
+    ///    consumer reading `level_a.join(level_b)` reads "the release bump
+    ///    that subsumes both changes" at the call site, where the same
+    ///    consumer reading `level_a.max(level_b)` reads "the larger of the
+    ///    two magnitudes" — the `max` form is a general lattice op shared
+    ///    with arbitrary comparable types, the `join` form names the
+    ///    release-aggregation reading at the typed-primitive surface.
+    ///    Same THEORY.md §V.4 honesty-channel discipline the
+    ///    [`crate::probe_outcome::per_axis_admission_tier_ceiling`] lift
+    ///    established at the per-axis admission-tier surface: surfacing
+    ///    "the best per-axis tier any axis admits at" as the load-bearing
+    ///    reading distinct from a bare `Ord::max` reduction.
+    /// 2. A one-oracle anchor for a future ladder refinement. The lattice
+    ///    join over a total order coincides with [`Ord::max`] by
+    ///    definition, but a future ladder extension that introduces
+    ///    structural distinctions inside the magnitude axis (a
+    ///    `Prerelease` variant strictly below `Patch` with refined
+    ///    release-aggregation semantics — does
+    ///    `Prerelease.join(Patch) == Patch`? does it propagate up to a
+    ///    pre-release release-bump shape distinct from a stable release?)
+    ///    extends this method body once, instead of retyping the release-
+    ///    aggregation oracle at every consumer's inline `.max()` call.
+    ///    Same THEORY.md §VI.1 one-oracle discipline the prior
+    ///    typed-method-peer lifts established
+    ///    ([`is_breaking`](Self::is_breaking) /
+    ///    [`is_non_breaking`](Self::is_non_breaking) /
+    ///    [`is_feature_or_breaking`](Self::is_feature_or_breaking) /
+    ///    [`is_below_feature_threshold`](Self::is_below_feature_threshold))
+    ///    over the half-open-ray gates, here applied to the lattice-join
+    ///    surface over the same total-order ladder.
+    ///
+    /// # Algebraic invariants
+    ///
+    /// The lattice join over a total order is idempotent, commutative,
+    /// and associative, with the ladder floor ([`BumpLevel::Patch`]) as
+    /// the identity element and the ladder ceiling ([`BumpLevel::Major`])
+    /// as the absorbing element — the load-bearing structural facts
+    /// pinned by:
+    /// * [`tests::test_bump_level_join_is_idempotent_at_every_variant`] —
+    ///   `a.join(a) == a` at every variant.
+    /// * [`tests::test_bump_level_join_is_commutative_at_every_pair`] —
+    ///   `a.join(b) == b.join(a)` at every (a, b) over the 3×3 grid.
+    /// * [`tests::test_bump_level_join_is_associative_at_every_triple`] —
+    ///   `a.join(b.join(c)) == a.join(b).join(c)` at every (a, b, c) over
+    ///   the 3×3×3 grid, the structural anchor a downstream release-
+    ///   pipeline fold can reorder commits over without changing the
+    ///   aggregated release bump.
+    /// * [`tests::test_bump_level_join_bounded_below_by_both_arguments`]
+    ///   — `a.join(b) >= a && a.join(b) >= b` at every (a, b), the
+    ///   structural anchor a downstream provenance gate consumes ("the
+    ///   release bump subsumes every per-commit bump") through one named
+    ///   site.
+    /// * [`tests::test_bump_level_join_returns_one_of_the_arguments`] —
+    ///   `a.join(b) ∈ {a, b}` at every (a, b), the structural witness
+    ///   that the lattice join over a total order is the identity-or-
+    ///   other readback — distinct from a free-lattice join that could
+    ///   return a third element.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the release-aggregation
+    /// reading is a lattice operation (`max`) on the derived [`Ord`]
+    /// ladder, named at the typed-primitive surface so a downstream
+    /// consumer reads `level_a.join(level_b)` once and is automatically
+    /// updated across a future ladder refinement. THEORY.md §VI.1 one-
+    /// oracle / generation-over-composition: the release-aggregation
+    /// idiom is named at one site (this method's body), not retyped at
+    /// every consumer's inline `.max()` call.
+    ///
+    /// Frontier inspiration: SLSA release-tier aggregation rules read the
+    /// released-artifact tier as the join (`max`) over per-source
+    /// attestation tiers — the "subsumes every contributing source" reading
+    /// where the released artifact tier is bounded above by every
+    /// contributing tier; conventional-commits release-aggregation lifts
+    /// per-commit type tokens (fix / feat / breaking) into a release-level
+    /// bump magnitude via the same max-fold, with `fix` as the floor /
+    /// identity element and `breaking` as the ceiling / absorbing element.
+    /// Translation: forge's [`BumpLevel`] sum now names the release-
+    /// aggregation join at the typed-primitive surface so a downstream
+    /// release-pipeline fold reads `levels.fold(BumpLevel::Patch, |acc, l|
+    /// acc.join(l))` through one named oracle, rather than retyping
+    /// `acc.max(l)` at every release-pipeline aggregation site.
+    #[allow(dead_code)]
+    pub fn join(self, other: Self) -> Self {
+        self.max(other)
+    }
 }
 
 impl std::fmt::Display for BumpLevel {
@@ -2205,6 +2329,202 @@ mod tests {
                 level.is_fix_only(),
                 "under the present 3-variant ladder, is_below_feature_threshold() must equal is_fix_only() at {level:?}",
             );
+        }
+    }
+
+    /// Exact-shape per-(a,b) pin over the 3×3 grid: `join` returns the
+    /// release-bump magnitude required to subsume both arguments at every
+    /// reachable pair. Floor-sibling at the lattice-join surface of the
+    /// per-variant pins
+    /// (`test_bump_level_is_breaking_named_at_top_of_ladder` et al.) at the
+    /// half-open-ray gate surface — the surface-witness pin a regression
+    /// in the method body surfaces against.
+    #[test]
+    fn test_bump_level_join_named_at_release_aggregation_surface() {
+        use BumpLevel::*;
+        let cases = [
+            (Patch, Patch, Patch),
+            (Patch, Minor, Minor),
+            (Patch, Major, Major),
+            (Minor, Patch, Minor),
+            (Minor, Minor, Minor),
+            (Minor, Major, Major),
+            (Major, Patch, Major),
+            (Major, Minor, Major),
+            (Major, Major, Major),
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(
+                a.join(b),
+                expected,
+                "join({a:?}, {b:?}) must return {expected:?}",
+            );
+        }
+    }
+
+    /// Structural-equivalence pin: `join` agrees with `Ord::max` at every
+    /// pair over the 3×3 grid. The pin that makes the `max` form (not a
+    /// hand-rolled match cascade) the load-bearing oracle, so a future
+    /// variant insertion that desynced the method body from the derived
+    /// `Ord` ladder would light up here rather than drifting silently
+    /// through the lattice-join surface. Sibling of
+    /// `test_bump_level_is_breaking_agrees_with_ge_major_at_every_variant`
+    /// at the half-open-ray gate surface.
+    #[test]
+    fn test_bump_level_join_agrees_with_max_at_every_pair() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                assert_eq!(
+                    a.join(b),
+                    a.max(b),
+                    "join({a:?}, {b:?}) must equal max({a:?}, {b:?})",
+                );
+            }
+        }
+    }
+
+    /// Idempotence invariant: `a.join(a) == a` at every variant. The
+    /// load-bearing structural fact a release-pipeline fold over
+    /// duplicate per-commit bump levels relies on (a release that contains
+    /// two patch commits is still a patch release). Sibling of the
+    /// reflexive-ordering pin
+    /// `test_bump_level_ordering_reflexive_at_every_variant` at the
+    /// derived-Ord surface, here at the lattice-join surface.
+    #[test]
+    fn test_bump_level_join_is_idempotent_at_every_variant() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                level.join(level),
+                level,
+                "join must be idempotent at {level:?}",
+            );
+        }
+    }
+
+    /// Commutativity invariant: `a.join(b) == b.join(a)` at every pair
+    /// over the 3×3 grid. The load-bearing structural fact a release-
+    /// pipeline fold relies on to be insensitive to per-commit ORDER —
+    /// the release bump for [fix, feat] equals the release bump for
+    /// [feat, fix]. A future hand-rolled match cascade that drifted from
+    /// the symmetric `max` form across a fourth-variant addition would
+    /// light up here as a per-(a,b) asymmetry.
+    #[test]
+    fn test_bump_level_join_is_commutative_at_every_pair() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                assert_eq!(
+                    a.join(b),
+                    b.join(a),
+                    "join must be commutative: join({a:?}, {b:?}) vs join({b:?}, {a:?})",
+                );
+            }
+        }
+    }
+
+    /// Associativity invariant: `a.join(b.join(c)) == a.join(b).join(c)`
+    /// at every triple over the 3×3×3 grid. The load-bearing structural
+    /// anchor a release-pipeline fold relies on to be insensitive to
+    /// per-commit GROUPING — the release bump for a fold over a
+    /// per-commit sequence is well-defined regardless of how the sequence
+    /// is partitioned into sub-folds.
+    #[test]
+    fn test_bump_level_join_is_associative_at_every_triple() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                for c in BumpLevel::ALL {
+                    assert_eq!(
+                        a.join(b.join(c)),
+                        a.join(b).join(c),
+                        "join must be associative at ({a:?}, {b:?}, {c:?})",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Identity-element invariant: `Patch` is the join identity at every
+    /// variant — `Patch.join(a) == a.join(Patch) == a`. The load-bearing
+    /// structural fact a release-pipeline fold seeds with: a fold seeded
+    /// at `BumpLevel::Patch` over a sequence of per-commit bump levels
+    /// returns the max of the sequence (or `Patch` if the sequence is
+    /// empty — the no-op release shape).
+    #[test]
+    fn test_bump_level_join_has_patch_as_identity() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                BumpLevel::Patch.join(level),
+                level,
+                "Patch must be left-identity for join at {level:?}",
+            );
+            assert_eq!(
+                level.join(BumpLevel::Patch),
+                level,
+                "Patch must be right-identity for join at {level:?}",
+            );
+        }
+    }
+
+    /// Absorbing-element invariant: `Major` is the join absorber at every
+    /// variant — `Major.join(a) == a.join(Major) == Major`. The load-
+    /// bearing structural fact a release-pipeline fold can early-exit on:
+    /// once any per-commit bump reads `Major`, the release bump collapses
+    /// to `Major` regardless of the remaining commits. A SLSA-style
+    /// breaking-change-takes-priority discipline reads this invariant
+    /// once at the typed-primitive surface rather than re-deriving it at
+    /// every aggregation site.
+    #[test]
+    fn test_bump_level_join_has_major_as_absorbing_element() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                BumpLevel::Major.join(level),
+                BumpLevel::Major,
+                "Major must be left-absorbing for join at {level:?}",
+            );
+            assert_eq!(
+                level.join(BumpLevel::Major),
+                BumpLevel::Major,
+                "Major must be right-absorbing for join at {level:?}",
+            );
+        }
+    }
+
+    /// Lower-bound invariant: `a.join(b) >= a && a.join(b) >= b` at every
+    /// pair over the 3×3 grid. The load-bearing structural anchor a
+    /// downstream provenance gate consumes ("the release bump subsumes
+    /// every per-commit bump") through one named site, derived directly
+    /// from the lattice-join surface rather than re-derived at every
+    /// inline `.max()` call. A regression in the method body that
+    /// returned a value below either argument lights up here as a
+    /// bound-violation.
+    #[test]
+    fn test_bump_level_join_bounded_below_by_both_arguments() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                let j = a.join(b);
+                assert!(j >= a, "join({a:?}, {b:?}) = {j:?} must be >= {a:?}",);
+                assert!(j >= b, "join({a:?}, {b:?}) = {j:?} must be >= {b:?}",);
+            }
+        }
+    }
+
+    /// Total-order witness: `a.join(b) ∈ {a, b}` at every pair over the
+    /// 3×3 grid. The structural witness that the lattice join over a
+    /// total order is the identity-or-other readback — distinct from a
+    /// free-lattice join that could return a third element. A future
+    /// ladder refinement that introduced a meet-irreducible variant where
+    /// `a.join(b)` returned a strict upper bound of both arguments would
+    /// light up here as a witness-set escape, surfacing the structural
+    /// distinction at the lattice-join site rather than at every consumer.
+    #[test]
+    fn test_bump_level_join_returns_one_of_the_arguments() {
+        for a in BumpLevel::ALL {
+            for b in BumpLevel::ALL {
+                let j = a.join(b);
+                assert!(
+                    j == a || j == b,
+                    "join({a:?}, {b:?}) = {j:?} must be in {{ {a:?}, {b:?} }}",
+                );
+            }
         }
     }
 }
