@@ -654,6 +654,49 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // / `"connection refused"` carries.
     "broken pipe",
     "Broken pipe",
+    // DNS-resolver transient — `getaddrinfo(3)` `EAI_AGAIN` (glibc -3).
+    // Distinct layer from the kernel-routing transients above
+    // (`syscall.ENETUNREACH` / `EHOSTUNREACH`) and from the TCP-state
+    // transients (`ECONNREFUSED` / `ECONNRESET` / `ETIMEDOUT`): here the
+    // resolver upstream (typically cluster coredns / glibc's nss-dns
+    // over the configured `/etc/resolv.conf` nameserver list) fails to
+    // return a verdict within the resolver-side budget — distinct from
+    // `EAI_NONAME` (NXDOMAIN: a permanent verdict from the resolver that
+    // no record exists) and from `EAI_NODATA` (the name exists but no
+    // matching record-type). `EAI_AGAIN`'s leading `"Temporary"` word
+    // carries the transient verdict on its face; the production trigger
+    // for forge's pipeline is cluster coredns reloading its corefile
+    // (kubectl apply on the coredns configmap, node-local-dns
+    // reconciliation, or upstream resolver flap) — the resolver returns
+    // transient-fail within seconds, then reconverges. Across the
+    // dialects forge's external CLIs emit:
+    // - glibc strerror surface (every curl/skopeo/regctl/attic-client/
+    //   kubectl/helm-cli/git on standard distros): emits the bare
+    //   `gai_strerror(EAI_AGAIN)` phrase
+    //   `"Temporary failure in name resolution"` verbatim;
+    // - Go net (skopeo, regctl, attic-client through its golang
+    //   surface, kubectl, helm-cli's discovery shells): the resolver
+    //   wraps the strerror through the `net.DNSError` formatter — e.g.
+    //   `"lookup ghcr.io on 169.254.169.254:53: Temporary failure in
+    //   name resolution"`;
+    // - curl (git-over-HTTPS, container-registry probes, healthcheck
+    //   shells): forwards the strerror through `CURLE_COULDNT_RESOLVE_
+    //   HOST` — `"curl: (6) Could not resolve host: ghcr.io: Temporary
+    //   failure in name resolution"`;
+    // - Python (`socket.gaierror` raised by `urllib3` / `requests` /
+    //   `httpx` / the runtime probe shells): emits `"[Errno -3]
+    //   Temporary failure in name resolution"`;
+    // - hyper / reqwest (attic-client Rust surface): the resolver
+    //   forwards a `std::io::Error` whose Display impl includes the
+    //   same `"Temporary failure in name resolution"` substring.
+    // One casing only — every emitter passes through glibc's strerror
+    // verbatim, which capitalizes only the leading `T`. The marker set
+    // deliberately does NOT include the `EAI_NONAME` phrase
+    // `"Name or service not known"` (a permanent NXDOMAIN verdict from
+    // the resolver) — retrying a deterministic-deny would burn budget
+    // against a permanent resolver verdict; `EAI_AGAIN`'s `"Temporary"`
+    // prefix is what makes this phrase unambiguously retryable.
+    "Temporary failure in name resolution",
 ];
 
 /// Named markers matched token-wise rather than as bare substrings.
@@ -2574,6 +2617,111 @@ mod tests {
         // capitalized `Broken pipe` through the Display impl.
         assert!(is_transient_network_stderr(
             "error sending request for url: Broken pipe (os error 32)"
+        ));
+    }
+
+    /// DNS-resolver transient — `getaddrinfo(3)` `EAI_AGAIN` (glibc -3)
+    /// is retryable. Distinct layer from the kernel-routing transients
+    /// (`syscall.ENETUNREACH` / `EHOSTUNREACH`, pinned by
+    /// [`test_transient_classifier_matches_network_is_unreachable`] /
+    /// [`test_transient_classifier_matches_no_route_to_host`]) and from
+    /// the TCP-state transients (`ECONNREFUSED` / `ECONNRESET`, pinned
+    /// by [`test_transient_classifier_matches_connection_failures`]):
+    /// here the resolver upstream (typically cluster coredns / glibc's
+    /// nss-dns over the configured `/etc/resolv.conf` nameserver list)
+    /// fails to return a verdict within the resolver-side budget. The
+    /// dominant production trigger is cluster coredns reloading its
+    /// corefile (kubectl apply on the coredns configmap, node-local-dns
+    /// reconciliation, or upstream resolver flap) — the resolver
+    /// returns transient-fail within seconds; the next probe succeeds.
+    ///
+    /// Distinct from `EAI_NONAME` / `"Name or service not known"` (a
+    /// permanent NXDOMAIN verdict from the resolver) and from
+    /// `EAI_NODATA` (record-type miss) — `EAI_AGAIN`'s leading
+    /// `"Temporary"` word carries the transient verdict on its face.
+    /// The marker set deliberately does NOT include the NXDOMAIN
+    /// phrase: retrying a deterministic-deny would burn budget against
+    /// a permanent resolver verdict, the dual anti-pattern of the EOF
+    /// false-positive `8952b9a` closed.
+    ///
+    /// Fail-before: the pre-fix marker set carried connection-layer
+    /// (`refused` / `reset` / `aborted`), routing-layer (`no route to
+    /// host` / `network is unreachable`), connect-timeout (`timed
+    /// out`), and stream-drop (`unexpected EOF` / `broken pipe`)
+    /// markers but no marker for the DNS-resolver transient at the
+    /// layer above kernel routing. So every realistic skopeo / regctl
+    /// / attic-client / curl / kubectl / helm-cli / git probe during a
+    /// coredns reload or upstream-resolver flap silently
+    /// short-circuited to terminal — the typed retry loop refused to
+    /// back off, burning the connect attempt against a transient
+    /// resolver-side event that would have reconverged within the
+    /// existing retry-policy budget. Pass-after: every realistic
+    /// dialect classifies transient and the shared `retry_command` /
+    /// `run_with_policy` driver backs off and retries the lookup.
+    #[test]
+    fn test_transient_classifier_matches_temporary_dns_failure() {
+        // glibc strerror surface (every curl/skopeo/regctl/attic-client/
+        // kubectl/helm-cli/git on standard distros): emits the bare
+        // `gai_strerror(EAI_AGAIN)` phrase verbatim.
+        assert!(is_transient_network_stderr(
+            "Temporary failure in name resolution"
+        ));
+        // Go net (skopeo, regctl, attic-client through its golang
+        // surface, kubectl, helm-cli's discovery shells): the resolver
+        // wraps the strerror through the `net.DNSError` formatter.
+        assert!(is_transient_network_stderr(
+            "lookup ghcr.io on 169.254.169.254:53: Temporary failure in name resolution"
+        ));
+        // curl (git-over-HTTPS, container-registry probes, healthcheck
+        // surfaces): `CURLE_COULDNT_RESOLVE_HOST` forwards the strerror.
+        assert!(is_transient_network_stderr(
+            "curl: (6) Could not resolve host: ghcr.io: Temporary failure in name resolution"
+        ));
+        // Python (`socket.gaierror` raised by `urllib3` / `requests` /
+        // `httpx` / the runtime probe shells): emits the bracketed-
+        // errno form.
+        assert!(is_transient_network_stderr(
+            "socket.gaierror: [Errno -3] Temporary failure in name resolution"
+        ));
+        // hyper / reqwest (attic-client Rust surface): the resolver
+        // forwards a `std::io::Error` whose Display impl includes the
+        // same substring.
+        assert!(is_transient_network_stderr(
+            "error sending request for url: Temporary failure in name resolution"
+        ));
+    }
+
+    /// `EAI_NONAME` / `"Name or service not known"` is a PERMANENT
+    /// NXDOMAIN verdict from the resolver — not retryable. Pinning the
+    /// fail-fast verdict explicitly is the load-bearing test: if a
+    /// future marker is added that swallows the NXDOMAIN phrase, the
+    /// regression shows up here, not in production via burned retry
+    /// budget against a deterministic-deny resolver verdict. This is
+    /// the dual anti-pattern of the EOF false-positive `8952b9a` closed
+    /// — the marker `"Temporary failure in name resolution"` matches
+    /// only the explicitly-transient `EAI_AGAIN` phrase, not the
+    /// permanent `EAI_NONAME` phrase whose record genuinely does not
+    /// exist.
+    #[test]
+    fn test_transient_classifier_nxdomain_is_terminal() {
+        // glibc strerror (`gai_strerror(EAI_NONAME)`) — terminal.
+        assert!(!is_transient_network_stderr("Name or service not known"));
+        // Go net DNSError wrapping the strerror — terminal.
+        assert!(!is_transient_network_stderr(
+            "lookup typo-host.example.invalid on 169.254.169.254:53: no such host"
+        ));
+        // Python `socket.gaierror` — terminal.
+        assert!(!is_transient_network_stderr(
+            "socket.gaierror: [Errno -2] Name or service not known"
+        ));
+        // curl `CURLE_COULDNT_RESOLVE_HOST` carrying the strerror —
+        // terminal. The leading `Could not resolve host` substring is
+        // deliberately not a marker because curl uses it for both
+        // permanent (NXDOMAIN) and transient (EAI_AGAIN) verdicts; only
+        // the trailing strerror disambiguates, and only the
+        // `Temporary failure` strerror is matched as transient.
+        assert!(!is_transient_network_stderr(
+            "curl: (6) Could not resolve host: typo.example.invalid"
         ));
     }
 
