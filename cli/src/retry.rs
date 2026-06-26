@@ -635,6 +635,69 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // (`Connection` / `connection` / `Operation` / `connect`) — the
     // `"timed out"` suffix is uniformly lowercase across emitters.
     "timed out",
+    // Go-context-layer timeout — `context.DeadlineExceeded.Error()`
+    // formats as the bare phrase `"context deadline exceeded"`
+    // verbatim. Distinct layer from the kernel-TCP transients above
+    // (`syscall.ETIMEDOUT` / `"timed out"` — SYN-retransmit budget
+    // exhausted at the connect phase, or read budget exhausted on an
+    // established socket) and from the net/http I/O budget
+    // (`"i/o timeout"` — `http.Client.Timeout` fires inside the
+    // request loop): here a higher-level Go `context.WithTimeout` /
+    // `context.WithDeadline` budget elapses while a downstream
+    // operation is in flight, and the context-cancellation propagates
+    // up through every `select` on `ctx.Done()` as the same
+    // `context.DeadlineExceeded` sentinel. The bare phrase is NOT a
+    // substring of `"timeout"` (the contiguous letters
+    // `t-i-m-e-o-u-t` do not appear in `"context deadline exceeded"`)
+    // nor of `"timed out"` (different word, `exceeded` vs `out`), so
+    // every dialect that emits the Go-context-deadline form silently
+    // short-circuited to terminal before this entry.
+    //
+    // forge's pipeline invokes kubectl / helm / skopeo / regctl /
+    // attic-client extensively, every one of which uses
+    // `context.WithTimeout` on its outer API call — kubectl's
+    // `--request-timeout` flag, helm's `--timeout` flag, skopeo's
+    // `--command-timeout`, attic-client's per-request context budget.
+    // The production trigger is the kube-apiserver / helm-release-
+    // controller / container-registry being slow to respond within
+    // the per-request budget — typically during a kube control-plane
+    // election, helm release-history compaction, registry-side blob
+    // lookup against a cold object-store backend, or attic-server
+    // under upload pressure — every one of which reconverges within
+    // the existing retry-policy budget. The fix here is recognizing
+    // the Go-context-deadline phrase the prior `"timed out"` /
+    // `"timeout"` markers silently short-circuited to terminal at
+    // every Go-context-fronted CLI surface.
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - Go net / context (skopeo, regctl, attic-client through its
+    //   golang surface, kubectl, helm-cli): the bare
+    //   `context.DeadlineExceeded.Error()` phrase verbatim —
+    //   `"Get \"https://10.0.0.1:6443/api/v1/namespaces/foo/pods\":
+    //   context deadline exceeded"`,
+    //   `"Error from server (Timeout): context deadline exceeded"`,
+    //   `"trying to reuse connection: context deadline exceeded"`,
+    //   `"Error: query: failed to query with labels: context
+    //   deadline exceeded"` (helm), `"writing blob: context
+    //   deadline exceeded"` (skopeo);
+    // - gRPC-Go (controller-runtime clients wrapping kube-apiserver
+    //   long-poll watches): the bare phrase forwards through the
+    //   gRPC status formatter — `"rpc error: code = DeadlineExceeded
+    //   desc = context deadline exceeded"`.
+    // One casing only — every Go emitter passes through the
+    // `context` package's exact lowercase formatting; the phrase is
+    // not a cross-tool variant the way `Connection refused` /
+    // `connection refused` is split. The marker is also distinct
+    // from the closely-related `"context canceled"` phrase
+    // (`context.Canceled.Error()`) which is deliberately NOT added:
+    // a cancelled context can be the user's CTRL+C (terminal) or a
+    // parent context's deadline-firing (transient at one layer up
+    // but already covered by the deadline-exceeded propagation when
+    // the parent's deadline fires); leaving the ambiguous-form
+    // signal out of the marker set keeps the unambiguous-phrase-only
+    // discipline `"Temporary failure in name resolution"` /
+    // `"connection closed before message completed"` carry.
+    "context deadline exceeded",
     // Mid-stream TCP drops — multi-word Go form. The bare `EOF` acronym
     // (`io.EOF`) is matched token-wise via
     // [`TRANSIENT_NETWORK_STDERR_TOKEN_MARKERS`].
@@ -2486,6 +2549,75 @@ mod tests {
             "java.net.SocketTimeoutException: connect timed out"
         ));
         assert!(is_transient_network_stderr("read timed out"));
+    }
+
+    /// Go-context-layer timeout — `context.DeadlineExceeded.Error()` is
+    /// retryable. Distinct layer from the kernel-TCP transients
+    /// (`syscall.ETIMEDOUT` / `"timed out"`, pinned by
+    /// [`test_transient_classifier_matches_timed_out`]) and from the
+    /// net/http I/O budget (`"i/o timeout"` / `"TLS handshake timeout"`,
+    /// pinned by [`test_transient_classifier_matches_timeouts`]): here a
+    /// higher-level Go `context.WithTimeout` / `context.WithDeadline`
+    /// budget elapses while a downstream operation is in flight, and the
+    /// context-cancellation propagates up through every `select` on
+    /// `ctx.Done()` as the same `context.DeadlineExceeded` sentinel.
+    ///
+    /// The dominant production transient class across forge's Go-context-
+    /// fronted CLI surface: kubectl's `--request-timeout`, helm's
+    /// `--timeout`, skopeo's `--command-timeout`, attic-client's
+    /// per-request context budget. Production triggers: kube-apiserver
+    /// election, helm release-history compaction, container-registry
+    /// blob lookup against a cold object-store backend, attic-server
+    /// under upload pressure — every one reconverges within the existing
+    /// retry-policy budget.
+    ///
+    /// Fail-before: the pre-fix marker set carried `"timeout"` (substring
+    /// `t-i-m-e-o-u-t` contiguous), `"timed out"` (the past-tense
+    /// kernel-TCP form), `"i/o timeout"`, and `"TLS handshake timeout"`,
+    /// but none of these is a substring of `"context deadline exceeded"`
+    /// (the bare phrase contains neither the contiguous letters
+    /// `t-i-m-e-o-u-t` nor the word `"out"` adjacent to `"timed"`). So
+    /// every realistic kubectl / helm / skopeo / regctl / attic-client
+    /// Go-context-timeout silently short-circuited to terminal — the
+    /// typed retry loop refused to back off, burning the request against
+    /// a reconvergent upstream-budget event the existing retry-policy
+    /// budget covers. Pass-after: every realistic Go-context dialect
+    /// classifies transient and the shared `retry_command` /
+    /// `run_with_policy` driver backs off and retries.
+    #[test]
+    fn test_transient_classifier_matches_context_deadline_exceeded() {
+        // Bare phrase — `context.DeadlineExceeded.Error()` emits this
+        // verbatim across every Go binary.
+        assert!(is_transient_network_stderr("context deadline exceeded"));
+        // kubectl request-timeout surface — `--request-timeout` elapses
+        // while waiting on the kube-apiserver response.
+        assert!(is_transient_network_stderr(
+            "Get \"https://10.0.0.1:6443/api/v1/namespaces/forge/pods\": context deadline exceeded"
+        ));
+        assert!(is_transient_network_stderr(
+            "Error from server (Timeout): context deadline exceeded"
+        ));
+        // helm release surface — `--timeout` elapses on a slow release-
+        // history compaction or chart-render path.
+        assert!(is_transient_network_stderr(
+            "Error: query: failed to query with labels: context deadline exceeded"
+        ));
+        // skopeo blob-copy surface — `--command-timeout` elapses while
+        // writing a blob to a cold registry backend.
+        assert!(is_transient_network_stderr(
+            "writing blob: context deadline exceeded"
+        ));
+        // gRPC-Go status wrapper (controller-runtime watch clients) —
+        // the bare phrase forwards through the gRPC status formatter.
+        assert!(is_transient_network_stderr(
+            "rpc error: code = DeadlineExceeded desc = context deadline exceeded"
+        ));
+        // attic-client through its golang surface (when invoked via the
+        // golang CLI on legacy attic deployments) — the same phrase
+        // forwards through an anyhow / contextual wrapper.
+        assert!(is_transient_network_stderr(
+            "Pushing store path /nix/store/abcd-foo: context deadline exceeded"
+        ));
     }
 
     /// Routing-layer kernel transient — host-scope sibling
