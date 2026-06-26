@@ -3,6 +3,7 @@
 //! Provides lint, package, push, deploy, release, template, and bump operations
 //! for pleme-io Helm charts distributed via OCI registries.
 
+use crate::version;
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Command;
@@ -672,14 +673,11 @@ pub fn bump(
 
     info!("Current version: {}", old_version);
 
-    // Parse and bump
-    let (major, minor, patch) = parse_semver(&old_version)?;
-    let new_version = match level {
-        "patch" => format!("{}.{}.{}", major, minor, patch + 1),
-        "minor" => format!("{}.{}.0", major, minor + 1),
-        "major" => format!("{}.0.0", major + 1),
-        _ => bail!("Invalid bump level '{}' — use patch, minor, or major", level),
-    };
+    // Parse and bump through the canonical typed primitive in `crate::version`.
+    // Matches the routing `gem::bump` (commands/gem.rs) and `tool::bump`
+    // (commands/tool.rs) already perform, closing this site's drift onto the
+    // typed `BumpLevel` grammar named at one site (`BumpLevel::from_str`).
+    let new_version = version::bump_semver(&old_version, level)?;
 
     info!("New version:     {}", new_version);
 
@@ -1236,20 +1234,6 @@ pub fn release_all(
 
 // --- Helpers ---
 
-/// Parse a semver version string "X.Y.Z" into components.
-fn parse_semver(version: &str) -> Result<(u64, u64, u64)> {
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() != 3 {
-        bail!("Invalid version format '{}' — expected X.Y.Z", version);
-    }
-
-    let major = parts[0].parse::<u64>().context("Invalid major version")?;
-    let minor = parts[1].parse::<u64>().context("Invalid minor version")?;
-    let patch = parts[2].parse::<u64>().context("Invalid patch version")?;
-
-    Ok((major, minor, patch))
-}
-
 /// Extract a top-level YAML field value (simple key: value parsing).
 fn extract_yaml_field(content: &str, field: &str) -> Result<String> {
     let prefix = format!("{}: ", field);
@@ -1314,5 +1298,63 @@ fn update_helmrelease_image_tag(content: &str, new_tag: &str) -> Result<String> 
                 "Could not find image tag pattern (value: amd64-* or newTag: amd64-*) in content"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bump_routing_tests {
+    use super::bump;
+    use crate::version::{bump_semver_typed, BumpLevel};
+
+    /// Build a minimal `<charts_dir>/<lib_chart_name>/Chart.yaml` carrying the
+    /// given version under the single-line `version: X.Y.Z` shape
+    /// [`super::extract_yaml_field`] recognizes, and return the temp charts dir.
+    fn build_solo_lib_chart(version: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_name = "pleme-lib";
+        let chart_dir = dir.path().join(lib_name);
+        std::fs::create_dir(&chart_dir).unwrap();
+        let chart_yaml = format!(
+            "apiVersion: v2\nname: {}\nversion: {}\n",
+            lib_name, version
+        );
+        std::fs::write(chart_dir.join("Chart.yaml"), chart_yaml).unwrap();
+        (dir, lib_name.to_string())
+    }
+
+    /// `helm::bump` routes every accepted level through
+    /// [`crate::version::bump_semver_typed`] at every [`BumpLevel`] variant —
+    /// the structural-routing seal that the typed-primitive grammar
+    /// ([`crate::version::BumpLevel::from_str`]) IS the helm-bump level
+    /// grammar. Lifts the prior verbatim-duplicate `parse_semver` + inline
+    /// `match level { "patch" | "minor" | "major" | _ => bail!(...) }` cascade
+    /// at this site onto the canonical primitive, matching the routing
+    /// `commands/gem.rs::bump` and `commands/tool.rs::bump` already use.
+    #[test]
+    fn helm_bump_routes_through_bump_semver_typed_at_every_variant() {
+        for &level in BumpLevel::ALL.iter() {
+            let starting = "1.2.3";
+            let (dir, lib_name) = build_solo_lib_chart(starting);
+            let level_str = level.to_string();
+            let (old, new) =
+                bump(dir.path().to_str().unwrap(), &lib_name, &level_str, false).unwrap();
+            assert_eq!(old, starting);
+            assert_eq!(new, bump_semver_typed(starting, level).unwrap());
+        }
+    }
+
+    /// `helm::bump` rejects an unrecognized level string with the byte-
+    /// identical wording [`crate::version::BumpLevel::from_str`] emits — the
+    /// one-oracle seal that the helm-bump level grammar is named at one site
+    /// (`BumpLevel::from_str`), not retyped at every `bump()` consumer.
+    #[test]
+    fn helm_bump_rejects_unknown_level_with_canonical_wording() {
+        let (dir, lib_name) = build_solo_lib_chart("1.2.3");
+        let err = bump(dir.path().to_str().unwrap(), &lib_name, "xyz", false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Invalid bump level 'xyz' — use patch, minor, or major"),
+            "got: {err}"
+        );
     }
 }
