@@ -103,6 +103,90 @@ pub trait ProbeOutcome {
     /// the [`impl_probe_outcome!`](crate::impl_probe_outcome) macro
     /// generates the impl from the type + absent variant name.
     fn is_probe_absent(&self) -> bool;
+
+    /// True iff this outcome represents the "the probe ran and produced
+    /// evidence" world — the named De Morgan complement of
+    /// [`is_probe_absent`](Self::is_probe_absent). Default-implemented as
+    /// `!self.is_probe_absent()`, so every implementor inherits the
+    /// complement at the trait surface without per-implementor
+    /// duplication; the load-bearing discriminator stays at one site (the
+    /// [`impl_probe_outcome!`](crate::impl_probe_outcome) macro body), and
+    /// the named "probe ran" reading is admissible at every consumer that
+    /// previously had to write `!outcome.is_probe_absent()` per call site.
+    ///
+    /// # Why a named complement, not `!is_probe_absent()` at every site
+    ///
+    /// The "probe ran / produced evidence" semantic role is the load-
+    /// bearing positive reading downstream attestation telemetry and
+    /// admission gates care about — [`ProbeCoverage::ran`] counts it,
+    /// [`probe_coverage`] increments it on the not-absent arm, and a
+    /// strict-production admission verifier branches on the
+    /// (`is_probe_absent`, [`VerifiedOutcome::is_verified`]) two-bool
+    /// decomposition the orthogonality pin
+    /// [`tests::test_probe_absent_and_verified_decompose_orthogonally`]
+    /// names at one matrix corner. The bare negation idiom
+    /// `!outcome.is_probe_absent()` reads as a derived form at every site
+    /// that consumes the positive reading, even though the positive role
+    /// is the one the field name [`ProbeCoverage::ran`] and the loop body
+    /// of [`probe_coverage`] already carry. Naming it at the trait surface
+    /// makes the De Morgan complement the load-bearing positive peer at
+    /// one site: the [`ProbeCoverage::ran`] counter, the
+    /// [`VerificationCoverage`] verified-vs-absent join, and any future
+    /// telemetry consumer that branches on "probe ran" read
+    /// `outcome.is_probe_present()` directly.
+    ///
+    /// Same idiom the rest of the typed-method peer family already
+    /// applies at the per-type surface:
+    /// [`crate::version::BumpLevel::is_breaking`] /
+    /// [`crate::version::BumpLevel::is_non_breaking`] at the version-bump
+    /// surface, [`crate::retry::RetryPolicy::is_no_retry`] /
+    /// [`crate::retry::RetryPolicy::will_retry`] at the retry-policy
+    /// surface,
+    /// [`crate::retry::CommandAttemptFailure::is_transient`] /
+    /// [`crate::retry::CommandAttemptFailure::is_terminal`] at the
+    /// command-attempt-failure surface,
+    /// [`crate::retry::CapturedFailure::is_signal_killed`] /
+    /// [`crate::retry::CapturedFailure::is_exited_normally`] at the
+    /// captured-failure surface — each names the De Morgan complement of
+    /// its sibling at the typed-primitive surface so a consumer reads the
+    /// positive role directly rather than as the negation of the negative
+    /// role. Here applied at the cross-implementor trait surface rather
+    /// than at a per-type inherent surface: the default-implemented body
+    /// composes against `is_probe_absent` so every implementor of
+    /// [`ProbeOutcome`] inherits both readings from the one match arm the
+    /// [`impl_probe_outcome!`](crate::impl_probe_outcome) macro generates.
+    ///
+    /// # De Morgan / XOR partition invariants
+    ///
+    /// The De Morgan complementarity invariant
+    /// `is_probe_present() == !is_probe_absent()` is pinned by
+    /// [`tests::test_is_probe_present_equals_negation_of_is_probe_absent`]
+    /// at every variant of every implementor (`DummyOutcome`,
+    /// `DummyAbsentOutcome`, `DummyVerifiedOutcome`,
+    /// `DummyVerifiedFieldsOutcome`). The disjoint-and-covering partition
+    /// pin
+    /// [`tests::test_is_probe_present_xor_is_probe_absent_partitions_outcomes`]
+    /// nails `is_probe_present() XOR is_probe_absent() == true` so a
+    /// regression that overrode the default body with a divergent impl
+    /// (e.g., a future implementor that hand-rolled `is_probe_present`
+    /// without inverting `is_probe_absent`) surfaces as a partition gap
+    /// or overlap at the offending implementor. Same partition shape the
+    /// `is_breaking` / `is_non_breaking` pair sealed at the version-bump
+    /// surface, here at the cross-implementor probe-outcome surface.
+    ///
+    /// THEORY.md §V.4 typed primitives: the "probe ran" reading is a
+    /// typed-trait-surface peer on [`ProbeOutcome`] itself, not a bare
+    /// `!outcome.is_probe_absent()` negation re-derived at every
+    /// consumer that wants the positive reading. THEORY.md §VI.1
+    /// one-oracle: the structural-discriminator semantic role
+    /// (probe-ran ⇔ NOT probe-absent) is named at one site (this default
+    /// method body), so a consumer that previously read
+    /// `!outcome.is_probe_absent()` reads `outcome.is_probe_present()`
+    /// once and is automatically inverted across a future trait extension
+    /// that lifted the negative reading to a different match shape.
+    fn is_probe_present(&self) -> bool {
+        !self.is_probe_absent()
+    }
 }
 
 /// Emit the [`ProbeOutcome`] impl for `$ty` whose absent variant is
@@ -6242,6 +6326,113 @@ mod tests {
     fn test_macro_accepts_absent_variant_name() {
         assert!(DummyAbsentOutcome::Absent.is_probe_absent());
         assert!(!DummyAbsentOutcome::Collected.is_probe_absent());
+    }
+
+    /// Pin the load-bearing positive peer of [`ProbeOutcome::is_probe_absent`]:
+    /// the non-absent variant identifies as present, and the absent
+    /// variant identifies as not-present. The ceiling-sibling of
+    /// [`test_is_probe_absent_pins_absent_variant`] at the trait surface:
+    /// same per-variant exact-shape pin, here on the default-implemented
+    /// De Morgan complement. A future regression that overrode the
+    /// default body with a divergent impl (e.g., a hand-rolled
+    /// `is_probe_present` that returned hardcoded `true` on every variant
+    /// to "always treat probes as present") would fail this pin against
+    /// any sibling implementor.
+    #[test]
+    fn test_is_probe_present_pins_present_variant() {
+        assert!(DummyOutcome::Probed.is_probe_present());
+        assert!(!DummyOutcome::ProbeAbsent.is_probe_present());
+    }
+
+    /// The default-implemented `is_probe_present` peer respects the
+    /// alternative `Absent` variant naming convention through the same
+    /// macro-generated `is_probe_absent` body it negates — exercises the
+    /// `security_scan` / `oci_architecture` naming convention against the
+    /// positive peer. Sibling of [`test_macro_accepts_absent_variant_name`]
+    /// at the De Morgan complement surface.
+    #[test]
+    fn test_is_probe_present_pins_present_variant_with_absent_name() {
+        assert!(DummyAbsentOutcome::Collected.is_probe_present());
+        assert!(!DummyAbsentOutcome::Absent.is_probe_present());
+    }
+
+    /// The De Morgan complementarity invariant
+    /// `is_probe_present() == !is_probe_absent()` holds at every variant
+    /// of every implementor: `DummyOutcome` (2 arms),
+    /// `DummyAbsentOutcome` (2 arms), `DummyVerifiedOutcome` (3 arms),
+    /// `DummyVerifiedFieldsOutcome` (4 arms). The structural pin that
+    /// makes the macro-generated `is_probe_absent` body the load-bearing
+    /// oracle for the trait surface: every consumer of
+    /// `is_probe_present` reads the inverse of the one match-arm the
+    /// macro generated, not a per-implementor hand-rolled body. Sibling
+    /// pin of
+    /// [`crate::version::tests::test_bump_level_is_non_breaking_equals_negation_of_is_breaking`]
+    /// at the version-bump surface and of
+    /// [`crate::retry::tests::test_will_retry_equals_negation_of_is_no_retry`]
+    /// at the retry-policy surface, here at the cross-implementor
+    /// probe-outcome trait surface.
+    #[test]
+    fn test_is_probe_present_equals_negation_of_is_probe_absent() {
+        let dummies: [&dyn ProbeOutcome; 11] = [
+            &DummyOutcome::Probed,
+            &DummyOutcome::ProbeAbsent,
+            &DummyAbsentOutcome::Collected,
+            &DummyAbsentOutcome::Absent,
+            &DummyVerifiedOutcome::Verified,
+            &DummyVerifiedOutcome::VerifyFailed,
+            &DummyVerifiedOutcome::ProbeAbsent,
+            &DummyVerifiedFieldsOutcome::Verified {
+                fingerprint: "x".to_string(),
+            },
+            &DummyVerifiedFieldsOutcome::VerifyFailed,
+            &DummyVerifiedFieldsOutcome::Unverified,
+            &DummyVerifiedFieldsOutcome::ProbeAbsent,
+        ];
+        for outcome in dummies {
+            assert_eq!(
+                outcome.is_probe_present(),
+                !outcome.is_probe_absent(),
+                "is_probe_present() must equal !is_probe_absent() at every implementor variant",
+            );
+        }
+    }
+
+    /// The disjoint-and-covering partition invariant
+    /// `is_probe_present() XOR is_probe_absent() == true` holds at every
+    /// variant of every implementor — the two predicates partition the
+    /// outcome space into two non-overlapping, exhaustive halves. A
+    /// regression that overrode the default body with an impl that
+    /// drifted from the strict complement (e.g., a future implementor
+    /// that returned `true` for both predicates on some variant, or
+    /// `false` for both on some other variant) surfaces as a partition
+    /// gap or overlap at the offending implementor. Same partition shape
+    /// the `is_breaking` / `is_non_breaking` pair at
+    /// [`crate::version::tests::test_bump_level_is_non_breaking_xor_is_breaking_partitions_ladder`]
+    /// sealed at the version-bump surface, here at the cross-implementor
+    /// probe-outcome trait surface.
+    #[test]
+    fn test_is_probe_present_xor_is_probe_absent_partitions_outcomes() {
+        let dummies: [&dyn ProbeOutcome; 11] = [
+            &DummyOutcome::Probed,
+            &DummyOutcome::ProbeAbsent,
+            &DummyAbsentOutcome::Collected,
+            &DummyAbsentOutcome::Absent,
+            &DummyVerifiedOutcome::Verified,
+            &DummyVerifiedOutcome::VerifyFailed,
+            &DummyVerifiedOutcome::ProbeAbsent,
+            &DummyVerifiedFieldsOutcome::Verified {
+                fingerprint: "x".to_string(),
+            },
+            &DummyVerifiedFieldsOutcome::VerifyFailed,
+            &DummyVerifiedFieldsOutcome::Unverified,
+            &DummyVerifiedFieldsOutcome::ProbeAbsent,
+        ];
+        for outcome in dummies {
+            assert!(
+                outcome.is_probe_present() ^ outcome.is_probe_absent(),
+                "is_probe_present() XOR is_probe_absent() must hold at every implementor variant",
+            );
+        }
     }
 
     /// `probe_coverage` over an empty slice returns `ProbeCoverage { ran:
