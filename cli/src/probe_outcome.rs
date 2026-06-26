@@ -18077,6 +18077,84 @@ mod tests {
         }
     }
 
+    /// Meet distributes over join:
+    /// `a.meet(b.join(c)) == a.meet(b).join(a.meet(c))` at every
+    /// `(a, b, c)` over the 3×3×3 grid (27 triples). The structural
+    /// anchor that the meet/join pair forms a DISTRIBUTIVE lattice in
+    /// the algebraic sense — every chain (totally-ordered lattice) is
+    /// distributive, and the [`AdmissionTier`] ladder (`Refused <
+    /// StagingOnly < Strict`) inherits the distributive property from
+    /// its derived [`Ord`] chain. The admission-tier mirror of
+    /// `test_bump_level_meet_distributes_over_join_at_every_triple` at
+    /// the magnitude-ladder surface. The next algebraic-law pin beyond
+    /// absorption ([`test_admission_tier_meet_join_absorption_at_every_pair`]):
+    /// absorption + distributivity together carry the full "distributive
+    /// lattice" axioms a downstream lattice-walk relies on when reducing
+    /// a meet/join expression to a normal form without retyping the
+    /// distributive identity at every reduction site. A future ladder
+    /// refinement that broke distributivity (e.g., inserting two
+    /// incomparable variants in the same band — `Refused` and a parallel
+    /// `RefusedPendingRetry` neither dominating the other, turning the
+    /// chain into a non-distributive lattice like the diamond `M3` or
+    /// the pentagon `N5`) would light up here, surfacing the structural
+    /// distinction at the lattice-pair site rather than at every
+    /// downstream consumer that silently relied on the distributive
+    /// identity. THEORY.md §V.5: distributivity is the load-bearing
+    /// axiom that distinguishes a chain-derived lattice from a general
+    /// bounded lattice, and the structural witness the meet/join pair
+    /// carries beyond mere absorption.
+    #[test]
+    fn test_admission_tier_meet_distributes_over_join_at_every_triple() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                for c in AdmissionTier::ALL {
+                    let lhs = a.meet(b.join(c));
+                    let rhs = a.meet(b).join(a.meet(c));
+                    assert_eq!(
+                        lhs, rhs,
+                        "meet distributes over join must hold: \
+                         meet({a:?}, join({b:?}, {c:?})) = {lhs:?} \
+                         must equal join(meet({a:?}, {b:?}), meet({a:?}, {c:?})) = {rhs:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Join distributes over meet:
+    /// `a.join(b.meet(c)) == a.join(b).meet(a.join(c))` at every
+    /// `(a, b, c)` over the 3×3×3 grid (27 triples). The lattice-dual
+    /// of [`test_admission_tier_meet_distributes_over_join_at_every_triple`]
+    /// at the same admission-tier ladder — in a distributive lattice
+    /// the two distributive identities are equivalent, and pinning both
+    /// closes the structural witness against a refactor that broke one
+    /// but not the other (the structurally-asymmetric refactor a
+    /// single-identity pin would miss). The admission-tier mirror of
+    /// `test_bump_level_join_distributes_over_meet_at_every_triple` at
+    /// the magnitude-ladder surface. Together with the absorption-law
+    /// pin ([`test_admission_tier_meet_join_absorption_at_every_pair`])
+    /// and the lattice-bracket pin
+    /// ([`test_admission_tier_meet_le_join_at_every_pair`]), this closes
+    /// the distributive-lattice axiom surface on the [`AdmissionTier`]
+    /// ladder at the typed-primitive site.
+    #[test]
+    fn test_admission_tier_join_distributes_over_meet_at_every_triple() {
+        for a in AdmissionTier::ALL {
+            for b in AdmissionTier::ALL {
+                for c in AdmissionTier::ALL {
+                    let lhs = a.join(b.meet(c));
+                    let rhs = a.join(b).meet(a.join(c));
+                    assert_eq!(
+                        lhs, rhs,
+                        "join distributes over meet must hold: \
+                         join({a:?}, meet({b:?}, {c:?})) = {lhs:?} \
+                         must equal meet(join({a:?}, {b:?}), join({a:?}, {c:?})) = {rhs:?}",
+                    );
+                }
+            }
+        }
+    }
+
     /// [`per_axis_admission_tier_ceiling`] routes through the named
     /// [`AdmissionTier::join`] oracle at every reachable
     /// `(probe, verification)` pair. The structural pin that makes the
