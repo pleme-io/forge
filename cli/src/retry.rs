@@ -515,6 +515,50 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     "Connection reset",
     "connection reset",
     "Connection aborted",
+    // Routing-layer kernel transient — `syscall.EHOSTUNREACH` and
+    // `syscall.ENETUNREACH`, the ICMP-destination-unreachable signal
+    // the kernel emits when the local routing table has no route to
+    // the destination at `connect()` time. Distinct from
+    // `syscall.ECONNREFUSED` (covered by `connection refused` above —
+    // SYN reached the destination, the destination actively replied
+    // RST) and from `syscall.ETIMEDOUT` (covered by `timed out` below
+    // — SYN was sent and the retransmit budget elapsed without ACK):
+    // here the SYN never leaves the local kernel because no route
+    // matches the destination prefix. The structural transient
+    // forge's pipeline trips on during BGP withdraw / route-flap /
+    // VPN-tunnel renegotiation / cluster-network policy reload — the
+    // local route disappears for seconds, then reconverges. Across
+    // the dialects forge's external CLIs emit:
+    // - Go net (skopeo / regctl / attic-client through its golang
+    //   surface, kubectl): `syscall.EHOSTUNREACH.Error()` formats
+    //   lowercase as `"no route to host"`
+    //   (`"dial tcp 10.0.0.1:443: connect: no route to host"`,
+    //   `"dial tcp: lookup ghcr.io: connect: network is unreachable"`);
+    // - curl (git-over-HTTPS, container-registry probes,
+    //   healthcheck shells): emits capitalized
+    //   `"No route to host"` from `CURLE_COULDNT_CONNECT` /
+    //   `CURLE_INTERFACE_FAILED` (`"curl: (7) Failed to connect to
+    //   ghcr.io port 443: No route to host"`);
+    // - Java jvm (helm-cli's JNI shells, jvm-backed kubectl
+    //   plugins): `java.net.NoRouteToHostException: No route to
+    //   host`;
+    // - Python (`urllib3.exceptions.NewConnectionError` /
+    //   `socket.error`): `"OSError: [Errno 113] No route to host"`;
+    // - hyper / reqwest (attic-client Rust surface): `std::io::Error`
+    //   wrapping `io::ErrorKind::HostUnreachable` formats
+    //   `"No route to host (os error 113)"`.
+    // Both casings carried because Go's lowercase form and curl's
+    // capitalized form coexist in forge's stderr corpus — the same
+    // dual-case discipline `"Connection refused"` / `"connection
+    // refused"` and `"broken pipe"` / `"Broken pipe"` already carry.
+    // One marker per casing rather than a single bare-lowercase
+    // because, unlike `"timed out"` whose past-tense suffix is
+    // uniformly lowercase across emitters and whose leading-word
+    // variance carries the case, the `"no route to host"` phrase
+    // itself carries the leading-word case: Go's whole emission is
+    // lowercase, curl's whole emission capitalizes the leading `N`.
+    "no route to host",
+    "No route to host",
     // I/O timeouts (Go net/http and TLS handshake variants).
     "i/o timeout",
     "TLS handshake timeout",
@@ -2198,7 +2242,12 @@ mod tests {
     }
 
     /// Connection-level failures must match in both Go-stdlib lowercase
-    /// and curl mixed-case dialects.
+    /// and curl mixed-case dialects. The routing-layer kernel transient
+    /// (`syscall.EHOSTUNREACH` / `no route to host`) is the structural
+    /// mirror at the routing layer — the kernel emits
+    /// destination-unreachable when no route matches the destination
+    /// prefix at `connect()`, before any SYN leaves the host (covered
+    /// by [`test_transient_classifier_matches_no_route_to_host`]).
     #[test]
     fn test_transient_classifier_matches_connection_failures() {
         assert!(is_transient_network_stderr(
@@ -2288,6 +2337,69 @@ mod tests {
             "java.net.SocketTimeoutException: connect timed out"
         ));
         assert!(is_transient_network_stderr("read timed out"));
+    }
+
+    /// Routing-layer kernel transient (`syscall.EHOSTUNREACH`) is
+    /// retryable — the kernel emits ICMP-destination-unreachable when
+    /// no route in the local routing table matches the destination
+    /// prefix at `connect()` time. Distinct from `ECONNREFUSED`
+    /// (covered by `connection refused` —
+    /// `test_transient_classifier_matches_connection_failures`) and
+    /// from `ETIMEDOUT` (covered by `timed out` —
+    /// `test_transient_classifier_matches_timed_out`): here the SYN
+    /// never leaves the local kernel, where `ECONNREFUSED` requires
+    /// the destination to actively reply RST and `ETIMEDOUT` requires
+    /// the SYN-retransmit budget to elapse without ACK. The dominant
+    /// production transient class during BGP withdraw / route-flap /
+    /// VPN-tunnel renegotiation / cluster-network policy reload — the
+    /// local route disappears for seconds, then reconverges; the
+    /// kernel surfaces `EHOSTUNREACH` for the gap.
+    ///
+    /// Fail-before: the pre-fix marker set carried `connection
+    /// refused` / `connection reset` / `connection aborted` (TCP
+    /// destination-side states) and `timed out` (SYN-budget
+    /// exhaustion) but no marker for `EHOSTUNREACH`. So every
+    /// realistic skopeo / regctl / attic-client / curl / kubectl /
+    /// helm-cli connect attempt during a route-flap silently
+    /// short-circuited to terminal — the typed retry loop refused to
+    /// back off, burning the connect attempt against a transient
+    /// kernel-level routing event that would have reconverged within
+    /// the existing retry-policy budget. Pass-after: every realistic
+    /// dialect classifies transient and the shared `retry_command` /
+    /// `run_with_policy` driver backs off and retries the connect.
+    #[test]
+    fn test_transient_classifier_matches_no_route_to_host() {
+        // Go net (skopeo, regctl, attic-client through its golang
+        // surface, kubectl): `syscall.EHOSTUNREACH.Error()` formats
+        // lowercase as `no route to host`.
+        assert!(is_transient_network_stderr(
+            "dial tcp 10.0.0.1:443: connect: no route to host"
+        ));
+        assert!(is_transient_network_stderr("read tcp: no route to host"));
+        // curl (git-over-HTTPS, container-registry probes,
+        // healthcheck shells): `CURLE_COULDNT_CONNECT` formats
+        // capitalized `No route to host`.
+        assert!(is_transient_network_stderr(
+            "curl: (7) Failed to connect to ghcr.io port 443: No route to host"
+        ));
+        // Java jvm (helm-cli JNI shells, jvm-backed kubectl
+        // plugins): `java.net.NoRouteToHostException` carries
+        // `No route to host` in its message.
+        assert!(is_transient_network_stderr(
+            "java.net.NoRouteToHostException: No route to host"
+        ));
+        // Python (`urllib3.exceptions.NewConnectionError` /
+        // `socket.error`): emits `OSError: [Errno 113] No route to
+        // host` through the runtime probe shells.
+        assert!(is_transient_network_stderr(
+            "OSError: [Errno 113] No route to host"
+        ));
+        // hyper / reqwest (attic-client Rust surface): `std::io::Error`
+        // wrapping `io::ErrorKind::HostUnreachable` formats
+        // `No route to host (os error 113)`.
+        assert!(is_transient_network_stderr(
+            "error sending request for url: No route to host (os error 113)"
+        ));
     }
 
     /// Mid-stream EOF (TCP drop while a response is streaming) is transient.
