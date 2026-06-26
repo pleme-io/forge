@@ -515,25 +515,29 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     "Connection reset",
     "connection reset",
     "Connection aborted",
-    // Routing-layer kernel transient — `syscall.EHOSTUNREACH` and
-    // `syscall.ENETUNREACH`, the ICMP-destination-unreachable signal
-    // the kernel emits when the local routing table has no route to
-    // the destination at `connect()` time. Distinct from
-    // `syscall.ECONNREFUSED` (covered by `connection refused` above —
-    // SYN reached the destination, the destination actively replied
-    // RST) and from `syscall.ETIMEDOUT` (covered by `timed out` below
-    // — SYN was sent and the retransmit budget elapsed without ACK):
-    // here the SYN never leaves the local kernel because no route
-    // matches the destination prefix. The structural transient
-    // forge's pipeline trips on during BGP withdraw / route-flap /
-    // VPN-tunnel renegotiation / cluster-network policy reload — the
-    // local route disappears for seconds, then reconverges. Across
-    // the dialects forge's external CLIs emit:
+    // Routing-layer kernel transient — host-scope sibling
+    // (`syscall.EHOSTUNREACH`). The kernel emits this signal at
+    // `connect()` time when the local routing table has no route
+    // matching the destination *host* prefix (and the upstream
+    // router returned ICMP-host-unreachable, or the local stack
+    // synthesized the equivalent verdict). Distinct from
+    // `syscall.ECONNREFUSED` (covered by `connection refused` above
+    // — SYN reached the destination, the destination actively
+    // replied RST) and from `syscall.ETIMEDOUT` (covered by `timed
+    // out` below — SYN was sent and the retransmit budget elapsed
+    // without ACK): here the SYN never leaves the local kernel
+    // because no route matches the destination prefix. The
+    // structural transient forge's pipeline trips on during BGP
+    // withdraw / route-flap / VPN-tunnel renegotiation /
+    // cluster-network policy reload — the local route disappears
+    // for seconds, then reconverges. The network-scope sibling
+    // `syscall.ENETUNREACH` / `"network is unreachable"` is the
+    // mirror entry directly below. Across the dialects forge's
+    // external CLIs emit:
     // - Go net (skopeo / regctl / attic-client through its golang
     //   surface, kubectl): `syscall.EHOSTUNREACH.Error()` formats
     //   lowercase as `"no route to host"`
-    //   (`"dial tcp 10.0.0.1:443: connect: no route to host"`,
-    //   `"dial tcp: lookup ghcr.io: connect: network is unreachable"`);
+    //   (`"dial tcp 10.0.0.1:443: connect: no route to host"`);
     // - curl (git-over-HTTPS, container-registry probes,
     //   healthcheck shells): emits capitalized
     //   `"No route to host"` from `CURLE_COULDNT_CONNECT` /
@@ -559,6 +563,50 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // lowercase, curl's whole emission capitalizes the leading `N`.
     "no route to host",
     "No route to host",
+    // Routing-layer kernel transient — network-scope sibling
+    // (`syscall.ENETUNREACH`). The kernel emits this signal at
+    // `connect()` time when the local routing table has no route
+    // matching the destination *network* prefix at all — distinct
+    // from `EHOSTUNREACH` directly above, which fires when the
+    // *host* within an otherwise-reachable network is unreachable.
+    // The two signals are sibling routing-layer transients with
+    // distinct phrases the kernel chooses based on which prefix-
+    // match step failed (host-row vs network-row); both reconverge
+    // on the same BGP-withdraw / route-flap / VPN-tunnel
+    // renegotiation / interface-toggle / cluster-network policy
+    // reload events. `ENETUNREACH` is the more commonly emitted of
+    // the pair when the failure is the local default-route going
+    // away (VPN tunnel down, primary interface flap, kubelet
+    // network plugin reconciling) — forge's pipeline trips on this
+    // form during cluster reconcile windows where the local pod's
+    // routing table loses its default route for seconds. Across
+    // the dialects forge's external CLIs emit:
+    // - Go net (skopeo / regctl / attic-client through its golang
+    //   surface, kubectl): `syscall.ENETUNREACH.Error()` formats
+    //   lowercase as `"network is unreachable"`
+    //   (`"dial tcp 10.0.0.1:443: connect: network is unreachable"`,
+    //   `"dial tcp: lookup ghcr.io: connect: network is unreachable"`);
+    // - curl (git-over-HTTPS, container-registry probes,
+    //   healthcheck shells): emits capitalized
+    //   `"Network is unreachable"` from `CURLE_COULDNT_CONNECT`
+    //   (`"curl: (7) Failed to connect to ghcr.io port 443:
+    //   Network is unreachable"`);
+    // - Java jvm (helm-cli's JNI shells, jvm-backed kubectl
+    //   plugins): `java.net.SocketException: Network is
+    //   unreachable`;
+    // - Python (`urllib3.exceptions.NewConnectionError` /
+    //   `socket.error`): `"OSError: [Errno 101] Network is
+    //   unreachable"`;
+    // - hyper / reqwest (attic-client Rust surface): `std::io::Error`
+    //   wrapping `io::ErrorKind::NetworkUnreachable` formats
+    //   `"Network is unreachable (os error 101)"`.
+    // Both casings carried for the same reason `"no route to host"`
+    // / `"No route to host"` carries both: Go's whole emission is
+    // lowercase, curl's whole emission capitalizes the leading
+    // `N` — the casing variance is on the leading phrase-word,
+    // not a uniformly-lowercase suffix like `"timed out"`.
+    "network is unreachable",
+    "Network is unreachable",
     // I/O timeouts (Go net/http and TLS handshake variants).
     "i/o timeout",
     "TLS handshake timeout",
@@ -2339,11 +2387,11 @@ mod tests {
         assert!(is_transient_network_stderr("read timed out"));
     }
 
-    /// Routing-layer kernel transient (`syscall.EHOSTUNREACH`) is
-    /// retryable — the kernel emits ICMP-destination-unreachable when
-    /// no route in the local routing table matches the destination
-    /// prefix at `connect()` time. Distinct from `ECONNREFUSED`
-    /// (covered by `connection refused` —
+    /// Routing-layer kernel transient — host-scope sibling
+    /// (`syscall.EHOSTUNREACH`) is retryable. The kernel emits this
+    /// signal at `connect()` time when no route in the local routing
+    /// table matches the destination *host* prefix. Distinct from
+    /// `ECONNREFUSED` (covered by `connection refused` —
     /// `test_transient_classifier_matches_connection_failures`) and
     /// from `ETIMEDOUT` (covered by `timed out` —
     /// `test_transient_classifier_matches_timed_out`): here the SYN
@@ -2353,7 +2401,9 @@ mod tests {
     /// production transient class during BGP withdraw / route-flap /
     /// VPN-tunnel renegotiation / cluster-network policy reload — the
     /// local route disappears for seconds, then reconverges; the
-    /// kernel surfaces `EHOSTUNREACH` for the gap.
+    /// kernel surfaces `EHOSTUNREACH` for the gap. The network-scope
+    /// sibling `syscall.ENETUNREACH` / `"network is unreachable"` is
+    /// pinned by [`test_transient_classifier_matches_network_is_unreachable`].
     ///
     /// Fail-before: the pre-fix marker set carried `connection
     /// refused` / `connection reset` / `connection aborted` (TCP
@@ -2399,6 +2449,72 @@ mod tests {
         // `No route to host (os error 113)`.
         assert!(is_transient_network_stderr(
             "error sending request for url: No route to host (os error 113)"
+        ));
+    }
+
+    /// Routing-layer kernel transient — network-scope sibling
+    /// (`syscall.ENETUNREACH`) is retryable. The kernel emits this
+    /// signal at `connect()` time when the local routing table has no
+    /// route matching the destination *network* prefix at all — the
+    /// mirror entry to `EHOSTUNREACH` / `"no route to host"`
+    /// (pinned by [`test_transient_classifier_matches_no_route_to_host`])
+    /// when the failure is at the network-row, not the host-row, of
+    /// the local routing table. The dominant production trigger is
+    /// the local default-route going away (VPN tunnel down, primary
+    /// interface flap, kubelet network plugin reconciling) — during
+    /// cluster reconcile windows the local pod's routing table loses
+    /// its default route for seconds, then reconverges; the kernel
+    /// surfaces `ENETUNREACH` for the gap.
+    ///
+    /// Fail-before: the pre-fix marker set carried `"no route to
+    /// host"` / `"No route to host"` (host-scope `EHOSTUNREACH`) but
+    /// no marker for the network-scope `ENETUNREACH`. So every
+    /// realistic skopeo / regctl / attic-client / curl / kubectl /
+    /// helm-cli connect attempt during a VPN-tunnel renegotiation
+    /// or interface-toggle silently short-circuited to terminal —
+    /// the typed retry loop refused to back off, burning the connect
+    /// attempt against a transient kernel-level routing event that
+    /// would have reconverged within the existing retry-policy
+    /// budget. (The `"no route to host"` marker does not match the
+    /// `"network is unreachable"` phrase — distinct phrases the
+    /// kernel chooses based on which prefix-match step failed.)
+    /// Pass-after: every realistic dialect classifies transient and
+    /// the shared `retry_command` / `run_with_policy` driver backs
+    /// off and retries the connect.
+    #[test]
+    fn test_transient_classifier_matches_network_is_unreachable() {
+        // Go net (skopeo, regctl, attic-client through its golang
+        // surface, kubectl): `syscall.ENETUNREACH.Error()` formats
+        // lowercase as `network is unreachable`.
+        assert!(is_transient_network_stderr(
+            "dial tcp 10.0.0.1:443: connect: network is unreachable"
+        ));
+        assert!(is_transient_network_stderr(
+            "dial tcp: lookup ghcr.io: connect: network is unreachable"
+        ));
+        // curl (git-over-HTTPS, container-registry probes,
+        // healthcheck shells): `CURLE_COULDNT_CONNECT` formats
+        // capitalized `Network is unreachable`.
+        assert!(is_transient_network_stderr(
+            "curl: (7) Failed to connect to ghcr.io port 443: Network is unreachable"
+        ));
+        // Java jvm (helm-cli JNI shells, jvm-backed kubectl
+        // plugins): `java.net.SocketException` carries
+        // `Network is unreachable` in its message.
+        assert!(is_transient_network_stderr(
+            "java.net.SocketException: Network is unreachable"
+        ));
+        // Python (`urllib3.exceptions.NewConnectionError` /
+        // `socket.error`): emits `OSError: [Errno 101] Network is
+        // unreachable` through the runtime probe shells.
+        assert!(is_transient_network_stderr(
+            "OSError: [Errno 101] Network is unreachable"
+        ));
+        // hyper / reqwest (attic-client Rust surface): `std::io::Error`
+        // wrapping `io::ErrorKind::NetworkUnreachable` formats
+        // `Network is unreachable (os error 101)`.
+        assert!(is_transient_network_stderr(
+            "error sending request for url: Network is unreachable (os error 101)"
         ));
     }
 
