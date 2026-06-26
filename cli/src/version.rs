@@ -170,6 +170,179 @@ impl BumpLevel {
     #[allow(dead_code)]
     pub const ALL: [Self; 3] = [Self::Patch, Self::Minor, Self::Major];
 
+    /// The bounded-lattice bottom (⊥) on the magnitude ladder — the
+    /// variant at the floor of the derived [`Ord`] chain
+    /// (`Patch < Minor < Major`). Named typed-primitive peer of
+    /// [`BumpLevel::Patch`] at the bounded-lattice surface, distinct from
+    /// the variant-name surface: where `BumpLevel::Patch` reads the
+    /// semver-component semantic role ("increment the patch component"),
+    /// [`BumpLevel::BOTTOM`] reads the bounded-lattice semantic role
+    /// ("the floor of the magnitude ladder — the join-identity, the
+    /// meet-absorbing element, the lower bound every variant sits at-or-
+    /// above"). Mirror const of [`BumpLevel::TOP`] at the ceiling of the
+    /// same ladder, closing the bounded-lattice anchor pair at the
+    /// typed-primitive surface.
+    ///
+    /// # The bounded-lattice axiom set
+    ///
+    /// The recent lattice trajectory closed the distributive-lattice
+    /// axiom set on the meet/join pair on this ladder (idempotence +
+    /// commutativity + associativity + identity + absorbing-element +
+    /// lattice-bracket + absorption + distributivity, commits f7436eb /
+    /// ba37d27 / 46d2754). A BOUNDED lattice is a distributive lattice
+    /// equipped with explicit ⊥ and ⊤ constants and the bounded-lattice
+    /// laws relating them to the meet/join pair:
+    ///
+    /// - `BOTTOM.join(a) == a` (BOTTOM is the join-identity);
+    /// - `BOTTOM.meet(a) == BOTTOM` (BOTTOM is the meet-absorbing element);
+    /// - `BOTTOM <= a` at every variant (BOTTOM is the global lower bound).
+    ///
+    /// These three laws — pinned by
+    /// [`tests::test_bump_level_bottom_is_join_identity_at_every_variant`],
+    /// [`tests::test_bump_level_bottom_is_meet_absorbing_at_every_variant`],
+    /// and [`tests::test_bump_level_bottom_le_every_variant`] — name the
+    /// ⊥ anchor at the typed-primitive surface, where prior commits pinned
+    /// the same facts against the variant name (`BumpLevel::Patch`). The
+    /// named [`BOTTOM`](Self::BOTTOM) surface carries the bounded-lattice
+    /// semantic role distinct from the variant-name surface: a downstream
+    /// consumer reading "seed a per-commit-magnitude join-fold at the
+    /// lattice bottom" reads
+    /// `levels.fold(BumpLevel::BOTTOM, |acc, l| acc.join(l))` once at one
+    /// named oracle, where the same consumer reading
+    /// `levels.fold(BumpLevel::Patch, ...)` reads the variant-name
+    /// surface (the patch semver-component, which happens to coincide
+    /// with the bottom at the present ladder).
+    ///
+    /// # Why a named const, not the variant
+    ///
+    /// The const reads `Self::Patch` and at the present three-variant
+    /// ladder the two coincide (pinned by
+    /// [`tests::test_bump_level_bottom_named_at_lattice_floor`] and
+    /// [`tests::test_bump_level_bottom_equals_ladder_floor`]). The named
+    /// [`BOTTOM`](Self::BOTTOM) const carries TWO load-bearing pieces of
+    /// content the bare variant name does not:
+    ///
+    /// 1. The bounded-lattice semantic role. A downstream consumer that
+    ///    reads `BumpLevel::BOTTOM` reads "the magnitude-ladder floor —
+    ///    the value any per-commit-magnitude join-fold seeds at and any
+    ///    per-commit-floor meet-fold early-exits on" at the call site,
+    ///    where the same consumer reading `BumpLevel::Patch` reads the
+    ///    semver-component semantic role (the canonical patch bump). The
+    ///    two surfaces overlap at the present ladder but diverge under
+    ///    refinement: a future `Prerelease` variant inserted strictly
+    ///    below `Patch` (release-candidate / staging-channel bump shapes)
+    ///    shifts the bounded-lattice floor — [`BOTTOM`](Self::BOTTOM)
+    ///    would update at this one site to `Self::Prerelease` and every
+    ///    consumer of "the join-fold seed" / "the meet-fold absorber"
+    ///    would automatically pick up the new floor, while consumers of
+    ///    `BumpLevel::Patch` (semver-component readers) would
+    ///    structurally NOT pick up the new variant. Same one-oracle
+    ///    discipline [`as_str`](Self::as_str) established for the
+    ///    canonical-string surface and [`ALL`](Self::ALL) established
+    ///    for the variant-enumeration surface — here applied to the
+    ///    bounded-lattice anchor surface.
+    /// 2. A const-pattern surface for the bounded-lattice readback. A
+    ///    `match level { BumpLevel::BOTTOM => ..., _ => ... }` consumer
+    ///    is structurally a "branch on whether this is the magnitude
+    ///    floor" reader; the variant-name surface
+    ///    `match level { BumpLevel::Patch => ... }` is a "branch on the
+    ///    patch semver-component" reader. Same intent vs. shape
+    ///    distinction the [`is_fix_only`](Self::is_fix_only) /
+    ///    [`is_minor_only`](Self::is_minor_only) /
+    ///    [`is_major_only`](Self::is_major_only) typed-method trio
+    ///    surfaces at the variant-identity reading, here applied to the
+    ///    bounded-lattice anchor surface.
+    ///
+    /// THEORY.md §V.4 typed primitives: the bounded-lattice floor is a
+    /// typed-primitive surface on [`BumpLevel`] itself (one named const),
+    /// not the variant name re-aliased at every join-fold seed site.
+    /// THEORY.md §V.5 total-order discipline: [`BOTTOM`](Self::BOTTOM)
+    /// is the global lower bound of the derived [`Ord`] chain, the
+    /// structural anchor a downstream `<= BOTTOM` / `>= BOTTOM` reader
+    /// consumes through one named oracle rather than the variant name.
+    /// THEORY.md §VI.1 one-oracle / generation-over-composition: the
+    /// bounded-lattice floor semantic role is named at one site (this
+    /// const), so a future ladder refinement that shifts the floor
+    /// updates one site, not every join-fold seed / meet-fold absorber
+    /// consumer.
+    #[allow(dead_code)]
+    pub const BOTTOM: Self = Self::Patch;
+
+    /// The bounded-lattice top (⊤) on the magnitude ladder — the variant
+    /// at the ceiling of the derived [`Ord`] chain (`Patch < Minor <
+    /// Major`). Named typed-primitive peer of [`BumpLevel::Major`] at
+    /// the bounded-lattice surface, distinct from the variant-name
+    /// surface: where `BumpLevel::Major` reads the semver-component
+    /// semantic role ("increment the major component"),
+    /// [`BumpLevel::TOP`] reads the bounded-lattice semantic role
+    /// ("the ceiling of the magnitude ladder — the meet-identity, the
+    /// join-absorbing element, the upper bound every variant sits at-or-
+    /// below"). Mirror const of [`BumpLevel::BOTTOM`] at the floor of the
+    /// same ladder, closing the bounded-lattice anchor pair at the
+    /// typed-primitive surface.
+    ///
+    /// # The bounded-lattice axiom set (top dual)
+    ///
+    /// The dual of the [`BOTTOM`](Self::BOTTOM) axioms at the same
+    /// ladder:
+    ///
+    /// - `TOP.meet(a) == a` (TOP is the meet-identity);
+    /// - `TOP.join(a) == TOP` (TOP is the join-absorbing element);
+    /// - `a <= TOP` at every variant (TOP is the global upper bound).
+    ///
+    /// Pinned by
+    /// [`tests::test_bump_level_top_is_meet_identity_at_every_variant`],
+    /// [`tests::test_bump_level_top_is_join_absorbing_at_every_variant`],
+    /// and [`tests::test_bump_level_top_ge_every_variant`]. Together
+    /// with the [`BOTTOM`](Self::BOTTOM) axioms, these close the
+    /// bounded-lattice axiom set on the [`BumpLevel`] ladder at the
+    /// typed-primitive surface, naming the meet/join pair as a BOUNDED
+    /// DISTRIBUTIVE LATTICE rather than the unbounded distributive
+    /// lattice the prior trajectory closed.
+    ///
+    /// # Why a named const, not the variant
+    ///
+    /// At the present three-variant ladder [`TOP`](Self::TOP) coincides
+    /// with [`BumpLevel::Major`] (pinned by
+    /// [`tests::test_bump_level_top_named_at_lattice_ceiling`] and
+    /// [`tests::test_bump_level_top_equals_ladder_ceiling`]). The named
+    /// [`TOP`](Self::TOP) surface carries the bounded-lattice ceiling
+    /// semantic role distinct from the variant-name surface — the dual
+    /// of the [`BOTTOM`](Self::BOTTOM) / [`Patch`](Self::Patch) split at
+    /// the floor. A future ladder refinement that inserts an `Epoch`
+    /// variant strictly above `Major` (semver4 / `0ver`-style
+    /// incompatible-by-design rewrites) shifts the bounded-lattice
+    /// ceiling — [`TOP`](Self::TOP) would update at this one site to
+    /// `Self::Epoch`, and every consumer of "the join-fold absorber" /
+    /// "the meet-fold seed" would automatically pick up the new
+    /// ceiling. Same one-oracle discipline [`BOTTOM`](Self::BOTTOM)
+    /// established at the floor, here applied to the ceiling.
+    ///
+    /// # Together with [`BOTTOM`](Self::BOTTOM)
+    ///
+    /// The pair [`BOTTOM`](Self::BOTTOM) / [`TOP`](Self::TOP) names the
+    /// closed magnitude-ladder interval `[BOTTOM, TOP]` that contains
+    /// every variant — pinned by
+    /// [`tests::test_bump_level_bottom_le_top_at_lattice`] and the
+    /// per-variant pins above. A downstream consumer that needs the
+    /// global bounds of the magnitude ladder reads
+    /// `BumpLevel::BOTTOM..=BumpLevel::TOP` once at one named oracle
+    /// pair, rather than restating the variant names at every consumer
+    /// site. Mirror of [`AdmissionTier`] at the admission-gate surface
+    /// — the dual ladder-anchor lift the next routine can land —
+    /// closing the bounded-lattice anchor pair symmetry across the two
+    /// repo-internal tier ladders.
+    ///
+    /// THEORY.md §V.4 typed primitives: the bounded-lattice ceiling is
+    /// a typed-primitive surface on [`BumpLevel`] itself (one named
+    /// const). THEORY.md §V.5 total-order discipline: [`TOP`](Self::TOP)
+    /// is the global upper bound of the derived [`Ord`] chain.
+    /// THEORY.md §VI.1 one-oracle: the bounded-lattice ceiling semantic
+    /// role is named at one site, so a future ladder refinement that
+    /// shifts the ceiling updates one site.
+    #[allow(dead_code)]
+    pub const TOP: Self = Self::Major;
+
     /// The canonical lowercase string each variant renders as under
     /// [`Display`](std::fmt::Display) and parses from under [`FromStr`].
     /// Const-callable so a `const ARGNAME: &str = BumpLevel::Patch.as_str();`
@@ -2976,6 +3149,234 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// [`BumpLevel::BOTTOM`] is exactly [`BumpLevel::Patch`] at the
+    /// present three-variant ladder. The structural exact-shape pin
+    /// that names the bounded-lattice floor at the typed-primitive
+    /// surface: a future variant insertion strictly below `Patch`
+    /// (e.g., a `Prerelease` release-candidate variant) forces the
+    /// author to update this one pin alongside the const body so that
+    /// every consumer reading "the magnitude-ladder floor" picks up
+    /// the new bottom automatically. Floor-sibling of
+    /// [`test_bump_level_top_named_at_lattice_ceiling`] at the
+    /// bounded-lattice anchor surface.
+    #[test]
+    fn test_bump_level_bottom_named_at_lattice_floor() {
+        assert_eq!(
+            BumpLevel::BOTTOM,
+            BumpLevel::Patch,
+            "BOTTOM must read as Patch at the present three-variant magnitude ladder",
+        );
+    }
+
+    /// [`BumpLevel::TOP`] is exactly [`BumpLevel::Major`] at the
+    /// present three-variant ladder. The dual of
+    /// [`test_bump_level_bottom_named_at_lattice_floor`] at the
+    /// bounded-lattice ceiling — a future variant insertion strictly
+    /// above `Major` (e.g., an `Epoch` semver4-style variant) forces
+    /// the author to update this one pin so every consumer reading
+    /// "the magnitude-ladder ceiling" picks up the new top.
+    #[test]
+    fn test_bump_level_top_named_at_lattice_ceiling() {
+        assert_eq!(
+            BumpLevel::TOP,
+            BumpLevel::Major,
+            "TOP must read as Major at the present three-variant magnitude ladder",
+        );
+    }
+
+    /// [`BumpLevel::BOTTOM`] coincides with the first element of
+    /// [`BumpLevel::ALL`] — the structural routing pin that ties the
+    /// bounded-lattice floor to the canonical ladder-order
+    /// enumeration. The pin that holds against a refactor that
+    /// silently desynced the bounded-lattice anchor from the
+    /// canonical-ladder-order surface (e.g., a future variant
+    /// insertion that updated [`ALL`](BumpLevel::ALL) but forgot to
+    /// shift [`BOTTOM`](BumpLevel::BOTTOM) accordingly, leaving the
+    /// bounded-lattice surface stale relative to the enumeration
+    /// surface). Together with
+    /// [`test_bump_level_all_is_canonical_ladder_order`] (the
+    /// pre-existing pin that ties `ALL`'s order to the derived [`Ord`]
+    /// chain), this seals the two-step routing
+    /// `BOTTOM == ALL[0] == min(every-variant)` at the typed-primitive
+    /// site.
+    #[test]
+    fn test_bump_level_bottom_equals_ladder_floor() {
+        let first = *BumpLevel::ALL.first().expect("ALL must be non-empty");
+        assert_eq!(
+            BumpLevel::BOTTOM,
+            first,
+            "BOTTOM must equal ALL.first() — the canonical ladder floor",
+        );
+    }
+
+    /// [`BumpLevel::TOP`] coincides with the last element of
+    /// [`BumpLevel::ALL`] — the dual of
+    /// [`test_bump_level_bottom_equals_ladder_floor`] at the
+    /// bounded-lattice ceiling, sealing the
+    /// `TOP == ALL[ALL.len() - 1] == max(every-variant)` routing at
+    /// the typed-primitive site.
+    #[test]
+    fn test_bump_level_top_equals_ladder_ceiling() {
+        let last = *BumpLevel::ALL.last().expect("ALL must be non-empty");
+        assert_eq!(
+            BumpLevel::TOP,
+            last,
+            "TOP must equal ALL.last() — the canonical ladder ceiling",
+        );
+    }
+
+    /// Bounded-lattice lower-bound law: [`BumpLevel::BOTTOM`] sits
+    /// at-or-below every variant under the derived [`Ord`] chain. The
+    /// structural anchor of "BOTTOM is the global lower bound" at
+    /// the typed-primitive surface — pinned at every variant rather
+    /// than only at the present floor, so a future variant insertion
+    /// either side of the ladder forces the property to hold against
+    /// the new variant before the test passes. Floor pin of
+    /// [`test_bump_level_top_ge_every_variant`].
+    #[test]
+    fn test_bump_level_bottom_le_every_variant() {
+        for level in BumpLevel::ALL {
+            assert!(
+                BumpLevel::BOTTOM <= level,
+                "BOTTOM must be <= every variant — failed at {level:?}",
+            );
+        }
+    }
+
+    /// Bounded-lattice upper-bound law: [`BumpLevel::TOP`] sits
+    /// at-or-above every variant under the derived [`Ord`] chain. The
+    /// dual of [`test_bump_level_bottom_le_every_variant`] — together
+    /// the two pins seal the closed magnitude-ladder interval
+    /// `[BOTTOM, TOP]` as the global containment range every variant
+    /// sits inside.
+    #[test]
+    fn test_bump_level_top_ge_every_variant() {
+        for level in BumpLevel::ALL {
+            assert!(
+                BumpLevel::TOP >= level,
+                "TOP must be >= every variant — failed at {level:?}",
+            );
+        }
+    }
+
+    /// Bounded-lattice non-degeneracy pin: `BOTTOM <= TOP` at the
+    /// magnitude ladder. The structural witness that the bounded-
+    /// lattice interval is non-empty — a refactor that collapsed the
+    /// two anchors to the same variant (or inverted them) would light
+    /// up here. At the present three-variant ladder the inequality is
+    /// strict (`Patch < Major`); a degenerate one-variant ladder
+    /// would coincide and still pass under `<=` — the pin holds the
+    /// containment direction, not the cardinality.
+    #[test]
+    fn test_bump_level_bottom_le_top_at_lattice() {
+        assert!(
+            BumpLevel::BOTTOM <= BumpLevel::TOP,
+            "BOTTOM must be <= TOP — the bounded-lattice interval must not invert",
+        );
+    }
+
+    /// Bounded-lattice join-identity law: `BOTTOM.join(a) ==
+    /// a.join(BOTTOM) == a` at every variant. The load-bearing
+    /// structural fact a downstream join-fold seeded at the lattice
+    /// bottom relies on — `levels.fold(BumpLevel::BOTTOM, |acc, l|
+    /// acc.join(l))` returns the join of `levels`, or `BOTTOM` on an
+    /// empty sequence. Pins the bounded-lattice anchor against the
+    /// join surface, where the pre-existing
+    /// [`test_bump_level_join_has_patch_as_identity`] pinned the same
+    /// fact against the variant name. Same property — the bounded-
+    /// lattice surface adds the named-anchor route so a consumer
+    /// reading "seed the join-fold at the lattice floor" reads through
+    /// one named oracle rather than the variant name.
+    #[test]
+    fn test_bump_level_bottom_is_join_identity_at_every_variant() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                BumpLevel::BOTTOM.join(level),
+                level,
+                "BOTTOM must be left-identity for join at {level:?}",
+            );
+            assert_eq!(
+                level.join(BumpLevel::BOTTOM),
+                level,
+                "BOTTOM must be right-identity for join at {level:?}",
+            );
+        }
+    }
+
+    /// Bounded-lattice meet-identity law: `TOP.meet(a) == a.meet(TOP)
+    /// == a` at every variant. Dual of
+    /// [`test_bump_level_bottom_is_join_identity_at_every_variant`] —
+    /// a downstream meet-fold seeded at the lattice top relies on the
+    /// fact that `levels.fold(BumpLevel::TOP, |acc, l| acc.meet(l))`
+    /// returns the meet of `levels`, or `TOP` on an empty sequence.
+    /// Bounded-lattice anchor route over the same property pre-pinned
+    /// at the variant-name surface by
+    /// [`test_bump_level_meet_has_major_as_identity`].
+    #[test]
+    fn test_bump_level_top_is_meet_identity_at_every_variant() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                BumpLevel::TOP.meet(level),
+                level,
+                "TOP must be left-identity for meet at {level:?}",
+            );
+            assert_eq!(
+                level.meet(BumpLevel::TOP),
+                level,
+                "TOP must be right-identity for meet at {level:?}",
+            );
+        }
+    }
+
+    /// Bounded-lattice meet-absorbing law: `BOTTOM.meet(a) ==
+    /// a.meet(BOTTOM) == BOTTOM` at every variant. The load-bearing
+    /// structural fact a downstream per-commit-floor meet-fold can
+    /// early-exit on — once any per-commit magnitude reads BOTTOM, the
+    /// per-commit-floor collapses to BOTTOM regardless of the
+    /// remaining commits. Bounded-lattice anchor route over the same
+    /// property pre-pinned at the variant-name surface by
+    /// [`test_bump_level_meet_has_patch_as_absorbing_element`].
+    #[test]
+    fn test_bump_level_bottom_is_meet_absorbing_at_every_variant() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                BumpLevel::BOTTOM.meet(level),
+                BumpLevel::BOTTOM,
+                "BOTTOM must be left-absorbing for meet at {level:?}",
+            );
+            assert_eq!(
+                level.meet(BumpLevel::BOTTOM),
+                BumpLevel::BOTTOM,
+                "BOTTOM must be right-absorbing for meet at {level:?}",
+            );
+        }
+    }
+
+    /// Bounded-lattice join-absorbing law: `TOP.join(a) == a.join(TOP)
+    /// == TOP` at every variant. Dual of
+    /// [`test_bump_level_bottom_is_meet_absorbing_at_every_variant`]
+    /// — a downstream release-aggregation join-fold can early-exit on
+    /// the fact that once any per-commit magnitude reads TOP, the
+    /// release-aggregation join collapses to TOP regardless of the
+    /// remaining commits. Bounded-lattice anchor route over the same
+    /// property pre-pinned at the variant-name surface by
+    /// [`test_bump_level_join_has_major_as_absorbing_element`].
+    #[test]
+    fn test_bump_level_top_is_join_absorbing_at_every_variant() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                BumpLevel::TOP.join(level),
+                BumpLevel::TOP,
+                "TOP must be left-absorbing for join at {level:?}",
+            );
+            assert_eq!(
+                level.join(BumpLevel::TOP),
+                BumpLevel::TOP,
+                "TOP must be right-absorbing for join at {level:?}",
+            );
         }
     }
 }
