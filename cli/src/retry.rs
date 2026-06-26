@@ -654,6 +654,64 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // / `"connection refused"` carries.
     "broken pipe",
     "Broken pipe",
+    // Mid-stream HTTP-framing READ drop — hyper's
+    // `hyper::Error::IncompleteMessage` `Display` impl emits the bare
+    // phrase `"connection closed before message completed"` verbatim.
+    // Structural sibling of `unexpected EOF` (Go's `io.ErrUnexpectedEOF`
+    // — TCP-level EOF mid-stream, the READ-side mirror at the Go-net
+    // dialect) and of `broken pipe` (`syscall.EPIPE` — WRITE-side EPIPE,
+    // the cross-dialect mirror at the kernel-TCP layer). The HTTP-
+    // framing-layer distinction matters: here the TCP connection
+    // carried partial HTTP-response bytes before the upstream sent FIN
+    // (graceful close) or RST (`syscall.ECONNRESET`) without completing
+    // the chunked-transfer-encoding terminator / `Content-Length` byte
+    // budget hyper's response decoder requires — distinct from
+    // `unexpected EOF` (Go's TCP-level signal at the same shape,
+    // emitted by skopeo / regctl / kubectl / helm-cli's Go-net surface)
+    // and from `Connection reset` / `connection reset` (already carried
+    // above — the kernel-layer `ECONNRESET` signal hyper's underlying
+    // socket also surfaces directly when the upstream sends RST before
+    // any HTTP-response bytes return).
+    //
+    // forge's attic-push hot path runs the attic-client Rust surface
+    // (`reqwest` → `hyper`) against attic-server over the cluster LB.
+    // Production triggers: attic-server restart (helm rollout, pod
+    // eviction), upstream LB rolling reconciliation (cluster ingress
+    // reload, service-mesh sidecar restart), HTTP/2 GOAWAY frame from
+    // upstream before forge's PUT body fully drained, or upstream
+    // idle-connection eviction (server-side `Keep-Alive` timeout
+    // expiring mid-stream while forge's request-body uploader is mid-
+    // chunk). Every one is reconvergent within the existing retry-
+    // policy budget; the fix here is recognizing the hyper-specific
+    // phrase the prior `unexpected EOF` marker (Go-only) silently
+    // short-circuited to terminal at the Rust dialect.
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - hyper / reqwest (the attic-client Rust surface): emits the bare
+    //   phrase `"connection closed before message completed"` verbatim
+    //   from `hyper::Error::IncompleteMessage`'s `Display`
+    //   (`std::error::Error::source` chain — `"error sending request
+    //   for url (https://attic.…/_api/v1/cache/…): connection closed
+    //   before message completed"`);
+    // - Rust async-stream wrappers (`tokio-stream`, `axum`-fronted
+    //   probes, attic-fronted CDN probes whose Rust-side fetch wraps
+    //   the same hyper error): forward the same `Display` substring
+    //   through whatever request-error wrapper they layer on top.
+    //
+    // One casing only — every emitter passes through hyper's exact
+    // lowercase formatting; the phrase is hyper-specific, not a
+    // cross-tool variant the way `Connection refused` / `connection
+    // refused` is split. The marker is also distinct from the curl
+    // sibling `"Empty reply from server"` (`CURLE_GOT_NOTHING` —
+    // libcurl emits this when the TCP connection accepted then closed
+    // with zero response bytes, distinct from hyper's *partial*-
+    // response signal where some bytes returned before the close); the
+    // libcurl marker is not added in this commit because forge's
+    // libcurl-fronted CLIs (git-over-HTTPS) trip the closely-related
+    // `unexpected EOF` substring first via libcurl's `CURLE_RECV_ERROR`
+    // path — the hot-path gap closed here is the hyper/reqwest dialect
+    // attic-client takes against attic-server.
+    "connection closed before message completed",
     // DNS-resolver transient — `getaddrinfo(3)` `EAI_AGAIN` (glibc -3).
     // Distinct layer from the kernel-routing transients above
     // (`syscall.ENETUNREACH` / `EHOSTUNREACH`) and from the TCP-state
@@ -2617,6 +2675,68 @@ mod tests {
         // capitalized `Broken pipe` through the Display impl.
         assert!(is_transient_network_stderr(
             "error sending request for url: Broken pipe (os error 32)"
+        ));
+    }
+
+    /// Mid-stream HTTP-framing READ drop (hyper's
+    /// `hyper::Error::IncompleteMessage`) is transient — the structural
+    /// HTTP-framing-layer sibling of `unexpected EOF` (Go's TCP-level
+    /// mirror, pinned by `test_transient_classifier_matches_eof`) and of
+    /// `broken pipe` (the WRITE-side mirror, pinned by
+    /// `test_transient_classifier_matches_broken_pipe`). Fires on the
+    /// attic-client Rust surface (`reqwest` → `hyper`) when the upstream
+    /// TCP connection carries partial HTTP-response bytes before sending
+    /// FIN or RST without completing the `Content-Length` / chunked-
+    /// transfer-encoding byte budget hyper's response decoder requires.
+    ///
+    /// Production triggers on forge's attic-push hot path: attic-server
+    /// restart (helm rollout, pod eviction), upstream LB rolling
+    /// reconciliation (cluster ingress reload, service-mesh sidecar
+    /// restart), HTTP/2 GOAWAY frame from upstream before forge's PUT
+    /// body drained, upstream `Keep-Alive` idle-connection eviction
+    /// mid-stream. Every one is reconvergent within the existing
+    /// retry-policy budget; the fail-before / pass-after seal is the
+    /// hyper-specific phrase the prior Go-only `unexpected EOF` marker
+    /// silently short-circuited to terminal at the Rust dialect.
+    ///
+    /// Fail-before: the pre-fix marker set carried `unexpected EOF`
+    /// (Go's TCP-level mirror, used by skopeo / regctl / kubectl /
+    /// helm-cli's Go-net surface) and `broken pipe` (WRITE-side EPIPE
+    /// across dialects), but no marker for the hyper-specific HTTP-
+    /// framing READ-side `IncompleteMessage` phrase. So every realistic
+    /// attic-client push during an attic-server restart / upstream LB
+    /// rolling reconcile / HTTP/2 GOAWAY / idle-conn eviction
+    /// short-circuited to terminal — the typed retry loop refused to
+    /// back off, burning the attic-push against a reconvergent upstream
+    /// event the existing retry-policy budget covers. Pass-after: every
+    /// realistic hyper-dialect surrounding-context wraps it and the
+    /// shared `retry_command` / `run_with_policy` driver backs off and
+    /// retries the push.
+    #[test]
+    fn test_transient_classifier_matches_connection_closed_before_message_completed() {
+        // Bare hyper `Display` form — `hyper::Error::IncompleteMessage`
+        // emits the lowercase phrase verbatim with no surrounding
+        // context.
+        assert!(is_transient_network_stderr(
+            "connection closed before message completed"
+        ));
+        // reqwest request-error wrapping (the dominant attic-client
+        // production surface) — `reqwest::Error::Request` forwards the
+        // hyper source error's `Display` through its own format string.
+        assert!(is_transient_network_stderr(
+            "error sending request for url (https://attic.example.com/_api/v1/cache/forge/store): connection closed before message completed"
+        ));
+        // Surrounding-context anyhow chain (`forge`'s typed-error
+        // surface formats `.context()`-wrapped errors as `outer: inner`)
+        // — the hyper substring still classifies through whatever
+        // outer wrapper layered on top.
+        assert!(is_transient_network_stderr(
+            "Pushing store path /nix/store/abcd-foo: connection closed before message completed"
+        ));
+        // tokio-stream / async-stream wrapper around a hyper-fronted
+        // CDN probe — the same hyper substring carries through.
+        assert!(is_transient_network_stderr(
+            "stream error: connection closed before message completed"
         ));
     }
 
