@@ -570,6 +570,97 @@ impl BumpLevel {
     pub fn is_major_only(&self) -> bool {
         *self == Self::Major
     }
+
+    /// True iff `self` sits at or above the lower magnitude threshold —
+    /// i.e., `*self >= Self::Minor` under the derived [`Ord`] instance. The
+    /// named typed-method peer at the Minor threshold of the version-bump
+    /// magnitude ladder: the half-open-ray gate naming "this bump
+    /// introduces user-visible change — a backward-compatible feature
+    /// addition or a breaking API change" reading downstream consumers
+    /// previously had to write as `!level.is_fix_only()` (or
+    /// `matches!(level, BumpLevel::Minor | BumpLevel::Major)` against the
+    /// variants directly). A release-notes generator that says "any non-fix
+    /// bump requires a user-facing changelog entry and a release-notes
+    /// section" reads `level.is_feature_or_breaking()` instead of
+    /// `!level.is_fix_only()` or a two-arm `match level { Minor | Major =>
+    /// require_changelog, Patch => skip }` cascade at every policy site —
+    /// the user-visible-change semantic role is named at the typed-
+    /// primitive surface, not retyped at every consumer.
+    ///
+    /// Sibling lift of [`is_breaking`](Self::is_breaking) (>=Major) at the
+    /// upper threshold, here applied to the lower (Minor) threshold of the
+    /// magnitude ladder. Together with [`is_breaking`] and the dual pair
+    /// [`is_non_breaking`](Self::is_non_breaking), the named half-open-ray
+    /// surface now carries one of the two ladder-gate readings at the
+    /// lower threshold, closing the structural gap between the
+    /// [`BumpLevel`] sum and the four-method admit/refuse × relaxed/strict
+    /// gate matrix the [`crate::probe_outcome::AdmissionTier`] surface
+    /// carries over its two thresholds (`>= StagingOnly`, `>= Strict`).
+    ///
+    /// # Why `>= Self::Minor`, not `!self.is_fix_only()` or `matches!`
+    ///
+    /// Under the present three-variant ladder, `is_feature_or_breaking`
+    /// reduces to `!self.is_fix_only()` and to `matches!(self, Self::Minor
+    /// | Self::Major)`, but the `>=` form is the load-bearing one. It
+    /// makes the total-order discipline (commit 8c2bbd5) the structural
+    /// oracle for the lower-threshold gate the same way the `>=` form
+    /// does for [`is_breaking`] at the upper threshold: a future variant
+    /// `BumpLevel::Epoch` inserted in source order strictly above `Major`
+    /// (semver4 / `0ver`-style incompatible-by-design rewrites) is
+    /// automatically `>= Minor` and so structurally classified as
+    /// feature-or-breaking — the same way a future `BumpLevel::Prerelease`
+    /// variant inserted strictly below `Patch` (release-candidate /
+    /// staging-channel bump shapes) is automatically `< Minor` and so
+    /// structurally classified as NOT feature-or-breaking. The
+    /// `!is_fix_only()` form would silently misclassify `Prerelease` as
+    /// feature-or-breaking (it is `!= Patch` and so reads `!is_fix_only()`
+    /// as true), inheriting the same drift class
+    /// [`crate::probe_outcome::AdmissionTier::admits_relaxed`] avoids by
+    /// reading `>= StagingOnly` rather than `matches!(self, StagingOnly |
+    /// Strict)`. The `matches!` form would silently misclassify a future
+    /// `Epoch` variant above `Major` as NOT feature-or-breaking (it would
+    /// not match `Minor | Major`), inheriting the dual drift class. The
+    /// `>=` form refuses both by construction.
+    ///
+    /// # Implication chain and decomposition pins
+    ///
+    /// The implication invariant `is_breaking() => is_feature_or_breaking()`
+    /// is pinned by
+    /// [`tests::test_bump_level_is_breaking_implies_is_feature_or_breaking`]:
+    /// every breaking bump is structurally feature-or-breaking (every
+    /// `>= Major` is `>= Minor`), so a downstream release-notes gate that
+    /// admits feature-or-breaking automatically admits every breaking
+    /// bump. The De Morgan complementarity invariant
+    /// `is_feature_or_breaking() == !is_fix_only()` under the present
+    /// three-variant ladder is pinned by
+    /// [`tests::test_bump_level_is_feature_or_breaking_equals_negation_of_is_fix_only_under_present_ladder`]:
+    /// the two predicates are exact complements at every present variant.
+    /// The partition pin
+    /// [`tests::test_bump_level_is_feature_or_breaking_xor_is_fix_only_partitions_ladder`]
+    /// nails the disjoint-and-covering invariant
+    /// `is_feature_or_breaking() XOR is_fix_only() == true` so a regression
+    /// that broke either method body (e.g., a future hand-rolled
+    /// `matches!(self, Self::Minor | Self::Major)` body that drifted from
+    /// the `>=` form across a fourth-variant addition) surfaces as a
+    /// partition gap or overlap at the new variant. Same partition shape
+    /// the `is_breaking` / `is_non_breaking` pair sealed at the upper
+    /// threshold, here at the lower threshold of the same ladder.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the version-bump-magnitude
+    /// lower-threshold gate reads the derived `Ord` impl through a named
+    /// typed-method peer at the typed-primitive surface, not retyped at
+    /// every consumer's match cascade or De Morgan negation. THEORY.md
+    /// §VI.1 one-oracle: the user-visible-change semantic role
+    /// (feature-or-breaking ⇔ at-or-above Minor) is named at one site
+    /// (this method's body), so a downstream policy gate that previously
+    /// read `!level.is_fix_only()` reads `level.is_feature_or_breaking()`
+    /// once and is automatically refined — by the `>=` form — across a
+    /// future `Prerelease` insertion below `Patch` that the gate should
+    /// NOT classify as user-visible.
+    #[allow(dead_code)]
+    pub fn is_feature_or_breaking(&self) -> bool {
+        *self >= Self::Minor
+    }
 }
 
 impl std::fmt::Display for BumpLevel {
@@ -1230,10 +1321,7 @@ mod tests {
     /// at this typed-method surface.
     #[test]
     fn test_bump_level_is_breaking_partitions_ladder_into_one_breaking_variant() {
-        let breaking_count = BumpLevel::ALL
-            .iter()
-            .filter(|l| l.is_breaking())
-            .count();
+        let breaking_count = BumpLevel::ALL.iter().filter(|l| l.is_breaking()).count();
         assert_eq!(
             breaking_count, 1,
             "exactly one of {{Patch, Minor, Major}} is breaking at the current ladder",
@@ -1694,6 +1782,148 @@ mod tests {
                 level.is_major_only(),
                 level.is_breaking(),
                 "under the present 3-variant ladder, is_major_only() and is_breaking() must coincide at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant, `is_feature_or_breaking()` returns
+    /// the value a downstream release-notes gate would have written as
+    /// `level >= BumpLevel::Minor` at the consumer surface — `false` only
+    /// at [`BumpLevel::Patch`] (the structural floor), `true` at the two
+    /// strictly-greater variants (`Minor`, `Major`). The exact-shape
+    /// per-variant pin that makes a release-notes generator that says
+    /// "any non-fix bump requires a user-facing changelog entry" reads
+    /// `if level.is_feature_or_breaking() { generate_changelog() }` at
+    /// one site instead of `if !level.is_fix_only() { ... }` or a two-arm
+    /// `match level { Minor | Major => ..., Patch => ... }` cascade.
+    /// Floor-sibling of [`test_bump_level_is_breaking_named_at_threshold`]
+    /// at the upper threshold.
+    #[test]
+    fn test_bump_level_is_feature_or_breaking_named_at_lower_threshold() {
+        assert!(
+            !BumpLevel::Patch.is_feature_or_breaking(),
+            "Patch sits strictly below the Minor threshold and must NOT read as feature-or-breaking",
+        );
+        assert!(
+            BumpLevel::Minor.is_feature_or_breaking(),
+            "Minor sits at the lower threshold and must read as feature-or-breaking",
+        );
+        assert!(
+            BumpLevel::Major.is_feature_or_breaking(),
+            "Major sits strictly above the Minor threshold and must read as feature-or-breaking",
+        );
+    }
+
+    /// `is_feature_or_breaking()` agrees with `*self >= BumpLevel::Minor`
+    /// at every variant — the structural pin that makes the `>=` form (not
+    /// the `!is_fix_only()` decomposition or the `matches!(self, Self::
+    /// Minor | Self::Major)` arm cascade) the load-bearing oracle for the
+    /// lower-threshold gate. A hand-rolled regression that drifted the
+    /// method body to either decomposition would still pass
+    /// [`test_bump_level_is_feature_or_breaking_named_at_lower_threshold`]
+    /// at the present three-variant ladder but break this structural-
+    /// equivalence pin at any future variant insertion below `Patch` or
+    /// above `Major`. Same idiom
+    /// [`test_bump_level_is_breaking_agrees_with_geq_major_at_every_variant`]
+    /// established at the upper threshold of the same ladder.
+    #[test]
+    fn test_bump_level_is_feature_or_breaking_agrees_with_geq_minor_at_every_variant() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                level.is_feature_or_breaking(),
+                level >= BumpLevel::Minor,
+                "is_feature_or_breaking() must read the >= Minor comparison at {level:?}",
+            );
+        }
+    }
+
+    /// The implication invariant `is_breaking() => is_feature_or_breaking()`
+    /// holds at every variant: every breaking bump is structurally feature-
+    /// or-breaking (every `>= Major` is `>= Minor`). A downstream release-
+    /// notes gate that admits `is_feature_or_breaking()` automatically
+    /// admits every `is_breaking()` bump, with no per-site reclassification
+    /// of the breaking ceiling. Sibling pin of
+    /// [`test_bump_level_is_major_only_implies_is_breaking`] at the
+    /// variant-identity / half-open-ray pair, here at the two half-open-
+    /// ray surfaces of the same ladder.
+    #[test]
+    fn test_bump_level_is_breaking_implies_is_feature_or_breaking() {
+        for level in BumpLevel::ALL {
+            assert!(
+                !level.is_breaking() || level.is_feature_or_breaking(),
+                "is_breaking() must imply is_feature_or_breaking() at {level:?}",
+            );
+        }
+    }
+
+    /// Under the present three-variant ladder, `is_feature_or_breaking()`
+    /// and `is_fix_only()` are exact De Morgan complements at every
+    /// variant: `Patch` reads fix-only / not-feature-or-breaking, `Minor`
+    /// and `Major` read not-fix-only / feature-or-breaking. The
+    /// coincidence depends on the present ladder having only one variant
+    /// strictly below `Minor` (`Patch`, which is also exactly the
+    /// `is_fix_only` floor); a future `Prerelease` variant inserted
+    /// strictly below `Patch` would surface the structural distinction —
+    /// `Prerelease` would read `!is_feature_or_breaking()` (it sits below
+    /// the Minor threshold) AND `!is_fix_only()` (it is not exactly
+    /// `Patch`), so the De Morgan complementarity would no longer hold at
+    /// the new variant. Same present-ladder-coincidence idiom
+    /// [`test_bump_level_is_major_only_equals_is_breaking_under_present_ladder`]
+    /// established at the upper threshold against the variant-identity
+    /// surface.
+    #[test]
+    fn test_bump_level_is_feature_or_breaking_equals_negation_of_is_fix_only_under_present_ladder()
+    {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                level.is_feature_or_breaking(),
+                !level.is_fix_only(),
+                "under the present 3-variant ladder, is_feature_or_breaking() must equal !is_fix_only() at {level:?}",
+            );
+        }
+    }
+
+    /// Under the present three-variant ladder, `is_feature_or_breaking()`
+    /// XOR `is_fix_only()` reads `true` at every variant — the disjoint-
+    /// and-covering partition: no variant is simultaneously
+    /// feature-or-breaking AND fix-only, and no variant is neither. A
+    /// regression that broke either method body (e.g., a future hand-
+    /// rolled `*self != Self::Patch` body for `is_feature_or_breaking`
+    /// that drifted from the `>=` form across a fourth-variant addition
+    /// below `Patch`) would surface here as a partition gap or overlap.
+    /// Same partition shape
+    /// [`test_bump_level_named_trio_xor_partitions_ladder`] established
+    /// at the variant-identity / half-open-ray trio, here at the two-
+    /// method pair across the lower threshold.
+    #[test]
+    fn test_bump_level_is_feature_or_breaking_xor_is_fix_only_partitions_ladder() {
+        for level in BumpLevel::ALL {
+            assert!(
+                level.is_feature_or_breaking() ^ level.is_fix_only(),
+                "is_feature_or_breaking() XOR is_fix_only() must read true at {level:?} \
+                 — the lower-threshold gate and the floor-identity must partition the ladder",
+            );
+        }
+    }
+
+    /// Under the present three-variant ladder, `is_feature_or_breaking()`
+    /// decomposes as `is_minor_only() || is_major_only()` — every variant
+    /// that reads as feature-or-breaking is exactly one of the two non-
+    /// floor variant identities. The pin that ties the half-open-ray
+    /// surface at the lower threshold to the two variant-identity peers
+    /// strictly above the floor, so a future regression that broke either
+    /// side of the named-method composition lights up here. Same
+    /// decomposition shape
+    /// [`crate::probe_outcome::tests::test_admission_tier_admits_relaxed_decomposes_as_is_staging_only_or_is_strict`]
+    /// (if any) carries at the admission-tier ladder; here at the
+    /// magnitude-ladder lower threshold.
+    #[test]
+    fn test_bump_level_is_feature_or_breaking_decomposes_as_minor_or_major_identity() {
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                level.is_feature_or_breaking(),
+                level.is_minor_only() || level.is_major_only(),
+                "under the present 3-variant ladder, is_feature_or_breaking() must decompose as is_minor_only() || is_major_only() at {level:?}",
             );
         }
     }
