@@ -842,17 +842,124 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // One casing only — every emitter passes through hyper's exact
     // lowercase formatting; the phrase is hyper-specific, not a
     // cross-tool variant the way `Connection refused` / `connection
-    // refused` is split. The marker is also distinct from the curl
-    // sibling `"Empty reply from server"` (`CURLE_GOT_NOTHING` —
-    // libcurl emits this when the TCP connection accepted then closed
-    // with zero response bytes, distinct from hyper's *partial*-
-    // response signal where some bytes returned before the close); the
-    // libcurl marker is not added in this commit because forge's
-    // libcurl-fronted CLIs (git-over-HTTPS) trip the closely-related
-    // `unexpected EOF` substring first via libcurl's `CURLE_RECV_ERROR`
-    // path — the hot-path gap closed here is the hyper/reqwest dialect
-    // attic-client takes against attic-server.
+    // refused` is split. The libcurl sibling at the zero-bytes-
+    // received shape — `"Empty reply from server"` (`CURLE_GOT_NOTHING`,
+    // error 52) — is the marker entry directly below; it covers the
+    // distinct case where libcurl established the TCP+TLS connection,
+    // sent the request, and the upstream closed with zero response
+    // bytes (no HTTP response started). Hyper's partial-response signal
+    // here and libcurl's zero-bytes signal below are sibling shapes at
+    // different runtimes, both reconvergent within the existing retry-
+    // policy budget.
     "connection closed before message completed",
+    // libcurl zero-response-bytes transient — `CURLE_GOT_NOTHING`
+    // (error 52). libcurl declares this in `lib/strerror.c` as
+    // `"Empty reply from server"`, surfaced through every libcurl-
+    // fronted CLI's response-error formatter (curl's `--fail` path,
+    // git-over-HTTPS's `remote-curl` helper, helm-cli's OCI surface,
+    // nix-prefetch-url's fetcher, every healthcheck shell). The error
+    // fires after the SYN+SYN-ACK+ACK completed, the TLS handshake
+    // completed, libcurl sent the HTTP request, and the upstream
+    // closed the connection without writing any HTTP response bytes —
+    // distinct from `CURLE_RECV_ERROR` (56) which fires on a TCP
+    // error during read after some bytes returned. libcurl's
+    // `lib/transfer.c` recognizes the zero-bytes-received case at a
+    // higher layer than the generic recv-error path and emits this
+    // structurally distinct phrase.
+    //
+    // Distinct from the prior markers already carried:
+    // - `"connection closed before message completed"` (hyper's
+    //   `IncompleteMessage`) — partial response received then drop;
+    // - `"unexpected EOF"` (Go's `io.ErrUnexpectedEOF`) — partial
+    //   response received then EOF at the Go-net dialect;
+    // - `"broken pipe"` / `"Broken pipe"` (`syscall.EPIPE`) —
+    //   WRITE-side drop at the kernel-TCP layer;
+    // - `"Connection reset"` (`syscall.ECONNRESET`) — kernel-level
+    //   RST during read.
+    // All four cover *partial*-response shapes; `CURLE_GOT_NOTHING`
+    // is the *zero*-response mirror at the libcurl dialect — the
+    // upstream accepted the TCP+TLS handshake then closed without
+    // any HTTP response. The retry semantics are SAFER than the
+    // partial-response class: with zero application bytes
+    // exchanged, retrying cannot cause a duplicate side-effect at
+    // the application layer (the request never reached an upstream
+    // handler that could have begun processing). Same RFC-grounded
+    // safe-retry guarantee `REFUSED_STREAM` carries at the HTTP/2
+    // stream layer, translated to the libcurl-HTTP/1.x layer.
+    //
+    // forge's pipeline invokes libcurl-fronted CLIs on every run:
+    // git-over-HTTPS (`git push` / `git fetch` / `git ls-remote`
+    // through `git-remote-https`, which links against libcurl) for
+    // tag/version probes during release-all and for the source-of-
+    // truth fetch against github.com, helm-cli's OCI surface
+    // (`helm pull oci://`, `helm registry login`, `helm push`
+    // against an OCI registry — helm-cli uses libcurl for the
+    // HTTPS transport under `oras-go`'s fallback path), healthcheck
+    // shells (curl-based readiness probes against GHCR / attic-
+    // server before push), and nix-prefetch-url's tarball fetcher.
+    // Production triggers: github.com frontend rolling deploy (the
+    // GitHub frontend backend pool rebalances mid-handshake-
+    // completion — the SYN+TLS handshake reaches a backend that's
+    // about to drain, the backend sends FIN immediately on receipt
+    // of the HTTP request without writing any response), GHCR edge-
+    // tier rolling deploy (Azure Front Door's edge pool reconciles
+    // mid-handshake during Microsoft's tenant rebalance windows),
+    // attic-server ingress reloading (the nginx ingress drops the
+    // in-flight connection at the same shape during configmap
+    // reload — accept-then-close before any response bytes),
+    // cluster ingress active-active failover (the active node fails
+    // over to the passive node mid-stream; the new node has no
+    // session state and immediately closes). Every one is
+    // reconvergent within the existing retry-policy budget; the fix
+    // here is recognizing the libcurl zero-bytes phrase the prior
+    // partial-response markers (`unexpected EOF` Go-dialect,
+    // `connection closed before message completed` hyper-dialect)
+    // silently short-circuited to terminal at the libcurl dialect.
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - libcurl (`curl` CLI, `git-remote-https`, helm-cli's OCI
+    //   surface, nix-prefetch-url, healthcheck shells): emits the
+    //   bare phrase verbatim through `curl_easy_strerror(CURLE_
+    //   GOT_NOTHING)` — `"curl: (52) Empty reply from server"`
+    //   (curl CLI through `--fail`), `"fatal: unable to access
+    //   'https://github.com/org/repo.git/': Empty reply from
+    //   server"` (git-remote-https through curl's response-error
+    //   chain), `"Error: failed to do request: Empty reply from
+    //   server"` (helm OCI through oras-go's libcurl-fronted
+    //   transport);
+    // - git-over-HTTPS surfaces forge invokes directly (`forge`'s
+    //   git-fetch / git-ls-remote paths through the `git2-rs` C-
+    //   binding, which links against the system libcurl on Linux):
+    //   forwards the phrase through `git2::Error::Display` —
+    //   `"failed to send request: Empty reply from server; class=
+    //   Net (12)"`;
+    // - Python urllib3 / requests (helm-cli's plugin-shell escape
+    //   hatches, runtime probe shells): emits `"requests.exceptions.
+    //   ConnectionError: ('Connection aborted.', RemoteDisconnected(
+    //   'Remote end closed connection without response'))"` — NOT
+    //   the libcurl phrase verbatim, but the closely-adjacent
+    //   `"Connection aborted"` marker already carried above covers
+    //   the urllib3 dialect.
+    //
+    // One casing only — every emitter passes through libcurl's
+    // exact `strerror` formatting (`"Empty reply from server"` with
+    // title-case `E` and lowercase rest, declared at one site in
+    // libcurl's `lib/strerror.c` static table). Requiring the full
+    // phrase keeps the signal while dropping the substring-buried
+    // false positives a bare `"Empty"` or `"server"` substring
+    // would catch (e.g. a logger message describing an empty
+    // manifest, a server-name diagnostic). The marker is also
+    // distinct from the closely-adjacent libcurl phrases whose
+    // retry semantics are NOT safe: `"Could not resolve host"`
+    // (`CURLE_COULDNT_RESOLVE_HOST` 6 — covered as transient via
+    // the `"Temporary failure in name resolution"` named-form
+    // marker only when the resolver returned `EAI_AGAIN`; bare
+    // `"Could not resolve host"` without the `"Temporary"` prefix
+    // is the permanent NXDOMAIN verdict and stays terminal),
+    // `"SSL certificate problem"` (`CURLE_SSL_CACERT` 60 — terminal
+    // TLS-config issue), `"The requested URL returned error: 404"`
+    // (`CURLE_HTTP_RETURNED_ERROR` 22 on a permanent 4xx — terminal).
+    "Empty reply from server",
     // DNS-resolver transient — `getaddrinfo(3)` `EAI_AGAIN` (glibc -3).
     // Distinct layer from the kernel-routing transients above
     // (`syscall.ENETUNREACH` / `EHOSTUNREACH`) and from the TCP-state
@@ -3339,6 +3446,73 @@ mod tests {
         assert!(is_transient_network_stderr(
             "stream error: connection closed before message completed"
         ));
+    }
+
+    /// libcurl zero-response-bytes transient — `CURLE_GOT_NOTHING`
+    /// (error 52) emits the bare phrase `"Empty reply from server"`
+    /// verbatim. The structural sibling at the libcurl dialect of the
+    /// hyper `"connection closed before message completed"` marker
+    /// (partial-response drop) and the Go-net `"unexpected EOF"`
+    /// marker (also partial-response): here the upstream accepted the
+    /// TCP+TLS handshake then closed without writing any HTTP
+    /// response bytes. The retry semantics are strictly safer than
+    /// the partial-response class — with zero application bytes
+    /// exchanged, no upstream handler began processing — mirroring
+    /// the RFC-9113-§6.4 `REFUSED_STREAM` safe-retry guarantee
+    /// translated to the libcurl-HTTP/1.x layer.
+    ///
+    /// Fail-before: the pre-fix marker set carried hyper's partial-
+    /// response phrase (`"connection closed before message
+    /// completed"`) and Go's partial-response phrase (`"unexpected
+    /// EOF"`) but no marker for the libcurl zero-bytes case at every
+    /// libcurl-fronted CLI surface forge depends on (`git push` /
+    /// `git fetch` / `git ls-remote` through `git-remote-https`,
+    /// helm-cli's OCI surface, healthcheck shells, `git2-rs`
+    /// bindings against the system libcurl). So every realistic
+    /// dialect emitting `"curl: (52) Empty reply from server"` /
+    /// `"fatal: unable to access 'https://github.com/...': Empty
+    /// reply from server"` during a github.com / GHCR / attic-server
+    /// frontend rolling-deploy window silently short-circuited to
+    /// terminal — the retry loop refused to back off, burning the
+    /// single attempt against a frontend reconciliation event that
+    /// would have reconverged within the existing retry-policy
+    /// budget. Pass-after: every realistic libcurl-fronted dialect
+    /// classifies transient and the shared `retry_command` /
+    /// `run_with_policy` driver backs off and retries the request.
+    #[test]
+    fn test_transient_classifier_matches_empty_reply_from_server() {
+        // Bare curl CLI `--fail` form — `curl_easy_strerror(CURLE_GOT_NOTHING)`
+        // verbatim through curl's response-error chain.
+        assert!(is_transient_network_stderr(
+            "curl: (52) Empty reply from server"
+        ));
+        // git-over-HTTPS through `git-remote-https` (the dominant
+        // production surface during release-all tag/version probes
+        // and source-of-truth fetches against github.com).
+        assert!(is_transient_network_stderr(
+            "fatal: unable to access 'https://github.com/pleme-io/forge.git/': Empty reply from server"
+        ));
+        // git2-rs C-binding wrapping the libcurl phrase through
+        // `git2::Error::Display`'s `class=Net` decoration (forge's
+        // direct git-fetch / git-ls-remote paths).
+        assert!(is_transient_network_stderr(
+            "failed to send request: Empty reply from server; class=Net (12)"
+        ));
+        // helm-cli OCI surface through oras-go's libcurl-fronted
+        // transport — `helm pull oci://` / `helm push` during a
+        // GHCR or attic-fronted-OCI edge reconciliation.
+        assert!(is_transient_network_stderr(
+            "Error: failed to do request: Empty reply from server"
+        ));
+        // Healthcheck shell wrapping the bare phrase with surrounding
+        // shell-script context (probe shells against GHCR / attic-
+        // server before the push step).
+        assert!(is_transient_network_stderr(
+            "readiness probe failed: Empty reply from server (curl exit 52)"
+        ));
+        // Bare phrase with no surrounding context — every emitter
+        // that emits ONLY the strerror text classifies transient.
+        assert!(is_transient_network_stderr("Empty reply from server"));
     }
 
     /// DNS-resolver transient — `getaddrinfo(3)` `EAI_AGAIN` (glibc -3)
