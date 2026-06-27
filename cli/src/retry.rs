@@ -1500,6 +1500,141 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // commit's deferral of `INTERNAL_ERROR` / `PROTOCOL_ERROR`
     // GOAWAY shapes.
     "REFUSED_STREAM",
+    // Go net/http `(*Client).Timeout` budget exhaustion — the bare
+    // phrase `"Client.Timeout exceeded"` is emitted by `net/http/
+    // client.go`'s deadline-firing path verbatim. The full Go error
+    // chain forms as `"Get \"<url>\": net/http: request canceled
+    // (Client.Timeout exceeded while awaiting headers)"` (the
+    // dominant production case — timeout fires while the client is
+    // waiting for the server's HEADERS frame) or `"…(Client.Timeout
+    // exceeded while reading body)"` (timeout fires mid-body-read on
+    // an established response stream). Distinct layer from every
+    // prior timeout marker already carried:
+    // - `"context deadline exceeded"` (`context.DeadlineExceeded` —
+    //   Go-context-layer budget, fires on `ctx.WithTimeout` /
+    //   `ctx.WithDeadline`, the higher-level cancellation propagates
+    //   through every `select` on `ctx.Done()`);
+    // - `"i/o timeout"` (Go-net `net.OpError`'s `net.Error.Timeout()`
+    //   surface — socket-layer read/write budget exhaustion at the
+    //   `(*conn).Read` / `(*conn).Write` boundary);
+    // - `"TLS handshake timeout"` (Go-net `tls.Conn.Handshake`'s
+    //   per-handshake budget — fires before any HTTP request bytes
+    //   reach the wire);
+    // - `"timeout"` (generic substring catch — but case-sensitive
+    //   `.contains()` means `"Client.Timeout"` with capital `T` does
+    //   NOT match the lowercase `"timeout"` substring; this is the
+    //   silent-short-circuit shape the marker here closes);
+    // - `"timed out"` (kernel `syscall.ETIMEDOUT` — SYN-retransmit
+    //   budget at the connect phase);
+    // - `"Request Timeout"` (HTTP 408 named form — server's response
+    //   status, distinct from a client-side budget elapsing).
+    // `Client.Timeout` is the `http.Client` struct field's named
+    // budget — a higher-level deadline than `context.WithTimeout`
+    // (which is a context-layer cancellation that the client honors
+    // via `req.WithContext`) and structurally distinct from the
+    // socket-layer `i/o timeout`. Go's `net/http` library formats
+    // the budget-elapsed verdict through `client.go`'s `setReqCancel`
+    // path with the literal `"Client.Timeout exceeded while …"`
+    // suffix — uniformly across every Go-net/http-fronted CLI.
+    //
+    // forge's pipeline invokes the four Go-net/http-fronted CLIs —
+    // kubectl, helm-cli, skopeo, regctl — extensively, every one
+    // of which sets `http.Client.Timeout` on its outer client:
+    // kubectl's `--request-timeout` flag (default `0` but commonly
+    // set by CI scripts and forge's own wrappers), helm-cli's
+    // `--timeout` flag (default `5m` for `helm install`/`upgrade`),
+    // skopeo's `--command-timeout` (default `0` but commonly set
+    // on registry-copy operations under burst load), regctl's
+    // `--request-timeout` (defaults vary by subcommand), and
+    // `helm registry login` / `helm push`'s per-request timeout
+    // against an OCI registry. Production triggers: kube-apiserver
+    // takes longer than `--request-timeout` to send response
+    // HEADERS during a control-plane election (the elected apiserver
+    // is rebuilding watch-cache, the per-request latency spikes
+    // 5-30s during this window), GHCR's edge tier delays HEADERS on
+    // a manifest GET during a backend rebalance (Azure Front Door
+    // routes the GET to a backend draining its connection pool,
+    // adding seconds to the first-byte latency), attic-server's
+    // golang surface (when forge invokes attic via its CLI wrapper
+    // rather than the Rust client) takes longer than the per-
+    // request budget to send HEADERS during burst upload pressure,
+    // or helm-release-controller's release-history compaction
+    // blocks the discovery shell's `helm list` past helm-cli's
+    // `--timeout`. Every one is reconvergent within the existing
+    // retry-policy budget — the next attempt against a non-
+    // congested upstream / freshly-elected apiserver / drained
+    // backend completes within the budget; the fix here is
+    // recognizing the Go-net/http Client.Timeout-elapsed phrase
+    // the prior `"i/o timeout"` (socket-layer) and `"context
+    // deadline exceeded"` (context-layer) markers do not cover.
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - Go net/http (kubectl, helm-cli's HTTPS surface, skopeo,
+    //   regctl, attic-client through its golang surface): the
+    //   bare phrase `"Client.Timeout exceeded while awaiting
+    //   headers"` wrapped through `Transport.RoundTrip`'s error
+    //   chain — `"Get \"https://10.0.0.1:6443/api/v1/namespaces/
+    //   forge/pods\": net/http: request canceled (Client.Timeout
+    //   exceeded while awaiting headers)"` (kubectl GET against
+    //   slow apiserver), `"Get \"https://ghcr.io/v2/org/repo/
+    //   manifests/sha256:…\": net/http: request canceled
+    //   (Client.Timeout exceeded while awaiting headers)"`
+    //   (skopeo/regctl manifest fetch against slow GHCR edge),
+    //   `"Error: query: failed to query with labels: Get
+    //   \"https://10.0.0.1:6443/api/v1/…\": net/http: request
+    //   canceled (Client.Timeout exceeded while awaiting headers)"`
+    //   (helm-cli release-status against slow apiserver);
+    // - body-read variant — `"Get \"https://attic.…/_api/v1/
+    //   cache/…\": net/http: request canceled (Client.Timeout
+    //   exceeded while reading body)"` (attic-fetch where the
+    //   server began streaming response bytes then stalled past
+    //   the per-request budget — the `Client.Timeout exceeded`
+    //   prefix is shared, the suffix names which phase the budget
+    //   elapsed in);
+    // - gRPC-Go (controller-runtime watch clients wrapping kube-
+    //   apiserver long-polls): forwards the phrase through the
+    //   gRPC status formatter — `"rpc error: code = DeadlineExceeded
+    //   desc = Client.Timeout exceeded while awaiting headers"`.
+    // The hyper / reqwest Rust dialect (attic-client Rust surface)
+    // does NOT use this exact phrase — reqwest's per-request
+    // timeout surfaces as `"operation timed out"` (covered via the
+    // `"timed out"` marker above) or as `"error sending request
+    // for url"` wrapping the underlying `hyper::Error::IncompleteMessage`
+    // (covered via the `"connection closed before message completed"`
+    // marker above).
+    //
+    // One casing only — every Go emitter passes through `net/http/
+    // client.go`'s exact mixed-case formatting (the `Client.Timeout`
+    // identifier follows Go's exported-field convention with capital
+    // `C` and capital `T`, the `exceeded` verb is uniformly lowercase,
+    // the `while awaiting headers` / `while reading body` suffix is
+    // uniformly lowercase). The marker uses the prefix substring
+    // `"Client.Timeout exceeded"` rather than either full suffix
+    // variant — both `while awaiting headers` and `while reading
+    // body` share the load-bearing `Client.Timeout exceeded` prefix,
+    // and both are equally transient at the retry-policy oracle
+    // (the budget elapsed against an upstream that was slow to
+    // respond; the next attempt against a non-congested upstream
+    // completes within the budget). Requiring the `Client.Timeout`
+    // qualifier keeps the signal while dropping the substring-buried
+    // false positives a bare `"Timeout exceeded"` substring would
+    // catch (e.g. an unrelated subsystem's `"PodReady Timeout
+    // exceeded"` kube-event message describing a permanent
+    // readiness verdict, a `"RequestTimeout exceeded"` config-
+    // parser diagnostic). The marker is also distinct from the
+    // closely-related `"net/http: request canceled"` bare phrase
+    // (deliberately NOT added: a cancelled request can be the
+    // user's CTRL+C through a parent `context.WithCancel`
+    // (terminal) or a parent context's deadline-firing (transient
+    // at one layer up but already covered by the deadline-exceeded
+    // propagation when the parent's deadline fires); leaving the
+    // ambiguous-form signal out of the marker set keeps the
+    // unambiguous-phrase-only discipline `"Temporary failure in
+    // name resolution"` / `"connection closed before message
+    // completed"` carry — the `Client.Timeout exceeded` phrase
+    // unambiguously names a budget-elapsed verdict, not a parent-
+    // cancel propagation).
+    "Client.Timeout exceeded",
 ];
 
 /// Named markers matched token-wise rather than as bare substrings.
@@ -4161,6 +4296,149 @@ mod tests {
         // reqwest's request-error chain.
         assert!(is_transient_network_stderr(
             "error sending request for url (https://attic.forge.example.com/_api/v1/cache/forge): connection error: REFUSED_STREAM"
+        ));
+    }
+
+    /// Go net/http `(*Client).Timeout` budget exhaustion — `net/http/
+    /// client.go`'s deadline-firing path emits the bare phrase
+    /// `"Client.Timeout exceeded while awaiting headers"` (HEADERS-
+    /// phase budget elapsed; the dominant production form) or
+    /// `"Client.Timeout exceeded while reading body"` (body-read-
+    /// phase budget elapsed). Both forms share the load-bearing
+    /// `"Client.Timeout exceeded"` prefix; both classify transient.
+    /// Distinct layer from the four prior timeout markers already
+    /// pinned: `"context deadline exceeded"` (Go-context-layer,
+    /// pinned by
+    /// [`test_transient_classifier_matches_context_deadline_exceeded`]),
+    /// `"i/o timeout"` / `"TLS handshake timeout"` / `"timeout"`
+    /// (Go-net socket-layer / TLS-handshake / generic, pinned by
+    /// [`test_transient_classifier_matches_timeouts`]), and
+    /// `"timed out"` (kernel-`syscall.ETIMEDOUT` connect-side, pinned
+    /// by [`test_transient_classifier_matches_timed_out`]). The
+    /// `Client.Timeout` budget is the `http.Client` struct field's
+    /// named deadline — distinct from `context.WithTimeout` (context-
+    /// layer cancellation propagating through `ctx.Done()`) and from
+    /// the underlying socket I/O budget (`net.Error.Timeout()` at
+    /// the `(*conn).Read` boundary).
+    ///
+    /// Fail-before: the pre-fix marker set carried context-layer,
+    /// socket-layer, TLS-handshake-layer, and kernel-TCP-layer
+    /// timeout markers but no marker for the Go-net/http Client-
+    /// layer budget. The case-sensitive `.contains()` check meant
+    /// the existing `"timeout"` substring marker did NOT catch
+    /// `"Client.Timeout exceeded while awaiting headers"` (the
+    /// capital-`T` `Timeout` identifier vs the lowercase `timeout`
+    /// substring) — so every realistic kubectl `--request-timeout` /
+    /// helm-cli `--timeout` / skopeo `--command-timeout` / regctl
+    /// `--request-timeout` budget exhaustion against a slow kube-
+    /// apiserver / slow GHCR edge / slow attic-server golang surface
+    /// silently short-circuited to terminal. The typed retry loop
+    /// refused to back off, burning the single attempt against a
+    /// transient slow-HEADERS event that would have reconverged
+    /// within the existing retry-policy budget. Pass-after: every
+    /// realistic Go-net/http dialect classifies transient and the
+    /// shared `retry_command` / `run_with_policy` driver backs off
+    /// and retries on a fresh request against a non-congested
+    /// upstream.
+    #[test]
+    fn test_transient_classifier_matches_client_timeout_exceeded() {
+        // Bare `Client.Timeout exceeded while awaiting headers`
+        // phrase — emitters that forward ONLY the net/http
+        // client-error diagnostic classify transient.
+        assert!(is_transient_network_stderr(
+            "Client.Timeout exceeded while awaiting headers"
+        ));
+        // Bare `Client.Timeout exceeded while reading body` sibling
+        // — body-read-phase budget elapsed, same `Client.Timeout
+        // exceeded` prefix shared with the headers variant.
+        assert!(is_transient_network_stderr(
+            "Client.Timeout exceeded while reading body"
+        ));
+        // Go net/http full error chain — `(*Client).do` wraps the
+        // Client.Timeout-elapsed verdict through the
+        // `net/http: request canceled (…)` formatter against an
+        // outer `Get "<url>":` prefix.
+        assert!(is_transient_network_stderr(
+            "Get \"https://10.0.0.1:6443/api/v1/namespaces/forge/pods\": net/http: request canceled (Client.Timeout exceeded while awaiting headers)"
+        ));
+        // kubectl `--request-timeout` exhaustion against slow kube-
+        // apiserver during a control-plane election (the elected
+        // apiserver is rebuilding watch-cache, per-request HEADERS
+        // latency spikes past kubectl's budget).
+        assert!(is_transient_network_stderr(
+            "error: Get \"https://kube-apiserver/api/v1/pods\": net/http: request canceled (Client.Timeout exceeded while awaiting headers)"
+        ));
+        // skopeo concurrent blob-upload / manifest-fetch — GHCR's
+        // edge tier delays HEADERS on a manifest GET during a
+        // backend rebalance window past skopeo's `--command-timeout`.
+        assert!(is_transient_network_stderr(
+            "Get \"https://ghcr.io/v2/pleme-io/forge/manifests/sha256:abcd\": net/http: request canceled (Client.Timeout exceeded while awaiting headers)"
+        ));
+        // regctl manifest-fetch surface — same GHCR-slow-HEADERS
+        // shape on the read path against regctl's per-request
+        // budget.
+        assert!(is_transient_network_stderr(
+            "regctl: failed to fetch manifest: net/http: request canceled (Client.Timeout exceeded while awaiting headers)"
+        ));
+        // helm-cli release-status surface — `helm list` against
+        // kube-apiserver where the release-history compaction
+        // blocks the discovery shell past helm-cli's `--timeout`.
+        assert!(is_transient_network_stderr(
+            "Error: query: failed to query with labels: Get \"https://kube-apiserver/api/v1/namespaces/forge/secrets\": net/http: request canceled (Client.Timeout exceeded while awaiting headers)"
+        ));
+        // gRPC-Go status wrapper — controller-runtime watch clients
+        // propagate the Client.Timeout-elapsed verdict through the
+        // gRPC status formatter as `code = DeadlineExceeded`.
+        assert!(is_transient_network_stderr(
+            "rpc error: code = DeadlineExceeded desc = Client.Timeout exceeded while awaiting headers"
+        ));
+        // attic-client golang surface — when forge invokes attic
+        // through its golang CLI wrapper rather than the Rust
+        // client, the per-request budget exhaustion forwards
+        // through the typed-error chain.
+        assert!(is_transient_network_stderr(
+            "Pushing store path /nix/store/abcd-foo: net/http: request canceled (Client.Timeout exceeded while awaiting headers)"
+        ));
+        // Body-read variant in production context — attic-fetch
+        // where the server began streaming response bytes then
+        // stalled past the per-request budget.
+        assert!(is_transient_network_stderr(
+            "Get \"https://attic.forge.example.com/_api/v1/cache/forge/abcd\": net/http: request canceled (Client.Timeout exceeded while reading body)"
+        ));
+    }
+
+    /// The bare phrase `"Timeout exceeded"` (without the leading
+    /// `"Client.Timeout"` qualifier) is NOT a transient marker on
+    /// its own — only the qualified `"Client.Timeout exceeded"`
+    /// phrase is matched. Pinning the false-positive guard
+    /// explicitly is the load-bearing test: if a future marker is
+    /// added that swallows the bare `"Timeout exceeded"` substring,
+    /// the regression shows up here, not in production via burned
+    /// retry budget against a kube-event message describing a
+    /// permanent readiness verdict, an HPA scaling-decision log
+    /// describing a permanent deadline verdict, or an unrelated
+    /// subsystem's bare-`"Timeout exceeded"` diagnostic. Same dual
+    /// anti-pattern the bare-`"connection lost"` / bare-`"closed
+    /// network"` / bare-`"GOAWAY"` false-positive guards close for
+    /// the prior HTTP/2 / Go-net markers, here applied to the bare
+    /// `"Timeout exceeded"` phrase.
+    #[test]
+    fn test_transient_classifier_bare_timeout_exceeded_is_not_a_marker() {
+        // Bare `"Timeout exceeded"` phrase without the
+        // `"Client.Timeout"` qualifier — could appear in a kube-
+        // event message describing a permanent PodReady verdict,
+        // an HPA scaling-decision log line, or an unrelated
+        // subsystem diagnostic. Not a transient signal on its
+        // own at this oracle.
+        assert!(!is_transient_network_stderr(
+            "Event: PodReady Timeout exceeded for pod forge-runner: ImagePullBackOff"
+        ));
+        // A `"Timeout exceeded"` phrase buried inside an HPA
+        // event message that's otherwise terminal — the
+        // unqualified substring would catch this, the qualified
+        // phrase does not.
+        assert!(!is_transient_network_stderr(
+            "Event: ScalingActiveTimeout: ScaleUp Timeout exceeded: 403 Forbidden quota exceeded"
         ));
     }
 
