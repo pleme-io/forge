@@ -998,6 +998,100 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // dropping the substring-buried false positives a bare
     // `"connection lost"` substring would catch.
     "http2: client connection lost",
+    // Go-net stdlib `net.ErrClosed` — local-side connection-close
+    // race transient. The standard library declares
+    // `var ErrClosed error = errClosed` (alias for the private
+    // `errClosed = errors.New("use of closed network connection")`
+    // in `src/net/net.go`) since Go 1.16, returned by `(*conn).Read`
+    // / `(*conn).Write` / `(*TCPConn).CloseRead` / `(*Listener).
+    // Accept` after `Close` has been called on the underlying
+    // file descriptor.
+    //
+    // Distinct from the four remote-initiated Go-net connection-
+    // loss markers already carried:
+    // - `"http2: server sent GOAWAY"` — the remote peer sent
+    //   the RFC 9113 §6.8 graceful-shutdown frame BEFORE
+    //   closing;
+    // - `"http2: client connection lost"` — the Go-net/http2
+    //   client detected the underlying TCP transport is dead
+    //   without an upstream GOAWAY frame (abrupt remote loss);
+    // - `"Connection reset"` / `"connection refused"` —
+    //   kernel-level remote-side RST / refusal at TCP layer;
+    // - `"broken pipe"` / `"Broken pipe"` / `"unexpected EOF"`
+    //   — kernel-level TCP drop mid-stream initiated by the
+    //   remote (EPIPE on the WRITE side, EOF on the READ side).
+    // All five cover *remote*-initiated connection-loss shapes;
+    // `net.ErrClosed` is the LOCAL-initiated mirror: another
+    // goroutine in THIS process (the parent's `context.WithCancel`
+    // cleanup running on cancellation, a `defer transport.Close
+    // IdleConnections()` in a graceful-stop handler, an HTTP/2
+    // transport's `connsByKey` sweep evicting an idle connection,
+    // a sibling worker's `(*Listener).Close` on shared accept-
+    // loop teardown) closed the file descriptor before this
+    // goroutine's read/write reached it. The retry semantics
+    // are identical to the remote-loss class: the next attempt
+    // allocates a fresh connection.
+    //
+    // forge's pipeline trips on this shape during context-
+    // cancellation races against the same Go-net/http2-fronted
+    // CLIs the prior client-loss / GOAWAY markers cover: kubectl's
+    // `--request-timeout` budget fires, the typed retry loop
+    // dispatches a fresh attempt, but a stale watch-goroutine
+    // from the prior attempt hits `net.ErrClosed` as the parent
+    // `context.WithTimeout`'s cleanup tore down the shared
+    // transport mid-read. Same shape during concurrent blob-
+    // upload in skopeo / regctl when a per-blob goroutine's
+    // context is cancelled while the underlying HTTP/2 transport
+    // is being reset by a sibling goroutine's connection-pool
+    // sweep. Same shape during attic-client's parallel store-
+    // path push against attic-server fronted by a cluster ingress
+    // — the shared transport's idle-connection sweep closes the
+    // connection mid-flight on a stale goroutine when the ingress
+    // reconciles its HTTP/2 backend during a rolling restart.
+    // Every one is reconvergent within the existing retry-policy
+    // budget; the fix here is recognizing the local-close phrase
+    // the prior remote-initiated markers do not cover — the
+    // `errClosed` sentinel fires when local cleanup beat the
+    // in-flight read/write to the file descriptor, not when the
+    // remote sent a GOAWAY / RST / EOF, so the Go-net error
+    // chain forwards a structurally distinct phrase.
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - Go net (skopeo, regctl, attic-client through its golang
+    //   surface, kubectl, helm-cli's discovery shells):
+    //   `net.ErrClosed.Error()` formats the bare phrase
+    //   `"use of closed network connection"` verbatim, wrapped
+    //   through `Transport.RoundTrip`'s error chain — `"Get
+    //   \"https://10.0.0.1:6443/api/v1/watch/pods\": use of
+    //   closed network connection"`, `"writing blob: use of
+    //   closed network connection"` (skopeo), `"Error: query:
+    //   failed to query with labels: use of closed network
+    //   connection"` (helm-cli);
+    // - gRPC-Go (controller-runtime watch clients wrapping
+    //   kube-apiserver long-polls): forwards the phrase through
+    //   the gRPC status formatter — `"rpc error: code =
+    //   Unavailable desc = transport is closing; use of closed
+    //   network connection"`.
+    // The hyper / reqwest Rust dialect (attic-client Rust
+    // surface) does NOT use this exact phrase — hyper surfaces
+    // the local-close shape as `"connection closed before
+    // message completed"` (already carried above as the HTTP/1-
+    // framing mirror) or as Tokio's `io::ErrorKind::NotConnected`
+    // / `io::ErrorKind::BrokenPipe` (already carried as
+    // `"broken pipe"` / `"Broken pipe"` above for the kernel-
+    // EPIPE shape).
+    //
+    // One casing only — every Go emitter passes through the
+    // `errClosed` sentinel's exact lowercase formatting (the
+    // entire phrase `"use of closed network connection"` is
+    // uniformly lowercase). Requiring the leading `"use of "`
+    // qualifier keeps the signal while dropping the substring-
+    // buried false positives a bare `"closed network connection"`
+    // or `"closed network"` substring would catch (e.g. a
+    // CNI / VPN-tunnel reconciliation log line, a kube event
+    // describing a closed-network-policy reconcile, an unrelated
+    // subsystem's diagnostic).
+    "use of closed network connection",
 ];
 
 /// Named markers matched token-wise rather than as bare substrings.
@@ -3316,6 +3410,118 @@ mod tests {
         // the anyhow chain.
         assert!(is_transient_network_stderr(
             "pushing store path: http2: client connection lost"
+        ));
+    }
+
+    /// Go-net stdlib `net.ErrClosed` — local-side connection-close
+    /// race transient is retryable. Distinct from the five remote-
+    /// initiated Go-net connection-loss markers already pinned:
+    /// `"http2: server sent GOAWAY"` (server-initiated graceful
+    /// drain, pinned by
+    /// [`test_transient_classifier_matches_http2_server_sent_goaway`]),
+    /// `"http2: client connection lost"` (client-detected abrupt
+    /// remote loss, pinned by
+    /// [`test_transient_classifier_matches_http2_client_connection_lost`]),
+    /// `"connection reset"` / `"connection refused"` (kernel-RST /
+    /// refusal, pinned by
+    /// [`test_transient_classifier_matches_connection_failures`]),
+    /// and `"broken pipe"` / `"unexpected EOF"` (kernel-EPIPE /
+    /// EOF, pinned by
+    /// [`test_transient_classifier_matches_broken_pipe`] /
+    /// [`test_transient_classifier_matches_eof`]): here LOCAL code
+    /// (the parent `context.WithCancel`'s cleanup, a sibling
+    /// goroutine's `Transport.CloseIdleConnections`, a shared
+    /// HTTP/2 transport's idle-connection sweep) closed the file
+    /// descriptor before this goroutine's read/write reached it.
+    ///
+    /// Fail-before: the pre-fix marker set carried every REMOTE-
+    /// initiated Go-net connection-loss form (GOAWAY,
+    /// `errClientConnLost`, ECONNRESET, EPIPE, EOF) but no marker
+    /// for the local-close mirror (`net.ErrClosed`). So every
+    /// realistic kubectl / helm-cli / skopeo / regctl / attic-
+    /// client probe whose context-cancellation cleanup raced a
+    /// stale goroutine on the shared HTTP/2 transport silently
+    /// short-circuited to terminal — the typed retry loop refused
+    /// to back off, burning the request against a local-cleanup
+    /// race that would have reconverged on a fresh connection
+    /// within the existing retry-policy budget. Pass-after:
+    /// every realistic Go-net dialect classifies transient and
+    /// the shared `retry_command` / `run_with_policy` driver
+    /// backs off and retries on a fresh connection.
+    #[test]
+    fn test_transient_classifier_matches_use_of_closed_network_connection() {
+        // Bare `net.ErrClosed.Error()` phrase — Go's stdlib emits
+        // this verbatim across every binary.
+        assert!(is_transient_network_stderr(
+            "use of closed network connection"
+        ));
+        // kubectl long-poll watch surface — the parent
+        // `context.WithTimeout`'s cleanup tore down the shared
+        // HTTP/2 transport while a stale watch goroutine was
+        // still reading.
+        assert!(is_transient_network_stderr(
+            "Get \"https://10.0.0.1:6443/api/v1/watch/namespaces/forge/pods\": use of closed network connection"
+        ));
+        // skopeo concurrent blob-upload surface — a sibling
+        // goroutine's `Transport.CloseIdleConnections` closed
+        // the shared transport mid-write.
+        assert!(is_transient_network_stderr(
+            "writing blob: use of closed network connection"
+        ));
+        // regctl manifest-fetch surface — same shape on the read
+        // path against a GHCR connection torn down by a sibling.
+        assert!(is_transient_network_stderr(
+            "regctl: failed to fetch manifest: use of closed network connection"
+        ));
+        // helm-cli release-status surface — kube-apiserver
+        // discovery shell's HTTP/2 transport reset during
+        // context-cancellation cleanup.
+        assert!(is_transient_network_stderr(
+            "Error: query: failed to query with labels: use of closed network connection"
+        ));
+        // gRPC-Go controller-runtime watch clients — the bare
+        // phrase forwards through the gRPC status formatter.
+        assert!(is_transient_network_stderr(
+            "rpc error: code = Unavailable desc = transport is closing; use of closed network connection"
+        ));
+        // attic-client golang surface against attic-server fronted
+        // by a cluster ingress — parallel store-path push races a
+        // shared-transport reset during ingress rolling restart.
+        assert!(is_transient_network_stderr(
+            "Pushing store path /nix/store/abcd-foo: use of closed network connection"
+        ));
+    }
+
+    /// The bare phrase `"closed network connection"` (without the
+    /// leading `"use of "` qualifier) is NOT a transient marker on
+    /// its own — only the qualified `"use of closed network
+    /// connection"` phrase is matched. Pinning the false-positive
+    /// guard explicitly is the load-bearing test: if a future
+    /// marker is added that swallows the bare `"closed network"` /
+    /// `"closed network connection"` substring, the regression
+    /// shows up here, not in production via burned retry budget
+    /// against a CNI reconcile log line, a closed-network-policy
+    /// kube event, or an unrelated subsystem's `"closed network"`
+    /// diagnostic. Same dual anti-pattern the bare-`"connection
+    /// lost"` and bare-`"GOAWAY"` false-positive guards close for
+    /// the prior HTTP/2 markers, here applied to the bare
+    /// `"closed network"` phrase.
+    #[test]
+    fn test_transient_classifier_bare_closed_network_is_not_a_marker() {
+        // Bare `"closed network connection"` phrase without the
+        // `"use of "` qualifier — could appear in a CNI
+        // reconciliation log line, an ingress-controller
+        // teardown notice, or an unrelated subsystem diagnostic.
+        // Not a transient signal on its own at this oracle.
+        assert!(!is_transient_network_stderr(
+            "Event: cni reconcile: closed network connection slot for pod foo: 403 Forbidden"
+        ));
+        // A `"closed network"` substring buried inside a
+        // network-policy kube event message that's otherwise
+        // terminal — the unqualified substring would catch this,
+        // the qualified phrase does not.
+        assert!(!is_transient_network_stderr(
+            "Event: NetworkPolicy reconcile: closed network egress to ghcr.io: 401 Unauthorized"
         ));
     }
 
