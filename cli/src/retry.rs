@@ -420,6 +420,130 @@ impl RetryPolicy {
         !self.is_no_retry()
     }
 
+    /// True iff the 1-indexed `attempt` is the LAST attempt allowed under
+    /// this policy's budget — i.e., `attempt >= self.max_attempts.max(1)`
+    /// under the same clamp-to-≥1 discipline the retry-loop body at
+    /// [`run_with_policy`] applies. Named typed-method peer of the inline
+    /// `attempt >= max` predicate the retry loop short-circuits on at
+    /// [`run_with_policy`] (`if !is_transient(&e) || attempt >= max`) and
+    /// of the structural complement `attempt < max_attempts` the
+    /// warn-only-while-budget-remains dispatch at [`log_retry_attempt`]
+    /// suppresses its warn on.
+    ///
+    /// # The per-attempt retry-budget axis
+    ///
+    /// Where [`is_no_retry`](Self::is_no_retry) names the *policy-level*
+    /// retry-budget partition ("does this policy ever burn retry
+    /// budget?") and [`will_retry`](Self::will_retry) names the
+    /// *policy-level* complement ("will this policy ever invoke `op`
+    /// more than once?"), `is_final_attempt` names the *per-attempt*
+    /// reading at the same retry-budget axis ("is THIS specific attempt
+    /// the last one under the policy's budget — and so the one the
+    /// retry loop must short-circuit on, the one the warn-while-budget-
+    /// remains dispatch must suppress its warn on, the one a future
+    /// loud-fail telemetry surface must escalate its diagnostic class
+    /// on?"). The two policy-level predicates are special cases of this
+    /// per-attempt predicate at `attempt = 1`:
+    /// `policy.is_no_retry() == policy.is_final_attempt(1)` and
+    /// `policy.will_retry() == !policy.is_final_attempt(1)` — pinned by
+    /// [`tests::test_retry_policy_is_no_retry_equals_is_final_attempt_at_one`]
+    /// and
+    /// [`tests::test_retry_policy_will_retry_complements_is_final_attempt_at_one`].
+    ///
+    /// # Why a named typed-method predicate
+    ///
+    /// The "is this attempt the last one under the budget?" reading is
+    /// the load-bearing structural reading at the typed-primitive
+    /// surface: a future per-attempt telemetry consumer that buckets
+    /// final-attempt failures (a candidate for a loud-fail diagnostic
+    /// class distinct from the budget-remaining-warn class
+    /// [`log_retry_attempt`] already emits), a future structured-
+    /// attestation surface distinguishing "final-attempt-exhausted"
+    /// from "interim-attempt-failed" provenance classes against the
+    /// SLSA chain, a future pre-attempt fail-fast escalation that wants
+    /// to surface the final-attempt-imminent verdict before the next
+    /// `op` invocation, a future per-attempt error-message enrichment
+    /// that wants to inline the budget-exhausted verdict in the final
+    /// attempt's error wrapper — all read the partition through one
+    /// named typed method, where today they would each re-derive the
+    /// `attempt >= self.max_attempts.max(1)` cascade against the raw
+    /// fields. The named typed-method peer hoists that reading to the
+    /// typed-primitive surface, matching the named-predicate idiom the
+    /// peer-pairs at the typed-failure surfaces established at the
+    /// retry boundary (the [`CapturedFailure::is_transient`] /
+    /// [`CapturedFailure::is_terminal`] retry-dispatch pair, the
+    /// [`CommandAttemptFailure::is_spawn_failure`] /
+    /// [`CommandAttemptFailure::is_op_failure`] structural pair, the
+    /// [`is_no_retry`](Self::is_no_retry) / [`will_retry`](Self::will_retry)
+    /// policy-level retry-budget pair directly above).
+    ///
+    /// # Co-firing with the retry-loop short-circuit
+    ///
+    /// The named typed method is the structural witness for the retry-
+    /// loop's short-circuit behavior at [`run_with_policy`]: under an
+    /// always-transient classifier, the loop body short-circuits and
+    /// returns the captured error iff `policy.is_final_attempt(attempt)`
+    /// — pinned by
+    /// [`tests::test_retry_policy_is_final_attempt_co_fires_with_run_with_policy_short_circuit`].
+    /// A future regression that decoupled the predicate from the loop's
+    /// short-circuit (e.g., a refactor that promoted the retry-loop's
+    /// `max(1)` clamp to a `max(2)` floor without updating the
+    /// predicate, a refactor that broadened the predicate to fire on
+    /// `attempt > max` instead of `>=`) lights up that test.
+    ///
+    /// # Clamp-to-≥1 invariant
+    ///
+    /// The body reads `self.max_attempts.max(1)` rather than the raw
+    /// `self.max_attempts` field, matching the retry-loop body at
+    /// [`run_with_policy`] (`let max = policy.max_attempts.max(1);`)
+    /// and the same clamp discipline [`is_no_retry`](Self::is_no_retry)
+    /// applies through its `<= 1` comparator. A hand-built
+    /// `RetryPolicy { max_attempts: 0, .. }` (the degenerate field-
+    /// literal shape every factory constructor's clamping discipline
+    /// forecloses against, but which is structurally constructible)
+    /// is treated as a no-retry policy under this predicate — i.e.,
+    /// `is_final_attempt(1)` returns `true` — so a future consumer
+    /// reading the per-attempt predicate cannot silently slip into a
+    /// no-op loop against the same degenerate shape
+    /// [`is_no_retry`](Self::is_no_retry) classifies as no-retry.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`is_no_retry`](Self::is_no_retry) and
+    /// [`will_retry`](Self::will_retry) are: the predicate is a pure
+    /// function of the receiver and the attempt argument, with no
+    /// allocation and no trait dispatch beyond the const-stable
+    /// `u32::max` inherent comparison. A const-context call shape
+    /// (e.g., a `const FIRST_IS_FINAL: bool =
+    /// RetryPolicy::immediate().is_final_attempt(1);` table at a
+    /// future telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-attempt retry-
+    /// budget partition is named at one typed-primitive site instead
+    /// of retyped as the inline `attempt >= self.max_attempts.max(1)`
+    /// cascade at every consumer site that branches on the structural
+    /// state — [`run_with_policy`]'s loop body, [`log_retry_attempt`]'s
+    /// warn-while-budget-remains dispatch (the structural complement
+    /// `attempt < max_attempts`), and any future per-attempt diagnostic
+    /// /telemetry/attestation consumer at the retry boundary. THEORY.md
+    /// §V.5 total-order discipline: the predicate reads the `>=`
+    /// comparison on the derived [`u32::Ord`] instance, the same
+    /// total-order surface the [`is_no_retry`](Self::is_no_retry) /
+    /// [`will_retry`](Self::will_retry) policy-level pair reads its
+    /// `<= 1` / `> 1` comparators on, here applied to the per-attempt
+    /// axis with the clamp-to-≥1 invariant pinned at the typed-
+    /// primitive surface.
+    #[allow(dead_code)]
+    pub const fn is_final_attempt(&self, attempt: u32) -> bool {
+        let max = if self.max_attempts > 1 {
+            self.max_attempts
+        } else {
+            1
+        };
+        attempt >= max
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -2818,14 +2942,13 @@ where
     Fut: Future<Output = Result<T, E>>,
     F: Fn(&E) -> bool,
 {
-    let max = policy.max_attempts.max(1);
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
         match op(attempt).await {
             Ok(v) => return Ok(v),
             Err(e) => {
-                if !is_transient(&e) || attempt >= max {
+                if !is_transient(&e) || policy.is_final_attempt(attempt) {
                     return Err(e);
                 }
                 let delay = policy.compute_delay(attempt + 1);
@@ -5690,6 +5813,200 @@ mod tests {
                 calls.load(Ordering::SeqCst),
                 1,
                 "!will_retry policy must invoke op exactly once: {p:?}"
+            );
+        }
+    }
+
+    /// [`RetryPolicy::is_final_attempt`] reads the per-attempt retry-
+    /// budget partition across the canonical factory constructors. The
+    /// canonical [`RetryPolicy::network`] policy with `max_attempts: 5`
+    /// classifies attempts 1..=4 as non-final and 5..=u32::MAX as final;
+    /// the no-retry shapes ([`RetryPolicy::immediate`],
+    /// [`RetryPolicy::network_with_max_attempts(1)`],
+    /// [`RetryPolicy::network_or_immediate(false)`]) classify attempt 1
+    /// as final; the degenerate `max_attempts: 0` hand-built field-
+    /// literal shape inherits the same clamp-to-≥1 discipline the loop
+    /// body at [`run_with_policy`] applies, so attempt 1 is final.
+    #[test]
+    fn test_retry_policy_is_final_attempt_discriminates_canonical_factories() {
+        // network() retries — attempts 1..=4 are non-final, 5..=∞ are final.
+        let net = RetryPolicy::network();
+        for attempt in 1..=4 {
+            assert!(
+                !net.is_final_attempt(attempt),
+                "network() attempt {attempt} is not final (budget = 5)"
+            );
+        }
+        for attempt in [5u32, 6, 100, u32::MAX] {
+            assert!(
+                net.is_final_attempt(attempt),
+                "network() attempt {attempt} is final (>= budget = 5)"
+            );
+        }
+        // immediate() is no-retry — attempt 1 is final.
+        assert!(
+            RetryPolicy::immediate().is_final_attempt(1),
+            "immediate() attempt 1 is final (budget = 1)"
+        );
+        // network_with_max_attempts(1) is no-retry despite the network
+        // schedule — attempt 1 is final.
+        assert!(
+            RetryPolicy::network_with_max_attempts(1).is_final_attempt(1),
+            "network_with_max_attempts(1) attempt 1 is final"
+        );
+        // network_or_immediate(false) routes to immediate() — attempt 1 is final.
+        assert!(
+            RetryPolicy::network_or_immediate(false).is_final_attempt(1),
+            "network_or_immediate(false) attempt 1 is final"
+        );
+        // network_or_immediate(true) routes to network() — attempt 1 is
+        // NOT final under the network budget.
+        assert!(
+            !RetryPolicy::network_or_immediate(true).is_final_attempt(1),
+            "network_or_immediate(true) attempt 1 is not final (network budget = 5)"
+        );
+        // Degenerate hand-built max_attempts: 0 — clamp-to-≥1 makes
+        // attempt 1 the final attempt.
+        let degenerate = RetryPolicy {
+            max_attempts: 0,
+            initial_backoff: Duration::ZERO,
+            factor: 1,
+            max_backoff: Duration::ZERO,
+        };
+        assert!(
+            degenerate.is_final_attempt(1),
+            "max_attempts: 0 attempt 1 is final under clamp-to-≥1"
+        );
+    }
+
+    /// [`RetryPolicy::is_final_attempt`] reduces to the policy-level
+    /// [`RetryPolicy::is_no_retry`] reading at `attempt = 1` — the per-
+    /// attempt predicate's behavior at the first attempt names exactly
+    /// the same retry-budget partition as the policy-level predicate.
+    /// Structural-witness pin across the full `max_attempts` ×
+    /// `{ZERO, network}` schedule cross-product: a future regression
+    /// that desynced the per-attempt predicate at `attempt = 1` from the
+    /// policy-level predicate (e.g., a future per-attempt predicate
+    /// reading `attempt > max` instead of `>=`, a future policy-level
+    /// predicate broadening to cover an `initial_backoff: ZERO` arm the
+    /// per-attempt predicate did not) lights up this test.
+    #[test]
+    fn test_retry_policy_is_no_retry_equals_is_final_attempt_at_one() {
+        let cases = [0u32, 1, 2, 5, 100, u32::MAX];
+        for max_attempts in cases {
+            for schedule in [
+                (Duration::ZERO, 1, Duration::ZERO),
+                (Duration::from_millis(250), 2, Duration::from_secs(30)),
+            ] {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff: schedule.0,
+                    factor: schedule.1,
+                    max_backoff: schedule.2,
+                };
+                assert_eq!(
+                    p.is_no_retry(),
+                    p.is_final_attempt(1),
+                    "is_no_retry must equal is_final_attempt(1): max_attempts = {max_attempts}, schedule = {schedule:?}"
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_final_attempt`] at `attempt = 1` is the De
+    /// Morgan complement of [`RetryPolicy::will_retry`] —
+    /// `will_retry() == !is_final_attempt(1)` holds for every
+    /// [`RetryPolicy`] record. Structural-complement pin across the
+    /// full `max_attempts` × `{ZERO, network}` schedule cross-product
+    /// — the named-complement closure between the policy-level retry-
+    /// budget pair ([`is_no_retry`] / [`will_retry`]) and the per-
+    /// attempt retry-budget predicate at the first attempt, the same
+    /// way [`is_no_retry`] / [`will_retry`] themselves form a named-
+    /// complement pair at the policy level.
+    #[test]
+    fn test_retry_policy_will_retry_complements_is_final_attempt_at_one() {
+        let cases = [0u32, 1, 2, 5, 100, u32::MAX];
+        for max_attempts in cases {
+            for schedule in [
+                (Duration::ZERO, 1, Duration::ZERO),
+                (Duration::from_millis(250), 2, Duration::from_secs(30)),
+            ] {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff: schedule.0,
+                    factor: schedule.1,
+                    max_backoff: schedule.2,
+                };
+                assert_eq!(
+                    p.will_retry(),
+                    !p.is_final_attempt(1),
+                    "will_retry must complement is_final_attempt(1): max_attempts = {max_attempts}, schedule = {schedule:?}"
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_final_attempt`] is the structural witness for
+    /// the retry-loop short-circuit at [`run_with_policy`]: under an
+    /// always-transient classifier, the loop body returns the captured
+    /// error on attempt `n` iff `policy.is_final_attempt(n)` — the
+    /// last invocation of `op` is at the smallest `n` for which the
+    /// predicate fires. Load-bearing co-firing pin against any future
+    /// regression that decoupled the predicate from the loop body's
+    /// short-circuit (e.g., a refactor that promoted the retry-loop's
+    /// `max(1)` clamp to a `max(2)` floor without updating the
+    /// predicate, a refactor that broadened the predicate to fire on
+    /// `attempt > max` instead of `>=`).
+    #[tokio::test]
+    async fn test_retry_policy_is_final_attempt_co_fires_with_run_with_policy_short_circuit() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::new(2, Duration::ZERO, 1, Duration::ZERO),
+            RetryPolicy::new(3, Duration::ZERO, 1, Duration::ZERO),
+            RetryPolicy::new(5, Duration::ZERO, 1, Duration::ZERO),
+        ];
+        for p in &policies {
+            let calls = Arc::new(AtomicU32::new(0));
+            let last_seen = Arc::new(AtomicU32::new(0));
+            let calls_clone = calls.clone();
+            let last_seen_clone = last_seen.clone();
+            let result: Result<(), &'static str> = run_with_policy(
+                p,
+                |_| true,
+                |attempt| {
+                    let calls = calls_clone.clone();
+                    let last_seen = last_seen_clone.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        last_seen.store(attempt, Ordering::SeqCst);
+                        Err::<(), &'static str>("err")
+                    }
+                },
+            )
+            .await;
+            assert!(result.is_err());
+            let observed = calls.load(Ordering::SeqCst);
+            let last_attempt = last_seen.load(Ordering::SeqCst);
+            // The last attempt the loop invoked must be the smallest n
+            // for which is_final_attempt(n) is true — i.e., the loop
+            // short-circuits exactly when the predicate fires.
+            assert!(
+                p.is_final_attempt(last_attempt),
+                "{p:?}: predicate must fire on the last attempt invoked (attempt {last_attempt})"
+            );
+            if last_attempt > 1 {
+                assert!(
+                    !p.is_final_attempt(last_attempt - 1),
+                    "{p:?}: predicate must NOT fire before the last attempt (attempt {})",
+                    last_attempt - 1
+                );
+            }
+            // Invocation count equals the last attempt (the loop ran
+            // sequentially from 1 to the final attempt).
+            assert_eq!(
+                observed, last_attempt,
+                "{p:?}: invocation count must equal the final attempt index"
             );
         }
     }
