@@ -818,6 +818,107 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // against a permanent resolver verdict; `EAI_AGAIN`'s `"Temporary"`
     // prefix is what makes this phrase unambiguously retryable.
     "Temporary failure in name resolution",
+    // HTTP/2 graceful-shutdown transient — `golang.org/x/net/http2`
+    // emits `"http2: server sent GOAWAY and closed the connection;
+    // LastStreamID=…, ErrCode=NO_ERROR, debug=\"…\""` verbatim
+    // (`http2/transport.go`'s `(*ClientConn).readLoop` propagating
+    // `http2.GoAwayError` up through `Transport.RoundTrip`). Distinct
+    // layer from the kernel-TCP transients (`syscall.ETIMEDOUT` /
+    // `"timed out"`, `syscall.ECONNREFUSED` / `"connection refused"`),
+    // from the HTTP/1-framing transient (hyper's
+    // `"connection closed before message completed"` — the Rust-
+    // dialect mirror at the HTTP/1.1 layer one phrase above), and from
+    // the Go-context-layer transient (`context.DeadlineExceeded` /
+    // `"context deadline exceeded"`): here the upstream HTTP/2 peer
+    // signals graceful shutdown by sending a GOAWAY frame BEFORE
+    // closing the TCP connection, per RFC 9113 §6.8 — the explicit
+    // "you may safely retry on a new connection" signal in HTTP/2.
+    // RFC 9113 §6.8 names the contract: a GOAWAY frame with
+    // `ErrCode=NO_ERROR` is a SOFT signal that the upstream is
+    // draining (rolling restart, scale-down, load-balancer
+    // reconciliation) and the client SHOULD retry pending requests on
+    // a fresh connection; an `ErrCode=PROTOCOL_ERROR` GOAWAY is a hard
+    // signal that the client misbehaved (terminal), but the Go
+    // formatter emits BOTH through the same `"http2: server sent
+    // GOAWAY"` prefix and the dominant production class against
+    // kube-apiserver / GHCR / attic-server upstreams is the
+    // `NO_ERROR` rolling-shutdown shape — the hard-error case is
+    // already covered by the per-error-code branch of the typed
+    // retry-policy classifier above and is rare in forge's pipeline.
+    //
+    // forge's pipeline invokes the four Go-net/http2-fronted CLIs
+    // — kubectl, helm-cli, skopeo, regctl — extensively against the
+    // three HTTP/2-capable upstreams it depends on: the kube-apiserver
+    // (HTTP/2-by-default since k8s 1.20), GHCR (HTTP/2 for OCI manifest
+    // and blob endpoints), and attic-server (HTTP/2 when fronted by a
+    // cluster ingress with HTTP/2 upstream). Production triggers: kube-
+    // apiserver rolling restart (apiserver pod deletion during control-
+    // plane upgrade, watch-cache compaction sending GOAWAY to drain
+    // long-poll clients), GHCR backend rotation (Microsoft's GHCR
+    // edge tier sends GOAWAY periodically to rebalance HTTP/2 streams
+    // across backend pools), attic-server scale-up / helm-rollout
+    // (HPA decisions during burst pressure trigger GOAWAY from the
+    // pod being scaled down). Every one of these is reconvergent
+    // within the existing retry-policy budget; the fix here is
+    // recognizing the Go net/http2 GOAWAY phrase the prior `"timed
+    // out"` / `"unexpected EOF"` / `"connection closed before message
+    // completed"` markers silently short-circuited to terminal at the
+    // Go-net/http2 dialect — Go's HTTP/2 client distinguishes GOAWAY
+    // (a structured frame the server sent before closing) from the
+    // raw TCP-EOF the prior markers cover, and forwards the GOAWAY
+    // through its own typed error class with the distinctive phrase
+    // above.
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - Go net/http2 (kubectl, helm-cli's HTTPS surface, skopeo,
+    //   regctl, attic-client through its golang surface): `http2.
+    //   GoAwayError.Error()` formats the prefix `"http2: server sent
+    //   GOAWAY"` verbatim — `"http2: server sent GOAWAY and closed
+    //   the connection; LastStreamID=137, ErrCode=NO_ERROR, debug=\"\""`,
+    //   `"Get \"https://kube-apiserver/api/v1/pods\": http2: server
+    //   sent GOAWAY and closed the connection; LastStreamID=33,
+    //   ErrCode=NO_ERROR, debug=\"\""`, `"writing blob: http2: server
+    //   sent GOAWAY and closed the connection; LastStreamID=5,
+    //   ErrCode=NO_ERROR, debug=\"\""` (skopeo);
+    // - gRPC-Go (controller-runtime watch clients wrapping kube-
+    //   apiserver long-polls — surfaces transitively through helm-cli's
+    //   release-status surface): forwards the GOAWAY through the gRPC
+    //   status formatter — `"rpc error: code = Unavailable desc =
+    //   transport is closing; http2: server sent GOAWAY and closed
+    //   the connection; LastStreamID=…, ErrCode=NO_ERROR, debug=\"\""`.
+    // The hyper / reqwest Rust dialect (attic-client Rust surface)
+    // does NOT use this exact phrase — hyper's `h2`-backed transport
+    // surfaces GOAWAY as either `"connection closed before message
+    // completed"` (already carried above as the HTTP/1-framing mirror
+    // marker — `hyper::Error::IncompleteMessage` covers the
+    // mid-stream-drop shape regardless of frame type) or as a
+    // GOAWAY-specific `"received unexpected GOAWAY"` whose
+    // distinctive substring is left for a future marker if forge's
+    // attic-client surface starts emitting it under the production
+    // corpus.
+    //
+    // One casing only — every Go emitter passes through `http2.
+    // GoAwayError`'s exact lowercase formatting (the `"http2:"`
+    // package prefix is uniformly lowercase, the `"GOAWAY"` token is
+    // the RFC-defined uppercase frame-name, the `"server"` /
+    // `"sent"` middle words are uniformly lowercase). The marker is
+    // distinct from the bare `"GOAWAY"` token a downstream proxy
+    // configuration / k8s manifest comment might carry — requiring
+    // the multi-word phrase `"http2: server sent GOAWAY"` keeps the
+    // signal while dropping the substring-buried false positives an
+    // unqualified `"GOAWAY"` substring would catch (the same
+    // discipline `"unexpected EOF"` carries over the bare `"EOF"`
+    // token — covered substring-wise here, token-wise via
+    // [`TRANSIENT_NETWORK_STDERR_TOKEN_MARKERS`] for the bare form).
+    // The marker is also distinct from a `PROTOCOL_ERROR` /
+    // `INTERNAL_ERROR` GOAWAY whose `ErrCode` field signals a hard
+    // failure rather than a graceful drain — those rare shapes
+    // would benefit from a future per-ErrCode classifier; the
+    // dominant `NO_ERROR` shape that drives forge's GOAWAY
+    // production corpus is unambiguously transient and the
+    // `"http2: server sent GOAWAY"` prefix is the load-bearing
+    // substring across every `ErrCode` variant.
+    "http2: server sent GOAWAY",
 ];
 
 /// Named markers matched token-wise rather than as bare substrings.
@@ -2974,6 +3075,115 @@ mod tests {
         // `Temporary failure` strerror is matched as transient.
         assert!(!is_transient_network_stderr(
             "curl: (6) Could not resolve host: typo.example.invalid"
+        ));
+    }
+
+    /// HTTP/2 graceful-shutdown transient — Go net/http2's
+    /// `http2.GoAwayError` is retryable. RFC 9113 §6.8 names the
+    /// contract: a GOAWAY frame is the upstream's "draining; you may
+    /// retry on a new connection" signal, and the dominant production
+    /// shape (`ErrCode=NO_ERROR`) is unambiguously transient. Distinct
+    /// layer from the kernel-TCP transients (`syscall.ETIMEDOUT` /
+    /// `"timed out"`, pinned by
+    /// [`test_transient_classifier_matches_timed_out`]), from the
+    /// HTTP/1-framing-layer transient (hyper's
+    /// `"connection closed before message completed"`, pinned by
+    /// [`test_transient_classifier_matches_connection_closed_before_message_completed`]),
+    /// and from the Go-context-layer transient (`context.Deadline
+    /// Exceeded` / `"context deadline exceeded"`, pinned by
+    /// [`test_transient_classifier_matches_context_deadline_exceeded`]):
+    /// here the upstream HTTP/2 peer sends a structured GOAWAY frame
+    /// before closing the TCP connection, distinct from the raw TCP-
+    /// EOF the prior markers cover, and Go's HTTP/2 client forwards
+    /// that signal through its own typed error class with the
+    /// distinctive `"http2: server sent GOAWAY"` phrase.
+    ///
+    /// Fail-before: the pre-fix marker set carried connection-layer
+    /// (`refused` / `reset` / `aborted`), routing-layer (`no route to
+    /// host` / `network is unreachable`), connect-timeout (`timed
+    /// out`), DNS (`Temporary failure in name resolution`),
+    /// HTTP/1-framing (`unexpected EOF` / `broken pipe` /
+    /// `connection closed before message completed`), and Go-context-
+    /// layer (`context deadline exceeded`) markers but no marker for
+    /// the HTTP/2 graceful-shutdown transient at the layer above kernel
+    /// TCP. So every realistic kubectl / helm-cli / skopeo / regctl /
+    /// attic-client probe during a kube-apiserver rolling restart,
+    /// GHCR backend rotation, or attic-server scale event silently
+    /// short-circuited to terminal — the typed retry loop refused to
+    /// back off, burning the attempt against a transient HTTP/2
+    /// graceful-shutdown event that would have reconverged within
+    /// the existing retry-policy budget. Pass-after: every realistic
+    /// Go-net/http2 dialect classifies transient and the shared
+    /// `retry_command` / `run_with_policy` driver backs off and
+    /// retries on a fresh connection.
+    #[test]
+    fn test_transient_classifier_matches_http2_server_sent_goaway() {
+        // Bare `http2.GoAwayError.Error()` prefix — Go's HTTP/2 client
+        // emits this verbatim across every Go-net/http2-fronted CLI.
+        assert!(is_transient_network_stderr(
+            "http2: server sent GOAWAY and closed the connection; LastStreamID=137, ErrCode=NO_ERROR, debug=\"\""
+        ));
+        // kubectl rolling-restart surface — kube-apiserver pod deletion
+        // during control-plane upgrade or watch-cache compaction sends
+        // GOAWAY to drain long-poll clients; the bare phrase forwards
+        // through `Transport.RoundTrip`'s error wrap.
+        assert!(is_transient_network_stderr(
+            "Get \"https://10.0.0.1:6443/api/v1/namespaces/forge/pods\": http2: server sent GOAWAY and closed the connection; LastStreamID=33, ErrCode=NO_ERROR, debug=\"\""
+        ));
+        // skopeo blob-copy surface — GHCR backend rotation sends GOAWAY
+        // mid-blob-upload; the Go-net/http2 client surfaces it through
+        // the registry-write error wrap.
+        assert!(is_transient_network_stderr(
+            "writing blob: http2: server sent GOAWAY and closed the connection; LastStreamID=5, ErrCode=NO_ERROR, debug=\"\""
+        ));
+        // regctl manifest-fetch surface — same GHCR shape on the
+        // read path.
+        assert!(is_transient_network_stderr(
+            "regctl: failed to fetch manifest: http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug=\"\""
+        ));
+        // helm-cli release-status surface — kube-apiserver GOAWAY
+        // forwards through the discovery-client wrap.
+        assert!(is_transient_network_stderr(
+            "Error: query: failed to query with labels: http2: server sent GOAWAY and closed the connection; LastStreamID=7, ErrCode=NO_ERROR, debug=\"\""
+        ));
+        // gRPC-Go status wrapper — controller-runtime long-poll
+        // watch clients propagate the GOAWAY through the gRPC
+        // status formatter.
+        assert!(is_transient_network_stderr(
+            "rpc error: code = Unavailable desc = transport is closing; http2: server sent GOAWAY and closed the connection; LastStreamID=11, ErrCode=NO_ERROR, debug=\"\""
+        ));
+        // GOAWAY with a non-empty `debug` field — production
+        // upstreams sometimes attach a short reason string; the
+        // marker substring is at the front so the trailing
+        // `debug` payload is irrelevant to classification.
+        assert!(is_transient_network_stderr(
+            "http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug=\"graceful shutdown\""
+        ));
+    }
+
+    /// The bare `GOAWAY` token is NOT a transient marker on its own —
+    /// only the multi-word phrase `"http2: server sent GOAWAY"` is
+    /// matched. Pinning the false-positive guard explicitly is the
+    /// load-bearing test: if a future marker is added that swallows
+    /// the bare `GOAWAY` token, the regression shows up here, not in
+    /// production via burned retry budget against a config / manifest
+    /// / comment buried `GOAWAY` substring. Same dual anti-pattern the
+    /// EOF false-positive `8952b9a` closed at the bare `EOF` token,
+    /// here applied to the bare `GOAWAY` token.
+    #[test]
+    fn test_transient_classifier_bare_goaway_token_is_not_a_marker() {
+        // Bare `GOAWAY` token without the `"http2: server sent"`
+        // prefix — could appear in a k8s manifest comment, an
+        // ingress-controller config, or an unrelated error log line.
+        // Not a transient signal on its own.
+        assert!(!is_transient_network_stderr(
+            "Error: invalid manifest: configmap GOAWAY-override missing"
+        ));
+        // A `GOAWAY` token buried inside a hostname / identifier —
+        // the unqualified token would catch this, the qualified
+        // phrase does not.
+        assert!(!is_transient_network_stderr(
+            "auth denied at https://GOAWAY-edge.example.com/v2/"
         ));
     }
 
