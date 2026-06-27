@@ -919,6 +919,85 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // `"http2: server sent GOAWAY"` prefix is the load-bearing
     // substring across every `ErrCode` variant.
     "http2: server sent GOAWAY",
+    // HTTP/2 client-side connection-lost transient — the client-
+    // side mirror of the server-initiated `http2: server sent
+    // GOAWAY` drain signal directly above. `golang.org/x/net/http2`
+    // declares `errClientConnLost = errors.New("http2: client
+    // connection lost")` in `transport.go`, propagated by
+    // `(*ClientConn).RoundTrip` and `(*clientStream).awaitFlowControl`
+    // when the underlying TCP transport detects the connection is
+    // dead without the upstream having sent a structured GOAWAY
+    // frame first — typical when an upstream pod is killed (SIGKILL
+    // / OOM / node-eviction) or a cluster-network policy reconcile
+    // tears down the established HTTP/2 connection before the
+    // server's draining handler can run. Distinct from
+    // `"http2: server sent GOAWAY"` (graceful server-initiated
+    // shutdown via RFC 9113 §6.8 frame — the prior marker), from
+    // `"connection closed before message completed"` (hyper's
+    // HTTP/1-framing dialect — a different runtime), from
+    // `"unexpected EOF"` (Go-net TCP-level EOF — the layer below
+    // HTTP/2, fires when the read syscall returns 0 bytes without
+    // any HTTP/2-layer signal), and from `"broken pipe"`
+    // (`syscall.EPIPE` — kernel-level WRITE-side drop, the layer
+    // below HTTP/2 for the upload direction).
+    //
+    // forge's pipeline invokes the four Go-net/http2-fronted CLIs
+    // — kubectl, helm-cli, skopeo, regctl — extensively against the
+    // three HTTP/2-capable upstreams it depends on: kube-apiserver
+    // (HTTP/2-by-default since k8s 1.20), GHCR (HTTP/2 for OCI
+    // manifest and blob endpoints), and attic-server (HTTP/2 when
+    // fronted by a cluster ingress with HTTP/2 upstream).
+    // Production triggers: kube-apiserver pod SIGKILL during
+    // forced control-plane upgrade (the apiserver process dies
+    // before its graceful-shutdown handler can send GOAWAY),
+    // node-eviction of the GHCR / attic-server pod (kubelet sends
+    // SIGTERM but the pod's graceful-stop hook misses the in-flight
+    // HTTP/2 connection), cluster-network-policy reconcile dropping
+    // an established HTTP/2 connection (calico / cilium iptables
+    // rules updating mid-stream), or HTTP/2 keep-alive ping timeout
+    // (the client's `ClientConn.healthCheck` fires when its
+    // periodic PING frame goes unanswered past the read deadline).
+    // Every one is reconvergent within the existing retry-policy
+    // budget; the fix here is recognizing the client-side lost-
+    // connection phrase the prior `"http2: server sent GOAWAY"`
+    // marker (server-side initiated) does not cover — the GOAWAY
+    // phrase requires the upstream to have sent a structured frame,
+    // but the abrupt-pod-kill / network-policy-flap class drops
+    // the connection without any HTTP/2 frame and surfaces through
+    // Go's own typed `errClientConnLost` instead.
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - Go net/http2 (kubectl, helm-cli's HTTPS surface, skopeo,
+    //   regctl, attic-client through its golang surface):
+    //   `errClientConnLost.Error()` formats the bare phrase
+    //   `"http2: client connection lost"` verbatim, wrapped through
+    //   `Transport.RoundTrip`'s error chain — `"Get
+    //   \"https://kube-apiserver/api/v1/pods\": http2: client
+    //   connection lost"`, `"writing blob: http2: client connection
+    //   lost"` (skopeo), `"Error: query: failed to query with
+    //   labels: http2: client connection lost"` (helm-cli);
+    // - gRPC-Go (controller-runtime watch clients): forwards the
+    //   phrase through the gRPC status formatter — `"rpc error:
+    //   code = Unavailable desc = transport is closing; http2:
+    //   client connection lost"`.
+    // The hyper / reqwest Rust dialect (attic-client Rust surface)
+    // does NOT use this exact phrase — hyper's `h2`-backed transport
+    // surfaces the same shape as `"connection closed before message
+    // completed"` (already carried above as the HTTP/1-framing
+    // mirror) or as the bare-EOF token via
+    // [`TRANSIENT_NETWORK_STDERR_TOKEN_MARKERS`].
+    //
+    // One casing only — every Go emitter passes through the
+    // `errClientConnLost` sentinel's exact lowercase formatting
+    // (the `"http2:"` package prefix is uniformly lowercase, the
+    // body `"client connection lost"` is uniformly lowercase).
+    // The marker is also distinct from the bare phrase
+    // `"connection lost"` an unrelated diagnostic might carry
+    // (e.g. a VPN-client log, a kube event message) — requiring
+    // the `"http2:"` package prefix keeps the signal while
+    // dropping the substring-buried false positives a bare
+    // `"connection lost"` substring would catch.
+    "http2: client connection lost",
 ];
 
 /// Named markers matched token-wise rather than as bare substrings.
@@ -3158,6 +3237,114 @@ mod tests {
         // `debug` payload is irrelevant to classification.
         assert!(is_transient_network_stderr(
             "http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR, debug=\"graceful shutdown\""
+        ));
+    }
+
+    /// HTTP/2 client-side connection-lost transient — Go net/http2's
+    /// `errClientConnLost` is retryable. The client-side mirror of
+    /// the server-initiated GOAWAY drain signal: distinct from
+    /// `"http2: server sent GOAWAY"` (server gracefully signals
+    /// drain via RFC 9113 §6.8 frame, pinned by
+    /// [`test_transient_classifier_matches_http2_server_sent_goaway`]),
+    /// from the HTTP/1-framing transient (hyper's
+    /// `"connection closed before message completed"`, pinned by
+    /// [`test_transient_classifier_matches_connection_closed_before_message_completed`]),
+    /// and from the TCP-EOF transient (`"unexpected EOF"`, pinned
+    /// by [`test_transient_classifier_matches_eof`]): here the Go
+    /// HTTP/2 client detects the underlying connection is dead
+    /// without an upstream GOAWAY frame — typically an abrupt
+    /// upstream-pod SIGKILL, a cluster-network-policy reconcile
+    /// tearing down the established connection, or an HTTP/2
+    /// keep-alive ping-timeout firing on a silently-dropped TCP
+    /// link.
+    ///
+    /// Fail-before: the pre-fix marker set carried the server-
+    /// initiated `"http2: server sent GOAWAY"` graceful-shutdown
+    /// signal but no marker for the client-side abrupt-loss
+    /// signal — every realistic kubectl / helm-cli / skopeo /
+    /// regctl / attic-client probe against a kube-apiserver pod
+    /// killed by node-eviction / OOM / forced control-plane
+    /// upgrade, or a GHCR / attic-server pod that lost its
+    /// HTTP/2 connection to a cluster-network-policy reconcile,
+    /// silently short-circuited to terminal — the typed retry
+    /// loop refused to back off, burning the attempt against a
+    /// transient connection-loss event that would have
+    /// reconverged on a fresh connection within the existing
+    /// retry-policy budget. Pass-after: every realistic
+    /// Go-net/http2 dialect classifies transient and the shared
+    /// `retry_command` / `run_with_policy` driver backs off and
+    /// retries on a fresh connection.
+    #[test]
+    fn test_transient_classifier_matches_http2_client_connection_lost() {
+        // Bare `errClientConnLost.Error()` phrase — Go's HTTP/2
+        // client emits this verbatim when its underlying
+        // `(*ClientConn)` detects the TCP transport is dead without
+        // a GOAWAY frame.
+        assert!(is_transient_network_stderr("http2: client connection lost"));
+        // kubectl surface against a kube-apiserver pod that was
+        // SIGKILL'd mid-request (node-eviction, OOM, or forced
+        // control-plane upgrade) — the typed-error wrap forwards
+        // the bare phrase through `Transport.RoundTrip`'s chain.
+        assert!(is_transient_network_stderr(
+            "Get \"https://10.0.0.1:6443/api/v1/namespaces/forge/pods\": http2: client connection lost"
+        ));
+        // skopeo blob-copy surface — GHCR pod abrupt-loss
+        // mid-blob-upload; the Go-net/http2 client surfaces it
+        // through the registry-write error wrap.
+        assert!(is_transient_network_stderr(
+            "writing blob: http2: client connection lost"
+        ));
+        // regctl manifest-fetch surface — same GHCR shape on the
+        // read path.
+        assert!(is_transient_network_stderr(
+            "regctl: failed to fetch manifest: http2: client connection lost"
+        ));
+        // helm-cli release-status surface — kube-apiserver
+        // connection-loss forwards through the discovery-client
+        // wrap.
+        assert!(is_transient_network_stderr(
+            "Error: query: failed to query with labels: http2: client connection lost"
+        ));
+        // gRPC-Go status wrapper — controller-runtime long-poll
+        // watch clients propagate the connection-loss through the
+        // gRPC status formatter.
+        assert!(is_transient_network_stderr(
+            "rpc error: code = Unavailable desc = transport is closing; http2: client connection lost"
+        ));
+        // attic-client golang surface against attic-server fronted
+        // by a cluster ingress — the bare phrase forwards through
+        // the anyhow chain.
+        assert!(is_transient_network_stderr(
+            "pushing store path: http2: client connection lost"
+        ));
+    }
+
+    /// The bare phrase `"connection lost"` is NOT a transient marker
+    /// on its own — only the qualified `"http2: client connection
+    /// lost"` phrase is matched. Pinning the false-positive guard
+    /// explicitly is the load-bearing test: if a future marker is
+    /// added that swallows the bare `"connection lost"` phrase, the
+    /// regression shows up here, not in production via burned retry
+    /// budget against a VPN-client log line, a kube-event message,
+    /// or an unrelated subsystem's `"connection lost"` diagnostic.
+    /// Same dual anti-pattern the bare-GOAWAY false-positive guard
+    /// closes for the GOAWAY phrase, here applied to the bare
+    /// `"connection lost"` phrase.
+    #[test]
+    fn test_transient_classifier_bare_connection_lost_is_not_a_marker() {
+        // Bare `"connection lost"` phrase without the `"http2:"`
+        // package prefix — could appear in a VPN-client log line,
+        // a kube event, or an unrelated subsystem diagnostic. Not
+        // a transient signal on its own at this oracle.
+        assert!(!is_transient_network_stderr(
+            "Error: vpn tunnel connection lost: peer authentication required"
+        ));
+        // A `"connection lost"` phrase buried inside a kube event
+        // message that's otherwise terminal — the unqualified
+        // substring would catch this, the qualified phrase does
+        // not.
+        assert!(!is_transient_network_stderr(
+            "Event: BackOff: connection lost to image registry: 403 Forbidden"
         ));
     }
 
