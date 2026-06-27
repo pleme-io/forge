@@ -960,6 +960,112 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // TLS-config issue), `"The requested URL returned error: 404"`
     // (`CURLE_HTTP_RETURNED_ERROR` 22 on a permanent 4xx — terminal).
     "Empty reply from server",
+    // Git-protocol mid-stream transport drop — `git` emits the bare
+    // phrase `"the remote end hung up unexpectedly"` from
+    // `pkt-line.c::packet_read` (the side-band-demultiplexing read
+    // loop) when the remote closes the pack-protocol stream before
+    // sending the expected pack-protocol terminator. Every git
+    // transport forwards the same phrase — git-over-HTTPS through
+    // `git-remote-https` (the TCP socket closes mid-pack-write before
+    // libcurl can frame an HTTP-status error above), git-over-SSH
+    // through `git-remote-ssh` (the SSH channel closes mid-pack-write),
+    // git-over-git:// through `git-daemon` — because the upstream
+    // caller is git's own `pkt-line.c`, not the transport.
+    //
+    // Distinct layer from the partial-response markers already carried:
+    // - `"Empty reply from server"` (libcurl `CURLE_GOT_NOTHING` 52) —
+    //   fires when libcurl established the TCP+TLS connection, sent
+    //   the HTTP request, and the upstream closed WITHOUT writing any
+    //   HTTP response bytes (HTTP-layer zero-bytes shape, the marker
+    //   directly above); the git pkt-line drop fires AFTER the HTTP
+    //   response started, mid-pack-stream — the pack bytes were
+    //   arriving then the socket closed before the pack-protocol
+    //   terminator;
+    // - `"connection closed before message completed"` (hyper
+    //   `IncompleteMessage`) — partial-HTTP-response drop at the Rust
+    //   `hyper` layer; git doesn't use hyper, it uses libcurl + its
+    //   own pack-protocol layer above HTTP, so the same shape
+    //   surfaces here as the pkt-line phrase instead;
+    // - `"unexpected EOF"` (Go's `io.ErrUnexpectedEOF`) — Go-net
+    //   dialect partial-response drop; git is C, not Go;
+    // - `"broken pipe"` / `"Broken pipe"` (`syscall.EPIPE`) — kernel-
+    //   layer WRITE-side drop; the pkt-line phrase is the higher-
+    //   layer git-protocol diagnostic that fires when the READ side
+    //   of the pack-stream hangs up mid-frame.
+    // All four cover non-git-protocol shapes; `"the remote end hung
+    // up unexpectedly"` is the git-protocol-specific marker at the
+    // pack-stream-receipt layer.
+    //
+    // forge's pipeline invokes git on every release-all and deploy
+    // run — `git fetch` / `git push` / `git ls-remote` against
+    // github.com for the source-of-truth pull and the GitOps-manifest
+    // commit-push, plus the `git2-rs`-fronted operations forge runs
+    // through its `git` module. Production triggers: the github.com
+    // frontend backend pool rebalances mid-pack-write (the SYN+TLS
+    // handshake reached a backend about to drain, the backend started
+    // sending pack bytes then sent FIN before the pack-protocol
+    // terminator), a cluster-internal Gitea / forgejo upstream
+    // restarts mid-`git push` during helm rollout, the SSH connection's
+    // TCP socket closes during BGP/routing reconvergence on the
+    // GitHub edge, or a corporate proxy / firewall drops idle git-
+    // over-HTTPS connections at its connection-pool timeout mid-pack-
+    // receipt. Every one is reconvergent within the existing retry-
+    // policy budget; the fix here is recognizing git's own pack-
+    // protocol drop phrase the prior libcurl/hyper/Go-net partial-
+    // response markers do not cover — git's pkt-line.c emits this
+    // phrase at a layer ABOVE the transport, after the HTTP response
+    // or SSH channel began sending pack bytes, and the transport-
+    // layer markers above all fire on conditions distinct from the
+    // pack-stream-mid-frame drop.
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - git-over-HTTPS (`git push` / `git fetch` / `git ls-remote`
+    //   through `git-remote-https`): the bare phrase wrapped in
+    //   git's typical multi-line error chain — `"error: RPC failed;
+    //   HTTP 502 curl 22 The requested URL returned error: 502\n
+    //   fatal: the remote end hung up unexpectedly"` (the HTTP-error
+    //   variant where libcurl framed an HTTP-status error before the
+    //   pack-stream drop) and `"fatal: the remote end hung up
+    //   unexpectedly\nfatal: protocol error: bad pack header"` (the
+    //   bare TCP-drop variant where no HTTP-status error preceded);
+    // - git-over-SSH (`git push` / `git fetch` through `git-remote-
+    //   ssh`): the bare phrase wrapped through git's pkt-line.c —
+    //   `"Connection to ssh.github.com closed by remote host.\n
+    //   fatal: the remote end hung up unexpectedly"`;
+    // - git2-rs (forge's `git2`-fronted operations through the C-
+    //   binding linking against the system libcurl on Linux): the
+    //   phrase forwards through `git2::Error::Display`'s `class=Net`
+    //   decoration — `"the remote end hung up unexpectedly;
+    //   class=Net (12)"`;
+    // - git's index-pack subprocess error chain: `"fatal: the
+    //   remote end hung up unexpectedly\nfatal: index-pack failed"`
+    //   (the bare-EOF early diagnostic when present is captured
+    //   token-wise by the `"EOF"` token marker; the pkt-line phrase
+    //   covers the cases where index-pack does not emit the bare-
+    //   EOF line because the drop happened before any pack bytes
+    //   arrived to index).
+    //
+    // One casing only — git's `pkt-line.c` emits the phrase with the
+    // exact lowercase-articles casing (`"the remote end hung up
+    // unexpectedly"`) and every transport forwards through the same
+    // formatter, so no cross-dialect casing variance. Requiring the
+    // multi-word phrase keeps the signal while dropping the substring-
+    // buried false positives a bare `"hung up"` substring would catch
+    // (the verb form is too generic — a TCP-state diagnostic, an SSH
+    // disconnect message that is NOT the git-protocol drop, an
+    // unrelated subsystem's metaphor in a log line). The marker is
+    // also distinct from terminal git failures whose retry semantics
+    // are NOT safe: `"fatal: Authentication failed"` (terminal auth
+    // verdict — bad credential, not reconvergent), `"fatal: repository
+    // '…' not found"` (terminal NXDOMAIN-equivalent at the git-
+    // namespace layer), `"error: failed to push some refs"` followed
+    // by `"non-fast-forward"` (terminal merge-conflict verdict — the
+    // remote rejected the push for a reason retrying cannot resolve).
+    // The pkt-line-drop phrase is the one git-protocol diagnostic the
+    // protocol itself classifies as a transport-state signal rather
+    // than a content-or-auth verdict, so it is the load-bearing
+    // safe-retry marker at the git-protocol layer.
+    "the remote end hung up unexpectedly",
     // DNS-resolver transient — `getaddrinfo(3)` `EAI_AGAIN` (glibc -3).
     // Distinct layer from the kernel-routing transients above
     // (`syscall.ENETUNREACH` / `EHOSTUNREACH`) and from the TCP-state
@@ -3513,6 +3619,85 @@ mod tests {
         // Bare phrase with no surrounding context — every emitter
         // that emits ONLY the strerror text classifies transient.
         assert!(is_transient_network_stderr("Empty reply from server"));
+    }
+
+    /// Git-protocol mid-stream transport drop — `git`'s `pkt-line.c::
+    /// packet_read` emits the bare phrase `"the remote end hung up
+    /// unexpectedly"` when the remote closes the pack-protocol stream
+    /// before the pack-protocol terminator arrives. The git-protocol-
+    /// specific marker at the pack-stream-receipt layer; structurally
+    /// distinct from libcurl's HTTP-layer `"Empty reply from server"`
+    /// (pinned by [`test_transient_classifier_matches_empty_reply_from_server`]),
+    /// hyper's `"connection closed before message completed"` (pinned
+    /// by [`test_transient_classifier_matches_connection_closed_before_message_completed`]),
+    /// Go's `"unexpected EOF"` (pinned by
+    /// [`test_transient_classifier_matches_eof`]), and the kernel-
+    /// EPIPE `"broken pipe"` (pinned by
+    /// [`test_transient_classifier_matches_broken_pipe`]) markers
+    /// already carried.
+    ///
+    /// Fail-before: the pre-fix marker set carried HTTP-layer drops
+    /// (libcurl zero-bytes, hyper partial-response) and kernel-layer
+    /// drops (EPIPE / ECONNRESET / ECONNREFUSED) but no marker for
+    /// git's own pack-protocol drop phrase. So every `git fetch` /
+    /// `git push` / `git ls-remote` against github.com / the cluster-
+    /// internal Gitea upstream / a corporate-proxy-fronted SSH
+    /// endpoint that closed the pack-stream mid-write — without a
+    /// libcurl/hyper/Go-net error having framed the drop first —
+    /// silently short-circuited to terminal at the typed classifier.
+    /// Pass-after: every realistic git-protocol dialect classifies
+    /// transient and the shared `retry_command` / `run_with_policy`
+    /// driver backs off and retries the git operation.
+    #[test]
+    fn test_transient_classifier_matches_remote_end_hung_up_unexpectedly() {
+        // Bare git pkt-line.c phrase — emitters that forward ONLY
+        // the pkt-line.c diagnostic classify transient.
+        assert!(is_transient_network_stderr(
+            "the remote end hung up unexpectedly"
+        ));
+        // git-over-HTTPS multi-line error chain with the leading
+        // libcurl-HTTP-error line — the pkt-line.c phrase trails
+        // after the RPC-failed banner (the HTTP-error variant where
+        // libcurl framed an HTTP-status error before the pack-
+        // stream drop).
+        assert!(is_transient_network_stderr(
+            "error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502\nfatal: the remote end hung up unexpectedly"
+        ));
+        // git-over-HTTPS bare TCP-drop variant — no preceding HTTP-
+        // status error (the drop happened before any HTTP response
+        // bytes returned, so git's pack-stream reader hits the pkt-
+        // line EOF without a libcurl-status line above it).
+        assert!(is_transient_network_stderr(
+            "fatal: the remote end hung up unexpectedly\nfatal: protocol error: bad pack header"
+        ));
+        // git-over-SSH — the SSH channel closes mid-pack-write,
+        // git's pkt-line.c emits the same phrase regardless of
+        // transport.
+        assert!(is_transient_network_stderr(
+            "Connection to ssh.github.com closed by remote host.\nfatal: the remote end hung up unexpectedly"
+        ));
+        // git2-rs C-binding wrapping the pkt-line phrase through
+        // `git2::Error::Display`'s `class=Net` decoration (forge's
+        // direct `git2`-fronted operations against the system
+        // libcurl).
+        assert!(is_transient_network_stderr(
+            "the remote end hung up unexpectedly; class=Net (12)"
+        ));
+        // index-pack subprocess wrapping the pkt-line.c phrase —
+        // the bare-EOF early diagnostic when present would also
+        // classify via the `"EOF"` token marker, but the load-
+        // bearing signal here is the pkt-line.c phrase for the
+        // cases where index-pack does not emit the bare-EOF line.
+        assert!(is_transient_network_stderr(
+            "fatal: the remote end hung up unexpectedly\nfatal: index-pack failed"
+        ));
+        // Surrounding-context anyhow chain (`forge`'s typed-error
+        // surface formats `.context()`-wrapped errors as
+        // `outer: inner`) — the git substring still classifies
+        // through whatever outer wrapper layered on top.
+        assert!(is_transient_network_stderr(
+            "Pushing GitOps manifest to origin: the remote end hung up unexpectedly"
+        ));
     }
 
     /// DNS-resolver transient — `getaddrinfo(3)` `EAI_AGAIN` (glibc -3)
