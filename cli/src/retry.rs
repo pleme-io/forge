@@ -1092,6 +1092,123 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // describing a closed-network-policy reconcile, an unrelated
     // subsystem's diagnostic).
     "use of closed network connection",
+    // HTTP/2 stream-level explicit-retry signal — RFC 9113 §6.4
+    // `REFUSED_STREAM` (ErrCode 0x7). The RFC names the contract
+    // verbatim: "The REFUSED_STREAM error code can be included in
+    // a RST_STREAM frame to indicate that the stream is being
+    // closed prior to any processing having occurred. Any request
+    // that was sent on the reset stream can be safely retried."
+    // This is THE canonical safe-retry signal in HTTP/2 — the
+    // upstream is explicitly telling the client "no application
+    // processing happened, retry me on a new stream / new
+    // connection". Distinct layer from the prior HTTP/2 markers
+    // already carried:
+    // - `"http2: server sent GOAWAY"` — CONNECTION-level signal:
+    //   the upstream is draining the whole HTTP/2 connection;
+    // - `"http2: client connection lost"` — TRANSPORT-level signal:
+    //   Go-net/http2 detected the underlying TCP transport is dead
+    //   without an upstream GOAWAY frame.
+    // `REFUSED_STREAM` is the STREAM-level signal: the connection
+    // is healthy, but THIS specific stream was refused (typically
+    // because the upstream's per-connection concurrent-stream
+    // budget — `SETTINGS_MAX_CONCURRENT_STREAMS`, RFC 9113 §6.5.2
+    // — was hit, or because the upstream's worker pool was
+    // exhausted at request-receipt time, or because a backend-
+    // affinity hash routed the stream to a pod being scaled down
+    // before any handler ran). The structural retry semantics are
+    // strictly safer than the GOAWAY case: GOAWAY requires the
+    // retry to allocate a fresh CONNECTION (the old one is
+    // draining); REFUSED_STREAM only requires a fresh STREAM
+    // (the existing connection is still healthy and the client's
+    // HTTP/2 transport can immediately open a new stream against
+    // the same multiplexed socket). The RFC's "safely retried"
+    // language is the load-bearing pin: this is the one HTTP/2
+    // ErrCode the spec itself classifies as unconditionally
+    // idempotent at the protocol layer, regardless of the
+    // request's own idempotency — because no application
+    // processing happened, retrying cannot cause a duplicate
+    // side-effect.
+    //
+    // forge's pipeline invokes the four Go-net/http2-fronted CLIs
+    // — kubectl, helm-cli, skopeo, regctl — extensively against the
+    // three HTTP/2-capable upstreams it depends on: kube-apiserver
+    // (HTTP/2-by-default since k8s 1.20, with per-connection
+    // `MaxConcurrentStreams` budget kube-apiserver advertises via
+    // SETTINGS frame), GHCR (HTTP/2 for OCI manifest and blob
+    // endpoints, with edge-tier per-connection stream budgets
+    // Microsoft tunes for fair-share across tenants), and attic-
+    // server (HTTP/2 when fronted by a cluster ingress that
+    // multiplexes streams across an upstream h2 backend pool).
+    // Production triggers: kube-apiserver under burst load during
+    // mass-watch reconciliation (hundreds of controller-runtime
+    // watches reconverging after a node-add reattaches CSI / CNI),
+    // GHCR concurrent-blob-upload bursting past the per-connection
+    // stream budget during a multi-platform image push (skopeo's
+    // parallel-blob-upload writer opens N concurrent streams,
+    // GHCR's edge tier RST_STREAMs the (N+1)th with REFUSED_STREAM),
+    // attic-server ingress receiving REFUSED_STREAM from its
+    // upstream h2 backend during HPA scale-down (the pod about to
+    // be terminated refuses new streams to its draining handler
+    // pool before the SIGTERM-driven GOAWAY drain completes).
+    // Every one is reconvergent within the existing retry-policy
+    // budget — the next attempt opens a fresh stream against the
+    // healthy connection (or, if the connection is also draining,
+    // against a fresh connection via the GOAWAY path) — and the
+    // RFC explicitly guarantees the retry is safe at the protocol
+    // layer.
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - Go net/http2 (kubectl, helm-cli's HTTPS surface, skopeo,
+    //   regctl, attic-client through its golang surface):
+    //   `http2.ErrCodeRefusedStream.String()` formats as
+    //   `"REFUSED_STREAM"` verbatim, wrapped through
+    //   `http2.StreamError.Error()` as `"stream error: stream ID
+    //   %d; REFUSED_STREAM"` and forwarded through
+    //   `Transport.RoundTrip`'s error chain — `"Get
+    //   \"https://kube-apiserver/api/v1/pods\": stream error:
+    //   stream ID 137; REFUSED_STREAM"`, `"writing blob: stream
+    //   error: stream ID 5; REFUSED_STREAM"` (skopeo), `"Error:
+    //   query: failed to query with labels: stream error: stream
+    //   ID 33; REFUSED_STREAM"` (helm-cli);
+    // - gRPC-Go (controller-runtime watch clients wrapping
+    //   kube-apiserver long-polls — the dominant production
+    //   surface for stream-pool exhaustion since each watch holds
+    //   a stream for the watch's lifetime): forwards the phrase
+    //   through the gRPC status formatter — `"rpc error: code =
+    //   Unavailable desc = stream error: stream ID 25;
+    //   REFUSED_STREAM"`;
+    // - hyper / reqwest / h2 (attic-client Rust surface): h2's
+    //   `h2::Error::reason()` returns `h2::Reason::REFUSED_STREAM`,
+    //   which formats through the `Display` impl as
+    //   `"REFUSED_STREAM"` verbatim, wrapped through reqwest's
+    //   request-error chain — `"error sending request for url
+    //   (https://attic.…/_api/v1/cache/…): connection error:
+    //   REFUSED_STREAM"`.
+    //
+    // One casing only — the ErrCode name is RFC-defined uppercase
+    // (`REFUSED_STREAM` per RFC 9113 §7) and every emitter passes
+    // through the same uppercase formatting (Go's
+    // `ErrCode.String()`, h2's `Reason::Display`, gRPC-Go's status-
+    // formatter pass-through). The marker is the bare RFC token
+    // because no unrelated diagnostic in forge's stderr corpus
+    // spells `REFUSED_STREAM` — the underscore-separated
+    // all-uppercase token is uniquely an HTTP/2 frame-error name,
+    // distinct from every English-word diagnostic and from the
+    // adjacent ErrCode names whose retry semantics are NOT safe
+    // (`INTERNAL_ERROR` ErrCode 0x2 — could be an upstream bug
+    // class, not RFC-classified as safe-retry; `PROTOCOL_ERROR`
+    // ErrCode 0x1 — the client misbehaved, terminal; `CANCEL`
+    // ErrCode 0x8 — request explicitly cancelled, terminal at
+    // this surface). Deliberately matching ONLY `REFUSED_STREAM`,
+    // not the broader `"stream error"` prefix, keeps the strict
+    // RFC-9113-§6.4 contract: only the one ErrCode the spec
+    // itself names as safe-retry is classified transient. Future
+    // commits may extend per-ErrCode coverage if a less-strict
+    // signal proves load-bearing under production telemetry, but
+    // the conservative discipline here matches the GOAWAY-marker
+    // commit's deferral of `INTERNAL_ERROR` / `PROTOCOL_ERROR`
+    // GOAWAY shapes.
+    "REFUSED_STREAM",
 ];
 
 /// Named markers matched token-wise rather than as bare substrings.
@@ -3522,6 +3639,146 @@ mod tests {
         // the qualified phrase does not.
         assert!(!is_transient_network_stderr(
             "Event: NetworkPolicy reconcile: closed network egress to ghcr.io: 401 Unauthorized"
+        ));
+    }
+
+    /// HTTP/2 stream-level explicit-retry signal — RFC 9113 §6.4
+    /// `REFUSED_STREAM` (ErrCode 0x7) classifies transient. The RFC
+    /// itself names the contract: "Any request that was sent on the
+    /// reset stream can be safely retried." This is the one HTTP/2
+    /// ErrCode the spec unconditionally classifies as safe-retry at
+    /// the protocol layer, regardless of the request's own
+    /// idempotency — because no application processing happened.
+    /// Distinct from the prior HTTP/2 markers already pinned:
+    /// `"http2: server sent GOAWAY"` (CONNECTION-level drain, pinned
+    /// by [`test_transient_classifier_matches_http2_server_sent_goaway`])
+    /// and `"http2: client connection lost"` (TRANSPORT-level abrupt
+    /// loss, pinned by
+    /// [`test_transient_classifier_matches_http2_client_connection_lost`]):
+    /// here the connection is healthy but THIS specific stream was
+    /// refused (per-connection `SETTINGS_MAX_CONCURRENT_STREAMS`
+    /// budget hit, upstream worker-pool exhausted at receipt time,
+    /// backend-affinity hash routed the stream to a draining pod).
+    ///
+    /// Fail-before: the pre-fix marker set carried both
+    /// CONNECTION-level GOAWAY and TRANSPORT-level
+    /// `errClientConnLost` HTTP/2 transients but no marker for the
+    /// STREAM-level explicit-retry signal — every realistic kubectl /
+    /// helm-cli / skopeo / regctl probe whose stream was refused by
+    /// kube-apiserver / GHCR / attic-server under load silently
+    /// short-circuited to terminal, the typed retry loop refused to
+    /// back off, the request burned against the one HTTP/2 signal
+    /// the RFC itself names as safely retryable. Pass-after: every
+    /// realistic Go-net/http2 dialect classifies transient and the
+    /// shared `retry_command` / `run_with_policy` driver backs off
+    /// and opens a fresh stream against the healthy multiplexed
+    /// connection.
+    #[test]
+    fn test_transient_classifier_matches_refused_stream() {
+        // Bare `http2.ErrCodeRefusedStream.String()` token — the
+        // RFC-defined uppercase ErrCode name forwards through every
+        // emitter's status formatter verbatim.
+        assert!(is_transient_network_stderr("REFUSED_STREAM"));
+        // Go net/http2 `StreamError.Error()` formatted phrase —
+        // wraps the bare ErrCode name with the stream-error
+        // formatter prefix and stream ID.
+        assert!(is_transient_network_stderr(
+            "stream error: stream ID 137; REFUSED_STREAM"
+        ));
+        // kubectl surface against kube-apiserver under burst load
+        // — per-connection `MaxConcurrentStreams` budget hit during
+        // mass-watch reconciliation, the typed-error wrap forwards
+        // the stream-error phrase through `Transport.RoundTrip`'s
+        // chain.
+        assert!(is_transient_network_stderr(
+            "Get \"https://10.0.0.1:6443/api/v1/namespaces/forge/pods\": stream error: stream ID 137; REFUSED_STREAM"
+        ));
+        // skopeo concurrent blob-upload surface — GHCR's edge tier
+        // RST_STREAMs the (N+1)th concurrent blob upload past the
+        // per-connection stream budget; the registry-write error
+        // wrap forwards the phrase.
+        assert!(is_transient_network_stderr(
+            "writing blob: stream error: stream ID 5; REFUSED_STREAM"
+        ));
+        // regctl manifest-fetch surface — same GHCR shape on the
+        // read path against a connection whose stream budget was
+        // exhausted by a parallel push goroutine.
+        assert!(is_transient_network_stderr(
+            "regctl: failed to fetch manifest: stream error: stream ID 9; REFUSED_STREAM"
+        ));
+        // helm-cli release-status surface — kube-apiserver
+        // discovery shell's HTTP/2 stream pool exhausted during
+        // controller-runtime watch storm.
+        assert!(is_transient_network_stderr(
+            "Error: query: failed to query with labels: stream error: stream ID 33; REFUSED_STREAM"
+        ));
+        // gRPC-Go controller-runtime watch clients — the bare token
+        // forwards through the gRPC status formatter; this is the
+        // dominant production surface since each watch holds a
+        // stream for the watch's lifetime.
+        assert!(is_transient_network_stderr(
+            "rpc error: code = Unavailable desc = stream error: stream ID 25; REFUSED_STREAM"
+        ));
+        // attic-client Rust h2 surface — `h2::Reason::REFUSED_STREAM`
+        // formats through the `Display` impl wrapped through
+        // reqwest's request-error chain.
+        assert!(is_transient_network_stderr(
+            "error sending request for url (https://attic.forge.example.com/_api/v1/cache/forge): connection error: REFUSED_STREAM"
+        ));
+    }
+
+    /// Adjacent HTTP/2 ErrCode names whose retry semantics are NOT
+    /// safe at the protocol layer are NOT matched — only
+    /// `REFUSED_STREAM` (RFC 9113 §6.4: "can be safely retried")
+    /// classifies transient. Pinning the per-ErrCode discipline
+    /// explicitly is the load-bearing test: if a future marker is
+    /// added that swallows the broader `"stream error:"` prefix, a
+    /// `PROTOCOL_ERROR` (client misbehaved, terminal) or
+    /// `CANCEL` (request explicitly cancelled, terminal at this
+    /// surface) ErrCode would silently get retried, burning budget
+    /// against a permanent verdict the RFC does NOT classify as
+    /// safe-retry. The strict-RFC-§6.4-only discipline keeps the
+    /// transient classification aligned with the one ErrCode the
+    /// spec itself names as protocol-layer safe.
+    #[test]
+    fn test_transient_classifier_other_stream_errors_are_not_markers() {
+        // `PROTOCOL_ERROR` (ErrCode 0x1) — RFC 9113 §7: "The
+        // endpoint detected an unspecific protocol error." The
+        // client misbehaved; retrying cannot help.
+        assert!(!is_transient_network_stderr(
+            "stream error: stream ID 3; PROTOCOL_ERROR"
+        ));
+        // `INTERNAL_ERROR` (ErrCode 0x2) — RFC 9113 §7: "The
+        // endpoint encountered an unexpected internal error."
+        // Could be an upstream bug class; the RFC does NOT
+        // classify as safe-retry at the protocol layer. The
+        // GOAWAY-marker commit deferred this ErrCode for the same
+        // reason; the same discipline applies at the stream
+        // surface.
+        assert!(!is_transient_network_stderr(
+            "stream error: stream ID 7; INTERNAL_ERROR"
+        ));
+        // `CANCEL` (ErrCode 0x8) — RFC 9113 §7: "Used by the
+        // endpoint to indicate that the stream is no longer
+        // needed." Request was explicitly cancelled (typically by
+        // a parent `context.WithCancel`); retrying re-races the
+        // same cancellation.
+        assert!(!is_transient_network_stderr(
+            "stream error: stream ID 11; CANCEL"
+        ));
+        // `ENHANCE_YOUR_CALM` (ErrCode 0xb) — RFC 9113 §7: "The
+        // endpoint detected that its peer is exhibiting a behavior
+        // that might be generating excessive load." This is a
+        // rate-limit signal but at the HTTP/2-frame layer rather
+        // than the HTTP-429 layer; the existing rate-limit retry
+        // surface routes through the HTTP-429 status code, and
+        // retrying immediately against an ENHANCE_YOUR_CALM frame
+        // would worsen the upstream's pressure verdict. Not a
+        // transient signal at this oracle (would belong on a
+        // back-pressure-aware retry surface, not the substring
+        // classifier).
+        assert!(!is_transient_network_stderr(
+            "stream error: stream ID 17; ENHANCE_YOUR_CALM"
         ));
     }
 
