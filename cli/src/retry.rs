@@ -474,13 +474,15 @@ impl Default for RetryPolicy {
 /// digits-buried-in-a-larger-token false positives.
 ///
 /// 5xx (500/502/503/504): upstream server faults the registry/cache CDN
-/// recovers from. 429 (Too Many Requests, RFC 6585 §4): the rate-limit
-/// backoff signal GHCR / Docker Hub / attic-fronted CDNs return under
-/// load with an advisory `Retry-After` — the one retryable 4xx (back
-/// off, then retry). The terminal 4xx family (400/401/403/404 — bad
-/// request, auth, not-found) is absent by construction: retrying cannot
-/// help, so failing fast preserves the budget.
-const TRANSIENT_HTTP_STATUS_CODES: &[&str] = &["500", "502", "503", "504", "429"];
+/// recovers from. The two RFC-named safe-retry 4xx codes — 408 (Request
+/// Timeout, RFC 7231 §6.5.7: "The client MAY repeat the request without
+/// modifications at any later time") and 429 (Too Many Requests, RFC 6585
+/// §4: the rate-limit backoff signal GHCR / Docker Hub / attic-fronted
+/// CDNs return under load with an advisory `Retry-After`) — round out the
+/// retryable set. The terminal 4xx family (400/401/403/404 — bad request,
+/// auth, not-found) is absent by construction: retrying cannot help, so
+/// failing fast preserves the budget.
+const TRANSIENT_HTTP_STATUS_CODES: &[&str] = &["500", "502", "503", "504", "408", "429"];
 
 /// Named/phrase markers in captured stderr that signal a transient
 /// network/server failure worth retrying. The list is canonical across
@@ -509,6 +511,82 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // "received unexpected HTTP status: 429 Too Many Requests"). The
     // numeric "429" form is matched token-wise via the status-code set.
     "Too Many Requests",
+    // HTTP 408 Request Timeout — named form. RFC 7231 §6.5.7 names the
+    // contract verbatim: "The server would like to shut down this unused
+    // connection. […] The client MAY repeat the request without
+    // modifications at any later time." The one other RFC-explicit
+    // safe-retry 4xx code beyond 429: the spec itself classifies 408 as
+    // retryable at the protocol layer regardless of the request's own
+    // idempotency, because the server is signalling it never began
+    // processing the request body (it timed out the read before the body
+    // arrived). Structurally distinct from 429 (`Too Many Requests`,
+    // RFC 6585 §4 — rate-limit backoff signal: the server DID receive
+    // the request but is asking the client to throttle): 408 says "I
+    // never got your request, send it again"; 429 says "I got your
+    // request but I'm rate-limiting you, back off then retry". Both
+    // converge on the same retry verdict but at different ingress
+    // semantics.
+    //
+    // forge's pipeline pushes against ingress-fronted upstreams every
+    // run: GHCR (Microsoft Azure Front Door edge, `client_body_timeout`
+    // tunable), attic-server (typically behind an nginx ingress with
+    // `client_body_timeout 60s` default), git-over-HTTPS to github.com
+    // (GitHub frontend's per-request body-receipt deadline), and
+    // kube-apiserver behind a cluster ingress for the external-kubectl
+    // shape. Production triggers: the per-blob upload exceeds the
+    // ingress's `client_body_timeout` during a slow-start TCP window
+    // (skopeo / regctl uploading a large multi-platform manifest blob
+    // under burst load), the cluster ingress times out an inbound
+    // request body during HPA-driven rolling reconciliation (the new
+    // pod isn't ready to accept body bytes within the ingress's
+    // upstream-read budget), or Cloudflare/Front-Door synthesizes a 408
+    // when the upstream takes longer than the edge's request-body-read
+    // budget. Every one is reconvergent within the existing retry-
+    // policy budget; the fix here is recognizing the 408 named phrase
+    // the prior `"Too Many Requests"` / `"Bad Gateway"` / `"Service
+    // Unavailable"` / `"Gateway Timeout"` markers covered only the 5xx
+    // and 429 axes, silently short-circuiting the one other RFC-named
+    // safe-retry 4xx code at every consumer that reads the named-form
+    // dialect (reqwest's `"HTTP status client error (Request Timeout)
+    // for url"` carries no standalone `"408"` token for the numeric
+    // matcher to catch).
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - Go net/http (skopeo, regctl, kubectl, helm-cli's HTTPS surface):
+    //   `http.StatusText(408)` returns `"Request Timeout"` and the Go
+    //   client formats `"received unexpected HTTP status: 408 Request
+    //   Timeout"` (skopeo's response-error formatter, regctl's identical
+    //   formatter, kubectl's `--request-timeout`-elapsed surface against
+    //   an ingress that emitted 408 mid-upload);
+    // - curl (git-over-HTTPS, container-registry probes, healthcheck
+    //   shells): emits `"The requested URL returned error: 408 Request
+    //   Timeout"` (curl's response-status formatter through
+    //   `CURLE_HTTP_RETURNED_ERROR` when `--fail` is set) — note the
+    //   numeric "408" token is captured by the status-code list, the
+    //   named phrase is captured here for the dialects that drop the
+    //   numeric form;
+    // - reqwest / hyper (attic-client Rust surface): `reqwest::StatusCode::
+    //   canonical_reason()` for 408 returns `"Request Timeout"` and
+    //   reqwest's error formatter emits `"HTTP status client error (408
+    //   Request Timeout) for url <url>"` — both forms covered;
+    // - nginx ingress emitting 408 to the upstream client when
+    //   `client_body_timeout` elapses: the response includes the named
+    //   text `"408 Request Timeout"` in its body, surfaced through
+    //   whatever client dialect parses the response.
+    // One casing only — the named phrase follows the canonical HTTP
+    // status text (RFC 7231 §6.5.7, IANA HTTP Status Code Registry
+    // canonical: `Request Timeout` with title-case on both words).
+    // Every emitter that produces the named form uses this exact
+    // casing because they all source from the same canonical status-
+    // text table (Go's `http.StatusText`, reqwest's `canonical_reason`,
+    // libcurl's `Curl_strcase` lookup, nginx's `ngx_http_error_pages`
+    // static table). The marker is distinct from the unrelated
+    // diagnostic phrase `"request timeout"` (lowercase, hyphenated
+    // form `--request-timeout` for kubectl/helm flag references) and
+    // from the connection-level `"i/o timeout"` Go-net signal already
+    // carried above (TCP-read-budget exhaustion on an established
+    // socket, distinct from the HTTP-status-layer 408 signal here).
+    "Request Timeout",
     // Connection-level failures — both Go-stdlib lowercase and curl mixed-case.
     "Connection refused",
     "connection refused",
@@ -3967,6 +4045,76 @@ mod tests {
         // With an advisory Retry-After still classifies transient.
         assert!(is_transient_network_stderr(
             "429 Too Many Requests (retry-after: 30)"
+        ));
+    }
+
+    /// HTTP 408 (Request Timeout, RFC 7231 §6.5.7) is the second
+    /// RFC-explicit safe-retry 4xx code beyond 429: the spec names the
+    /// contract verbatim ("The client MAY repeat the request without
+    /// modifications at any later time") so the shared `retry_command`
+    /// / `run_with_policy` driver MUST classify it transient and back
+    /// off instead of failing fast. Covers the dialects forge's CLIs
+    /// emit against ingress-fronted upstreams (GHCR via Azure Front
+    /// Door's `client_body_timeout`, attic-server behind nginx
+    /// ingress, github.com's per-request body-receipt deadline,
+    /// kube-apiserver behind cluster ingress under HPA reconcile):
+    /// skopeo/regctl numeric+named (`"received unexpected HTTP
+    /// status: 408 Request Timeout"`), curl numeric+named (`"The
+    /// requested URL returned error: 408 Request Timeout"`), reqwest
+    /// named-only-within-paren and numeric+named-within-paren
+    /// (`"HTTP status client error (408 Request Timeout) for url"`),
+    /// and nginx-passthrough body emit. This is the load-bearing
+    /// pin: the pre-fix marker set carried 429 as the one retryable
+    /// 4xx but silently short-circuited 408 to terminal at every
+    /// consumer that reads the named-form dialect — reqwest's
+    /// `"HTTP status client error (Request Timeout) for url"`
+    /// carries no standalone `"408"` token for the numeric matcher
+    /// (it sits inside the paren before the named text), and the
+    /// pre-existing `"Gateway Timeout"` / `"i/o timeout"` /
+    /// `"timed out"` markers cover the 504 / kernel-TCP / connect-
+    /// side timeouts but never the HTTP-408 status-layer timeout
+    /// the ingress emits when it gives up reading the request body.
+    #[test]
+    fn test_transient_classifier_matches_408_request_timeout() {
+        // skopeo / regctl: numeric + named in one line via Go's
+        // `http.StatusText(408)` formatter.
+        assert!(is_transient_network_stderr(
+            "Error: writing blob: received unexpected HTTP status: 408 Request Timeout"
+        ));
+        // curl (git-over-HTTPS, container-registry probes): numeric +
+        // named via `CURLE_HTTP_RETURNED_ERROR` when `--fail` is set.
+        assert!(is_transient_network_stderr(
+            "curl: (22) The requested URL returned error: 408 Request Timeout"
+        ));
+        // curl numeric-only variant the matcher must catch via the
+        // token-wise status code list (no named text after the number).
+        assert!(is_transient_network_stderr(
+            "The requested URL returned error: 408"
+        ));
+        // reqwest / attic: named form within paren — the numeric "408"
+        // appears in the paren but the named phrase carries the signal.
+        assert!(is_transient_network_stderr(
+            "HTTP status client error (408 Request Timeout) for url"
+        ));
+        // reqwest variant emitting only the canonical_reason inside
+        // the paren without the numeric prefix (older reqwest formats).
+        assert!(is_transient_network_stderr(
+            "HTTP status client error (Request Timeout) for url"
+        ));
+        // Go net/http client formatted error against an ingress that
+        // returned 408 mid-upload (kubectl, helm-cli, skopeo): wraps
+        // the upstream status text through the request-error chain.
+        assert!(is_transient_network_stderr(
+            "Put \"https://ghcr.io/v2/org/repo/blobs/upload\": 408 Request Timeout"
+        ));
+        // nginx ingress body passthrough — the default `408 Request
+        // Timeout` response body when `client_body_timeout` elapses.
+        assert!(is_transient_network_stderr(
+            "<html><head><title>408 Request Timeout</title></head>"
+        ));
+        // With advisory metadata still classifies transient.
+        assert!(is_transient_network_stderr(
+            "408 Request Timeout (client_body_timeout=60s exceeded)"
         ));
     }
 
