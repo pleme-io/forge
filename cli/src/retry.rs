@@ -284,7 +284,10 @@ impl PerAttemptRegion {
     /// updated.
     #[allow(dead_code)]
     pub const fn is_terminal(&self) -> bool {
-        matches!(*self, PerAttemptRegion::Final | PerAttemptRegion::OverBudget)
+        matches!(
+            *self,
+            PerAttemptRegion::Final | PerAttemptRegion::OverBudget
+        )
     }
 
     /// True iff `self` is one of [`PerAttemptRegion::BeforeFirst`],
@@ -378,6 +381,125 @@ impl PerAttemptRegion {
     #[allow(dead_code)]
     pub const fn is_pre_terminal(&self) -> bool {
         !self.is_terminal()
+    }
+
+    /// True iff `self` is one of [`PerAttemptRegion::BeforeFirst`] or
+    /// [`PerAttemptRegion::OverBudget`] — the load-bearing OUT-OF-SCHEDULE
+    /// peer at the projected sum surface. Names the "the retry loop would
+    /// NEVER legally reach this attempt index under this policy — the
+    /// index is either strictly before the first legal call (a
+    /// pre-invocation counter reading) or strictly past the last legal
+    /// call (a bug / telemetry-replay)" reading at ONE typed method
+    /// instead of restating the two-variant `matches!` disjunction, the
+    /// two-peer strict-boundary boolean disjunction
+    /// (`p.is_before_first_attempt(a) || p.is_over_budget(a)`), or the
+    /// range-complement `!(1..=M).contains(&attempt)` at every downstream
+    /// consumer.
+    ///
+    /// # Semantic role
+    ///
+    /// The two variants this disjunction covers are the diagnostic
+    /// classes at the STRICT boundaries of the per-attempt axis: the
+    /// pre-invocation index (`attempt < 1`) and the past-budget index
+    /// (`attempt > effective_max_attempts()`). Neither can be produced by
+    /// the retry loop at [`run_with_policy`] — the loop's counter starts
+    /// at `1` and short-circuits at [`PerAttemptRegion::Final`], so the
+    /// live sequence the loop produces is
+    /// `First -> (Interim -> ...) -> Final`, wholly inside the closed
+    /// inclusive interval `[1, M]`. A downstream consumer receiving an
+    /// out-of-band `attempt` index (a persisted counter reading from a
+    /// prior policy with a different `M`, a telemetry-replay of a
+    /// serialized attempt index, a deserialization or caller-bug source)
+    /// that says "this index is a bug/replay diagnostic class distinct
+    /// from any live in-schedule attempt" — a defensive pre-invocation
+    /// guard, a structured-attestation surface recording an out-of-band
+    /// provenance datum, a telemetry emitter distinguishing bug/replay
+    /// classes from live-invocation classes against the SLSA chain —
+    /// reads `region.is_out_of_schedule()` at ONE site instead of
+    /// writing `matches!(region, BeforeFirst | OverBudget)` or the
+    /// two-peer boolean disjunction at each site.
+    ///
+    /// # Orthogonal to the terminal axis
+    ///
+    /// The sum surface now names TWO orthogonal binary axes:
+    ///
+    /// |                | in-schedule (legal live attempt)  | out-of-schedule (bug/replay)  |
+    /// | -------------- | --------------------------------- | ----------------------------- |
+    /// | pre-terminal   | `First`, `Interim`                | `BeforeFirst`                 |
+    /// | terminal       | `Final`                           | `OverBudget`                  |
+    ///
+    /// [`is_terminal`](Self::is_terminal) /
+    /// [`is_pre_terminal`](Self::is_pre_terminal) names the "does the
+    /// retry loop short-circuit after this attempt?" axis;
+    /// `is_out_of_schedule` (and its complement, the affirmative
+    /// in-schedule reading) names the "is this attempt index a live
+    /// in-schedule invocation or a bug/replay diagnostic?" axis. The
+    /// two axes cross-classify every variant, so a future consumer that
+    /// needs the FULL 2×2 grid reads both peers independently rather
+    /// than restating either axis at every emission site. Pinned by
+    /// [`tests::test_per_attempt_region_out_of_schedule_orthogonal_to_terminal`].
+    ///
+    /// # Grounding through the strict-boundary boolean peers
+    ///
+    /// `region.is_out_of_schedule()` grounds through the STRICT-boundary
+    /// disjunction on the numeric axis at every `(policy, attempt)`:
+    /// `self.per_attempt_region(attempt).is_out_of_schedule()` iff
+    /// `self.is_before_first_attempt(attempt) || self.is_over_budget(attempt)`
+    /// iff `attempt < 1 || attempt > self.effective_max_attempts()`.
+    /// Pinned by
+    /// [`tests::test_retry_policy_per_attempt_region_is_out_of_schedule_iff_strict_boundary`]
+    /// across the canonical policy grid × attempt-index grid.
+    ///
+    /// # De Morgan complement
+    ///
+    /// The complement `!self.is_out_of_schedule()` names the "the retry
+    /// loop legally invokes `op(attempt)` at this attempt index" reading
+    /// — the disjunction `First | Interim | Final` at the sum surface,
+    /// equivalent to the closed inclusive range `1 <= attempt <= M`.
+    /// Future compounding: a named `is_in_schedule(&self) -> bool` De
+    /// Morgan peer closes the 2-way in-schedule/out-of-schedule split at
+    /// the projected surface, the same FLOOR/CEILING BOOLEAN COMPLEMENT
+    /// idiom [`is_terminal`](Self::is_terminal) /
+    /// [`is_pre_terminal`](Self::is_pre_terminal) applies at the
+    /// terminal axis.
+    ///
+    /// # Idiom lineage
+    ///
+    /// Sibling of [`is_terminal`](Self::is_terminal) at the sum surface
+    /// — both are two-variant disjunctions naming a load-bearing binary
+    /// axis. Where `is_terminal` names the CEILING half-open ray at the
+    /// TERMINAL axis (`{Final, OverBudget}`, `attempt >= M`),
+    /// `is_out_of_schedule` names the DIAGONAL disjunction at the
+    /// SCHEDULE axis (`{BeforeFirst, OverBudget}`, `attempt < 1 || attempt > M`).
+    /// The `OverBudget` variant sits at the intersection of both axes'
+    /// affirmative readings — it is BOTH terminal AND out-of-schedule —
+    /// while `Final` is terminal but IN-SCHEDULE and `BeforeFirst` is
+    /// out-of-schedule but PRE-TERMINAL. The 2×2 grid pin refuses the
+    /// silent axis-collapse a downstream consumer might infer from the
+    /// shared `OverBudget` variant.
+    ///
+    /// # THEORY grounding
+    ///
+    /// THEORY.md §II Language — typed primitives own boundary
+    /// classification; the STRICT-boundary disjunction at the projected
+    /// sum surface is named at ONE typed method (`is_out_of_schedule`)
+    /// rather than restated as the two-variant `matches!` disjunction or
+    /// as the two-peer strict-boundary boolean disjunction at every
+    /// downstream consumer. THEORY.md §VI.1 one-oracle — the "attempt
+    /// index is a bug/replay diagnostic class distinct from any live
+    /// in-schedule invocation" semantic role is named at one site (this
+    /// method's body), so a downstream defensive pre-invocation guard, a
+    /// structured-attestation surface recording out-of-band provenance,
+    /// or a telemetry emitter distinguishing bug/replay from
+    /// live-invocation classes reads `region.is_out_of_schedule()` once
+    /// and is automatically extended across a future STRICT-boundary
+    /// variant insertion when this method is updated.
+    #[allow(dead_code)]
+    pub const fn is_out_of_schedule(&self) -> bool {
+        matches!(
+            *self,
+            PerAttemptRegion::BeforeFirst | PerAttemptRegion::OverBudget
+        )
     }
 }
 
@@ -9836,6 +9958,147 @@ mod tests {
                      effective_max_attempts = {m}"
                 );
             }
+        }
+    }
+
+    /// [`PerAttemptRegion::is_out_of_schedule`] fires on
+    /// [`PerAttemptRegion::BeforeFirst`] and [`PerAttemptRegion::OverBudget`]
+    /// — the two STRICT-boundary diagnostic classes — and NOT on
+    /// [`PerAttemptRegion::First`], [`PerAttemptRegion::Interim`], or
+    /// [`PerAttemptRegion::Final`] — the three legal in-schedule
+    /// invocation classes the retry loop at [`run_with_policy`] produces.
+    /// Variant-anchor pin: a future regression that broadened the body
+    /// to also fire on `Final` (silently reclassifying the final
+    /// in-schedule attempt as a bug/replay class) or narrowed it to fire
+    /// only on `OverBudget` (dropping the FLOOR-strict pre-invocation
+    /// diagnostic) lights up here.
+    #[test]
+    fn test_per_attempt_region_is_out_of_schedule_at_before_first_and_over_budget() {
+        assert!(PerAttemptRegion::BeforeFirst.is_out_of_schedule());
+        assert!(PerAttemptRegion::OverBudget.is_out_of_schedule());
+        assert!(!PerAttemptRegion::First.is_out_of_schedule());
+        assert!(!PerAttemptRegion::Interim.is_out_of_schedule());
+        assert!(!PerAttemptRegion::Final.is_out_of_schedule());
+    }
+
+    /// [`PerAttemptRegion::is_out_of_schedule`] agrees with the two-
+    /// variant `matches!(*region, BeforeFirst | OverBudget)` disjunction
+    /// at every [`PerAttemptRegion::ALL`] variant. Structural-shape pin
+    /// that refuses a body drift onto a different variant set — a
+    /// regression that promoted the body to `Final | OverBudget` (the
+    /// CEILING terminal reading), `BeforeFirst | First` (the FLOOR
+    /// closed-inclusive-below-first reading), or the whole-sum
+    /// `matches!(*self, _)` still passes the variant-anchor test only
+    /// when the drift happens to land back on the same variant set;
+    /// this pin refuses any variant-set desync across every variant
+    /// iteration.
+    #[test]
+    fn test_per_attempt_region_is_out_of_schedule_agrees_with_matches_before_first_or_over_budget()
+    {
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                region.is_out_of_schedule(),
+                matches!(
+                    region,
+                    PerAttemptRegion::BeforeFirst | PerAttemptRegion::OverBudget
+                ),
+                "is_out_of_schedule() must read the (BeforeFirst | OverBudget) disjunction at {region:?}"
+            );
+        }
+    }
+
+    /// [`RetryPolicy::per_attempt_region`] projected through
+    /// [`PerAttemptRegion::is_out_of_schedule`] reads `true` exactly when
+    /// the two STRICT-boundary boolean peers fire —
+    /// `p.is_before_first_attempt(a) || p.is_over_budget(a)` — the
+    /// disjunction of the FLOOR-STRICT and CEILING-STRICT peers on the
+    /// numeric axis. Grounding pin that bridges the sum-surface
+    /// out-of-schedule reading to the STRICT-boundary boolean peers:
+    /// `region.is_out_of_schedule()` iff the retry loop's counter
+    /// leaves the closed inclusive `[1, effective_max_attempts()]`
+    /// interval. A future regression that broke the projection's
+    /// STRICT-boundary classification OR broke `is_out_of_schedule` at
+    /// the sum surface lights up here at the first offending attempt-
+    /// index. Cross-product of the canonical-factory set × attempt-
+    /// index grid, including the degenerate `max_attempts: 0` hand-
+    /// built field-literal shape.
+    #[test]
+    fn test_retry_policy_per_attempt_region_is_out_of_schedule_iff_strict_boundary() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        let attempts = [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX];
+        for p in &policies {
+            let m = p.effective_max_attempts();
+            for attempt in attempts {
+                let out_of_schedule = p.per_attempt_region(attempt).is_out_of_schedule();
+                let strict_boundary =
+                    p.is_before_first_attempt(attempt) || p.is_over_budget(attempt);
+                assert_eq!(
+                    out_of_schedule, strict_boundary,
+                    "is_out_of_schedule() at the sum surface must match the STRICT-boundary \
+                     boolean disjunction (is_before_first_attempt || is_over_budget): \
+                     policy = {p:?}, attempt = {attempt}, effective_max_attempts = {m}"
+                );
+                assert_eq!(
+                    out_of_schedule,
+                    attempt < 1 || attempt > m,
+                    "is_out_of_schedule() must match the numeric out-of-schedule condition \
+                     (attempt < 1 || attempt > effective_max_attempts): \
+                     policy = {p:?}, attempt = {attempt}, effective_max_attempts = {m}"
+                );
+            }
+        }
+    }
+
+    /// [`PerAttemptRegion::is_out_of_schedule`] and
+    /// [`PerAttemptRegion::is_terminal`] name two ORTHOGONAL axes at the
+    /// sum surface — the 2×2 cross-classification of every variant is
+    /// pinned here. `OverBudget` sits at the intersection of the two
+    /// affirmative readings (both terminal AND out-of-schedule);
+    /// `Final` is terminal but IN-SCHEDULE; `BeforeFirst` is
+    /// out-of-schedule but PRE-TERMINAL; `First` and `Interim` are
+    /// neither. Refuses the silent axis-collapse a downstream consumer
+    /// might infer from the shared `OverBudget` variant — the two
+    /// predicates read distinct semantic axes even though they overlap
+    /// on that one variant. A future regression that collapsed either
+    /// axis onto the other (e.g., broadened `is_out_of_schedule` to
+    /// match `Final` or narrowed `is_terminal` to exclude `OverBudget`)
+    /// lights up here.
+    #[test]
+    fn test_per_attempt_region_out_of_schedule_orthogonal_to_terminal() {
+        assert!(
+            PerAttemptRegion::OverBudget.is_out_of_schedule()
+                && PerAttemptRegion::OverBudget.is_terminal(),
+            "OverBudget must be BOTH terminal AND out-of-schedule"
+        );
+        assert!(
+            !PerAttemptRegion::Final.is_out_of_schedule() && PerAttemptRegion::Final.is_terminal(),
+            "Final must be terminal but IN-SCHEDULE"
+        );
+        assert!(
+            PerAttemptRegion::BeforeFirst.is_out_of_schedule()
+                && !PerAttemptRegion::BeforeFirst.is_terminal(),
+            "BeforeFirst must be out-of-schedule but PRE-TERMINAL"
+        );
+        for region in [PerAttemptRegion::First, PerAttemptRegion::Interim] {
+            assert!(
+                !region.is_out_of_schedule() && !region.is_terminal(),
+                "{region:?} must be neither out-of-schedule nor terminal"
+            );
         }
     }
 
