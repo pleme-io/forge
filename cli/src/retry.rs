@@ -973,6 +973,149 @@ impl RetryPolicy {
         attempt <= 1
     }
 
+    /// True iff the 1-indexed `attempt` is a RETRY under this policy's
+    /// budget — i.e., `attempt > 1`, the exact predicate the
+    /// [`log_retry_attempt`] surface, a future
+    /// "retrying attempt N" warn-message prefix, or a future
+    /// per-attempt telemetry consumer that emits a "retry-vs-first-call"
+    /// class distinct from the boolean is-final/is-interim class reads
+    /// when it needs to skip the first-call happy-path arm.
+    ///
+    /// Defined as `!self.is_first_attempt(attempt)` — the named De Morgan
+    /// complement peer at the per-attempt-axis FLOOR grain, closing the
+    /// binary partition the [`is_first_attempt`](Self::is_first_attempt)
+    /// predicate exposes and mirroring the
+    /// [`is_final_attempt`](Self::is_final_attempt) /
+    /// [`is_interim_attempt`](Self::is_interim_attempt) named-complement
+    /// pair at the per-attempt-axis CEILING grain directly above. Closes
+    /// the per-attempt-axis BOOLEAN 2×2 quadrant grid at the same
+    /// (FLOOR/CEILING × ANCHOR/COMPLEMENT) surface the numeric axis's
+    /// FLOOR-EXCLUSIVE / FLOOR-INCLUSIVE / CEILING-EXCLUSIVE /
+    /// CEILING-INCLUSIVE quadrant grid closes at
+    /// [`attempts_completed_before`](Self::attempts_completed_before) /
+    /// [`attempts_used_through`](Self::attempts_used_through) /
+    /// [`attempts_remaining`](Self::attempts_remaining) /
+    /// [`attempts_remaining_including`](Self::attempts_remaining_including).
+    ///
+    /// # The per-attempt-axis BOOLEAN 2×2 quadrant closure
+    ///
+    /// The per-attempt-axis boolean surface now spans:
+    ///
+    /// |         | ANCHOR                                | COMPLEMENT (De Morgan)                 |
+    /// | ------- | ------------------------------------- | -------------------------------------- |
+    /// | FLOOR   | [`is_first_attempt`] (`a <= 1`)       | `is_retry_attempt` (`a > 1`) ← new     |
+    /// | CEILING | [`is_final_attempt`] (`a >= budget`)  | [`is_interim_attempt`] (`a < budget`)  |
+    ///
+    /// Every consumer that previously would have retyped the inline
+    /// `!policy.is_first_attempt(attempt)` or `attempt > 1` or
+    /// `attempt >= 2` cascade — a per-attempt telemetry gauge emitting
+    /// a "retry-vs-first-call" class label distinct from the
+    /// interim/final class distinction, a structured-attestation surface
+    /// recording the "ran-under-retry" provenance datum against the SLSA
+    /// chain, a warn-message enrichment at
+    /// [`log_retry_attempt`](crate::retry::log_retry_attempt) that
+    /// wants to gate its "retrying attempt N" prefix on "this is not
+    /// the first call", a pre-attempt escalation that wants to
+    /// short-circuit on the first-call happy-path arm — now reads one
+    /// named typed method.
+    ///
+    /// # Equivalent to `!self.is_first_attempt(attempt)`
+    ///
+    /// The complement law `self.is_retry_attempt(a) ==
+    /// !self.is_first_attempt(a)` holds for every [`RetryPolicy`] record
+    /// and every `attempt` — pinned by
+    /// [`tests::test_retry_policy_is_retry_attempt_complements_is_first_attempt`].
+    /// A future regression that desynced the two predicates (e.g., one
+    /// promoting its threshold off `<=` without the other, one starting
+    /// to ground through
+    /// [`effective_max_attempts`](Self::effective_max_attempts) as the
+    /// ceiling peers do while the other stayed clamp-independent) lights
+    /// up that test.
+    ///
+    /// # Clamp-independence discipline
+    ///
+    /// The body reads through [`is_first_attempt`](Self::is_first_attempt)
+    /// so the same clamp-INDEPENDENT discipline the floor peer applies
+    /// is preserved without restatement. Like the FLOOR anchor peer —
+    /// and UNLIKE the CEILING pair
+    /// [`is_final_attempt`](Self::is_final_attempt) /
+    /// [`is_interim_attempt`](Self::is_interim_attempt) which ground
+    /// through [`effective_max_attempts`](Self::effective_max_attempts)
+    /// — `is_retry_attempt` does not depend on the policy's clamped
+    /// budget: whether attempt `a` is a retry is determined entirely by
+    /// `a > 1`, independent of `max_attempts`. This pins the load-bearing
+    /// structural asymmetry that the per-attempt-axis FLOOR predicate
+    /// pair is clamp-INDEPENDENT while the CEILING predicate pair is
+    /// clamp-DEPENDENT as an explicit surface on both sides of the FLOOR
+    /// partition, matching the same clamp-INDEPENDENT / clamp-DEPENDENT
+    /// asymmetry the numeric quadrant grid pins between
+    /// [`attempts_completed_before`](Self::attempts_completed_before)
+    /// (clamp-INDEPENDENT) and
+    /// [`attempts_used_through`](Self::attempts_used_through) /
+    /// [`attempts_remaining`](Self::attempts_remaining) /
+    /// [`attempts_remaining_including`](Self::attempts_remaining_including)
+    /// (clamp-DEPENDENT).
+    ///
+    /// # Boolean-numeric correspondence at the FLOOR peer
+    ///
+    /// The boolean FLOOR-COMPLEMENT reading `is_retry_attempt(a)` is
+    /// equivalent to the numeric FLOOR-EXCLUSIVE reading
+    /// `attempts_completed_before(a) > 0`:
+    ///
+    /// ```text
+    /// self.is_retry_attempt(a) == (self.attempts_completed_before(a) > 0)
+    /// ```
+    ///
+    /// — pinned by
+    /// [`tests::test_retry_policy_is_retry_attempt_iff_attempts_completed_before_positive`].
+    /// The zero-vs-positive dichotomy at the numeric FLOOR-EXCLUSIVE
+    /// reading names exactly the "first-vs-retry" dichotomy at the
+    /// boolean FLOOR peer, mirroring the algebraic law
+    /// `is_interim_attempt(a) == (attempts_remaining(a) > 0)` that ties
+    /// the boolean CEILING-COMPLEMENT reading to the numeric
+    /// CEILING-EXCLUSIVE reading at the ceiling peer.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`is_first_attempt`](Self::is_first_attempt),
+    /// [`is_final_attempt`](Self::is_final_attempt),
+    /// [`is_interim_attempt`](Self::is_interim_attempt),
+    /// [`is_no_retry`](Self::is_no_retry), and
+    /// [`will_retry`](Self::will_retry) are: the predicate is a pure
+    /// function of the attempt argument, delegating to a const-fn peer.
+    /// A const-context call shape (e.g., a `const
+    /// FIRST_IS_NOT_RETRY: bool =
+    /// !RetryPolicy::network().is_retry_attempt(1);` table at a future
+    /// telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-attempt-axis
+    /// "is-this-a-retry" partition is named at one typed-primitive site
+    /// instead of retyped as the inline `attempt > 1` or `attempt >= 2`
+    /// or `!policy.is_first_attempt(attempt)` cascade at every consumer
+    /// — a future per-attempt telemetry surface emitting a
+    /// "retry-vs-first-call" class label, a warn-message enrichment at
+    /// [`log_retry_attempt`](crate::retry::log_retry_attempt) that
+    /// gates its "retrying attempt N" prefix on
+    /// `!is_first_attempt(attempt)`, a structured-attestation surface
+    /// recording the "ran-under-retry" provenance class as the
+    /// complement of the first-attempt reading, or a pre-attempt
+    /// happy-path guard that skips the "no retries needed" log on
+    /// `is_first_attempt(attempt) && op.is_ok()` — all read one named
+    /// typed method rather than restating the raw-counter comparison.
+    /// THEORY.md §V.4 typed primitives: the reading is a typed-primitive
+    /// surface on `RetryPolicy` itself (one named const-fn method), not
+    /// a raw-counter-comparison shape restated at every consumer.
+    ///
+    /// [`log_retry_attempt`]: crate::retry::log_retry_attempt
+    /// [`is_first_attempt`]: Self::is_first_attempt
+    /// [`is_final_attempt`]: Self::is_final_attempt
+    /// [`is_interim_attempt`]: Self::is_interim_attempt
+    #[allow(dead_code)]
+    pub const fn is_retry_attempt(&self, attempt: u32) -> bool {
+        !self.is_first_attempt(attempt)
+    }
+
     /// The number of ATTEMPTS this policy has BURNED before the given
     /// 1-indexed `attempt` — i.e., `attempt.saturating_sub(1)`, the
     /// prior-attempts count read as a `u32` at every attempt-index in
@@ -7564,6 +7707,230 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [`RetryPolicy::is_retry_attempt`] complements
+    /// [`RetryPolicy::is_first_attempt`] at every point in the
+    /// `max_attempts × {ZERO, network} × attempt` cross-product grid —
+    /// the load-bearing De Morgan complement law tying the FLOOR-anchor
+    /// peer to the FLOOR-complement peer at the per-attempt-axis boolean
+    /// surface. Mirrors the CEILING-side complement law
+    /// [`test_retry_policy_is_interim_attempt_complements_is_final_attempt`]
+    /// at the FLOOR side, closing the per-attempt-axis boolean 2×2
+    /// quadrant grid at both ends.
+    #[test]
+    fn test_retry_policy_is_retry_attempt_complements_is_first_attempt() {
+        let max_attempt_cases = [0u32, 1, 2, 5, 100, u32::MAX];
+        let attempt_cases = [0u32, 1, 2, 3, 4, 5, 6, 100, u32::MAX];
+        for max_attempts in max_attempt_cases {
+            for schedule in [
+                (Duration::ZERO, 1, Duration::ZERO),
+                (Duration::from_millis(250), 2, Duration::from_secs(30)),
+            ] {
+                let (initial_backoff, factor, max_backoff) = schedule;
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in attempt_cases {
+                    assert_eq!(
+                        p.is_retry_attempt(attempt),
+                        !p.is_first_attempt(attempt),
+                        "is_retry_attempt must complement is_first_attempt: \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {schedule:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_retry_attempt`] reads the raw `attempt > 1`
+    /// predicate — `false` at `attempt ∈ {0, 1}` (the pre-invocation
+    /// counter reading and the first `op(attempt)` call), `true` at
+    /// every `attempt >= 2` (any retry). Pinned across the full
+    /// `max_attempts × {ZERO, network}` schedule cross-product ×
+    /// attempt-count grid so a future regression that coupled the
+    /// retry-attempt reading to the clamped budget (e.g., misgrounded
+    /// the predicate through
+    /// [`RetryPolicy::effective_max_attempts`] as the ceiling peers do)
+    /// lights up this test.
+    #[test]
+    fn test_retry_policy_is_retry_attempt_reads_attempt_gt_one() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+                    assert_eq!(
+                        p.is_retry_attempt(attempt),
+                        attempt > 1,
+                        "is_retry_attempt must equal (attempt > 1): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_retry_attempt`] is clamp-independent — the
+    /// reading at any given `attempt` is identical across every
+    /// canonical factory and the degenerate hand-built
+    /// `max_attempts: 0` shape. Load-bearing peer of
+    /// [`test_retry_policy_is_first_attempt_independent_of_policy`]:
+    /// pins the structural asymmetry that BOTH sides of the
+    /// per-attempt-axis FLOOR boolean partition are clamp-INDEPENDENT
+    /// (unlike the CEILING pair, whose two sides both ground through
+    /// [`RetryPolicy::effective_max_attempts`]). A future regression
+    /// that coupled the FLOOR-COMPLEMENT peer to the budget lights up
+    /// on the disagreement between any two policies.
+    #[test]
+    fn test_retry_policy_is_retry_attempt_independent_of_policy() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+            let readings: Vec<bool> = policies
+                .iter()
+                .map(|p| p.is_retry_attempt(attempt))
+                .collect();
+            let first = readings[0];
+            for (i, r) in readings.iter().enumerate() {
+                assert_eq!(
+                    *r, first,
+                    "is_retry_attempt must be clamp-independent: attempt = {attempt}, \
+                     policies[0] reads {first}, policies[{i}] = {:?} reads {r}",
+                    policies[i]
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_retry_attempt`] fires exactly when
+    /// [`RetryPolicy::attempts_completed_before`] is positive — the
+    /// algebraic law tying the boolean FLOOR-COMPLEMENT reading to the
+    /// numeric FLOOR-EXCLUSIVE reading at the per-attempt-axis floor
+    /// peer. Cross-product of the full `max_attempts × {ZERO, network}`
+    /// schedule grid × attempt-count grid — a future regression that
+    /// desynced the boolean and numeric floor peers (e.g., off-by-one
+    /// in either, or a change in the boolean predicate's threshold
+    /// without a matching numeric change) lights up this test. Mirrors
+    /// the CEILING-side boolean-numeric correspondence law
+    /// [`test_retry_policy_attempts_remaining_positive_iff_is_interim_attempt`]
+    /// at the FLOOR side, closing the boolean-numeric correspondence at
+    /// both ends of the per-attempt-axis.
+    #[test]
+    fn test_retry_policy_is_retry_attempt_iff_attempts_completed_before_positive() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+                    assert_eq!(
+                        p.is_retry_attempt(attempt),
+                        p.attempts_completed_before(attempt) > 0,
+                        "is_retry_attempt must equal (attempts_completed_before > 0): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_retry_attempt`] discriminates the per-attempt
+    /// "first-vs-retry" partition across the canonical factory
+    /// constructors identically to `!is_first_attempt` — the clamp-
+    /// INDEPENDENT reading means every canonical factory classifies
+    /// attempts `{0, 1}` as non-retry and every attempt `>= 2` as
+    /// retry, independent of the clamped budget. The load-bearing
+    /// witness that the FLOOR-COMPLEMENT peer preserves the
+    /// clamp-independence of the FLOOR-ANCHOR peer across every factory
+    /// shape.
+    #[test]
+    fn test_retry_policy_is_retry_attempt_discriminates_canonical_factories() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+        ];
+        for p in policies {
+            assert!(
+                !p.is_retry_attempt(0),
+                "attempt 0 (pre-invocation) is not a retry: policy = {p:?}"
+            );
+            assert!(
+                !p.is_retry_attempt(1),
+                "attempt 1 (first call) is not a retry: policy = {p:?}"
+            );
+            for attempt in [2u32, 3, 4, 5, 10, 100, u32::MAX] {
+                assert!(
+                    p.is_retry_attempt(attempt),
+                    "attempt {attempt} (>= 2) is a retry: policy = {p:?}"
+                );
+            }
+        }
+        // Degenerate hand-built max_attempts: 0 shape — the FLOOR-
+        // COMPLEMENT peer is clamp-INDEPENDENT, so it agrees with every
+        // canonical factory on the retry-attempt reading regardless of
+        // the degenerate budget.
+        let degenerate = RetryPolicy {
+            max_attempts: 0,
+            initial_backoff: Duration::ZERO,
+            factor: 1,
+            max_backoff: Duration::ZERO,
+        };
+        assert!(
+            !degenerate.is_retry_attempt(0),
+            "degenerate max_attempts: 0 attempt 0 is not a retry"
+        );
+        assert!(
+            !degenerate.is_retry_attempt(1),
+            "degenerate max_attempts: 0 attempt 1 is not a retry"
+        );
+        assert!(
+            degenerate.is_retry_attempt(2),
+            "degenerate max_attempts: 0 attempt 2 is a retry \
+             (clamp-INDEPENDENT reading)"
+        );
     }
 
     /// [`RetryPolicy::compute_delay`] returns `Duration::ZERO` exactly
