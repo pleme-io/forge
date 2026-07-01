@@ -191,6 +191,101 @@ impl PerAttemptRegion {
         PerAttemptRegion::Final,
         PerAttemptRegion::OverBudget,
     ];
+
+    /// True iff `self` is one of [`PerAttemptRegion::Final`] or
+    /// [`PerAttemptRegion::OverBudget`] — the load-bearing CEILING peer at
+    /// the projected sum surface. Names the "retry loop short-circuits
+    /// after (or without invoking) this attempt" reading at ONE typed
+    /// method instead of restating the two-variant `matches!` disjunction
+    /// at every downstream consumer.
+    ///
+    /// # Semantic role
+    ///
+    /// The retry loop's structural short-circuit condition — the schedule
+    /// terminates rather than dispatching another `op(attempt + 1)` — is
+    /// `attempt >= self.effective_max_attempts()`. That condition is the
+    /// UNION of the two ladder-ceiling regions at the sum surface:
+    /// [`PerAttemptRegion::Final`] (the last legal in-schedule attempt,
+    /// `attempt == M`) AND [`PerAttemptRegion::OverBudget`] (attempts
+    /// STRICTLY past the schedule, `attempt > M`, that a caller-bug or
+    /// telemetry-replay could still surface). A downstream consumer that
+    /// says "on this attempt, DO NOT dispatch a follow-up" — a retry-loop
+    /// exit condition, a fail-terminal telemetry emitter, a
+    /// budget-exhausted diagnostic classifier — reads
+    /// `region.is_terminal()` at ONE site instead of writing
+    /// `matches!(region, Final | OverBudget)` or the equivalent
+    /// `p.is_final_attempt(attempt) || p.is_over_budget(attempt)` boolean
+    /// disjunction at the boolean-peer ladder each site.
+    ///
+    /// # Why the two-variant disjunction (not just [`Final`])
+    ///
+    /// The retry-loop short-circuit MUST cover both variants: `Final`
+    /// alone omits the caller-bug diagnostic class where a consumer
+    /// legitimately holds an attempt index past the budget (a persisted
+    /// index from a prior policy with a larger `M`, a telemetry-replay of
+    /// an over-budget value, a manual invocation with a hand-written
+    /// index) and would still want to skip dispatch. Naming the disjunction
+    /// at the sum surface refuses the silent classification drift a
+    /// downstream `matches!(region, Final)` predicate leaves open — every
+    /// terminal reading grounds through this method, and a future variant
+    /// insertion at the ceiling side (e.g., a hypothetical
+    /// `PerAttemptRegion::CancelledByCaller` inserted between `Final` and
+    /// `OverBudget`) forces the compilation error at ONE named site
+    /// rather than at every consumer's inline `matches!` disjunction.
+    ///
+    /// # De Morgan complement
+    ///
+    /// The complement `!self.is_terminal()` names the "retry loop may
+    /// dispatch a follow-up after this attempt" reading — the disjunction
+    /// `BeforeFirst | First | Interim` at the sum surface. Future
+    /// compounding: a named `is_pre_terminal(&self) -> bool` De Morgan peer
+    /// closes the 2-way split at the projected surface — the same
+    /// FLOOR/CEILING BOOLEAN COMPLEMENT idiom
+    /// [`RetryPolicy::is_retry_attempt`] applies at the FLOOR side of the
+    /// boolean-peer ladder (commit 3359c54).
+    ///
+    /// # Grounding through the boolean-peer ladder
+    ///
+    /// `region.is_terminal()` grounds through the CEILING-side
+    /// boolean-peer disjunction at every `(policy, attempt)`:
+    /// `self.per_attempt_region(attempt).is_terminal()` iff
+    /// `self.is_final_attempt(attempt) || self.is_over_budget(attempt)`
+    /// iff `attempt >= self.effective_max_attempts()`. Pinned by
+    /// [`tests::test_retry_policy_per_attempt_region_is_terminal_iff_ge_effective_max`]
+    /// across the canonical policy grid × attempt-index grid.
+    ///
+    /// # Idiom lineage
+    ///
+    /// Sibling of [`crate::probe_outcome::AdmissionTier::is_strict`]
+    /// (commit 1775181) and [`crate::version::BumpLevel::is_major_only`]
+    /// (commit 79e7dde) at their respective ladder-ceiling variant-
+    /// identity peers — here at the projected sum surface, the CEILING
+    /// reading spans TWO variants (`Final | OverBudget`) because the
+    /// projection factors the CEILING half-open ray of the per-attempt
+    /// axis into the ladder-ceiling variant (`Final`) and the
+    /// STRICTLY-past-ceiling variant (`OverBudget`) at commit b3aeb92 /
+    /// eb0d5d1 / 158c06a. The disjunction reading at this method's body
+    /// closes the CEILING half-open ray at ONE named surface at the sum
+    /// level.
+    ///
+    /// # THEORY grounding
+    ///
+    /// THEORY.md §II Language — typed primitives own boundary
+    /// classification; the CEILING half-open ray at the projected sum
+    /// surface is named at ONE typed method (`is_terminal`) rather than
+    /// restated as the two-variant `matches!` disjunction or as the
+    /// two-peer boolean-ladder disjunction at every downstream consumer.
+    /// THEORY.md §VI.1 one-oracle — the "retry loop short-circuits after
+    /// this attempt" semantic role is named at one site (this method's
+    /// body), so a downstream retry-loop exit condition, a fail-terminal
+    /// telemetry emitter, or a budget-exhausted diagnostic classifier
+    /// reads `region.is_terminal()` once and is automatically extended
+    /// across a future CEILING-side variant insertion when this method is
+    /// updated.
+    #[allow(dead_code)]
+    pub const fn is_terminal(&self) -> bool {
+        matches!(*self, PerAttemptRegion::Final | PerAttemptRegion::OverBudget)
+    }
 }
 
 impl RetryPolicy {
@@ -9388,6 +9483,130 @@ mod tests {
             PerAttemptRegion::OverBudget,
             "attempt >> M must map to OverBudget"
         );
+    }
+
+    /// [`PerAttemptRegion::is_terminal`] fires exactly at
+    /// [`PerAttemptRegion::Final`] and [`PerAttemptRegion::OverBudget`]
+    /// — the two CEILING-side variants at the projected sum surface — and
+    /// nowhere else. The load-bearing variant-anchor pin at the ladder-
+    /// ceiling reading: a regression that swept a third variant into the
+    /// terminal disjunction (e.g., silently classifying `Interim` as
+    /// terminal after a body edit) or dropped one of the two CEILING
+    /// variants (e.g., an over-narrow `matches!(*self, Final)` body)
+    /// lights up here.
+    #[test]
+    fn test_per_attempt_region_is_terminal_at_final_and_over_budget() {
+        assert!(
+            PerAttemptRegion::Final.is_terminal(),
+            "Final is the ladder-ceiling variant — retry loop short-circuits here"
+        );
+        assert!(
+            PerAttemptRegion::OverBudget.is_terminal(),
+            "OverBudget is strictly past the ceiling — retry loop cannot dispatch further"
+        );
+        assert!(
+            !PerAttemptRegion::BeforeFirst.is_terminal(),
+            "BeforeFirst is a pre-invocation index — not a terminal region"
+        );
+        assert!(
+            !PerAttemptRegion::First.is_terminal(),
+            "First is a live in-schedule attempt — not a terminal region"
+        );
+        assert!(
+            !PerAttemptRegion::Interim.is_terminal(),
+            "Interim is a mid-schedule retry — not a terminal region"
+        );
+    }
+
+    /// [`PerAttemptRegion::is_terminal`] agrees with the two-variant
+    /// `matches!(*region, Final | OverBudget)` disjunction at every
+    /// [`PerAttemptRegion::ALL`] variant — the structural pin that makes
+    /// the derived `PartialEq`/`Eq` impl on the sum surface the load-
+    /// bearing oracle for the CEILING-side ray reading. A regression that
+    /// drifted the body to a different disjunction (e.g., `Final |
+    /// Interim`, `Final` alone, or the whole-sum `matches!(*self, _)`)
+    /// still passes
+    /// [`test_per_attempt_region_is_terminal_at_final_and_over_budget`]
+    /// only when the drift happens to land back on the same variant set;
+    /// this pin refuses any variant-set desync against the canonical
+    /// `Final | OverBudget` disjunction across every variant iteration.
+    /// Iterates via [`PerAttemptRegion::ALL`] so a future variant addition
+    /// automatically extends the coverage once `ALL` is extended.
+    #[test]
+    fn test_per_attempt_region_is_terminal_agrees_with_matches_final_or_over_budget() {
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                region.is_terminal(),
+                matches!(
+                    region,
+                    PerAttemptRegion::Final | PerAttemptRegion::OverBudget
+                ),
+                "is_terminal() must read the (Final | OverBudget) disjunction at {region:?}"
+            );
+        }
+    }
+
+    /// [`RetryPolicy::per_attempt_region`] projected through
+    /// [`PerAttemptRegion::is_terminal`] reads `true` exactly when
+    /// `attempt >= self.effective_max_attempts()` — the retry loop's
+    /// structural short-circuit condition. The load-bearing grounding pin
+    /// that bridges the sum-surface CEILING peer to the numeric
+    /// per-attempt-axis reading: `region.is_terminal()` iff the retry loop
+    /// would NOT dispatch a follow-up `op(attempt + 1)` after this
+    /// attempt. A future regression that broke the projection's CEILING-
+    /// side classification (e.g., misgrounded `Final` to a strictly-
+    /// smaller attempt index) OR broke `is_terminal` at the sum surface
+    /// (e.g., dropped `OverBudget` from the disjunction) lights up here at
+    /// the first CEILING-side attempt-index. Cross-product of the
+    /// canonical-factory set × attempt-index grid.
+    ///
+    /// The equivalence also grounds through the CEILING-side boolean-peer
+    /// disjunction: `region.is_terminal()` iff
+    /// `p.is_final_attempt(attempt) || p.is_over_budget(attempt)` — the
+    /// two-peer boolean disjunction the projection factors into
+    /// [`PerAttemptRegion::Final`] and [`PerAttemptRegion::OverBudget`]
+    /// (commits eb0d5d1 / d55b12b). Pinning both equivalences at ONE
+    /// test seals the sum-surface CEILING reading against desync with
+    /// either the numeric axis or the boolean-peer ladder.
+    #[test]
+    fn test_retry_policy_per_attempt_region_is_terminal_iff_ge_effective_max() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        let attempts = [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX];
+        for p in &policies {
+            let m = p.effective_max_attempts();
+            for attempt in attempts {
+                let terminal = p.per_attempt_region(attempt).is_terminal();
+                assert_eq!(
+                    terminal,
+                    attempt >= m,
+                    "is_terminal() at the sum surface must match the retry loop's \
+                     short-circuit condition (attempt >= effective_max_attempts): \
+                     policy = {p:?}, attempt = {attempt}, effective_max_attempts = {m}"
+                );
+                assert_eq!(
+                    terminal,
+                    p.is_final_attempt(attempt) || p.is_over_budget(attempt),
+                    "is_terminal() at the sum surface must ground through the CEILING-side \
+                     boolean-peer disjunction (is_final_attempt || is_over_budget): \
+                     policy = {p:?}, attempt = {attempt}, effective_max_attempts = {m}"
+                );
+            }
+        }
     }
 
     /// [`RetryPolicy::compute_delay`] returns `Duration::ZERO` exactly
