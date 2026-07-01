@@ -1043,6 +1043,50 @@ impl PerAttemptRegion {
     }
 }
 
+/// `Display` impl routes through [`PerAttemptRegion::as_str`] so the
+/// variant→label mapping stays single-source: a future variant insertion
+/// (a `CancelledByCaller` band strictly between [`PerAttemptRegion::Final`]
+/// and [`PerAttemptRegion::OverBudget`], a `PostFinal` peer at the terminal
+/// axis) updates the [`as_str`] match body alone and every `format!` /
+/// `write!` consumer automatically inherits the new canonical label.
+///
+/// Sibling of [`crate::version::BumpLevel`]'s `Display` impl (which routes
+/// through [`crate::version::BumpLevel::as_str`]) and
+/// [`crate::probe_outcome::AdmissionTier`]'s `Display` impl (which routes
+/// through [`crate::probe_outcome::AdmissionTier::as_str`]), here applied
+/// to the per-attempt-region typed sum. Together with
+/// [`PerAttemptRegion::as_str`] this closes the `to_string()` / `format!`
+/// surface a downstream retry-loop telemetry / log-formatting consumer
+/// reads the region through — no per-call-site `match` cascade that
+/// drifts when a sixth variant is inserted and no leakage of the derived
+/// `Debug` impl's UpperCamel labels (`BeforeFirst`, `OverBudget`) through
+/// the formatter surface.
+///
+/// After this commit the trio (`BumpLevel` / `AdmissionTier` /
+/// `PerAttemptRegion`) all carry `Display`-mirrors-`as_str` at their
+/// label-axis surfaces, matching the closed lattice-op peer-set
+/// (`join`/`meet`) and bounded-lattice-anchor peer-set (`BOTTOM`/`TOP`)
+/// across the three repo-internal ordered typed sums. A downstream
+/// consumer reading `format!("{region}")` at any of the three ladders
+/// reads through one named oracle per surface with the label-axis
+/// discipline (canonical labels + snake_case + injectivity) pinned at
+/// each typed-primitive site.
+///
+/// THEORY.md §V.4 typed primitives: the per-variant string rendering is a
+/// typed-primitive surface on [`PerAttemptRegion`] itself (one `Display`
+/// impl routing through one `as_str` match body), not a per-call-site
+/// cascade restated at every `format!("{:?}", region)` site that would
+/// otherwise emit `BeforeFirst` / `OverBudget` UpperCamel labels via the
+/// derived `Debug` rendering. THEORY.md §VI.1 one-oracle discipline: the
+/// canonical label is named at one site ([`PerAttemptRegion::as_str`])
+/// and every surface — `as_str`, `Display`, future `Serialize`,
+/// future `FromStr` — reads through it.
+impl std::fmt::Display for PerAttemptRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -10960,6 +11004,49 @@ mod tests {
             n,
             "as_str must be injective across ALL — no two variants share a label",
         );
+    }
+
+    /// [`PerAttemptRegion`]'s `Display` impl renders each variant as its
+    /// canonical lowercase / snake_case string — the same label
+    /// [`PerAttemptRegion::as_str`] returns. Fixed-shape pin at the
+    /// `Display` surface: a regression that drifted the `Display` impl off
+    /// [`as_str`] (e.g., a hand-written `match self { BeforeFirst =>
+    /// write!(f, "BeforeFirst") }` cascade slipping in and re-introducing
+    /// UpperCamel labels through `to_string()`, or a `Display` impl that
+    /// forgot the underscore separator on `BeforeFirst` / `OverBudget`)
+    /// lights up here at one site, preventing the drift from leaking to
+    /// every `format!("{region}")` / `to_string()` consumer that surfaces
+    /// the region as a string. Mirrors
+    /// [`crate::probe_outcome::tests::test_admission_tier_display_canonical_strings`]
+    /// at the sibling typed sum.
+    #[test]
+    fn test_per_attempt_region_display_canonical_strings() {
+        assert_eq!(PerAttemptRegion::BeforeFirst.to_string(), "before_first");
+        assert_eq!(PerAttemptRegion::First.to_string(), "first");
+        assert_eq!(PerAttemptRegion::Interim.to_string(), "interim");
+        assert_eq!(PerAttemptRegion::Final.to_string(), "final");
+        assert_eq!(PerAttemptRegion::OverBudget.to_string(), "over_budget");
+    }
+
+    /// At every [`PerAttemptRegion`] variant, the `Display` rendering
+    /// agrees byte-for-byte with [`PerAttemptRegion::as_str`]. The
+    /// structural pin that ties the `Display` impl to the single-source
+    /// `as_str` match body, so a future variant insertion automatically
+    /// inherits both surfaces from the one site. Iterates
+    /// [`PerAttemptRegion::ALL`] so the discipline extends to any future
+    /// variant without an edit at the pin site. Mirrors the discipline
+    /// [`crate::probe_outcome::tests::test_admission_tier_display_agrees_with_as_str`]
+    /// established at the sibling typed sum: `Display` must agree with
+    /// `as_str` at every variant the `ALL` const enumerates.
+    #[test]
+    fn test_per_attempt_region_display_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                region.to_string(),
+                region.as_str(),
+                "Display and as_str must agree at {region:?}",
+            );
+        }
     }
 
     /// [`PerAttemptRegion::BOTTOM`] sits at the FLOOR-strict corner of
