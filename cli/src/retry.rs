@@ -746,6 +746,91 @@ impl PerAttemptRegion {
     /// consumer.
     #[allow(dead_code)]
     pub const TOP: Self = Self::OverBudget;
+
+    /// The lattice join over the per-attempt-axis ladder — the
+    /// [`PerAttemptRegion`] the most-advanced of `self` and `other` reads
+    /// on the derived [`Ord`] chain
+    /// (`BeforeFirst < First < Interim < Final < OverBudget`). Reads
+    /// `self.max(other)` at one named site, returning the greater of the
+    /// two variants. The named typed-method peer of the [`Ord::max`]
+    /// reduction at the [`PerAttemptRegion`] surface, the structural
+    /// mirror of [`crate::version::BumpLevel::join`] (commit ba37d27) at
+    /// the version-bump magnitude ladder and
+    /// [`crate::probe_outcome::AdmissionTier::join`] (commit ad62782) at
+    /// the admission-tier ladder, here at the per-attempt-region ladder.
+    /// Single one-line body routing through the derived [`Ord`] chain
+    /// (commit 158c06a) so a future ladder refinement extends the
+    /// most-advanced-region oracle at one site instead of retyping
+    /// `.max()` at every consumer.
+    ///
+    /// # The most-advanced-region reading
+    ///
+    /// Given two [`PerAttemptRegion`] readings (e.g., a fold across two
+    /// counters watching the same [`RetryPolicy`] — a per-op progress
+    /// counter and a per-batch progress counter), [`join`](Self::join)
+    /// names "the further-along region either counter reached." The
+    /// load-bearing distinction from a bare
+    /// [`Ord::max`] reduction is the reading, not the numeric answer:
+    /// * A consumer reading `region_a.join(region_b)` reads "the
+    ///   most-advanced region either input reached" at the call site,
+    ///   where the same consumer reading `region_a.max(region_b)` reads
+    ///   "the larger of the two variants" — the `max` form is a general
+    ///   lattice op shared with arbitrary comparable types, the `join`
+    ///   form names the most-advanced-region reading at the typed-
+    ///   primitive surface. Same one-oracle discipline the
+    ///   [`crate::version::BumpLevel::join`] lift established at the
+    ///   release-aggregation surface and
+    ///   [`crate::probe_outcome::AdmissionTier::join`] established at
+    ///   the per-axis-OR-ceiling surface, here applied to the
+    ///   most-advanced-region surface over the per-attempt-axis ladder.
+    /// * A one-oracle anchor for a future ladder refinement. The
+    ///   lattice join over a total order coincides with [`Ord::max`] by
+    ///   definition, but a future ladder extension that introduces new
+    ///   structural distinctions inside the per-attempt-axis (e.g., a
+    ///   `PerAttemptRegion::CancelledByCaller` variant inserted between
+    ///   `Final` and `OverBudget` — see the projection docstring)
+    ///   extends this method body once, instead of retyping the
+    ///   most-advanced-region oracle at every consumer's inline `.max()`
+    ///   call.
+    ///
+    /// # Algebraic invariants
+    ///
+    /// The lattice join over a total order is idempotent, commutative,
+    /// and associative, with the ladder floor
+    /// ([`PerAttemptRegion::BOTTOM`]) as the identity element and the
+    /// ladder ceiling ([`PerAttemptRegion::TOP`]) as the absorbing
+    /// element — the load-bearing structural facts pinned by:
+    /// * [`tests::test_per_attempt_region_join_is_idempotent_at_every_variant`]
+    ///   — `a.join(a) == a` at every variant.
+    /// * [`tests::test_per_attempt_region_join_is_commutative_at_every_pair`]
+    ///   — `a.join(b) == b.join(a)` at every (a, b) over the 5×5 grid.
+    /// * [`tests::test_per_attempt_region_join_is_associative_at_every_triple`]
+    ///   — `a.join(b.join(c)) == a.join(b).join(c)` at every (a, b, c)
+    ///   over the 5×5×5 grid.
+    /// * [`tests::test_per_attempt_region_join_has_bottom_as_identity`]
+    ///   — `BOTTOM.join(a) == a.join(BOTTOM) == a` at every variant.
+    /// * [`tests::test_per_attempt_region_join_has_top_as_absorbing_element`]
+    ///   — `TOP.join(a) == a.join(TOP) == TOP` at every variant.
+    /// * [`tests::test_per_attempt_region_join_bounded_below_by_both_arguments`]
+    ///   — `a.join(b) >= a && a.join(b) >= b` at every (a, b).
+    /// * [`tests::test_per_attempt_region_join_returns_one_of_the_arguments`]
+    ///   — `a.join(b) ∈ {a, b}` at every (a, b), the structural witness
+    ///   that the lattice join over a total order is the identity-or-
+    ///   other readback — distinct from a free-lattice join that could
+    ///   return a third element.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the most-advanced-region
+    /// reading is a lattice operation (`max`) on the derived [`Ord`]
+    /// ladder, named at the typed-primitive surface so a downstream
+    /// consumer reads `region_a.join(region_b)` once and is automatically
+    /// updated across a future ladder refinement. THEORY.md §VI.1
+    /// one-oracle / generation-over-composition: the most-advanced-
+    /// region idiom is named at one site (this method's body), not
+    /// retyped at every consumer's inline `.max()` call.
+    #[allow(dead_code)]
+    pub fn join(self, other: Self) -> Self {
+        self.max(other)
+    }
 }
 
 impl RetryPolicy {
@@ -10630,6 +10715,203 @@ mod tests {
             PerAttemptRegion::TOP.is_terminal(),
             "PerAttemptRegion::TOP must be terminal (retry loop must not dispatch a follow-up)"
         );
+    }
+
+    /// Exact-shape per-(a,b) pin over the 5×5 grid of
+    /// [`PerAttemptRegion::ALL`] variants. Floor-sibling at the lattice-
+    /// join surface, structural mirror of the corresponding
+    /// [`crate::version::BumpLevel::join`] and
+    /// [`crate::probe_outcome::AdmissionTier::join`] pins on the smaller
+    /// ladders. Pins the exact answer at every corner of the closed
+    /// per-attempt-axis 5×5 grid so a future variant insertion / ladder
+    /// refinement lights up here rather than drifting silently.
+    #[test]
+    fn test_per_attempt_region_join_named_at_most_advanced_region_surface() {
+        use PerAttemptRegion::*;
+        let cases: &[(PerAttemptRegion, PerAttemptRegion, PerAttemptRegion)] = &[
+            (BeforeFirst, BeforeFirst, BeforeFirst),
+            (BeforeFirst, First, First),
+            (BeforeFirst, Interim, Interim),
+            (BeforeFirst, Final, Final),
+            (BeforeFirst, OverBudget, OverBudget),
+            (First, BeforeFirst, First),
+            (First, First, First),
+            (First, Interim, Interim),
+            (First, Final, Final),
+            (First, OverBudget, OverBudget),
+            (Interim, BeforeFirst, Interim),
+            (Interim, First, Interim),
+            (Interim, Interim, Interim),
+            (Interim, Final, Final),
+            (Interim, OverBudget, OverBudget),
+            (Final, BeforeFirst, Final),
+            (Final, First, Final),
+            (Final, Interim, Final),
+            (Final, Final, Final),
+            (Final, OverBudget, OverBudget),
+            (OverBudget, BeforeFirst, OverBudget),
+            (OverBudget, First, OverBudget),
+            (OverBudget, Interim, OverBudget),
+            (OverBudget, Final, OverBudget),
+            (OverBudget, OverBudget, OverBudget),
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(
+                a.join(*b),
+                *expected,
+                "PerAttemptRegion::{a:?}.join({b:?}) must equal {expected:?}"
+            );
+        }
+    }
+
+    /// Structural-equivalence pin against [`Ord::max`] at every (a, b)
+    /// over the 5×5 grid. Makes the `max` form the load-bearing oracle,
+    /// so a future variant insertion that desynced the method body from
+    /// the derived [`Ord`] chain lights up at the lattice-join surface
+    /// rather than drifting silently.
+    #[test]
+    fn test_per_attempt_region_join_agrees_with_max_at_every_pair() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                assert_eq!(
+                    a.join(b),
+                    a.max(b),
+                    "PerAttemptRegion::{a:?}.join({b:?}) must equal {a:?}.max({b:?})"
+                );
+            }
+        }
+    }
+
+    /// `a.join(a) == a` at every [`PerAttemptRegion::ALL`] variant. The
+    /// idempotence axiom of the lattice-join surface, sibling of the
+    /// reflexive-ordering pin at the derived-[`Ord`] surface.
+    #[test]
+    fn test_per_attempt_region_join_is_idempotent_at_every_variant() {
+        for a in PerAttemptRegion::ALL {
+            assert_eq!(
+                a.join(a),
+                a,
+                "PerAttemptRegion::{a:?}.join({a:?}) must equal {a:?}"
+            );
+        }
+    }
+
+    /// `a.join(b) == b.join(a)` at every (a, b) over the 5×5 grid. The
+    /// commutativity axiom of the lattice-join surface — the load-
+    /// bearing fact a downstream most-advanced-region fold relies on to
+    /// be insensitive to per-counter ORDER.
+    #[test]
+    fn test_per_attempt_region_join_is_commutative_at_every_pair() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                assert_eq!(
+                    a.join(b),
+                    b.join(a),
+                    "PerAttemptRegion::{a:?}.join({b:?}) must equal {b:?}.join({a:?})"
+                );
+            }
+        }
+    }
+
+    /// `a.join(b.join(c)) == a.join(b).join(c)` at every (a, b, c) over
+    /// the 5×5×5 grid. The associativity axiom of the lattice-join
+    /// surface — the structural anchor a downstream most-advanced-region
+    /// fold relies on to be insensitive to per-counter GROUPING.
+    #[test]
+    fn test_per_attempt_region_join_is_associative_at_every_triple() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                for c in PerAttemptRegion::ALL {
+                    assert_eq!(
+                        a.join(b.join(c)),
+                        a.join(b).join(c),
+                        "PerAttemptRegion::{a:?}.join({b:?}.join({c:?})) must equal \
+                         {a:?}.join({b:?}).join({c:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `BOTTOM.join(a) == a.join(BOTTOM) == a` at every variant. The
+    /// load-bearing fact a downstream most-advanced-region fold seeds
+    /// at [`PerAttemptRegion::BOTTOM`] with — a fold seeded at BOTTOM
+    /// over a sequence returns the max of the sequence, or BOTTOM on an
+    /// empty sequence (the no-progress reading).
+    #[test]
+    fn test_per_attempt_region_join_has_bottom_as_identity() {
+        for a in PerAttemptRegion::ALL {
+            assert_eq!(
+                PerAttemptRegion::BOTTOM.join(a),
+                a,
+                "PerAttemptRegion::BOTTOM.join({a:?}) must equal {a:?}"
+            );
+            assert_eq!(
+                a.join(PerAttemptRegion::BOTTOM),
+                a,
+                "PerAttemptRegion::{a:?}.join(BOTTOM) must equal {a:?}"
+            );
+        }
+    }
+
+    /// `TOP.join(a) == a.join(TOP) == TOP` at every variant. The load-
+    /// bearing fact a downstream most-advanced-region fold can early-
+    /// exit on: once any per-counter region reads
+    /// [`PerAttemptRegion::TOP`], the aggregated most-advanced-region
+    /// collapses to TOP regardless of the remaining counters.
+    #[test]
+    fn test_per_attempt_region_join_has_top_as_absorbing_element() {
+        for a in PerAttemptRegion::ALL {
+            assert_eq!(
+                PerAttemptRegion::TOP.join(a),
+                PerAttemptRegion::TOP,
+                "PerAttemptRegion::TOP.join({a:?}) must equal TOP"
+            );
+            assert_eq!(
+                a.join(PerAttemptRegion::TOP),
+                PerAttemptRegion::TOP,
+                "PerAttemptRegion::{a:?}.join(TOP) must equal TOP"
+            );
+        }
+    }
+
+    /// `a.join(b) >= a && a.join(b) >= b` at every (a, b) over the 5×5
+    /// grid. The bounded-below-by-both-arguments law of the lattice-
+    /// join surface — the structural anchor a downstream telemetry
+    /// aggregator consumes ("the most-advanced-region reading subsumes
+    /// every per-counter region") through one named site.
+    #[test]
+    fn test_per_attempt_region_join_bounded_below_by_both_arguments() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                let j = a.join(b);
+                assert!(
+                    j >= a,
+                    "PerAttemptRegion::{a:?}.join({b:?}) = {j:?} must be >= {a:?}"
+                );
+                assert!(
+                    j >= b,
+                    "PerAttemptRegion::{a:?}.join({b:?}) = {j:?} must be >= {b:?}"
+                );
+            }
+        }
+    }
+
+    /// `a.join(b) ∈ {a, b}` at every (a, b) over the 5×5 grid. The
+    /// structural witness that the lattice join over a TOTAL order is
+    /// the identity-or-other readback — distinct from a free-lattice
+    /// join that could return a third element outside `{a, b}`.
+    #[test]
+    fn test_per_attempt_region_join_returns_one_of_the_arguments() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                let j = a.join(b);
+                assert!(
+                    j == a || j == b,
+                    "PerAttemptRegion::{a:?}.join({b:?}) = {j:?} must be one of {{{a:?}, {b:?}}}"
+                );
+            }
+        }
     }
 
     /// [`RetryPolicy::compute_delay`] returns `Duration::ZERO` exactly
