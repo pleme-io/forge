@@ -1568,6 +1568,130 @@ impl RetryPolicy {
             .saturating_sub(self.attempts_completed_before(attempt))
     }
 
+    /// True iff the 1-indexed `attempt` is STRICTLY PAST this policy's
+    /// clamped budget — i.e., `attempt > self.effective_max_attempts()`,
+    /// the "structurally-exhausted" per-attempt reading distinct from the
+    /// "at-or-past" reading [`is_final_attempt`](Self::is_final_attempt)
+    /// captures. Named strict CEILING peer of the non-strict CEILING
+    /// anchor [`is_final_attempt`](Self::is_final_attempt): the two
+    /// together decompose the CEILING side of the per-attempt-axis into
+    /// the 3-way partition "before-boundary" / "at-boundary" /
+    /// "past-boundary" that a per-attempt consumer receiving an
+    /// out-of-band `attempt` (a telemetry replay, a deserialized retry
+    /// record, a bug in caller code) can classify without restating the
+    /// raw `attempt > self.max_attempts.max(1)` cascade.
+    ///
+    /// # 3-way CEILING partition
+    ///
+    /// The two CEILING predicates together classify every `attempt: u32`:
+    ///
+    /// |  Region         | Predicate reading                                     |
+    /// | --------------- | ----------------------------------------------------- |
+    /// | BEFORE boundary | `is_interim_attempt(a) == true`                       |
+    /// | AT boundary     | `is_final_attempt(a) && !is_over_budget(a)`           |
+    /// | PAST boundary   | `is_over_budget(a) == true` (⊂ `is_final_attempt(a)`) |
+    ///
+    /// [`is_final_attempt`](Self::is_final_attempt) fires on both AT and
+    /// PAST regions (its non-strict `>=` reading), whereas `is_over_budget`
+    /// fires only on the PAST region (its strict `>` reading). The
+    /// distinction is load-bearing for a per-attempt consumer that wants
+    /// to distinguish "this attempt is the last legal one in the budget"
+    /// (a route to the loud-fail final-attempt telemetry class) from
+    /// "this attempt index is structurally impossible under the policy"
+    /// (a route to a caller-bug diagnostic class distinct from the
+    /// exhausted-budget class).
+    ///
+    /// # Strict subset of `is_final_attempt`
+    ///
+    /// The implication `is_over_budget(a) ⇒ is_final_attempt(a)` holds
+    /// for every [`RetryPolicy`] record and every `attempt` — pinned by
+    /// [`tests::test_retry_policy_is_over_budget_implies_is_final_attempt`].
+    /// A future regression that broadened `is_over_budget` to fire on
+    /// `attempt >= max` (collapsing the 3-way partition back to the
+    /// 2-way anchor/complement) or that narrowed `is_final_attempt` to
+    /// fire only on `attempt == max` (breaking the loop-short-circuit
+    /// discipline [`run_with_policy`] reads through it) lights up this
+    /// test.
+    ///
+    /// # Boolean-numeric correspondence with `attempts_remaining_including`
+    ///
+    /// The strict CEILING boolean reading `is_over_budget(a)` is
+    /// equivalent to the CEILING NUMERIC INCLUSIVE reading
+    /// `attempts_remaining_including(a) == 0`:
+    ///
+    /// ```text
+    /// self.is_over_budget(a) == (self.attempts_remaining_including(a) == 0)
+    /// ```
+    ///
+    /// — pinned by
+    /// [`tests::test_retry_policy_is_over_budget_iff_attempts_remaining_including_zero`].
+    /// The zero-slot reading at the CEILING NUMERIC INCLUSIVE peer names
+    /// exactly the "past-the-boundary" reading at the CEILING BOOLEAN
+    /// strict peer — the "budget saturated with the current slot itself
+    /// gone" dichotomy at both surfaces, mirroring the algebraic bridge
+    /// `is_interim_attempt(a) == (attempts_remaining(a) > 0)` that ties
+    /// the CEILING NON-STRICT boolean COMPLEMENT to the CEILING NUMERIC
+    /// EXCLUSIVE positive reading at the boundary-adjacent peer.
+    ///
+    /// # Clamp-dependence discipline
+    ///
+    /// Like [`is_final_attempt`](Self::is_final_attempt),
+    /// [`is_interim_attempt`](Self::is_interim_attempt),
+    /// [`attempts_remaining`](Self::attempts_remaining),
+    /// [`attempts_used_through`](Self::attempts_used_through), and
+    /// [`attempts_remaining_including`](Self::attempts_remaining_including)
+    /// — and UNLIKE the clamp-INDEPENDENT FLOOR peers
+    /// [`is_first_attempt`](Self::is_first_attempt),
+    /// [`is_retry_attempt`](Self::is_retry_attempt), and
+    /// [`attempts_completed_before`](Self::attempts_completed_before) —
+    /// this reading grounds through
+    /// [`effective_max_attempts`](Self::effective_max_attempts): whether
+    /// attempt `a` is past the budget is determined against the clamped
+    /// budget, not the raw `self.max_attempts` field, so a hand-built
+    /// `RetryPolicy { max_attempts: 0, .. }` (the degenerate shape every
+    /// factory constructor's clamping discipline forecloses against) reads
+    /// as-if `max_attempts == 1` under this predicate, matching the
+    /// clamp-DEPENDENT discipline the other CEILING peers apply.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`is_final_attempt`](Self::is_final_attempt),
+    /// [`is_interim_attempt`](Self::is_interim_attempt),
+    /// [`effective_max_attempts`](Self::effective_max_attempts), and the
+    /// other CEILING peers are: the reading is a pure function of the
+    /// receiver and attempt argument, with no allocation and no trait
+    /// dispatch beyond the const-callable
+    /// [`effective_max_attempts`](Self::effective_max_attempts) and the
+    /// const-stable `u32::gt` comparison on the derived [`u32::Ord`]
+    /// instance. A const-context call shape (e.g., a
+    /// `const NETWORK_OVER_AT_ONE: bool =
+    /// RetryPolicy::network().is_over_budget(1);` table at a future
+    /// telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the "past-the-clamped-
+    /// budget" reading is named at one typed-primitive site instead of
+    /// retyped as the inline `attempt > self.max_attempts.max(1)` or
+    /// `attempt > self.effective_max_attempts()` or
+    /// `self.attempts_remaining_including(attempt) == 0` cascade at every
+    /// consumer — a future per-attempt telemetry surface emitting a
+    /// caller-bug "impossible attempt index" class distinct from the
+    /// budget-exhausted "final-attempt" class, a structured-attestation
+    /// surface recording the "structurally-past-budget" provenance class
+    /// distinct from the "at-final-slot" class, a defensive
+    /// pre-invocation guard that skips the `op(attempt)` call on
+    /// out-of-band attempt indices before they reach the retry loop —
+    /// all read one named typed method. THEORY.md §V.5 total-order
+    /// discipline: the predicate reads the strict `>` comparison on the
+    /// derived [`u32::Ord`] instance, the strict-inequality peer of the
+    /// non-strict `>=` comparison [`is_final_attempt`](Self::is_final_attempt)
+    /// reads, applied to the same per-attempt axis with the clamp-to-≥1
+    /// invariant preserved by delegation.
+    #[allow(dead_code)]
+    pub const fn is_over_budget(&self, attempt: u32) -> bool {
+        attempt > self.effective_max_attempts()
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -7931,6 +8055,278 @@ mod tests {
             "degenerate max_attempts: 0 attempt 2 is a retry \
              (clamp-INDEPENDENT reading)"
         );
+    }
+
+    /// [`RetryPolicy::is_over_budget`] reads the raw `attempt >
+    /// effective_max_attempts()` predicate — `true` at every `attempt >
+    /// budget.max(1)`, `false` at every `attempt ∈ [0,
+    /// effective_max_attempts()]`. Pinned across the full `max_attempts ×
+    /// {ZERO, network}` schedule cross-product × attempt-count grid so a
+    /// future regression that broadened the reading to fire on `>=`
+    /// (collapsing the 3-way CEILING partition back to the anchor peer
+    /// [`RetryPolicy::is_final_attempt`]) or dropped the clamp-to-≥1
+    /// discipline (misgrounding through the raw `self.max_attempts`
+    /// field) lights up this test.
+    #[test]
+    fn test_retry_policy_is_over_budget_reads_attempt_gt_effective_max() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                let cap = p.effective_max_attempts();
+                for attempt in [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX] {
+                    assert_eq!(
+                        p.is_over_budget(attempt),
+                        attempt > cap,
+                        "is_over_budget must equal (attempt > effective_max_attempts()): \
+                         max_attempts = {max_attempts}, effective = {cap}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_over_budget`] is a STRICT subset of
+    /// [`RetryPolicy::is_final_attempt`] — every attempt classified as
+    /// over-budget is also classified as final, but the converse fails at
+    /// exactly one attempt-index: `attempt == effective_max_attempts()`
+    /// (the AT-boundary case that distinguishes the strict `>` peer from
+    /// the non-strict `>=` anchor). Cross-product of the full
+    /// `max_attempts × {ZERO, network}` schedule grid × attempt-count
+    /// grid, with an explicit AT-boundary assertion that the two
+    /// predicates disagree at `attempt == cap`. A future regression that
+    /// collapsed the 3-way CEILING partition back to the 2-way
+    /// anchor/complement grid — e.g., a refactor that promoted the
+    /// strict-past reading to a non-strict at-or-past reading — lights up
+    /// this test.
+    #[test]
+    fn test_retry_policy_is_over_budget_implies_is_final_attempt() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                let cap = p.effective_max_attempts();
+                for attempt in [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX] {
+                    if p.is_over_budget(attempt) {
+                        assert!(
+                            p.is_final_attempt(attempt),
+                            "is_over_budget must imply is_final_attempt: \
+                             max_attempts = {max_attempts}, effective = {cap}, \
+                             attempt = {attempt}, schedule = {:?}",
+                            (initial_backoff, factor, max_backoff)
+                        );
+                    }
+                }
+                assert!(
+                    p.is_final_attempt(cap),
+                    "AT-boundary attempt {cap} must be final: max_attempts = {max_attempts}"
+                );
+                assert!(
+                    !p.is_over_budget(cap),
+                    "AT-boundary attempt {cap} must NOT be over-budget \
+                     (the strict `>` reading distinguishes AT from PAST): \
+                     max_attempts = {max_attempts}"
+                );
+                if let Some(past) = cap.checked_add(1) {
+                    assert!(
+                        p.is_over_budget(past),
+                        "PAST-boundary attempt {past} must be over-budget: \
+                         max_attempts = {max_attempts}"
+                    );
+                    assert!(
+                        p.is_final_attempt(past),
+                        "PAST-boundary attempt {past} must also be final \
+                         (the non-strict `>=` reading fires on both AT and PAST): \
+                         max_attempts = {max_attempts}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_over_budget`] fires exactly when
+    /// [`RetryPolicy::attempts_remaining_including`] reads zero — the
+    /// algebraic law tying the CEILING BOOLEAN STRICT reading to the
+    /// CEILING NUMERIC INCLUSIVE zero-slot reading. Cross-product of the
+    /// full `max_attempts × {ZERO, network}` schedule grid × attempt-count
+    /// grid — a future regression that desynced the boolean and numeric
+    /// CEILING-strict peers (e.g., off-by-one in either primitive, drift
+    /// in the clamp discipline between the two) lights up this test.
+    /// Mirrors the CEILING-NON-STRICT boolean-numeric correspondence law
+    /// [`test_retry_policy_attempts_remaining_positive_iff_is_interim_attempt`]
+    /// at the strict peer, closing the boolean-numeric correspondence at
+    /// both non-strict AND strict CEILING peers.
+    #[test]
+    fn test_retry_policy_is_over_budget_iff_attempts_remaining_including_zero() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX] {
+                    assert_eq!(
+                        p.is_over_budget(attempt),
+                        p.attempts_remaining_including(attempt) == 0,
+                        "is_over_budget must equal (attempts_remaining_including == 0): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_over_budget`] discriminates the per-attempt
+    /// "past-the-budget" partition across the canonical factory
+    /// constructors. Because the reading is clamp-DEPENDENT (grounds
+    /// through [`RetryPolicy::effective_max_attempts`]), the boundary
+    /// varies by factory: [`RetryPolicy::immediate`] and
+    /// [`RetryPolicy::network_or_immediate(false)`] read
+    /// `effective_max_attempts() == 1` (so attempts ≥ 2 are past-budget),
+    /// [`RetryPolicy::network`] reads `effective_max_attempts() == 5`
+    /// (attempts ≥ 6 past-budget), and the degenerate hand-built
+    /// `max_attempts: 0` shape reads `effective_max_attempts() == 1`
+    /// under the clamp — matching the clamp-DEPENDENT CEILING discipline
+    /// the other ceiling peers apply. Load-bearing witness that the
+    /// STRICT CEILING peer preserves the clamp-DEPENDENCE of the
+    /// NON-STRICT CEILING anchor across every factory shape.
+    #[test]
+    fn test_retry_policy_is_over_budget_discriminates_canonical_factories() {
+        let cases: &[(RetryPolicy, u32)] = &[
+            (RetryPolicy::immediate(), 1),
+            (RetryPolicy::network(), 5),
+            (RetryPolicy::network_with_max_attempts(1), 1),
+            (RetryPolicy::network_with_max_attempts(3), 3),
+            (RetryPolicy::network_with_max_attempts(7), 7),
+            (RetryPolicy::network_or_immediate(true), 5),
+            (RetryPolicy::network_or_immediate(false), 1),
+        ];
+        for (p, expected_cap) in cases {
+            assert_eq!(
+                p.effective_max_attempts(),
+                *expected_cap,
+                "canonical factory {p:?} must report effective_max_attempts = {expected_cap}"
+            );
+            for attempt in 0..=*expected_cap {
+                assert!(
+                    !p.is_over_budget(attempt),
+                    "attempt {attempt} ≤ cap {expected_cap} is not over-budget: policy = {p:?}"
+                );
+            }
+            for attempt in [
+                expected_cap.saturating_add(1),
+                expected_cap.saturating_add(2),
+                expected_cap.saturating_add(10),
+                u32::MAX,
+            ] {
+                assert!(
+                    p.is_over_budget(attempt),
+                    "attempt {attempt} > cap {expected_cap} is over-budget: policy = {p:?}"
+                );
+            }
+        }
+        // Degenerate hand-built max_attempts: 0 shape — the STRICT
+        // CEILING peer is clamp-DEPENDENT, so it grounds through
+        // effective_max_attempts() (which clamps to ≥ 1) and reads
+        // as-if max_attempts == 1: attempts ≥ 2 are past-budget.
+        let degenerate = RetryPolicy {
+            max_attempts: 0,
+            initial_backoff: Duration::ZERO,
+            factor: 1,
+            max_backoff: Duration::ZERO,
+        };
+        assert_eq!(
+            degenerate.effective_max_attempts(),
+            1,
+            "degenerate max_attempts: 0 clamps to effective_max_attempts == 1"
+        );
+        assert!(
+            !degenerate.is_over_budget(0),
+            "degenerate max_attempts: 0 attempt 0 is not over-budget"
+        );
+        assert!(
+            !degenerate.is_over_budget(1),
+            "degenerate max_attempts: 0 attempt 1 is not over-budget (== cap)"
+        );
+        for attempt in [2u32, 3, 5, 10, 100, u32::MAX] {
+            assert!(
+                degenerate.is_over_budget(attempt),
+                "degenerate max_attempts: 0 attempt {attempt} is over-budget \
+                 (clamp-DEPENDENT reading grounds through the clamped cap of 1)"
+            );
+        }
+    }
+
+    /// [`RetryPolicy::is_over_budget`] partitions the per-attempt-axis
+    /// CEILING into three regions in cooperation with
+    /// [`RetryPolicy::is_final_attempt`] and
+    /// [`RetryPolicy::is_interim_attempt`]: every attempt is in EXACTLY
+    /// one of `BEFORE`, `AT`, or `PAST` boundary. The three regions are
+    /// mutually exclusive and jointly exhaustive at every `attempt: u32`
+    /// under every policy shape. A future regression that either
+    /// admitted overlap (e.g., `is_over_budget` firing on `>=` so AT and
+    /// PAST both fire together) or admitted a gap (e.g., `is_final_attempt`
+    /// narrowed to fire only on `==` so AT falls through neither predicate
+    /// class) lights up this test — the load-bearing structural witness
+    /// that the strict CEILING peer closes the 3-way partition cleanly.
+    #[test]
+    fn test_retry_policy_is_over_budget_partitions_ceiling_three_ways() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        for p in policies {
+            for attempt in [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX] {
+                let before = p.is_interim_attempt(attempt);
+                let at = p.is_final_attempt(attempt) && !p.is_over_budget(attempt);
+                let past = p.is_over_budget(attempt);
+                let region_count = usize::from(before) + usize::from(at) + usize::from(past);
+                assert_eq!(
+                    region_count, 1,
+                    "3-way CEILING partition must be mutually exclusive and jointly \
+                     exhaustive: policy = {p:?}, attempt = {attempt}, \
+                     BEFORE = {before}, AT = {at}, PAST = {past}"
+                );
+            }
+        }
     }
 
     /// [`RetryPolicy::compute_delay`] returns `Duration::ZERO` exactly
