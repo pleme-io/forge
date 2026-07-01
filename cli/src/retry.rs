@@ -286,6 +286,99 @@ impl PerAttemptRegion {
     pub const fn is_terminal(&self) -> bool {
         matches!(*self, PerAttemptRegion::Final | PerAttemptRegion::OverBudget)
     }
+
+    /// True iff `self` is one of [`PerAttemptRegion::BeforeFirst`],
+    /// [`PerAttemptRegion::First`], or [`PerAttemptRegion::Interim`] —
+    /// the load-bearing FLOOR peer at the projected sum surface, the
+    /// De Morgan complement of [`PerAttemptRegion::is_terminal`]. Names
+    /// the "retry loop MAY dispatch a follow-up `op(attempt + 1)` after
+    /// (or before) this attempt" reading at ONE typed method instead of
+    /// restating either the three-variant `matches!` disjunction or the
+    /// negated CEILING peer (`!region.is_terminal()`) at every downstream
+    /// consumer.
+    ///
+    /// # Semantic role
+    ///
+    /// The retry loop's structural non-short-circuit condition — the
+    /// schedule may still dispatch another attempt after (or has not yet
+    /// invoked) `op(attempt)` — is `attempt < self.effective_max_attempts()`.
+    /// That condition is the UNION of the three non-CEILING regions at the
+    /// sum surface: [`PerAttemptRegion::BeforeFirst`] (the pre-invocation
+    /// counter reading, `attempt < 1`), [`PerAttemptRegion::First`] (the
+    /// first live `op(attempt)` call in a multi-attempt schedule), and
+    /// [`PerAttemptRegion::Interim`] (a mid-schedule retry attempt). A
+    /// downstream consumer that says "on this attempt, the retry loop is
+    /// still live" — a pre-attempt guard, a "may-retry" telemetry
+    /// discriminator, a structured-attestation surface recording "this
+    /// attempt did NOT terminate the schedule" against the SLSA chain —
+    /// reads `region.is_pre_terminal()` at ONE site instead of writing
+    /// `matches!(region, BeforeFirst | First | Interim)`,
+    /// `!region.is_terminal()`, or the equivalent
+    /// `p.is_before_first_attempt(attempt) || p.is_first_attempt(attempt)
+    /// || p.is_retry_attempt(attempt) && !p.is_final_attempt(attempt)`
+    /// cascade at each site.
+    ///
+    /// # Idiom lineage
+    ///
+    /// Sibling of [`RetryPolicy::is_retry_attempt`] (commit 3359c54) at
+    /// the FLOOR side of the boolean-peer ladder — the same FLOOR/CEILING
+    /// BOOLEAN COMPLEMENT idiom the boolean-peer ladder established when
+    /// closing the CEILING peer [`RetryPolicy::is_final_attempt`] (d55b12b)
+    /// with its FLOOR complement [`RetryPolicy::is_retry_attempt`]. Here
+    /// at the projected sum surface, the FLOOR reading spans THREE
+    /// variants because the projection factors the FLOOR half-open ray
+    /// of the per-attempt axis into the STRICTLY-below-floor variant
+    /// (`BeforeFirst` — b3aeb92), the ladder-floor variant (`First` —
+    /// 1123c2c), and the strictly-between-boundaries variant (`Interim` —
+    /// 14c0de3) at commits 158c06a / 494c053.
+    ///
+    /// # Why the three-variant disjunction (not just the CEILING negation)
+    ///
+    /// A downstream `!region.is_terminal()` restatement carries the same
+    /// truth-table but leaves the "retry loop may dispatch" reading
+    /// implicit at the negation site — the reader must trace the CEILING
+    /// peer's docstring to recover the "loop is still live" semantic
+    /// role. Naming the disjunction at ONE typed method surfaces the
+    /// affirmative reading (the retry loop is NOT short-circuited on
+    /// this attempt) as the load-bearing typed-primitive surface, matching
+    /// the same affirmative-vs-negated discipline
+    /// [`RetryPolicy::is_retry_attempt`] surfaces at the boolean-peer
+    /// ladder's FLOOR side (`attempt > 1` named at ONE method, not
+    /// restated as `!p.is_first_attempt(attempt)` at every consumer). The
+    /// pin at
+    /// [`tests::test_per_attempt_region_is_pre_terminal_complements_is_terminal`]
+    /// enforces the De Morgan complement law across every
+    /// [`PerAttemptRegion::ALL`] variant so a future CEILING-side variant
+    /// insertion desyncs at ONE named site rather than at every consumer's
+    /// inline `matches!` disjunction.
+    ///
+    /// # Grounding through the boolean-peer ladder
+    ///
+    /// `region.is_pre_terminal()` grounds through the FLOOR-side numeric
+    /// axis at every `(policy, attempt)`:
+    /// `self.per_attempt_region(attempt).is_pre_terminal()` iff
+    /// `attempt < self.effective_max_attempts()`. Pinned by
+    /// [`tests::test_retry_policy_per_attempt_region_is_pre_terminal_iff_lt_effective_max`]
+    /// across the canonical policy grid × attempt-index grid.
+    ///
+    /// # THEORY grounding
+    ///
+    /// THEORY.md §II Language — typed primitives own boundary
+    /// classification; the FLOOR half-open ray at the projected sum
+    /// surface is named at ONE typed method (`is_pre_terminal`) rather
+    /// than restated as the three-variant `matches!` disjunction or as
+    /// the negated CEILING peer at every downstream consumer.
+    /// THEORY.md §VI.1 one-oracle — the "retry loop MAY dispatch a
+    /// follow-up after this attempt" semantic role is named at one site
+    /// (this method's body), so a downstream pre-attempt guard, a
+    /// "may-retry" telemetry discriminator, or an in-schedule attestation
+    /// classifier reads `region.is_pre_terminal()` once and is
+    /// automatically extended across a future FLOOR-side variant insertion
+    /// when this method is updated.
+    #[allow(dead_code)]
+    pub const fn is_pre_terminal(&self) -> bool {
+        !self.is_terminal()
+    }
 }
 
 impl RetryPolicy {
@@ -9604,6 +9697,143 @@ mod tests {
                     "is_terminal() at the sum surface must ground through the CEILING-side \
                      boolean-peer disjunction (is_final_attempt || is_over_budget): \
                      policy = {p:?}, attempt = {attempt}, effective_max_attempts = {m}"
+                );
+            }
+        }
+    }
+
+    /// [`PerAttemptRegion::is_pre_terminal`] fires exactly at the three
+    /// FLOOR-side variants ([`PerAttemptRegion::BeforeFirst`],
+    /// [`PerAttemptRegion::First`], [`PerAttemptRegion::Interim`]) — the
+    /// non-CEILING variants at the projected sum surface — and nowhere
+    /// else. The load-bearing variant-anchor pin at the FLOOR-side
+    /// reading: a regression that swept a CEILING-side variant into the
+    /// pre-terminal disjunction (e.g., silently classifying `Final` as
+    /// pre-terminal after a body edit) or dropped one of the three FLOOR
+    /// variants (e.g., an over-narrow `matches!(*self, First | Interim)`
+    /// body) lights up here.
+    #[test]
+    fn test_per_attempt_region_is_pre_terminal_at_before_first_first_interim() {
+        assert!(
+            PerAttemptRegion::BeforeFirst.is_pre_terminal(),
+            "BeforeFirst is a pre-invocation index — retry loop has not short-circuited"
+        );
+        assert!(
+            PerAttemptRegion::First.is_pre_terminal(),
+            "First is a live in-schedule attempt — retry loop may dispatch a follow-up"
+        );
+        assert!(
+            PerAttemptRegion::Interim.is_pre_terminal(),
+            "Interim is a mid-schedule retry — retry loop may dispatch a follow-up"
+        );
+        assert!(
+            !PerAttemptRegion::Final.is_pre_terminal(),
+            "Final is the ladder-ceiling variant — retry loop short-circuits here"
+        );
+        assert!(
+            !PerAttemptRegion::OverBudget.is_pre_terminal(),
+            "OverBudget is strictly past the ceiling — retry loop cannot dispatch further"
+        );
+    }
+
+    /// [`PerAttemptRegion::is_pre_terminal`] is the De Morgan complement
+    /// of [`PerAttemptRegion::is_terminal`] at every
+    /// [`PerAttemptRegion::ALL`] variant — the structural pin that ties
+    /// the FLOOR-side sum-surface reading to the CEILING-side sum-surface
+    /// reading at ONE named law. A regression that desynced the two
+    /// predicates (e.g., one drifted onto a different variant set without
+    /// the other) lights up here at the first offending variant. Iterates
+    /// via [`PerAttemptRegion::ALL`] so a future variant addition
+    /// automatically extends the coverage once `ALL` is extended.
+    #[test]
+    fn test_per_attempt_region_is_pre_terminal_complements_is_terminal() {
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                region.is_pre_terminal(),
+                !region.is_terminal(),
+                "is_pre_terminal() must equal !is_terminal() at {region:?}"
+            );
+        }
+    }
+
+    /// [`PerAttemptRegion::is_pre_terminal`] agrees with the three-variant
+    /// `matches!(*region, BeforeFirst | First | Interim)` disjunction at
+    /// every [`PerAttemptRegion::ALL`] variant — the structural pin that
+    /// makes the derived `PartialEq`/`Eq` impl on the sum surface the
+    /// load-bearing oracle for the FLOOR-side ray reading. A regression
+    /// that drifted the body to a different disjunction (e.g., `First |
+    /// Interim`, `BeforeFirst | First`, or the whole-sum `matches!(*self,
+    /// _)`) still passes
+    /// [`test_per_attempt_region_is_pre_terminal_at_before_first_first_interim`]
+    /// only when the drift happens to land back on the same variant set;
+    /// this pin refuses any variant-set desync against the canonical
+    /// `BeforeFirst | First | Interim` disjunction across every variant
+    /// iteration.
+    #[test]
+    fn test_per_attempt_region_is_pre_terminal_agrees_with_matches_before_first_first_interim() {
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                region.is_pre_terminal(),
+                matches!(
+                    region,
+                    PerAttemptRegion::BeforeFirst
+                        | PerAttemptRegion::First
+                        | PerAttemptRegion::Interim
+                ),
+                "is_pre_terminal() must read the (BeforeFirst | First | Interim) disjunction at {region:?}"
+            );
+        }
+    }
+
+    /// [`RetryPolicy::per_attempt_region`] projected through
+    /// [`PerAttemptRegion::is_pre_terminal`] reads `true` exactly when
+    /// `attempt < self.effective_max_attempts()` — the retry loop's
+    /// structural non-short-circuit condition. The load-bearing grounding
+    /// pin that bridges the sum-surface FLOOR peer to the numeric
+    /// per-attempt-axis reading: `region.is_pre_terminal()` iff the retry
+    /// loop's `attempt < M` guard admits `op(attempt)` for another
+    /// dispatch (or has not yet dispatched). A future regression that
+    /// broke the projection's FLOOR-side classification OR broke
+    /// `is_pre_terminal` at the sum surface (e.g., dropped a variant from
+    /// the disjunction) lights up here at the first offending
+    /// attempt-index. Cross-product of the canonical-factory set ×
+    /// attempt-index grid.
+    #[test]
+    fn test_retry_policy_per_attempt_region_is_pre_terminal_iff_lt_effective_max() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        let attempts = [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX];
+        for p in &policies {
+            let m = p.effective_max_attempts();
+            for attempt in attempts {
+                let pre_terminal = p.per_attempt_region(attempt).is_pre_terminal();
+                assert_eq!(
+                    pre_terminal,
+                    attempt < m,
+                    "is_pre_terminal() at the sum surface must match the retry loop's \
+                     non-short-circuit condition (attempt < effective_max_attempts): \
+                     policy = {p:?}, attempt = {attempt}, effective_max_attempts = {m}"
+                );
+                assert_eq!(
+                    pre_terminal,
+                    !p.per_attempt_region(attempt).is_terminal(),
+                    "is_pre_terminal() must be the De Morgan complement of is_terminal at the \
+                     sum-surface projection: policy = {p:?}, attempt = {attempt}, \
+                     effective_max_attempts = {m}"
                 );
             }
         }
