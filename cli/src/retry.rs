@@ -647,6 +647,112 @@ impl RetryPolicy {
         !self.is_final_attempt(attempt)
     }
 
+    /// Number of attempts remaining under this policy's budget *after* the
+    /// given 1-indexed `attempt` — the numeric peer of the boolean per-
+    /// attempt [`is_final_attempt`](Self::is_final_attempt) /
+    /// [`is_interim_attempt`](Self::is_interim_attempt) partition at the
+    /// same per-attempt retry-budget axis. Defined as
+    /// `self.max_attempts.max(1).saturating_sub(attempt)` under the same
+    /// clamp-to-≥1 discipline the boolean pair applies.
+    ///
+    /// # The numeric-vs-boolean reading at the same axis
+    ///
+    /// Where [`is_final_attempt`](Self::is_final_attempt) and
+    /// [`is_interim_attempt`](Self::is_interim_attempt) name the *boolean*
+    /// partition at the per-attempt retry-budget axis (the two-way "is
+    /// this the last one?" / "is another attempt in budget?" split),
+    /// `attempts_remaining` names the *numeric* reading at the same axis:
+    /// "how many attempts remain after this one?" The boolean partition is
+    /// a special case of the numeric reading:
+    /// `policy.is_final_attempt(a) == (policy.attempts_remaining(a) == 0)`
+    /// and `policy.is_interim_attempt(a) == (policy.attempts_remaining(a) > 0)`
+    /// — pinned by
+    /// [`tests::test_retry_policy_attempts_remaining_zero_iff_is_final_attempt`]
+    /// and
+    /// [`tests::test_retry_policy_attempts_remaining_positive_iff_is_interim_attempt`].
+    ///
+    /// # Why a named numeric typed method
+    ///
+    /// The "how many more?" reading is the load-bearing structural reading
+    /// distinct from the two-way boolean partition: a future warn-message
+    /// enrichment at [`log_retry_attempt`] that wants to inline the
+    /// budget-remaining count in the attempt's warn wrapper (`"...retrying
+    /// (N attempts remaining)..."` — a strict shape refinement over the
+    /// current `attempt/max_attempts` fraction), a future per-attempt
+    /// telemetry consumer that emits a budget-remaining gauge distinct
+    /// from the boolean interim/final class distinction, a future pre-
+    /// attempt escalation that wants to gate its "getting close to
+    /// exhaustion" verdict on `attempts_remaining(attempt) <= 1` rather
+    /// than the coarser is-final boolean — all read the numeric partition
+    /// through one named typed method, where today they would each re-
+    /// derive the `max_attempts.max(1).saturating_sub(attempt)` cascade
+    /// against the raw fields. The named typed-method peer hoists that
+    /// reading to the typed-primitive surface, matching the numeric-peer
+    /// idiom [`compute_delay`](Self::compute_delay) established at the
+    /// backoff-schedule axis (numeric [`Duration`] peer of the boolean
+    /// "is-there-a-next-attempt?" partition).
+    ///
+    /// # Saturation on out-of-budget attempts
+    ///
+    /// The body reads `saturating_sub`, so an `attempt` beyond the
+    /// clamped budget (e.g., `policy.network().attempts_remaining(100)`)
+    /// returns `0` rather than underflowing — matching the retry-loop
+    /// body's short-circuit at [`run_with_policy`], which returns after
+    /// the final attempt and cannot invoke the predicate at
+    /// `attempt > max`. Pinning saturation at the typed-primitive surface
+    /// forecloses a future consumer's silent underflow against an
+    /// off-by-one call shape.
+    ///
+    /// # Clamp-to-≥1 invariant
+    ///
+    /// The body reads `self.max_attempts.max(1)` rather than the raw
+    /// `self.max_attempts` field, matching the clamp discipline
+    /// [`is_final_attempt`](Self::is_final_attempt) and
+    /// [`is_interim_attempt`](Self::is_interim_attempt) apply through
+    /// their peer delegation. A hand-built
+    /// `RetryPolicy { max_attempts: 0, .. }` (the degenerate field-
+    /// literal shape every factory constructor's clamping discipline
+    /// forecloses against, but which is structurally constructible) is
+    /// treated as a no-retry policy under this predicate — i.e.,
+    /// `attempts_remaining(1) == 0` — so a future consumer reading the
+    /// per-attempt numeric budget cannot silently classify a degenerate
+    /// no-op policy's first attempt as "one attempt remaining", matching
+    /// the boolean partition's degenerate-shape reading.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`is_final_attempt`](Self::is_final_attempt),
+    /// [`is_interim_attempt`](Self::is_interim_attempt),
+    /// [`is_no_retry`](Self::is_no_retry), and
+    /// [`will_retry`](Self::will_retry) are: the reading is a pure
+    /// function of the receiver and the attempt argument, with no
+    /// allocation and no trait dispatch beyond the const-stable
+    /// `u32::max` / `u32::saturating_sub` inherent operations. A
+    /// const-context call shape (e.g., a `const NETWORK_INITIAL_BUDGET:
+    /// u32 = RetryPolicy::network().attempts_remaining(1);` table at a
+    /// future telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-attempt numeric
+    /// budget-remaining reading is named at one typed-primitive site
+    /// instead of retyped as the inline
+    /// `policy.max_attempts.max(1).saturating_sub(attempt)` cascade at
+    /// every consumer site that reads the numeric budget — any future
+    /// per-attempt diagnostic / telemetry / warn-message-enrichment /
+    /// pre-attempt-escalation consumer at the retry boundary. THEORY.md
+    /// §V.4 typed primitives: the reading is a typed-primitive surface
+    /// on `RetryPolicy` itself (one named const-fn method), not a raw-
+    /// field-plus-clamp-plus-saturate shape restated at every consumer.
+    #[allow(dead_code)]
+    pub const fn attempts_remaining(&self, attempt: u32) -> u32 {
+        let max = if self.max_attempts > 1 {
+            self.max_attempts
+        } else {
+            1
+        };
+        max.saturating_sub(attempt)
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -6292,6 +6398,174 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [`RetryPolicy::attempts_remaining`] returns `0` exactly when
+    /// [`RetryPolicy::is_final_attempt`] fires — the algebraic law tying
+    /// the numeric budget-remaining reading to the boolean per-attempt
+    /// "is-this-the-last-one?" partition. Cross-product of the full
+    /// `max_attempts × {ZERO, network}` schedule grid × attempt-count
+    /// grid — 6 max_attempts × 2 schedules × 8 attempts = 96 pinned
+    /// points. A future regression that desynced the numeric and boolean
+    /// readings (e.g., off-by-one in `attempts_remaining`, or a change
+    /// in the boolean predicate's threshold without a matching numeric
+    /// change) lights up this test.
+    #[test]
+    fn test_retry_policy_attempts_remaining_zero_iff_is_final_attempt() {
+        let schedules = [
+            (std::time::Duration::ZERO, 1, std::time::Duration::ZERO),
+            (
+                std::time::Duration::from_millis(250),
+                2,
+                std::time::Duration::from_secs(30),
+            ),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [1u32, 2, 3, 4, 5, 6, 10, 100] {
+                    assert_eq!(
+                        p.attempts_remaining(attempt) == 0,
+                        p.is_final_attempt(attempt),
+                        "attempts_remaining(attempt) == 0 must equal is_final_attempt(attempt): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::attempts_remaining`] returns a positive count
+    /// exactly when [`RetryPolicy::is_interim_attempt`] fires — the
+    /// algebraic law tying the numeric budget-remaining reading to the
+    /// boolean per-attempt "is-another-attempt-in-budget?" partition
+    /// (the complement of the `is_final_attempt` reading at the same
+    /// axis). The peer-pair correspondence a future consumer relies on
+    /// when it factors a boolean interim/final branch through the
+    /// numeric budget-remaining threshold or vice versa.
+    #[test]
+    fn test_retry_policy_attempts_remaining_positive_iff_is_interim_attempt() {
+        let schedules = [
+            (std::time::Duration::ZERO, 1, std::time::Duration::ZERO),
+            (
+                std::time::Duration::from_millis(250),
+                2,
+                std::time::Duration::from_secs(30),
+            ),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [1u32, 2, 3, 4, 5, 6, 10, 100] {
+                    assert_eq!(
+                        p.attempts_remaining(attempt) > 0,
+                        p.is_interim_attempt(attempt),
+                        "attempts_remaining(attempt) > 0 must equal is_interim_attempt(attempt): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// Per-attempt numeric budget-remaining discrimination across every
+    /// canonical factory: `immediate()` (max=1) returns 0 at attempt 1
+    /// and beyond; `network()` (max=5) counts down 4 → 3 → 2 → 1 → 0
+    /// across attempts 1..=5, saturating at 0 for later attempts;
+    /// `network_with_max_attempts(3)` (max=3) counts down 2 → 1 → 0;
+    /// `network_or_immediate(true)` matches `network()` and
+    /// `network_or_immediate(false)` matches `immediate()`. Pins the
+    /// numeric budget accounting the canonical factories expose.
+    #[test]
+    fn test_retry_policy_attempts_remaining_discriminates_canonical_factories() {
+        assert_eq!(RetryPolicy::immediate().attempts_remaining(1), 0);
+        assert_eq!(RetryPolicy::immediate().attempts_remaining(2), 0);
+
+        assert_eq!(RetryPolicy::network().attempts_remaining(1), 4);
+        assert_eq!(RetryPolicy::network().attempts_remaining(2), 3);
+        assert_eq!(RetryPolicy::network().attempts_remaining(3), 2);
+        assert_eq!(RetryPolicy::network().attempts_remaining(4), 1);
+        assert_eq!(RetryPolicy::network().attempts_remaining(5), 0);
+
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(3).attempts_remaining(1),
+            2
+        );
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(3).attempts_remaining(2),
+            1
+        );
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(3).attempts_remaining(3),
+            0
+        );
+
+        assert_eq!(
+            RetryPolicy::network_or_immediate(true).attempts_remaining(1),
+            4
+        );
+        assert_eq!(
+            RetryPolicy::network_or_immediate(false).attempts_remaining(1),
+            0
+        );
+    }
+
+    /// An out-of-budget `attempt` (past `max_attempts`) saturates to
+    /// `0` rather than underflowing under the `saturating_sub`
+    /// discipline. `network()` (max=5) reads `attempts_remaining(6)`,
+    /// `attempts_remaining(100)`, `attempts_remaining(u32::MAX)` all as
+    /// `0` — matching the retry-loop body's short-circuit at
+    /// [`run_with_policy`], which returns after the final attempt and
+    /// cannot invoke the reading at `attempt > max`. Pinning saturation
+    /// at the typed-primitive surface forecloses a future consumer's
+    /// silent underflow against an off-by-one call shape.
+    #[test]
+    fn test_retry_policy_attempts_remaining_saturates_out_of_budget() {
+        let p = RetryPolicy::network();
+        assert_eq!(p.attempts_remaining(6), 0);
+        assert_eq!(p.attempts_remaining(100), 0);
+        assert_eq!(p.attempts_remaining(u32::MAX), 0);
+
+        let p3 = RetryPolicy::network_with_max_attempts(3);
+        assert_eq!(p3.attempts_remaining(4), 0);
+        assert_eq!(p3.attempts_remaining(u32::MAX), 0);
+    }
+
+    /// The degenerate hand-built `RetryPolicy { max_attempts: 0, .. }`
+    /// shape (the field-literal shape every factory constructor's
+    /// clamping discipline forecloses against) reads through the same
+    /// clamp-to-≥1 discipline that [`is_final_attempt`] applies —
+    /// `attempts_remaining(1) == 0` on the degenerate shape, matching
+    /// `is_final_attempt(1) == true` and `is_interim_attempt(1) ==
+    /// false`. Pins the clamp-invariant load-bearingly at the typed-
+    /// primitive surface so a future consumer reading the numeric
+    /// budget cannot silently classify a degenerate no-op policy's
+    /// first attempt as "one attempt remaining".
+    #[test]
+    fn test_retry_policy_attempts_remaining_clamps_degenerate_max_attempts_zero() {
+        let p = RetryPolicy {
+            max_attempts: 0,
+            initial_backoff: std::time::Duration::ZERO,
+            factor: 1,
+            max_backoff: std::time::Duration::ZERO,
+        };
+        assert_eq!(p.attempts_remaining(1), 0);
+        assert_eq!(p.attempts_remaining(2), 0);
+        assert_eq!(p.attempts_remaining(100), 0);
+        assert!(p.is_final_attempt(1));
+        assert!(!p.is_interim_attempt(1));
     }
 
     /// Success on the first call must not retry. `op` is invoked exactly
