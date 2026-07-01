@@ -501,6 +501,108 @@ impl PerAttemptRegion {
             PerAttemptRegion::BeforeFirst | PerAttemptRegion::OverBudget
         )
     }
+
+    /// True iff `self` is one of [`PerAttemptRegion::First`],
+    /// [`PerAttemptRegion::Interim`], or [`PerAttemptRegion::Final`] —
+    /// the load-bearing IN-SCHEDULE peer at the projected sum surface,
+    /// the De Morgan complement of
+    /// [`PerAttemptRegion::is_out_of_schedule`]. Names the "the retry
+    /// loop LEGALLY invokes `op(attempt)` at this attempt index under
+    /// this policy" reading at ONE typed method instead of restating the
+    /// three-variant `matches!` disjunction, the negated OUT-OF-SCHEDULE
+    /// peer (`!region.is_out_of_schedule()`), the closed-inclusive
+    /// range-membership `(1..=M).contains(&attempt)`, or the negated
+    /// STRICT-boundary boolean disjunction
+    /// (`!(p.is_before_first_attempt(a) || p.is_over_budget(a))`) at
+    /// every downstream consumer.
+    ///
+    /// # Semantic role
+    ///
+    /// The three variants this disjunction covers are the LIVE
+    /// in-schedule invocation classes the retry loop at
+    /// [`run_with_policy`] actually produces — its counter starts at
+    /// `1`, dispatches `op(attempt)` at [`PerAttemptRegion::First`] /
+    /// [`PerAttemptRegion::Interim`] / [`PerAttemptRegion::Final`], and
+    /// short-circuits at [`PerAttemptRegion::Final`]. A downstream
+    /// consumer that says "this attempt index is a legal live
+    /// invocation of the schedule" — a pre-invocation guard admitting
+    /// the attempt to the retry loop, a "legal provenance" attestation
+    /// classifier recording the attempt against the SLSA chain as an
+    /// in-schedule datum distinct from a bug/replay class, a telemetry
+    /// emitter tagging live-invocation counts distinct from bug/replay
+    /// counts — reads `region.is_in_schedule()` at ONE site instead of
+    /// writing `matches!(region, First | Interim | Final)`,
+    /// `!region.is_out_of_schedule()`, or the closed-inclusive range
+    /// membership at each site.
+    ///
+    /// # Orthogonal to the terminal axis
+    ///
+    /// The sum surface now names TWO orthogonal binary axes with BOTH
+    /// halves affirmatively surfaced:
+    ///
+    /// |                | in-schedule (legal live attempt) | out-of-schedule (bug/replay) |
+    /// | -------------- | -------------------------------- | ---------------------------- |
+    /// | pre-terminal   | `First`, `Interim`               | `BeforeFirst`                |
+    /// | terminal       | `Final`                          | `OverBudget`                 |
+    ///
+    /// [`is_terminal`](Self::is_terminal) /
+    /// [`is_pre_terminal`](Self::is_pre_terminal) names the "does the
+    /// retry loop short-circuit after this attempt?" axis with BOTH
+    /// halves surfaced affirmatively; `is_out_of_schedule` /
+    /// `is_in_schedule` now names the "is this attempt index a live
+    /// in-schedule invocation or a bug/replay diagnostic?" axis with
+    /// BOTH halves surfaced affirmatively too. A future consumer that
+    /// needs either single axis reads the affirmative peer directly at
+    /// ONE site; a consumer that needs the FULL 2×2 grid reads both
+    /// peers independently rather than restating either axis at every
+    /// emission site.
+    ///
+    /// # Grounding through the closed-inclusive range
+    ///
+    /// `region.is_in_schedule()` grounds through the closed-inclusive
+    /// range-membership on the numeric axis at every `(policy, attempt)`:
+    /// `self.per_attempt_region(attempt).is_in_schedule()` iff
+    /// `!(self.is_before_first_attempt(attempt) || self.is_over_budget(attempt))`
+    /// iff `1 <= attempt <= self.effective_max_attempts()`. Pinned by
+    /// [`tests::test_retry_policy_per_attempt_region_is_in_schedule_iff_closed_inclusive_range`]
+    /// across the canonical policy grid × attempt-index grid.
+    ///
+    /// # Idiom lineage
+    ///
+    /// Sibling of [`is_pre_terminal`](Self::is_pre_terminal) at the sum
+    /// surface — both are affirmative De Morgan complements of a
+    /// two-variant CEILING-style disjunction peer, naming the
+    /// three-variant FLOOR-side reading through the negated body idiom
+    /// (`!self.is_out_of_schedule()` here mirrors `!self.is_terminal()`
+    /// at commit 1887f97). Together they close both axes at the
+    /// projected sum surface with BOTH halves named at ONE affirmative
+    /// typed method each — the same FLOOR/CEILING BOOLEAN COMPLEMENT
+    /// discipline the boolean-peer ladder established
+    /// ([`RetryPolicy::is_final_attempt`] d55b12b /
+    /// [`RetryPolicy::is_retry_attempt`] 3359c54,
+    /// [`RetryPolicy::is_over_budget`] eb0d5d1 /
+    /// [`RetryPolicy::is_before_first_attempt`] b3aeb92).
+    ///
+    /// # THEORY grounding
+    ///
+    /// THEORY.md §II Language — typed primitives own boundary
+    /// classification; the closed-inclusive-range disjunction at the
+    /// projected sum surface is named at ONE typed method
+    /// (`is_in_schedule`) rather than restated as the three-variant
+    /// `matches!` disjunction, the negated OUT-OF-SCHEDULE peer, or the
+    /// negated STRICT-boundary boolean disjunction at every downstream
+    /// consumer. THEORY.md §VI.1 one-oracle — the "attempt index is a
+    /// legal live in-schedule invocation of the retry loop" semantic
+    /// role is named at ONE typed-primitive site (this method's body),
+    /// so a downstream pre-invocation guard admitting live attempts, a
+    /// legal-provenance attestation classifier, or a telemetry emitter
+    /// tagging live-invocation counts reads `region.is_in_schedule()`
+    /// once and is automatically extended across a future in-schedule
+    /// variant insertion when this method is updated.
+    #[allow(dead_code)]
+    pub const fn is_in_schedule(&self) -> bool {
+        !self.is_out_of_schedule()
+    }
 }
 
 impl RetryPolicy {
@@ -10099,6 +10201,146 @@ mod tests {
                 !region.is_out_of_schedule() && !region.is_terminal(),
                 "{region:?} must be neither out-of-schedule nor terminal"
             );
+        }
+    }
+
+    /// [`PerAttemptRegion::is_in_schedule`] fires exactly at the three
+    /// LIVE in-schedule invocation variants ([`PerAttemptRegion::First`],
+    /// [`PerAttemptRegion::Interim`], [`PerAttemptRegion::Final`]) — the
+    /// three variants the retry loop at [`run_with_policy`] actually
+    /// produces — and NOT at [`PerAttemptRegion::BeforeFirst`] or
+    /// [`PerAttemptRegion::OverBudget`] — the two STRICT-boundary
+    /// diagnostic classes. Variant-anchor pin: a future regression that
+    /// swept `BeforeFirst` into the in-schedule reading (silently
+    /// classifying a pre-invocation counter reading as a live
+    /// invocation), swept `OverBudget` into the in-schedule reading
+    /// (silently classifying a past-budget bug/replay index as a live
+    /// invocation), or dropped one of the three in-schedule variants
+    /// (e.g., an over-narrow `matches!(*self, First | Interim)` body that
+    /// silently excluded the ladder-ceiling live attempt) lights up here.
+    #[test]
+    fn test_per_attempt_region_is_in_schedule_at_first_interim_final() {
+        assert!(
+            PerAttemptRegion::First.is_in_schedule(),
+            "First is the first live in-schedule attempt — retry loop dispatches op(1)"
+        );
+        assert!(
+            PerAttemptRegion::Interim.is_in_schedule(),
+            "Interim is a mid-schedule live attempt — retry loop dispatches op(attempt)"
+        );
+        assert!(
+            PerAttemptRegion::Final.is_in_schedule(),
+            "Final is the last legal live attempt — retry loop dispatches op(M)"
+        );
+        assert!(
+            !PerAttemptRegion::BeforeFirst.is_in_schedule(),
+            "BeforeFirst is a pre-invocation counter reading — retry loop never reaches it"
+        );
+        assert!(
+            !PerAttemptRegion::OverBudget.is_in_schedule(),
+            "OverBudget is strictly past the budget — retry loop never reaches it"
+        );
+    }
+
+    /// [`PerAttemptRegion::is_in_schedule`] is the De Morgan complement
+    /// of [`PerAttemptRegion::is_out_of_schedule`] at every
+    /// [`PerAttemptRegion::ALL`] variant — the structural pin that ties
+    /// the affirmative in-schedule reading to the affirmative
+    /// out-of-schedule reading at ONE named law at the sum surface. A
+    /// regression that desynced the two predicates (e.g., one drifted
+    /// onto a different variant set without the other) lights up here at
+    /// the first offending variant. Iterates via
+    /// [`PerAttemptRegion::ALL`] so a future variant addition
+    /// automatically extends the pin's coverage.
+    #[test]
+    fn test_per_attempt_region_is_in_schedule_complements_is_out_of_schedule() {
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                region.is_in_schedule(),
+                !region.is_out_of_schedule(),
+                "is_in_schedule() must be the De Morgan complement of is_out_of_schedule() at {region:?}"
+            );
+        }
+    }
+
+    /// [`PerAttemptRegion::is_in_schedule`] agrees with the three-variant
+    /// `matches!(*region, First | Interim | Final)` disjunction at every
+    /// [`PerAttemptRegion::ALL`] variant — the structural-shape pin that
+    /// refuses a body drift onto a different variant set. A regression
+    /// that promoted the body to `First | Interim | Final | OverBudget`
+    /// (silently sweeping the past-budget bug/replay into the live
+    /// class), narrowed it to `First | Final` (dropping the mid-schedule
+    /// live retry), or reshaped it to any other variant set still passes
+    /// the variant-anchor test only when the drift happens to land back
+    /// on the same variant set; this pin refuses any variant-set desync
+    /// across every variant iteration.
+    #[test]
+    fn test_per_attempt_region_is_in_schedule_agrees_with_matches_first_or_interim_or_final() {
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                region.is_in_schedule(),
+                matches!(
+                    region,
+                    PerAttemptRegion::First | PerAttemptRegion::Interim | PerAttemptRegion::Final
+                ),
+                "is_in_schedule() must read the (First | Interim | Final) disjunction at {region:?}"
+            );
+        }
+    }
+
+    /// [`RetryPolicy::per_attempt_region`] projected through
+    /// [`PerAttemptRegion::is_in_schedule`] reads `true` exactly when
+    /// the attempt index lies inside the closed inclusive range
+    /// `[1, effective_max_attempts()]` — the range the retry loop's
+    /// counter actually traverses. Grounding pin that bridges the
+    /// sum-surface in-schedule reading to the closed-inclusive range on
+    /// the numeric axis AND to the negated STRICT-boundary boolean
+    /// disjunction (`!(is_before_first_attempt || is_over_budget)`) at
+    /// every `(policy, attempt)`. A future regression that broke the
+    /// projection's live-attempt classification OR broke `is_in_schedule`
+    /// at the sum surface lights up here at the first offending
+    /// attempt-index. Cross-product of the canonical-factory set ×
+    /// attempt-index grid, including the degenerate `max_attempts: 0`
+    /// hand-built field-literal shape.
+    #[test]
+    fn test_retry_policy_per_attempt_region_is_in_schedule_iff_closed_inclusive_range() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        let attempts = [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX];
+        for p in &policies {
+            let m = p.effective_max_attempts();
+            for attempt in attempts {
+                let in_schedule = p.per_attempt_region(attempt).is_in_schedule();
+                let negated_strict_boundary =
+                    !(p.is_before_first_attempt(attempt) || p.is_over_budget(attempt));
+                assert_eq!(
+                    in_schedule, negated_strict_boundary,
+                    "is_in_schedule() at the sum surface must match the negated STRICT-boundary \
+                     boolean disjunction (!(is_before_first_attempt || is_over_budget)): \
+                     policy = {p:?}, attempt = {attempt}, effective_max_attempts = {m}"
+                );
+                assert_eq!(
+                    in_schedule,
+                    (1..=m).contains(&attempt),
+                    "is_in_schedule() must match the closed-inclusive range membership \
+                     (1 <= attempt <= effective_max_attempts): \
+                     policy = {p:?}, attempt = {attempt}, effective_max_attempts = {m}"
+                );
+            }
         }
     }
 
