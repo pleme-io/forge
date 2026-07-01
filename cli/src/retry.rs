@@ -1266,6 +1266,165 @@ impl RetryPolicy {
         }
     }
 
+    /// The number of BUDGET SLOTS this policy has REMAINING at the given
+    /// 1-indexed `attempt` INCLUSIVE — i.e., the current attempt itself
+    /// plus every attempt still to come under the clamped budget, read as
+    /// a `u32` at every attempt-index in the retry-loop's 1-indexed
+    /// convention. The per-attempt-axis CEILING NUMERIC INCLUSIVE peer of
+    /// the CEILING NUMERIC EXCLUSIVE
+    /// [`attempts_remaining`](Self::attempts_remaining) reading — closes
+    /// the inclusive/exclusive ceiling-numeric peer pair at the same
+    /// per-attempt grain, and closes the full 2×2 numeric quadrant grid
+    /// (FLOOR/CEILING × EXCLUSIVE/INCLUSIVE) the numeric axis at the
+    /// per-attempt surface exposes.
+    ///
+    /// # The per-attempt-axis 2×2 numeric quadrant closure
+    ///
+    /// The per-attempt-axis numeric surface now spans:
+    ///
+    /// - the FLOOR NUMERIC EXCLUSIVE reading through
+    ///   [`attempts_completed_before`](Self::attempts_completed_before)
+    ///   ("how many attempts have been consumed BEFORE this one?",
+    ///   clamp-INDEPENDENT);
+    /// - the FLOOR NUMERIC INCLUSIVE reading through
+    ///   [`attempts_used_through`](Self::attempts_used_through) ("how
+    ///   many budget slots have been consumed THROUGH this one
+    ///   inclusive?", clamp-DEPENDENT);
+    /// - the CEILING NUMERIC EXCLUSIVE reading through
+    ///   [`attempts_remaining`](Self::attempts_remaining) ("how many
+    ///   attempts remain AFTER this one?", clamp-DEPENDENT).
+    ///
+    /// `attempts_remaining_including` closes the CEILING NUMERIC
+    /// INCLUSIVE side: "how many budget slots remain FROM this one
+    /// forward, counting the current attempt itself?" — the numerator
+    /// "n − k + 1" reading a per-attempt progress emitter that says
+    /// "attempts remaining including this one" wants, distinct from the
+    /// AFTER-current [`attempts_remaining`] reading.
+    ///
+    /// # Dual conservation identity
+    ///
+    /// For every `attempt: u32` with `attempt <= effective_max_attempts() + 1`:
+    ///
+    /// ```text
+    /// attempts_completed_before(attempt)
+    ///   + attempts_remaining_including(attempt)
+    ///   == effective_max_attempts()
+    /// ```
+    ///
+    /// — the completed-before + remaining-including-current decomposition
+    /// of the clamped budget, the dual of the universal 2-term
+    /// `attempts_used_through(attempt) + attempts_remaining(attempt) ==
+    /// effective_max_attempts()` identity, pinned by
+    /// [`tests::test_retry_policy_attempts_remaining_including_dual_conservation`].
+    /// Unlike the FLOOR-INCLUSIVE + CEILING-EXCLUSIVE partition (which
+    /// holds universally because both terms saturate at the budget
+    /// boundary), the dual FLOOR-EXCLUSIVE + CEILING-INCLUSIVE partition
+    /// holds only up to `effective_max_attempts() + 1`: beyond that, the
+    /// clamp-INDEPENDENT floor exclusive `attempts_completed_before`
+    /// grows unboundedly while the clamp-DEPENDENT ceiling inclusive
+    /// saturates at `0`, so the sum overshoots the budget.
+    ///
+    /// # Relation to `attempts_remaining`
+    ///
+    /// The ceiling pair is related by `+1` under the clamp — for every
+    /// `attempt ∈ [1, effective_max_attempts()]`:
+    ///
+    /// ```text
+    /// attempts_remaining_including(attempt)
+    ///   == attempts_remaining(attempt) + 1
+    /// ```
+    ///
+    /// — pinned by
+    /// [`tests::test_retry_policy_attempts_remaining_including_is_remaining_plus_one_in_budget`].
+    /// The load-bearing bridge between the CEILING NUMERIC EXCLUSIVE and
+    /// CEILING NUMERIC INCLUSIVE readings inside the budget, mirroring
+    /// the FLOOR-side `+1` bridge
+    /// `attempts_used_through(attempt) == attempts_completed_before(attempt) + 1`
+    /// pinned by
+    /// [`tests::test_retry_policy_attempts_used_through_is_completed_before_plus_one_in_budget`].
+    /// Outside the budget the two ceiling readings diverge by the clamp
+    /// discipline: both saturate at `0`, but from different attempt-index
+    /// thresholds (`attempts_remaining` saturates one attempt earlier
+    /// because it counts strictly AFTER the current attempt).
+    ///
+    /// # Clamp-dependence discipline
+    ///
+    /// Like [`attempts_remaining`](Self::attempts_remaining),
+    /// [`attempts_used_through`](Self::attempts_used_through),
+    /// [`is_final_attempt`](Self::is_final_attempt), and
+    /// [`is_interim_attempt`](Self::is_interim_attempt) — and UNLIKE
+    /// [`attempts_completed_before`](Self::attempts_completed_before)
+    /// and [`is_first_attempt`](Self::is_first_attempt) — this reading
+    /// grounds through
+    /// [`effective_max_attempts`](Self::effective_max_attempts): the
+    /// count of budget slots remaining including the current attempt
+    /// saturates at `0` past the clamped budget's ceiling and at the
+    /// full budget at attempt `0` or `1`, matching the clamp-grounded
+    /// discipline the other ceiling peers apply.
+    ///
+    /// # Saturating-sub discipline
+    ///
+    /// The body reads
+    /// `self.effective_max_attempts().saturating_sub(self.attempts_completed_before(attempt))`
+    /// — grounding through both clamp-grounded primitives at once so any
+    /// future drift in either the clamped-budget definition or the
+    /// prior-attempts count propagates coherently. At `attempt == 0`
+    /// (pre-invocation) and `attempt == 1` (first attempt), reads
+    /// `effective_max_attempts()` (the full budget is still ahead
+    /// counting the current slot). At `attempt == effective_max_attempts()`
+    /// (last attempt), reads `1` (only the current slot remains). At
+    /// `attempt > effective_max_attempts()` (out-of-budget), saturates
+    /// at `0`. No underflow.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`attempts_used_through`](Self::attempts_used_through),
+    /// [`attempts_completed_before`](Self::attempts_completed_before),
+    /// [`attempts_remaining`](Self::attempts_remaining),
+    /// [`effective_max_attempts`](Self::effective_max_attempts),
+    /// [`is_first_attempt`](Self::is_first_attempt),
+    /// [`is_final_attempt`](Self::is_final_attempt),
+    /// [`is_interim_attempt`](Self::is_interim_attempt),
+    /// [`is_no_retry`](Self::is_no_retry), and
+    /// [`will_retry`](Self::will_retry) are: the reading is a pure
+    /// function of the receiver and the attempt argument, with no
+    /// allocation and no trait dispatch beyond the const-callable
+    /// [`effective_max_attempts`](Self::effective_max_attempts) and
+    /// [`attempts_completed_before`](Self::attempts_completed_before) it
+    /// grounds through, plus the const-stable `u32::saturating_sub`. A
+    /// const-context call shape (e.g., a
+    /// `const NETWORK_REMAIN_INCL_AT_FIRST: u32 =
+    /// RetryPolicy::network().attempts_remaining_including(1);` table at
+    /// a future telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the "attempts left
+    /// including current" count is named at one typed-primitive site
+    /// instead of retyped as the inline
+    /// `self.effective_max_attempts().saturating_sub(attempt.saturating_sub(1))`
+    /// or `self.attempts_remaining(attempt).saturating_add(1)` cascade
+    /// at every consumer site — a future per-attempt telemetry gauge
+    /// emitting "attempts left INCLUDING this one" against the total
+    /// budget (the numerator a user-visible "N attempts to go
+    /// (including this one)" progress prefix wants), a structured-
+    /// attestation surface recording the remaining-INCLUDING-current
+    /// count as a numeric provenance datum against the SLSA chain, a
+    /// warn-message enrichment at
+    /// [`log_retry_attempt`](crate::retry::log_retry_attempt) that
+    /// wants to surface the "N-attempts-left-including-this-one"
+    /// progress denominator distinct from the strictly-AFTER
+    /// [`attempts_remaining`](Self::attempts_remaining) reading — all
+    /// read through one named typed method rather than restating the
+    /// saturating-sub cascade against the budget. THEORY.md §V.4 typed
+    /// primitives: the reading is a typed-primitive surface on
+    /// `RetryPolicy` itself (one named const-fn method), not a
+    /// raw-budget-minus-prior-count shape restated at every consumer.
+    #[allow(dead_code)]
+    pub const fn attempts_remaining_including(&self, attempt: u32) -> u32 {
+        self.effective_max_attempts()
+            .saturating_sub(self.attempts_completed_before(attempt))
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -7919,6 +8078,234 @@ mod tests {
         assert_eq!(
             RetryPolicy::network_or_immediate(false).attempts_used_through(3),
             1
+        );
+    }
+
+    /// [`RetryPolicy::attempts_remaining_including`] reads
+    /// `effective_max_attempts().saturating_sub(attempts_completed_before(attempt))`
+    /// verbatim across every `attempt: u32` and every canonical schedule
+    /// / `max_attempts` shape — the raw-formula grid pin that lights up
+    /// any drift between the primitive's body and its documented
+    /// definition (an off-by-one in the ceiling INCLUSIVE side, a
+    /// promotion of the exclusive floor reading it grounds through, a
+    /// stale delegation to a different saturating operator).
+    #[test]
+    fn test_retry_policy_attempts_remaining_including_reads_budget_minus_completed_before() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                let cap = p.effective_max_attempts();
+                for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+                    let expected = cap.saturating_sub(attempt.saturating_sub(1));
+                    assert_eq!(
+                        p.attempts_remaining_including(attempt),
+                        expected,
+                        "attempts_remaining_including must equal \
+                         effective_max_attempts.saturating_sub(attempt.saturating_sub(1)): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, cap = {cap}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// Dual conservation-of-attempts identity for every
+    /// `attempt ∈ [0, effective_max_attempts() + 1]`:
+    ///
+    /// `attempts_completed_before(attempt) + attempts_remaining_including(attempt)
+    ///  == effective_max_attempts()`
+    ///
+    /// — the completed-before + remaining-including-current
+    /// decomposition of the clamped budget, the dual of the universal
+    /// 2-term
+    /// `attempts_used_through(attempt) + attempts_remaining(attempt) ==
+    /// effective_max_attempts()` identity pinned at
+    /// [`test_retry_policy_attempts_used_through_conservation_universal`].
+    /// Unlike the FLOOR-INCLUSIVE + CEILING-EXCLUSIVE partition (which
+    /// holds universally because both terms saturate at the budget
+    /// boundary), the dual FLOOR-EXCLUSIVE + CEILING-INCLUSIVE partition
+    /// holds only up to `effective_max_attempts() + 1`: beyond that, the
+    /// clamp-INDEPENDENT floor exclusive `attempts_completed_before`
+    /// grows unboundedly while the clamp-DEPENDENT ceiling inclusive
+    /// saturates at `0`, so the sum overshoots the budget. Pinning the
+    /// boundary explicitly locks the dual partition's exact domain-of-
+    /// validity against any future drift.
+    #[test]
+    fn test_retry_policy_attempts_remaining_including_dual_conservation() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                let budget = p.effective_max_attempts();
+                for attempt in 0..=(budget + 1) {
+                    assert_eq!(
+                        p.attempts_completed_before(attempt)
+                            + p.attempts_remaining_including(attempt),
+                        budget,
+                        "attempts_completed_before + attempts_remaining_including must equal \
+                         effective_max_attempts on [0, effective_max_attempts() + 1]: \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The ceiling pair is related by `+1` under the clamp — for every
+    /// `attempt ∈ [1, effective_max_attempts()]`:
+    ///
+    /// `attempts_remaining_including(attempt)
+    ///   == attempts_remaining(attempt) + 1`
+    ///
+    /// — the load-bearing bridge between the CEILING NUMERIC EXCLUSIVE
+    /// and CEILING NUMERIC INCLUSIVE readings inside the budget,
+    /// mirroring the FLOOR-side `+1` bridge
+    /// `attempts_used_through(attempt) == attempts_completed_before(attempt) + 1`
+    /// pinned by
+    /// [`test_retry_policy_attempts_used_through_is_completed_before_plus_one_in_budget`].
+    /// Outside the budget the two ceiling readings diverge by the clamp
+    /// discipline: both saturate at `0`, but from different attempt-
+    /// index thresholds. A future regression that desynced the two
+    /// ceiling readings inside the budget (e.g., dropped the `+ 1`
+    /// inclusion, silently demoted the inclusive ceiling to exclude the
+    /// current attempt) lights up this test.
+    #[test]
+    fn test_retry_policy_attempts_remaining_including_is_remaining_plus_one_in_budget() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                let budget = p.effective_max_attempts();
+                for attempt in 1..=budget {
+                    assert_eq!(
+                        p.attempts_remaining_including(attempt),
+                        p.attempts_remaining(attempt) + 1,
+                        "attempts_remaining_including(attempt) must equal \
+                         attempts_remaining(attempt) + 1 in-budget: \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::attempts_remaining_including`] saturates at `0`
+    /// for any `attempt > effective_max_attempts()`. Pins the clamp
+    /// discipline at the boundary: the [`run_with_policy`] loop cannot
+    /// produce an out-of-budget `attempt` (it short-circuits on
+    /// [`RetryPolicy::is_final_attempt`]), but a hand-built consumer (a
+    /// telemetry gauge fed a raw counter, a diagnostic that reads an
+    /// already-exhausted policy's projected slots-left at some
+    /// hypothetical future attempt) can, and the reading must remain
+    /// bounded at `0` rather than underflowing. Mirrors the ceiling-
+    /// exclusive [`test_retry_policy_attempts_remaining_saturates_out_of_budget`]
+    /// pin (which pins the CEILING EXCLUSIVE saturating at `0` at the
+    /// same threshold — but a distinct saturating operator: the
+    /// exclusive ceiling reads `cap.saturating_sub(attempt)` while the
+    /// inclusive ceiling reads
+    /// `cap.saturating_sub(attempt.saturating_sub(1))`, so drift in
+    /// either would break exactly one of the two pins).
+    #[test]
+    fn test_retry_policy_attempts_remaining_including_saturates_out_of_budget() {
+        for max_attempts in [1u32, 2, 3, 5, 10] {
+            let p = RetryPolicy::network_with_max_attempts(max_attempts);
+            let cap = p.effective_max_attempts();
+            for over in [2u32, 3, 5, 100, u32::MAX - cap] {
+                let attempt = cap.saturating_add(over);
+                assert_eq!(
+                    p.attempts_remaining_including(attempt),
+                    0,
+                    "attempts_remaining_including must saturate at 0 for \
+                     attempt > effective_max_attempts() + 1: max_attempts = {max_attempts}, \
+                     attempt = {attempt}, cap = {cap}"
+                );
+            }
+        }
+    }
+
+    /// Per-attempt CEILING INCLUSIVE budget-remaining discrimination
+    /// across every canonical factory: `immediate()` (cap=1) reads 1 →
+    /// 1 → 0 across attempts 0 → 1 → 2 (the current attempt slot at
+    /// attempt=1 saturating at 0 past the cap); `network()` (cap=5)
+    /// counts down 5 → 5 → 4 → 3 → 2 → 1 across attempts 0..=5 and
+    /// saturates at 0 past the cap; `network_with_max_attempts(3)`
+    /// counts down 3 → 3 → 2 → 1; `network_or_immediate(true)` matches
+    /// `network()` and `network_or_immediate(false)` matches
+    /// `immediate()`. Pins the per-factory numeric slots-left-including-
+    /// current accounting, mirroring the
+    /// [`test_retry_policy_attempts_used_through_discriminates_canonical_factories`]
+    /// pin at the FLOOR INCLUSIVE and the
+    /// [`test_retry_policy_attempts_remaining_discriminates_canonical_factories`]
+    /// pin at the CEILING EXCLUSIVE.
+    #[test]
+    fn test_retry_policy_attempts_remaining_including_discriminates_canonical_factories() {
+        assert_eq!(RetryPolicy::immediate().attempts_remaining_including(0), 1);
+        assert_eq!(RetryPolicy::immediate().attempts_remaining_including(1), 1);
+        assert_eq!(RetryPolicy::immediate().attempts_remaining_including(2), 0);
+
+        assert_eq!(RetryPolicy::network().attempts_remaining_including(0), 5);
+        assert_eq!(RetryPolicy::network().attempts_remaining_including(1), 5);
+        assert_eq!(RetryPolicy::network().attempts_remaining_including(2), 4);
+        assert_eq!(RetryPolicy::network().attempts_remaining_including(3), 3);
+        assert_eq!(RetryPolicy::network().attempts_remaining_including(4), 2);
+        assert_eq!(RetryPolicy::network().attempts_remaining_including(5), 1);
+        assert_eq!(RetryPolicy::network().attempts_remaining_including(6), 0);
+
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(3).attempts_remaining_including(1),
+            3
+        );
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(3).attempts_remaining_including(2),
+            2
+        );
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(3).attempts_remaining_including(3),
+            1
+        );
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(3).attempts_remaining_including(4),
+            0
+        );
+
+        assert_eq!(
+            RetryPolicy::network_or_immediate(true).attempts_remaining_including(3),
+            3
+        );
+        assert_eq!(
+            RetryPolicy::network_or_immediate(false).attempts_remaining_including(3),
+            0
         );
     }
 
