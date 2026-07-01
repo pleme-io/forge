@@ -544,6 +544,109 @@ impl RetryPolicy {
         attempt >= max
     }
 
+    /// True iff the 1-indexed `attempt` is an INTERIM attempt under this
+    /// policy's budget — i.e., another attempt remains after this one,
+    /// equivalently `attempt < self.max_attempts.max(1)` under the same
+    /// clamp-to-≥1 discipline the retry-loop body at [`run_with_policy`]
+    /// applies. Named typed-method peer of the inline `attempt <
+    /// max_attempts` predicate the warn-only-while-budget-remains
+    /// dispatch at [`log_retry_attempt`] gates its `warn!` emission on.
+    ///
+    /// Defined as `!self.is_final_attempt(attempt)` — the named De Morgan
+    /// complement peer at the per-attempt retry-budget axis, closing the
+    /// binary partition the [`is_final_attempt`](Self::is_final_attempt)
+    /// predicate exposes and mirroring the
+    /// [`is_no_retry`](Self::is_no_retry) /
+    /// [`will_retry`](Self::will_retry) named-complement pair at the
+    /// policy-level retry-budget axis directly above. The two policy-
+    /// level predicates are special cases of the per-attempt pair at
+    /// `attempt = 1`: `policy.will_retry() == policy.is_interim_attempt(1)`
+    /// — pinned by
+    /// [`tests::test_retry_policy_will_retry_equals_is_interim_attempt_at_one`].
+    ///
+    /// # Why the named-complement peer
+    ///
+    /// Every binary partition the typed primitives at the retry
+    /// boundary surface previously exposed surfaces the named
+    /// complement as a peer typed method: the
+    /// [`CapturedFailure::is_transient`] /
+    /// [`CapturedFailure::is_terminal`] retry-dispatch pair, the
+    /// [`CommandAttemptFailure::is_spawn_failure`] /
+    /// [`CommandAttemptFailure::is_op_failure`] structural pair, the
+    /// [`CommandAttemptFailure::is_signal_killed`] /
+    /// [`CommandAttemptFailure::is_exited_normally`] three-way partition
+    /// closure at the call-site surface, and the
+    /// [`is_no_retry`](Self::is_no_retry) /
+    /// [`will_retry`](Self::will_retry) policy-level retry-budget pair
+    /// directly above. The per-attempt retry-budget axis at the retry-
+    /// policy surface now joins that idiom: any future consumer reading
+    /// the "budget-remaining" arm of the per-attempt partition (the
+    /// natural retry-policy peer of a final-vs-interim branch — the
+    /// warn-while-budget-remains dispatch at [`log_retry_attempt`], a
+    /// future per-attempt telemetry surface that emits a distinct
+    /// counter class for interim-attempt failures against final-
+    /// attempt failures, a future structured-attestation surface
+    /// recording "interim-attempt" provenance distinct from "final-
+    /// attempt-exhausted" against the SLSA chain, a future per-attempt
+    /// warn-message enrichment that inlines the "budget-remaining"
+    /// verdict in the attempt's warn wrapper) reads one named typed
+    /// method without re-typing the `attempt < policy.max_attempts.max(1)`
+    /// or `!policy.is_final_attempt(attempt)` cascade per consumer.
+    ///
+    /// # Equivalent to `!self.is_final_attempt(attempt)`
+    ///
+    /// The complement law `self.is_interim_attempt(a) ==
+    /// !self.is_final_attempt(a)` holds for every [`RetryPolicy`]
+    /// record and every `attempt` — pinned by
+    /// [`tests::test_retry_policy_is_interim_attempt_complements_is_final_attempt`].
+    /// A future regression that desynced the two predicates (e.g., one
+    /// promoting its threshold off `>=` without the other, one reading
+    /// a stale `initial_backoff.is_zero()` shortcut the other did not)
+    /// lights up that test.
+    ///
+    /// # Clamp-to-≥1 invariant
+    ///
+    /// The body reads through [`is_final_attempt`](Self::is_final_attempt)
+    /// so the same clamp discipline the retry-loop body at
+    /// [`run_with_policy`] applies (`let max =
+    /// policy.max_attempts.max(1);`) is preserved without restatement. A
+    /// hand-built `RetryPolicy { max_attempts: 0, .. }` (the degenerate
+    /// field-literal shape every factory constructor's clamping
+    /// discipline forecloses against) is treated as a no-retry policy
+    /// under this predicate — `is_interim_attempt(1)` returns `false` —
+    /// so a future consumer reading the per-attempt predicate cannot
+    /// silently classify a degenerate no-op policy's first attempt as
+    /// interim, matching the retry-loop body's short-circuit.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`is_final_attempt`](Self::is_final_attempt),
+    /// [`is_no_retry`](Self::is_no_retry), and
+    /// [`will_retry`](Self::will_retry) are: the predicate is a pure
+    /// function of the receiver and the attempt argument, delegating to
+    /// a const-fn peer. A const-context call shape (e.g., a `const
+    /// FIRST_IS_INTERIM: bool =
+    /// RetryPolicy::network().is_interim_attempt(1);` table at a future
+    /// telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-attempt "budget-
+    /// remaining" partition is named at one typed-primitive site
+    /// instead of retyped as the inline `attempt < self.max_attempts`
+    /// cascade at every consumer site that branches on the structural
+    /// state — [`log_retry_attempt`]'s warn-while-budget-remains
+    /// dispatch, and any future per-attempt diagnostic / telemetry /
+    /// attestation consumer at the retry boundary. THEORY.md §V.5
+    /// total-order discipline: the predicate reads the same `>=`
+    /// comparison on the derived [`u32::Ord`] instance that
+    /// [`is_final_attempt`](Self::is_final_attempt) reads, here
+    /// complemented at the typed-primitive surface with the clamp-to-≥1
+    /// invariant preserved by delegation.
+    #[allow(dead_code)]
+    pub const fn is_interim_attempt(&self, attempt: u32) -> bool {
+        !self.is_final_attempt(attempt)
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -6008,6 +6111,186 @@ mod tests {
                 observed, last_attempt,
                 "{p:?}: invocation count must equal the final attempt index"
             );
+        }
+    }
+
+    /// [`RetryPolicy::is_interim_attempt`] is the named De Morgan
+    /// complement of [`RetryPolicy::is_final_attempt`]:
+    /// `is_interim_attempt(attempt) == !is_final_attempt(attempt)` holds
+    /// for every [`RetryPolicy`] record and every 1-indexed attempt.
+    /// Structural-complement pin across the full `max_attempts` ×
+    /// `{ZERO, network}` schedule cross-product × attempt-count grid — a
+    /// future regression that desynced the two predicates (e.g., one
+    /// promoting its threshold off `>=` without the other, one reading
+    /// a stale `initial_backoff.is_zero()` shortcut the other did not,
+    /// a custom impl that drifted from the delegation) lights up this
+    /// test.
+    #[test]
+    fn test_retry_policy_is_interim_attempt_complements_is_final_attempt() {
+        let max_attempt_cases = [0u32, 1, 2, 5, 100, u32::MAX];
+        let attempt_cases = [1u32, 2, 3, 4, 5, 6, 100, u32::MAX];
+        for max_attempts in max_attempt_cases {
+            for schedule in [
+                (Duration::ZERO, 1, Duration::ZERO),
+                (Duration::from_millis(250), 2, Duration::from_secs(30)),
+            ] {
+                let (initial_backoff, factor, max_backoff) = schedule;
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in attempt_cases {
+                    assert_eq!(
+                        p.is_interim_attempt(attempt),
+                        !p.is_final_attempt(attempt),
+                        "is_interim_attempt must complement is_final_attempt: \
+                         max_attempts = {max_attempts}, attempt = {attempt}, schedule = {schedule:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_interim_attempt`] discriminates the per-attempt
+    /// "budget-remaining" partition across the canonical factory
+    /// constructors. The canonical [`RetryPolicy::network`] policy with
+    /// `max_attempts: 5` classifies attempts 1..=4 as interim and
+    /// 5..=u32::MAX as non-interim (final); every no-retry shape
+    /// ([`RetryPolicy::immediate`],
+    /// [`RetryPolicy::network_with_max_attempts(1)`],
+    /// [`RetryPolicy::network_or_immediate(false)`]) classifies attempt
+    /// 1 as non-interim; the degenerate `max_attempts: 0` hand-built
+    /// field-literal shape inherits the same clamp-to-≥1 discipline
+    /// [`is_final_attempt`](RetryPolicy::is_final_attempt) applies, so
+    /// attempt 1 is non-interim.
+    #[test]
+    fn test_retry_policy_is_interim_attempt_discriminates_canonical_factories() {
+        // network() retries — attempts 1..=4 are interim, 5..=∞ are non-interim.
+        let net = RetryPolicy::network();
+        for attempt in 1..=4 {
+            assert!(
+                net.is_interim_attempt(attempt),
+                "network() attempt {attempt} is interim (budget = 5)"
+            );
+        }
+        for attempt in [5u32, 6, 100, u32::MAX] {
+            assert!(
+                !net.is_interim_attempt(attempt),
+                "network() attempt {attempt} is not interim (>= budget = 5)"
+            );
+        }
+        // immediate() is no-retry — attempt 1 is not interim.
+        assert!(
+            !RetryPolicy::immediate().is_interim_attempt(1),
+            "immediate() attempt 1 is not interim (budget = 1)"
+        );
+        // network_with_max_attempts(1) is no-retry despite the network
+        // schedule — attempt 1 is not interim.
+        assert!(
+            !RetryPolicy::network_with_max_attempts(1).is_interim_attempt(1),
+            "network_with_max_attempts(1) attempt 1 is not interim"
+        );
+        // network_or_immediate(false) routes to immediate() — attempt 1 is not interim.
+        assert!(
+            !RetryPolicy::network_or_immediate(false).is_interim_attempt(1),
+            "network_or_immediate(false) attempt 1 is not interim"
+        );
+        // network_or_immediate(true) routes to network() — attempt 1 IS interim.
+        assert!(
+            RetryPolicy::network_or_immediate(true).is_interim_attempt(1),
+            "network_or_immediate(true) attempt 1 is interim (network budget = 5)"
+        );
+        // Degenerate hand-built max_attempts: 0 — clamp-to-≥1 makes
+        // attempt 1 non-interim (matches is_final_attempt's degenerate arm).
+        let degenerate = RetryPolicy {
+            max_attempts: 0,
+            initial_backoff: Duration::ZERO,
+            factor: 1,
+            max_backoff: Duration::ZERO,
+        };
+        assert!(
+            !degenerate.is_interim_attempt(1),
+            "max_attempts: 0 attempt 1 is not interim under clamp-to-≥1"
+        );
+    }
+
+    /// [`RetryPolicy::is_interim_attempt`] reduces to the policy-level
+    /// [`RetryPolicy::will_retry`] reading at `attempt = 1` — the per-
+    /// attempt "budget-remaining" predicate's behavior at the first
+    /// attempt names exactly the same retry-budget partition the
+    /// policy-level "will-retry" predicate names. Closes the algebraic
+    /// pair `is_final_attempt(1) == is_no_retry()` (pinned above) with
+    /// its named-complement peer `is_interim_attempt(1) == will_retry()`
+    /// across the full `max_attempts` × `{ZERO, network}` schedule
+    /// cross-product.
+    #[test]
+    fn test_retry_policy_will_retry_equals_is_interim_attempt_at_one() {
+        let cases = [0u32, 1, 2, 5, 100, u32::MAX];
+        for max_attempts in cases {
+            for schedule in [
+                (Duration::ZERO, 1, Duration::ZERO),
+                (Duration::from_millis(250), 2, Duration::from_secs(30)),
+            ] {
+                let (initial_backoff, factor, max_backoff) = schedule;
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                assert_eq!(
+                    p.is_interim_attempt(1),
+                    p.will_retry(),
+                    "is_interim_attempt(1) must equal will_retry(): \
+                     max_attempts = {max_attempts}, schedule = {schedule:?}"
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_interim_attempt`] is the structural witness for
+    /// the warn-only-while-budget-remains dispatch at
+    /// [`log_retry_attempt`]: the inline `attempt < max_attempts`
+    /// predicate the warn is gated on is the raw-field spelling of the
+    /// per-attempt "budget-remaining" partition the typed method names.
+    /// For every canonical factory and every attempt in the reachable
+    /// budget range, the typed-method reading and the
+    /// `attempt < max_attempts` raw-field reading agree; the typed
+    /// method additionally forecloses the degenerate `max_attempts: 0`
+    /// arm through the clamp-to-≥1 discipline (a hand-built
+    /// `max_attempts: 0` shape reads `attempt < 0 == false` at the raw-
+    /// field spelling and `is_interim_attempt(attempt) == false` at the
+    /// typed-method spelling — they agree on non-interim, but the
+    /// typed-method reading names the invariant load-bearingly at the
+    /// primitive surface). Pins the correspondence a future migration
+    /// of [`log_retry_attempt`] to route through the typed predicate
+    /// consumes.
+    #[test]
+    fn test_retry_policy_is_interim_attempt_matches_log_retry_attempt_predicate() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+        ];
+        for p in policies {
+            let max = p.max_attempts;
+            for attempt in [1u32, 2, 3, 4, 5, 6, 100] {
+                // At canonical factories max_attempts is always >= 1
+                // (clamped in the constructors), so the raw-field
+                // reading and the typed-method reading agree exactly.
+                assert_eq!(
+                    p.is_interim_attempt(attempt),
+                    attempt < max,
+                    "log_retry_attempt's `attempt < max_attempts` predicate must \
+                     equal is_interim_attempt(attempt) for canonical factories: \
+                     policy = {p:?}, attempt = {attempt}"
+                );
+            }
         }
     }
 
