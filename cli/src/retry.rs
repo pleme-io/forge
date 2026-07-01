@@ -132,7 +132,7 @@ pub struct RetryPolicy {
 /// per-attempt classification read the sum instead of restating the
 /// cascade.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PerAttemptRegion {
     /// STRICTLY before the FLOOR boundary — `attempt < 1` (equivalently,
     /// `attempt == 0`). The "pre-invocation counter reading" class: a
@@ -603,6 +603,149 @@ impl PerAttemptRegion {
     pub const fn is_in_schedule(&self) -> bool {
         !self.is_out_of_schedule()
     }
+
+    /// The bounded-ladder BOTTOM (⊥) on the per-attempt-axis order —
+    /// [`PerAttemptRegion::BeforeFirst`], the strictly-below-floor
+    /// STRICT-boundary diagnostic class, the leftmost variant of
+    /// [`PerAttemptRegion::ALL`] under the derived [`Ord`] chain
+    /// (`BeforeFirst < First < Interim < Final < OverBudget`). Named
+    /// typed-primitive peer of [`PerAttemptRegion::BeforeFirst`] at the
+    /// bounded-ladder surface, distinct from the variant-name surface:
+    /// where `PerAttemptRegion::BeforeFirst` reads the pre-invocation
+    /// counter semantic role, [`PerAttemptRegion::BOTTOM`] reads the
+    /// bounded-ladder anchor role — the global lower bound of the
+    /// per-attempt-axis Ord chain, the leftmost variant of the
+    /// [`PerAttemptRegion::ALL`] enumeration, the seed a downstream
+    /// per-attempt-axis min-fold consumes at ONE named oracle.
+    ///
+    /// # The bounded-ladder axiom pair
+    ///
+    /// - `BOTTOM <= v` at every [`PerAttemptRegion::ALL`] variant — the
+    ///   global-lower-bound law. Pinned by
+    ///   [`tests::test_per_attempt_region_bottom_le_every_variant`].
+    /// - `BOTTOM == *PerAttemptRegion::ALL.first().unwrap()` — the
+    ///   routing pin that ties the bounded-ladder anchor to the
+    ///   canonical-ladder-order enumeration surface. Pinned by
+    ///   [`tests::test_per_attempt_region_bottom_equals_all_first`].
+    ///
+    /// # Grounding through the sum-surface axes
+    ///
+    /// [`BOTTOM`](Self::BOTTOM) sits at the FLOOR-strict corner of the
+    /// 2×2 grid the schedule-axis / terminal-axis pair projects:
+    /// `is_out_of_schedule()` is TRUE (the strictly-below-floor STRICT
+    /// boundary is out-of-schedule) AND `is_pre_terminal()` is TRUE
+    /// (the retry loop MAY dispatch a follow-up — the counter has not
+    /// yet started). Pinned by
+    /// [`tests::test_per_attempt_region_bottom_out_of_schedule_and_pre_terminal`].
+    ///
+    /// # Why a named const, not the variant
+    ///
+    /// The const reads `Self::BeforeFirst` and at the present five-variant
+    /// enumeration the two coincide. The named [`BOTTOM`](Self::BOTTOM)
+    /// const carries the bounded-ladder anchor semantic role distinct
+    /// from the variant-name surface: a downstream consumer reading
+    /// `PerAttemptRegion::BOTTOM` reads "the per-attempt-axis floor —
+    /// the seed a per-attempt-axis min-fold consumes at, the leftmost
+    /// class in the derived Ord chain" at the call site, where the same
+    /// consumer reading `PerAttemptRegion::BeforeFirst` reads the
+    /// pre-invocation counter semantic role (the strictly-below-floor
+    /// STRICT boundary at the numeric axis, `attempt < 1`). The two
+    /// surfaces overlap at the present ladder but diverge under
+    /// refinement: a future variant inserted strictly below
+    /// `BeforeFirst` (e.g., a hypothetical `NeverInvoked` variant
+    /// distinct from `BeforeFirst`'s "counter at zero" reading) would
+    /// shift the bounded-ladder floor — [`BOTTOM`](Self::BOTTOM) updates
+    /// at this one site, every consumer of "the per-attempt-axis
+    /// min-fold seed" automatically picks up the new floor. Same
+    /// one-oracle discipline [`crate::version::BumpLevel::BOTTOM`]
+    /// (commit 7f561de) and
+    /// [`crate::probe_outcome::AdmissionTier::BOTTOM`] (commit fbf3ae5)
+    /// established at their respective ladders, here applied to the
+    /// per-attempt-axis projection surface.
+    ///
+    /// THEORY.md §II Language — typed primitives own boundary
+    /// classification; the per-attempt-axis floor anchor is a
+    /// typed-primitive surface on [`PerAttemptRegion`] itself (one
+    /// named const), not the variant name re-aliased at every min-fold
+    /// seed / lower-bound reader consumer site. THEORY.md §V.5
+    /// total-order discipline — [`BOTTOM`](Self::BOTTOM) is the global
+    /// lower bound of the derived [`Ord`] chain, the structural anchor
+    /// a downstream `<= BOTTOM` / `>= BOTTOM` reader consumes through
+    /// one named oracle. THEORY.md §VI.1 one-oracle — the per-attempt-
+    /// axis floor semantic role is named at one site (this const), so
+    /// a future ladder refinement that shifts the floor updates one
+    /// site, not every min-fold seed / lower-bound reader consumer.
+    #[allow(dead_code)]
+    pub const BOTTOM: Self = Self::BeforeFirst;
+
+    /// The bounded-ladder TOP (⊤) on the per-attempt-axis order —
+    /// [`PerAttemptRegion::OverBudget`], the strictly-past-ceiling
+    /// STRICT-boundary diagnostic class, the rightmost variant of
+    /// [`PerAttemptRegion::ALL`] under the derived [`Ord`] chain
+    /// (`BeforeFirst < First < Interim < Final < OverBudget`). Named
+    /// typed-primitive peer of [`PerAttemptRegion::OverBudget`] at the
+    /// bounded-ladder surface, distinct from the variant-name surface:
+    /// where `PerAttemptRegion::OverBudget` reads the past-budget
+    /// caller-bug / telemetry-replay semantic role,
+    /// [`PerAttemptRegion::TOP`] reads the bounded-ladder anchor role
+    /// — the global upper bound of the per-attempt-axis Ord chain, the
+    /// rightmost variant of the [`PerAttemptRegion::ALL`] enumeration,
+    /// the seed a downstream per-attempt-axis max-fold consumes at
+    /// ONE named oracle. Mirror const of [`BOTTOM`](Self::BOTTOM),
+    /// closing the bounded-ladder anchor pair at the typed-primitive
+    /// surface.
+    ///
+    /// # The bounded-ladder axiom pair (top dual)
+    ///
+    /// - `v <= TOP` at every [`PerAttemptRegion::ALL`] variant — the
+    ///   global-upper-bound law. Pinned by
+    ///   [`tests::test_per_attempt_region_top_ge_every_variant`].
+    /// - `TOP == *PerAttemptRegion::ALL.last().unwrap()` — the routing
+    ///   pin that ties the bounded-ladder anchor to the canonical-
+    ///   ladder-order enumeration surface. Pinned by
+    ///   [`tests::test_per_attempt_region_top_equals_all_last`].
+    ///
+    /// # Grounding through the sum-surface axes
+    ///
+    /// [`TOP`](Self::TOP) sits at the CEILING-strict corner of the 2×2
+    /// grid the schedule-axis / terminal-axis pair projects:
+    /// `is_out_of_schedule()` is TRUE (the strictly-past-ceiling STRICT
+    /// boundary is out-of-schedule) AND `is_terminal()` is TRUE (the
+    /// retry loop MUST NOT dispatch a follow-up — the budget is
+    /// exhausted). Pinned by
+    /// [`tests::test_per_attempt_region_top_out_of_schedule_and_terminal`].
+    /// The pair [`BOTTOM`](Self::BOTTOM) / [`TOP`](Self::TOP) is thus
+    /// the two-anchor witness of the schedule-axis STRICT-boundary
+    /// disjunction — [`is_out_of_schedule`](Self::is_out_of_schedule)
+    /// reads `matches!(*self, BOTTOM | TOP)` at ONE named oracle pair
+    /// (structurally, though the body still reads
+    /// `BeforeFirst | OverBudget` for locality with the sum surface).
+    ///
+    /// # Together with [`BOTTOM`](Self::BOTTOM)
+    ///
+    /// The pair [`BOTTOM`](Self::BOTTOM) / [`TOP`](Self::TOP) names the
+    /// closed per-attempt-axis interval `[BOTTOM, TOP]` that contains
+    /// every variant — pinned by
+    /// [`tests::test_per_attempt_region_bottom_lt_top`] (non-degeneracy)
+    /// and the per-variant pins above (lower / upper bound). A
+    /// downstream consumer that needs the global bounds of the
+    /// per-attempt-axis reads
+    /// `PerAttemptRegion::BOTTOM..=PerAttemptRegion::TOP` once at one
+    /// named oracle pair, rather than restating the variant names at
+    /// every consumer site.
+    ///
+    /// THEORY.md §II Language — typed primitives own boundary
+    /// classification; the per-attempt-axis ceiling anchor is a
+    /// typed-primitive surface on [`PerAttemptRegion`] itself (one
+    /// named const). THEORY.md §V.5 total-order discipline —
+    /// [`TOP`](Self::TOP) is the global upper bound of the derived
+    /// [`Ord`] chain. THEORY.md §VI.1 one-oracle — the per-attempt-
+    /// axis ceiling semantic role is named at one site (this const),
+    /// so a future ladder refinement that shifts the ceiling updates
+    /// one site, not every max-fold seed / upper-bound reader
+    /// consumer.
+    #[allow(dead_code)]
+    pub const TOP: Self = Self::OverBudget;
 }
 
 impl RetryPolicy {
@@ -10342,6 +10485,151 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [`PerAttemptRegion::BOTTOM`] names the bounded-ladder floor at
+    /// [`PerAttemptRegion::BeforeFirst`] — the strictly-below-floor
+    /// STRICT-boundary diagnostic class, the leftmost variant of the
+    /// per-attempt-axis Ord chain. Exact-shape pin that forces a future
+    /// variant insertion strictly below `BeforeFirst` (e.g., a
+    /// hypothetical `NeverInvoked` distinct from the "counter at zero"
+    /// reading) to shift the bounded-ladder anchor at this one site.
+    #[test]
+    fn test_per_attempt_region_bottom_named_at_ladder_floor() {
+        assert_eq!(
+            PerAttemptRegion::BOTTOM,
+            PerAttemptRegion::BeforeFirst,
+            "PerAttemptRegion::BOTTOM must name the ladder floor variant"
+        );
+    }
+
+    /// [`PerAttemptRegion::TOP`] names the bounded-ladder ceiling at
+    /// [`PerAttemptRegion::OverBudget`] — the strictly-past-ceiling
+    /// STRICT-boundary diagnostic class, the rightmost variant of the
+    /// per-attempt-axis Ord chain. Exact-shape pin — the dual of
+    /// [`test_per_attempt_region_bottom_named_at_ladder_floor`] at the
+    /// ceiling.
+    #[test]
+    fn test_per_attempt_region_top_named_at_ladder_ceiling() {
+        assert_eq!(
+            PerAttemptRegion::TOP,
+            PerAttemptRegion::OverBudget,
+            "PerAttemptRegion::TOP must name the ladder ceiling variant"
+        );
+    }
+
+    /// [`PerAttemptRegion::BOTTOM`] equals the first element of
+    /// [`PerAttemptRegion::ALL`] — the routing pin that ties the
+    /// bounded-ladder anchor to the canonical-ladder-order enumeration
+    /// surface. A refactor that reordered `ALL` but forgot to shift
+    /// `BOTTOM` accordingly lights up here.
+    #[test]
+    fn test_per_attempt_region_bottom_equals_all_first() {
+        assert_eq!(
+            PerAttemptRegion::BOTTOM,
+            *PerAttemptRegion::ALL.first().unwrap(),
+            "PerAttemptRegion::BOTTOM must equal PerAttemptRegion::ALL.first()"
+        );
+    }
+
+    /// [`PerAttemptRegion::TOP`] equals the last element of
+    /// [`PerAttemptRegion::ALL`] — the routing pin that ties the
+    /// bounded-ladder anchor to the canonical-ladder-order enumeration
+    /// surface. Dual of
+    /// [`test_per_attempt_region_bottom_equals_all_first`] at the
+    /// ceiling.
+    #[test]
+    fn test_per_attempt_region_top_equals_all_last() {
+        assert_eq!(
+            PerAttemptRegion::TOP,
+            *PerAttemptRegion::ALL.last().unwrap(),
+            "PerAttemptRegion::TOP must equal PerAttemptRegion::ALL.last()"
+        );
+    }
+
+    /// [`PerAttemptRegion::BOTTOM`] is the global lower bound of the
+    /// derived [`Ord`] chain: `BOTTOM <= v` at every
+    /// [`PerAttemptRegion::ALL`] variant. The structural anchor of
+    /// "BOTTOM is the per-attempt-axis global lower bound." Iterates
+    /// through `ALL` so a future variant addition automatically extends
+    /// the pin's coverage.
+    #[test]
+    fn test_per_attempt_region_bottom_le_every_variant() {
+        for region in PerAttemptRegion::ALL {
+            assert!(
+                PerAttemptRegion::BOTTOM <= region,
+                "PerAttemptRegion::BOTTOM must be <= every variant, failed at {region:?}"
+            );
+        }
+    }
+
+    /// [`PerAttemptRegion::TOP`] is the global upper bound of the
+    /// derived [`Ord`] chain: `v <= TOP` at every
+    /// [`PerAttemptRegion::ALL`] variant. Dual of
+    /// [`test_per_attempt_region_bottom_le_every_variant`] at the
+    /// ceiling.
+    #[test]
+    fn test_per_attempt_region_top_ge_every_variant() {
+        for region in PerAttemptRegion::ALL {
+            assert!(
+                region <= PerAttemptRegion::TOP,
+                "PerAttemptRegion::TOP must be >= every variant, failed at {region:?}"
+            );
+        }
+    }
+
+    /// [`PerAttemptRegion::BOTTOM`] is strictly below
+    /// [`PerAttemptRegion::TOP`] — the non-degeneracy pin that refuses
+    /// a future collapse of the per-attempt-axis to a single-variant
+    /// degenerate ladder. The structural witness that the bounded-
+    /// ladder interval `[BOTTOM, TOP]` is non-empty / non-inverted.
+    #[test]
+    fn test_per_attempt_region_bottom_lt_top() {
+        assert!(
+            PerAttemptRegion::BOTTOM < PerAttemptRegion::TOP,
+            "PerAttemptRegion::BOTTOM must be strictly less than PerAttemptRegion::TOP"
+        );
+    }
+
+    /// [`PerAttemptRegion::BOTTOM`] sits at the FLOOR-strict corner of
+    /// the schedule-axis / terminal-axis 2×2 grid — it is
+    /// out-of-schedule (the strictly-below-floor STRICT boundary) AND
+    /// pre-terminal (the retry loop has not yet started, may still
+    /// dispatch a follow-up). Grounds the bounded-ladder floor anchor
+    /// through both sum-surface axes at ONE named pin.
+    #[test]
+    fn test_per_attempt_region_bottom_out_of_schedule_and_pre_terminal() {
+        assert!(
+            PerAttemptRegion::BOTTOM.is_out_of_schedule(),
+            "PerAttemptRegion::BOTTOM must be out-of-schedule (strictly-below-floor STRICT boundary)"
+        );
+        assert!(
+            PerAttemptRegion::BOTTOM.is_pre_terminal(),
+            "PerAttemptRegion::BOTTOM must be pre-terminal (retry loop has not yet started)"
+        );
+    }
+
+    /// [`PerAttemptRegion::TOP`] sits at the CEILING-strict corner of
+    /// the schedule-axis / terminal-axis 2×2 grid — it is
+    /// out-of-schedule (the strictly-past-ceiling STRICT boundary) AND
+    /// terminal (the retry loop MUST NOT dispatch a follow-up, budget
+    /// is exhausted). Grounds the bounded-ladder ceiling anchor
+    /// through both sum-surface axes at ONE named pin. Together with
+    /// [`test_per_attempt_region_bottom_out_of_schedule_and_pre_terminal`]
+    /// pins BOTH strict-boundary anchors of the schedule axis at the
+    /// bounded-ladder endpoints of the per-attempt-axis, and pins the
+    /// off-diagonal split on the terminal axis at those two anchors
+    /// (BOTTOM pre-terminal, TOP terminal).
+    #[test]
+    fn test_per_attempt_region_top_out_of_schedule_and_terminal() {
+        assert!(
+            PerAttemptRegion::TOP.is_out_of_schedule(),
+            "PerAttemptRegion::TOP must be out-of-schedule (strictly-past-ceiling STRICT boundary)"
+        );
+        assert!(
+            PerAttemptRegion::TOP.is_terminal(),
+            "PerAttemptRegion::TOP must be terminal (retry loop must not dispatch a follow-up)"
+        );
     }
 
     /// [`RetryPolicy::compute_delay`] returns `Duration::ZERO` exactly
