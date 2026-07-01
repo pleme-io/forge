@@ -1692,6 +1692,169 @@ impl RetryPolicy {
         attempt > self.effective_max_attempts()
     }
 
+    /// True iff the 1-indexed `attempt` is STRICTLY BEFORE this policy's
+    /// FLOOR boundary of `1` — i.e., `attempt < 1` (equivalently `attempt
+    /// == 0`), the "not-yet-started" per-attempt reading distinct from the
+    /// "at-or-not-yet-started" reading
+    /// [`is_first_attempt`](Self::is_first_attempt) captures. Named strict
+    /// FLOOR peer of the non-strict FLOOR anchor
+    /// [`is_first_attempt`](Self::is_first_attempt): the two together
+    /// decompose the FLOOR side of the per-attempt-axis into the 3-way
+    /// partition "before-boundary" / "at-boundary" / "past-boundary" that
+    /// a per-attempt consumer receiving an out-of-band `attempt` (a
+    /// telemetry replay of a pre-invocation state, a deserialized
+    /// counter reading, a bug in caller code) can classify without
+    /// restating the raw `attempt < 1` or `attempt == 0` cascade.
+    ///
+    /// The FLOOR-side mirror of the strict CEILING peer
+    /// [`is_over_budget`](Self::is_over_budget): both peers name the
+    /// "strictly past the boundary" reading distinct from the "at-or-past
+    /// the boundary" reading the non-strict anchor captures. Together they
+    /// close the per-attempt-axis BOOLEAN 3×2 grid at (FLOOR/CEILING ×
+    /// NON-STRICT/COMPLEMENT/STRICT), the full boundary-classification
+    /// surface the per-attempt-axis exposes.
+    ///
+    /// # 3-way FLOOR partition
+    ///
+    /// The two FLOOR predicates together classify every `attempt: u32`:
+    ///
+    /// |  Region         | Predicate reading                                       |
+    /// | --------------- | ------------------------------------------------------- |
+    /// | PAST boundary   | [`is_retry_attempt`](Self::is_retry_attempt) == true    |
+    /// | AT boundary     | `is_first_attempt(a) && !is_before_first_attempt(a)`    |
+    /// | BEFORE boundary | `is_before_first_attempt(a) == true` (⊂ `is_first_attempt(a)`) |
+    ///
+    /// [`is_first_attempt`](Self::is_first_attempt) fires on both AT and
+    /// BEFORE regions (its non-strict `<=` reading), whereas
+    /// `is_before_first_attempt` fires only on the BEFORE region (its
+    /// strict `<` reading). The distinction is load-bearing for a
+    /// per-attempt consumer that wants to distinguish "this is the first
+    /// legal call in the schedule" (a route to the first-call happy-path
+    /// telemetry class) from "this attempt index is a pre-invocation
+    /// counter reading, not a live call" (a route to a caller-bug or
+    /// telemetry-replay diagnostic class distinct from the at-first-call
+    /// class).
+    ///
+    /// # The per-attempt-axis BOOLEAN 3×2 grid closure
+    ///
+    /// The per-attempt-axis boolean surface now spans:
+    ///
+    /// |         | NON-STRICT (anchor)                     | COMPLEMENT (De Morgan)                | STRICT (⊂ anchor)                                    |
+    /// | ------- | --------------------------------------- | ------------------------------------- | ---------------------------------------------------- |
+    /// | FLOOR   | [`is_first_attempt`] (`a <= 1`)         | [`is_retry_attempt`] (`a > 1`)        | `is_before_first_attempt` (`a < 1`) ← new            |
+    /// | CEILING | [`is_final_attempt`] (`a >= budget`)    | [`is_interim_attempt`] (`a < budget`) | [`is_over_budget`] (`a > budget`)                    |
+    ///
+    /// Every consumer that previously would have retyped the inline
+    /// `attempt < 1` or `attempt == 0` cascade — a per-attempt telemetry
+    /// class emitting a "pre-invocation counter reading" label distinct
+    /// from the "at-first-call" label, a structured-attestation surface
+    /// recording the "not-yet-started" provenance datum against the SLSA
+    /// chain, a defensive pre-invocation guard that classifies out-of-band
+    /// attempt indices before they reach the retry loop, a caller-bug
+    /// diagnostic that discriminates the pre-invocation zero index from
+    /// the first-call one index — now reads one named typed method.
+    ///
+    /// # Strict subset of `is_first_attempt`
+    ///
+    /// The implication `is_before_first_attempt(a) ⇒ is_first_attempt(a)`
+    /// holds for every [`RetryPolicy`] record and every `attempt` —
+    /// pinned by
+    /// [`tests::test_retry_policy_is_before_first_attempt_implies_is_first_attempt`].
+    /// The FLOOR-side mirror of the CEILING-side strict-subset law
+    /// `is_over_budget(a) ⇒ is_final_attempt(a)`. A future regression
+    /// that broadened `is_before_first_attempt` to fire on `attempt <= 1`
+    /// (collapsing the 3-way FLOOR partition back to the 2-way
+    /// anchor/complement) or narrowed `is_first_attempt` to fire only on
+    /// `attempt == 1` (breaking the zero-delay short-circuit
+    /// [`compute_delay`](Self::compute_delay) reads through it) lights up
+    /// that test.
+    ///
+    /// # Boolean-numeric correspondence with `attempts_used_through`
+    ///
+    /// The strict FLOOR boolean reading `is_before_first_attempt(a)` is
+    /// equivalent to the FLOOR NUMERIC INCLUSIVE reading
+    /// `attempts_used_through(a) == 0`:
+    ///
+    /// ```text
+    /// self.is_before_first_attempt(a) == (self.attempts_used_through(a) == 0)
+    /// ```
+    ///
+    /// — pinned by
+    /// [`tests::test_retry_policy_is_before_first_attempt_iff_attempts_used_through_zero`].
+    /// The zero-slot reading at the FLOOR NUMERIC INCLUSIVE peer names
+    /// exactly the "before-the-boundary" reading at the FLOOR BOOLEAN
+    /// strict peer — the "no budget slot consumed even counting the
+    /// current one" dichotomy at both surfaces, mirroring the algebraic
+    /// bridge `is_over_budget(a) == (attempts_remaining_including(a) == 0)`
+    /// that ties the CEILING STRICT boolean reading to the CEILING NUMERIC
+    /// INCLUSIVE zero-slot reading. Both STRICT boolean peers correspond
+    /// to zero at the INCLUSIVE numeric peer of their side, closing the
+    /// strict-peer boolean-numeric correspondence at FLOOR and CEILING
+    /// alike.
+    ///
+    /// # Clamp-independence discipline
+    ///
+    /// Like [`is_first_attempt`](Self::is_first_attempt) and
+    /// [`is_retry_attempt`](Self::is_retry_attempt) — and UNLIKE the
+    /// clamp-DEPENDENT CEILING peers
+    /// [`is_final_attempt`](Self::is_final_attempt),
+    /// [`is_interim_attempt`](Self::is_interim_attempt), and
+    /// [`is_over_budget`](Self::is_over_budget) — this reading does not
+    /// depend on the policy's clamped budget: whether attempt `a` is
+    /// before the first attempt is determined entirely by `a < 1`,
+    /// independent of `max_attempts`. This pins the load-bearing
+    /// structural asymmetry that ALL THREE per-attempt-axis FLOOR boolean
+    /// peers (NON-STRICT/COMPLEMENT/STRICT) are clamp-INDEPENDENT while
+    /// ALL THREE per-attempt-axis CEILING boolean peers are
+    /// clamp-DEPENDENT, matching the same clamp-INDEPENDENT /
+    /// clamp-DEPENDENT asymmetry the numeric quadrant grid pins between
+    /// [`attempts_completed_before`](Self::attempts_completed_before)
+    /// (clamp-INDEPENDENT) and every other numeric peer (clamp-DEPENDENT).
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`is_first_attempt`](Self::is_first_attempt),
+    /// [`is_retry_attempt`](Self::is_retry_attempt),
+    /// [`is_final_attempt`](Self::is_final_attempt),
+    /// [`is_interim_attempt`](Self::is_interim_attempt), and
+    /// [`is_over_budget`](Self::is_over_budget) are: the predicate is a
+    /// pure function of the attempt argument, with no allocation and no
+    /// trait dispatch beyond the const-stable `u32::lt` comparison on the
+    /// derived [`u32::Ord`] instance. A const-context call shape (e.g., a
+    /// `const NETWORK_BEFORE_AT_ZERO: bool =
+    /// RetryPolicy::network().is_before_first_attempt(0);` table at a
+    /// future telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the "strictly-before-first-
+    /// attempt" reading is named at one typed-primitive site instead of
+    /// retyped as the inline `attempt < 1` or `attempt == 0` or
+    /// `self.attempts_used_through(attempt) == 0` cascade at every
+    /// consumer — a future per-attempt telemetry surface emitting a
+    /// "pre-invocation counter reading" class distinct from the
+    /// "at-first-call" class, a structured-attestation surface recording
+    /// the "not-yet-started" provenance class distinct from the "at-first-
+    /// slot" class, a defensive pre-invocation guard that skips the
+    /// `op(attempt)` call on out-of-band pre-invocation indices before
+    /// they reach the retry loop — all read one named typed method.
+    /// THEORY.md §V.5 total-order discipline: the predicate reads the
+    /// strict `<` comparison on the derived [`u32::Ord`] instance, the
+    /// strict-inequality peer of the non-strict `<=` comparison
+    /// [`is_first_attempt`](Self::is_first_attempt) reads, applied to the
+    /// same per-attempt axis with the clamp-INDEPENDENT discipline the
+    /// FLOOR peers apply.
+    ///
+    /// [`is_first_attempt`]: Self::is_first_attempt
+    /// [`is_retry_attempt`]: Self::is_retry_attempt
+    /// [`is_final_attempt`]: Self::is_final_attempt
+    /// [`is_interim_attempt`]: Self::is_interim_attempt
+    /// [`is_over_budget`]: Self::is_over_budget
+    #[allow(dead_code)]
+    pub const fn is_before_first_attempt(&self, attempt: u32) -> bool {
+        let _ = self;
+        attempt < 1
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -8322,6 +8485,248 @@ mod tests {
                 assert_eq!(
                     region_count, 1,
                     "3-way CEILING partition must be mutually exclusive and jointly \
+                     exhaustive: policy = {p:?}, attempt = {attempt}, \
+                     BEFORE = {before}, AT = {at}, PAST = {past}"
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_before_first_attempt`] reads the raw `attempt <
+    /// 1` predicate — `true` at every `attempt == 0` (the pre-invocation
+    /// counter reading), `false` at every `attempt >= 1`. Pinned across
+    /// the full `max_attempts × {ZERO, network}` schedule cross-product ×
+    /// attempt-count grid so a future regression that broadened the
+    /// reading to fire on `<=` (collapsing the 3-way FLOOR partition back
+    /// to the anchor peer
+    /// [`RetryPolicy::is_first_attempt`]) or coupled the predicate to the
+    /// clamped budget (misgrounding through
+    /// [`RetryPolicy::effective_max_attempts`] as the ceiling peers do)
+    /// lights up this test.
+    #[test]
+    fn test_retry_policy_is_before_first_attempt_reads_attempt_lt_one() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+                    assert_eq!(
+                        p.is_before_first_attempt(attempt),
+                        attempt < 1,
+                        "is_before_first_attempt must equal (attempt < 1): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_before_first_attempt`] is a STRICT subset of
+    /// [`RetryPolicy::is_first_attempt`] — every attempt classified as
+    /// before-first is also classified as first, but the converse fails
+    /// at exactly one attempt-index: `attempt == 1` (the AT-boundary case
+    /// that distinguishes the strict `<` peer from the non-strict `<=`
+    /// anchor). Cross-product of the full `max_attempts × {ZERO,
+    /// network}` schedule grid × attempt-count grid, with an explicit
+    /// AT-boundary assertion that the two predicates disagree at
+    /// `attempt == 1`. The FLOOR-side mirror of the CEILING-side
+    /// strict-subset test
+    /// [`test_retry_policy_is_over_budget_implies_is_final_attempt`]. A
+    /// future regression that collapsed the 3-way FLOOR partition back to
+    /// the 2-way anchor/complement grid — e.g., a refactor that promoted
+    /// the strict-before reading to a non-strict at-or-before reading —
+    /// lights up this test.
+    #[test]
+    fn test_retry_policy_is_before_first_attempt_implies_is_first_attempt() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+                    if p.is_before_first_attempt(attempt) {
+                        assert!(
+                            p.is_first_attempt(attempt),
+                            "is_before_first_attempt must imply is_first_attempt: \
+                             max_attempts = {max_attempts}, attempt = {attempt}, \
+                             schedule = {:?}",
+                            (initial_backoff, factor, max_backoff)
+                        );
+                    }
+                }
+                assert!(
+                    p.is_first_attempt(1),
+                    "AT-boundary attempt 1 must be first: max_attempts = {max_attempts}"
+                );
+                assert!(
+                    !p.is_before_first_attempt(1),
+                    "AT-boundary attempt 1 must NOT be before-first \
+                     (the strict `<` reading distinguishes AT from BEFORE): \
+                     max_attempts = {max_attempts}"
+                );
+                assert!(
+                    p.is_before_first_attempt(0),
+                    "BEFORE-boundary attempt 0 must be before-first: \
+                     max_attempts = {max_attempts}"
+                );
+                assert!(
+                    p.is_first_attempt(0),
+                    "BEFORE-boundary attempt 0 must also be first \
+                     (the non-strict `<=` reading fires on both AT and BEFORE): \
+                     max_attempts = {max_attempts}"
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_before_first_attempt`] fires exactly when
+    /// [`RetryPolicy::attempts_used_through`] reads zero — the algebraic
+    /// law tying the FLOOR BOOLEAN STRICT reading to the FLOOR NUMERIC
+    /// INCLUSIVE zero-slot reading. Cross-product of the full
+    /// `max_attempts × {ZERO, network}` schedule grid × attempt-count
+    /// grid — a future regression that desynced the boolean and numeric
+    /// FLOOR-strict peers (e.g., off-by-one in either primitive, or a
+    /// change to the clamped-budget saturation shape of `attempts_used_through`)
+    /// lights up this test. The FLOOR-side mirror of the CEILING-side
+    /// boolean-numeric correspondence law
+    /// [`test_retry_policy_is_over_budget_iff_attempts_remaining_including_zero`]
+    /// at the strict peer, closing the boolean-numeric correspondence at
+    /// both non-strict AND strict FLOOR peers.
+    #[test]
+    fn test_retry_policy_is_before_first_attempt_iff_attempts_used_through_zero() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX] {
+                    assert_eq!(
+                        p.is_before_first_attempt(attempt),
+                        p.attempts_used_through(attempt) == 0,
+                        "is_before_first_attempt must equal (attempts_used_through == 0): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_before_first_attempt`] is clamp-independent —
+    /// the reading at any given `attempt` is identical across every
+    /// canonical factory (`immediate()`, `network()`,
+    /// `network_with_max_attempts(n)` for `n ∈ {0, 1, 3, 7}`,
+    /// `network_or_immediate(true/false)`) and the degenerate hand-built
+    /// `max_attempts: 0` shape. Load-bearing peer of
+    /// [`test_retry_policy_is_first_attempt_independent_of_policy`] and
+    /// [`test_retry_policy_is_retry_attempt_independent_of_policy`]: pins
+    /// the structural asymmetry that ALL THREE per-attempt-axis FLOOR
+    /// boolean peers (NON-STRICT/COMPLEMENT/STRICT) are clamp-INDEPENDENT
+    /// while ALL THREE per-attempt-axis CEILING boolean peers are
+    /// clamp-DEPENDENT. A future regression that coupled the FLOOR STRICT
+    /// peer to the budget lights up on the disagreement between any two
+    /// policies.
+    #[test]
+    fn test_retry_policy_is_before_first_attempt_independent_of_policy() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+            let readings: Vec<bool> = policies
+                .iter()
+                .map(|p| p.is_before_first_attempt(attempt))
+                .collect();
+            let first = readings[0];
+            for (i, r) in readings.iter().enumerate() {
+                assert_eq!(
+                    *r, first,
+                    "is_before_first_attempt must be clamp-independent: attempt = {attempt}, \
+                     policies[0] reads {first}, policies[{i}] = {:?} reads {r}",
+                    policies[i]
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_before_first_attempt`] partitions the
+    /// per-attempt-axis FLOOR into three regions in cooperation with
+    /// [`RetryPolicy::is_first_attempt`] and
+    /// [`RetryPolicy::is_retry_attempt`]: every attempt is in EXACTLY
+    /// one of `BEFORE`, `AT`, or `PAST` boundary. The three regions are
+    /// mutually exclusive and jointly exhaustive at every `attempt: u32`
+    /// under every policy shape. The FLOOR-side mirror of
+    /// [`test_retry_policy_is_over_budget_partitions_ceiling_three_ways`].
+    /// A future regression that either admitted overlap (e.g.,
+    /// `is_before_first_attempt` firing on `<=` so AT and BEFORE both fire
+    /// together) or admitted a gap (e.g., `is_first_attempt` narrowed to
+    /// fire only on `==` so BEFORE falls through neither predicate class)
+    /// lights up this test — the load-bearing structural witness that the
+    /// strict FLOOR peer closes the 3-way partition cleanly.
+    #[test]
+    fn test_retry_policy_is_before_first_attempt_partitions_floor_three_ways() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        for p in policies {
+            for attempt in [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX] {
+                let before = p.is_before_first_attempt(attempt);
+                let at = p.is_first_attempt(attempt) && !p.is_before_first_attempt(attempt);
+                let past = p.is_retry_attempt(attempt);
+                let region_count = usize::from(before) + usize::from(at) + usize::from(past);
+                assert_eq!(
+                    region_count, 1,
+                    "3-way FLOOR partition must be mutually exclusive and jointly \
                      exhaustive: policy = {p:?}, attempt = {attempt}, \
                      BEFORE = {before}, AT = {at}, PAST = {past}"
                 );
