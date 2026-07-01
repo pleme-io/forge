@@ -973,6 +973,134 @@ impl RetryPolicy {
         attempt <= 1
     }
 
+    /// The number of ATTEMPTS this policy has BURNED before the given
+    /// 1-indexed `attempt` — i.e., `attempt.saturating_sub(1)`, the
+    /// prior-attempts count read as a `u32` at every attempt-index in
+    /// the retry-loop's 1-indexed convention. The per-attempt-axis
+    /// FLOOR NUMERIC peer of the CEILING NUMERIC
+    /// [`attempts_remaining`](Self::attempts_remaining) reading —
+    /// closes the numeric-peer pair at the same per-attempt grain the
+    /// boolean partition [`is_first_attempt`](Self::is_first_attempt) /
+    /// [`is_final_attempt`](Self::is_final_attempt) /
+    /// [`is_interim_attempt`](Self::is_interim_attempt) already spans.
+    ///
+    /// # The per-attempt-axis floor NUMERIC peer
+    ///
+    /// The per-attempt-axis previously named:
+    ///
+    /// - the CEILING BOOLEAN partition through
+    ///   [`is_final_attempt`](Self::is_final_attempt) /
+    ///   [`is_interim_attempt`](Self::is_interim_attempt) ("is
+    ///   `attempt >= max`? — is another attempt in budget?");
+    /// - the CEILING NUMERIC reading through
+    ///   [`attempts_remaining`](Self::attempts_remaining) ("how many
+    ///   attempts remain AFTER this one?");
+    /// - the FLOOR BOOLEAN reading through
+    ///   [`is_first_attempt`](Self::is_first_attempt) ("is this the
+    ///   opening attempt, before any retry has been consumed?").
+    ///
+    /// `attempts_completed_before` closes the FLOOR NUMERIC side: "how
+    /// many attempts have been consumed BEFORE this one?" — the
+    /// numeric peer of the floor boolean at the same axis, matching
+    /// the numeric/boolean peer idiom
+    /// [`attempts_remaining`](Self::attempts_remaining) already
+    /// established at the ceiling.
+    ///
+    /// # Zero iff first attempt
+    ///
+    /// `attempts_completed_before(attempt) == 0` exactly when
+    /// [`is_first_attempt`](Self::is_first_attempt) fires — the
+    /// algebraic law tying the numeric prior-count reading to the
+    /// boolean per-attempt "is-this-the-first-one?" partition, pinned
+    /// by
+    /// [`tests::test_retry_policy_attempts_completed_before_zero_iff_is_first_attempt`].
+    /// The floor-side peer of the
+    /// `attempts_remaining(attempt) == 0 iff is_final_attempt(attempt)`
+    /// law pinned at the ceiling.
+    ///
+    /// # Conservation-of-attempts identity
+    ///
+    /// For every `attempt ∈ [1, effective_max_attempts()]`:
+    ///
+    /// ```text
+    /// attempts_completed_before(attempt)
+    ///   + 1
+    ///   + attempts_remaining(attempt)
+    ///   == effective_max_attempts()
+    /// ```
+    ///
+    /// — the prior + current + remaining decomposition of the clamped
+    /// budget, pinned by
+    /// [`tests::test_retry_policy_attempts_completed_before_conservation_in_budget`].
+    /// A future regression that desynced any of the three primitives
+    /// (an off-by-one in the numeric floor, an off-by-one in the
+    /// numeric ceiling, a drift in the clamp discipline) lights up
+    /// this test.
+    ///
+    /// # Clamp-independence discipline
+    ///
+    /// Unlike [`attempts_remaining`](Self::attempts_remaining),
+    /// [`is_final_attempt`](Self::is_final_attempt), and
+    /// [`is_interim_attempt`](Self::is_interim_attempt), this reading
+    /// does NOT ground through
+    /// [`effective_max_attempts`](Self::effective_max_attempts) — the
+    /// prior-attempts count at any given `attempt` is `attempt - 1`
+    /// regardless of the clamped budget's ceiling, mirroring the
+    /// clamp-independence discipline
+    /// [`is_first_attempt`](Self::is_first_attempt) applies at the
+    /// floor BOOLEAN side. The load-bearing structural asymmetry: the
+    /// per-attempt-axis ceiling depends on the policy's budget; the
+    /// per-attempt-axis floor does not. Naming the reading at one
+    /// typed-primitive site pins that asymmetry as an explicit surface
+    /// distinct from the clamp-grounded ceiling peers.
+    ///
+    /// # Saturating-sub discipline
+    ///
+    /// The body reads `attempt.saturating_sub(1)` — a pre-invocation
+    /// `attempt == 0` counter reading (matches the shape
+    /// [`run_with_policy`]'s counter enters the loop body with, before
+    /// the `attempt += 1` increment) reads `0`, matching the
+    /// `is_first_attempt(0) == true` reading at the boolean peer. No
+    /// underflow.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`is_first_attempt`](Self::is_first_attempt),
+    /// [`is_final_attempt`](Self::is_final_attempt),
+    /// [`is_interim_attempt`](Self::is_interim_attempt),
+    /// [`attempts_remaining`](Self::attempts_remaining),
+    /// [`effective_max_attempts`](Self::effective_max_attempts),
+    /// [`is_no_retry`](Self::is_no_retry), and
+    /// [`will_retry`](Self::will_retry) are: the reading is a pure
+    /// function of the attempt argument, with no allocation and no
+    /// receiver-field access beyond the const-stable
+    /// `u32::saturating_sub`. A const-context call shape (e.g., a
+    /// `const FIRST_HAS_NO_PRIOR: u32 =
+    /// RetryPolicy::network().attempts_completed_before(1);` table at
+    /// a future telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the prior-attempts count
+    /// is named at one typed-primitive site instead of retyped as the
+    /// inline `attempt.saturating_sub(1)` cascade at every consumer
+    /// site — a future per-attempt telemetry counter emitting
+    /// "attempts consumed so far", a structured-attestation surface
+    /// recording the prior-attempt count as a numeric provenance
+    /// datum, a warn-message enrichment at
+    /// [`log_retry_attempt`](crate::retry::log_retry_attempt) that
+    /// wants to surface the burned-so-far count distinct from the
+    /// current 1-indexed attempt number — all read through one named
+    /// typed method rather than restating the raw subtraction against
+    /// the counter. THEORY.md §V.4 typed primitives: the reading is a
+    /// typed-primitive surface on `RetryPolicy` itself (one named
+    /// const-fn method), not a raw-counter-shape restated at every
+    /// consumer.
+    #[allow(dead_code)]
+    pub const fn attempts_completed_before(&self, attempt: u32) -> u32 {
+        let _ = self;
+        attempt.saturating_sub(1)
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -7189,6 +7317,219 @@ mod tests {
                  policy = {p:?}"
             );
         }
+    }
+
+    /// [`RetryPolicy::attempts_completed_before`] reads the raw
+    /// `attempt.saturating_sub(1)` predicate — `0` at `attempt ∈ {0, 1}`
+    /// (the pre-invocation counter reading and the first `op(attempt)`
+    /// call), `attempt - 1` at every `attempt >= 2`. Pinned across the
+    /// full `max_attempts × {ZERO, network}` schedule cross-product ×
+    /// attempt-count grid so a future regression that coupled the
+    /// prior-attempts count to the clamped budget (e.g., misgrounded
+    /// the reading through
+    /// [`RetryPolicy::effective_max_attempts`] as the ceiling numeric
+    /// peer does) lights up this test.
+    #[test]
+    fn test_retry_policy_attempts_completed_before_reads_attempt_saturating_sub_one() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+                    assert_eq!(
+                        p.attempts_completed_before(attempt),
+                        attempt.saturating_sub(1),
+                        "attempts_completed_before must equal attempt.saturating_sub(1): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::attempts_completed_before`] is clamp-independent
+    /// — the reading at any given `attempt` is identical across every
+    /// canonical factory (`immediate()`, `network()`,
+    /// `network_with_max_attempts(n)` for `n ∈ {0, 1, 3, 7}`,
+    /// `network_or_immediate(true/false)`) and the degenerate hand-
+    /// built `max_attempts: 0` shape. Load-bearing: pins the
+    /// structural asymmetry that the per-attempt-axis floor NUMERIC
+    /// does not depend on the clamped budget, mirroring the
+    /// clamp-independence discipline
+    /// [`RetryPolicy::is_first_attempt`] applies at the floor BOOLEAN
+    /// side and inverting the clamp-grounded discipline
+    /// [`RetryPolicy::attempts_remaining`] applies at the ceiling
+    /// NUMERIC side. A future regression that coupled the floor
+    /// NUMERIC to the budget lights up on the disagreement between
+    /// any two policies.
+    #[test]
+    fn test_retry_policy_attempts_completed_before_independent_of_policy() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+            let readings: Vec<u32> = policies
+                .iter()
+                .map(|p| p.attempts_completed_before(attempt))
+                .collect();
+            let first = readings[0];
+            for (i, r) in readings.iter().enumerate() {
+                assert_eq!(
+                    *r, first,
+                    "attempts_completed_before must be clamp-independent: attempt = {attempt}, \
+                     policies[0] reads {first}, policies[{i}] = {:?} reads {r}",
+                    policies[i]
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::attempts_completed_before`] returns `0` exactly
+    /// when [`RetryPolicy::is_first_attempt`] fires — the algebraic
+    /// law tying the numeric prior-count reading at the FLOOR to the
+    /// boolean per-attempt "is-this-the-first-one?" partition. The
+    /// floor-side peer of the
+    /// `attempts_remaining(attempt) == 0 iff is_final_attempt(attempt)`
+    /// law pinned at the ceiling. Cross-product of the full
+    /// `max_attempts × {ZERO, network}` schedule grid × attempt-count
+    /// grid — a future regression that desynced the numeric-floor
+    /// reading and the boolean-floor predicate (off-by-one, drift in
+    /// clamp discipline) lights up this test.
+    #[test]
+    fn test_retry_policy_attempts_completed_before_zero_iff_is_first_attempt() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX] {
+                    assert_eq!(
+                        p.attempts_completed_before(attempt) == 0,
+                        p.is_first_attempt(attempt),
+                        "attempts_completed_before(attempt) == 0 must equal \
+                         is_first_attempt(attempt): max_attempts = {max_attempts}, \
+                         attempt = {attempt}, schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// Conservation-of-attempts identity for every
+    /// `attempt ∈ [1, effective_max_attempts()]`:
+    ///
+    /// `attempts_completed_before(attempt) + 1 + attempts_remaining(attempt)
+    ///  == effective_max_attempts()`
+    ///
+    /// — the prior + current + remaining decomposition of the clamped
+    /// budget. Pinned across the full `max_attempts × {ZERO, network}`
+    /// schedule cross-product, iterating `attempt` over the in-budget
+    /// range `[1, effective_max_attempts()]` on each policy. A future
+    /// regression that desynced any of the three primitives (off-by-
+    /// one in the numeric floor, off-by-one in the numeric ceiling,
+    /// drift in the clamp discipline) lights up this test.
+    #[test]
+    fn test_retry_policy_attempts_completed_before_conservation_in_budget() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                let budget = p.effective_max_attempts();
+                for attempt in 1..=budget {
+                    assert_eq!(
+                        p.attempts_completed_before(attempt) + 1 + p.attempts_remaining(attempt),
+                        budget,
+                        "attempts_completed_before + 1 + attempts_remaining must equal \
+                         effective_max_attempts: max_attempts = {max_attempts}, \
+                         attempt = {attempt}, schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// Per-attempt numeric prior-count discrimination across every
+    /// canonical factory: `immediate()` reads 0 → 1 across attempts
+    /// 1..=2; `network()` (max=5) counts up 0 → 1 → 2 → 3 → 4 across
+    /// attempts 1..=5; `network_with_max_attempts(3)` counts up 0 → 1
+    /// → 2; `network_or_immediate(true)` matches `network()` and
+    /// `network_or_immediate(false)` matches `immediate()`. Pins the
+    /// numeric prior-count accounting the canonical factories expose,
+    /// mirroring the
+    /// [`test_retry_policy_attempts_remaining_discriminates_canonical_factories`]
+    /// pin at the ceiling numeric peer.
+    #[test]
+    fn test_retry_policy_attempts_completed_before_discriminates_canonical_factories() {
+        assert_eq!(RetryPolicy::immediate().attempts_completed_before(1), 0);
+        assert_eq!(RetryPolicy::immediate().attempts_completed_before(2), 1);
+
+        assert_eq!(RetryPolicy::network().attempts_completed_before(1), 0);
+        assert_eq!(RetryPolicy::network().attempts_completed_before(2), 1);
+        assert_eq!(RetryPolicy::network().attempts_completed_before(3), 2);
+        assert_eq!(RetryPolicy::network().attempts_completed_before(4), 3);
+        assert_eq!(RetryPolicy::network().attempts_completed_before(5), 4);
+
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(3).attempts_completed_before(1),
+            0
+        );
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(3).attempts_completed_before(2),
+            1
+        );
+        assert_eq!(
+            RetryPolicy::network_with_max_attempts(3).attempts_completed_before(3),
+            2
+        );
+
+        assert_eq!(
+            RetryPolicy::network_or_immediate(true).attempts_completed_before(1),
+            0
+        );
+        assert_eq!(
+            RetryPolicy::network_or_immediate(false).attempts_completed_before(2),
+            1
+        );
     }
 
     /// Success on the first call must not retry. `op` is invoked exactly
