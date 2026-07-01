@@ -747,6 +747,109 @@ impl PerAttemptRegion {
     #[allow(dead_code)]
     pub const TOP: Self = Self::OverBudget;
 
+    /// The canonical lowercase snake_case label for this
+    /// [`PerAttemptRegion`] variant. Fixed-shape named oracle for
+    /// telemetry / log / structured-attestation consumers that surface
+    /// the per-attempt-axis classification as a string, closing the
+    /// variant→label mapping at ONE named typed-primitive site instead
+    /// of restating the match at every downstream consumer.
+    ///
+    /// # The label-axis one-oracle
+    ///
+    /// A downstream consumer that renders the per-attempt-axis
+    /// classification as a string — a per-attempt telemetry counter
+    /// labelled by region (`retry_attempts_total{region="interim"}`),
+    /// a structured-attestation record carrying the region as a
+    /// `provenance.retry.region` field on the SLSA chain, a debug/CLI
+    /// pretty-print of the retry-loop state at a given attempt — reads
+    /// `region.as_str()` at ONE named site. Without this method the
+    /// consumer either restates the five-variant `match` at each site
+    /// (drift class: a typo `"interim"` vs. `"Interim"` slipping in at
+    /// one site out of many, silently re-classifying a downstream
+    /// aggregator's histogram bucket), or falls back to the Debug
+    /// impl's `"Interim"` / `"BeforeFirst"` UpperCamel form (drift
+    /// class: a structured-attestation surface consuming the UpperCamel
+    /// form breaks when the label-axis convention shifts to
+    /// snake_case for consistency with the sibling
+    /// [`crate::probe_outcome::AdmissionTier::as_str`] and
+    /// [`crate::version::BumpLevel::as_str`] surfaces).
+    ///
+    /// # Idiom lineage
+    ///
+    /// Sibling of [`crate::version::BumpLevel::as_str`] (canonical
+    /// `patch` / `minor` / `major` labels at the semver-magnitude
+    /// ladder) and [`crate::probe_outcome::AdmissionTier::as_str`]
+    /// (canonical `refused` / `staging_only` / `strict` labels at the
+    /// admission-tier ladder) — both label-axis oracles at the sibling
+    /// typed sums. This method completes the label-axis oracle at the
+    /// per-attempt-region ladder under the same lowercase snake_case
+    /// discipline, so a downstream telemetry / attestation / CLI
+    /// surface that reads the label-axis of any of the three
+    /// repo-internal ordered typed sums reads through one named
+    /// oracle at each surface.
+    ///
+    /// # Canonical labels
+    ///
+    /// The five variants render as:
+    /// * [`PerAttemptRegion::BeforeFirst`] → `"before_first"`
+    /// * [`PerAttemptRegion::First`] → `"first"`
+    /// * [`PerAttemptRegion::Interim`] → `"interim"`
+    /// * [`PerAttemptRegion::Final`] → `"final"`
+    /// * [`PerAttemptRegion::OverBudget`] → `"over_budget"`
+    ///
+    /// The labels track the variant names verbatim under the
+    /// `UpperCamel → snake_case` transform: two-word variants
+    /// (`BeforeFirst` → `"before_first"`, `OverBudget` → `"over_budget"`)
+    /// gain the underscore separator; one-word variants (`First`,
+    /// `Interim`, `Final`) lowercase in place. Pinned by
+    /// [`tests::test_per_attempt_region_as_str_canonical_strings`] at
+    /// the exact-shape surface and
+    /// [`tests::test_per_attempt_region_as_str_lowercase_snake_case`]
+    /// at the discipline surface (lowercase ASCII letters, digits, or
+    /// underscores only — no hyphens, no whitespace, no uppercase),
+    /// matching the same discipline
+    /// [`crate::probe_outcome::AdmissionTier::as_str`] pins at its
+    /// sibling surface. The mapping is injective across
+    /// [`PerAttemptRegion::ALL`] (no two variants share a label),
+    /// pinned by
+    /// [`tests::test_per_attempt_region_as_str_distinct`] — the
+    /// structural anchor that seals the bijection between the variant
+    /// axis and the label axis so a future variant insertion that
+    /// collided with an existing label (e.g., a `PostFinal` variant
+    /// mistakenly labelled `"final"`) would silently re-classify every
+    /// telemetry consumer that branched on the label; this test
+    /// surfaces the collision at the one source-of-truth site.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`crate::probe_outcome::AdmissionTier::as_str`] and
+    /// [`crate::version::BumpLevel::as_str`] are: the mapping is a
+    /// pure function of the receiver, with no allocation and no trait
+    /// dispatch. A const-context call shape (e.g., a `const
+    /// FIRST_LABEL: &str = PerAttemptRegion::First.as_str();` table
+    /// at a future telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §II Language — typed primitives own boundary
+    /// classification; the variant→label mapping is a typed-primitive
+    /// surface on [`PerAttemptRegion`] itself (one named method), not
+    /// the variant name re-aliased at every telemetry/log consumer
+    /// site. THEORY.md §VI.1 one-oracle / generation-over-composition:
+    /// the label-axis oracle is named at one site (this method's body),
+    /// so a downstream telemetry / attestation / CLI consumer reads
+    /// `region.as_str()` once and is automatically updated across a
+    /// future ladder refinement that renames or inserts a variant.
+    #[allow(dead_code)]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            PerAttemptRegion::BeforeFirst => "before_first",
+            PerAttemptRegion::First => "first",
+            PerAttemptRegion::Interim => "interim",
+            PerAttemptRegion::Final => "final",
+            PerAttemptRegion::OverBudget => "over_budget",
+        }
+    }
+
     /// The lattice join over the per-attempt-axis ladder — the
     /// [`PerAttemptRegion`] the most-advanced of `self` and `other` reads
     /// on the derived [`Ord`] chain
@@ -10780,6 +10883,82 @@ mod tests {
         assert!(
             PerAttemptRegion::BOTTOM < PerAttemptRegion::TOP,
             "PerAttemptRegion::BOTTOM must be strictly less than PerAttemptRegion::TOP"
+        );
+    }
+
+    /// Each [`PerAttemptRegion`] variant renders to its canonical
+    /// lowercase snake_case string under [`PerAttemptRegion::as_str`].
+    /// Fixed-shape pin at the label-axis oracle: a regression that
+    /// drifted any variant's label (a typo `"pre_first"` substituting
+    /// `"before_first"`, an UpperCamel `"BeforeFirst"` slipping in, or
+    /// the two-word variants losing their underscore separator to
+    /// `"beforefirst"` / `"overbudget"`) lights up here at exactly
+    /// one site, preventing the drift from leaking to every consumer
+    /// that surfaces the region as a string. Mirrors the discipline
+    /// [`crate::probe_outcome::AdmissionTier::as_str`] and
+    /// [`crate::version::BumpLevel::as_str`] pin at their sibling
+    /// typed sums.
+    #[test]
+    fn test_per_attempt_region_as_str_canonical_strings() {
+        assert_eq!(PerAttemptRegion::BeforeFirst.as_str(), "before_first");
+        assert_eq!(PerAttemptRegion::First.as_str(), "first");
+        assert_eq!(PerAttemptRegion::Interim.as_str(), "interim");
+        assert_eq!(PerAttemptRegion::Final.as_str(), "final");
+        assert_eq!(PerAttemptRegion::OverBudget.as_str(), "over_budget");
+    }
+
+    /// Every [`PerAttemptRegion`] variant's
+    /// [`as_str`](PerAttemptRegion::as_str) rendering is lowercase +
+    /// snake_case (lowercase ASCII letters, digits, or underscores
+    /// only — no hyphens, no whitespace, no uppercase). Matches the
+    /// discipline [`crate::version::BumpLevel::as_str`] and
+    /// [`crate::probe_outcome::AdmissionTier::as_str`] established at
+    /// the sibling typed sums, and the `serde(rename_all =
+    /// "snake_case")` convention the deploy orchestrator's typed-enum
+    /// YAML surfaces route through. Iterates
+    /// [`PerAttemptRegion::ALL`] so a future variant insertion
+    /// automatically inherits the discipline pin — a new variant
+    /// labelled `"final-plus-one"` (kebab-case) or `"FinalPlusOne"`
+    /// (UpperCamel) would light up here.
+    #[test]
+    fn test_per_attempt_region_as_str_lowercase_snake_case() {
+        for region in PerAttemptRegion::ALL {
+            let s = region.as_str();
+            assert!(!s.is_empty(), "as_str must not be empty at {region:?}");
+            assert!(
+                s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "as_str must be lowercase snake_case at {region:?} (got {s:?})",
+            );
+        }
+    }
+
+    /// Every [`PerAttemptRegion`] variant's
+    /// [`as_str`](PerAttemptRegion::as_str) rendering is distinct from
+    /// every other variant's — the variant→label mapping is injective
+    /// across [`PerAttemptRegion::ALL`]. Pairs with
+    /// [`test_per_attempt_region_as_str_canonical_strings`] (which pins
+    /// the canonical labels) to seal the bijection between the variant
+    /// axis and the label axis: a future variant insertion that
+    /// collided with an existing label (e.g., a `PostFinal` variant
+    /// mistakenly labelled `"final"`) would silently re-classify every
+    /// telemetry consumer that branched on the label — this test
+    /// surfaces the collision at the one source-of-truth site.
+    /// Mirrors [`test_admission_tier_as_str_distinct`] at the sibling
+    /// typed sum.
+    #[test]
+    fn test_per_attempt_region_as_str_distinct() {
+        let mut labels: Vec<&'static str> = PerAttemptRegion::ALL
+            .iter()
+            .map(PerAttemptRegion::as_str)
+            .collect();
+        let n = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(
+            labels.len(),
+            n,
+            "as_str must be injective across ALL — no two variants share a label",
         );
     }
 
