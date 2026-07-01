@@ -8734,6 +8734,192 @@ mod tests {
         }
     }
 
+    /// The per-attempt-axis BOOLEAN 3×2 grid at (FLOOR/CEILING ×
+    /// NON-STRICT/COMPLEMENT/STRICT) splits by ONE universal property:
+    /// every FLOOR boolean peer is a function of `attempt` alone
+    /// (clamp-INDEPENDENT — the reading agrees across every policy at
+    /// the same attempt); every CEILING boolean peer is a function of
+    /// `(attempt, effective_max_attempts)` alone (clamp-DEPENDENT — the
+    /// reading is determined by the clamped budget the CEILING peers
+    /// ground through). This test pins that split as ONE structural
+    /// property distinct from the per-side witness pair the per-
+    /// predicate `_independent_of_policy` / `_discriminates_canonical_
+    /// factories` tests already establish.
+    ///
+    /// # The FLOOR/CEILING clamp asymmetry
+    ///
+    /// The 3×2 grid of per-attempt-axis boolean peers closes at:
+    ///
+    /// ```text
+    /// |         | NON-STRICT               | COMPLEMENT             | STRICT (⊂ anchor)         |
+    /// | ------- | ------------------------ | ---------------------- | ------------------------- |
+    /// | FLOOR   | is_first_attempt (<= 1)  | is_retry_attempt (> 1) | is_before_first_attempt (< 1) |
+    /// | CEILING | is_final_attempt (>= m)  | is_interim_attempt (< m) | is_over_budget (> m)        |
+    /// ```
+    ///
+    /// where `m = self.effective_max_attempts()` — the clamped budget
+    /// [`RetryPolicy::effective_max_attempts`] names as the CEILING
+    /// axis's grounded primitive. The FLOOR peers compare `attempt`
+    /// against the fixed literal `1` (the retry-loop's 1-indexed first
+    /// attempt), whose reading does not depend on `max_attempts` at all;
+    /// the CEILING peers compare `attempt` against the clamped `m`,
+    /// whose reading is determined by `max_attempts` (through the clamp
+    /// to `>= 1`). The load-bearing structural asymmetry: the FLOOR
+    /// half of the grid ignores the receiver; the CEILING half grounds
+    /// through it.
+    ///
+    /// # Why the universal property is load-bearing
+    ///
+    /// The per-side clamp-independence-vs-dependence discipline was
+    /// pinned per predicate (`test_retry_policy_is_first_attempt_
+    /// independent_of_policy`, `test_retry_policy_is_retry_attempt_
+    /// independent_of_policy`, `test_retry_policy_is_before_first_
+    /// attempt_independent_of_policy` at the FLOOR side; `test_retry_
+    /// policy_is_final_attempt_discriminates_canonical_factories`,
+    /// `test_retry_policy_is_interim_attempt_discriminates_canonical_
+    /// factories`, `test_retry_policy_is_over_budget_discriminates_
+    /// canonical_factories` at the CEILING side). Each of those pins
+    /// the property at one witness — one predicate's reading. A future
+    /// regression that broke the FLOOR/CEILING split at a different
+    /// axis than any single witness catches (e.g., a refactor that
+    /// promoted every FLOOR peer to ground through
+    /// `effective_max_attempts` without updating any single witness's
+    /// clamp-independence test, or that promoted every CEILING peer to
+    /// read against the fixed literal without updating any single
+    /// witness's canonical-factory discrimination) would slip past every
+    /// per-side witness. This universal property test pins the split at
+    /// the level of the split itself, not at the level of any single
+    /// witness — the load-bearing regression barrier the per-witness
+    /// pairs cannot close alone.
+    ///
+    /// The universal property also names the FLOOR/CEILING split as
+    /// ONE typed reading a future consumer (a `PerAttemptRegion` enum
+    /// discriminated by both FLOOR and CEILING peers, a telemetry
+    /// emitter that reads the 3-way partition as one label, a
+    /// structured-attestation surface that classifies per-attempt
+    /// events by both axes) can rely on: the FLOOR half determines
+    /// the per-attempt phase without receiver context, the CEILING
+    /// half grounds through the clamped budget. Both halves are
+    /// necessary; the split is the load-bearing structural property.
+    ///
+    /// THEORY.md §II Language — typed primitives own boundary
+    /// classification; the split between "boundary against the fixed
+    /// first-attempt literal" and "boundary against the clamped budget"
+    /// is a named structural property on the `RetryPolicy` typed-
+    /// primitive surface, not a per-predicate coincidence to be
+    /// rediscovered at every downstream consumer. THEORY.md §VI.1
+    /// one-oracle discipline — the FLOOR/CEILING split is pinned at one
+    /// structural test rather than as a per-predicate coincidence
+    /// distributed across six independent witnesses.
+    #[test]
+    fn test_retry_policy_floor_ceiling_boolean_split_universal_property() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        let attempts = [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX];
+        for attempt in attempts {
+            // FLOOR half: every peer reads (attempt <op> 1) against the
+            // fixed first-attempt literal, so the reading is a pure
+            // function of `attempt` — every policy agrees.
+            let expected_first = attempt <= 1;
+            let expected_retry = attempt > 1;
+            let expected_before = attempt < 1;
+            for p in &policies {
+                assert_eq!(
+                    p.is_first_attempt(attempt),
+                    expected_first,
+                    "FLOOR NON-STRICT is_first_attempt must be clamp-INDEPENDENT: \
+                     attempt = {attempt}, policy = {p:?}, expected = {expected_first}"
+                );
+                assert_eq!(
+                    p.is_retry_attempt(attempt),
+                    expected_retry,
+                    "FLOOR COMPLEMENT is_retry_attempt must be clamp-INDEPENDENT: \
+                     attempt = {attempt}, policy = {p:?}, expected = {expected_retry}"
+                );
+                assert_eq!(
+                    p.is_before_first_attempt(attempt),
+                    expected_before,
+                    "FLOOR STRICT is_before_first_attempt must be clamp-INDEPENDENT: \
+                     attempt = {attempt}, policy = {p:?}, expected = {expected_before}"
+                );
+            }
+            // CEILING half: every peer grounds through
+            // `effective_max_attempts()`, so the reading is a pure
+            // function of `(attempt, effective_max_attempts)`. Two
+            // policies with the same clamped budget agree; two with
+            // different clamped budgets can differ.
+            for p in &policies {
+                let eff = p.effective_max_attempts();
+                assert_eq!(
+                    p.is_final_attempt(attempt),
+                    attempt >= eff,
+                    "CEILING NON-STRICT is_final_attempt must ground through \
+                     effective_max_attempts (clamp-DEPENDENT): attempt = {attempt}, \
+                     policy = {p:?}, effective_max_attempts = {eff}"
+                );
+                assert_eq!(
+                    p.is_interim_attempt(attempt),
+                    attempt < eff,
+                    "CEILING COMPLEMENT is_interim_attempt must ground through \
+                     effective_max_attempts (clamp-DEPENDENT): attempt = {attempt}, \
+                     policy = {p:?}, effective_max_attempts = {eff}"
+                );
+                assert_eq!(
+                    p.is_over_budget(attempt),
+                    attempt > eff,
+                    "CEILING STRICT is_over_budget must ground through \
+                     effective_max_attempts (clamp-DEPENDENT): attempt = {attempt}, \
+                     policy = {p:?}, effective_max_attempts = {eff}"
+                );
+            }
+        }
+        // Cross-policy CEILING equivalence: any two policies that share
+        // an `effective_max_attempts` produce identical CEILING readings
+        // at every attempt. The load-bearing witness that the CEILING
+        // reading is a function of the clamped-budget equivalence class,
+        // not of the raw `max_attempts` field.
+        for attempt in attempts {
+            for p1 in &policies {
+                for p2 in &policies {
+                    if p1.effective_max_attempts() == p2.effective_max_attempts() {
+                        assert_eq!(
+                            p1.is_final_attempt(attempt),
+                            p2.is_final_attempt(attempt),
+                            "CEILING peers must agree on same effective_max_attempts: \
+                             attempt = {attempt}, p1 = {p1:?}, p2 = {p2:?}"
+                        );
+                        assert_eq!(
+                            p1.is_interim_attempt(attempt),
+                            p2.is_interim_attempt(attempt),
+                            "CEILING peers must agree on same effective_max_attempts: \
+                             attempt = {attempt}, p1 = {p1:?}, p2 = {p2:?}"
+                        );
+                        assert_eq!(
+                            p1.is_over_budget(attempt),
+                            p2.is_over_budget(attempt),
+                            "CEILING peers must agree on same effective_max_attempts: \
+                             attempt = {attempt}, p1 = {p1:?}, p2 = {p2:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// [`RetryPolicy::compute_delay`] returns `Duration::ZERO` exactly
     /// when either
     /// [`RetryPolicy::is_first_attempt`] fires *or* the policy's
