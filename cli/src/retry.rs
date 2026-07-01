@@ -847,6 +847,132 @@ impl RetryPolicy {
         self.effective_max_attempts().saturating_sub(attempt)
     }
 
+    /// True iff the 1-indexed `attempt` is the FIRST attempt under this
+    /// policy's budget — i.e., `attempt <= 1`, the exact predicate the
+    /// [`compute_delay`](Self::compute_delay) body applies verbatim as its
+    /// zero-delay early-return guard. The per-attempt-axis FLOOR peer of
+    /// the CEILING reading the [`is_final_attempt`](Self::is_final_attempt)
+    /// / [`is_interim_attempt`](Self::is_interim_attempt) named-complement
+    /// pair anchors — the ladder-floor anchor at the per-attempt grain,
+    /// matching the ladder-floor/ceiling anchor idiom
+    /// [`BumpLevel::BOTTOM`](crate::version::BumpLevel::BOTTOM) /
+    /// [`BumpLevel::TOP`](crate::version::BumpLevel::TOP) and
+    /// [`AdmissionTier::BOTTOM`](crate::network_policy_admission::AdmissionTier::BOTTOM)
+    /// /
+    /// [`AdmissionTier::TOP`](crate::network_policy_admission::AdmissionTier::TOP)
+    /// established at the magnitude and tier ladders in commits 7f561de /
+    /// fbf3ae5.
+    ///
+    /// # The per-attempt-axis floor peer
+    ///
+    /// The per-attempt-axis previously named only the CEILING side of the
+    /// attempt-index range through the boolean partition
+    /// [`is_final_attempt`](Self::is_final_attempt) ("is `attempt >=
+    /// max`?") / [`is_interim_attempt`](Self::is_interim_attempt) ("is
+    /// there budget after `attempt`?"), plus the numeric
+    /// [`attempts_remaining`](Self::attempts_remaining) reading ("how many
+    /// remain after `attempt`?"). `is_first_attempt` names the FLOOR side:
+    /// "is this the opening attempt, before any retry has been consumed?"
+    /// — the peer that reads the other end of the attempt-index axis.
+    ///
+    /// Under the retry-loop `attempt` counter's 1-indexed convention (the
+    /// [`run_with_policy`] body increments the counter from `0` to `1`
+    /// before the first `op(attempt)` call), `is_first_attempt(1)` is
+    /// always `true` (the first attempt is always the first), and
+    /// `is_first_attempt(a)` for `a >= 2` is always `false` (any attempt
+    /// past 1 is a retry). `is_first_attempt(0)` returns `true` — the
+    /// pre-invocation counter reading — matching the same shape
+    /// [`compute_delay`](Self::compute_delay) admits at its early-return
+    /// guard.
+    ///
+    /// # The grounding call site
+    ///
+    /// [`compute_delay`](Self::compute_delay) reads `if attempt <= 1
+    /// { return Duration::ZERO; }` as its zero-delay early-return guard —
+    /// the verbatim shape this predicate names. The
+    /// [`compute_delay`](Self::compute_delay) body is refactored to route
+    /// that guard through `self.is_first_attempt(attempt)`, so the raw
+    /// `attempt <= 1` predicate is named at one typed-primitive site
+    /// rather than restated at the call site. Any future per-attempt
+    /// telemetry consumer that emits a "first-attempt-vs-retry" class
+    /// label distinct from the boolean is-final/is-interim class, a
+    /// future warn-message enrichment at [`log_retry_attempt`] that
+    /// wants to gate its "retrying attempt N" prefix on "this is not the
+    /// first call", a future structured-attestation surface that
+    /// records the "ran-under-retry" provenance class as the
+    /// complement of the first-attempt reading, or a future pre-attempt
+    /// diagnostic that wants to skip the "no retries needed" happy-path
+    /// log on `is_first_attempt(attempt) && op.is_ok()` — all consume
+    /// this named predicate rather than restating the `attempt <= 1`
+    /// cascade against the raw counter.
+    ///
+    /// # The ladder-floor/ceiling anchor idiom at the per-attempt axis
+    ///
+    /// The typed-primitive surface at the retry boundary previously
+    /// named the ladder-floor/ceiling anchors at the two other ordered
+    /// axes forge's typed algebra tracks:
+    /// [`BumpLevel::BOTTOM`](crate::version::BumpLevel::BOTTOM) /
+    /// [`BumpLevel::TOP`](crate::version::BumpLevel::TOP) at the
+    /// magnitude ladder (commit 7f561de) and
+    /// [`AdmissionTier::BOTTOM`](crate::network_policy_admission::AdmissionTier::BOTTOM)
+    /// /
+    /// [`AdmissionTier::TOP`](crate::network_policy_admission::AdmissionTier::TOP)
+    /// at the tier ladder (commit fbf3ae5). Both anchor the two ends of
+    /// a bounded ordered surface at named typed-method peers so a
+    /// consumer branching on "the floor" or "the ceiling" of the ladder
+    /// reads one named surface rather than restating the specific
+    /// variant. The per-attempt attempt-index axis at the retry-budget
+    /// surface is the same shape — a bounded ordered range from 1 up to
+    /// the clamped `effective_max_attempts()` budget — and the
+    /// [`is_final_attempt`](Self::is_final_attempt) predicate previously
+    /// named the ceiling side. `is_first_attempt` closes the floor side
+    /// at the named typed-method peer, matching the anchor idiom.
+    ///
+    /// # The clamp-independence discipline
+    ///
+    /// Unlike [`is_final_attempt`](Self::is_final_attempt) and
+    /// [`attempts_remaining`](Self::attempts_remaining), the first-
+    /// attempt reading does not ground through
+    /// [`effective_max_attempts`](Self::effective_max_attempts) — the
+    /// floor of the attempt-index range is `1` regardless of the
+    /// clamped budget's ceiling. The predicate reads `attempt <= 1`
+    /// directly, matching the shape [`compute_delay`](Self::compute_delay)
+    /// applies. This is the load-bearing structural asymmetry: the
+    /// per-attempt-axis ceiling depends on the policy's budget; the
+    /// per-attempt-axis floor does not. Naming the reading at one
+    /// typed-primitive site pins that asymmetry as an explicit surface
+    /// distinct from the clamp-grounded ceiling peers.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`is_final_attempt`](Self::is_final_attempt),
+    /// [`is_interim_attempt`](Self::is_interim_attempt),
+    /// [`attempts_remaining`](Self::attempts_remaining),
+    /// [`effective_max_attempts`](Self::effective_max_attempts),
+    /// [`is_no_retry`](Self::is_no_retry), and
+    /// [`will_retry`](Self::will_retry) are: the predicate is a pure
+    /// function of the attempt argument, with no allocation and no
+    /// receiver-field access. A const-context call shape (e.g., a
+    /// `const FIRST_CALL_HAS_NO_DELAY: bool =
+    /// RetryPolicy::network().is_first_attempt(1);` table at a future
+    /// telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §VI.1 one-oracle discipline: the per-attempt-axis
+    /// floor reading is named at one typed-primitive site instead of
+    /// retyped as the inline `attempt <= 1` cascade at every consumer
+    /// site — previously inlined verbatim at
+    /// [`compute_delay`](Self::compute_delay)'s zero-delay early-return
+    /// guard, now grounded through one named primitive. THEORY.md §V.4
+    /// typed primitives: the reading is a typed-primitive surface on
+    /// `RetryPolicy` itself (one named const-fn method), not a raw-
+    /// counter-comparison shape restated at every consumer.
+    #[allow(dead_code)]
+    pub const fn is_first_attempt(&self, attempt: u32) -> bool {
+        let _ = self;
+        attempt <= 1
+    }
+
     /// Backoff to wait *before* the given 1-indexed attempt.
     ///
     /// `compute_delay(1)` is `Duration::ZERO` (no wait before the first
@@ -855,7 +981,7 @@ impl RetryPolicy {
     /// when `factor.pow(n-2)` overflows `u32`, so the schedule is safe
     /// for arbitrarily-large `n` without panic.
     pub fn compute_delay(&self, attempt: u32) -> Duration {
-        if attempt <= 1 {
+        if self.is_first_attempt(attempt) {
             return Duration::ZERO;
         }
         if self.initial_backoff.is_zero() {
@@ -6901,6 +7027,166 @@ mod tests {
                 p.will_retry(),
                 p.effective_max_attempts() > 1,
                 "will_retry must equal (effective_max_attempts > 1): policy = {p:?}"
+            );
+        }
+    }
+
+    /// [`RetryPolicy::is_first_attempt`] reads the raw `attempt <= 1`
+    /// predicate — `true` at `attempt ∈ {0, 1}` (the pre-invocation
+    /// counter reading and the first `op(attempt)` call), `false` at
+    /// every `attempt >= 2` (any retry). Pinned across the full
+    /// `max_attempts × {ZERO, network}` schedule cross-product ×
+    /// attempt-count grid so a future regression that coupled the
+    /// first-attempt reading to the clamped budget (e.g., misgrounded
+    /// the predicate through
+    /// [`RetryPolicy::effective_max_attempts`] as the ceiling peers do)
+    /// lights up this test.
+    #[test]
+    fn test_retry_policy_is_first_attempt_reads_attempt_leq_one() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [0u32, 1, 2, 3, 5, 10, u32::MAX] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+                    assert_eq!(
+                        p.is_first_attempt(attempt),
+                        attempt <= 1,
+                        "is_first_attempt must equal (attempt <= 1): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_first_attempt`] is clamp-independent — the
+    /// reading at any given `attempt` is identical across every
+    /// canonical factory (`immediate()`, `network()`,
+    /// `network_with_max_attempts(n)` for `n ∈ {0, 1, 3, 7}`,
+    /// `network_or_immediate(true/false)`) and the degenerate hand-
+    /// built `max_attempts: 0` shape. Load-bearing: pins the
+    /// structural asymmetry that the per-attempt-axis floor does not
+    /// depend on the clamped budget (unlike the ceiling peers). A
+    /// future regression that coupled the floor to the budget lights
+    /// up on the disagreement between any two policies.
+    #[test]
+    fn test_retry_policy_is_first_attempt_independent_of_policy() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        for attempt in [0u32, 1, 2, 3, 4, 5, 10, 100, u32::MAX] {
+            let readings: Vec<bool> = policies
+                .iter()
+                .map(|p| p.is_first_attempt(attempt))
+                .collect();
+            let first = readings[0];
+            for (i, r) in readings.iter().enumerate() {
+                assert_eq!(
+                    *r, first,
+                    "is_first_attempt must be clamp-independent: attempt = {attempt}, \
+                     policies[0] reads {first}, policies[{i}] = {:?} reads {r}",
+                    policies[i]
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::compute_delay`] returns `Duration::ZERO` exactly
+    /// when either
+    /// [`RetryPolicy::is_first_attempt`] fires *or* the policy's
+    /// `initial_backoff` is zero — the algebraic law tying the backoff-
+    /// schedule zero reading to the per-attempt-axis floor reading. The
+    /// grounding-through-typed-primitive law a future consumer relies
+    /// on when it factors the compute_delay early-return through the
+    /// named floor peer or vice versa. Cross-product of the full
+    /// `max_attempts × {ZERO, network}` schedule grid × attempt-count
+    /// grid.
+    #[test]
+    fn test_retry_policy_compute_delay_zero_iff_first_attempt_or_zero_backoff() {
+        let schedules = [
+            (Duration::ZERO, 1, Duration::ZERO),
+            (Duration::from_millis(250), 2, Duration::from_secs(30)),
+        ];
+        for max_attempts in [1u32, 2, 3, 5, 10] {
+            for (initial_backoff, factor, max_backoff) in schedules {
+                let p = RetryPolicy {
+                    max_attempts,
+                    initial_backoff,
+                    factor,
+                    max_backoff,
+                };
+                for attempt in [0u32, 1, 2, 3, 4, 5, 6, 10] {
+                    let delay_is_zero = p.compute_delay(attempt).is_zero();
+                    let expected_zero = p.is_first_attempt(attempt) || p.initial_backoff.is_zero();
+                    assert_eq!(
+                        delay_is_zero,
+                        expected_zero,
+                        "compute_delay(attempt).is_zero() must equal \
+                         (is_first_attempt(attempt) || initial_backoff.is_zero()): \
+                         max_attempts = {max_attempts}, attempt = {attempt}, \
+                         schedule = {:?}",
+                        (initial_backoff, factor, max_backoff)
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`RetryPolicy::is_first_attempt(1)`] AND
+    /// [`RetryPolicy::is_final_attempt(1)`] both fire iff the policy is
+    /// no-retry — pinned by
+    /// `(is_first_attempt(1) && is_final_attempt(1)) == is_no_retry()`
+    /// across every canonical factory and the degenerate hand-built
+    /// `max_attempts: 0` shape. The load-bearing structural law that
+    /// closes the per-attempt-axis floor and ceiling peers at the
+    /// no-retry singleton case: a one-shot policy is the unique shape
+    /// where the first attempt is also the final attempt.
+    #[test]
+    fn test_retry_policy_is_first_attempt_and_is_final_attempt_at_one_iff_no_retry() {
+        let cases = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        for p in cases {
+            assert_eq!(
+                p.is_first_attempt(1) && p.is_final_attempt(1),
+                p.is_no_retry(),
+                "(is_first_attempt(1) && is_final_attempt(1)) must equal is_no_retry(): \
+                 policy = {p:?}"
             );
         }
     }
