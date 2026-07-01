@@ -11298,6 +11298,92 @@ mod tests {
         }
     }
 
+    /// Meet distributes over join:
+    /// `a.meet(b.join(c)) == a.meet(b).join(a.meet(c))` at every
+    /// `(a, b, c)` over the 5×5×5 grid (125 triples). The structural
+    /// anchor that the meet/join pair forms a DISTRIBUTIVE lattice in
+    /// the algebraic sense — every chain (totally-ordered lattice) is
+    /// distributive, and the [`PerAttemptRegion`] ladder (`BeforeFirst
+    /// < First < Interim < Final < OverBudget`) inherits the
+    /// distributive property from its derived [`Ord`] chain. The next
+    /// algebraic-law pin beyond absorption
+    /// ([`test_per_attempt_region_meet_join_absorption_at_every_pair`]):
+    /// absorption + distributivity together carry the full
+    /// "distributive lattice" axioms a downstream lattice-walk relies
+    /// on when reducing a meet/join expression to a normal form
+    /// without retyping the distributive identity at every reduction
+    /// site. A future ladder refinement that broke distributivity
+    /// (e.g., inserting two incomparable variants in the same band —
+    /// turning the chain into a non-distributive lattice like the
+    /// diamond `M3` or the pentagon `N5`) would light up here,
+    /// surfacing the structural distinction at the lattice-pair site
+    /// rather than at every downstream consumer that silently relied
+    /// on the distributive identity. Direct mirror of
+    /// `test_bump_level_meet_distributes_over_join_at_every_triple` at
+    /// the version-bump magnitude ladder and
+    /// `test_admission_tier_meet_distributes_over_join_at_every_triple`
+    /// at the admission-tier ladder, here at the per-attempt-axis
+    /// ladder. THEORY.md §V.5: distributivity is the load-bearing
+    /// axiom that distinguishes a chain-derived lattice from a general
+    /// bounded lattice, and the structural witness the meet/join pair
+    /// carries beyond mere absorption.
+    #[test]
+    fn test_per_attempt_region_meet_distributes_over_join_at_every_triple() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                for c in PerAttemptRegion::ALL {
+                    let lhs = a.meet(b.join(c));
+                    let rhs = a.meet(b).join(a.meet(c));
+                    assert_eq!(
+                        lhs, rhs,
+                        "meet distributes over join must hold: \
+                         PerAttemptRegion::{a:?}.meet({b:?}.join({c:?})) = {lhs:?} \
+                         must equal {a:?}.meet({b:?}).join({a:?}.meet({c:?})) = {rhs:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Join distributes over meet:
+    /// `a.join(b.meet(c)) == a.join(b).meet(a.join(c))` at every
+    /// `(a, b, c)` over the 5×5×5 grid (125 triples). The lattice-dual
+    /// of
+    /// [`test_per_attempt_region_meet_distributes_over_join_at_every_triple`]
+    /// at the same per-attempt-axis ladder — in a distributive lattice
+    /// the two distributive identities are equivalent, and pinning
+    /// both closes the structural witness against a refactor that
+    /// broke one but not the other (the structurally-asymmetric
+    /// refactor a single-identity pin would miss). Together with the
+    /// absorption-law pin
+    /// ([`test_per_attempt_region_meet_join_absorption_at_every_pair`])
+    /// and the lattice-bracket pin
+    /// ([`test_per_attempt_region_meet_le_join_at_every_pair`]), this
+    /// closes the distributive-lattice axiom surface on the
+    /// [`PerAttemptRegion`] ladder at the typed-primitive site —
+    /// mirroring what [`BumpLevel`](crate::version::BumpLevel) closed
+    /// at the version-bump magnitude ladder (commit 46d2754) and
+    /// [`AdmissionTier`](crate::probe_outcome::AdmissionTier) closed
+    /// at the admission-tier ladder over the same 3×3×3 grid, here
+    /// applied to the 5-variant per-attempt-axis ladder.
+    #[test]
+    fn test_per_attempt_region_join_distributes_over_meet_at_every_triple() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                for c in PerAttemptRegion::ALL {
+                    let lhs = a.join(b.meet(c));
+                    let rhs = a.join(b).meet(a.join(c));
+                    assert_eq!(
+                        lhs, rhs,
+                        "join distributes over meet must hold: \
+                         PerAttemptRegion::{a:?}.join({b:?}.meet({c:?})) = {lhs:?} \
+                         must equal {a:?}.join({b:?}).meet({a:?}.join({c:?})) = {rhs:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// [`RetryPolicy::compute_delay`] returns `Duration::ZERO` exactly
     /// when either
     /// [`RetryPolicy::is_first_attempt`] fires *or* the policy's
