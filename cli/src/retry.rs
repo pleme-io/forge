@@ -63,6 +63,136 @@ pub struct RetryPolicy {
     pub max_backoff: Duration,
 }
 
+/// Where a 1-indexed `attempt` sits under a [`RetryPolicy`]'s per-attempt
+/// axis — the typed sum consuming the closed per-attempt-axis BOOLEAN 3×2
+/// grid at ONE reading.
+///
+/// The per-attempt-axis boolean surface pinned by
+/// [`tests::test_retry_policy_floor_ceiling_boolean_split_universal_property`]
+/// factors into two 3-way partitions (`is_before_first_attempt` /
+/// `is_first_attempt` / `is_retry_attempt` at the FLOOR side, `is_over_budget`
+/// / `is_final_attempt` / `is_interim_attempt` at the CEILING side).
+/// `PerAttemptRegion` names the load-bearing 5-way projection through the
+/// cross-product: every `(policy, attempt)` maps to exactly one variant,
+/// and the mapping is a pure function of the boolean peers at that input.
+///
+/// # The 5-way partition
+///
+/// For a policy with `M = self.effective_max_attempts()` (clamped to ≥ 1),
+/// the projection reads:
+///
+/// | Region        | Condition                                            |
+/// | ------------- | ---------------------------------------------------- |
+/// | `BeforeFirst` | `attempt < 1`                                        |
+/// | `First`       | `attempt == 1` AND `attempt < M`                     |
+/// | `Interim`     | `attempt > 1` AND `attempt < M`                      |
+/// | `Final`       | `attempt == M` (may collide with `First` when M = 1) |
+/// | `OverBudget`  | `attempt > M`                                        |
+///
+/// The collision at `attempt == 1 == M` (a single-attempt policy calling
+/// `op(1)`) is resolved by the CEILING side: the region is [`Final`], not
+/// [`First`]. This matches the load-bearing distinction the retry loop
+/// itself reads — a single-attempt policy short-circuits at `is_final_attempt`
+/// regardless of whether the attempt is also the first, so the projection
+/// preserves the termination-relevant classification at the collision.
+///
+/// # Consumers
+///
+/// The projection lets a downstream telemetry emitter, structured-
+/// attestation surface, or defensive pre-invocation guard read ONE typed
+/// label instead of restating the FLOOR-then-CEILING boolean cascade:
+///
+/// * A per-attempt telemetry label that discriminates
+///   `BeforeFirst` / `First` / `Interim` / `Final` / `OverBudget` reads
+///   [`RetryPolicy::per_attempt_region`] once instead of six inline
+///   boolean readings against the raw
+///   [`RetryPolicy::is_before_first_attempt`] /
+///   [`RetryPolicy::is_first_attempt`] / [`RetryPolicy::is_retry_attempt`] /
+///   [`RetryPolicy::is_final_attempt`] /
+///   [`RetryPolicy::is_interim_attempt`] / [`RetryPolicy::is_over_budget`]
+///   ladder.
+/// * A structured-attestation record classifying per-attempt events
+///   against the SLSA chain reads the sum type directly, and a future
+///   variant insertion (e.g., splitting `First` into `FirstAndOnly` for
+///   single-attempt policies vs `FirstOfMany` for multi-attempt policies)
+///   forces every consumer's exhaustive `match` to extend by construction.
+/// * A defensive pre-invocation guard that skips `op(attempt)` on
+///   out-of-band attempt indices reads `matches!(region, BeforeFirst
+///   | OverBudget)` at ONE site instead of two independent boolean
+///   readings.
+///
+/// # THEORY grounding
+///
+/// THEORY.md §II Language — typed primitives own boundary classification;
+/// the per-attempt-axis 3×2 boolean grid closure is projected here as ONE
+/// typed sum instead of read as six boolean peers at every downstream
+/// consumer. THEORY.md §VI.1 one-oracle discipline — the FLOOR-then-CEILING
+/// boolean cascade is named at ONE typed-primitive site
+/// ([`RetryPolicy::per_attempt_region`]); downstream consumers of the
+/// per-attempt classification read the sum instead of restating the
+/// cascade.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PerAttemptRegion {
+    /// STRICTLY before the FLOOR boundary — `attempt < 1` (equivalently,
+    /// `attempt == 0`). The "pre-invocation counter reading" class: a
+    /// telemetry replay of a state before any `op(attempt)` call has been
+    /// made, or a caller-bug diagnostic for an out-of-band pre-invocation
+    /// index. Grounds through [`RetryPolicy::is_before_first_attempt`].
+    BeforeFirst,
+    /// AT the FLOOR boundary and STRICTLY below the CEILING boundary —
+    /// `attempt == 1` AND `attempt < self.effective_max_attempts()`. The
+    /// first live `op(attempt)` call in a multi-attempt schedule. The
+    /// FLOOR/CEILING collision at `attempt == 1 == M` (single-attempt
+    /// policies) is absorbed by [`PerAttemptRegion::Final`], not by
+    /// `First` — the CEILING side wins because it names the termination-
+    /// relevant class the retry loop itself reads.
+    First,
+    /// STRICTLY between the FLOOR and CEILING boundaries — `attempt > 1`
+    /// AND `attempt < self.effective_max_attempts()`. A mid-schedule
+    /// retry attempt.
+    Interim,
+    /// AT the CEILING boundary — `attempt == self.effective_max_attempts()`.
+    /// The final attempt in the schedule; the retry loop short-circuits
+    /// after this call. Absorbs the FLOOR/CEILING collision at
+    /// `attempt == 1 == M` — see [`PerAttemptRegion::First`].
+    Final,
+    /// STRICTLY past the CEILING boundary — `attempt >
+    /// self.effective_max_attempts()`. A caller-bug or telemetry-replay
+    /// diagnostic class distinct from [`Final`]: an attempt index the
+    /// retry loop could never legally produce under this policy. Grounds
+    /// through [`RetryPolicy::is_over_budget`].
+    ///
+    /// [`Final`]: PerAttemptRegion::Final
+    OverBudget,
+}
+
+impl PerAttemptRegion {
+    /// Every [`PerAttemptRegion`] variant, listed in per-attempt-axis
+    /// order (`BeforeFirst < First < Interim < Final < OverBudget`) — the
+    /// single-source enumeration of the typed sum. The named peer of the
+    /// array-literal restatement pattern the sibling
+    /// [`crate::probe_outcome::AdmissionTier::ALL`] and
+    /// [`crate::version::BumpLevel::ALL`] enumerations closed at their
+    /// surfaces (95e74ae / f891180): an exhaustive-cover property test,
+    /// a telemetry-label enumeration, or a debug-print traversal reads
+    /// this const instead of restating the variant list.
+    ///
+    /// The exhaustive `match` in
+    /// [`tests::test_per_attempt_region_all_contains_every_variant`]
+    /// refuses compilation until a future variant is added to `ALL`, so
+    /// property tests iterating `PerAttemptRegion::ALL` automatically
+    /// pick up new variants without per-site edits.
+    #[allow(dead_code)]
+    pub const ALL: [PerAttemptRegion; 5] = [
+        PerAttemptRegion::BeforeFirst,
+        PerAttemptRegion::First,
+        PerAttemptRegion::Interim,
+        PerAttemptRegion::Final,
+        PerAttemptRegion::OverBudget,
+    ];
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -1853,6 +1983,96 @@ impl RetryPolicy {
     pub const fn is_before_first_attempt(&self, attempt: u32) -> bool {
         let _ = self;
         attempt < 1
+    }
+
+    /// Project the 1-indexed `attempt` under this policy's per-attempt
+    /// axis onto the 5-way [`PerAttemptRegion`] sum — the typed reading
+    /// that consumes the closed per-attempt-axis BOOLEAN 3×2 grid
+    /// (`is_before_first_attempt` / `is_first_attempt` / `is_retry_attempt`
+    /// at the FLOOR side, `is_over_budget` / `is_final_attempt` /
+    /// `is_interim_attempt` at the CEILING side) at ONE named projection.
+    ///
+    /// The projection is a total, mutually-exclusive function on `u32`:
+    /// every input maps to exactly one variant, and the classification is
+    /// a pure function of `(attempt, self.effective_max_attempts())`.
+    /// [`tests::test_retry_policy_per_attempt_region_is_total_and_mutually_exclusive`]
+    /// pins totality-and-mutual-exclusion across the canonical
+    /// `max_attempts × {ZERO, network}` policy grid × attempt-index grid,
+    /// and
+    /// [`tests::test_retry_policy_per_attempt_region_grounds_through_boolean_peers`]
+    /// pins the FLOOR-then-CEILING boolean-cascade equivalence at every
+    /// input.
+    ///
+    /// # 5-way partition
+    ///
+    /// For `M = self.effective_max_attempts()` (clamped to ≥ 1):
+    ///
+    /// | Region        | Predicate reading                                    |
+    /// | ------------- | ---------------------------------------------------- |
+    /// | `BeforeFirst` | `self.is_before_first_attempt(attempt)`              |
+    /// | `First`       | `self.is_first_attempt(attempt) && !self.is_before_first_attempt(attempt) && !self.is_final_attempt(attempt)` |
+    /// | `Interim`     | `self.is_retry_attempt(attempt) && !self.is_final_attempt(attempt)` |
+    /// | `Final`       | `self.is_final_attempt(attempt) && !self.is_over_budget(attempt)` |
+    /// | `OverBudget`  | `self.is_over_budget(attempt)`                       |
+    ///
+    /// The FLOOR/CEILING boundary collision at `attempt == 1 == M` (a
+    /// single-attempt policy calling `op(1)`) is resolved by the CEILING
+    /// side: the projection returns [`PerAttemptRegion::Final`], not
+    /// [`PerAttemptRegion::First`]. The load-bearing collision-resolution
+    /// discipline
+    /// [`tests::test_retry_policy_per_attempt_region_absorbs_floor_ceiling_collision_at_no_retry`]
+    /// pins.
+    ///
+    /// # Grounding through the boolean peers
+    ///
+    /// The body reads the CEILING-then-FLOOR strict cascade — [`is_over_budget`],
+    /// [`is_final_attempt`], [`is_retry_attempt`], [`is_before_first_attempt`],
+    /// with [`PerAttemptRegion::First`] as the residual case — so a future
+    /// regression that broke ANY of the six per-attempt boolean peers'
+    /// clamp-independence / clamp-dependence discipline propagates directly
+    /// into a misprojection here. The projection does not restate any
+    /// `attempt <op> 1` or `attempt <op> self.effective_max_attempts()`
+    /// literal; every branch grounds through one named typed method.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason every per-attempt boolean
+    /// peer is: the projection is a pure function of the receiver and
+    /// attempt argument, with no allocation and no trait dispatch beyond
+    /// the const-callable [`is_over_budget`] / [`is_final_attempt`] /
+    /// [`is_retry_attempt`] / [`is_before_first_attempt`] ladder and the
+    /// const-stable `u32::gt` / `u32::ge` / `u32::lt` comparisons on the
+    /// derived [`u32::Ord`] instance. A const-context call shape (e.g., a
+    /// `const NETWORK_AT_ONE: PerAttemptRegion =
+    /// RetryPolicy::network().per_attempt_region(1);` table at a future
+    /// telemetry-label site) is admissible.
+    ///
+    /// THEORY.md §II Language — typed primitives own boundary
+    /// classification; the FLOOR-then-CEILING boolean cascade is projected
+    /// here as ONE typed sum instead of restated at every downstream
+    /// consumer. THEORY.md §VI.1 one-oracle discipline — the 5-way
+    /// classification is named at ONE typed-primitive site (this method);
+    /// downstream telemetry-label surfaces, structured-attestation records,
+    /// and defensive pre-invocation guards read the sum instead of
+    /// restating the six-peer boolean ladder.
+    ///
+    /// [`is_over_budget`]: Self::is_over_budget
+    /// [`is_final_attempt`]: Self::is_final_attempt
+    /// [`is_retry_attempt`]: Self::is_retry_attempt
+    /// [`is_before_first_attempt`]: Self::is_before_first_attempt
+    #[allow(dead_code)]
+    pub const fn per_attempt_region(&self, attempt: u32) -> PerAttemptRegion {
+        if self.is_over_budget(attempt) {
+            PerAttemptRegion::OverBudget
+        } else if self.is_final_attempt(attempt) {
+            PerAttemptRegion::Final
+        } else if self.is_retry_attempt(attempt) {
+            PerAttemptRegion::Interim
+        } else if self.is_before_first_attempt(attempt) {
+            PerAttemptRegion::BeforeFirst
+        } else {
+            PerAttemptRegion::First
+        }
     }
 
     /// Backoff to wait *before* the given 1-indexed attempt.
@@ -8918,6 +9138,256 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// [`PerAttemptRegion::ALL`] contains every [`PerAttemptRegion`]
+    /// variant. Uses an exhaustive `match` against the variant axis to
+    /// refuse compilation until a future variant is added to `ALL` — the
+    /// same single-source-enumeration discipline the sibling
+    /// [`crate::probe_outcome::AdmissionTier::ALL`] and
+    /// [`crate::version::BumpLevel::ALL`] tests pin at their surfaces
+    /// (95e74ae / f891180). Every downstream property test iterating
+    /// `PerAttemptRegion::ALL` picks up new variants automatically once
+    /// this test is extended.
+    #[test]
+    fn test_per_attempt_region_all_contains_every_variant() {
+        for region in PerAttemptRegion::ALL {
+            let matched = match region {
+                PerAttemptRegion::BeforeFirst
+                | PerAttemptRegion::First
+                | PerAttemptRegion::Interim
+                | PerAttemptRegion::Final
+                | PerAttemptRegion::OverBudget => true,
+            };
+            assert!(matched, "PerAttemptRegion::ALL must list every variant");
+        }
+        assert_eq!(
+            PerAttemptRegion::ALL.len(),
+            5,
+            "PerAttemptRegion::ALL length must match variant count"
+        );
+    }
+
+    /// [`RetryPolicy::per_attempt_region`] is a TOTAL, MUTUALLY-EXCLUSIVE
+    /// function on `u32`: every `(policy, attempt)` pair in the canonical
+    /// cross-product produces exactly one [`PerAttemptRegion`] variant.
+    /// The load-bearing structural pin that the 5-way projection is a
+    /// well-formed partition of the per-attempt-axis, not a merely-
+    /// heuristic classifier: no attempt index at any policy falls into
+    /// zero regions (totality) or two regions simultaneously (mutual
+    /// exclusion). Cross-product of the full canonical-factory set ×
+    /// attempt-index grid.
+    #[test]
+    fn test_retry_policy_per_attempt_region_is_total_and_mutually_exclusive() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        let attempts = [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX];
+        for p in &policies {
+            for attempt in attempts {
+                let region = p.per_attempt_region(attempt);
+                // Totality: the exhaustive match reduces to `true`
+                // exactly when the projection returns SOME variant. The
+                // match itself refuses compilation if a future variant
+                // is added without extending the projection body.
+                let covered = match region {
+                    PerAttemptRegion::BeforeFirst
+                    | PerAttemptRegion::First
+                    | PerAttemptRegion::Interim
+                    | PerAttemptRegion::Final
+                    | PerAttemptRegion::OverBudget => true,
+                };
+                assert!(
+                    covered,
+                    "per_attempt_region must be total: policy = {p:?}, attempt = {attempt}"
+                );
+                // Mutual exclusion: exactly one of the five candidate
+                // classifications fires. Reading each region against the
+                // projection's output as a boolean and summing counts
+                // pins that no two regions co-fire.
+                let hits = [
+                    region == PerAttemptRegion::BeforeFirst,
+                    region == PerAttemptRegion::First,
+                    region == PerAttemptRegion::Interim,
+                    region == PerAttemptRegion::Final,
+                    region == PerAttemptRegion::OverBudget,
+                ];
+                let count = hits.iter().filter(|h| **h).count();
+                assert_eq!(
+                    count, 1,
+                    "per_attempt_region must be mutually exclusive: \
+                     policy = {p:?}, attempt = {attempt}, region = {region:?}"
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::per_attempt_region`] grounds through the closed
+    /// per-attempt-axis BOOLEAN 3×2 grid at every input — the load-
+    /// bearing bridge from the six-peer boolean cascade to the 5-way
+    /// typed sum. For every `(policy, attempt)`:
+    ///
+    /// * `OverBudget` iff `is_over_budget(attempt)`;
+    /// * `Final` iff `is_final_attempt(attempt) && !is_over_budget(attempt)`;
+    /// * `Interim` iff `is_retry_attempt(attempt) && !is_final_attempt(attempt)`;
+    /// * `First` iff `is_first_attempt(attempt) && !is_before_first_attempt(attempt) && !is_final_attempt(attempt)`;
+    /// * `BeforeFirst` iff `is_before_first_attempt(attempt)`.
+    ///
+    /// A future regression that broke the projection's boolean-peer
+    /// cascade (e.g., swapped the FLOOR/CEILING resolution order at the
+    /// `attempt == 1 == M` collision, or misgrounded any single branch)
+    /// lights up this test at the first collision-relevant
+    /// `(policy, attempt)`. Cross-product of the canonical-factory set ×
+    /// attempt-index grid.
+    #[test]
+    fn test_retry_policy_per_attempt_region_grounds_through_boolean_peers() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        let attempts = [0u32, 1, 2, 3, 4, 5, 6, 10, 100, u32::MAX];
+        for p in &policies {
+            for attempt in attempts {
+                let region = p.per_attempt_region(attempt);
+                let expected = if p.is_over_budget(attempt) {
+                    PerAttemptRegion::OverBudget
+                } else if p.is_final_attempt(attempt) {
+                    PerAttemptRegion::Final
+                } else if p.is_retry_attempt(attempt) {
+                    PerAttemptRegion::Interim
+                } else if p.is_before_first_attempt(attempt) {
+                    PerAttemptRegion::BeforeFirst
+                } else {
+                    PerAttemptRegion::First
+                };
+                assert_eq!(
+                    region,
+                    expected,
+                    "per_attempt_region must ground through the FLOOR/CEILING boolean \
+                     cascade with CEILING winning at the boundary collision: \
+                     policy = {p:?}, attempt = {attempt}, \
+                     effective_max_attempts = {}",
+                    p.effective_max_attempts()
+                );
+            }
+        }
+    }
+
+    /// [`RetryPolicy::per_attempt_region`] at `attempt == 1` returns
+    /// [`PerAttemptRegion::Final`] iff the policy is
+    /// [`RetryPolicy::is_no_retry`], and [`PerAttemptRegion::First`]
+    /// otherwise. The load-bearing FLOOR/CEILING collision-resolution
+    /// pin: at the single-attempt case where `is_first_attempt(1) &&
+    /// is_final_attempt(1)` both fire (the no-retry singleton
+    /// [`tests::test_retry_policy_is_first_attempt_and_is_final_attempt_at_one_iff_no_retry`]
+    /// pins), the projection collapses the collision by choosing the
+    /// CEILING-side variant `Final` — the termination-relevant
+    /// classification the retry loop itself reads. A future regression
+    /// that inverted the tie-break to FLOOR-wins (returning `First` at
+    /// the collision) or broadened it to a hypothetical `FirstAndOnly`
+    /// variant without updating this test lights up here.
+    #[test]
+    fn test_retry_policy_per_attempt_region_absorbs_floor_ceiling_collision_at_no_retry() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_with_max_attempts(0),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(7),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::ZERO,
+                factor: 1,
+                max_backoff: Duration::ZERO,
+            },
+        ];
+        for p in &policies {
+            let region_at_one = p.per_attempt_region(1);
+            let expected = if p.is_no_retry() {
+                PerAttemptRegion::Final
+            } else {
+                PerAttemptRegion::First
+            };
+            assert_eq!(
+                region_at_one,
+                expected,
+                "per_attempt_region(1) must absorb FLOOR/CEILING collision by CEILING: \
+                 policy = {p:?}, is_no_retry = {}, effective_max_attempts = {}",
+                p.is_no_retry(),
+                p.effective_max_attempts()
+            );
+        }
+    }
+
+    /// [`RetryPolicy::per_attempt_region`] reads the expected variant at
+    /// the anchor cases of the 5-way partition on a fixed multi-attempt
+    /// policy (`network_with_max_attempts(3)`, `M = 3`). Fixed-witness
+    /// pin distinct from the boolean-cascade grounding test: reads the
+    /// projection at concrete `(attempt, region)` pairs so a future
+    /// regression that broke the partition at ONE anchor without breaking
+    /// the boolean cascade at that same anchor still lights up here.
+    #[test]
+    fn test_retry_policy_per_attempt_region_reads_five_way_partition_at_anchors() {
+        let p = RetryPolicy::network_with_max_attempts(3);
+        assert_eq!(p.effective_max_attempts(), 3);
+        assert_eq!(
+            p.per_attempt_region(0),
+            PerAttemptRegion::BeforeFirst,
+            "attempt < 1 must map to BeforeFirst"
+        );
+        assert_eq!(
+            p.per_attempt_region(1),
+            PerAttemptRegion::First,
+            "attempt == 1 AND attempt < M must map to First"
+        );
+        assert_eq!(
+            p.per_attempt_region(2),
+            PerAttemptRegion::Interim,
+            "1 < attempt < M must map to Interim"
+        );
+        assert_eq!(
+            p.per_attempt_region(3),
+            PerAttemptRegion::Final,
+            "attempt == M must map to Final"
+        );
+        assert_eq!(
+            p.per_attempt_region(4),
+            PerAttemptRegion::OverBudget,
+            "attempt > M must map to OverBudget"
+        );
+        assert_eq!(
+            p.per_attempt_region(u32::MAX),
+            PerAttemptRegion::OverBudget,
+            "attempt >> M must map to OverBudget"
+        );
     }
 
     /// [`RetryPolicy::compute_delay`] returns `Duration::ZERO` exactly
