@@ -831,6 +831,113 @@ impl PerAttemptRegion {
     pub fn join(self, other: Self) -> Self {
         self.max(other)
     }
+
+    /// The lattice meet over the per-attempt-axis ladder — the
+    /// [`PerAttemptRegion`] the least-advanced of `self` and `other`
+    /// reads on the derived [`Ord`] chain
+    /// (`BeforeFirst < First < Interim < Final < OverBudget`). Reads
+    /// `self.min(other)` at one named site, returning the lesser of
+    /// the two variants. The named typed-method peer of the
+    /// [`Ord::min`] reduction at the [`PerAttemptRegion`] surface, the
+    /// structural mirror of [`crate::version::BumpLevel::meet`] (commit
+    /// f7436eb) at the version-bump magnitude ladder and
+    /// [`crate::probe_outcome::AdmissionTier::meet`] (commit 0093064)
+    /// at the admission-tier ladder, here at the per-attempt-region
+    /// ladder. Dual of [`join`](Self::join) at the same ladder — the
+    /// commit that closes the lattice-operation pair at the
+    /// [`PerAttemptRegion`] surface. Single one-line body routing
+    /// through the derived [`Ord`] chain (commit 158c06a) so a future
+    /// ladder refinement extends the least-advanced-region oracle at
+    /// one site instead of retyping `.min()` at every consumer.
+    ///
+    /// # The least-advanced-region reading
+    ///
+    /// Given two [`PerAttemptRegion`] readings (e.g., a fold across
+    /// two counters watching the same [`RetryPolicy`] — a per-op
+    /// progress counter and a per-batch progress counter),
+    /// [`meet`](Self::meet) names "the less-advanced region either
+    /// counter reached." The load-bearing distinction from a bare
+    /// [`Ord::min`] reduction is the reading, not the numeric answer:
+    /// * A consumer reading `region_a.meet(region_b)` reads "the
+    ///   least-advanced region either input reached" at the call
+    ///   site, where the same consumer reading `region_a.min(region_b)`
+    ///   reads "the smaller of the two variants" — the `min` form is
+    ///   a general lattice op shared with arbitrary comparable types,
+    ///   the `meet` form names the least-advanced-region reading at
+    ///   the typed-primitive surface. Same one-oracle discipline the
+    ///   [`crate::version::BumpLevel::meet`] lift established at the
+    ///   per-commit-floor surface and
+    ///   [`crate::probe_outcome::AdmissionTier::meet`] established at
+    ///   the per-axis-AND-floor surface, here applied to the least-
+    ///   advanced-region surface over the per-attempt-axis ladder.
+    /// * A one-oracle anchor for a future ladder refinement. The
+    ///   lattice meet over a total order coincides with [`Ord::min`]
+    ///   by definition, but a future ladder extension that introduces
+    ///   new structural distinctions inside the per-attempt-axis
+    ///   (e.g., a `PerAttemptRegion::CancelledByCaller` variant
+    ///   inserted between `Final` and `OverBudget` — see the
+    ///   projection docstring) extends this method body once, instead
+    ///   of retyping the least-advanced-region oracle at every
+    ///   consumer's inline `.min()` call.
+    ///
+    /// # Algebraic invariants
+    ///
+    /// The lattice meet over a total order is idempotent, commutative,
+    /// and associative, with the ladder ceiling
+    /// ([`PerAttemptRegion::TOP`]) as the identity element and the
+    /// ladder floor ([`PerAttemptRegion::BOTTOM`]) as the absorbing
+    /// element — the duals of the [`join`](Self::join) invariants on
+    /// the same ladder. The lattice meet and join satisfy the
+    /// absorption laws (`a.join(a.meet(b)) == a` and
+    /// `a.meet(a.join(b)) == a`), pinned by
+    /// [`tests::test_per_attempt_region_meet_join_absorption_at_every_pair`]
+    /// — the structural anchor that the meet/join pair forms a
+    /// lattice in the algebraic sense, not merely two independent
+    /// reductions over the same [`Ord`] ladder. The meet is bounded
+    /// above by both arguments and below by the join over the same
+    /// pair, pinned by
+    /// [`tests::test_per_attempt_region_meet_bounded_above_by_both_arguments`]
+    /// and
+    /// [`tests::test_per_attempt_region_meet_le_join_at_every_pair`]
+    /// — the structural witness that the meet–join interval brackets
+    /// the per-attempt-axis range of the input pair.
+    ///
+    /// * [`tests::test_per_attempt_region_meet_is_idempotent_at_every_variant`]
+    ///   — `a.meet(a) == a` at every variant.
+    /// * [`tests::test_per_attempt_region_meet_is_commutative_at_every_pair`]
+    ///   — `a.meet(b) == b.meet(a)` at every (a, b) over the 5×5 grid.
+    /// * [`tests::test_per_attempt_region_meet_is_associative_at_every_triple`]
+    ///   — `a.meet(b.meet(c)) == a.meet(b).meet(c)` at every (a, b, c)
+    ///   over the 5×5×5 grid.
+    /// * [`tests::test_per_attempt_region_meet_has_top_as_identity`]
+    ///   — `TOP.meet(a) == a.meet(TOP) == a` at every variant.
+    /// * [`tests::test_per_attempt_region_meet_has_bottom_as_absorbing_element`]
+    ///   — `BOTTOM.meet(a) == a.meet(BOTTOM) == BOTTOM` at every
+    ///   variant.
+    /// * [`tests::test_per_attempt_region_meet_returns_one_of_the_arguments`]
+    ///   — `a.meet(b) ∈ {a, b}` at every (a, b), the structural
+    ///   witness that the lattice meet over a total order is the
+    ///   identity-or-other readback — distinct from a free-lattice
+    ///   meet that could return a third element.
+    ///
+    /// THEORY.md §V.5 total-order discipline: the least-advanced-
+    /// region reading is a lattice operation (`min`) on the derived
+    /// [`Ord`] ladder, named at the typed-primitive surface so a
+    /// downstream consumer reads `region_a.meet(region_b)` once and
+    /// is automatically updated across a future ladder refinement.
+    /// THEORY.md §VI.1 one-oracle / generation-over-composition: the
+    /// least-advanced-region idiom is named at one site (this
+    /// method's body), not retyped at every consumer's inline `.min()`
+    /// call. Together with [`join`](Self::join), this closes the
+    /// lattice-operation pair at the [`PerAttemptRegion`] surface —
+    /// the structural mirror of the [`crate::version::BumpLevel`]
+    /// meet/join pair at the version-bump magnitude surface and the
+    /// [`crate::probe_outcome::AdmissionTier`] meet/join pair at the
+    /// admission-tier surface.
+    #[allow(dead_code)]
+    pub fn meet(self, other: Self) -> Self {
+        self.min(other)
+    }
 }
 
 impl RetryPolicy {
@@ -10909,6 +11016,283 @@ mod tests {
                 assert!(
                     j == a || j == b,
                     "PerAttemptRegion::{a:?}.join({b:?}) = {j:?} must be one of {{{a:?}, {b:?}}}"
+                );
+            }
+        }
+    }
+
+    /// Exact-shape per-(a,b) pin over the 5×5 grid of
+    /// [`PerAttemptRegion::ALL`] variants at the lattice-meet surface.
+    /// Ceiling-sibling of
+    /// [`test_per_attempt_region_join_named_at_most_advanced_region_surface`]
+    /// at the lattice-join surface, structural mirror of the
+    /// corresponding [`crate::version::BumpLevel::meet`] and
+    /// [`crate::probe_outcome::AdmissionTier::meet`] pins on the
+    /// smaller ladders. Pins the exact answer at every corner of the
+    /// closed per-attempt-axis 5×5 grid so a future variant insertion
+    /// / ladder refinement lights up at the least-advanced-region
+    /// surface rather than drifting silently.
+    #[test]
+    fn test_per_attempt_region_meet_named_at_least_advanced_region_surface() {
+        use PerAttemptRegion::*;
+        let cases: &[(PerAttemptRegion, PerAttemptRegion, PerAttemptRegion)] = &[
+            (BeforeFirst, BeforeFirst, BeforeFirst),
+            (BeforeFirst, First, BeforeFirst),
+            (BeforeFirst, Interim, BeforeFirst),
+            (BeforeFirst, Final, BeforeFirst),
+            (BeforeFirst, OverBudget, BeforeFirst),
+            (First, BeforeFirst, BeforeFirst),
+            (First, First, First),
+            (First, Interim, First),
+            (First, Final, First),
+            (First, OverBudget, First),
+            (Interim, BeforeFirst, BeforeFirst),
+            (Interim, First, First),
+            (Interim, Interim, Interim),
+            (Interim, Final, Interim),
+            (Interim, OverBudget, Interim),
+            (Final, BeforeFirst, BeforeFirst),
+            (Final, First, First),
+            (Final, Interim, Interim),
+            (Final, Final, Final),
+            (Final, OverBudget, Final),
+            (OverBudget, BeforeFirst, BeforeFirst),
+            (OverBudget, First, First),
+            (OverBudget, Interim, Interim),
+            (OverBudget, Final, Final),
+            (OverBudget, OverBudget, OverBudget),
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(
+                a.meet(*b),
+                *expected,
+                "PerAttemptRegion::{a:?}.meet({b:?}) must equal {expected:?}"
+            );
+        }
+    }
+
+    /// Structural-equivalence pin against [`Ord::min`] at every (a, b)
+    /// over the 5×5 grid. Makes the `min` form the load-bearing oracle
+    /// at the lattice-meet surface, so a future variant insertion that
+    /// desynced the method body from the derived [`Ord`] chain lights
+    /// up at the lattice-meet surface rather than drifting silently.
+    /// Dual of
+    /// [`test_per_attempt_region_join_agrees_with_max_at_every_pair`]
+    /// at the lattice-join surface.
+    #[test]
+    fn test_per_attempt_region_meet_agrees_with_min_at_every_pair() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                assert_eq!(
+                    a.meet(b),
+                    a.min(b),
+                    "PerAttemptRegion::{a:?}.meet({b:?}) must equal {a:?}.min({b:?})"
+                );
+            }
+        }
+    }
+
+    /// `a.meet(a) == a` at every [`PerAttemptRegion::ALL`] variant.
+    /// The idempotence axiom of the lattice-meet surface, sibling of
+    /// the reflexive-ordering pin at the derived-[`Ord`] surface. Dual
+    /// of
+    /// [`test_per_attempt_region_join_is_idempotent_at_every_variant`].
+    #[test]
+    fn test_per_attempt_region_meet_is_idempotent_at_every_variant() {
+        for a in PerAttemptRegion::ALL {
+            assert_eq!(
+                a.meet(a),
+                a,
+                "PerAttemptRegion::{a:?}.meet({a:?}) must equal {a:?}"
+            );
+        }
+    }
+
+    /// `a.meet(b) == b.meet(a)` at every (a, b) over the 5×5 grid.
+    /// The commutativity axiom of the lattice-meet surface — the
+    /// load-bearing fact a downstream least-advanced-region fold
+    /// relies on to be insensitive to per-counter ORDER. Dual of
+    /// [`test_per_attempt_region_join_is_commutative_at_every_pair`].
+    #[test]
+    fn test_per_attempt_region_meet_is_commutative_at_every_pair() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                assert_eq!(
+                    a.meet(b),
+                    b.meet(a),
+                    "PerAttemptRegion::{a:?}.meet({b:?}) must equal {b:?}.meet({a:?})"
+                );
+            }
+        }
+    }
+
+    /// `a.meet(b.meet(c)) == a.meet(b).meet(c)` at every (a, b, c)
+    /// over the 5×5×5 grid. The associativity axiom of the lattice-
+    /// meet surface — the structural anchor a downstream least-
+    /// advanced-region fold relies on to be insensitive to per-
+    /// counter GROUPING. Dual of
+    /// [`test_per_attempt_region_join_is_associative_at_every_triple`].
+    #[test]
+    fn test_per_attempt_region_meet_is_associative_at_every_triple() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                for c in PerAttemptRegion::ALL {
+                    assert_eq!(
+                        a.meet(b.meet(c)),
+                        a.meet(b).meet(c),
+                        "PerAttemptRegion::{a:?}.meet({b:?}.meet({c:?})) must equal \
+                         {a:?}.meet({b:?}).meet({c:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `TOP.meet(a) == a.meet(TOP) == a` at every variant. The load-
+    /// bearing fact a downstream least-advanced-region fold seeds at
+    /// [`PerAttemptRegion::TOP`] with — a fold seeded at TOP over a
+    /// sequence returns the min of the sequence, or TOP on an empty
+    /// sequence (the no-input reading, dual to the empty-fold BOTTOM
+    /// reading at the join surface). Dual of
+    /// [`test_per_attempt_region_join_has_bottom_as_identity`].
+    #[test]
+    fn test_per_attempt_region_meet_has_top_as_identity() {
+        for a in PerAttemptRegion::ALL {
+            assert_eq!(
+                PerAttemptRegion::TOP.meet(a),
+                a,
+                "PerAttemptRegion::TOP.meet({a:?}) must equal {a:?}"
+            );
+            assert_eq!(
+                a.meet(PerAttemptRegion::TOP),
+                a,
+                "PerAttemptRegion::{a:?}.meet(TOP) must equal {a:?}"
+            );
+        }
+    }
+
+    /// `BOTTOM.meet(a) == a.meet(BOTTOM) == BOTTOM` at every variant.
+    /// The load-bearing fact a downstream least-advanced-region fold
+    /// can early-exit on: once any per-counter region reads
+    /// [`PerAttemptRegion::BOTTOM`], the aggregated least-advanced-
+    /// region collapses to BOTTOM regardless of the remaining
+    /// counters. Dual of
+    /// [`test_per_attempt_region_join_has_top_as_absorbing_element`].
+    #[test]
+    fn test_per_attempt_region_meet_has_bottom_as_absorbing_element() {
+        for a in PerAttemptRegion::ALL {
+            assert_eq!(
+                PerAttemptRegion::BOTTOM.meet(a),
+                PerAttemptRegion::BOTTOM,
+                "PerAttemptRegion::BOTTOM.meet({a:?}) must equal BOTTOM"
+            );
+            assert_eq!(
+                a.meet(PerAttemptRegion::BOTTOM),
+                PerAttemptRegion::BOTTOM,
+                "PerAttemptRegion::{a:?}.meet(BOTTOM) must equal BOTTOM"
+            );
+        }
+    }
+
+    /// `a.meet(b) <= a && a.meet(b) <= b` at every (a, b) over the 5×5
+    /// grid. The bounded-above-by-both-arguments law of the lattice-
+    /// meet surface — the structural anchor a downstream telemetry
+    /// aggregator consumes ("the least-advanced-region reading is at
+    /// or below every per-counter region") through one named site.
+    /// Dual of
+    /// [`test_per_attempt_region_join_bounded_below_by_both_arguments`].
+    #[test]
+    fn test_per_attempt_region_meet_bounded_above_by_both_arguments() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                let m = a.meet(b);
+                assert!(
+                    m <= a,
+                    "PerAttemptRegion::{a:?}.meet({b:?}) = {m:?} must be <= {a:?}"
+                );
+                assert!(
+                    m <= b,
+                    "PerAttemptRegion::{a:?}.meet({b:?}) = {m:?} must be <= {b:?}"
+                );
+            }
+        }
+    }
+
+    /// `a.meet(b) ∈ {a, b}` at every (a, b) over the 5×5 grid. The
+    /// structural witness that the lattice meet over a TOTAL order is
+    /// the identity-or-other readback — distinct from a free-lattice
+    /// meet that could return a third element outside `{a, b}`. Dual
+    /// of
+    /// [`test_per_attempt_region_join_returns_one_of_the_arguments`].
+    #[test]
+    fn test_per_attempt_region_meet_returns_one_of_the_arguments() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                let m = a.meet(b);
+                assert!(
+                    m == a || m == b,
+                    "PerAttemptRegion::{a:?}.meet({b:?}) = {m:?} must be one of {{{a:?}, {b:?}}}"
+                );
+            }
+        }
+    }
+
+    /// Cross-surface order pin: `a.meet(b) <= a.join(b)` at every (a,
+    /// b) over the 5×5 grid. The structural witness that the meet-
+    /// join interval brackets the per-attempt-axis range of the
+    /// input pair — the direct mirror of
+    /// [`crate::version::BumpLevel`] `test_bump_level_meet_le_join_at_every_pair`
+    /// at the version-bump magnitude ladder, here at the per-attempt-
+    /// axis ladder. Equality holds when the inputs coincide
+    /// (`a.meet(a) == a == a.join(a)`); strict inequality holds at
+    /// every asymmetric pair (the meet and join return the two
+    /// distinct arguments respectively).
+    #[test]
+    fn test_per_attempt_region_meet_le_join_at_every_pair() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                let m = a.meet(b);
+                let j = a.join(b);
+                assert!(
+                    m <= j,
+                    "PerAttemptRegion::{a:?}.meet({b:?}) = {m:?} must be <= \
+                     {a:?}.join({b:?}) = {j:?}"
+                );
+            }
+        }
+    }
+
+    /// Absorption laws: `a.join(a.meet(b)) == a` and
+    /// `a.meet(a.join(b)) == a` at every (a, b) over the 5×5 grid.
+    /// The structural anchor that the meet/join pair forms a LATTICE
+    /// in the algebraic sense — two reductions over the same [`Ord`]
+    /// ladder, related by the absorption laws so that "join with
+    /// one's own meet collapses" and "meet with one's own join
+    /// collapses." A future ladder refinement that broke the
+    /// absorption laws (e.g., a meet-irreducible variant inserted
+    /// where `a.meet(b)` returned a strict lower bound of both
+    /// arguments) would light up here, surfacing the structural
+    /// distinction at the lattice-pair site rather than at every
+    /// consumer. The load-bearing fact a downstream lattice-walk
+    /// relies on to round-trip through the meet/join pair without
+    /// unbounded drift. Direct mirror of
+    /// `test_bump_level_meet_join_absorption_at_every_pair` at the
+    /// version-bump magnitude ladder.
+    #[test]
+    fn test_per_attempt_region_meet_join_absorption_at_every_pair() {
+        for a in PerAttemptRegion::ALL {
+            for b in PerAttemptRegion::ALL {
+                assert_eq!(
+                    a.join(a.meet(b)),
+                    a,
+                    "join-meet absorption must hold: \
+                     PerAttemptRegion::{a:?}.join({a:?}.meet({b:?})) must equal {a:?}"
+                );
+                assert_eq!(
+                    a.meet(a.join(b)),
+                    a,
+                    "meet-join absorption must hold: \
+                     PerAttemptRegion::{a:?}.meet({a:?}.join({b:?})) must equal {a:?}"
                 );
             }
         }
