@@ -1352,6 +1352,83 @@ impl<'de> serde::Deserialize<'de> for BumpLevel {
     }
 }
 
+/// [`AsRef<str>`] impl routes through [`BumpLevel::as_str`] so a
+/// downstream consumer that accepts `impl AsRef<str>` (a path-segment
+/// builder assembling a release-manifest key, a version-tag env-var
+/// setter, a [`std::collections::HashMap<&str, _>`] keyed by bump
+/// magnitude, a generic log-fields sink, an OpenTelemetry / tracing
+/// attribute setter that keys by `Into<Cow<'static, str>>`) reads the
+/// canonical lowercase label (`"patch"`, `"minor"`, `"major"`)
+/// directly from a [`BumpLevel`] value without going through the
+/// [`std::fmt::Display`] formatter buffer or an intermediate [`String`]
+/// allocation. The zero-cost byte-slice-coercion peer of the
+/// format-machinery [`std::fmt::Display`] surface, both routing
+/// through the same [`BumpLevel::as_str`] canonical-label oracle.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], and [`serde::Deserialize`] impls above — the
+/// same lift at the byte-slice-access layer instead of the format /
+/// parse / serde layers. Together with the impls above this closes
+/// the `as_str` ⇢ {`Display`, `AsRef<str>`, `Serialize`} emission
+/// triangle and the {`FromStr`, `Deserialize`} parse pair at the
+/// version-bump-magnitude ladder against the shared canonical-label
+/// oracle. Structural mirror of `impl AsRef<str> for AdmissionTier`
+/// (commit 7acca19 — the same lift at the admission-tier ladder,
+/// routing through [`crate::probe_outcome::AdmissionTier::as_str`])
+/// and `impl AsRef<str> for PerAttemptRegion` (commit 8c8cffe — the
+/// same lift at the per-attempt-region ladder, routing through
+/// [`crate::retry::PerAttemptRegion::as_str`]). After this commit
+/// all three repo-internal ordered typed sums that carry
+/// `as_str` + [`Display`](std::fmt::Display) +
+/// [`FromStr`](std::str::FromStr) + [`serde::Serialize`] +
+/// [`serde::Deserialize`] ([`BumpLevel`],
+/// [`crate::probe_outcome::AdmissionTier`],
+/// [`crate::retry::PerAttemptRegion`]) also carry [`AsRef<str>`]
+/// routing through the shared canonical-label oracle — the label-axis
+/// grammar at every ordered typed sum is now a one-oracle surface at
+/// every Rust-idiomatic reading (direct call `as_str`, format
+/// machinery [`std::fmt::Display`], byte slice [`AsRef<str>`], string
+/// parse [`std::str::FromStr`], serde [`serde::Serialize`] /
+/// [`serde::Deserialize`]).
+///
+/// Zero-cost by construction: the returned `&str` is `'static`
+/// (delegated from [`BumpLevel::as_str`]'s `&'static str` return
+/// type), so a consumer that borrows the slice reads directly into
+/// the static-string constant table without a copy, matching the
+/// zero-allocation discipline [`std::fmt::Display`] doesn't offer
+/// (which writes through a [`std::fmt::Formatter`] into a
+/// caller-provided buffer).
+///
+/// A future variant insertion (a `Prerelease` band strictly below
+/// [`BumpLevel::Patch`], an `Epoch` ceiling strictly above
+/// [`BumpLevel::Major`] for semver4 / `0ver`-style incompatible-by-
+/// design rewrites) updates the [`as_str`] match body alone and every
+/// consumer — release-manifest path-segment builder, changelog-tag
+/// env-var setter, SLSA-provenance attribute-key stamper — that
+/// accepts `impl AsRef<str>` inherits the new canonical label
+/// automatically with no downstream retyping.
+///
+/// The identity `level.as_ref() == level.as_str()` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_as_ref_str_agrees_with_as_str`]; the
+/// identity carrying through a generic `impl AsRef<str>` consumer at
+/// every variant is pinned by
+/// [`tests::test_bump_level_as_ref_str_carries_through_generic_consumer`].
+///
+/// THEORY.md §V.4 typed primitives: the byte-slice-coercion surface
+/// is a typed-primitive site on [`BumpLevel`] itself (one `AsRef<str>`
+/// impl routing through [`BumpLevel::as_str`]), not a per-consumer
+/// `.as_str()` restatement at every downstream site that accepts
+/// `impl AsRef<str>`. THEORY.md §VI.1 one-oracle: the canonical label
+/// is named at one site ([`BumpLevel::as_str`]) and every surface —
+/// `as_str`, `Display`, `Serialize`, `FromStr`, `Deserialize`, this
+/// `AsRef<str>` — reads through it.
+impl AsRef<str> for BumpLevel {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -3698,6 +3775,78 @@ mod tests {
             assert!(
                 serde_json::from_str::<BumpLevel>(bad).is_err(),
                 "Deserialize must reject non-string scalar {bad}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`], `level.as_ref()` (the [`AsRef<str>`] impl
+    /// body) equals `level.as_str()` (the canonical-label oracle)
+    /// exactly. The load-bearing structural pin that ties the
+    /// byte-slice-coercion surface to the shared
+    /// [`BumpLevel::as_str`] oracle: a regression that swapped
+    /// [`AsRef<str>`] to route through the [`std::fmt::Display`]
+    /// formatter buffer (paying a [`String`] allocation), or drifted
+    /// the [`AsRef<str>`] grammar from [`BumpLevel::as_str`]'s
+    /// lowercase labels, fails here at ONE named site instead of
+    /// leaking to every downstream consumer that accepts
+    /// `impl AsRef<str>` (path-segment builder assembling a release-
+    /// manifest key, version-tag env-var setter,
+    /// [`std::collections::HashMap<&str, _>`] key lookup, generic
+    /// log-fields sink, OpenTelemetry / tracing attribute setter).
+    /// Sibling of [`test_bump_level_display_round_trips_through_from_str`]
+    /// at the format-machinery surface, and structural mirror of
+    /// `test_admission_tier_as_ref_str_agrees_with_as_str` (commit
+    /// 7acca19) at the admission-tier ladder and
+    /// `test_per_attempt_region_as_ref_str_agrees_with_as_str`
+    /// (commit 8c8cffe) at the per-attempt-region ladder — the three
+    /// agreement pins together close the read-side agreement across
+    /// both the format-buffer surface ([`std::fmt::Display`]) and the
+    /// byte-slice surface ([`AsRef<str>`]) against the shared
+    /// canonical-label oracle at every ordered typed sum.
+    #[test]
+    fn test_bump_level_as_ref_str_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let borrowed: &str = level.as_ref();
+            assert_eq!(
+                borrowed,
+                level.as_str(),
+                "AsRef<str> and as_str must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<str>`] identity carries through a generic
+    /// `impl AsRef<str>` consumer at every [`BumpLevel::ALL`] variant.
+    /// A tiny generic function `fn read<T: AsRef<str>>(t: &T) -> &str
+    /// { t.as_ref() }` — the shape of an actual downstream consumer
+    /// (release-manifest path-segment builder, version-tag env-var
+    /// setter, [`std::collections::HashMap`] key lookup, tracing
+    /// attribute setter) — reads the canonical lowercase label
+    /// directly from a [`BumpLevel`] value without going through the
+    /// [`std::fmt::Display`] formatter buffer or an intermediate
+    /// [`String`] allocation. The structural witness that a
+    /// [`BumpLevel`] is genuinely usable at `impl AsRef<str>` call
+    /// sites — a regression that drifted the [`AsRef<str>`] impl
+    /// signature (e.g., returning an owned [`String`] instead of a
+    /// `&str`, or requiring a `&mut self`) fails here at compile time
+    /// instead of at every downstream generic call site. Structural
+    /// mirror of
+    /// `test_admission_tier_as_ref_str_carries_through_generic_consumer`
+    /// (commit 7acca19) at the admission-tier ladder and
+    /// `test_per_attempt_region_as_ref_str_carries_through_generic_consumer`
+    /// (commit 8c8cffe) at the per-attempt-region ladder.
+    #[test]
+    fn test_bump_level_as_ref_str_carries_through_generic_consumer() {
+        fn read<T: AsRef<str>>(t: &T) -> &str {
+            t.as_ref()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(&level),
+                level.as_str(),
+                "generic AsRef<str> consumer must read canonical label at {level:?}",
             );
         }
     }
