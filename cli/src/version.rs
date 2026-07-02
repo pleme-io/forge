@@ -1626,6 +1626,88 @@ impl TryFrom<&str> for BumpLevel {
     }
 }
 
+/// [`From<BumpLevel> for String`] routes through [`BumpLevel::as_str`] so
+/// a downstream consumer bound by [`Into<String>`] (a
+/// `std::collections::HashMap::<String, _>::insert` key builder keyed by
+/// canonical bump label, a
+/// [`std::process::Command::env(String, String)`]-shaped receiver that
+/// owns its key/value pair, a [`String::push_str`] sink over a
+/// caller-owned buffer, a release-manifest field builder that owns its
+/// bump-label emission, a [`std::borrow::Cow<'static, str>`] sink through
+/// the [`Cow::Owned`] branch) reads the canonical lowercase label
+/// (`"patch"`, `"minor"`, `"major"`) directly from a [`BumpLevel`] value
+/// with the [`String`] allocation named at this typed-primitive site
+/// rather than at every downstream `.as_str().to_owned()` /
+/// `.to_string()` call site.
+///
+/// The by-value owned-string emit peer of
+/// [`From<BumpLevel> for &'static str`] above — both are by-value emit
+/// surfaces of the label-axis conversion set, differing only on the
+/// returned string ownership: [`From<BumpLevel> for &'static str`]
+/// returns a zero-copy `'static`-lived borrow into the static-string
+/// constant table for [`Into<&'static str>`] consumers, this
+/// [`From<BumpLevel> for String`] returns the single-allocation owned
+/// [`String`] for [`Into<String>`] consumers. Both route through the
+/// shared [`BumpLevel::as_str`] canonical-label oracle: the borrowed peer
+/// through [`BumpLevel::as_str`] directly, this owned peer through
+/// `as_str().to_owned()` — the same canonical grammar lifted to the
+/// owned-string layer.
+///
+/// Structural mirror of
+/// `impl From<AdmissionTier> for String` (commit 463b31b — the by-value
+/// owned-string emit peer at the admission-tier ladder, routing through
+/// [`crate::probe_outcome::AdmissionTier::as_str`]) and
+/// `impl From<PerAttemptRegion> for String` (commit a5a379f — the
+/// by-value owned-string emit peer at the per-attempt-region ladder,
+/// routing through [`crate::retry::PerAttemptRegion::as_str`]) at the
+/// version-bump-magnitude ladder: the same lift by construction, at the
+/// remaining ordered typed sum in the label-axis idiom. After this
+/// commit all three repo-internal ordered typed sums that carry
+/// `as_str` + [`std::fmt::Display`] + [`std::str::FromStr`] +
+/// [`serde::Serialize`] + [`serde::Deserialize`] + [`AsRef<str>`] +
+/// [`From<T> for &'static str`] + [`TryFrom<&str>`] ([`BumpLevel`],
+/// [`crate::probe_outcome::AdmissionTier`],
+/// [`crate::retry::PerAttemptRegion`]) also carry
+/// `From<T> for String` routing through the shared canonical-label
+/// oracle — the by-value emit surface at every ordered typed sum is now
+/// a one-oracle surface at both string-ownership readings
+/// (`'static`-lived borrow via [`From<T> for &'static str`], owned
+/// allocation via [`From<T> for String`]).
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<BumpLevel> for &'static str`], and [`TryFrom<&str>`] impls
+/// above — the same lift at the by-value owned-string emit layer instead
+/// of the format / parse / serde / borrow / static-lifetime /
+/// try-conversion layers. Together with the impls above this closes the
+/// `as_str` ⇢ {`Display`, `AsRef<str>`, `Serialize`, `From<T> for
+/// &'static str`, `From<T> for String`} emission set at the
+/// version-bump-magnitude ladder against the shared canonical-label
+/// oracle.
+///
+/// The natural bridge to any downstream site that types its label sink
+/// as [`Into<String>`] — the owned-string sibling of the
+/// [`Into<&'static str>`] bridge [`From<BumpLevel> for &'static str`]
+/// opened for the borrowed static-lifetime peer.
+///
+/// The identity `String::from(level) == level.as_str()` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_from_into_string_agrees_with_as_str`]; the
+/// identity carried through a generic `impl Into<String>` consumer at
+/// every variant is pinned by
+/// [`tests::test_bump_level_into_string_carries_through_generic_consumer`].
+///
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// ([`BumpLevel::as_str`]) and every emit surface —
+/// [`BumpLevel::as_str`], [`std::fmt::Display`], [`serde::Serialize`],
+/// [`AsRef<str>`], [`From<BumpLevel> for &'static str`], this
+/// [`From<BumpLevel> for String`] — reads through it.
+impl From<BumpLevel> for String {
+    fn from(level: BumpLevel) -> String {
+        level.as_str().to_owned()
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -4226,6 +4308,71 @@ mod tests {
             assert!(
                 <BumpLevel as std::convert::TryFrom<&str>>::try_from(bad).is_err(),
                 "TryFrom<&str> must reject non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for String`] agrees with the canonical
+    /// [`BumpLevel::as_str`] label at every [`BumpLevel::ALL`] variant.
+    /// Pins the identity `String::from(level) == level.as_str()` at every
+    /// variant so a future variant insertion / grammar refinement at the
+    /// shared [`BumpLevel::as_str`] oracle propagates to the by-value
+    /// owned-string emit surface without a per-variant retype at the
+    /// [`From`] impl body. The structural agreement pin between the
+    /// by-value owned-string emit surface
+    /// ([`From<BumpLevel> for String`]) and the canonical-label oracle
+    /// ([`BumpLevel::as_str`]) — the owned-[`String`] sibling of the
+    /// borrowed `'static`-lifetime agreement pin
+    /// [`test_bump_level_from_into_static_str_agrees_with_as_str`]
+    /// already carries. Structural mirror of
+    /// `test_admission_tier_from_into_string_agrees_with_as_str` (commit
+    /// 463b31b) at the admission-tier ladder and
+    /// `test_per_attempt_region_from_into_string_agrees_with_as_str`
+    /// (commit a5a379f) at the per-attempt-region ladder.
+    #[test]
+    fn test_bump_level_from_into_string_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let owned: String = String::from(level);
+            assert_eq!(
+                owned,
+                level.as_str(),
+                "From<BumpLevel> for String and as_str must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for String`] identity carries through a
+    /// generic `impl Into<String>` consumer at every [`BumpLevel::ALL`]
+    /// variant. A tiny generic function
+    /// `fn read<T: Into<String>>(t: T) -> String { t.into() }` — the
+    /// shape of an actual downstream consumer
+    /// (`std::collections::HashMap::<String, _>::insert` key builder,
+    /// environment-variable setter that owns its key, release-manifest
+    /// field builder that owns its bump-label emission,
+    /// [`String::push_str`] sink over a caller-owned buffer) — reads the
+    /// canonical lowercase label directly from a [`BumpLevel`] value as
+    /// an owned [`String`]. The structural witness that a [`BumpLevel`]
+    /// is genuinely usable at `impl Into<String>` call sites — a
+    /// regression that drifted the [`From`] impl signature (returning
+    /// [`&'static str`] instead of [`String`], requiring
+    /// [`&BumpLevel`] and losing the by-value semantics) fails here at
+    /// compile time instead of at every downstream generic call site.
+    /// Structural mirror of
+    /// `test_admission_tier_into_string_carries_through_generic_consumer`
+    /// (commit 463b31b) at the admission-tier ladder and
+    /// `test_per_attempt_region_into_string_carries_through_generic_consumer`
+    /// (commit a5a379f) at the per-attempt-region ladder.
+    #[test]
+    fn test_bump_level_into_string_carries_through_generic_consumer() {
+        fn read<T: Into<String>>(t: T) -> String {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level),
+                level.as_str(),
+                "generic Into<String> consumer must read canonical label at {level:?}",
             );
         }
     }
