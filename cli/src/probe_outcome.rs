@@ -5597,7 +5597,7 @@ impl AdmissionTier {
 /// `Refused` / `StagingOnly` / `Strict` UpperCamel labels via the derived
 /// `Debug` rendering. THEORY.md §VI.1 one-oracle discipline: the canonical
 /// label is named at one site ([`AdmissionTier::as_str`]) and every
-/// surface — `as_str`, `Display`, future `Serialize` — reads through it.
+/// surface — `as_str`, `Display`, `serde::Serialize` — reads through it.
 impl std::fmt::Display for AdmissionTier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -5682,7 +5682,7 @@ impl std::fmt::Display for AdmissionTier {
 /// discipline: the canonical-label grammar (which strings parse to
 /// which variant) is named at one site (this parser body), inverse to
 /// the one [`as_str`] site that emits them — every surface,
-/// [`Display`], the parser, future `Deserialize`, reads through one
+/// [`Display`], the parser, [`serde::Deserialize`], reads through one
 /// oracle.
 impl std::str::FromStr for AdmissionTier {
     type Err = anyhow::Error;
@@ -5696,6 +5696,118 @@ impl std::str::FromStr for AdmissionTier {
                 "Invalid admission tier '{s}' — use refused, staging_only, or strict",
             )),
         }
+    }
+}
+
+/// [`serde::Serialize`] impl routes through [`AdmissionTier::as_str`] so
+/// a downstream structured-attestation record, YAML config emit, or JSON
+/// telemetry surface serialises the variant as its canonical snake_case
+/// label (`"refused"`, `"staging_only"`, `"strict"`) rather than the
+/// UpperCamel variant identifier the derived `serde::Serialize` (via
+/// `#[derive(Serialize)]`) would emit (`"Refused"`, `"StagingOnly"`) —
+/// the same label axis [`std::fmt::Display`] and [`std::str::FromStr`]
+/// already inhabit, now extended to the serde read/write surface at one
+/// typed-primitive site.
+///
+/// Sibling of `serde::Serialize for PerAttemptRegion` (commit 8fd06fe —
+/// the same lift at the per-attempt-region ladder, routing through
+/// [`crate::retry::PerAttemptRegion::as_str`]). After this commit the
+/// pair (`AdmissionTier` / `PerAttemptRegion`) both carry
+/// `Serialize`-via-`as_str` at their label-axis surfaces, matching the
+/// existing `Display`-via-`as_str` and `FromStr`-inverting-`as_str`
+/// impls at each sum, and closing the serde read/write surface at both
+/// ordered typed sums against the shared canonical-label oracle.
+///
+/// A future variant insertion (a `Pending` band strictly between
+/// [`AdmissionTier::Refused`] and [`AdmissionTier::StagingOnly`], a
+/// `StrictPlusAttestation` ceiling strictly above [`AdmissionTier::Strict`])
+/// updates the [`as_str`] match body alone and every serde emitter
+/// automatically inherits the new canonical label — no manifest schema
+/// churn per consumer, no drift between the [`Display`] rendering the
+/// operator reads at the deploy-orchestrator telemetry surface and the
+/// serialised value the SLSA attestation record stamps against the
+/// admission-tier label.
+///
+/// The round-trip `tier -> serialize -> deserialize` identity at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_serde_round_trips_through_json_at_every_variant`],
+/// closing the two-oracle discipline (canonical-label emission through
+/// [`as_str`], canonical-label parsing through [`std::str::FromStr`])
+/// across the full serde read/write surface — the structural mirror of
+/// the [`crate::retry::PerAttemptRegion`] serde round-trip pin at the
+/// per-attempt-region ladder.
+///
+/// THEORY.md §V.4 typed primitives: the serialisation surface is a
+/// typed-primitive site on [`AdmissionTier`] itself (one `Serialize`
+/// impl routing through the [`as_str`] canonical-label oracle), not a
+/// per-consumer `#[derive(Serialize)]` + `#[serde(rename_all)]` retyping
+/// that would fragment the label-axis definition across every downstream
+/// consumer's struct. THEORY.md §VI.1 one-oracle: the canonical label is
+/// named at one site ([`AdmissionTier::as_str`]) and every surface —
+/// `as_str`, `Display`, this `Serialize`, `Deserialize`, `FromStr` —
+/// reads through it.
+impl serde::Serialize for AdmissionTier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// [`serde::Deserialize`] impl routes through [`std::str::FromStr`] so a
+/// downstream YAML config load, JSON telemetry replay, or attestation-
+/// record rehydration recovers the [`AdmissionTier`] variant from the
+/// same canonical snake_case grammar [`AdmissionTier::as_str`] emits —
+/// no per-consumer `#[serde(rename)]` matrix, no drift between the
+/// serialised value the SLSA attestation record stamped and the
+/// deserialised variant a replay consumer reads back at the deploy-
+/// orchestrator telemetry surface.
+///
+/// Sibling of `serde::Deserialize for PerAttemptRegion` (commit 8fd06fe
+/// — the same lift at the per-attempt-region ladder, routing through
+/// `PerAttemptRegion`'s [`std::str::FromStr`] impl). Together with the
+/// paired `serde::Serialize` impl above, this closes the
+/// `Serialize`↔`Deserialize` round-trip at the admission-tier ladder
+/// against the shared [`as_str`] / [`std::str::FromStr`] canonical-label
+/// oracle — the structural mirror of the
+/// [`crate::retry::PerAttemptRegion`] serde surface at the per-attempt-
+/// region ladder.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is:
+/// only the canonical labels emitted by [`AdmissionTier::as_str`] parse.
+/// Empty input, UpperCamel rendering (as the derived [`Debug`] impl
+/// would emit — `"Refused"`, `"StagingOnly"`), whitespace padding,
+/// uppercase (`"STRICT"`), and snake_case labels with a dropped
+/// underscore (`"stagingonly"`) all reject. Non-string JSON/YAML scalars
+/// (numbers, booleans, nulls, objects, arrays) reject at the
+/// [`serde::Deserialize`] visitor layer with the standard "invalid type"
+/// diagnostic — a downstream surface that wants alias matrix, whitespace
+/// tolerance, or numeric-tag support normalises the input before routing
+/// it through this canonical parser.
+///
+/// The round-trip `tier -> serialize -> deserialize` identity at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_serde_round_trips_through_json_at_every_variant`].
+/// The strict-parse behaviour on unknown labels is pinned by
+/// [`tests::test_admission_tier_deserialize_rejects_unknown_string`].
+///
+/// THEORY.md §V.4 typed primitives: the deserialisation surface is a
+/// typed-primitive site on [`AdmissionTier`] itself (one `Deserialize`
+/// impl routing through the [`std::str::FromStr`] canonical-label
+/// parser), not a per-consumer `#[derive(Deserialize)]` +
+/// `#[serde(rename_all)]` retyping. THEORY.md §VI.1 one-oracle:
+/// canonical-label parsing lives at one site ([`std::str::FromStr`] for
+/// [`AdmissionTier`]) and every read surface — `FromStr`, this
+/// `Deserialize`, a future TOML config loader, a future MessagePack
+/// telemetry replay — reads through it.
+impl<'de> serde::Deserialize<'de> for AdmissionTier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = <&str as serde::Deserialize>::deserialize(deserializer)?;
+        s.parse::<Self>().map_err(serde::de::Error::custom)
     }
 }
 
@@ -16050,6 +16162,118 @@ mod tests {
                 "Display and as_str must agree at {tier:?}",
             );
         }
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`], the round-trip `tier -> Serialize ->
+    /// Deserialize` through JSON is the identity —
+    /// `serde_json::from_str(&serde_json::to_string(&tier).unwrap()).unwrap()
+    /// == tier`. The load-bearing structural pin that ties the
+    /// canonical-label oracle ([`AdmissionTier::as_str`]) to its
+    /// serde-round-trip inverse via the `Serialize` impl that routes
+    /// through [`as_str`] and the `Deserialize` impl that routes through
+    /// [`std::str::FromStr`]: a regression that drifted either side (a
+    /// `Serialize` change bypassing [`as_str`], a `Deserialize` change
+    /// bypassing [`std::str::FromStr`], or a variant insertion without
+    /// matching arms in both) desynchronises this pin at one site instead
+    /// of leaking to every downstream YAML config / JSON telemetry /
+    /// attestation-record consumer that reads a rehydrated
+    /// [`AdmissionTier`] back from its serialised form. Sibling of
+    /// [`test_admission_tier_display_round_trips_through_from_str`] at
+    /// the string-scalar round-trip surface, and structural mirror of
+    /// `test_per_attempt_region_serde_round_trips_through_json_at_every_variant`
+    /// at the per-attempt-region ladder — the three pins together close
+    /// the label-axis identity across both the `Display`/`FromStr` and
+    /// `Serialize`/`Deserialize` surfaces on both ordered typed sums.
+    #[test]
+    fn test_admission_tier_serde_round_trips_through_json_at_every_variant() {
+        for tier in AdmissionTier::ALL {
+            let json = serde_json::to_string(&tier).unwrap();
+            let parsed: AdmissionTier = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                parsed, tier,
+                "Serialize→Deserialize must round-trip through JSON at {tier:?} (via {json:?})",
+            );
+        }
+    }
+
+    /// The [`serde::Serialize`] impl emits the exact canonical-label
+    /// grammar [`AdmissionTier::as_str`] emits (as a JSON string scalar),
+    /// not the derived UpperCamel identifier a `#[derive(Serialize)]` on
+    /// the enum would emit. Pins the emission side of the
+    /// serde-round-trip against the [`as_str`] one-oracle at every
+    /// variant, so a regression that dropped the manual `Serialize` impl
+    /// and switched to `#[derive(Serialize)]` (which would emit
+    /// `"Refused"` / `"StagingOnly"` / `"Strict"`) surfaces here rather
+    /// than silently drifting every downstream YAML / JSON / attestation
+    /// consumer against the [`Display`] rendering.
+    #[test]
+    fn test_admission_tier_serialize_emits_canonical_label_at_every_variant() {
+        for tier in AdmissionTier::ALL {
+            let json = serde_json::to_string(&tier).unwrap();
+            let expected = format!("\"{}\"", tier.as_str());
+            assert_eq!(
+                json, expected,
+                "Serialize must emit the canonical as_str label at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`serde::Deserialize`] impl rejects every string that
+    /// [`std::str::FromStr`] rejects — empty input, UpperCamel rendering
+    /// (as the derived [`Debug`] impl would emit), uppercase, whitespace
+    /// padding, and snake_case labels with a dropped underscore all
+    /// reject. Non-string JSON scalars (numbers, booleans, nulls) reject
+    /// at the visitor layer with the standard "invalid type" diagnostic.
+    /// Sibling of [`test_admission_tier_from_str_rejects_unknown`] at the
+    /// serde read surface — the strict-parse discipline is pinned at
+    /// BOTH canonical-label parse sites. Structural mirror of
+    /// `test_per_attempt_region_deserialize_rejects_unknown_string` at
+    /// the per-attempt-region ladder — the strict-parse discipline is
+    /// pinned identically at both ordered typed sums' serde read
+    /// surfaces.
+    #[test]
+    fn test_admission_tier_deserialize_rejects_unknown_string() {
+        assert!(
+            serde_json::from_str::<AdmissionTier>("\"invalid\"").is_err(),
+            "unknown label rejects",
+        );
+        assert!(
+            serde_json::from_str::<AdmissionTier>("\"\"").is_err(),
+            "empty string rejects",
+        );
+        assert!(
+            serde_json::from_str::<AdmissionTier>("\"Refused\"").is_err(),
+            "UpperCamel rejects — only canonical lowercase parses",
+        );
+        assert!(
+            serde_json::from_str::<AdmissionTier>("\"StagingOnly\"").is_err(),
+            "UpperCamel rejects — only canonical lowercase parses",
+        );
+        assert!(
+            serde_json::from_str::<AdmissionTier>("\"STRICT\"").is_err(),
+            "uppercase rejects — only canonical lowercase parses",
+        );
+        assert!(
+            serde_json::from_str::<AdmissionTier>("\"  refused \"").is_err(),
+            "whitespace not trimmed — caller's responsibility",
+        );
+        assert!(
+            serde_json::from_str::<AdmissionTier>("\"stagingonly\"").is_err(),
+            "snake_case is load-bearing — `stagingonly` without the underscore rejects",
+        );
+        assert!(
+            serde_json::from_str::<AdmissionTier>("0").is_err(),
+            "numeric scalar rejects at the visitor layer",
+        );
+        assert!(
+            serde_json::from_str::<AdmissionTier>("true").is_err(),
+            "boolean scalar rejects at the visitor layer",
+        );
+        assert!(
+            serde_json::from_str::<AdmissionTier>("null").is_err(),
+            "null scalar rejects at the visitor layer",
+        );
     }
 
     /// Every strict-eligible state — both axes fully-covered /
