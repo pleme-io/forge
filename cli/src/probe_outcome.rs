@@ -5811,6 +5811,58 @@ impl<'de> serde::Deserialize<'de> for AdmissionTier {
     }
 }
 
+/// [`AsRef<str>`] impl routes through [`AdmissionTier::as_str`] so a
+/// downstream consumer that accepts `impl AsRef<str>` (a path-segment
+/// builder, an env-var setter, a [`std::collections::HashMap<&str, _>`]
+/// key lookup, a generic log-fields sink, an OpenTelemetry / tracing
+/// attribute setter that keys by `Into<Cow<'static, str>>`) reads the
+/// canonical snake_case label (`"refused"`, `"staging_only"`, `"strict"`)
+/// directly from an [`AdmissionTier`] value without going through the
+/// [`std::fmt::Display`] formatter buffer or an intermediate [`String`]
+/// allocation. The zero-cost byte-slice-coercion peer of the
+/// format-machinery [`std::fmt::Display`] surface, both routing through
+/// the same [`AdmissionTier::as_str`] canonical-label oracle.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], and [`serde::Deserialize`] impls above — the
+/// same lift at the byte-slice-access layer instead of the format /
+/// parse / serde layers. Together with the impls above this closes the
+/// `as_str` ⇢ {`Display`, `AsRef<str>`, `Serialize`} emission triangle
+/// and the {`FromStr`, `Deserialize`} parse pair at the admission-tier
+/// ladder against the shared canonical-label oracle. Structural mirror
+/// of `impl AsRef<str> for PerAttemptRegion` (commit 8c8cffe — the
+/// same lift at the per-attempt-region ladder, routing through
+/// [`crate::retry::PerAttemptRegion::as_str`]).
+///
+/// Zero-cost by construction: the returned `&str` is `'static`
+/// (delegated from [`AdmissionTier::as_str`]'s `&'static str` return
+/// type), so a consumer that borrows the slice reads directly into the
+/// static-string constant table without a copy, matching the
+/// zero-allocation discipline [`std::fmt::Display`] doesn't offer
+/// (which writes through a [`std::fmt::Formatter`] into a
+/// caller-provided buffer).
+///
+/// The identity `tier.as_ref() == tier.as_str()` at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_as_ref_str_agrees_with_as_str`]; the
+/// identity carried through a generic `impl AsRef<str>` consumer at
+/// every variant is pinned by
+/// [`tests::test_admission_tier_as_ref_str_carries_through_generic_consumer`].
+///
+/// THEORY.md §V.4 typed primitives: the byte-slice-coercion surface is
+/// a typed-primitive site on [`AdmissionTier`] itself (one `AsRef<str>`
+/// impl routing through [`AdmissionTier::as_str`]), not a per-consumer
+/// `.as_str()` restatement at every downstream site that accepts
+/// `impl AsRef<str>`. THEORY.md §VI.1 one-oracle: the canonical label
+/// is named at one site ([`AdmissionTier::as_str`]) and every surface
+/// — `as_str`, `Display`, `Serialize`, this `AsRef<str>` — reads
+/// through it.
+impl AsRef<str> for AdmissionTier {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -16215,6 +16267,71 @@ mod tests {
             assert_eq!(
                 json, expected,
                 "Serialize must emit the canonical as_str label at {tier:?}",
+            );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`], `tier.as_ref()` (the [`AsRef<str>`]
+    /// impl body) equals `tier.as_str()` (the canonical-label oracle)
+    /// exactly. The load-bearing structural pin that ties the
+    /// byte-slice-coercion surface to the shared [`AdmissionTier::as_str`]
+    /// oracle: a regression that swapped [`AsRef<str>`] to route through
+    /// the [`std::fmt::Display`] formatter buffer (paying a [`String`]
+    /// allocation), or drifted the [`AsRef<str>`] grammar from
+    /// [`AdmissionTier::as_str`]'s snake_case labels, fails here at ONE
+    /// named site instead of leaking to every downstream consumer that
+    /// accepts `impl AsRef<str>` (path-segment builder, env-var setter,
+    /// [`std::collections::HashMap<&str, _>`] key lookup, generic
+    /// log-fields sink, OpenTelemetry / tracing attribute setter).
+    /// Sibling of [`test_admission_tier_display_round_trips_through_from_str`]
+    /// at the format-machinery surface, and structural mirror of
+    /// `test_per_attempt_region_as_ref_str_agrees_with_as_str` (commit
+    /// 8c8cffe) at the per-attempt-region ladder — the two agreement
+    /// pins together close the read-side agreement across both the
+    /// format-buffer surface ([`std::fmt::Display`]) and the byte-slice
+    /// surface ([`AsRef<str>`]) against the shared canonical-label
+    /// oracle at both ordered typed sums.
+    #[test]
+    fn test_admission_tier_as_ref_str_agrees_with_as_str() {
+        for tier in AdmissionTier::ALL {
+            let borrowed: &str = tier.as_ref();
+            assert_eq!(
+                borrowed,
+                tier.as_str(),
+                "AsRef<str> and as_str must agree at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<str>`] identity carries through a generic
+    /// `impl AsRef<str>` consumer at every [`AdmissionTier::ALL`]
+    /// variant. A tiny generic function `fn read<T: AsRef<str>>(t: &T)
+    /// -> &str { t.as_ref() }` — the shape of an actual downstream
+    /// consumer (path-segment builder, env-var setter, HashMap key
+    /// lookup, tracing attribute setter) — reads the canonical
+    /// snake_case label directly from an [`AdmissionTier`] value
+    /// without going through the [`std::fmt::Display`] formatter buffer
+    /// or an intermediate [`String`] allocation. The structural witness
+    /// that an [`AdmissionTier`] is genuinely usable at
+    /// `impl AsRef<str>` call sites — a regression that drifted the
+    /// [`AsRef<str>`] impl signature (e.g., returning an owned
+    /// [`String`] instead of a `&str`, or requiring a `&mut self`)
+    /// fails here at compile time instead of at every downstream
+    /// generic call site. Structural mirror of
+    /// `test_per_attempt_region_as_ref_str_carries_through_generic_consumer`
+    /// (commit 8c8cffe) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_as_ref_str_carries_through_generic_consumer() {
+        fn read<T: AsRef<str>>(t: &T) -> &str {
+            t.as_ref()
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(&tier),
+                tier.as_str(),
+                "generic AsRef<str> consumer must read canonical label at {tier:?}",
             );
         }
     }
