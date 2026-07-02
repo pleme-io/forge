@@ -1523,6 +1523,109 @@ impl From<BumpLevel> for &'static str {
     }
 }
 
+/// [`TryFrom<&str> for BumpLevel`] routes through
+/// [`<BumpLevel as std::str::FromStr>::from_str`] so a downstream
+/// consumer bound by `impl TryFrom<&str>` (a serde container that opts
+/// into `#[serde(try_from = "&str")]` on a wrapper field, a generic
+/// try-conversion helper `fn parse_field<T: for<'a> TryFrom<&'a str>>`,
+/// a validated-input newtype builder whose canonical parse contract is
+/// stated as `TryFrom<&str>` rather than [`std::str::FromStr`]) recovers
+/// a [`BumpLevel`] value from its canonical lowercase label
+/// (`"patch"`, `"minor"`, `"major"`) through the same one-oracle
+/// grammar the direct `.parse::<BumpLevel>()` call sites already read.
+///
+/// The by-reference parse peer of [`From<BumpLevel> for &'static str`]
+/// (the by-value emit peer of the canonical-label axis) —
+/// [`From<BumpLevel> for &'static str`] is the by-value output
+/// direction of the label-axis conversion surface, this
+/// [`TryFrom<&str>`] is the by-reference input direction of the same
+/// label-axis conversion surface. Both route through the shared
+/// [`BumpLevel::as_str`] canonical-label oracle: the emit side through
+/// [`BumpLevel::as_str`] directly, this parse side through the
+/// [`std::str::FromStr`] impl whose match body inverts the
+/// [`BumpLevel::as_str`] grammar.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`], and
+/// [`From<BumpLevel> for &'static str`] impls above — the same lift at
+/// the by-reference try-conversion layer instead of the format / parse
+/// / serde / borrow / by-value-emit layers. Together with the impls
+/// above this closes the `as_str` ⇢ {`Display`, `AsRef<str>`,
+/// `Serialize`, `From<T> for &'static str`} emission set and the
+/// {`FromStr`, `Deserialize`, `TryFrom<&str>`} parse set at the
+/// version-bump-magnitude ladder against the shared canonical-label
+/// oracle. Structural mirror of `impl TryFrom<&str> for
+/// PerAttemptRegion` (commit 1be3c49 — the by-reference try-conversion
+/// peer at the per-attempt-region ladder) and `impl TryFrom<&str> for
+/// AdmissionTier` (commit a17cd83 — the by-reference try-conversion
+/// peer at the admission-tier ladder) at the version-bump-magnitude
+/// ladder: the same lift by construction, at the third ordered typed
+/// sum. After this commit all three repo-internal ordered typed sums
+/// that carry `as_str` + [`std::fmt::Display`] + [`std::str::FromStr`]
+/// + [`serde::Serialize`] + [`serde::Deserialize`] + [`AsRef<str>`] +
+/// [`From<T> for &'static str`] ([`BumpLevel`],
+/// [`crate::probe_outcome::AdmissionTier`],
+/// [`crate::retry::PerAttemptRegion`]) also carry [`TryFrom<&str>`]
+/// routing through the shared canonical-label oracle — the label-axis
+/// grammar at every ordered typed sum is now a one-oracle surface at
+/// every Rust-idiomatic reading (direct call `as_str`, format
+/// machinery [`std::fmt::Display`], byte slice [`AsRef<str>`], string
+/// parse [`std::str::FromStr`], serde [`serde::Serialize`] /
+/// [`serde::Deserialize`], by-value static-lifetime conversion
+/// [`From<T> for &'static str`], by-reference try-conversion
+/// [`TryFrom<&str>`]).
+///
+/// The natural bridge to the `serde` `try_from` container attribute
+/// (`#[serde(try_from = "&str")]` — which keys off [`TryFrom<&str>`],
+/// not [`std::str::FromStr`]) so a downstream config-schema field that
+/// wraps a [`BumpLevel`] and wants serde's `try_from` grammar (as
+/// opposed to the direct [`serde::Deserialize`] impl above) composes
+/// with one blanket impl at the typed-primitive site, not a
+/// per-consumer inline `#[serde(deserialize_with)]` cascade. The
+/// [`std::str::FromStr`] impl carries the load-bearing match body
+/// against the canonical grammar; this [`TryFrom<&str>`] impl
+/// delegates through it, so the parse-oracle discipline is preserved
+/// end-to-end and a future variant insertion (a `Prerelease` band
+/// strictly below [`BumpLevel::Patch`], an `Epoch` ceiling strictly
+/// above [`BumpLevel::Major`]) remains a one-site edit at
+/// [`BumpLevel::as_str`] plus the matching [`std::str::FromStr`] arm
+/// addition.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is:
+/// only the canonical lowercase labels emitted by [`BumpLevel::as_str`]
+/// parse. Empty input, UpperCamel rendering (`"Patch"`, `"Minor"`,
+/// `"Major"`), whitespace padding, and uppercase (`"PATCH"`) all
+/// reject — the strictness is delegated from the underlying
+/// [`std::str::FromStr`] impl.
+///
+/// The identity `BumpLevel::try_from(level.as_str()).unwrap() == level`
+/// at every [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_try_from_str_agrees_with_from_str`]; the
+/// identity carried through a generic `impl for<'a> TryFrom<&'a str>`
+/// consumer at every variant is pinned by
+/// [`tests::test_bump_level_try_from_str_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical input is pinned by
+/// [`tests::test_bump_level_try_from_str_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-reference try-conversion
+/// surface is a typed-primitive site on [`BumpLevel`] itself (one
+/// `TryFrom<&str>` impl routing through the [`std::str::FromStr`]
+/// parse oracle), not a per-consumer `.parse::<BumpLevel>()` bridge at
+/// every downstream site that types its parse contract as
+/// `impl TryFrom<&str>` rather than [`std::str::FromStr`]. THEORY.md
+/// §VI.1 one-oracle: the canonical-label grammar is named at one site
+/// ([`BumpLevel::as_str`]), inverted at one site
+/// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
+/// surface — [`std::str::FromStr`], [`serde::Deserialize`], this
+/// `TryFrom<&str>` — reads through it.
+impl TryFrom<&str> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s)
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -4024,6 +4127,105 @@ mod tests {
                 read(level),
                 level.as_str(),
                 "generic Into<&'static str> consumer must read canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&str> for BumpLevel`] recovers the original variant at
+    /// every [`BumpLevel::ALL`] variant when the canonical label emitted
+    /// by [`BumpLevel::as_str`] is fed back through it. Pins the
+    /// round-trip identity
+    /// `BumpLevel::try_from(level.as_str()).unwrap() == level` at every
+    /// variant against the shared canonical-label oracle. The
+    /// structural witness that the by-reference try-conversion parse
+    /// surface (this [`TryFrom<&str>`]) reads the same one-oracle
+    /// grammar the by-value emit surface
+    /// ([`From<BumpLevel> for &'static str`], the sibling above) writes
+    /// — one round-trip pin per variant, refuses a future variant
+    /// insertion that drops the `TryFrom`/`as_str` agreement.
+    /// Structural mirror of
+    /// `test_per_attempt_region_try_from_str_agrees_with_from_str`
+    /// (commit 1be3c49) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_str_agrees_with_from_str` (commit
+    /// a17cd83) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_str_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let parsed = <BumpLevel as std::convert::TryFrom<&str>>::try_from(level.as_str())
+                .expect("canonical label must parse through TryFrom<&str>");
+            assert_eq!(
+                parsed, level,
+                "TryFrom<&str> must round-trip through as_str at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<&str> for BumpLevel`] identity carries through a
+    /// generic `impl for<'a> TryFrom<&'a str>` consumer at every
+    /// [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(s: &str) -> T where T: for<'a> TryFrom<&'a str>,
+    /// T::Error: std::fmt::Debug` — the shape of an actual downstream
+    /// consumer (validated-input newtype builder, serde `try_from`
+    /// wrapper, generic try-conversion helper that opts into the
+    /// [`TryFrom<&str>`] contract rather than [`std::str::FromStr`]) —
+    /// recovers the canonical variant from the canonical lowercase
+    /// label at every variant. The structural witness that a
+    /// [`BumpLevel`] is genuinely usable at
+    /// `impl for<'a> TryFrom<&'a str>` call sites — a regression that
+    /// drifted the [`TryFrom`] impl signature (e.g., requiring an
+    /// owned [`String`] input instead of `&str`, or returning a
+    /// different variant than [`std::str::FromStr`] would) fails here
+    /// at compile time or at the assertion instead of at every
+    /// downstream generic call site. Structural mirror of
+    /// `test_per_attempt_region_try_from_str_carries_through_generic_consumer`
+    /// (commit 1be3c49) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_str_carries_through_generic_consumer`
+    /// (commit a17cd83) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_str_carries_through_generic_consumer() {
+        fn parse<T>(s: &str) -> T
+        where
+            T: for<'a> std::convert::TryFrom<&'a str>,
+            for<'a> <T as std::convert::TryFrom<&'a str>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<&str>>::try_from(s)
+                .expect("canonical label must parse through generic TryFrom<&str>")
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                parse::<BumpLevel>(level.as_str()),
+                level,
+                "generic TryFrom<&str> consumer must recover canonical variant at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&str> for BumpLevel`] rejects non-canonical input with
+    /// the same strictness [`std::str::FromStr`] enforces — empty
+    /// string, UpperCamel rendering, uppercase, and whitespace padding
+    /// all reject. Pins the strict-rejection contract at the
+    /// by-reference try-conversion surface so a downstream consumer
+    /// bound by [`TryFrom<&str>`] (a serde `try_from` container, a
+    /// generic try-conversion helper) inherits the same canonical-only
+    /// grammar the direct `.parse::<BumpLevel>()` call sites already
+    /// read, and a future permissive-parse regression at the underlying
+    /// [`std::str::FromStr`] impl lights up here rather than drifting
+    /// silently through the by-reference try-conversion surface.
+    /// Structural mirror of
+    /// `test_per_attempt_region_try_from_str_rejects_non_canonical_input`
+    /// (commit 1be3c49) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_str_rejects_non_canonical_input`
+    /// (commit a17cd83) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_str_rejects_non_canonical_input() {
+        for bad in [
+            "", "Patch", "Minor", "Major", "PATCH", "MINOR", "MAJOR", " patch", "patch ",
+            "  patch ", "invalid",
+        ] {
+            assert!(
+                <BumpLevel as std::convert::TryFrom<&str>>::try_from(bad).is_err(),
+                "TryFrom<&str> must reject non-canonical input {bad:?}",
             );
         }
     }
