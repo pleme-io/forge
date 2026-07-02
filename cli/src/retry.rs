@@ -1508,6 +1508,92 @@ impl From<PerAttemptRegion> for String {
     }
 }
 
+/// [`TryFrom<String> for PerAttemptRegion`] routes through
+/// [`<PerAttemptRegion as std::str::FromStr>::from_str`] on the borrowed
+/// `&str` view of the caller-owned input, so a downstream consumer bound
+/// by `impl TryFrom<String>` (a serde container that opts into
+/// `#[serde(try_from = "String")]` on a wrapper field, a generic
+/// try-conversion helper `fn parse_field<T: TryFrom<String>>` that owns
+/// the input buffer, a validated-input newtype builder that consumes an
+/// owned [`String`] and returns a validated [`PerAttemptRegion`])
+/// recovers a [`PerAttemptRegion`] value from its canonical snake_case
+/// label through the same one-oracle grammar the direct
+/// `.parse::<PerAttemptRegion>()` call sites and the sibling
+/// [`TryFrom<&str>`] impl already read.
+///
+/// The by-value owned-string parse peer of [`TryFrom<&str> for
+/// PerAttemptRegion`] above — both are parse surfaces of the label-axis
+/// conversion set, differing only on the input string ownership:
+/// [`TryFrom<&str>`] takes a borrowed `&str` view for consumers that
+/// already hold a borrow, this [`TryFrom<String>`] takes an owned
+/// [`String`] for consumers that own the input buffer (a serde
+/// `try_from = "String"` container, a builder that consumes its input).
+/// Both delegate through the shared [`FromStr`] parse oracle: the
+/// borrowed peer directly, this owned peer through `input.as_str()` at
+/// the boundary — the same canonical grammar lifted to the owned-string
+/// input layer.
+///
+/// The symmetric parse-side sibling of [`From<PerAttemptRegion> for
+/// String`] above: the two together close the by-value owned-string
+/// input+output symmetry at the per-attempt-region ladder —
+/// [`From<PerAttemptRegion> for String`] emits the canonical label as an
+/// owned [`String`] for [`Into<String>`] consumers, this
+/// [`TryFrom<String>`] parses the canonical label from an owned
+/// [`String`] for [`TryFrom<String>`] consumers, both routing through
+/// the shared [`as_str`] / [`FromStr`] oracle pair.
+///
+/// The natural bridge to the `serde` `try_from` container attribute at
+/// the owned-string layer (`#[serde(try_from = "String")]` — which keys
+/// off [`TryFrom<String>`], not [`TryFrom<&str>`]) so a downstream
+/// config-schema field that wraps a [`PerAttemptRegion`] and wants
+/// serde's owned-string `try_from` grammar (as opposed to the borrowed
+/// [`TryFrom<&str>`] variant or the direct [`serde::Deserialize`] impl)
+/// composes with one blanket impl at the typed-primitive site, not a
+/// per-consumer inline `#[serde(deserialize_with)]` cascade. The
+/// [`FromStr`] impl carries the load-bearing match body against the
+/// canonical grammar; this [`TryFrom<String>`] impl delegates through
+/// it, so the parse-oracle discipline is preserved end-to-end and a
+/// future variant insertion / grammar refinement remains a one-site
+/// edit at [`as_str`] plus the matching [`FromStr`] arm addition.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is:
+/// only the canonical snake_case labels emitted by
+/// [`PerAttemptRegion::as_str`] parse. Empty input, UpperCamel rendering
+/// (`"BeforeFirst"`, `"OverBudget"`), whitespace padding, uppercase
+/// (`"FIRST"`), and snake_case labels with a dropped underscore
+/// (`"beforefirst"`, `"overbudget"`) all reject — the strictness is
+/// delegated from the underlying [`FromStr`] impl.
+///
+/// The identity `PerAttemptRegion::try_from(String::from(region.as_str())).unwrap() ==
+/// region` at every [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_string_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<String>`
+/// consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_string_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical owned input is pinned
+/// by
+/// [`tests::test_per_attempt_region_try_from_string_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned-string
+/// try-conversion surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one `TryFrom<String>` impl routing
+/// through the [`FromStr`] parse oracle), not a per-consumer
+/// `.parse::<PerAttemptRegion>()` bridge at every downstream site that
+/// types its parse contract as `impl TryFrom<String>` rather than
+/// [`std::str::FromStr`] or [`TryFrom<&str>`]. THEORY.md §VI.1
+/// one-oracle: the canonical-label grammar is named at one site
+/// ([`PerAttemptRegion::as_str`]), inverted at one site
+/// ([`PerAttemptRegion::from_str`]), and every parse surface —
+/// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
+/// this [`TryFrom<String>`] — reads through it.
+impl TryFrom<String> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s.as_str())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -11952,6 +12038,104 @@ mod tests {
             assert!(
                 <PerAttemptRegion as std::convert::TryFrom<&str>>::try_from(bad).is_err(),
                 "TryFrom<&str> must reject non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<String> for PerAttemptRegion`] recovers the original
+    /// variant at every [`PerAttemptRegion::ALL`] variant when the
+    /// canonical label emitted by [`PerAttemptRegion::as_str`] is fed
+    /// back through it as an owned [`String`]. Pins the round-trip
+    /// identity
+    /// `PerAttemptRegion::try_from(String::from(region.as_str())).unwrap() == region`
+    /// at every variant against the shared canonical-label oracle. The
+    /// structural witness that the by-value owned-string try-conversion
+    /// parse surface (this [`TryFrom<String>`]) reads the same
+    /// one-oracle grammar the by-reference try-conversion parse surface
+    /// ([`TryFrom<&str>`], the sibling above) and the by-value
+    /// owned-string emit surface ([`From<PerAttemptRegion> for String`],
+    /// the sibling above) both read — one round-trip pin per variant,
+    /// refuses a future variant insertion that drops the
+    /// `TryFrom<String>`/`as_str` agreement.
+    #[test]
+    fn test_per_attempt_region_try_from_string_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let owned: String = region.as_str().to_owned();
+            let parsed = <PerAttemptRegion as std::convert::TryFrom<String>>::try_from(owned)
+                .expect("canonical label must parse through TryFrom<String>");
+            assert_eq!(
+                parsed, region,
+                "TryFrom<String> must round-trip through as_str at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<String> for PerAttemptRegion`] identity carries
+    /// through a generic `impl TryFrom<String>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn parse<T: TryFrom<String>>(s: String) -> T` — the shape of an
+    /// actual downstream consumer (validated-input newtype builder that
+    /// consumes an owned [`String`], serde `try_from = "String"`
+    /// wrapper, generic try-conversion helper that opts into the
+    /// [`TryFrom<String>`] contract rather than
+    /// [`std::str::FromStr`] or [`TryFrom<&str>`]) — recovers the
+    /// canonical variant from the canonical snake_case label at every
+    /// variant. The structural witness that a [`PerAttemptRegion`] is
+    /// genuinely usable at `impl TryFrom<String>` call sites — a
+    /// regression that drifted the [`TryFrom`] impl signature (e.g.,
+    /// requiring [`&PerAttemptRegion`], or returning a different
+    /// variant than [`FromStr`] would) fails here at compile time or at
+    /// the assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_try_from_string_carries_through_generic_consumer() {
+        fn parse<T>(s: String) -> T
+        where
+            T: std::convert::TryFrom<String>,
+            <T as std::convert::TryFrom<String>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<String>>::try_from(s)
+                .expect("canonical label must parse through generic TryFrom<String>")
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                parse::<PerAttemptRegion>(region.as_str().to_owned()),
+                region,
+                "generic TryFrom<String> consumer must recover canonical variant at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<String> for PerAttemptRegion`] rejects non-canonical
+    /// owned input with the same strictness [`std::str::FromStr`]
+    /// enforces — empty string, UpperCamel rendering, uppercase,
+    /// whitespace padding, and snake_case labels with a dropped
+    /// underscore all reject. Pins the strict-rejection contract at the
+    /// by-value owned-string try-conversion surface so a downstream
+    /// consumer bound by [`TryFrom<String>`] (a serde
+    /// `try_from = "String"` container, a builder that consumes owned
+    /// input) inherits the same canonical-only grammar the direct
+    /// `.parse::<PerAttemptRegion>()` call sites and the sibling
+    /// [`TryFrom<&str>`] impl already read, and a future permissive-
+    /// parse regression at the underlying [`FromStr`] impl lights up
+    /// here rather than drifting silently through the owned-string
+    /// try-conversion surface.
+    #[test]
+    fn test_per_attempt_region_try_from_string_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "BeforeFirst",
+            "OverBudget",
+            "FIRST",
+            " first",
+            "first ",
+            "beforefirst",
+            "overbudget",
+        ] {
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<String>>::try_from(bad.to_owned())
+                    .is_err(),
+                "TryFrom<String> must reject non-canonical input {bad:?}",
             );
         }
     }
