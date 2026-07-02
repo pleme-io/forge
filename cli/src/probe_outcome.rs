@@ -6094,6 +6094,114 @@ impl From<AdmissionTier> for String {
     }
 }
 
+/// [`TryFrom<String> for AdmissionTier`] routes through
+/// [`<AdmissionTier as std::str::FromStr>::from_str`] on the borrowed
+/// `&str` view of the caller-owned input, so a downstream consumer bound
+/// by `impl TryFrom<String>` (a serde container that opts into
+/// `#[serde(try_from = "String")]` on a wrapper field, a generic
+/// try-conversion helper `fn parse_field<T: TryFrom<String>>` that owns
+/// the input buffer, a validated-input newtype builder that consumes an
+/// owned [`String`] and returns a validated [`AdmissionTier`]) recovers
+/// an [`AdmissionTier`] value from its canonical snake_case label
+/// (`"refused"`, `"staging_only"`, `"strict"`) through the same
+/// one-oracle [`std::str::FromStr`]/[`AdmissionTier::as_str`] grammar the
+/// direct `.parse::<AdmissionTier>()` call sites and the sibling
+/// [`TryFrom<&str>`] impl already read.
+///
+/// The by-value owned-string parse peer of [`TryFrom<&str> for
+/// AdmissionTier`] above — both are parse surfaces of the label-axis
+/// conversion set, differing only on the input string ownership:
+/// [`TryFrom<&str>`] takes a borrowed `&str` view for consumers that
+/// already hold a borrow, this [`TryFrom<String>`] takes an owned
+/// [`String`] for consumers that own the input buffer (a serde
+/// `try_from = "String"` container, a builder that consumes its input).
+/// Both delegate through the shared [`std::str::FromStr`] parse oracle:
+/// the borrowed peer directly, this owned peer through `input.as_str()`
+/// at the boundary — the same canonical grammar lifted to the
+/// owned-string input layer.
+///
+/// The symmetric parse-side sibling of [`From<AdmissionTier> for
+/// String`] above: the two together close the by-value owned-string
+/// input+output symmetry at the admission-tier ladder —
+/// [`From<AdmissionTier> for String`] emits the canonical label as an
+/// owned [`String`] for [`Into<String>`] consumers, this
+/// [`TryFrom<String>`] parses the canonical label from an owned
+/// [`String`] for [`TryFrom<String>`] consumers, both routing through
+/// the shared [`AdmissionTier::as_str`] / [`std::str::FromStr`] oracle
+/// pair. After this impl the admission-tier ladder carries the closed
+/// by-reference + by-value pair at both emission
+/// ([`From<AdmissionTier> for &'static str`] +
+/// [`From<AdmissionTier> for String`]) and try-conversion
+/// ([`TryFrom<&str>`] + this [`TryFrom<String>`]) surfaces of the label
+/// axis — the four-way corner set of the string-ownership × conversion-
+/// direction grid at the admission-tier ladder, all routing through the
+/// shared canonical-label oracle.
+///
+/// Structural mirror of `impl TryFrom<String> for PerAttemptRegion`
+/// (commit 9f6feb3 — the by-value owned-string parse peer at the
+/// per-attempt-region ladder) at the admission-tier ladder: the same
+/// lift by construction, at the other ordered typed sum. Sibling of the
+/// [`std::fmt::Display`], [`std::str::FromStr`], [`serde::Serialize`],
+/// [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<AdmissionTier> for &'static str`], [`TryFrom<&str>`], and
+/// [`From<AdmissionTier> for String`] impls above — the same lift at
+/// the by-value owned-string try-conversion layer instead of the format
+/// / parse / serde / borrow / static-lifetime / borrowed-try-conversion
+/// / owned-emit layers.
+///
+/// The natural bridge to the `serde` `try_from` container attribute at
+/// the owned-string layer (`#[serde(try_from = "String")]` — which keys
+/// off [`TryFrom<String>`], not [`TryFrom<&str>`]) so a downstream
+/// config-schema field that wraps an [`AdmissionTier`] and wants
+/// serde's owned-string `try_from` grammar (as opposed to the borrowed
+/// [`TryFrom<&str>`] variant or the direct [`serde::Deserialize`] impl)
+/// composes with one blanket impl at the typed-primitive site, not a
+/// per-consumer inline `#[serde(deserialize_with)]` cascade. The
+/// [`std::str::FromStr`] impl carries the load-bearing match body
+/// against the canonical grammar; this [`TryFrom<String>`] impl
+/// delegates through it, so the parse-oracle discipline is preserved
+/// end-to-end and a future variant insertion / grammar refinement
+/// remains a one-site edit at [`AdmissionTier::as_str`] plus the
+/// matching [`std::str::FromStr`] arm addition.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is:
+/// only the canonical snake_case labels emitted by
+/// [`AdmissionTier::as_str`] parse. Empty input, UpperCamel rendering
+/// (`"Refused"`, `"StagingOnly"`, `"Strict"`), whitespace padding,
+/// uppercase (`"REFUSED"`), and snake_case labels with a dropped
+/// underscore (`"stagingonly"`) all reject — the strictness is
+/// delegated from the underlying [`std::str::FromStr`] impl.
+///
+/// The identity `AdmissionTier::try_from(String::from(tier.as_str())).unwrap() ==
+/// tier` at every [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_try_from_string_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<String>`
+/// consumer at every variant is pinned by
+/// [`tests::test_admission_tier_try_from_string_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical owned input is pinned
+/// by
+/// [`tests::test_admission_tier_try_from_string_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned-string
+/// try-conversion surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one `TryFrom<String>` impl routing through
+/// the [`std::str::FromStr`] parse oracle), not a per-consumer
+/// `.parse::<AdmissionTier>()` bridge at every downstream site that
+/// types its parse contract as `impl TryFrom<String>` rather than
+/// [`std::str::FromStr`] or [`TryFrom<&str>`]. THEORY.md §VI.1
+/// one-oracle: the canonical-label grammar is named at one site
+/// ([`AdmissionTier::as_str`]), inverted at one site
+/// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
+/// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], this [`TryFrom<String>`] — reads through it.
+impl TryFrom<String> for AdmissionTier {
+    type Error = anyhow::Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s.as_str())
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -16802,6 +16910,110 @@ mod tests {
                 read(tier),
                 tier.as_str(),
                 "generic Into<String> consumer must read canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<String> for AdmissionTier`] recovers the original
+    /// variant at every [`AdmissionTier::ALL`] variant when the
+    /// canonical label emitted by [`AdmissionTier::as_str`] is fed back
+    /// through it as an owned [`String`]. Pins the round-trip identity
+    /// `AdmissionTier::try_from(String::from(tier.as_str())).unwrap() == tier`
+    /// at every variant against the shared canonical-label oracle. The
+    /// structural witness that the by-value owned-string try-conversion
+    /// parse surface (this [`TryFrom<String>`]) reads the same
+    /// one-oracle grammar the by-reference try-conversion parse surface
+    /// ([`TryFrom<&str>`], the sibling above) and the by-value
+    /// owned-string emit surface
+    /// ([`From<AdmissionTier> for String`], the sibling above) both
+    /// read — one round-trip pin per variant, refuses a future variant
+    /// insertion that drops the `TryFrom<String>`/`as_str` agreement.
+    /// Structural mirror of
+    /// `test_per_attempt_region_try_from_string_agrees_with_from_str`
+    /// (commit 9f6feb3) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_try_from_string_agrees_with_from_str() {
+        for tier in AdmissionTier::ALL {
+            let owned: String = tier.as_str().to_owned();
+            let parsed = <AdmissionTier as std::convert::TryFrom<String>>::try_from(owned)
+                .expect("canonical label must parse through TryFrom<String>");
+            assert_eq!(
+                parsed, tier,
+                "TryFrom<String> must round-trip through as_str at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<String> for AdmissionTier`] identity carries
+    /// through a generic `impl TryFrom<String>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn parse<T: TryFrom<String>>(s: String) -> T` — the shape of an
+    /// actual downstream consumer (validated-input newtype builder that
+    /// consumes an owned [`String`], serde `try_from = "String"`
+    /// wrapper, generic try-conversion helper that opts into the
+    /// [`TryFrom<String>`] contract rather than
+    /// [`std::str::FromStr`] or [`TryFrom<&str>`]) — recovers the
+    /// canonical variant from the canonical snake_case label at every
+    /// variant. The structural witness that an [`AdmissionTier`] is
+    /// genuinely usable at `impl TryFrom<String>` call sites — a
+    /// regression that drifted the [`TryFrom`] impl signature (e.g.,
+    /// requiring [`&AdmissionTier`], or returning a different variant
+    /// than [`std::str::FromStr`] would) fails here at compile time or
+    /// at the assertion instead of at every downstream generic call
+    /// site. Structural mirror of
+    /// `test_per_attempt_region_try_from_string_carries_through_generic_consumer`
+    /// (commit 9f6feb3) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_try_from_string_carries_through_generic_consumer() {
+        fn parse<T>(s: String) -> T
+        where
+            T: std::convert::TryFrom<String>,
+            <T as std::convert::TryFrom<String>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<String>>::try_from(s)
+                .expect("canonical label must parse through generic TryFrom<String>")
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                parse::<AdmissionTier>(tier.as_str().to_owned()),
+                tier,
+                "generic TryFrom<String> consumer must recover canonical variant at {tier:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<String> for AdmissionTier`] rejects non-canonical
+    /// owned input with the same strictness [`std::str::FromStr`]
+    /// enforces — empty string, UpperCamel rendering, uppercase,
+    /// whitespace padding, and snake_case labels with a dropped
+    /// underscore all reject. Pins the strict-rejection contract at the
+    /// by-value owned-string try-conversion surface so a downstream
+    /// consumer bound by [`TryFrom<String>`] (a serde
+    /// `try_from = "String"` container, a builder that consumes owned
+    /// input) inherits the same canonical-only grammar the direct
+    /// `.parse::<AdmissionTier>()` call sites and the sibling
+    /// [`TryFrom<&str>`] impl already read, and a future permissive-
+    /// parse regression at the underlying [`std::str::FromStr`] impl
+    /// lights up here rather than drifting silently through the
+    /// owned-string try-conversion surface. Structural mirror of
+    /// `test_per_attempt_region_try_from_string_rejects_non_canonical_input`
+    /// (commit 9f6feb3) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_try_from_string_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            " refused",
+            "refused ",
+            "stagingonly",
+        ] {
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<String>>::try_from(bad.to_owned()).is_err(),
+                "TryFrom<String> must reject non-canonical input {bad:?}",
             );
         }
     }
