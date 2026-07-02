@@ -6300,6 +6300,116 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, str> {
     }
 }
 
+/// [`TryFrom<Cow<'_, str>> for AdmissionTier`] routes through
+/// [`<AdmissionTier as std::str::FromStr>::from_str`] on the borrowed
+/// `&str` view of the caller-supplied [`std::borrow::Cow`], so a
+/// downstream consumer bound by `impl TryFrom<Cow<'a, str>>` (a serde
+/// container that opts into `#[serde(try_from = "Cow<'a, str>")]` on a
+/// wrapper field, a generic try-conversion helper
+/// `fn parse<T: TryFrom<Cow<'a, str>>>` that composes with either a
+/// `'static`-lived label or an owned [`String`] uniformly, a validated-
+/// input newtype builder that accepts either a borrowed or an owned
+/// canonical label at the borrowed/owned frontier) recovers an
+/// [`AdmissionTier`] value from its canonical snake_case label through
+/// the same one-oracle grammar the direct `.parse::<AdmissionTier>()`
+/// call sites and the sibling [`TryFrom<&str>`] / [`TryFrom<String>`]
+/// impls already read.
+///
+/// The by-value [`Cow<'_, str>`] parse peer of [`TryFrom<&str> for
+/// AdmissionTier`] and [`TryFrom<String> for AdmissionTier`] above —
+/// all three are parse surfaces of the label-axis conversion set,
+/// differing only on the input string-owner shape: [`TryFrom<&str>`]
+/// takes a borrowed `&str` view for consumers that already hold a
+/// borrow, [`TryFrom<String>`] takes an owned [`String`] for consumers
+/// that own the input buffer, this [`TryFrom<Cow<'_, str>>`] takes
+/// either uniformly at the borrowed/owned-frontier receiver shape. All
+/// three route through the shared
+/// [`<Self as std::str::FromStr>::from_str`] canonical-grammar oracle:
+/// the [`&str`] peer through `from_str` directly, the [`String`] peer
+/// through `from_str(s.as_str())`, this [`Cow<'_, str>`] peer through
+/// `from_str(s.as_ref())` — the same canonical grammar lifted to the
+/// borrowed/owned-frontier parse layer, with the receiver-side
+/// [`std::borrow::Cow::as_ref`] call dispatching uniformly against
+/// both branches ([`Cow::Borrowed`] yields the borrowed `&str` view
+/// directly, [`Cow::Owned`] yields the borrowed `&str` view of the
+/// owned [`String`] via [`String::as_str`]) so the impl body reads the
+/// same one-oracle grammar regardless of receiver-supplied `Cow`
+/// branch.
+///
+/// The parse-side mirror of [`From<AdmissionTier> for Cow<'static,
+/// str>`] above — the emit peer closes the borrowed/owned-frontier
+/// emit surface (uniform emit at the [`Cow::Borrowed`] branch, zero
+/// allocation regardless of receiver typing), this parse peer closes
+/// the borrowed/owned-frontier parse surface (uniform parse regardless
+/// of caller-supplied `Cow` branch). Together the two impls close both
+/// directions of the borrowed/owned-frontier conversion at the
+/// admission-tier ladder, giving a downstream site that types its label
+/// sink or source as [`Cow<'a, str>`] (rather than one of the four
+/// owned/borrowed cross products [`&str`] / [`String`] on the emit or
+/// parse side) a first-class typed-primitive surface at both ends, not
+/// a per-consumer `Cow::Borrowed(...)` / `Cow::Owned(...)` restatement.
+///
+/// Structural mirror of [`TryFrom<Cow<'_, str>> for PerAttemptRegion`]
+/// (commit 0b85b4f) at the admission-tier ladder — the same
+/// `from_str(s.as_ref())` lift, through the same one-oracle discipline,
+/// at the other ordered typed sum.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<AdmissionTier> for &'static str`], [`TryFrom<&str>`],
+/// [`From<AdmissionTier> for String`], [`TryFrom<String>`], and
+/// [`From<AdmissionTier> for Cow<'static, str>`] impls above — the
+/// same lift at the by-value `Cow<'_, str>` parse layer instead of the
+/// format / parse / serde / borrow / static-lifetime / by-reference-
+/// try / owned-string-emit / owned-string-try / borrowed-frontier-emit
+/// layers. Together with the impls above this closes the parse-side arm
+/// of the borrowed/owned-frontier peer set at the admission-tier ladder
+/// against the shared [`<Self as std::str::FromStr>::from_str`]
+/// canonical-grammar oracle.
+///
+/// The impl body picks [`std::borrow::Cow::as_ref`] rather than
+/// [`Cow::into_owned`] or a per-branch [`match`]: [`Cow::as_ref`]
+/// yields a borrowed `&str` view against both branches without
+/// allocation ([`Cow::Borrowed`] yields the underlying borrow directly,
+/// [`Cow::Owned`] yields the [`String::as_str`] view of the caller-
+/// owned buffer without a redundant clone), so the parse-side receiver
+/// pays the by-reference `from_str` cost, not the [`String`]-
+/// allocation cost of a [`Cow::into_owned`] round trip — the same
+/// discipline the emit-side [`From<AdmissionTier> for Cow<'static,
+/// str>`] peer applies at the [`Cow::Borrowed`] branch.
+///
+/// The identity
+/// `AdmissionTier::try_from(Cow::Borrowed(tier.as_str())).unwrap()
+/// == tier` and its [`Cow::Owned`] sibling at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_try_from_cow_str_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<Cow<'_, str>>` consumer at every variant is pinned by
+/// [`tests::test_admission_tier_try_from_cow_str_carries_through_generic_consumer`];
+/// the strict-rejection contract at non-canonical input across both
+/// [`Cow`] branches is pinned by
+/// [`tests::test_admission_tier_try_from_cow_str_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value [`Cow<'_, str>`] parse
+/// surface is a typed-primitive site on [`AdmissionTier`] itself (one
+/// `TryFrom<Cow<'_, str>>` impl routing through
+/// [`<Self as std::str::FromStr>::from_str`] on
+/// [`Cow::as_ref`]), not a per-consumer
+/// `tier_str.parse::<AdmissionTier>()` restatement at every downstream
+/// site that receives a `Cow<'_, str>` label.
+/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// site ([`<AdmissionTier as std::str::FromStr>::from_str`]) and every
+/// parse surface — [`FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], [`TryFrom<String>`], this [`TryFrom<Cow<'_,
+/// str>>`] — reads through it.
+impl<'a> TryFrom<std::borrow::Cow<'a, str>> for AdmissionTier {
+    type Error = anyhow::Error;
+
+    fn try_from(s: std::borrow::Cow<'a, str>) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s.as_ref())
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -17217,6 +17327,153 @@ mod tests {
                 matches!(cow, std::borrow::Cow::Borrowed(_)),
                 "From<AdmissionTier> for Cow<'static, str> must return Cow::Borrowed \
                  (zero-allocation branch) at {tier:?}, not Cow::Owned",
+            );
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, str>> for AdmissionTier`] agrees with the
+    /// canonical [`std::str::FromStr`] grammar at every
+    /// [`AdmissionTier::ALL`] variant across both [`Cow`] branches. Pins
+    /// the identity
+    /// `AdmissionTier::try_from(Cow::Borrowed(tier.as_str())).unwrap() ==
+    /// tier` and its [`Cow::Owned`] sibling at every variant so a
+    /// future variant insertion / grammar refinement at the shared
+    /// [`std::str::FromStr`] oracle propagates to the by-value
+    /// [`Cow<'_, str>`] try-conversion surface without a per-variant
+    /// retype at the [`TryFrom`] impl body. The structural agreement
+    /// pin between the by-value [`Cow<'_, str>`] parse surface
+    /// ([`TryFrom<Cow<'_, str>> for AdmissionTier`]) and the canonical-
+    /// grammar oracle ([`<AdmissionTier as std::str::FromStr>::from_str`])
+    /// — the borrowed/owned-frontier parse-side sibling of the
+    /// borrowed-`&str` agreement pin
+    /// [`test_admission_tier_try_from_str_agrees_with_from_str`] and the
+    /// owned-[`String`] agreement pin
+    /// [`test_admission_tier_try_from_string_agrees_with_from_str`]
+    /// already carry, closing the three-way parse agreement across the
+    /// canonical string-owner shapes (`&str`, [`String`],
+    /// [`Cow<'_, str>`]). Structural mirror of
+    /// `test_per_attempt_region_try_from_cow_str_agrees_with_from_str`
+    /// (commit 0b85b4f) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_try_from_cow_str_agrees_with_from_str() {
+        for tier in AdmissionTier::ALL {
+            let borrowed: std::borrow::Cow<'_, str> = std::borrow::Cow::Borrowed(tier.as_str());
+            let parsed_borrowed = <AdmissionTier as std::convert::TryFrom<
+                std::borrow::Cow<'_, str>,
+            >>::try_from(borrowed)
+            .expect("canonical label must parse through TryFrom<Cow::Borrowed>");
+            assert_eq!(
+                parsed_borrowed, tier,
+                "TryFrom<Cow<'_, str>> must round-trip through Cow::Borrowed at {tier:?}",
+            );
+
+            let owned: std::borrow::Cow<'_, str> =
+                std::borrow::Cow::Owned(tier.as_str().to_owned());
+            let parsed_owned = <AdmissionTier as std::convert::TryFrom<
+                std::borrow::Cow<'_, str>,
+            >>::try_from(owned)
+            .expect("canonical label must parse through TryFrom<Cow::Owned>");
+            assert_eq!(
+                parsed_owned, tier,
+                "TryFrom<Cow<'_, str>> must round-trip through Cow::Owned at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Cow<'_, str>> for AdmissionTier`] identity carries
+    /// through a generic `impl TryFrom<Cow<'_, str>>` consumer at every
+    /// [`AdmissionTier::ALL`] variant across both [`Cow`] branches. A
+    /// tiny generic function
+    /// `fn parse<'a, T: TryFrom<Cow<'a, str>>>(s: Cow<'a, str>) -> T` —
+    /// the shape of an actual downstream consumer (validated-input
+    /// newtype builder that accepts either a borrowed static label or an
+    /// owned caller-supplied [`String`] uniformly, serde
+    /// `try_from = "Cow<'a, str>"` wrapper, generic try-conversion
+    /// helper that opts into the [`TryFrom<Cow<'_, str>>`] contract
+    /// rather than [`std::str::FromStr`] / [`TryFrom<&str>`] /
+    /// [`TryFrom<String>`] to compose with the borrowed/owned-frontier
+    /// receiver shape) — recovers the canonical variant from the
+    /// canonical snake_case label at every variant against both [`Cow`]
+    /// branches. The structural witness that an [`AdmissionTier`] is
+    /// genuinely usable at `impl TryFrom<Cow<'_, str>>` call sites — a
+    /// regression that drifted the [`TryFrom`] impl signature (e.g.,
+    /// requiring a specific `'static` lifetime rather than the parametric
+    /// `'a`, dropping the [`Cow`] wrapper entirely, or returning a
+    /// different variant than [`FromStr`] would) fails here at compile
+    /// time or at the assertion instead of at every downstream generic
+    /// call site. Structural mirror of
+    /// `test_per_attempt_region_try_from_cow_str_carries_through_generic_consumer`
+    /// (commit 0b85b4f) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_try_from_cow_str_carries_through_generic_consumer() {
+        fn parse<'a, T>(s: std::borrow::Cow<'a, str>) -> T
+        where
+            T: std::convert::TryFrom<std::borrow::Cow<'a, str>>,
+            <T as std::convert::TryFrom<std::borrow::Cow<'a, str>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::borrow::Cow<'a, str>>>::try_from(s)
+                .expect("canonical label must parse through generic TryFrom<Cow<'_, str>>")
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                parse::<AdmissionTier>(std::borrow::Cow::Borrowed(tier.as_str())),
+                tier,
+                "generic TryFrom<Cow<'_, str>> consumer must recover canonical variant \
+                 through Cow::Borrowed at {tier:?}",
+            );
+            assert_eq!(
+                parse::<AdmissionTier>(std::borrow::Cow::Owned(tier.as_str().to_owned())),
+                tier,
+                "generic TryFrom<Cow<'_, str>> consumer must recover canonical variant \
+                 through Cow::Owned at {tier:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, str>> for AdmissionTier`] rejects non-canonical
+    /// input with the same strictness [`std::str::FromStr`] enforces
+    /// across both [`Cow`] branches — empty string, UpperCamel rendering,
+    /// uppercase, whitespace padding, and snake_case labels with a
+    /// dropped underscore all reject, whether wrapped in [`Cow::Borrowed`]
+    /// or [`Cow::Owned`]. Pins the strict-rejection contract at the
+    /// by-value [`Cow<'_, str>`] try-conversion surface so a downstream
+    /// consumer bound by [`TryFrom<Cow<'_, str>>`] (a serde
+    /// `try_from = "Cow<'_, str>"` container, a builder that consumes
+    /// either a borrowed or an owned canonical label) inherits the same
+    /// canonical-only grammar the direct `.parse::<AdmissionTier>()`
+    /// call sites and the sibling [`TryFrom<&str>`] / [`TryFrom<String>`]
+    /// impls already read, and a future permissive-parse regression at
+    /// the underlying [`FromStr`] impl lights up here rather than
+    /// drifting silently through the borrowed/owned-frontier
+    /// try-conversion surface at either branch. Structural mirror of
+    /// `test_per_attempt_region_try_from_cow_str_rejects_non_canonical_input`
+    /// (commit 0b85b4f) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_try_from_cow_str_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            " refused",
+            "refused ",
+            "stagingonly",
+        ] {
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<std::borrow::Cow<'_, str>>>::try_from(
+                    std::borrow::Cow::Borrowed(bad),
+                )
+                .is_err(),
+                "TryFrom<Cow<'_, str>> must reject non-canonical Cow::Borrowed input {bad:?}",
+            );
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<std::borrow::Cow<'_, str>>>::try_from(
+                    std::borrow::Cow::Owned(bad.to_owned()),
+                )
+                .is_err(),
+                "TryFrom<Cow<'_, str>> must reject non-canonical Cow::Owned input {bad:?}",
             );
         }
     }
