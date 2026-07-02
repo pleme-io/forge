@@ -1242,6 +1242,54 @@ impl<'de> serde::Deserialize<'de> for PerAttemptRegion {
     }
 }
 
+/// [`AsRef<str>`] impl routes through [`PerAttemptRegion::as_str`] so a
+/// downstream consumer that accepts `impl AsRef<str>` (a path-segment
+/// builder, an env-var setter, a [`std::collections::HashMap<&str, _>`]
+/// key lookup, a generic log-fields sink, an OpenTelemetry / tracing
+/// attribute setter that keys by `Into<Cow<'static, str>>`) reads the
+/// canonical snake_case label (`"before_first"`, `"first"`, `"interim"`,
+/// `"final"`, `"over_budget"`) directly from a [`PerAttemptRegion`]
+/// value without going through the [`std::fmt::Display`] formatter
+/// buffer or an intermediate [`String`] allocation. The zero-cost
+/// byte-slice-coercion peer of the format-machinery `Display` surface,
+/// both routing through the same [`as_str`] canonical-label oracle.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], and [`serde::Deserialize`] impls above — the
+/// same lift at the byte-slice-access layer instead of the format /
+/// parse / serde layers. Together with the impls above this closes the
+/// `as_str` ⇢ {`Display`, `AsRef<str>`, `Serialize`} emission triangle
+/// and the {`FromStr`, `Deserialize`} parse pair at the per-attempt-
+/// region ladder against the shared canonical-label oracle.
+///
+/// Zero-cost by construction: the returned `&str` is `'static`
+/// (delegated from [`PerAttemptRegion::as_str`]'s `&'static str` return
+/// type), so a consumer that borrows the slice reads directly into the
+/// static-string constant table without a copy, matching the
+/// zero-allocation discipline `Display` doesn't offer (which writes
+/// through a `Formatter` into a caller-provided buffer).
+///
+/// The identity `region.as_ref() == region.as_str()` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_as_ref_str_agrees_with_as_str`];
+/// the identity carried through a generic `impl AsRef<str>` consumer at
+/// every variant is pinned by
+/// [`tests::test_per_attempt_region_as_ref_str_carries_through_generic_consumer`].
+///
+/// THEORY.md §V.4 typed primitives: the byte-slice-coercion surface is
+/// a typed-primitive site on [`PerAttemptRegion`] itself (one
+/// `AsRef<str>` impl routing through [`as_str`]), not a per-consumer
+/// `.as_str()` restatement at every downstream site that accepts
+/// `impl AsRef<str>`. THEORY.md §VI.1 one-oracle: the canonical label
+/// is named at one site ([`PerAttemptRegion::as_str`]) and every
+/// surface — `as_str`, `Display`, `Serialize`, this `AsRef<str>` —
+/// reads through it.
+impl AsRef<str> for PerAttemptRegion {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -11460,6 +11508,67 @@ mod tests {
             assert_eq!(
                 parsed, region,
                 "Serialize→Deserialize must round-trip through JSON at {region:?} (via {json:?})",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], `region.as_ref()` (the [`AsRef<str>`]
+    /// impl body) equals `region.as_str()` (the canonical-label
+    /// oracle) exactly. The load-bearing structural pin that ties the
+    /// byte-slice-coercion surface to the shared `as_str` oracle: a
+    /// regression that swapped [`AsRef<str>`] to route through the
+    /// [`std::fmt::Display`] formatter buffer (paying a `String`
+    /// allocation), or drifted the `AsRef<str>` grammar from
+    /// [`PerAttemptRegion::as_str`]'s snake_case labels, fails here at
+    /// ONE named site instead of leaking to every downstream consumer
+    /// that accepts `impl AsRef<str>` (path-segment builder, env-var
+    /// setter, [`std::collections::HashMap<&str, _>`] key lookup,
+    /// generic log-fields sink, OpenTelemetry / tracing attribute
+    /// setter). Sibling of
+    /// [`test_per_attempt_region_display_agrees_with_as_str`] at the
+    /// format-machinery surface — the two agreement pins together
+    /// close the read-side agreement across both the format-buffer
+    /// surface ([`std::fmt::Display`]) and the byte-slice surface
+    /// ([`AsRef<str>`]) against the shared canonical-label oracle.
+    #[test]
+    fn test_per_attempt_region_as_ref_str_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &str = region.as_ref();
+            assert_eq!(
+                borrowed,
+                region.as_str(),
+                "AsRef<str> and as_str must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<str>`] identity carries through a generic
+    /// `impl AsRef<str>` consumer at every [`PerAttemptRegion::ALL`]
+    /// variant. A tiny generic function `fn read<T: AsRef<str>>(t: &T)
+    /// -> &str { t.as_ref() }` — the shape of an actual downstream
+    /// consumer (path-segment builder, env-var setter, HashMap key
+    /// lookup, tracing attribute setter) — reads the canonical
+    /// snake_case label directly from a [`PerAttemptRegion`] value
+    /// without going through the [`std::fmt::Display`] formatter
+    /// buffer or an intermediate [`String`] allocation. The structural
+    /// witness that a `PerAttemptRegion` is genuinely usable at
+    /// `impl AsRef<str>` call sites — a regression that drifted the
+    /// [`AsRef<str>`] impl signature (e.g., returning an owned
+    /// [`String`] instead of a `&str`, or requiring a `&mut self`)
+    /// fails here at compile time instead of at every downstream
+    /// generic call site.
+    #[test]
+    fn test_per_attempt_region_as_ref_str_carries_through_generic_consumer() {
+        fn read<T: AsRef<str>>(t: &T) -> &str {
+            t.as_ref()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(&region),
+                region.as_str(),
+                "generic AsRef<str> consumer must read canonical label at {region:?}",
             );
         }
     }
