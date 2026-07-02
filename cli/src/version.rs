@@ -1836,6 +1836,116 @@ impl TryFrom<String> for BumpLevel {
     }
 }
 
+/// [`From<BumpLevel> for Cow<'static, str>`] routes through
+/// [`BumpLevel::as_str`] and wraps the `'static`-lived label borrow at
+/// the [`std::borrow::Cow::Borrowed`] branch so a downstream consumer
+/// that takes an [`Into<Cow<'static, str>>`] (a release-manifest
+/// serializer that keys its emission on either a static label or a
+/// caller-supplied [`String`] uniformly, a tracing / OpenTelemetry
+/// attribute slot typed as `Cow<'static, str>`, a `phf`-style static
+/// lookup table keyed by canonical label, a `clap` [`clap::builder::Str`]
+/// / [`clap::builder::StyledStr`] sink that accepts `Cow<'static, str>`,
+/// a serde helper that composes with `#[serde(borrow)]`-shaped grammars
+/// at the owned/borrowed frontier) reads the canonical lowercase label
+/// (`"patch"`, `"minor"`, `"major"`) directly from a [`BumpLevel`] value
+/// with **zero allocation** at the emit boundary — the [`Cow::Borrowed`]
+/// branch preserves the `'static` lifetime end-to-end, so a receiver
+/// bound by [`Into<Cow<'static, str>>`] pays the `'static`-borrow cost
+/// of [`From<BumpLevel> for &'static str`], not the [`String`]-
+/// allocation cost of [`From<BumpLevel> for String`].
+///
+/// The by-value `Cow<'static, str>` emit peer that closes the emit-side
+/// lifetime-choice ladder [`From<BumpLevel> for &'static str`] (zero-copy
+/// `'static` borrow) → [`From<BumpLevel> for String`] (single-allocation
+/// owned [`String`]) → this [`From<BumpLevel> for Cow<'static, str>`]
+/// (uniform emit at the borrowed/owned frontier, delegated through the
+/// [`Cow::Borrowed`] branch so zero-allocation is preserved at every
+/// [`BumpLevel`]-typed emit site regardless of receiver shape). The
+/// three by-value emit peers together consume the three canonical
+/// string-owner shapes at the label axis — `&'static str`, [`String`],
+/// [`std::borrow::Cow<'static, str>`] — through the shared
+/// [`BumpLevel::as_str`] canonical-label oracle: the `&'static str` peer
+/// through [`as_str`] directly, the [`String`] peer through
+/// `as_str().to_owned()`, this [`Cow<'static, str>`] peer through
+/// [`Cow::Borrowed`] wrapping [`as_str`] — the same canonical grammar
+/// lifted to the borrowed/owned-frontier emit layer.
+///
+/// Structural mirror of `impl From<PerAttemptRegion> for
+/// std::borrow::Cow<'static, str>` (commit 79113dd — the by-value
+/// `Cow<'static, str>` emit peer at the per-attempt-region ladder) and
+/// `impl From<AdmissionTier> for std::borrow::Cow<'static, str>` (commit
+/// 65b1e77 — the by-value `Cow<'static, str>` emit peer at the
+/// admission-tier ladder) at the version-bump-magnitude ladder: the
+/// same [`Cow::Borrowed`] lift, through the same one-oracle discipline,
+/// at the remaining ordered typed sum in the label-axis idiom. After
+/// this commit all three repo-internal ordered typed sums that carry
+/// `as_str` + [`std::fmt::Display`] + [`std::str::FromStr`] +
+/// [`serde::Serialize`] + [`serde::Deserialize`] + [`AsRef<str>`] +
+/// [`From<T> for &'static str`] + [`TryFrom<&str>`] +
+/// [`From<T> for String`] + [`TryFrom<String>`] ([`BumpLevel`],
+/// [`crate::probe_outcome::AdmissionTier`],
+/// [`crate::retry::PerAttemptRegion`]) also carry
+/// [`From<T> for Cow<'static, str>`] routing through the shared
+/// [`Cow::Borrowed`] wrapping of the [`as_str`] canonical-label oracle
+/// — the borrowed/owned-frontier emit surface at every ordered typed
+/// sum is now a one-oracle surface at the [`Cow<'static, str>`] layer.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<BumpLevel> for &'static str`], [`TryFrom<&str>`],
+/// [`From<BumpLevel> for String`], and [`TryFrom<String>`] impls above
+/// — the same lift at the by-value [`Cow<'static, str>`] emit layer
+/// instead of the format / parse / serde / borrow / static-lifetime /
+/// borrowed-try-conversion / owned-emit / owned-try-conversion layers.
+/// Together with the impls above this closes the `as_str` ⇢
+/// {`Display`, `AsRef<str>`, `Serialize`, `From<T> for &'static str`,
+/// `From<T> for String`, `From<T> for Cow<'static, str>`} emission set
+/// at the version-bump-magnitude ladder against the shared
+/// canonical-label oracle.
+///
+/// The natural bridge to any downstream site that types its label sink
+/// as [`Into<Cow<'static, str>>`] — the emit peer that answers the
+/// receiver-side question "does this API want a borrow or an owned
+/// [`String`]?" with "either, and in the [`BumpLevel`] case, always the
+/// zero-allocation [`Cow::Borrowed`] branch." A receiver typed as
+/// [`Cow<'static, str>`] (rather than `&'static str`) permits the caller
+/// to interleave [`BumpLevel`] labels with computed [`String`]s in the
+/// same sink; a receiver typed as [`Cow<'static, str>`] rather than
+/// [`String`] permits the caller to elide the allocation when the label
+/// is already `'static` — which every [`BumpLevel`] label is. The
+/// [`Cow::Borrowed`] branch is the load-bearing choice at this impl
+/// body: [`Cow::Owned`] would drift the impl toward the [`String`]-emit
+/// peer's allocation cost, defeating the borrowed/owned-frontier
+/// discipline this impl closes.
+///
+/// The identity `Cow::<'static, str>::from(level) == level.as_str()` at
+/// every [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_from_into_cow_static_str_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<Cow<'static, str>>` consumer at every variant is pinned
+/// by
+/// [`tests::test_bump_level_into_cow_static_str_carries_through_generic_consumer`];
+/// the [`Cow::Borrowed`]-not-[`Cow::Owned`] zero-allocation contract at
+/// the emit boundary is pinned by
+/// [`tests::test_bump_level_into_cow_static_str_is_borrowed`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value `Cow<'static, str>`
+/// emit surface is a typed-primitive site on [`BumpLevel`] itself (one
+/// `From<BumpLevel> for Cow<'static, str>` impl routing through
+/// [`as_str`] at the [`Cow::Borrowed`] branch), not a per-consumer
+/// `Cow::Borrowed(level.as_str())` restatement at every downstream
+/// site that accepts `impl Into<Cow<'static, str>>`. THEORY.md §VI.1
+/// one-oracle: the canonical label is named at one site
+/// ([`BumpLevel::as_str`]) and every emit surface — [`BumpLevel::as_str`],
+/// [`std::fmt::Display`], [`serde::Serialize`], [`AsRef<str>`],
+/// [`From<BumpLevel> for &'static str`], [`From<BumpLevel> for String`],
+/// this [`From<BumpLevel> for Cow<'static, str>`] — reads through it.
+impl From<BumpLevel> for std::borrow::Cow<'static, str> {
+    fn from(level: BumpLevel) -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(level.as_str())
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -4608,6 +4718,117 @@ mod tests {
             assert!(
                 <BumpLevel as std::convert::TryFrom<String>>::try_from(bad.to_owned()).is_err(),
                 "TryFrom<String> must reject non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for Cow<'static, str>`] agrees with the canonical
+    /// [`BumpLevel::as_str`] label at every [`BumpLevel::ALL`] variant.
+    /// Pins the identity `Cow::<'static, str>::from(level).as_ref() ==
+    /// level.as_str()` at every variant so a future variant insertion /
+    /// grammar refinement at the shared [`BumpLevel::as_str`] oracle
+    /// propagates to the by-value `Cow<'static, str>` emit surface
+    /// without a per-variant retype at the [`From`] impl body. The
+    /// borrowed/owned-frontier sibling of the borrowed `'static`-lifetime
+    /// agreement pin
+    /// [`test_bump_level_from_into_static_str_agrees_with_as_str`] and
+    /// the owned-[`String`] agreement pin
+    /// [`test_bump_level_from_into_string_agrees_with_as_str`] already
+    /// carry, closing the three-way emit agreement across the canonical
+    /// string-owner shapes (`&'static str`, [`String`],
+    /// [`std::borrow::Cow<'static, str>`]). Structural mirror of
+    /// `test_admission_tier_from_into_cow_static_str_agrees_with_as_str`
+    /// (commit 65b1e77) at the admission-tier ladder and
+    /// `test_per_attempt_region_from_into_cow_static_str_agrees_with_as_str`
+    /// (commit 79113dd) at the per-attempt-region ladder.
+    #[test]
+    fn test_bump_level_from_into_cow_static_str_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let cow: std::borrow::Cow<'static, str> = std::borrow::Cow::from(level);
+            assert_eq!(
+                cow.as_ref(),
+                level.as_str(),
+                "From<BumpLevel> for Cow<'static, str> and as_str must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Cow<'static, str>`] identity carries
+    /// through a generic `impl Into<Cow<'static, str>>` consumer at every
+    /// [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Cow<'static, str>>>(t: T) -> Cow<'static, str>
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (release-manifest serializer that accepts either a static label
+    /// or a caller-supplied [`String`] uniformly, tracing /
+    /// OpenTelemetry attribute slot typed as
+    /// [`std::borrow::Cow<'static, str>`], `clap`
+    /// [`clap::builder::Str`] / [`clap::builder::StyledStr`] sink) —
+    /// reads the canonical lowercase label directly from a [`BumpLevel`]
+    /// value with the `'static` lifetime preserved through the
+    /// [`std::borrow::Cow<'static, str>`] wrapper. The structural
+    /// witness that a [`BumpLevel`] is genuinely usable at
+    /// `impl Into<Cow<'static, str>>` call sites — a regression that
+    /// drifted the [`From`] impl signature (e.g., returning
+    /// [`std::borrow::Cow<'_, str>`] with a non-`'static` lifetime,
+    /// requiring [`&BumpLevel`] and losing the by-value semantics, or
+    /// dropping the [`std::borrow::Cow`] wrapper entirely) fails here at
+    /// compile time instead of at every downstream generic call site.
+    /// Structural mirror of
+    /// `test_admission_tier_into_cow_static_str_carries_through_generic_consumer`
+    /// (commit 65b1e77) at the admission-tier ladder and
+    /// `test_per_attempt_region_into_cow_static_str_carries_through_generic_consumer`
+    /// (commit 79113dd) at the per-attempt-region ladder.
+    #[test]
+    fn test_bump_level_into_cow_static_str_carries_through_generic_consumer() {
+        fn read<T: Into<std::borrow::Cow<'static, str>>>(t: T) -> std::borrow::Cow<'static, str> {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).as_ref(),
+                level.as_str(),
+                "generic Into<Cow<'static, str>> consumer must read canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for Cow<'static, str>`] returns the
+    /// [`std::borrow::Cow::Borrowed`] branch, not
+    /// [`std::borrow::Cow::Owned`], at every [`BumpLevel::ALL`] variant.
+    /// Pins the zero-allocation contract at the emit boundary: because
+    /// [`BumpLevel::as_str`] returns a `'static`-lived borrow into the
+    /// static-string constant table, this impl composes with an
+    /// [`Into<Cow<'static, str>>`] receiver at the
+    /// [`std::borrow::Cow::Borrowed`] branch — the receiver pays the
+    /// `'static`-borrow cost of [`From<BumpLevel> for &'static str`],
+    /// not the [`String`]-allocation cost of
+    /// [`From<BumpLevel> for String`]. The structural witness that the
+    /// impl body picks the load-bearing [`std::borrow::Cow::Borrowed`]
+    /// branch — a regression that drifted the impl body toward
+    /// `Cow::Owned(level.as_str().to_owned())` would silently allocate
+    /// at every emit site and defeat the borrowed/owned-frontier
+    /// discipline this impl closes; the [`matches!`] pin lights up here
+    /// at ONE named site instead of leaking to every downstream
+    /// `impl Into<Cow<'static, str>>` consumer as a hidden per-call
+    /// allocation. Sibling of the agreement pin
+    /// [`test_bump_level_from_into_cow_static_str_agrees_with_as_str`]
+    /// at the label-oracle surface — the two pins together close both
+    /// the value-agreement contract and the branch-choice /
+    /// zero-allocation contract at the by-value
+    /// [`std::borrow::Cow<'static, str>`] emit surface. Structural
+    /// mirror of `test_admission_tier_into_cow_static_str_is_borrowed`
+    /// (commit 65b1e77) at the admission-tier ladder and
+    /// `test_per_attempt_region_into_cow_static_str_is_borrowed`
+    /// (commit 79113dd) at the per-attempt-region ladder.
+    #[test]
+    fn test_bump_level_into_cow_static_str_is_borrowed() {
+        for level in BumpLevel::ALL {
+            let cow: std::borrow::Cow<'static, str> = std::borrow::Cow::from(level);
+            assert!(
+                matches!(cow, std::borrow::Cow::Borrowed(_)),
+                "From<BumpLevel> for Cow<'static, str> must return Cow::Borrowed \
+                 (zero-allocation branch) at {level:?}, not Cow::Owned",
             );
         }
     }
