@@ -1153,6 +1153,95 @@ impl std::str::FromStr for PerAttemptRegion {
     }
 }
 
+/// [`serde::Serialize`] impl routes through [`PerAttemptRegion::as_str`] so
+/// a downstream structured-attestation record, YAML config emit, or JSON
+/// telemetry surface serialises the variant as its canonical snake_case
+/// label (`"before_first"`, `"first"`, `"interim"`, `"final"`,
+/// `"over_budget"`) rather than the UpperCamel variant identifier the
+/// derived `serde::Serialize` (via `#[derive(Serialize)]`) would emit
+/// (`"BeforeFirst"`, `"OverBudget"`) — the same label axis
+/// [`std::fmt::Display`] and [`std::str::FromStr`] already inhabit, now
+/// extended to the serde read/write surface at one typed-primitive site.
+///
+/// A future variant insertion (a `CancelledByCaller` band strictly between
+/// [`PerAttemptRegion::Final`] and [`PerAttemptRegion::OverBudget`], a
+/// `PostFinal` peer at the terminal axis) updates the [`as_str`] match
+/// body alone and every serde emitter automatically inherits the new
+/// canonical label — no manifest schema churn per consumer, no drift
+/// between the [`Display`] rendering the operator reads at the retry-loop
+/// telemetry surface and the serialised value the SLSA attestation record
+/// stamps against the per-attempt-region label.
+///
+/// The round-trip `region -> serialize -> deserialize` identity at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_serde_round_trips_through_json_at_every_variant`],
+/// closing the two-oracle discipline (canonical-label emission through
+/// [`as_str`], canonical-label parsing through [`std::str::FromStr`])
+/// across the full serde read/write surface.
+///
+/// THEORY.md §V.4 typed primitives: the serialisation surface is a
+/// typed-primitive site on [`PerAttemptRegion`] itself (one `Serialize`
+/// impl routing through the [`as_str`] canonical-label oracle), not a
+/// per-consumer `#[derive(Serialize)]` + `#[serde(rename_all)]` retyping
+/// that would fragment the label-axis definition across every downstream
+/// consumer's struct. THEORY.md §VI.1 one-oracle: the canonical label is
+/// named at one site ([`PerAttemptRegion::as_str`]) and every surface —
+/// `as_str`, `Display`, this `Serialize`, `Deserialize`, `FromStr` —
+/// reads through it.
+impl serde::Serialize for PerAttemptRegion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// [`serde::Deserialize`] impl routes through [`std::str::FromStr`] so a
+/// downstream YAML config load, JSON telemetry replay, or attestation-
+/// record rehydration recovers the [`PerAttemptRegion`] variant from the
+/// same canonical snake_case grammar [`PerAttemptRegion::as_str`] emits —
+/// no per-consumer `#[serde(rename)]` matrix, no drift between the
+/// serialised value the SLSA attestation record stamped and the
+/// deserialised variant a replay consumer reads back at the retry-loop
+/// telemetry surface.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is: only
+/// the canonical labels emitted by [`PerAttemptRegion::as_str`] parse.
+/// Empty input, UpperCamel rendering (as the derived [`Debug`] impl would
+/// emit — `"BeforeFirst"`, `"OverBudget"`), whitespace padding, uppercase
+/// (`"FIRST"`), and snake_case labels with a dropped underscore
+/// (`"beforefirst"`, `"overbudget"`) all reject. Non-string JSON/YAML
+/// scalars (numbers, booleans, nulls, objects, arrays) reject at the
+/// [`serde::Deserialize`] visitor layer with the standard "invalid type"
+/// diagnostic — a downstream surface that wants alias matrix, whitespace
+/// tolerance, or numeric-tag support normalises the input before routing
+/// it through this canonical parser.
+///
+/// The round-trip `region -> serialize -> deserialize` identity at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_serde_round_trips_through_json_at_every_variant`].
+/// The strict-parse behaviour on unknown labels is pinned by
+/// [`tests::test_per_attempt_region_deserialize_rejects_unknown_string`].
+///
+/// THEORY.md §V.4 typed primitives: the deserialisation surface is a
+/// typed-primitive site on [`PerAttemptRegion`] itself (one `Deserialize`
+/// impl routing through the [`std::str::FromStr`] canonical-label parser),
+/// not a per-consumer `#[derive(Deserialize)]` + `#[serde(rename_all)]`
+/// retyping. THEORY.md §VI.1 one-oracle: canonical-label parsing lives at
+/// one site ([`std::str::FromStr`] for [`PerAttemptRegion`]) and every
+/// read surface — `FromStr`, this `Deserialize`, a future TOML config
+/// loader, a future MessagePack telemetry replay — reads through it.
+impl<'de> serde::Deserialize<'de> for PerAttemptRegion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = <&str as serde::Deserialize>::deserialize(deserializer)?;
+        s.parse::<Self>().map_err(serde::de::Error::custom)
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -11236,6 +11325,141 @@ mod tests {
                 s.as_str(),
                 region.as_str(),
                 "Display and as_str must agree at {region:?}",
+            );
+        }
+    }
+
+    /// Every [`PerAttemptRegion`] variant serialises to its canonical
+    /// snake_case label — the same string [`PerAttemptRegion::as_str`]
+    /// emits — through the `serde::Serialize` impl. The load-bearing
+    /// structural pin that ties the canonical-label oracle to the serde
+    /// write surface: a regression that swapped the `Serialize` impl to
+    /// the derived UpperCamel labels (`"BeforeFirst"`, `"OverBudget"`)
+    /// or diverged the label from [`as_str`] fails here at ONE named site
+    /// instead of leaking to every downstream attestation record / YAML
+    /// config emit / JSON telemetry consumer.
+    #[test]
+    fn test_per_attempt_region_serialize_emits_canonical_string_labels() {
+        for region in PerAttemptRegion::ALL {
+            let json = serde_json::to_string(&region).unwrap();
+            let expected = format!("\"{}\"", region.as_str());
+            assert_eq!(
+                json, expected,
+                "Serialize must emit canonical snake_case label at {region:?}",
+            );
+        }
+    }
+
+    /// Every canonical snake_case label deserialises back to its
+    /// corresponding [`PerAttemptRegion`] variant through the
+    /// `serde::Deserialize` impl. The load-bearing structural pin that
+    /// ties the canonical-label parser ([`std::str::FromStr`]) to the
+    /// serde read surface: a regression that swapped the `Deserialize`
+    /// impl to accept the UpperCamel variant identifiers or diverged the
+    /// accepted grammar from [`std::str::FromStr`] fails here at ONE
+    /// named site instead of leaking to every downstream YAML config
+    /// load / JSON telemetry replay / attestation-record rehydration
+    /// consumer.
+    #[test]
+    fn test_per_attempt_region_deserialize_accepts_canonical_string_labels() {
+        for region in PerAttemptRegion::ALL {
+            let json = format!("\"{}\"", region.as_str());
+            let parsed: PerAttemptRegion = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                parsed, region,
+                "Deserialize must accept canonical label at {region:?} (input {json:?})",
+            );
+        }
+    }
+
+    /// The `serde::Deserialize` impl for [`PerAttemptRegion`] rejects any
+    /// string outside the canonical snake_case grammar — the same strict-
+    /// parse behaviour [`std::str::FromStr`] enforces, propagated to the
+    /// serde read surface through
+    /// [`serde::de::Error::custom`]. UpperCamel rendering (as the derived
+    /// [`Debug`] impl would emit), uppercase, whitespace padding, and
+    /// snake_case labels with a dropped underscore all reject. Non-string
+    /// JSON scalars (numbers, booleans, nulls) reject at the visitor
+    /// layer with the standard "invalid type" diagnostic. Sibling of
+    /// [`test_per_attempt_region_from_str_rejects_unknown`] at the serde
+    /// read surface — the strict-parse discipline is pinned at BOTH
+    /// canonical-label parse sites.
+    #[test]
+    fn test_per_attempt_region_deserialize_rejects_unknown_string() {
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("\"invalid\"").is_err(),
+            "unknown label rejects",
+        );
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("\"\"").is_err(),
+            "empty string rejects",
+        );
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("\"BeforeFirst\"").is_err(),
+            "UpperCamel rejects — only canonical lowercase parses",
+        );
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("\"OverBudget\"").is_err(),
+            "UpperCamel rejects — only canonical lowercase parses",
+        );
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("\"FIRST\"").is_err(),
+            "uppercase rejects — only canonical lowercase parses",
+        );
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("\"  first \"").is_err(),
+            "whitespace not trimmed — caller's responsibility",
+        );
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("\"beforefirst\"").is_err(),
+            "snake_case is load-bearing — `beforefirst` without the underscore rejects",
+        );
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("\"overbudget\"").is_err(),
+            "snake_case is load-bearing — `overbudget` without the underscore rejects",
+        );
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("0").is_err(),
+            "numeric scalar rejects at the visitor layer",
+        );
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("true").is_err(),
+            "boolean scalar rejects at the visitor layer",
+        );
+        assert!(
+            serde_json::from_str::<PerAttemptRegion>("null").is_err(),
+            "null scalar rejects at the visitor layer",
+        );
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], the round-trip `region -> Serialize ->
+    /// Deserialize` through JSON is the identity — `serde_json::from_str
+    /// (&serde_json::to_string(&region).unwrap()).unwrap() == region`.
+    /// The load-bearing structural pin that ties the canonical-label
+    /// oracle ([`PerAttemptRegion::as_str`]) to its serde-round-trip
+    /// inverse via the `Serialize` impl that routes through [`as_str`]
+    /// and the `Deserialize` impl that routes through [`std::str::FromStr`]:
+    /// a regression that drifted either side (a `Serialize` change
+    /// bypassing [`as_str`], a `Deserialize` change bypassing
+    /// [`std::str::FromStr`], or a variant insertion without matching
+    /// arms in both) desynchronises this pin at one site instead of
+    /// leaking to every downstream YAML config / JSON telemetry /
+    /// attestation-record consumer that reads a rehydrated
+    /// [`PerAttemptRegion`] back from its serialised form. Sibling of
+    /// [`test_per_attempt_region_display_round_trips_through_from_str`]
+    /// at the string-scalar round-trip surface — the two round-trip
+    /// pins together close the label-axis identity across both the
+    /// `Display`/`FromStr` surface and the `Serialize`/`Deserialize`
+    /// surface.
+    #[test]
+    fn test_per_attempt_region_serde_round_trips_through_json_at_every_variant() {
+        for region in PerAttemptRegion::ALL {
+            let json = serde_json::to_string(&region).unwrap();
+            let parsed: PerAttemptRegion = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                parsed, region,
+                "Serialize→Deserialize must round-trip through JSON at {region:?} (via {json:?})",
             );
         }
     }
