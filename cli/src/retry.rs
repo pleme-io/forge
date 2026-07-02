@@ -1594,6 +1594,98 @@ impl TryFrom<String> for PerAttemptRegion {
     }
 }
 
+/// [`From<PerAttemptRegion> for Cow<'static, str>`] routes through
+/// [`PerAttemptRegion::as_str`] and wraps the `'static`-lived label
+/// borrow at the [`std::borrow::Cow::Borrowed`] branch so a downstream
+/// consumer that takes an [`Into<Cow<'static, str>>`] (a config-schema
+/// builder that keys its emission on either a static label or a
+/// caller-supplied [`String`] uniformly, a tracing / OpenTelemetry
+/// attribute slot typed as `Cow<'static, str>`, a `phf`-style static
+/// lookup table keyed by canonical label, a `clap` [`clap::builder::Str`]
+/// / [`clap::builder::StyledStr`] sink that accepts `Cow<'static, str>`,
+/// a serde helper that composes with `#[serde(borrow)]`-shaped grammars
+/// at the owned/borrowed frontier) reads the canonical snake_case label
+/// (`"before_first"`, `"first"`, `"interim"`, `"final"`,
+/// `"over_budget"`) directly from a [`PerAttemptRegion`] value with
+/// **zero allocation** at the emit boundary — the [`Cow::Borrowed`]
+/// branch preserves the `'static` lifetime end-to-end, so a receiver
+/// bound by [`Into<Cow<'static, str>>`] pays the `'static`-borrow cost
+/// of [`From<PerAttemptRegion> for &'static str`], not the
+/// [`String`]-allocation cost of [`From<PerAttemptRegion> for String`].
+///
+/// The by-value `Cow<'static, str>` emit peer that closes the emit-side
+/// lifetime-choice ladder [`From<PerAttemptRegion> for &'static str`]
+/// (zero-copy `'static` borrow) → [`From<PerAttemptRegion> for String`]
+/// (single-allocation owned [`String`]) → this
+/// [`From<PerAttemptRegion> for Cow<'static, str>`] (uniform emit at the
+/// borrowed/owned frontier, delegated through the [`Cow::Borrowed`]
+/// branch so zero-allocation is preserved at every
+/// [`PerAttemptRegion`]-typed emit site regardless of receiver shape).
+/// The three by-value emit peers together consume the three canonical
+/// string-owner shapes at the label axis — `&'static str`, [`String`],
+/// [`std::borrow::Cow<'static, str>`] — through the shared
+/// [`PerAttemptRegion::as_str`] canonical-label oracle: the
+/// `&'static str` peer through [`as_str`] directly, the [`String`] peer
+/// through `as_str().to_owned()`, this [`Cow<'static, str>`] peer
+/// through [`Cow::Borrowed`] wrapping [`as_str`] — the same canonical
+/// grammar lifted to the borrowed/owned-frontier emit layer.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<PerAttemptRegion> for &'static str`], [`TryFrom<&str>`],
+/// [`From<PerAttemptRegion> for String`], and [`TryFrom<String>`] impls
+/// above — the same lift at the by-value `Cow<'static, str>` emit layer
+/// instead of the format / parse / serde / borrow / static-lifetime /
+/// by-reference-try / owned-string-emit / owned-string-try layers.
+/// Together with the impls above this extends the `as_str` ⇢
+/// {`Display`, `AsRef<str>`, `Serialize`, `From<T> for &'static str`,
+/// `From<T> for String`, `From<T> for Cow<'static, str>`} emission set
+/// at the per-attempt-region ladder against the shared canonical-label
+/// oracle.
+///
+/// The natural bridge to any downstream site that types its label sink
+/// as [`Into<Cow<'static, str>>`] — the emit peer that answers the
+/// receiver-side question "does this API want a borrow or an owned
+/// [`String`]?" with "either, and in the [`PerAttemptRegion`] case,
+/// always the zero-allocation [`Cow::Borrowed`] branch." A receiver
+/// typed as [`Cow<'static, str>`] (rather than `&'static str`) permits
+/// the caller to interleave [`PerAttemptRegion`] labels with computed
+/// [`String`]s in the same sink; a receiver typed as [`Cow<'static,
+/// str>`] rather than [`String`] permits the caller to elide the
+/// allocation when the label is already `'static` — which every
+/// [`PerAttemptRegion`] label is. The [`Cow::Borrowed`] branch is the
+/// load-bearing choice at this impl body: [`Cow::Owned`] would drift the
+/// impl toward the [`String`]-emit peer's allocation cost, defeating
+/// the borrowed/owned-frontier discipline this impl closes.
+///
+/// The identity `Cow::<'static, str>::from(region) == region.as_str()`
+/// at every [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_cow_static_str_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<Cow<'static, str>>` consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_into_cow_static_str_carries_through_generic_consumer`];
+/// the [`Cow::Borrowed`]-not-[`Cow::Owned`] zero-allocation contract at
+/// the emit boundary is pinned by
+/// [`tests::test_per_attempt_region_into_cow_static_str_is_borrowed`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value `Cow<'static, str>`
+/// emit surface is a typed-primitive site on [`PerAttemptRegion`]
+/// itself (one `From<PerAttemptRegion> for Cow<'static, str>` impl
+/// routing through [`as_str`] at the [`Cow::Borrowed`] branch), not a
+/// per-consumer `Cow::Borrowed(region.as_str())` restatement at every
+/// downstream site that accepts `impl Into<Cow<'static, str>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]) and every emit surface — [`as_str`],
+/// [`std::fmt::Display`], [`serde::Serialize`], [`AsRef<str>`],
+/// [`From<PerAttemptRegion> for &'static str`],
+/// [`From<PerAttemptRegion> for String`], this
+/// [`From<PerAttemptRegion> for Cow<'static, str>`] — reads through it.
+impl From<PerAttemptRegion> for std::borrow::Cow<'static, str> {
+    fn from(region: PerAttemptRegion) -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(region.as_str())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -12195,6 +12287,105 @@ mod tests {
                 read(region),
                 region.as_str(),
                 "generic Into<String> consumer must read canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// [`From<PerAttemptRegion> for Cow<'static, str>`] agrees with the
+    /// canonical [`PerAttemptRegion::as_str`] label at every
+    /// [`PerAttemptRegion::ALL`] variant. Pins the identity
+    /// `Cow::<'static, str>::from(region) == region.as_str()` at every
+    /// variant so a future variant insertion / grammar refinement at the
+    /// shared [`as_str`] oracle propagates to the by-value
+    /// [`Cow<'static, str>`] emit surface without a per-variant retype at
+    /// the [`From`] impl body. The structural agreement pin between the
+    /// by-value [`Cow<'static, str>`] emit surface
+    /// ([`From<PerAttemptRegion> for Cow<'static, str>`]) and the
+    /// canonical-label oracle ([`PerAttemptRegion::as_str`]) — the
+    /// borrowed-frontier sibling of the borrowed `'static`-lifetime
+    /// agreement pin
+    /// [`test_per_attempt_region_from_into_static_str_agrees_with_as_str`]
+    /// and the owned-[`String`] agreement pin
+    /// [`test_per_attempt_region_from_into_string_agrees_with_as_str`]
+    /// already carry, closing the three-way emit agreement across the
+    /// canonical string-owner shapes (`&'static str`, [`String`],
+    /// [`Cow<'static, str>`]).
+    #[test]
+    fn test_per_attempt_region_from_into_cow_static_str_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let cow: std::borrow::Cow<'static, str> = std::borrow::Cow::from(region);
+            assert_eq!(
+                cow.as_ref(),
+                region.as_str(),
+                "From<PerAttemptRegion> for Cow<'static, str> and as_str must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for Cow<'static, str>`] identity
+    /// carries through a generic `impl Into<Cow<'static, str>>` consumer
+    /// at every [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Cow<'static, str>>>(t: T) -> Cow<'static, str>
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (config-schema builder that accepts either a static label or a
+    /// caller-supplied [`String`] uniformly, tracing / OpenTelemetry
+    /// attribute slot typed as [`Cow<'static, str>`], `clap`
+    /// [`clap::builder::Str`] / [`clap::builder::StyledStr`] sink) —
+    /// reads the canonical snake_case label directly from a
+    /// [`PerAttemptRegion`] value with the `'static` lifetime preserved
+    /// through the [`Cow<'static, str>`] wrapper. The structural witness
+    /// that a [`PerAttemptRegion`] is genuinely usable at
+    /// `impl Into<Cow<'static, str>>` call sites — a regression that
+    /// drifted the [`From`] impl signature (e.g., returning
+    /// [`Cow<'_, str>`] with a non-`'static` lifetime, requiring
+    /// [`&PerAttemptRegion`] and losing the by-value semantics, or
+    /// dropping the [`Cow`] wrapper entirely) fails here at compile time
+    /// instead of at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_cow_static_str_carries_through_generic_consumer() {
+        fn read<T: Into<std::borrow::Cow<'static, str>>>(t: T) -> std::borrow::Cow<'static, str> {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region).as_ref(),
+                region.as_str(),
+                "generic Into<Cow<'static, str>> consumer must read canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// [`From<PerAttemptRegion> for Cow<'static, str>`] returns the
+    /// [`Cow::Borrowed`] branch, not [`Cow::Owned`], at every
+    /// [`PerAttemptRegion::ALL`] variant. Pins the zero-allocation
+    /// contract at the emit boundary: because [`PerAttemptRegion::as_str`]
+    /// returns a `'static`-lived borrow into the static-string constant
+    /// table, this impl composes with an [`Into<Cow<'static, str>>`]
+    /// receiver at the [`Cow::Borrowed`] branch — the receiver pays the
+    /// `'static`-borrow cost of [`From<PerAttemptRegion> for &'static
+    /// str`], not the [`String`]-allocation cost of
+    /// [`From<PerAttemptRegion> for String`]. The structural witness that
+    /// the impl body picks the load-bearing [`Cow::Borrowed`] branch — a
+    /// regression that drifted the impl body toward
+    /// `Cow::Owned(region.as_str().to_owned())` would silently allocate at
+    /// every emit site and defeat the borrowed/owned-frontier discipline
+    /// this impl closes; the [`matches!`] pin lights up here at ONE named
+    /// site instead of leaking to every downstream
+    /// `impl Into<Cow<'static, str>>` consumer as a hidden per-call
+    /// allocation. Sibling of the agreement pin
+    /// [`test_per_attempt_region_from_into_cow_static_str_agrees_with_as_str`]
+    /// at the label-oracle surface — the two pins together close both the
+    /// value-agreement contract and the branch-choice / zero-allocation
+    /// contract at the by-value [`Cow<'static, str>`] emit surface.
+    #[test]
+    fn test_per_attempt_region_into_cow_static_str_is_borrowed() {
+        for region in PerAttemptRegion::ALL {
+            let cow: std::borrow::Cow<'static, str> = std::borrow::Cow::from(region);
+            assert!(
+                matches!(cow, std::borrow::Cow::Borrowed(_)),
+                "From<PerAttemptRegion> for Cow<'static, str> must return Cow::Borrowed \
+                 (zero-allocation branch) at {region:?}, not Cow::Owned",
             );
         }
     }
