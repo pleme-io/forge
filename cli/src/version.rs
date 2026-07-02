@@ -1239,6 +1239,119 @@ impl FromStr for BumpLevel {
     }
 }
 
+/// [`serde::Serialize`] impl routes through [`BumpLevel::as_str`] so a
+/// downstream release-manifest YAML emit, SLSA-provenance JSON stamp,
+/// or telemetry breadcrumb serialises the variant as its canonical
+/// lowercase label (`"patch"`, `"minor"`, `"major"`) rather than the
+/// UpperCamel variant identifier the derived [`serde::Serialize`] (via
+/// `#[derive(Serialize)]`) would emit (`"Patch"`, `"Minor"`, `"Major"`)
+/// — the same label axis [`std::fmt::Display`] and [`std::str::FromStr`]
+/// already inhabit, now extended to the serde read/write surface at one
+/// typed-primitive site.
+///
+/// Sibling of `serde::Serialize for AdmissionTier` (commit 22e1ae0) and
+/// `serde::Serialize for PerAttemptRegion` (commit 8fd06fe) — the same
+/// lift at the admission-tier and per-attempt-region ladders, routing
+/// through each sum's [`as_str`] canonical-label oracle. After this
+/// commit the three repo-internal ordered typed sums that carry
+/// `as_str` + [`Display`](std::fmt::Display) + [`FromStr`](std::str::FromStr)
+/// ([`BumpLevel`], [`crate::probe_outcome::AdmissionTier`],
+/// [`crate::retry::PerAttemptRegion`]) all also carry `Serialize` +
+/// `Deserialize` routing through the same canonical-label oracle,
+/// closing the serde read/write surface at every ordered typed sum
+/// against its shared label-axis grammar.
+///
+/// A future variant insertion (a `Prerelease` band strictly below
+/// [`BumpLevel::Patch`], an `Epoch` ceiling strictly above
+/// [`BumpLevel::Major`] for semver4 / `0ver`-style incompatible-by-
+/// design rewrites) updates the [`as_str`] match body alone and every
+/// serde emitter — release-manifest YAML, SLSA-provenance JSON, TOML
+/// changelog stamp — automatically inherits the new canonical label
+/// with no manifest schema churn per consumer.
+///
+/// The round-trip `level -> serialize -> deserialize` identity at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_serde_round_trips_through_json_at_every_variant`],
+/// closing the two-oracle discipline (canonical-label emission through
+/// [`as_str`], canonical-label parsing through [`std::str::FromStr`])
+/// across the full serde read/write surface — the structural mirror of
+/// the [`crate::probe_outcome::AdmissionTier`] serde round-trip pin at
+/// the admission-tier ladder.
+///
+/// THEORY.md §V.4 typed primitives: the serialisation surface is a
+/// typed-primitive site on [`BumpLevel`] itself (one `Serialize` impl
+/// routing through the [`as_str`] canonical-label oracle), not a
+/// per-consumer `#[derive(Serialize)]` + `#[serde(rename_all = "lowercase")]`
+/// retyping that would fragment the label-axis definition across every
+/// downstream consumer's release-manifest struct. THEORY.md §VI.1
+/// one-oracle: the canonical label is named at one site
+/// ([`BumpLevel::as_str`]) and every surface — `as_str`, `Display`,
+/// this `Serialize`, `Deserialize`, `FromStr` — reads through it.
+impl serde::Serialize for BumpLevel {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// [`serde::Deserialize`] impl routes through [`std::str::FromStr`] so
+/// a downstream release-manifest YAML load, changelog TOML replay, or
+/// SLSA-provenance JSON rehydration recovers the [`BumpLevel`] variant
+/// from the same canonical lowercase grammar [`BumpLevel::as_str`]
+/// emits — no per-consumer `#[serde(rename)]` matrix, no drift between
+/// the serialised value a release-pipeline stage stamped and the
+/// deserialised variant a downstream release-notes generator reads
+/// back.
+///
+/// Sibling of `serde::Deserialize for AdmissionTier` (commit 22e1ae0)
+/// and `serde::Deserialize for PerAttemptRegion` (commit 8fd06fe) —
+/// the same lift at the admission-tier and per-attempt-region ladders,
+/// routing through each sum's [`std::str::FromStr`] impl. Together
+/// with the paired `serde::Serialize` impl above, this closes the
+/// `Serialize`↔`Deserialize` round-trip at the version-bump-magnitude
+/// ladder against the shared [`as_str`] / [`std::str::FromStr`]
+/// canonical-label oracle.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is:
+/// only the canonical labels emitted by [`BumpLevel::as_str`] parse.
+/// Empty input, UpperCamel rendering (as the derived [`Debug`] impl
+/// would emit — `"Patch"`, `"Minor"`, `"Major"`), whitespace padding,
+/// uppercase (`"MAJOR"`), and abbreviations (`"maj"`, `"p"`) all
+/// reject with the byte-identical error wording the prior in-line
+/// [`bump_semver`] match-arm trap emitted. Non-string JSON/YAML
+/// scalars (numbers, booleans, nulls, objects, arrays) reject at the
+/// [`serde::Deserialize`] visitor layer with the standard "invalid
+/// type" diagnostic — a downstream surface that wants alias matrix,
+/// whitespace tolerance, or numeric-tag support normalises the input
+/// before routing it through this canonical parser.
+///
+/// The round-trip `level -> serialize -> deserialize` identity at
+/// every [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_serde_round_trips_through_json_at_every_variant`].
+/// The strict-parse behaviour on unknown labels is pinned by
+/// [`tests::test_bump_level_deserialize_rejects_unknown_string`].
+///
+/// THEORY.md §V.4 typed primitives: the deserialisation surface is a
+/// typed-primitive site on [`BumpLevel`] itself (one `Deserialize`
+/// impl routing through the [`std::str::FromStr`] canonical-label
+/// parser), not a per-consumer `#[derive(Deserialize)]` +
+/// `#[serde(rename_all)]` retyping. THEORY.md §VI.1 one-oracle:
+/// canonical-label parsing lives at one site ([`std::str::FromStr`]
+/// for [`BumpLevel`]) and every read surface — `FromStr`, this
+/// `Deserialize`, a future TOML changelog loader, a future MessagePack
+/// telemetry replay — reads through it.
+impl<'de> serde::Deserialize<'de> for BumpLevel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = <&str as serde::Deserialize>::deserialize(deserializer)?;
+        s.parse::<Self>().map_err(serde::de::Error::custom)
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -3478,6 +3591,113 @@ mod tests {
                 level.join(BumpLevel::TOP),
                 BumpLevel::TOP,
                 "TOP must be right-absorbing for join at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by [`BumpLevel::ALL`],
+    /// the round-trip `level -> Serialize -> Deserialize` through JSON
+    /// is the identity —
+    /// `serde_json::from_str(&serde_json::to_string(&level).unwrap()).unwrap()
+    /// == level`. The load-bearing structural pin that ties the
+    /// canonical-label oracle ([`BumpLevel::as_str`]) to its serde-
+    /// round-trip inverse via the `Serialize` impl that routes through
+    /// [`as_str`] and the `Deserialize` impl that routes through
+    /// [`std::str::FromStr`]: a regression that drifted either side (a
+    /// `Serialize` change bypassing [`as_str`], a `Deserialize` change
+    /// bypassing [`std::str::FromStr`], or a variant insertion without
+    /// matching arms in both) desynchronises this pin at one site
+    /// instead of leaking to every downstream release-manifest YAML /
+    /// SLSA-provenance JSON / changelog TOML consumer that reads a
+    /// rehydrated [`BumpLevel`] back from its serialised form. Sibling
+    /// of [`test_bump_level_display_round_trips_through_from_str`] at
+    /// the string-scalar round-trip surface, and structural mirror of
+    /// `test_admission_tier_serde_round_trips_through_json_at_every_variant`
+    /// at the admission-tier ladder — the three pins together close
+    /// the label-axis identity across both the `Display`/`FromStr` and
+    /// `Serialize`/`Deserialize` surfaces on all three ordered typed
+    /// sums.
+    #[test]
+    fn test_bump_level_serde_round_trips_through_json_at_every_variant() {
+        for level in BumpLevel::ALL {
+            let json = serde_json::to_string(&level).unwrap();
+            let round: BumpLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                round, level,
+                "serde JSON round-trip must be identity at {level:?} (json={json:?})",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel::ALL`] variant, the emitted JSON scalar is
+    /// exactly the canonical lowercase string [`BumpLevel::as_str`]
+    /// emits, quoted as a JSON string (`"patch"` / `"minor"` /
+    /// `"major"`), not the UpperCamel variant identifier a
+    /// `#[derive(Serialize)]` would emit (`"Patch"`, `"Minor"`,
+    /// `"Major"`). The structural pin that the `Serialize` impl routes
+    /// through [`as_str`] rather than the derived variant name — a
+    /// regression that dropped the routing (e.g., a future
+    /// `#[derive(Serialize)]` covering [`BumpLevel`] that shadowed the
+    /// hand-rolled impl) lights up here at the exact variant whose
+    /// serialised form drifted from the canonical label.
+    #[test]
+    fn test_bump_level_serialize_emits_canonical_label_at_every_variant() {
+        for level in BumpLevel::ALL {
+            let json = serde_json::to_string(&level).unwrap();
+            let expected = format!("\"{}\"", level.as_str());
+            assert_eq!(
+                json, expected,
+                "serde JSON emit must be as_str-quoted at {level:?}",
+            );
+        }
+    }
+
+    /// The [`serde::Deserialize`] parser is strict: only the canonical
+    /// lowercase labels [`BumpLevel::as_str`] emits (`"patch"` /
+    /// `"minor"` / `"major"`) parse. Empty input, UpperCamel rendering
+    /// (as the derived [`Debug`] impl would emit — `"Patch"`,
+    /// `"Minor"`, `"Major"`), whitespace padding, uppercase
+    /// (`"MAJOR"`), and abbreviations (`"maj"`, `"p"`) all reject. The
+    /// structural pin that the `Deserialize` impl inverts through
+    /// [`std::str::FromStr`] rather than a lenient alias matrix — the
+    /// same strict-parse discipline
+    /// [`test_admission_tier_deserialize_rejects_unknown_string`]
+    /// pins at the admission-tier ladder, here mirrored at the
+    /// version-bump-magnitude ladder.
+    #[test]
+    fn test_bump_level_deserialize_rejects_unknown_string() {
+        for bad in [
+            "\"\"",
+            "\"Patch\"",
+            "\"Minor\"",
+            "\"Major\"",
+            "\"MAJOR\"",
+            "\"  patch \"",
+            "\"maj\"",
+            "\"p\"",
+            "\"prerelease\"",
+        ] {
+            assert!(
+                serde_json::from_str::<BumpLevel>(bad).is_err(),
+                "Deserialize must reject non-canonical string {bad}",
+            );
+        }
+    }
+
+    /// Non-string JSON scalars (numbers, booleans, nulls, objects,
+    /// arrays) reject at the [`serde::Deserialize`] visitor layer,
+    /// mirroring the strict-parse discipline the string surface
+    /// enforces at
+    /// [`test_bump_level_deserialize_rejects_unknown_string`]. A
+    /// downstream consumer that wants numeric-tag or boolean-flag
+    /// support normalises the input before routing it through this
+    /// canonical parser.
+    #[test]
+    fn test_bump_level_deserialize_rejects_non_string_scalar() {
+        for bad in ["0", "1", "true", "false", "null", "{}", "[]"] {
+            assert!(
+                serde_json::from_str::<BumpLevel>(bad).is_err(),
+                "Deserialize must reject non-string scalar {bad}",
             );
         }
     }
