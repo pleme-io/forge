@@ -6019,6 +6019,81 @@ impl TryFrom<&str> for AdmissionTier {
     }
 }
 
+/// [`From<AdmissionTier> for String`] routes through
+/// [`AdmissionTier::as_str`] so a downstream consumer bound by
+/// [`Into<String>`] (a `std::collections::HashMap::<String, _>::insert`
+/// key builder, [`std::process::Command::env(String, String)`]-shaped
+/// receivers that own their key/value pair, a [`String::push_str`]
+/// sink over a caller-owned buffer, a config-schema builder that owns
+/// its label keys, a [`std::borrow::Cow<'static, str>`] sink through
+/// the [`Cow::Owned`] branch) reads the canonical snake_case label
+/// (`"refused"`, `"staging_only"`, `"strict"`) directly from an
+/// [`AdmissionTier`] value with the [`String`] allocation named at
+/// this typed-primitive site rather than at every downstream
+/// `.as_str().to_owned()` / `.to_string()` call site.
+///
+/// The by-value owned-string emit peer of
+/// [`From<AdmissionTier> for &'static str`] above — both are by-value
+/// emit surfaces of the label-axis conversion set, differing only on
+/// the returned string ownership: [`From<AdmissionTier> for &'static
+/// str`] returns a zero-copy `'static`-lived borrow into the static-
+/// string constant table for [`Into<&'static str>`] consumers, this
+/// [`From<AdmissionTier> for String`] returns the single-allocation
+/// owned [`String`] for [`Into<String>`] consumers. Both route
+/// through the shared [`AdmissionTier::as_str`] canonical-label
+/// oracle: the borrowed peer through [`AdmissionTier::as_str`]
+/// directly, this owned peer through `as_str().to_owned()` — the
+/// same canonical grammar lifted to the owned-string layer.
+///
+/// Structural mirror of `impl From<PerAttemptRegion> for String`
+/// (commit a5a379f — the by-value owned-string emit peer at the
+/// per-attempt-region ladder) at the admission-tier ladder: the same
+/// lift by construction, at the other ordered typed sum. Sibling of
+/// the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<AdmissionTier> for &'static str`], and [`TryFrom<&str>`]
+/// impls above — the same lift at the by-value owned-string emit
+/// layer instead of the format / parse / serde / borrow / static-
+/// lifetime / try-conversion layers. Together with the impls above
+/// this extends the `as_str` ⇢ {`Display`, `AsRef<str>`,
+/// `Serialize`, `From<T> for &'static str`, `From<T> for String`}
+/// emission set at the admission-tier ladder against the shared
+/// canonical-label oracle.
+///
+/// The natural bridge to any downstream site that types its label
+/// sink as [`Into<String>`] (`std::collections::HashMap::<String,
+/// _>::insert` for a canonical-label key,
+/// `std::process::Command::env(String, String)`-shaped receivers,
+/// [`String::push_str`] against a caller-owned buffer, a
+/// config-schema builder that keys its emission by canonical label
+/// and owns the [`String`]) — the owned-string sibling of the
+/// [`Into<&'static str>`] bridge [`From<AdmissionTier> for &'static
+/// str`] opened for the borrowed static-lifetime peer.
+///
+/// The identity `String::from(tier) == tier.as_str()` at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_from_into_string_agrees_with_as_str`];
+/// the identity carried through a generic `impl Into<String>`
+/// consumer at every variant is pinned by
+/// [`tests::test_admission_tier_into_string_carries_through_generic_consumer`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned-string emit
+/// surface is a typed-primitive site on [`AdmissionTier`] itself
+/// (one `From<AdmissionTier> for String` impl routing through
+/// [`AdmissionTier::as_str`]), not a per-consumer
+/// `.as_str().to_owned()` restatement at every downstream site that
+/// accepts `impl Into<String>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`AdmissionTier::as_str`])
+/// and every emit surface — [`AdmissionTier::as_str`],
+/// [`std::fmt::Display`], [`serde::Serialize`], [`AsRef<str>`],
+/// [`From<AdmissionTier> for &'static str`], this
+/// [`From<AdmissionTier> for String`] — reads through it.
+impl From<AdmissionTier> for String {
+    fn from(tier: AdmissionTier) -> String {
+        tier.as_str().to_owned()
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -16665,6 +16740,68 @@ mod tests {
             assert!(
                 <AdmissionTier as std::convert::TryFrom<&str>>::try_from(bad).is_err(),
                 "TryFrom<&str> must reject non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`From<AdmissionTier> for String`] agrees with the canonical
+    /// [`AdmissionTier::as_str`] label at every [`AdmissionTier::ALL`]
+    /// variant. Pins the identity
+    /// `String::from(tier) == tier.as_str()` at every variant so a
+    /// future variant insertion / grammar refinement at the shared
+    /// [`AdmissionTier::as_str`] oracle propagates to the by-value
+    /// owned-string emit surface without a per-variant retype at the
+    /// [`From`] impl body. The structural agreement pin between the
+    /// by-value owned-string emit surface
+    /// ([`From<AdmissionTier> for String`]) and the canonical-label
+    /// oracle ([`AdmissionTier::as_str`]) — the owned-[`String`]
+    /// sibling of the borrowed `'static`-lifetime agreement pin
+    /// [`test_admission_tier_from_into_static_str_agrees_with_as_str`]
+    /// already carries. Structural mirror of
+    /// `test_per_attempt_region_from_into_string_agrees_with_as_str`
+    /// (commit a5a379f) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_from_into_string_agrees_with_as_str() {
+        for tier in AdmissionTier::ALL {
+            let owned: String = String::from(tier);
+            assert_eq!(
+                owned,
+                tier.as_str(),
+                "From<AdmissionTier> for String and as_str must agree at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for String`] identity carries through
+    /// a generic `impl Into<String>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<String>>(t: T) -> String { t.into() }` — the
+    /// shape of an actual downstream consumer
+    /// (`std::collections::HashMap::<String, _>::insert` key builder,
+    /// environment-variable setter that owns its key, config-schema
+    /// builder that owns its label keys,
+    /// [`String::push_str`] sink over a caller-owned buffer) — reads
+    /// the canonical snake_case label directly from an
+    /// [`AdmissionTier`] value as an owned [`String`]. The structural
+    /// witness that an [`AdmissionTier`] is genuinely usable at
+    /// `impl Into<String>` call sites — a regression that drifted
+    /// the [`From`] impl signature (returning [`&'static str`] instead
+    /// of [`String`], requiring [`&AdmissionTier`] and losing the
+    /// by-value semantics) fails here at compile time instead of at
+    /// every downstream generic call site. Structural mirror of
+    /// `test_per_attempt_region_into_string_carries_through_generic_consumer`
+    /// (commit a5a379f) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_into_string_carries_through_generic_consumer() {
+        fn read<T: Into<String>>(t: T) -> String {
+            t.into()
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(tier),
+                tier.as_str(),
+                "generic Into<String> consumer must read canonical label at {tier:?}",
             );
         }
     }
