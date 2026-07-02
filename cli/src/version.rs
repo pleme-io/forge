@@ -1429,6 +1429,100 @@ impl AsRef<str> for BumpLevel {
     }
 }
 
+/// [`From<BumpLevel> for &'static str`] routes through
+/// [`BumpLevel::as_str`] so a downstream consumer that takes an owned
+/// [`&'static str`] via [`Into<&'static str>`] (a `const`-adjacent
+/// release-manifest path-segment builder that stashes the bump label
+/// in a `&'static str` slot, a `phf`-style static lookup table keyed
+/// by canonical bump label, an OpenTelemetry / tracing attribute slot
+/// that keys by `&'static str` for the zero-copy fast path, a
+/// [`std::borrow::Cow<'static, str>`] sink taking `Into<Cow<'static,
+/// str>>`) reads the canonical lowercase label (`"patch"`, `"minor"`,
+/// `"major"`) directly from a [`BumpLevel`] value with `'static`
+/// lifetime preserved. The zero-cost by-value conversion peer of the
+/// [`AsRef<str>`] borrow surface, both routing through the same
+/// [`BumpLevel::as_str`] canonical-label oracle — the difference is
+/// that [`AsRef<str>`] borrows through the receiver's lifetime (a
+/// caller with a short-lived [`BumpLevel`] gets a short-lived `&str`
+/// back), whereas this [`From`] impl consumes the receiver by value
+/// and returns `&'static str` (a caller that no longer needs the
+/// [`BumpLevel`] value gets a `'static`-lived label back).
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], and [`AsRef<str>`]
+/// impls above — the same lift at the by-value static-lifetime
+/// conversion layer instead of the format / parse / serde / borrow
+/// layers. Together with the impls above this closes the
+/// `as_str` ⇢ {`Display`, `AsRef<str>`, `Serialize`, `From<T> for
+/// &'static str`} emission set and the {`FromStr`, `Deserialize`}
+/// parse pair at the version-bump-magnitude ladder against the shared
+/// canonical-label oracle. Structural mirror of
+/// `impl From<PerAttemptRegion> for &'static str` (commit c8614e9 —
+/// the by-value static-lifetime peer at the per-attempt-region
+/// ladder, routing through [`crate::retry::PerAttemptRegion::as_str`])
+/// and `impl From<AdmissionTier> for &'static str` (commit c041b0b —
+/// the by-value static-lifetime peer at the admission-tier ladder,
+/// routing through [`crate::probe_outcome::AdmissionTier::as_str`]).
+/// After this commit all three repo-internal ordered typed sums that
+/// carry `as_str` + [`std::fmt::Display`] + [`std::str::FromStr`] +
+/// [`serde::Serialize`] + [`serde::Deserialize`] + [`AsRef<str>`]
+/// ([`BumpLevel`], [`crate::probe_outcome::AdmissionTier`],
+/// [`crate::retry::PerAttemptRegion`]) also carry `From<T> for
+/// &'static str` routing through the shared canonical-label oracle —
+/// the label-axis grammar at every ordered typed sum is now a
+/// one-oracle surface at every Rust-idiomatic reading (direct call
+/// `as_str`, format machinery [`std::fmt::Display`], byte slice
+/// [`AsRef<str>`], string parse [`std::str::FromStr`], serde
+/// [`serde::Serialize`] / [`serde::Deserialize`], by-value
+/// static-lifetime conversion [`From<T> for &'static str`]). The
+/// natural bridge to the [`strum::IntoStaticStr`] /
+/// [`strum_macros::IntoStaticStr`] frontier idiom (`strum` derives
+/// exactly this pattern via `#[derive(IntoStaticStr)]`) — here
+/// hand-written at ONE typed-primitive site so the routing through
+/// the shared [`BumpLevel::as_str`] oracle is explicit and
+/// inspectable rather than macro-generated.
+///
+/// Zero-cost by construction: the returned `&'static str` is
+/// delegated from [`BumpLevel::as_str`]'s `&'static str` return type,
+/// so a consumer that receives the slice reads directly into the
+/// static-string constant table without a copy, matching the
+/// zero-allocation discipline the [`std::fmt::Display`] format
+/// surface doesn't offer (which writes through a
+/// [`std::fmt::Formatter`] into a caller-provided buffer).
+///
+/// A future variant insertion (a `Prerelease` band strictly below
+/// [`BumpLevel::Patch`], an `Epoch` ceiling strictly above
+/// [`BumpLevel::Major`] for semver4 / `0ver`-style incompatible-by-
+/// design rewrites) updates the [`BumpLevel::as_str`] match body
+/// alone and every consumer — release-manifest path-segment builder
+/// holding `&'static str` slots, `phf`-style static lookup table
+/// keyed by canonical bump label, OpenTelemetry / tracing attribute
+/// slot, [`std::borrow::Cow<'static, str>`] sink — that accepts
+/// `impl Into<&'static str>` inherits the new canonical label
+/// automatically with no downstream retyping.
+///
+/// The identity `<&'static str>::from(level) == level.as_str()` at
+/// every [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_from_into_static_str_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<&'static str>` consumer at every variant is pinned by
+/// [`tests::test_bump_level_into_static_str_carries_through_generic_consumer`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// conversion surface is a typed-primitive site on [`BumpLevel`]
+/// itself (one `From<BumpLevel> for &'static str` impl routing
+/// through [`BumpLevel::as_str`]), not a per-consumer `.as_str()`
+/// restatement at every downstream site that accepts
+/// `impl Into<&'static str>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`BumpLevel::as_str`]) and
+/// every surface — `as_str`, `Display`, `Serialize`, `AsRef<str>`,
+/// this `From<T> for &'static str` — reads through it.
+impl From<BumpLevel> for &'static str {
+    fn from(level: BumpLevel) -> &'static str {
+        level.as_str()
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -3847,6 +3941,89 @@ mod tests {
                 read(&level),
                 level.as_str(),
                 "generic AsRef<str> consumer must read canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`],
+    /// `<&'static str as From<BumpLevel>>::from(level)` (the
+    /// [`From<BumpLevel> for &'static str`] impl body) equals
+    /// `level.as_str()` (the canonical-label oracle) exactly. The
+    /// load-bearing structural pin that ties the by-value static-
+    /// lifetime conversion surface to the shared [`BumpLevel::as_str`]
+    /// oracle: a regression that swapped [`From<BumpLevel> for
+    /// &'static str`] to route through the [`std::fmt::Display`]
+    /// formatter (which cannot return `&'static str` at all —
+    /// [`Display`](std::fmt::Display) writes through a
+    /// [`std::fmt::Formatter`] into a caller-provided buffer, forcing
+    /// a [`String::leak`] or [`Box::leak`] fabrication that would
+    /// drift from the canonical-label constant table), or drifted the
+    /// [`From`] grammar from [`BumpLevel::as_str`]'s lowercase labels,
+    /// fails here at ONE named site instead of leaking to every
+    /// downstream consumer that accepts `impl Into<&'static str>`
+    /// (release-manifest path-segment builder holding `&'static str`
+    /// slots, `phf`-style static lookup table keyed by canonical bump
+    /// label, OpenTelemetry / tracing attribute slot,
+    /// [`std::borrow::Cow<'static, str>`] sink). Sibling of
+    /// [`test_bump_level_as_ref_str_agrees_with_as_str`] at the
+    /// byte-slice-coercion surface and
+    /// [`test_bump_level_display_round_trips_through_from_str`] at
+    /// the format-machinery surface — the three agreement pins
+    /// together close the read-side agreement across the by-value
+    /// static-lifetime surface ([`From<BumpLevel> for &'static str`]),
+    /// the borrow surface ([`AsRef<str>`]), and the format-buffer
+    /// surface ([`std::fmt::Display`]) against the shared canonical-
+    /// label oracle. Structural mirror of
+    /// `test_per_attempt_region_from_into_static_str_agrees_with_as_str`
+    /// (commit c8614e9) at the per-attempt-region ladder and
+    /// `test_admission_tier_from_into_static_str_agrees_with_as_str`
+    /// (commit c041b0b) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_from_into_static_str_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let borrowed: &'static str = <&'static str>::from(level);
+            assert_eq!(
+                borrowed,
+                level.as_str(),
+                "From<BumpLevel> for &'static str and as_str must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for &'static str`] identity carries
+    /// through a generic `impl Into<&'static str>` consumer at every
+    /// [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<&'static str>>(t: T) -> &'static str
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (release-manifest path-segment builder holding `&'static str`
+    /// slots, `phf`-style static lookup table keyed by canonical bump
+    /// label, OpenTelemetry / tracing attribute slot,
+    /// [`std::borrow::Cow<'static, str>`] sink) — reads the canonical
+    /// lowercase label directly from a [`BumpLevel`] value with
+    /// `'static` lifetime preserved end-to-end. The structural
+    /// witness that a [`BumpLevel`] is genuinely usable at
+    /// `impl Into<&'static str>` call sites — a regression that
+    /// drifted the [`From`] impl signature (e.g., returning [`String`]
+    /// instead of `&'static str`, or requiring `&BumpLevel` and
+    /// losing the `'static` lifetime through a receiver borrow) fails
+    /// here at compile time instead of at every downstream generic
+    /// call site. Structural mirror of
+    /// `test_per_attempt_region_into_static_str_carries_through_generic_consumer`
+    /// (commit c8614e9) at the per-attempt-region ladder and
+    /// `test_admission_tier_into_static_str_carries_through_generic_consumer`
+    /// (commit c041b0b) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_into_static_str_carries_through_generic_consumer() {
+        fn read<T: Into<&'static str>>(t: T) -> &'static str {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level),
+                level.as_str(),
+                "generic Into<&'static str> consumer must read canonical label at {level:?}",
             );
         }
     }
