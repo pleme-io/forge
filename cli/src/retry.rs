@@ -1087,6 +1087,72 @@ impl std::fmt::Display for PerAttemptRegion {
     }
 }
 
+/// Parse the canonical lowercase / snake_case string (`"before_first"`,
+/// `"first"`, `"interim"`, `"final"`, `"over_budget"`) into a
+/// [`PerAttemptRegion`] variant. The named grammar-oracle inverse to
+/// [`PerAttemptRegion::as_str`] — a downstream CLI-flag parser, telemetry-
+/// label rehydrator, or YAML/JSON deserializer that recovers a
+/// [`PerAttemptRegion`] from its canonical string label reads through
+/// this one site instead of a per-consumer `match s { "first" | ... | _
+/// }` cascade that would drift when a sixth variant is inserted.
+///
+/// Sibling of [`crate::version::BumpLevel`]'s [`std::str::FromStr`] impl
+/// (which inverts [`crate::version::BumpLevel::as_str`]) and
+/// [`crate::probe_outcome::AdmissionTier`]'s [`std::str::FromStr`] impl
+/// (which inverts [`crate::probe_outcome::AdmissionTier::as_str`]), here
+/// applied to the per-attempt-region typed sum. Together with
+/// [`PerAttemptRegion::as_str`] and `Display for PerAttemptRegion` this
+/// closes the `Display`↔`FromStr`↔`as_str` triangle at the per-attempt-
+/// region ladder — the same closed round-trip surface
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] already carry at their ladders. The
+/// round-trip identity `region.to_string().parse::<PerAttemptRegion>()
+/// .unwrap() == region` at every variant is pinned by
+/// [`tests::test_per_attempt_region_display_round_trips_through_from_str`].
+///
+/// The parser is strict: only the canonical labels emitted by
+/// [`PerAttemptRegion::as_str`] parse. Empty input, UpperCamel rendering
+/// (`"BeforeFirst"`, `"OverBudget"` — as the derived [`Debug`] impl
+/// would emit), whitespace padding, uppercase (`"FIRST"`), and
+/// snake_case labels with a dropped underscore (`"beforefirst"`,
+/// `"overbudget"`) all reject. A downstream surface that wants alias
+/// matrix or whitespace tolerance normalizes the string before routing
+/// it through this canonical parser.
+///
+/// The error wording follows the sibling
+/// [`crate::probe_outcome::AdmissionTier::from_str`] shape — names the
+/// offending input inside single quotes and echoes the canonical
+/// grammar — so a downstream operator reading the error text at the
+/// retry-loop telemetry surface reads the same layout the admission-tier
+/// and bump-level traps at the sibling ladders emit.
+///
+/// THEORY.md §V.4 typed primitives: the label-axis parser is a typed-
+/// primitive surface on [`PerAttemptRegion`] itself (one match body over
+/// the closed variant grammar) rather than a per-consumer inline
+/// cascade. THEORY.md §VI.1 one-oracle / generation-over-composition:
+/// the canonical-label grammar is named at one site
+/// ([`PerAttemptRegion::as_str`]), the [`std::fmt::Display`] impl and
+/// this [`std::str::FromStr`] impl are the two derived read/write
+/// surfaces that route through it, and a future ladder refinement that
+/// renames or inserts a variant is a one-site edit at [`as_str`] plus
+/// the matching parser-arm addition here.
+impl std::str::FromStr for PerAttemptRegion {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "before_first" => Ok(Self::BeforeFirst),
+            "first" => Ok(Self::First),
+            "interim" => Ok(Self::Interim),
+            "final" => Ok(Self::Final),
+            "over_budget" => Ok(Self::OverBudget),
+            _ => Err(anyhow::anyhow!(
+                "Invalid per-attempt region '{s}' — use before_first, first, interim, final, or over_budget",
+            )),
+        }
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -11043,6 +11109,131 @@ mod tests {
         for region in PerAttemptRegion::ALL {
             assert_eq!(
                 region.to_string(),
+                region.as_str(),
+                "Display and as_str must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The five canonical lowercase / snake_case strings parse to the
+    /// five [`PerAttemptRegion`] variants exactly — the grammar oracle
+    /// inverse to [`PerAttemptRegion::as_str`] that every prior
+    /// `match s { "before_first" | "first" | "interim" | "final" |
+    /// "over_budget" | _ }` cascade at a downstream CLI / config /
+    /// telemetry rehydration consumer now routes through. Mirrors the
+    /// discipline
+    /// [`crate::probe_outcome::tests::test_admission_tier_from_str_canonical_strings`]
+    /// established at the sibling typed sum and
+    /// [`crate::version::tests::test_bump_level_from_str_canonical_strings`]
+    /// established at the sibling magnitude ladder.
+    #[test]
+    fn test_per_attempt_region_from_str_canonical_strings() {
+        assert_eq!(
+            "before_first".parse::<PerAttemptRegion>().unwrap(),
+            PerAttemptRegion::BeforeFirst,
+        );
+        assert_eq!(
+            "first".parse::<PerAttemptRegion>().unwrap(),
+            PerAttemptRegion::First,
+        );
+        assert_eq!(
+            "interim".parse::<PerAttemptRegion>().unwrap(),
+            PerAttemptRegion::Interim,
+        );
+        assert_eq!(
+            "final".parse::<PerAttemptRegion>().unwrap(),
+            PerAttemptRegion::Final,
+        );
+        assert_eq!(
+            "over_budget".parse::<PerAttemptRegion>().unwrap(),
+            PerAttemptRegion::OverBudget,
+        );
+    }
+
+    /// Any other string errors with wording that names the offending
+    /// input and echoes the canonical grammar — same shape the
+    /// [`crate::probe_outcome::AdmissionTier::from_str`] and
+    /// [`crate::version::BumpLevel::from_str`] traps emit at the sibling
+    /// typed sums. The parser is strict: empty input, UpperCamel
+    /// rendering (as the derived [`Debug`] impl would emit), whitespace
+    /// padding, uppercase, and snake_case labels with a dropped
+    /// underscore all reject. A downstream surface that wants alias
+    /// matrix or whitespace tolerance handles those concerns before
+    /// routing the normalised string through this canonical parser.
+    #[test]
+    fn test_per_attempt_region_from_str_rejects_unknown() {
+        let err = "invalid"
+            .parse::<PerAttemptRegion>()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Invalid per-attempt region 'invalid'"),
+            "error must name the offending input: {err}",
+        );
+        assert!(
+            err.contains("use before_first, first, interim, final, or over_budget"),
+            "error must echo the canonical grammar: {err}",
+        );
+        assert!(
+            "".parse::<PerAttemptRegion>().is_err(),
+            "empty string is rejected",
+        );
+        assert!(
+            "BeforeFirst".parse::<PerAttemptRegion>().is_err(),
+            "UpperCamel is rejected — only canonical lowercase parses",
+        );
+        assert!(
+            "OverBudget".parse::<PerAttemptRegion>().is_err(),
+            "UpperCamel is rejected — only canonical lowercase parses",
+        );
+        assert!(
+            "FIRST".parse::<PerAttemptRegion>().is_err(),
+            "uppercase is rejected — only canonical lowercase parses",
+        );
+        assert!(
+            "  first ".parse::<PerAttemptRegion>().is_err(),
+            "whitespace is not trimmed at this surface — caller's responsibility",
+        );
+        assert!(
+            "beforefirst".parse::<PerAttemptRegion>().is_err(),
+            "snake_case is load-bearing — `beforefirst` without the underscore is rejected",
+        );
+        assert!(
+            "overbudget".parse::<PerAttemptRegion>().is_err(),
+            "snake_case is load-bearing — `overbudget` without the underscore is rejected",
+        );
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], the round-trip `region -> Display ->
+    /// FromStr` is the identity — `region.to_string()
+    /// .parse::<PerAttemptRegion>().unwrap() == region`. The load-
+    /// bearing structural pin that ties the canonical-label oracle
+    /// ([`PerAttemptRegion::as_str`]) to its inverse
+    /// ([`std::str::FromStr`]) via the [`std::fmt::Display`] impl that
+    /// routes through [`as_str`]: a regression that drifted either side
+    /// (e.g., a future variant insertion that extended [`as_str`]
+    /// without a matching parser arm, or a parser-only alias extension
+    /// that bypassed the [`as_str`] canonical label) desynchronises this
+    /// pin at one site instead of leaking to every downstream telemetry
+    /// / attestation consumer that reads a rehydrated
+    /// [`PerAttemptRegion`] back from its serialized label. Mirrors the
+    /// discipline
+    /// [`crate::probe_outcome::tests::test_admission_tier_display_round_trips_through_from_str`]
+    /// established at the sibling typed sum and
+    /// [`crate::version::tests::test_bump_level_display_round_trips_through_from_str`]
+    /// established at the sibling magnitude ladder.
+    #[test]
+    fn test_per_attempt_region_display_round_trips_through_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let s = region.to_string();
+            assert_eq!(
+                s.parse::<PerAttemptRegion>().unwrap(),
+                region,
+                "Display→FromStr must round-trip at {region:?} (got {s:?})",
+            );
+            assert_eq!(
+                s.as_str(),
                 region.as_str(),
                 "Display and as_str must agree at {region:?}",
             );
