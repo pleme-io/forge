@@ -2287,6 +2287,123 @@ impl TryFrom<Box<str>> for BumpLevel {
     }
 }
 
+/// [`From<BumpLevel> for Arc<str>`] routes through [`BumpLevel::as_str`]
+/// and hands the canonical lowercase label (`"patch"`, `"minor"`,
+/// `"major"`) to [`std::sync::Arc::<str>::from`] so a downstream consumer
+/// bound by `impl Into<Arc<str>>` (a cross-thread cached-label slot that
+/// wants a single canonical allocation shared across worker threads via
+/// atomic refcount, a validated-input newtype wrapper whose level field
+/// is stored as [`Arc<str>`] to hand cheap clones to sibling structures
+/// on other threads, a serde container that opts into
+/// `#[serde(from = "Arc<str>")]` at the shared-owned frontier, a
+/// dashmap-style keyed-table value slot whose readers want an [`Arc`]
+/// clone rather than a per-lookup allocation) reads the canonical label
+/// directly from a [`BumpLevel`] value at a single atomic-refcount heap
+/// allocation — the shared-owned emit peer of
+/// [`From<BumpLevel> for Box<str>`] (single allocation, immutable
+/// heap-owned receiver at the shrunk-owned frontier, no refcount header)
+/// that trades the two-machine-word [`Box<str>`] receiver footprint for
+/// an [`Arc<str>`] receiver with an atomic-refcount slot preceding the
+/// label bytes, enabling `O(1)` [`Arc::clone`] on the emit result across
+/// threads without a per-clone allocation.
+///
+/// The by-value emit peer of [`From<BumpLevel> for &'static str`]
+/// (zero-copy `'static` borrow of the label constant, no allocation),
+/// [`From<BumpLevel> for String`] (single allocation, resizable
+/// receiver), [`From<BumpLevel> for Cow<'static, str>`] (uniform emit at
+/// the borrowed/owned frontier through [`Cow::Borrowed`], zero
+/// allocation regardless of receiver typing),
+/// [`From<BumpLevel> for Box<str>`] (single allocation, immutable
+/// heap-owned receiver at the shrunk-owned frontier), and this
+/// [`From<BumpLevel> for Arc<str>`] (single allocation with
+/// atomic-refcount header, immutable heap-owned receiver at the
+/// shared-owned frontier). All five route through the shared
+/// [`BumpLevel::as_str`] canonical-label oracle: the [`&'static str`]
+/// peer through [`as_str`] directly, the [`String`] peer through
+/// [`str::to_owned`] on [`as_str`], the [`Cow<'static, str>`] peer
+/// through [`Cow::Borrowed`] wrapping [`as_str`], the [`Box<str>`] peer
+/// through [`Box::<str>::from`] on [`as_str`], this [`Arc<str>`] peer
+/// through [`std::sync::Arc::<str>::from`] on [`as_str`] — the same
+/// canonical grammar lifted to the shared-owned-frontier emit layer.
+///
+/// The impl body picks [`std::sync::Arc::<str>::from`] rather than
+/// [`std::sync::Arc::from`] on a [`Box<str>`] intermediate or an
+/// [`std::sync::Arc::from`] on a [`String`]: the direct
+/// [`std::sync::Arc::<str>::from`] path allocates once from the
+/// `'static` label slice, including the atomic-refcount header, so the
+/// receiver pays a single allocation for exactly the label's length
+/// plus the header — never the [`Box<str>`]-then-[`Arc::from`] round
+/// trip (two allocations: box the slice, then rewrap into an
+/// [`Arc<str>`]) nor the [`String`]-then-[`Arc::from`] round trip
+/// (resizable allocation, then rewrap). The single-allocation contract
+/// is pinned by
+/// [`tests::test_bump_level_into_arc_str_agrees_with_as_str`] at the
+/// label-oracle surface (value agreement across every variant) and by
+/// [`tests::test_bump_level_into_arc_str_carries_through_generic_consumer`]
+/// (identity carried through a tiny generic
+/// `fn read<T: Into<Arc<str>>>(t: T) -> Arc<str>` consumer at every
+/// variant — the structural witness that a [`BumpLevel`] is genuinely
+/// usable at `impl Into<Arc<str>>` call sites, so a regression that
+/// drifted the impl signature (a returned [`Box<str>`] instead of
+/// [`Arc<str>`], a required `&BumpLevel` receiver losing the by-value
+/// semantics) fails at compile time or at the assertion instead of at
+/// every downstream generic call site). The
+/// `Arc::clone`-preserves-value contract is pinned by
+/// [`tests::test_bump_level_into_arc_str_shares_label_across_clones`]
+/// at every variant — the structural witness that the shared-owned
+/// receiver semantics hold: an [`Arc::clone`] of the emit result reads
+/// the same canonical label bytes as the original, and the atomic
+/// refcount lifts to at least two after the clone.
+///
+/// Structural mirror of
+/// [`From<PerAttemptRegion> for Arc<str>`](crate::retry::PerAttemptRegion)
+/// (commit c3a722d) at the per-attempt-region ladder and
+/// [`From<AdmissionTier> for Arc<str>`](crate::probe_outcome::AdmissionTier)
+/// (commit 6bab1ab) at the admission-tier ladder — the same
+/// [`std::sync::Arc::<str>::from`] lift, through the same one-oracle
+/// discipline, at the third ordered typed sum. Together with those two
+/// impls this closes the shared-owned-frontier emit peer at ALL THREE
+/// canonical-label typed primitives on the same ladder — the third arm
+/// of the trio whose first two arms landed at c3a722d and 6bab1ab. The
+/// closure discipline mirrors the same trio-closing rhythm already
+/// achieved at the `&'static str` / `String` / `Cow<'static, str>` /
+/// `Box<str>` emit frontiers in prior runs.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<BumpLevel> for &'static str`], [`TryFrom<&str>`],
+/// [`From<BumpLevel> for String`], [`TryFrom<String>`],
+/// [`From<BumpLevel> for Cow<'static, str>`], [`TryFrom<Cow<'_, str>>`],
+/// [`From<BumpLevel> for Box<str>`], and [`TryFrom<Box<str>>`] impls
+/// above — the same lift at the by-value [`Arc<str>`] emit layer instead
+/// of the format / parse / serde / borrow / static-lifetime /
+/// by-reference-try / owned-string-emit / owned-string-try /
+/// borrowed-frontier-emit / borrowed-frontier-try /
+/// shrunk-owned-frontier-emit / shrunk-owned-frontier-try layers.
+/// Closes the shared-owned-frontier arm of the emit peer set at the
+/// version-bump-magnitude ladder against the shared
+/// [`BumpLevel::as_str`] canonical-label oracle.
+///
+/// THEORY.md §V.4 typed primitives: the by-value [`Arc<str>`] emit
+/// surface is a typed-primitive site on [`BumpLevel`] itself (one
+/// `From<BumpLevel> for Arc<str>` impl routing through [`as_str`] at
+/// the [`std::sync::Arc::<str>::from`] boundary), not a per-consumer
+/// `Arc::<str>::from(level.as_str())` restatement at every downstream
+/// site that receives an [`Into<Arc<str>>`] label sink.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// ([`BumpLevel::as_str`]) and every emit surface — [`as_str`],
+/// [`Display`], [`serde::Serialize`], [`AsRef<str>`],
+/// [`From<BumpLevel> for &'static str`],
+/// [`From<BumpLevel> for String`],
+/// [`From<BumpLevel> for Cow<'static, str>`],
+/// [`From<BumpLevel> for Box<str>`], this
+/// `From<BumpLevel> for Arc<str>` — reads through it.
+impl From<BumpLevel> for std::sync::Arc<str> {
+    fn from(level: BumpLevel) -> std::sync::Arc<str> {
+        std::sync::Arc::<str>::from(level.as_str())
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -5509,6 +5626,126 @@ mod tests {
                 <BumpLevel as std::convert::TryFrom<Box<str>>>::try_from(Box::<str>::from(bad))
                     .is_err(),
                 "TryFrom<Box<str>> must reject non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for Arc<str>`] agrees with
+    /// [`BumpLevel::as_str`] at every [`BumpLevel::ALL`] variant: the
+    /// emitted [`std::sync::Arc<str>`] reads exactly the canonical
+    /// lowercase label the [`as_str`] oracle returns. Pins the
+    /// shared-owned emit surface against the same canonical-label oracle
+    /// every sibling emit surface reads —
+    /// [`test_bump_level_as_str_matches_display`] at the [`Display`]
+    /// emit surface,
+    /// [`test_bump_level_from_into_static_str_agrees_with_as_str`] at
+    /// the `'static`-borrow emit surface,
+    /// [`test_bump_level_from_into_string_agrees_with_as_str`] at the
+    /// owned [`String`] emit surface,
+    /// [`test_bump_level_from_into_cow_static_str_agrees_with_as_str`]
+    /// at the borrowed/owned-frontier emit surface, and
+    /// [`test_bump_level_into_box_str_agrees_with_as_str`] at the
+    /// shrunk-owned-frontier emit surface — the five agreement pins
+    /// together close the read-side agreement across every by-value
+    /// emit surface at the version-bump-magnitude ladder. Structural
+    /// mirror of `test_per_attempt_region_into_arc_str_agrees_with_as_str`
+    /// (commit c3a722d) at the per-attempt-region ladder and
+    /// `test_admission_tier_into_arc_str_agrees_with_as_str` (commit
+    /// 6bab1ab) at the admission-tier ladder — the same agreement pin
+    /// through the same one-oracle discipline at the third ordered
+    /// typed sum.
+    #[test]
+    fn test_bump_level_into_arc_str_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(level);
+            assert_eq!(
+                shared.as_ref(),
+                level.as_str(),
+                "From<BumpLevel> for Arc<str> and as_str must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Arc<str>`] identity carries through a
+    /// generic `impl Into<Arc<str>>` consumer at every
+    /// [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Arc<str>>>(t: T) -> Arc<str> { t.into() }` — the
+    /// shape of an actual downstream consumer (cross-thread cached-label
+    /// slot typed as [`Arc<str>`] to share a canonical allocation across
+    /// worker threads via atomic refcount, a validated-input newtype
+    /// wrapper that stores a canonical label as [`Arc<str>`] to hand
+    /// cheap clones to sibling structures, a serde container that opts
+    /// into `#[serde(from = "Arc<str>")]` at the shared-owned frontier,
+    /// a dashmap-style keyed-table value slot whose readers want an
+    /// [`Arc`] clone rather than a per-lookup allocation) reads the
+    /// canonical lowercase label directly from a [`BumpLevel`] value at
+    /// a single atomic-refcount heap allocation. The structural witness
+    /// that a [`BumpLevel`] is genuinely usable at
+    /// `impl Into<Arc<str>>` call sites — a regression that drifted the
+    /// [`From`] impl signature (e.g., returning [`Box<str>`] instead of
+    /// [`Arc<str>`], requiring [`&BumpLevel`] and losing the by-value
+    /// semantics, or dropping to a [`Box<str>`]-then-[`Arc::from`]
+    /// composition that would allocate twice) fails here at compile time
+    /// instead of at every downstream generic call site. Structural
+    /// mirror of
+    /// `test_per_attempt_region_into_arc_str_carries_through_generic_consumer`
+    /// (commit c3a722d) and
+    /// `test_admission_tier_into_arc_str_carries_through_generic_consumer`
+    /// (commit 6bab1ab) at the version-bump-magnitude ladder.
+    #[test]
+    fn test_bump_level_into_arc_str_carries_through_generic_consumer() {
+        fn read<T: Into<std::sync::Arc<str>>>(t: T) -> std::sync::Arc<str> {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).as_ref(),
+                level.as_str(),
+                "generic Into<Arc<str>> consumer must read canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Arc<str>`] shared-owned semantics hold
+    /// across [`std::sync::Arc::clone`] at every [`BumpLevel::ALL`]
+    /// variant: the clone reads exactly the same canonical lowercase
+    /// label the original reads, points at the same allocation (identity
+    /// of the underlying byte pointer via [`std::sync::Arc::ptr_eq`]),
+    /// and the atomic refcount lifts to at least two after the clone
+    /// (via [`std::sync::Arc::strong_count`]). Pins the shared-owned
+    /// receiver contract at the emit surface — a regression that drifted
+    /// the impl body to a non-`Arc` composition
+    /// ([`Box::<str>::from(as_str)`] then some ad-hoc rewrap, an
+    /// [`String`] intermediate) would break the pointer-identity
+    /// assertion (each clone would land at a distinct allocation) even
+    /// if the canonical-label bytes still agreed. The three pins
+    /// together (label agreement, pointer identity, refcount lift)
+    /// close the structural witness that the receiver actually holds a
+    /// shared-owned [`Arc<str>`] slot rather than an [`Arc<str>`]-typed
+    /// wrapper around a per-clone-allocated [`Box<str>`]. Structural
+    /// mirror of
+    /// `test_per_attempt_region_into_arc_str_shares_label_across_clones`
+    /// (commit c3a722d) and
+    /// `test_admission_tier_into_arc_str_shares_label_across_clones`
+    /// (commit 6bab1ab) at the version-bump-magnitude ladder.
+    #[test]
+    fn test_bump_level_into_arc_str_shares_label_across_clones() {
+        for level in BumpLevel::ALL {
+            let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(level);
+            let cloned = std::sync::Arc::clone(&shared);
+            assert_eq!(
+                cloned.as_ref(),
+                level.as_str(),
+                "Arc<str> clone must read canonical label at {level:?}",
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(&shared, &cloned),
+                "Arc<str> clone must share the same underlying allocation at {level:?}",
+            );
+            assert!(
+                std::sync::Arc::strong_count(&shared) >= 2,
+                "Arc<str> strong count must be at least 2 after clone at {level:?}",
             );
         }
     }
