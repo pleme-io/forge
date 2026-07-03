@@ -363,12 +363,12 @@ pub async fn push_with_retry(
         .to_string();
 
     let policy = RetryPolicy::network();
-    let max_attempts = policy.max_attempts;
     let op = format!("push {}:{}", registry, tag);
 
     let result = retry_command(&policy, &op, |attempt| {
         let organization = organization.clone();
         let op = op.clone();
+        let policy = policy.clone();
         async move {
             let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
             let outcome = Command::new(&skopeo)
@@ -384,7 +384,7 @@ pub async fn push_with_retry(
                 .stderr(Stdio::piped())
                 .output()
                 .await;
-            log_retry_attempt(outcome, &op, attempt, max_attempts)
+            log_retry_attempt(outcome, &op, attempt, &policy)
         }
     })
     .await;

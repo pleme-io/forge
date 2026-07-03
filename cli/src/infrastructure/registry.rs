@@ -213,11 +213,11 @@ impl RegistryClient {
         }
 
         let policy = RetryPolicy::network_with_max_attempts(retries);
-        let max_attempts = policy.max_attempts;
         let op = format!("push {}:{}", registry, tag);
 
         let result = retry_command(&policy, &op, |attempt| {
             let op = op.clone();
+            let policy = policy.clone();
             async move {
                 let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
                 let outcome = Command::new(&skopeo)
@@ -236,7 +236,7 @@ impl RegistryClient {
                     .stderr(Stdio::piped())
                     .output()
                     .await;
-                log_retry_attempt(outcome, &op, attempt, max_attempts)
+                log_retry_attempt(outcome, &op, attempt, &policy)
             }
         })
         .await;

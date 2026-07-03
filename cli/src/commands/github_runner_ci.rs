@@ -614,13 +614,13 @@ pub async fn execute(
 /// the public boundary so existing call sites remain unchanged.
 async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: bool) -> Result<()> {
     let policy = RetryPolicy::network_or_immediate(safe_mode);
-    let max_attempts = policy.max_attempts;
     let attic = get_tool_path("ATTIC_BIN", "attic");
     let op = operation.to_string();
 
     let result = retry_command(&policy, &op, |attempt| {
         let attic = attic.clone();
         let op = op.clone();
+        let policy = policy.clone();
         async move {
             debug!("Running: attic {}", args.join(" "));
             let outcome = Command::new(&attic)
@@ -645,7 +645,7 @@ async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: boo
                     debug_log_capture_streams(out, "attic");
                 }
             }
-            log_retry_attempt(outcome, &op, attempt, max_attempts)
+            log_retry_attempt(outcome, &op, attempt, &policy)
         }
     })
     .await;
@@ -710,13 +710,13 @@ async fn push_with_retry(
     // (the `attempts < retries || safe_mode` guard was always true).
     // The migration fixes that bug by construction.
     let policy = RetryPolicy::network_or_immediate(safe_mode);
-    let max_attempts = policy.max_attempts;
     let op = format!("push {}:{}", registry, tag);
 
     let result = retry_command(&policy, &op, |attempt| {
         let skopeo = skopeo.clone();
         let organization = organization.clone();
         let op = op.clone();
+        let policy = policy.clone();
         async move {
             debug!("Pushing {}:{} (attempt {})", registry, tag, attempt);
             let outcome = Command::new(&skopeo)
@@ -748,7 +748,7 @@ async fn push_with_retry(
                     debug_log_capture_streams(out, "skopeo");
                 }
             }
-            log_retry_attempt(outcome, &op, attempt, max_attempts)
+            log_retry_attempt(outcome, &op, attempt, &policy)
         }
     })
     .await;

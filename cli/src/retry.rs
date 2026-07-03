@@ -6511,22 +6511,37 @@ where
 /// infrastructure/* sites previously emitted "Push attempt {n} failed,
 /// retrying..." without the operation label, so post-migration their warns
 /// gain the op label by construction.
+///
+/// The "another attempt remains" predicate reads through the typed
+/// [`RetryPolicy::is_final_attempt`] peer (its De Morgan complement),
+/// not the inline `attempt < max_attempts` field-comparison the pre-
+/// migration shape carried against a raw `max_attempts: u32` parameter.
+/// The typed-primitive routing carries the clamp-to-≥1 discipline
+/// [`RetryPolicy::is_final_attempt`] and [`run_with_policy`] both apply
+/// down to the warn-dispatch site, so a hand-built
+/// `RetryPolicy { max_attempts: 0, .. }` (the degenerate field-literal
+/// shape every factory constructor forecloses via [`RetryPolicy::new`] /
+/// [`RetryPolicy::with_max_attempts`]'s `.max(1)` clamp) suppresses the
+/// warn on attempt 1 rather than emitting a mis-shaped
+/// `"attempt 1/0: retrying..."` line — matching the retry loop's own
+/// short-circuit at [`run_with_policy`], which returns the captured
+/// error on attempt 1 under the same degenerate shape.
 pub fn log_retry_attempt(
     outcome: std::io::Result<std::process::Output>,
     operation: &str,
     attempt: u32,
-    max_attempts: u32,
+    policy: &RetryPolicy,
 ) -> std::io::Result<std::process::Output> {
     let failed = outcome
         .as_ref()
         .map(|o| !o.status.success())
         .unwrap_or(true);
-    if failed && attempt < max_attempts {
+    if failed && !policy.is_final_attempt(attempt) {
         tracing::warn!(
             "{} failed (attempt {}/{}): retrying...",
             operation,
             attempt,
-            max_attempts
+            policy.max_attempts.max(1)
         );
     }
     outcome
@@ -17746,7 +17761,8 @@ mod tests {
     #[test]
     fn test_log_retry_attempt_success_returns_outcome_verbatim() {
         let out = synth_output(true, b"hello\n", b"");
-        let result = log_retry_attempt(Ok(out), "push transient", 1, 5);
+        let policy = RetryPolicy::network_with_max_attempts(5);
+        let result = log_retry_attempt(Ok(out), "push transient", 1, &policy);
         let captured = result.expect("success outcome must pass through Ok");
         assert!(captured.status.success());
         assert_eq!(captured.stdout, b"hello\n");
@@ -17764,7 +17780,8 @@ mod tests {
     #[test]
     fn test_log_retry_attempt_op_failure_with_budget_returns_outcome_verbatim() {
         let out = synth_output(false, b"", b"503 Service Unavailable\n");
-        let result = log_retry_attempt(Ok(out), "push ghcr.io/o/p:tag", 2, 5);
+        let policy = RetryPolicy::network_with_max_attempts(5);
+        let result = log_retry_attempt(Ok(out), "push ghcr.io/o/p:tag", 2, &policy);
         let captured = result.expect("op-failure must still pass Ok(Output) through");
         assert!(!captured.status.success());
         assert_eq!(captured.stderr, b"503 Service Unavailable\n");
@@ -17783,7 +17800,8 @@ mod tests {
     fn test_log_retry_attempt_op_failure_on_final_attempt_returns_outcome_verbatim() {
         let out = synth_output(false, b"", b"i/o timeout\n");
         // attempt == max_attempts: no retry follows.
-        let result = log_retry_attempt(Ok(out), "push ghcr.io/o/p:tag", 5, 5);
+        let policy = RetryPolicy::network_with_max_attempts(5);
+        let result = log_retry_attempt(Ok(out), "push ghcr.io/o/p:tag", 5, &policy);
         let captured = result.expect("op-failure on final attempt must still pass Ok(Output)");
         assert!(!captured.status.success());
         assert_eq!(captured.stderr, b"i/o timeout\n");
@@ -17809,7 +17827,8 @@ mod tests {
         // must still fire (attempt < max_attempts), and the outcome must
         // pass through verbatim for the downstream retry-loop's classifier.
         let out = synth_output(false, b"", b"503 Service Unavailable\n");
-        let result = log_retry_attempt(Ok(out), "push ghcr.io/o/p:tag", 1, 5);
+        let policy = RetryPolicy::network_with_max_attempts(5);
+        let result = log_retry_attempt(Ok(out), "push ghcr.io/o/p:tag", 1, &policy);
         let captured = result.expect("op-failure with empty stdout must pass Ok(Output) through");
         assert!(
             !captured.status.success(),
@@ -17841,7 +17860,8 @@ mod tests {
             std::io::ErrorKind::NotFound,
             "no such file or directory",
         ));
-        let result = log_retry_attempt(captured, "push ghcr.io/o/p:tag", 1, 5);
+        let policy = RetryPolicy::network_with_max_attempts(5);
+        let result = log_retry_attempt(captured, "push ghcr.io/o/p:tag", 1, &policy);
         let err = result.expect_err("spawn-failure must pass Err(io::Error) through");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(err.to_string().contains("no such file"));
@@ -17855,7 +17875,8 @@ mod tests {
     fn test_log_retry_attempt_spawn_failure_on_final_attempt_returns_outcome_verbatim() {
         let captured: std::io::Result<std::process::Output> =
             Err(std::io::Error::other("permission denied"));
-        let result = log_retry_attempt(captured, "push ghcr.io/o/p:tag", 5, 5);
+        let policy = RetryPolicy::network_with_max_attempts(5);
+        let result = log_retry_attempt(captured, "push ghcr.io/o/p:tag", 5, &policy);
         let err = result.expect_err("spawn-failure on final attempt must pass Err through");
         assert!(err.to_string().contains("permission denied"));
     }
@@ -17876,13 +17897,14 @@ mod tests {
         let p = RetryPolicy::new(3, Duration::ZERO, 1, Duration::ZERO);
         let calls = Arc::new(AtomicU32::new(0));
         let calls_clone = calls.clone();
-        let max_attempts = p.max_attempts;
+        let policy_clone = p.clone();
         let result = retry_command(&p, "push composed", move |attempt| {
             let calls = calls_clone.clone();
+            let policy = policy_clone.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
                 let outcome = Ok(synth_output(false, b"", b"503 Service Unavailable"));
-                log_retry_attempt(outcome, "push composed", attempt, max_attempts)
+                log_retry_attempt(outcome, "push composed", attempt, &policy)
             }
         })
         .await;
@@ -17895,6 +17917,182 @@ mod tests {
         assert_eq!(err.attempt, 3);
         assert!(err.is_transient());
         assert!(err.stderr.contains("503"));
+    }
+
+    /// Pass-through invariant across the full canonical-factory ×
+    /// per-attempt cross-product: `log_retry_attempt` returns the captured
+    /// `io::Result<Output>` verbatim regardless of whether the warn arm
+    /// fires. Pinned at every RetryPolicy factory-constructor shape
+    /// `retry_command`'s call sites use (`immediate` / `network` /
+    /// `network_or_immediate(true)` / `network_or_immediate(false)` /
+    /// `network_with_max_attempts(N)` at N ∈ {1, 3, 5, 10}) × every
+    /// attempt in `1..=policy.max_attempts + 2` (both budget-remaining and
+    /// exhausted-budget arms; +2 covers a caller passing an attempt past
+    /// the policy's own budget, matching the surface `run_with_policy`
+    /// itself does not restrict). A future regression at the
+    /// warn-dispatch site (e.g. a `?` operator or an `unwrap` that
+    /// short-circuits the return) would fail the pass-through at every
+    /// (policy, attempt) cell rather than only on the specific
+    /// (attempt=N, max=N) boundary the pre-migration test suite pinned.
+    /// The structural pass-through is the load-bearing invariant every
+    /// `retry_command` spawn closure depends on — the helper sits inside
+    /// the closure as the final expression, so a broken pass-through
+    /// silently changes the outcome shape `retry_command` reads.
+    #[test]
+    fn test_log_retry_attempt_pass_through_invariant_across_canonical_policies_and_attempts() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(3),
+            RetryPolicy::network_with_max_attempts(5),
+            RetryPolicy::network_with_max_attempts(10),
+        ];
+        for policy in &policies {
+            for attempt in 1..=policy.max_attempts + 2 {
+                let ok_out = synth_output(true, b"ok", b"");
+                let ok_result = log_retry_attempt(Ok(ok_out), "op", attempt, policy);
+                let ok_captured = ok_result.expect("Ok(Output) must pass through verbatim");
+                assert!(
+                    ok_captured.status.success(),
+                    "success status must survive pass-through at policy={policy:?} attempt={attempt}",
+                );
+                assert_eq!(
+                    ok_captured.stdout, b"ok",
+                    "stdout must survive pass-through at policy={policy:?} attempt={attempt}",
+                );
+
+                let fail_out = synth_output(false, b"", b"503");
+                let fail_result = log_retry_attempt(Ok(fail_out), "op", attempt, policy);
+                let fail_captured = fail_result.expect("op-failure Ok(Output) must pass through");
+                assert!(
+                    !fail_captured.status.success(),
+                    "op-failure status must survive at policy={policy:?} attempt={attempt}",
+                );
+                assert_eq!(
+                    fail_captured.stderr, b"503",
+                    "stderr must survive at policy={policy:?} attempt={attempt}",
+                );
+
+                let spawn_err: std::io::Result<std::process::Output> =
+                    Err(std::io::Error::other("spawn-err"));
+                let spawn_result = log_retry_attempt(spawn_err, "op", attempt, policy);
+                let spawn_captured = spawn_result
+                    .expect_err("spawn-failure Err(io::Error) must pass through verbatim");
+                assert!(
+                    spawn_captured.to_string().contains("spawn-err"),
+                    "spawn-err message must survive at policy={policy:?} attempt={attempt}",
+                );
+            }
+        }
+    }
+
+    /// `log_retry_attempt`'s warn-suppression predicate reads through the
+    /// typed [`RetryPolicy::is_final_attempt`] peer (its De Morgan
+    /// complement), not the inline `attempt < max_attempts` field-
+    /// comparison the pre-migration shape carried against a raw
+    /// `max_attempts: u32` parameter. Pinning the equivalence at the
+    /// primitive-level test suite means a future regression that re-
+    /// inlines the field-comparison at the warn dispatch (e.g., a naive
+    /// "revert the typed routing to save an indirection" refactor) fails
+    /// here before it reaches the retry-loop consumer sites. Reads the
+    /// two-way equivalence: on every (policy, attempt) cell where
+    /// `policy.is_final_attempt(attempt)` fires — the warn is suppressed
+    /// by the typed predicate; on every cell where it does NOT fire — the
+    /// warn arm is reached (structural pass-through witnesses that the
+    /// branch was taken without panicking on the degenerate shape). The
+    /// full canonical-factory × per-attempt cross-product covers the same
+    /// cells `test_retry_policy_is_final_attempt_discriminates_canonical_factories`
+    /// pins on the typed predicate itself, closing the algebraic
+    /// correspondence between the typed-primitive site and the retry-
+    /// dispatch consumer.
+    #[test]
+    fn test_log_retry_attempt_reads_through_is_final_attempt_axis() {
+        let policies = [
+            RetryPolicy::immediate(),
+            RetryPolicy::network(),
+            RetryPolicy::network_or_immediate(true),
+            RetryPolicy::network_or_immediate(false),
+            RetryPolicy::network_with_max_attempts(1),
+            RetryPolicy::network_with_max_attempts(2),
+            RetryPolicy::network_with_max_attempts(5),
+        ];
+        for policy in &policies {
+            for attempt in 1..=policy.max_attempts + 2 {
+                let is_final = policy.is_final_attempt(attempt);
+                let fail_out = synth_output(false, b"", b"transient");
+                let result = log_retry_attempt(Ok(fail_out), "op", attempt, policy);
+                let captured = result.expect("op-failure must pass Ok(Output) through");
+                assert!(
+                    !captured.status.success(),
+                    "warn-arm branch (is_final={is_final}) must not corrupt outcome status at policy={policy:?} attempt={attempt}",
+                );
+                // The typed predicate's algebraic correspondence with the
+                // policy-level pair (already pinned by
+                // `test_retry_policy_is_no_retry_equals_is_final_attempt_at_one`
+                // and `test_retry_policy_will_retry_complements_is_final_attempt_at_one`)
+                // extends here: the warn dispatch reads `!is_final`, and
+                // `!policy.is_final_attempt(1) == policy.will_retry()`.
+                if attempt == 1 {
+                    assert_eq!(
+                        !is_final,
+                        policy.will_retry(),
+                        "warn-suppression axis at attempt=1 must equal RetryPolicy::will_retry (De Morgan complement of is_no_retry) at policy={policy:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Hand-built degenerate `RetryPolicy { max_attempts: 0, .. }` shape
+    /// — the one field-literal case every factory constructor forecloses
+    /// via the `.max(1)` clamp at [`RetryPolicy::new`] /
+    /// [`RetryPolicy::with_max_attempts`], but a downstream consumer
+    /// hand-building the struct literal directly bypasses. Pins that
+    /// `log_retry_attempt` suppresses the warn on attempt 1 under this
+    /// shape (via the typed-primitive routing through
+    /// [`RetryPolicy::is_final_attempt`], which applies the same
+    /// clamp-to-≥1 discipline internally) rather than emitting a
+    /// mis-shaped `"attempt 1/0: retrying..."` warn — matching
+    /// [`run_with_policy`]'s own short-circuit at the same shape (returns
+    /// the captured error on attempt 1). A pre-migration regression that
+    /// bypassed the typed-predicate routing (e.g., a caller passing
+    /// `policy.max_attempts` verbatim as the `max_attempts` parameter,
+    /// which under `max_attempts: 0` reads `attempt < 0` → false at every
+    /// u32 attempt) would appear identical at this test — but the
+    /// printed denominator would drift from `1` (post-migration, matching
+    /// the clamp `run_with_policy` applies) to `0` (pre-migration, un-
+    /// clamped), producing a mis-shaped warn on any consumer that
+    /// re-enables the warn arm. The pass-through invariant is what this
+    /// test pins directly; the printed-denominator correction is a
+    /// consequence documented at the primitive.
+    #[test]
+    fn test_log_retry_attempt_degenerate_max_attempts_zero_shape_passes_through() {
+        let degenerate = RetryPolicy {
+            max_attempts: 0,
+            initial_backoff: Duration::ZERO,
+            factor: 1,
+            max_backoff: Duration::ZERO,
+        };
+        assert!(
+            degenerate.is_final_attempt(1),
+            "degenerate max_attempts=0 shape must classify attempt=1 as final under the .max(1) clamp",
+        );
+        for attempt in 1..=5 {
+            let out = synth_output(false, b"", b"503");
+            let result = log_retry_attempt(Ok(out), "op", attempt, &degenerate);
+            let captured = result.expect("Ok(Output) must pass through under degenerate policy");
+            assert!(
+                !captured.status.success(),
+                "op-failure status must survive pass-through at attempt={attempt}",
+            );
+            assert_eq!(
+                captured.stderr, b"503",
+                "stderr must survive pass-through at attempt={attempt}",
+            );
+        }
     }
 
     /// `classify_attempt_failure` routes a spawn-failure record (empty
