@@ -171,7 +171,6 @@ impl AtticClient {
         info!("Pushing to Attic cache: {}", self.cache_name);
 
         let policy = RetryPolicy::network_with_max_attempts(retries);
-        let max_attempts = policy.max_attempts;
         let attic_bin = self.resolve_attic_bin();
         let cache = self.cache_name.clone();
         let token = self.token.clone();
@@ -182,6 +181,7 @@ impl AtticClient {
             let cache = cache.clone();
             let token = token.clone();
             let op = op.clone();
+            let policy = policy.clone();
             async move {
                 let mut cmd = Command::new(&attic_bin);
                 cmd.args(["push", &cache, store_path])
@@ -190,7 +190,7 @@ impl AtticClient {
                 if let Some(t) = token.as_deref() {
                     cmd.env("ATTIC_TOKEN", t);
                 }
-                log_retry_attempt(cmd.output().await, &op, attempt, max_attempts)
+                log_retry_attempt(cmd.output().await, &op, attempt, &policy)
             }
         })
         .await;
