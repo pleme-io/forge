@@ -1882,6 +1882,115 @@ impl From<PerAttemptRegion> for Box<str> {
     }
 }
 
+/// [`TryFrom<Box<str>> for PerAttemptRegion`] routes through
+/// [`<PerAttemptRegion as std::str::FromStr>::from_str`] on the
+/// borrowed `&str` view of the caller-supplied [`Box<str>`], so a
+/// downstream consumer bound by `impl TryFrom<Box<str>>` (a serde
+/// container that opts into `#[serde(try_from = "Box<str>")]` on a
+/// wrapper field to consume an immutable heap-owned label without the
+/// [`String`] growth-header cost, a validated-input newtype builder
+/// whose parse contract accepts a caller-supplied [`Box<str>`] label
+/// slot at the shrunk-owned frontier, a `phf`-style keyed-table
+/// consumer whose key slot arrives as an immutable-owned label from an
+/// upstream table build) recovers a [`PerAttemptRegion`] value from
+/// its canonical snake_case label through the same one-oracle grammar
+/// the direct `.parse::<PerAttemptRegion>()` call sites and the
+/// sibling [`TryFrom<&str>`] / [`TryFrom<String>`] /
+/// [`TryFrom<Cow<'_, str>>`] impls already read.
+///
+/// The by-value [`Box<str>`] parse peer of the [`TryFrom<&str>`]
+/// (borrowed-view input), [`TryFrom<String>`] (owned-string input with
+/// [`String`] resize headroom), and [`TryFrom<Cow<'_, str>>`]
+/// (borrowed/owned-frontier input) impls above — all four are parse
+/// surfaces of the label-axis conversion set, differing only on the
+/// input string-owner shape: [`TryFrom<&str>`] takes a borrowed `&str`
+/// view for consumers that already hold a borrow, [`TryFrom<String>`]
+/// takes an owned resizable [`String`] for consumers that own the
+/// input buffer with growth headroom, [`TryFrom<Cow<'_, str>>`] takes
+/// either uniformly at the borrowed/owned-frontier receiver shape,
+/// this [`TryFrom<Box<str>>`] takes an immutable heap-owned
+/// [`Box<str>`] for consumers whose upstream produced a shrunk-owned
+/// label without the [`String`] growth-header (a boxed slice held
+/// through a `phf`-style value slot, a `Box<str>` field on a
+/// validated-input newtype, a serde container that owns the label as
+/// a boxed slice). All four route through the shared
+/// [`<Self as std::str::FromStr>::from_str`] canonical-grammar oracle:
+/// the [`&str`] peer through `from_str` directly, the [`String`] peer
+/// through `from_str(s.as_str())`, the [`Cow<'_, str>`] peer through
+/// `from_str(s.as_ref())`, this [`Box<str>`] peer through
+/// `from_str(s.as_ref())` — the same canonical grammar lifted to the
+/// shrunk-owned-frontier parse layer, with the receiver-side
+/// [`<Box<str> as AsRef<str>>::as_ref`] call yielding a borrowed `&str`
+/// view of the boxed slice without a redundant clone.
+///
+/// The parse-side mirror of [`From<PerAttemptRegion> for Box<str>`]
+/// above — the emit peer closes the shrunk-owned-frontier emit surface
+/// (single heap allocation for exactly the label's length, no
+/// [`String`]-realloc-plus-shrink round trip), this parse peer closes
+/// the shrunk-owned-frontier parse surface (single [`FromStr`] read
+/// through the boxed slice's borrowed view, no [`String`]-allocation
+/// round trip). Together the two impls close both directions of the
+/// shrunk-owned-frontier conversion at the per-attempt-region ladder,
+/// giving a downstream site that types its label sink or source as
+/// [`Box<str>`] (rather than one of the four owned/borrowed cross
+/// products [`&str`] / [`String`] / [`Cow<'_, str>`] on the emit or
+/// parse side) a first-class typed-primitive surface at both ends, not
+/// a per-consumer `boxed.parse::<PerAttemptRegion>()` restatement.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<PerAttemptRegion> for &'static str`], [`TryFrom<&str>`],
+/// [`From<PerAttemptRegion> for String`], [`TryFrom<String>`],
+/// [`From<PerAttemptRegion> for Cow<'static, str>`],
+/// [`TryFrom<Cow<'_, str>>`], and [`From<PerAttemptRegion> for
+/// Box<str>`] impls above — the same lift at the by-value [`Box<str>`]
+/// parse layer instead of the format / parse / serde / borrow /
+/// static-lifetime / by-reference-try / owned-string-emit /
+/// owned-string-try / borrowed-frontier-emit / borrowed-frontier-try /
+/// shrunk-owned-frontier-emit layers. Opens the parse-side arm of the
+/// shrunk-owned-frontier peer set at the per-attempt-region ladder
+/// against the shared [`<Self as std::str::FromStr>::from_str`]
+/// canonical-grammar oracle.
+///
+/// The impl body picks [`<Box<str> as AsRef<str>>::as_ref`] rather
+/// than [`Box::<str>::into_string`] or a per-branch consumption:
+/// [`AsRef::as_ref`] yields a borrowed `&str` view of the boxed slice
+/// without allocation, so the parse-side receiver pays the by-
+/// reference `from_str` cost, not the [`String`]-allocation cost of a
+/// `Box::<str>::into_string`-then-`from_str` composition — the same
+/// discipline the sibling [`TryFrom<Cow<'_, str>>`] peer applies at
+/// the [`Cow::as_ref`] boundary.
+///
+/// The identity
+/// `PerAttemptRegion::try_from(Box::<str>::from(region.as_str())).unwrap()
+/// == region` at every [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_box_str_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<Box<str>>` consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_box_str_carries_through_generic_consumer`];
+/// the strict-rejection contract at non-canonical input is pinned by
+/// [`tests::test_per_attempt_region_try_from_box_str_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value [`Box<str>`] parse
+/// surface is a typed-primitive site on [`PerAttemptRegion`] itself
+/// (one `TryFrom<Box<str>>` impl routing through
+/// [`<Self as std::str::FromStr>::from_str`] on
+/// [`<Box<str> as AsRef<str>>::as_ref`]), not a per-consumer
+/// `boxed.parse::<PerAttemptRegion>()` restatement at every downstream
+/// site that receives a [`Box<str>`] label.
+/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// site ([`<PerAttemptRegion as std::str::FromStr>::from_str`]) and
+/// every parse surface — [`FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// this [`TryFrom<Box<str>>`] — reads through it.
+impl TryFrom<Box<str>> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(s: Box<str>) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s.as_ref())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -12798,6 +12907,119 @@ mod tests {
                 read(region).as_ref(),
                 region.as_str(),
                 "generic Into<Box<str>> consumer must read canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<str>> for PerAttemptRegion`] round-trips through the
+    /// shared canonical-label oracle at every [`PerAttemptRegion::ALL`]
+    /// variant: the caller emits the canonical label through
+    /// [`PerAttemptRegion::as_str`], boxes it via
+    /// [`Box::<str>::from`] at the shrunk-owned frontier, and this parse
+    /// peer recovers the variant from the boxed slice through the
+    /// shared [`<Self as std::str::FromStr>::from_str`] oracle. Pins the
+    /// round-trip identity
+    /// `PerAttemptRegion::try_from(Box::<str>::from(region.as_str())).unwrap()
+    /// == region` at every variant against the shared canonical-label
+    /// oracle. The structural witness that the by-value [`Box<str>`]
+    /// try-conversion parse surface (this [`TryFrom<Box<str>>`]) reads
+    /// the same one-oracle grammar the by-reference try-conversion
+    /// parse surface ([`TryFrom<&str>`]), the by-value owned-string
+    /// try-conversion parse surface ([`TryFrom<String>`]), the by-value
+    /// borrowed/owned-frontier try-conversion parse surface
+    /// ([`TryFrom<Cow<'_, str>>`]), and the by-value shrunk-owned-
+    /// frontier emit surface ([`From<PerAttemptRegion> for Box<str>`])
+    /// all read — one round-trip pin per variant, refuses a future
+    /// variant insertion that drops the `TryFrom<Box<str>>`/`as_str`
+    /// agreement.
+    #[test]
+    fn test_per_attempt_region_try_from_box_str_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let boxed: Box<str> = Box::<str>::from(region.as_str());
+            let parsed = <PerAttemptRegion as std::convert::TryFrom<Box<str>>>::try_from(boxed)
+                .expect("canonical label must parse through TryFrom<Box<str>>");
+            assert_eq!(
+                parsed, region,
+                "TryFrom<Box<str>> must round-trip through Box::<str>::from(as_str) at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Box<str>> for PerAttemptRegion`] identity carries
+    /// through a generic `impl TryFrom<Box<str>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn parse<T: TryFrom<Box<str>>>(s: Box<str>) -> T` — the shape
+    /// of an actual downstream consumer (validated-input newtype
+    /// builder that accepts a caller-supplied [`Box<str>`] label at the
+    /// shrunk-owned frontier, serde `try_from = "Box<str>"` wrapper,
+    /// generic try-conversion helper that opts into the
+    /// [`TryFrom<Box<str>>`] contract rather than [`std::str::FromStr`]
+    /// / [`TryFrom<&str>`] / [`TryFrom<String>`] / [`TryFrom<Cow<'_,
+    /// str>>`] to compose with the shrunk-owned-frontier receiver
+    /// shape) — recovers the canonical variant from the canonical
+    /// snake_case label at every variant. The structural witness that
+    /// a [`PerAttemptRegion`] is genuinely usable at `impl
+    /// TryFrom<Box<str>>` call sites — a regression that drifted the
+    /// [`TryFrom`] impl signature (e.g., requiring a [`&Box<str>`]
+    /// receiver and losing the by-value semantics, dropping the
+    /// [`Box<str>`] wrapper entirely and demanding a [`String`], or
+    /// returning a different variant than [`FromStr`] would) fails
+    /// here at compile time or at the assertion instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_try_from_box_str_carries_through_generic_consumer() {
+        fn parse<T>(s: Box<str>) -> T
+        where
+            T: std::convert::TryFrom<Box<str>>,
+            <T as std::convert::TryFrom<Box<str>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<Box<str>>>::try_from(s)
+                .expect("canonical label must parse through generic TryFrom<Box<str>>")
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                parse::<PerAttemptRegion>(Box::<str>::from(region.as_str())),
+                region,
+                "generic TryFrom<Box<str>> consumer must recover canonical variant at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<str>> for PerAttemptRegion`] rejects non-canonical
+    /// input with the same strictness [`std::str::FromStr`] enforces —
+    /// empty string, UpperCamel rendering, uppercase, whitespace
+    /// padding, and snake_case labels with a dropped underscore all
+    /// reject when wrapped in a [`Box<str>`]. Pins the strict-rejection
+    /// contract at the by-value [`Box<str>`] try-conversion surface so
+    /// a downstream consumer bound by [`TryFrom<Box<str>>`] (a serde
+    /// `try_from = "Box<str>"` container, a builder that consumes an
+    /// immutable-owned canonical label at the shrunk-owned frontier)
+    /// inherits the same canonical-only grammar the direct
+    /// `.parse::<PerAttemptRegion>()` call sites and the sibling
+    /// [`TryFrom<&str>`] / [`TryFrom<String>`] / [`TryFrom<Cow<'_,
+    /// str>>`] impls already read, and a future permissive-parse
+    /// regression at the underlying [`FromStr`] impl lights up here
+    /// rather than drifting silently through the shrunk-owned-frontier
+    /// try-conversion surface.
+    #[test]
+    fn test_per_attempt_region_try_from_box_str_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "BeforeFirst",
+            "OverBudget",
+            "FIRST",
+            " first",
+            "first ",
+            "beforefirst",
+            "overbudget",
+        ] {
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<Box<str>>>::try_from(Box::<str>::from(
+                    bad
+                ))
+                .is_err(),
+                "TryFrom<Box<str>> must reject non-canonical input {bad:?}",
             );
         }
     }
