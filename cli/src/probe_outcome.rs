@@ -6995,6 +6995,155 @@ impl From<AdmissionTier> for std::rc::Rc<str> {
     }
 }
 
+/// [`TryFrom<Rc<str>> for AdmissionTier`] routes through
+/// [`<AdmissionTier as std::str::FromStr>::from_str`] on the borrowed
+/// `&str` view of the caller-supplied [`std::rc::Rc<str>`], so a
+/// downstream consumer bound by `impl TryFrom<Rc<str>>` (a serde
+/// container that opts into `#[serde(try_from = "Rc<str>")]` on a
+/// wrapper field to consume a thread-local shared-owned label without a
+/// per-consumer allocation, a validated-input newtype builder whose
+/// parse contract accepts a caller-supplied [`Rc<str>`] label slot at
+/// the thread-local shared-owned frontier for cheap same-thread
+/// [`Rc::clone`] semantics on the input, a single-threaded arena-keyed
+/// table consumer whose key slot arrives as an [`Rc<str>`] label from
+/// an upstream table build that never crosses a thread boundary)
+/// recovers an [`AdmissionTier`] value from its canonical snake_case
+/// label through the same one-oracle grammar the direct
+/// `.parse::<AdmissionTier>()` call sites and the sibling
+/// [`TryFrom<&str>`] / [`TryFrom<String>`] / [`TryFrom<Cow<'_, str>>`]
+/// / [`TryFrom<Box<str>>`] / [`TryFrom<Arc<str>>`] impls already read.
+///
+/// The by-value [`Rc<str>`] parse peer of the [`TryFrom<&str>`]
+/// (borrowed-view input), [`TryFrom<String>`] (owned-string input with
+/// [`String`] resize headroom), [`TryFrom<Cow<'_, str>>`]
+/// (borrowed/owned-frontier input), [`TryFrom<Box<str>>`]
+/// (shrunk-owned-frontier input, no refcount header), and
+/// [`TryFrom<Arc<str>>`] (atomic-shared-owned-frontier input,
+/// [`Send`] + [`Sync`]) impls above — all six are parse surfaces of the
+/// label-axis conversion set, differing only on the input string-owner
+/// shape: [`TryFrom<&str>`] takes a borrowed `&str` view for consumers
+/// that already hold a borrow, [`TryFrom<String>`] takes an owned
+/// resizable [`String`] for consumers that own the input buffer with
+/// growth headroom, [`TryFrom<Cow<'_, str>>`] takes either uniformly at
+/// the borrowed/owned-frontier receiver shape, [`TryFrom<Box<str>>`]
+/// takes an immutable heap-owned [`Box<str>`] with no refcount header,
+/// [`TryFrom<Arc<str>>`] takes an immutable shared-owned
+/// [`std::sync::Arc<str>`] with an atomic-refcount header preceding the
+/// label bytes for consumers whose upstream produced a cross-thread
+/// shared-owned label, this [`TryFrom<Rc<str>>`] takes an immutable
+/// thread-local shared-owned [`std::rc::Rc<str>`] with a
+/// non-atomic-refcount header for consumers whose upstream produced a
+/// same-thread shared-owned label already refcounted within one worker
+/// (a single-threaded cached-label slot handed cheaply via
+/// [`Rc::clone`], a per-request-arena keyed-table slot, a
+/// validated-input newtype whose label field is stored as [`Rc<str>`]
+/// because the consumer is known to never cross a thread boundary).
+/// All six route through the shared
+/// [`<AdmissionTier as std::str::FromStr>::from_str`] canonical-grammar
+/// oracle: the [`&str`] peer through `from_str` directly, the
+/// [`String`] peer through `from_str(s.as_str())`, the
+/// [`Cow<'_, str>`] peer through `from_str(s.as_ref())`, the
+/// [`Box<str>`] peer through `from_str(s.as_ref())`, the [`Arc<str>`]
+/// peer through `from_str(s.as_ref())`, this [`Rc<str>`] peer through
+/// `from_str(s.as_ref())` — the same canonical grammar lifted to the
+/// thread-local shared-owned-frontier parse layer, with the
+/// receiver-side [`<std::rc::Rc<str> as AsRef<str>>::as_ref`] call
+/// yielding a borrowed `&str` view of the shared allocation without
+/// touching the non-atomic refcount and without a redundant clone.
+///
+/// The parse-side mirror of [`From<AdmissionTier> for Rc<str>`]
+/// directly above — the emit peer closes the thread-local
+/// shared-owned-frontier emit surface (single non-atomic-refcount
+/// allocation for exactly the label's length plus refcount header,
+/// `O(1)` [`Rc::clone`] within a single thread at strictly lower
+/// per-clone cost than atomic [`Arc::clone`]), this parse peer closes
+/// the thread-local shared-owned-frontier parse surface (single
+/// [`FromStr`] read through the shared allocation's borrowed view, no
+/// [`String`]-allocation round trip, no refcount touch during the
+/// parse). Together the two impls close both directions of the
+/// thread-local shared-owned-frontier conversion at the admission-tier
+/// ladder, giving a downstream site that types its label sink or
+/// source as [`Rc<str>`] (rather than one of the five owned/borrowed
+/// cross products [`&str`] / [`String`] / [`Cow<'_, str>`] /
+/// [`Box<str>`] / [`Arc<str>`] on the emit or parse side) a first-class
+/// typed-primitive surface at both ends, not a per-consumer
+/// `shared.parse::<AdmissionTier>()` restatement.
+///
+/// Structural mirror of [`TryFrom<Rc<str>> for PerAttemptRegion`](crate::retry::PerAttemptRegion)
+/// (commit 0e9bc9f) at the admission-tier ladder — the same
+/// [`<Self as std::str::FromStr>::from_str`] route on the same
+/// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`] borrow, through the
+/// same one-oracle discipline, at the second ordered typed sum.
+/// Together with that impl this closes the parse-side arm of the
+/// thread-local shared-owned-frontier peer set at two of the three
+/// canonical-label typed primitives on the ladder set; the
+/// [`BumpLevel`](crate::version::BumpLevel) peer closes the third arm
+/// at the version-bump ladder — mid-trio parse peer at the [`Rc<str>`]
+/// arm, structural sibling of [`TryFrom<Arc<str>>`] at the
+/// atomic-shared-owned-frontier one string-owner shape above.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<AdmissionTier> for &'static str`], [`TryFrom<&str>`],
+/// [`From<AdmissionTier> for String`], [`TryFrom<String>`],
+/// [`From<AdmissionTier> for Cow<'static, str>`],
+/// [`TryFrom<Cow<'_, str>>`], [`From<AdmissionTier> for Box<str>`],
+/// [`TryFrom<Box<str>>`], [`From<AdmissionTier> for Arc<str>`],
+/// [`TryFrom<Arc<str>>`], and [`From<AdmissionTier> for Rc<str>`]
+/// impls above — the same lift at the by-value [`Rc<str>`] parse layer
+/// instead of the format / parse / serde / borrow / static-lifetime /
+/// by-reference-try / owned-string-emit / owned-string-try /
+/// borrowed-frontier-emit / borrowed-frontier-try /
+/// shrunk-owned-frontier-emit / shrunk-owned-frontier-try /
+/// atomic-shared-owned-frontier-emit / atomic-shared-owned-frontier-try /
+/// thread-local-shared-owned-frontier-emit layers.
+///
+/// The impl body picks [`<std::rc::Rc<str> as AsRef<str>>::as_ref`]
+/// rather than an [`std::rc::Rc::try_unwrap`]-then-conversion cascade
+/// or a per-branch consumption: [`AsRef::as_ref`] yields a borrowed
+/// `&str` view of the shared allocation without allocation and without
+/// touching the non-atomic refcount, so the parse-side receiver pays
+/// the by-reference `from_str` cost only, not the [`String`]-allocation
+/// cost of an [`Rc::try_unwrap`]-fallback-clone-then-`from_str`
+/// composition nor the [`String`]-copy cost of an
+/// `Rc::to_string`-then-`from_str` round trip — the same discipline
+/// the sibling [`TryFrom<Arc<str>>`] peer applies at the
+/// [`Arc::as_ref`] boundary, the sibling [`TryFrom<Box<str>>`] peer
+/// applies at the [`Box::as_ref`] boundary, and the sibling
+/// [`TryFrom<Cow<'_, str>>`] peer applies at the [`Cow::as_ref`]
+/// boundary.
+///
+/// The identity
+/// `AdmissionTier::try_from(std::rc::Rc::<str>::from(tier.as_str())).unwrap()
+/// == tier` at every [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_try_from_rc_str_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<Rc<str>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_admission_tier_try_from_rc_str_carries_through_generic_consumer`];
+/// the strict-rejection contract at non-canonical input is pinned by
+/// [`tests::test_admission_tier_try_from_rc_str_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value [`Rc<str>`] parse
+/// surface is a typed-primitive site on [`AdmissionTier`] itself (one
+/// `TryFrom<Rc<str>>` impl routing through
+/// [`<Self as std::str::FromStr>::from_str`] on
+/// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`]), not a per-consumer
+/// `shared.parse::<AdmissionTier>()` restatement at every downstream
+/// site that receives an [`Rc<str>`] label.
+/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// site ([`<AdmissionTier as std::str::FromStr>::from_str`]) and every
+/// parse surface — [`FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], this
+/// [`TryFrom<Rc<str>>`] — reads through it.
+impl TryFrom<std::rc::Rc<str>> for AdmissionTier {
+    type Error = anyhow::Error;
+
+    fn try_from(s: std::rc::Rc<str>) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s.as_ref())
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -18618,6 +18767,129 @@ mod tests {
             assert!(
                 std::rc::Rc::strong_count(&shared) >= 2,
                 "Rc<str> strong count must be at least 2 after clone at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Rc<str>> for AdmissionTier`] impl round-trips
+    /// through the canonical snake_case label at every
+    /// [`AdmissionTier::ALL`] variant: taking each variant's
+    /// [`AdmissionTier::as_str`] label, wrapping it as an
+    /// [`std::rc::Rc<str>`] via [`std::rc::Rc::<str>::from`], then
+    /// parsing it back through [`TryFrom<Rc<str>>`], recovers the
+    /// original variant. Pins the parse-side agreement at the
+    /// thread-local shared-owned-frontier receiver against the same
+    /// canonical-label oracle the by-reference try-conversion parse
+    /// surface ([`TryFrom<&str>`]), the by-value owned-string
+    /// try-conversion parse surface ([`TryFrom<String>`]), the
+    /// borrowed/owned-frontier try-conversion parse surface
+    /// ([`TryFrom<Cow<'_, str>>`]), the shrunk-owned-frontier
+    /// try-conversion parse surface ([`TryFrom<Box<str>>`]), the
+    /// atomic-shared-owned-frontier try-conversion parse surface
+    /// ([`TryFrom<Arc<str>>`]), and the by-value thread-local
+    /// shared-owned emit surface ([`From<AdmissionTier> for Rc<str>`])
+    /// all read — one round-trip pin per variant, refuses a future
+    /// variant insertion that drops the `TryFrom<Rc<str>>`/`as_str`
+    /// agreement. Structural mirror of
+    /// `test_per_attempt_region_try_from_rc_str_agrees_with_from_str`
+    /// (commit 0e9bc9f) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_try_from_rc_str_agrees_with_from_str() {
+        for tier in AdmissionTier::ALL {
+            let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(tier.as_str());
+            let parsed =
+                <AdmissionTier as std::convert::TryFrom<std::rc::Rc<str>>>::try_from(shared)
+                    .expect("canonical label must parse through TryFrom<Rc<str>>");
+            assert_eq!(
+                parsed, tier,
+                "TryFrom<Rc<str>> must round-trip through Rc::<str>::from(as_str) at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Rc<str>> for AdmissionTier`] identity carries
+    /// through a generic `impl TryFrom<Rc<str>>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn parse<T: TryFrom<Rc<str>>>(s: Rc<str>) -> T` — the shape of
+    /// an actual downstream consumer (validated-input newtype builder
+    /// that accepts a caller-supplied [`Rc<str>`] label at the
+    /// thread-local shared-owned frontier, serde
+    /// `try_from = "Rc<str>"` wrapper, generic try-conversion helper
+    /// that opts into the [`TryFrom<Rc<str>>`] contract rather than
+    /// [`std::str::FromStr`] / [`TryFrom<&str>`] / [`TryFrom<String>`]
+    /// / [`TryFrom<Cow<'_, str>>`] / [`TryFrom<Box<str>>`] /
+    /// [`TryFrom<Arc<str>>`] to compose with the thread-local
+    /// shared-owned-frontier receiver shape) — recovers the canonical
+    /// variant from the canonical snake_case label at every variant.
+    /// The structural witness that an [`AdmissionTier`] is genuinely
+    /// usable at `impl TryFrom<Rc<str>>` call sites — a regression that
+    /// drifted the [`TryFrom`] impl signature (e.g., requiring a
+    /// [`&Rc<str>`] receiver and losing the by-value semantics,
+    /// dropping the [`Rc<str>`] wrapper entirely and demanding a
+    /// [`String`], or returning a different variant than [`FromStr`]
+    /// would) fails here at compile time or at the assertion instead of
+    /// at every downstream generic call site. Structural mirror of
+    /// `test_per_attempt_region_try_from_rc_str_carries_through_generic_consumer`
+    /// (commit 0e9bc9f) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_try_from_rc_str_carries_through_generic_consumer() {
+        fn parse<T>(s: std::rc::Rc<str>) -> T
+        where
+            T: std::convert::TryFrom<std::rc::Rc<str>>,
+            <T as std::convert::TryFrom<std::rc::Rc<str>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::rc::Rc<str>>>::try_from(s)
+                .expect("canonical label must parse through generic TryFrom<Rc<str>>")
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                parse::<AdmissionTier>(std::rc::Rc::<str>::from(tier.as_str())),
+                tier,
+                "generic TryFrom<Rc<str>> consumer must recover canonical variant at {tier:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<str>> for AdmissionTier`] rejects non-canonical
+    /// input with the same strictness [`std::str::FromStr`] enforces —
+    /// empty string, UpperCamel rendering, uppercase, whitespace
+    /// padding, and snake_case labels with a dropped underscore all
+    /// reject when wrapped in an [`Rc<str>`]. Pins the strict-rejection
+    /// contract at the by-value [`Rc<str>`] try-conversion surface so
+    /// a downstream consumer bound by [`TryFrom<Rc<str>>`] (a serde
+    /// `try_from = "Rc<str>"` container, a builder that consumes a
+    /// thread-local shared-owned canonical label at the
+    /// thread-local-shared-owned frontier for cheap same-thread
+    /// [`Rc::clone`] semantics on the input) inherits the same
+    /// canonical-only grammar the direct `.parse::<AdmissionTier>()`
+    /// call sites and the sibling [`TryFrom<&str>`] /
+    /// [`TryFrom<String>`] / [`TryFrom<Cow<'_, str>>`] /
+    /// [`TryFrom<Box<str>>`] / [`TryFrom<Arc<str>>`] impls already
+    /// read, and a future permissive-parse regression at the underlying
+    /// [`FromStr`] impl lights up here rather than drifting silently
+    /// through the thread-local-shared-owned-frontier try-conversion
+    /// surface. Structural mirror of
+    /// `test_per_attempt_region_try_from_rc_str_rejects_non_canonical_input`
+    /// (commit 0e9bc9f) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_try_from_rc_str_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            " refused",
+            "refused ",
+            "stagingonly",
+        ] {
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<std::rc::Rc<str>>>::try_from(
+                    std::rc::Rc::<str>::from(bad)
+                )
+                .is_err(),
+                "TryFrom<Rc<str>> must reject non-canonical input {bad:?}",
             );
         }
     }
