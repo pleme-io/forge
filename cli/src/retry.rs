@@ -1793,6 +1793,95 @@ impl<'a> TryFrom<std::borrow::Cow<'a, str>> for PerAttemptRegion {
     }
 }
 
+/// [`From<PerAttemptRegion> for Box<str>`] routes through
+/// [`PerAttemptRegion::as_str`] and hands the canonical snake_case label
+/// (`"before_first"`, `"first"`, `"interim"`, `"final"`, `"over_budget"`)
+/// to [`Box::<str>::from`] so a downstream consumer bound by
+/// `impl Into<Box<str>>` (a config-struct field typed as
+/// [`Box<str>`] to shrink an owned label off a resizable [`String`]'s
+/// spare-capacity tail, a validated-input newtype wrapper that stores a
+/// canonical label as a fixed-size heap allocation without the [`String`]
+/// growth header, a serde container that opts into
+/// `#[serde(from = "Box<str>")]` at the immutable-owned-string frontier,
+/// a `phf`-style keyed table whose value slot wants a heap-owned label
+/// but not the excess-capacity overhead of a [`String`]) reads the
+/// canonical label directly from a [`PerAttemptRegion`] value at a
+/// single heap allocation — the shrunk-owned emit peer of
+/// [`From<PerAttemptRegion> for String`] (single allocation with
+/// resize headroom) that trades resizability for a smaller receiver
+/// footprint (two machine words: pointer + length, no capacity slot).
+///
+/// The by-value emit peer of [`From<PerAttemptRegion> for &'static str`]
+/// (zero-copy `'static` borrow of the label constant, no allocation),
+/// [`From<PerAttemptRegion> for String`] (single allocation, resizable
+/// receiver), [`From<PerAttemptRegion> for Cow<'static, str>`] (uniform
+/// emit at the borrowed/owned frontier through [`Cow::Borrowed`], zero
+/// allocation regardless of receiver typing), and this
+/// [`From<PerAttemptRegion> for Box<str>`] (single allocation, immutable
+/// heap-owned receiver at the shrunk-owned frontier). All four route
+/// through the shared [`PerAttemptRegion::as_str`] canonical-label
+/// oracle: the [`&'static str`] peer through [`as_str`] directly, the
+/// [`String`] peer through [`str::to_owned`] on [`as_str`], the
+/// [`Cow<'static, str>`] peer through [`Cow::Borrowed`] wrapping
+/// [`as_str`], this [`Box<str>`] peer through [`Box::<str>::from`] on
+/// [`as_str`] — the same canonical grammar lifted to the shrunk-owned-
+/// frontier emit layer.
+///
+/// The impl body picks [`Box::<str>::from`] rather than
+/// [`String::into_boxed_str`] on the [`String`]-emit peer: the direct
+/// [`Box::<str>::from`] path allocates once from the `'static` label
+/// slice through [`Box::<[u8]>::from`] on the label bytes and rewraps as
+/// [`Box<str>`] internally, so the receiver pays a single allocation for
+/// exactly the label's length — never the [`String`]-realloc-plus-shrink
+/// round trip a `Self::from(region).into_boxed_str()` composition would
+/// pay when the intermediate [`String`] allocates with resize headroom
+/// and [`String::into_boxed_str`] then shrinks it back to the label
+/// length. The single-allocation contract is pinned by
+/// [`tests::test_per_attempt_region_into_box_str_agrees_with_as_str`] at
+/// the label-oracle surface (value agreement across every variant) and
+/// by
+/// [`tests::test_per_attempt_region_into_box_str_carries_through_generic_consumer`]
+/// (identity carried through a tiny generic
+/// `fn read<T: Into<Box<str>>>(t: T) -> Box<str>` consumer at every
+/// variant — the structural witness that a [`PerAttemptRegion`] is
+/// genuinely usable at `impl Into<Box<str>>` call sites, so a
+/// regression that drifted the impl signature (a returned [`String`]
+/// instead of [`Box<str>`], a required `&PerAttemptRegion` receiver
+/// losing the by-value semantics) fails at compile time or at the
+/// assertion instead of at every downstream generic call site).
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<PerAttemptRegion> for &'static str`], [`TryFrom<&str>`],
+/// [`From<PerAttemptRegion> for String`], [`TryFrom<String>`],
+/// [`From<PerAttemptRegion> for Cow<'static, str>`], and
+/// [`TryFrom<Cow<'_, str>>`] impls above — the same lift at the by-value
+/// [`Box<str>`] emit layer instead of the format / parse / serde / borrow
+/// / static-lifetime / by-reference-try / owned-string-emit /
+/// owned-string-try / borrowed-frontier-emit / borrowed-frontier-try
+/// layers. Opens the shrunk-owned-frontier arm of the emit peer set at
+/// the per-attempt-region ladder against the shared
+/// [`PerAttemptRegion::as_str`] canonical-label oracle.
+///
+/// THEORY.md §V.4 typed primitives: the by-value [`Box<str>`] emit
+/// surface is a typed-primitive site on [`PerAttemptRegion`] itself (one
+/// `From<PerAttemptRegion> for Box<str>` impl routing through [`as_str`]
+/// at the [`Box::<str>::from`] boundary), not a per-consumer
+/// `Box::<str>::from(region.as_str())` restatement at every downstream
+/// site that receives an [`Into<Box<str>>`] label sink.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]) and every emit surface —
+/// [`as_str`], [`Display`], [`serde::Serialize`], [`AsRef<str>`],
+/// [`From<PerAttemptRegion> for &'static str`],
+/// [`From<PerAttemptRegion> for String`],
+/// [`From<PerAttemptRegion> for Cow<'static, str>`], this
+/// `From<PerAttemptRegion> for Box<str>` — reads through it.
+impl From<PerAttemptRegion> for Box<str> {
+    fn from(region: PerAttemptRegion) -> Box<str> {
+        Box::<str>::from(region.as_str())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -12637,6 +12726,78 @@ mod tests {
                 )
                 .is_err(),
                 "TryFrom<Cow<'_, str>> must reject non-canonical Cow::Owned input {bad:?}",
+            );
+        }
+    }
+
+    /// [`From<PerAttemptRegion> for Box<str>`] agrees with
+    /// [`PerAttemptRegion::as_str`] at every [`PerAttemptRegion::ALL`]
+    /// variant — the shrunk-owned emit peer reads the same canonical
+    /// snake_case label the shared oracle names. Pins the value-agreement
+    /// contract at the by-value [`Box<str>`] emit surface across every
+    /// variant: [`Box::<str>::from(region).as_ref()`] equals
+    /// [`region.as_str()`] for [`Before First`](PerAttemptRegion::BeforeFirst),
+    /// [`First`](PerAttemptRegion::First),
+    /// [`Interim`](PerAttemptRegion::Interim),
+    /// [`Final`](PerAttemptRegion::Final), and
+    /// [`OverBudget`](PerAttemptRegion::OverBudget). A regression that
+    /// drifted the impl body (e.g., emitting the [`std::fmt::Display`]
+    /// label from a stale variant name, boxing an unrelated string
+    /// constant, or diverging from the [`as_str`] one-oracle grammar)
+    /// lights up here at ONE named site instead of leaking through every
+    /// downstream `impl Into<Box<str>>` consumer as a silent
+    /// label-drift. Structural mirror of
+    /// [`test_per_attempt_region_from_into_static_str_agrees_with_as_str`]
+    /// at the `'static`-borrow emit surface,
+    /// [`test_per_attempt_region_from_into_string_agrees_with_as_str`] at
+    /// the owned [`String`] emit surface, and
+    /// [`test_per_attempt_region_from_into_cow_static_str_agrees_with_as_str`]
+    /// at the borrowed/owned-frontier emit surface — the four agreement
+    /// pins together close the read-side agreement across every by-value
+    /// emit surface at the per-attempt-region ladder.
+    #[test]
+    fn test_per_attempt_region_into_box_str_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let boxed: Box<str> = Box::<str>::from(region);
+            assert_eq!(
+                boxed.as_ref(),
+                region.as_str(),
+                "From<PerAttemptRegion> for Box<str> and as_str must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for Box<str>`] identity carries
+    /// through a generic `impl Into<Box<str>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Box<str>>>(t: T) -> Box<str> { t.into() }` — the
+    /// shape of an actual downstream consumer (config-struct field typed
+    /// as [`Box<str>`] to shrink an owned label off a resizable
+    /// [`String`]'s spare-capacity tail, a validated-input newtype
+    /// wrapper that stores a canonical label as a fixed-size heap
+    /// allocation, a serde container that opts into
+    /// `#[serde(from = "Box<str>")]` at the immutable-owned-string
+    /// frontier) — reads the canonical snake_case label directly from a
+    /// [`PerAttemptRegion`] value at a single heap allocation. The
+    /// structural witness that a [`PerAttemptRegion`] is genuinely
+    /// usable at `impl Into<Box<str>>` call sites — a regression that
+    /// drifted the [`From`] impl signature (e.g., returning [`String`]
+    /// instead of [`Box<str>`], requiring [`&PerAttemptRegion`] and
+    /// losing the by-value semantics, or dropping to a
+    /// [`String::into_boxed_str`] composition on the [`String`]-emit
+    /// peer that would allocate-then-shrink) fails here at compile time
+    /// instead of at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_box_str_carries_through_generic_consumer() {
+        fn read<T: Into<Box<str>>>(t: T) -> Box<str> {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region).as_ref(),
+                region.as_str(),
+                "generic Into<Box<str>> consumer must read canonical label at {region:?}",
             );
         }
     }
