@@ -6870,6 +6870,131 @@ impl TryFrom<std::sync::Arc<str>> for AdmissionTier {
     }
 }
 
+/// [`From<AdmissionTier> for Rc<str>`] routes through
+/// [`AdmissionTier::as_str`] and hands the canonical snake_case label
+/// (`"refused"`, `"staging_only"`, `"strict"`) to
+/// [`std::rc::Rc::<str>::from`] so a downstream consumer bound by
+/// `impl Into<Rc<str>>` (a thread-local cached-label slot that wants a
+/// single canonical allocation shared within one worker via non-atomic
+/// refcount, a validated-input newtype wrapper whose label field is
+/// stored as [`Rc<str>`] to hand cheap clones to sibling structures on
+/// the same thread, a per-request-arena label slot that never crosses a
+/// thread boundary, a graph-walk visitor that clones labels across
+/// nodes without needing [`Send`] / [`Sync`]) reads the canonical label
+/// directly from an [`AdmissionTier`] value at a single non-atomic-
+/// refcount heap allocation — the thread-local shared-owned emit peer
+/// of [`From<AdmissionTier> for Arc<str>`] (single allocation with
+/// atomic-refcount header, immutable heap-owned receiver at the
+/// shared-owned frontier, [`Send`] + [`Sync`]) that trades the atomic
+/// refcount for the non-atomic [`std::rc::Rc`] refcount, enabling
+/// `O(1)` [`Rc::clone`] within a single thread at a strictly lower
+/// per-clone cost than the atomic [`Arc::clone`] — the correct choice
+/// at every emit site where the consumer is known to never cross a
+/// thread boundary.
+///
+/// The by-value emit peer of [`From<AdmissionTier> for &'static str`]
+/// (zero-copy `'static` borrow of the label constant, no allocation),
+/// [`From<AdmissionTier> for String`] (single allocation, resizable
+/// receiver), [`From<AdmissionTier> for Cow<'static, str>`] (uniform
+/// emit at the borrowed/owned frontier through [`Cow::Borrowed`], zero
+/// allocation regardless of receiver typing),
+/// [`From<AdmissionTier> for Box<str>`] (single allocation, immutable
+/// heap-owned receiver at the shrunk-owned frontier, no refcount header),
+/// [`From<AdmissionTier> for Arc<str>`] (single allocation with atomic-
+/// refcount header, immutable heap-owned receiver at the shared-owned
+/// frontier, [`Send`] + [`Sync`]), and this
+/// [`From<AdmissionTier> for Rc<str>`] (single allocation with
+/// non-atomic-refcount header, immutable heap-owned receiver at the
+/// thread-local shared-owned frontier, `!Send` / `!Sync`). All six route
+/// through the shared [`AdmissionTier::as_str`] canonical-label oracle:
+/// the [`&'static str`] peer through [`as_str`] directly, the [`String`]
+/// peer through [`str::to_owned`] on [`as_str`], the [`Cow<'static, str>`]
+/// peer through [`Cow::Borrowed`] wrapping [`as_str`], the [`Box<str>`]
+/// peer through [`Box::<str>::from`] on [`as_str`], the [`Arc<str>`]
+/// peer through [`std::sync::Arc::<str>::from`] on [`as_str`], this
+/// [`Rc<str>`] peer through [`std::rc::Rc::<str>::from`] on [`as_str`] —
+/// the same canonical grammar lifted to the thread-local shared-owned-
+/// frontier emit layer.
+///
+/// The impl body picks [`std::rc::Rc::<str>::from`] rather than
+/// [`std::rc::Rc::from`] on a [`Box<str>`] intermediate or an
+/// [`std::rc::Rc::from`] on a [`String`]: the direct
+/// [`std::rc::Rc::<str>::from`] path allocates once from the
+/// `'static` label slice, including the non-atomic-refcount header, so
+/// the receiver pays a single allocation for exactly the label's length
+/// plus the header — never the [`Box<str>`]-then-[`Rc::from`] round trip
+/// (two allocations: box the slice, then rewrap into an [`Rc<str>`]) nor
+/// the [`String`]-then-[`Rc::from`] round trip (resizable allocation,
+/// then rewrap). The single-allocation contract is pinned by
+/// [`tests::test_admission_tier_into_rc_str_agrees_with_as_str`] at the
+/// label-oracle surface (value agreement across every variant) and by
+/// [`tests::test_admission_tier_into_rc_str_carries_through_generic_consumer`]
+/// (identity carried through a tiny generic
+/// `fn read<T: Into<Rc<str>>>(t: T) -> Rc<str>` consumer at every
+/// variant — the structural witness that an [`AdmissionTier`] is
+/// genuinely usable at `impl Into<Rc<str>>` call sites, so a regression
+/// that drifted the impl signature (a returned [`Box<str>`] instead of
+/// [`Rc<str>`], a required `&AdmissionTier` receiver losing the by-value
+/// semantics) fails at compile time or at the assertion instead of at
+/// every downstream generic call site). The `Rc::clone`-preserves-value
+/// contract is pinned by
+/// [`tests::test_admission_tier_into_rc_str_shares_label_across_clones`]
+/// at every variant — the structural witness that the thread-local
+/// shared-owned receiver semantics hold: an [`Rc::clone`] of the emit
+/// result reads the same canonical label bytes as the original, points
+/// at the same allocation ([`std::rc::Rc::ptr_eq`]), and the non-atomic
+/// refcount lifts to at least two after the clone.
+///
+/// Structural mirror of [`From<PerAttemptRegion> for Rc<str>`](crate::retry::PerAttemptRegion)
+/// (commit 8950199) at the admission-tier ladder — the same
+/// [`std::rc::Rc::<str>::from`] lift, through the same one-oracle
+/// discipline, at the second ordered typed sum. Together with that impl
+/// this closes the thread-local shared-owned emit peer at two of the
+/// three canonical-label typed primitives on the same ladder; the
+/// [`BumpLevel`](crate::version::BumpLevel) peer closes the third arm at
+/// the version-bump ladder.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<AdmissionTier> for &'static str`], [`TryFrom<&str>`],
+/// [`From<AdmissionTier> for String`], [`TryFrom<String>`],
+/// [`From<AdmissionTier> for Cow<'static, str>`],
+/// [`TryFrom<Cow<'_, str>>`], [`From<AdmissionTier> for Box<str>`],
+/// [`TryFrom<Box<str>>`], [`From<AdmissionTier> for Arc<str>`], and
+/// [`TryFrom<Arc<str>>`] impls above — the same lift at the by-value
+/// [`Rc<str>`] emit layer instead of the format / parse / serde /
+/// borrow / static-lifetime / by-reference-try / owned-string-emit /
+/// owned-string-try / borrowed-frontier-emit / borrowed-frontier-try /
+/// shrunk-owned-frontier-emit / shrunk-owned-frontier-try / atomic-
+/// shared-owned-frontier-emit / atomic-shared-owned-frontier-try layers.
+/// Opens the emit-side arm of the thread-local shared-owned-frontier
+/// peer set at the admission-tier ladder against the shared
+/// [`AdmissionTier::as_str`] canonical-label oracle — the [`Rc<str>`]
+/// parse peer ([`TryFrom<Rc<str>>`]) closes the trio in a follow-up
+/// commit, sibling of the closed [`Arc<str>`] emit + parse trio directly
+/// above.
+///
+/// THEORY.md §V.4 typed primitives: the by-value [`Rc<str>`] emit
+/// surface is a typed-primitive site on [`AdmissionTier`] itself (one
+/// `From<AdmissionTier> for Rc<str>` impl routing through [`as_str`] at
+/// the [`std::rc::Rc::<str>::from`] boundary), not a per-consumer
+/// `Rc::<str>::from(tier.as_str())` restatement at every downstream site
+/// that receives an [`Into<Rc<str>>`] label sink.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// ([`AdmissionTier::as_str`]) and every emit surface — [`as_str`],
+/// [`Display`], [`serde::Serialize`], [`AsRef<str>`],
+/// [`From<AdmissionTier> for &'static str`],
+/// [`From<AdmissionTier> for String`],
+/// [`From<AdmissionTier> for Cow<'static, str>`],
+/// [`From<AdmissionTier> for Box<str>`],
+/// [`From<AdmissionTier> for Arc<str>`], this
+/// `From<AdmissionTier> for Rc<str>` — reads through it.
+impl From<AdmissionTier> for std::rc::Rc<str> {
+    fn from(tier: AdmissionTier) -> std::rc::Rc<str> {
+        std::rc::Rc::<str>::from(tier.as_str())
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -18370,6 +18495,129 @@ mod tests {
                 )
                 .is_err(),
                 "TryFrom<Arc<str>> must reject non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`From<AdmissionTier> for Rc<str>`] agrees with the canonical
+    /// [`AdmissionTier::as_str`] label oracle at every
+    /// [`AdmissionTier::ALL`] variant: the emitted [`std::rc::Rc<str>`]
+    /// reads exactly the canonical snake_case label the [`as_str`]
+    /// oracle returns. Pins the thread-local shared-owned emit surface
+    /// against the same canonical-label oracle every sibling emit
+    /// surface reads —
+    /// [`test_admission_tier_as_str_matches_display`] at the
+    /// [`Display`] emit surface,
+    /// [`test_admission_tier_from_into_static_str_agrees_with_as_str`]
+    /// at the `'static`-borrow emit surface,
+    /// [`test_admission_tier_from_into_string_agrees_with_as_str`] at
+    /// the owned [`String`] emit surface,
+    /// [`test_admission_tier_from_into_cow_static_str_agrees_with_as_str`]
+    /// at the borrowed/owned-frontier emit surface,
+    /// [`test_admission_tier_into_box_str_agrees_with_as_str`] at the
+    /// shrunk-owned-frontier emit surface, and
+    /// [`test_admission_tier_into_arc_str_agrees_with_as_str`] at the
+    /// atomic-shared-owned-frontier emit surface — the six agreement
+    /// pins together close the read-side agreement across every
+    /// by-value emit surface at the admission-tier ladder. Structural
+    /// mirror of `test_per_attempt_region_into_rc_str_agrees_with_as_str`
+    /// (commit 8950199) at the admission-tier ladder — the same
+    /// agreement pin through the same one-oracle discipline at the
+    /// second ordered typed sum.
+    #[test]
+    fn test_admission_tier_into_rc_str_agrees_with_as_str() {
+        for tier in AdmissionTier::ALL {
+            let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(tier);
+            assert_eq!(
+                shared.as_ref(),
+                tier.as_str(),
+                "From<AdmissionTier> for Rc<str> and as_str must agree at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for Rc<str>`] identity carries through
+    /// a generic `impl Into<Rc<str>>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Rc<str>>>(t: T) -> Rc<str> { t.into() }` — the
+    /// shape of an actual downstream consumer (thread-local cached-
+    /// label slot typed as [`Rc<str>`] to share a canonical allocation
+    /// within one worker via non-atomic refcount, a validated-input
+    /// newtype wrapper that stores a canonical label as [`Rc<str>`] to
+    /// hand cheap clones to sibling structures on the same thread, a
+    /// per-request-arena label slot that never crosses a thread
+    /// boundary, a graph-walk visitor that clones labels across nodes
+    /// without needing [`Send`] / [`Sync`]) reads the canonical
+    /// snake_case label directly from an [`AdmissionTier`] value at a
+    /// single non-atomic-refcount heap allocation. The structural
+    /// witness that an [`AdmissionTier`] is genuinely usable at
+    /// `impl Into<Rc<str>>` call sites — a regression that drifted the
+    /// [`From`] impl signature (e.g., returning [`Box<str>`] instead of
+    /// [`Rc<str>`], requiring [`&AdmissionTier`] and losing the
+    /// by-value semantics, or dropping to a [`Box<str>`]-then-
+    /// [`Rc::from`] composition that would allocate twice) fails here
+    /// at compile time instead of at every downstream generic call
+    /// site. Structural mirror of
+    /// `test_per_attempt_region_into_rc_str_carries_through_generic_consumer`
+    /// (commit 8950199) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_into_rc_str_carries_through_generic_consumer() {
+        fn read<T: Into<std::rc::Rc<str>>>(t: T) -> std::rc::Rc<str> {
+            t.into()
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(tier).as_ref(),
+                tier.as_str(),
+                "generic Into<Rc<str>> consumer must read canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for Rc<str>`] thread-local shared-
+    /// owned semantics hold across [`std::rc::Rc::clone`] at every
+    /// [`AdmissionTier::ALL`] variant: the clone reads exactly the same
+    /// canonical snake_case label the original reads, points at the
+    /// same allocation (identity of the underlying byte pointer via
+    /// [`std::rc::Rc::ptr_eq`]), and the non-atomic refcount lifts to
+    /// at least two after the clone (via [`std::rc::Rc::strong_count`]).
+    /// Pins the thread-local shared-owned receiver contract at the
+    /// emit surface — a regression that drifted the impl body to a
+    /// non-`Rc` composition ([`Box::<str>::from(as_str)`] then some
+    /// ad-hoc rewrap, a [`String`] intermediate) would break the
+    /// pointer-identity assertion (each clone would land at a distinct
+    /// allocation) even if the canonical-label bytes still agreed. The
+    /// three pins together (label agreement, pointer identity, refcount
+    /// lift) close the structural witness that the receiver actually
+    /// holds a thread-local shared-owned [`Rc<str>`] slot rather than
+    /// an [`Rc<str>`]-typed wrapper around a per-clone-allocated
+    /// [`Box<str>`]. Structural mirror of
+    /// [`test_admission_tier_into_arc_str_shares_label_across_clones`]
+    /// at the atomic-shared-owned-frontier ([`Arc<str>`]) — the two
+    /// pins together close the shared-owned semantics across both
+    /// refcount disciplines the admission-tier ladder exposes, and of
+    /// `test_per_attempt_region_into_rc_str_shares_label_across_clones`
+    /// (commit 8950199) at the per-attempt-region ladder — the same
+    /// clone-preserves-value pin through the same one-oracle discipline
+    /// at the second ordered typed sum.
+    #[test]
+    fn test_admission_tier_into_rc_str_shares_label_across_clones() {
+        for tier in AdmissionTier::ALL {
+            let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(tier);
+            let cloned = std::rc::Rc::clone(&shared);
+            assert_eq!(
+                cloned.as_ref(),
+                tier.as_str(),
+                "Rc<str> clone must read canonical label at {tier:?}",
+            );
+            assert!(
+                std::rc::Rc::ptr_eq(&shared, &cloned),
+                "Rc<str> clone must share the same underlying allocation at {tier:?}",
+            );
+            assert!(
+                std::rc::Rc::strong_count(&shared) >= 2,
+                "Rc<str> strong count must be at least 2 after clone at {tier:?}",
             );
         }
     }
