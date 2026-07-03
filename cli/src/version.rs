@@ -2663,6 +2663,113 @@ impl From<BumpLevel> for std::rc::Rc<str> {
     }
 }
 
+/// [`TryFrom<Rc<str>> for BumpLevel`] routes the by-value thread-local
+/// shared-owned canonical label through
+/// [`<Self as std::str::FromStr>::from_str`] on
+/// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`] so a downstream consumer
+/// bound by `impl TryFrom<Rc<str>>` (a serde container that opts into
+/// `#[serde(try_from = "Rc<str>")]` on a wrapper field to consume a
+/// thread-local shared-owned canonical label without a per-consumer
+/// allocation, a validated-input newtype builder whose parse contract
+/// accepts a caller-supplied [`Rc<str>`] label slot at the thread-local
+/// shared-owned frontier for cheap same-thread [`Rc::clone`] semantics on
+/// the input, a single-threaded arena-keyed table consumer whose key slot
+/// arrives as an [`Rc<str>`] label from an upstream table build that
+/// never crosses a thread boundary) reads the canonical variant directly
+/// from a caller-supplied [`Rc<str>`] with a single receiver-side
+/// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`] call yielding a borrowed
+/// `&str` view of the shared allocation without allocation and without
+/// touching the non-atomic refcount, so the parse-side receiver pays the
+/// by-reference `from_str` cost only, not the [`String`]-allocation cost
+/// of an [`Rc::try_unwrap`]-fallback-clone-then-`from_str` composition
+/// nor the [`String`]-copy cost of an `Rc::to_string`-then-`from_str`
+/// round trip — the same discipline the sibling [`TryFrom<Arc<str>>`]
+/// peer applies at the [`Arc::as_ref`] boundary, the sibling
+/// [`TryFrom<Box<str>>`] peer applies at the [`Box::as_ref`] boundary,
+/// and the sibling [`TryFrom<Cow<'_, str>>`] peer applies at the
+/// [`Cow::as_ref`] boundary.
+///
+/// The parse-side mirror of [`From<BumpLevel> for Rc<str>`] directly
+/// above — the emit peer closes the thread-local shared-owned-frontier
+/// emit surface (single non-atomic-refcount allocation for exactly the
+/// label's length plus refcount header, `O(1)` [`Rc::clone`] within a
+/// single thread at strictly lower per-clone cost than atomic
+/// [`Arc::clone`]), this parse peer closes the thread-local shared-owned-
+/// frontier parse surface (single [`FromStr`] read through the shared
+/// allocation's borrowed view, no [`String`]-allocation round trip, no
+/// refcount touch during the parse). Together the two impls close both
+/// directions of the thread-local shared-owned-frontier conversion at
+/// the version-bump ladder, giving a downstream site that types its
+/// label sink or source as [`Rc<str>`] (rather than one of the five
+/// owned/borrowed cross products [`&str`] / [`String`] / [`Cow<'_, str>`]
+/// / [`Box<str>`] / [`Arc<str>`] on the emit or parse side) a first-class
+/// typed-primitive surface at both ends, not a per-consumer
+/// `shared.parse::<BumpLevel>()` restatement.
+///
+/// Structural mirror of
+/// [`TryFrom<Rc<str>> for PerAttemptRegion`](crate::retry::PerAttemptRegion)
+/// (commit 0e9bc9f) at the per-attempt-region ladder and
+/// [`TryFrom<Rc<str>> for AdmissionTier`](crate::probe_outcome::AdmissionTier)
+/// (commit 9545b4d) at the admission-tier ladder — the same
+/// [`<Self as std::str::FromStr>::from_str`] route on the same
+/// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`] borrow, through the same
+/// one-oracle discipline, at the third and final ordered typed sum. This
+/// closes the parse-side arm of the thread-local shared-owned-frontier
+/// peer set at ALL THREE canonical-label typed primitives on the same
+/// ladder — the closure discipline already achieved at the `&str` /
+/// `String` / `Cow<'_, str>` / `Box<str>` / `Arc<str>` frontiers in prior
+/// runs, now extended to the `Rc<str>` frontier. Sibling of
+/// [`TryFrom<Arc<str>> for BumpLevel`] at the atomic-shared-owned-
+/// frontier one string-owner shape above — same route, same oracle,
+/// same by-value receiver shape; only the refcount discipline (non-atomic
+/// vs atomic) differs.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<BumpLevel> for &'static str`], [`TryFrom<&str>`],
+/// [`From<BumpLevel> for String`], [`TryFrom<String>`],
+/// [`From<BumpLevel> for Cow<'static, str>`],
+/// [`TryFrom<Cow<'_, str>>`], [`From<BumpLevel> for Box<str>`],
+/// [`TryFrom<Box<str>>`], [`From<BumpLevel> for Arc<str>`],
+/// [`TryFrom<Arc<str>>`], and [`From<BumpLevel> for Rc<str>`] impls
+/// above — the same lift at the by-value [`Rc<str>`] parse layer instead
+/// of the format / parse / serde / borrow / static-lifetime /
+/// by-reference-try / owned-string-emit / owned-string-try /
+/// borrowed-frontier-emit / borrowed-frontier-try /
+/// shrunk-owned-frontier-emit / shrunk-owned-frontier-try /
+/// atomic-shared-owned-frontier-emit / atomic-shared-owned-frontier-try /
+/// thread-local-shared-owned-frontier-emit layers.
+///
+/// The identity
+/// `BumpLevel::try_from(std::rc::Rc::<str>::from(level.as_str())).unwrap()
+/// == level` at every [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_try_from_rc_str_agrees_with_from_str`]; the
+/// identity carried through a generic `impl TryFrom<Rc<str>>` consumer
+/// at every variant is pinned by
+/// [`tests::test_bump_level_try_from_rc_str_carries_through_generic_consumer`];
+/// the strict-rejection contract at non-canonical input is pinned by
+/// [`tests::test_bump_level_try_from_rc_str_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value [`Rc<str>`] parse
+/// surface is a typed-primitive site on [`BumpLevel`] itself (one
+/// `TryFrom<Rc<str>>` impl routing through
+/// [`<Self as std::str::FromStr>::from_str`] on
+/// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`]), not a per-consumer
+/// `shared.parse::<BumpLevel>()` restatement at every downstream site
+/// that receives an [`Rc<str>`] label.
+/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// site ([`<BumpLevel as std::str::FromStr>::from_str`]) and every parse
+/// surface — [`FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
+/// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`], [`TryFrom<Box<str>>`],
+/// [`TryFrom<Arc<str>>`], this [`TryFrom<Rc<str>>`] — reads through it.
+impl TryFrom<std::rc::Rc<str>> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(s: std::rc::Rc<str>) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s.as_ref())
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -6257,6 +6364,122 @@ mod tests {
             assert!(
                 std::rc::Rc::strong_count(&shared) >= 2,
                 "Rc<str> strong count must be at least 2 after clone at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Rc<str>> for BumpLevel`] impl round-trips through
+    /// the canonical lowercase label at every [`BumpLevel::ALL`] variant:
+    /// taking each variant's [`BumpLevel::as_str`] label, wrapping it as
+    /// an [`std::rc::Rc<str>`] via [`std::rc::Rc::<str>::from`], then
+    /// parsing it back through [`TryFrom<Rc<str>>`], recovers the
+    /// original variant. Pins the parse-side agreement at the thread-
+    /// local shared-owned-frontier receiver against the same canonical-
+    /// label oracle the by-reference try-conversion parse surface
+    /// ([`TryFrom<&str>`]), the by-value owned-string try-conversion
+    /// parse surface ([`TryFrom<String>`]), the borrowed/owned-frontier
+    /// try-conversion parse surface ([`TryFrom<Cow<'_, str>>`]), the
+    /// shrunk-owned-frontier try-conversion parse surface
+    /// ([`TryFrom<Box<str>>`]), the atomic-shared-owned-frontier try-
+    /// conversion parse surface ([`TryFrom<Arc<str>>`]), and the by-value
+    /// thread-local shared-owned emit surface
+    /// ([`From<BumpLevel> for Rc<str>`]) all read — one round-trip pin
+    /// per variant, refuses a future variant insertion that drops the
+    /// `TryFrom<Rc<str>>`/`as_str` agreement. Structural mirror of
+    /// `test_per_attempt_region_try_from_rc_str_agrees_with_from_str`
+    /// (commit 0e9bc9f) and
+    /// `test_admission_tier_try_from_rc_str_agrees_with_from_str`
+    /// (commit 9545b4d) at the version-bump-magnitude ladder.
+    #[test]
+    fn test_bump_level_try_from_rc_str_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(level.as_str());
+            let parsed = <BumpLevel as std::convert::TryFrom<std::rc::Rc<str>>>::try_from(shared)
+                .expect("canonical label must parse through TryFrom<Rc<str>>");
+            assert_eq!(
+                parsed, level,
+                "TryFrom<Rc<str>> must round-trip through Rc::<str>::from(as_str) at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Rc<str>> for BumpLevel`] identity carries through a
+    /// generic `impl TryFrom<Rc<str>>` consumer at every
+    /// [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn parse<T: TryFrom<Rc<str>>>(s: Rc<str>) -> T` — the shape of
+    /// an actual downstream consumer (validated-input newtype builder
+    /// that accepts a caller-supplied [`Rc<str>`] label at the thread-
+    /// local shared-owned frontier, serde `try_from = "Rc<str>"` wrapper,
+    /// generic try-conversion helper that opts into the
+    /// [`TryFrom<Rc<str>>`] contract rather than [`std::str::FromStr`] /
+    /// [`TryFrom<&str>`] / [`TryFrom<String>`] / [`TryFrom<Cow<'_, str>>`]
+    /// / [`TryFrom<Box<str>>`] / [`TryFrom<Arc<str>>`] to compose with
+    /// the thread-local shared-owned-frontier receiver shape) — recovers
+    /// the canonical variant from the canonical lowercase label at every
+    /// variant. The structural witness that a [`BumpLevel`] is genuinely
+    /// usable at `impl TryFrom<Rc<str>>` call sites — a regression that
+    /// drifted the [`TryFrom`] impl signature (e.g., requiring a
+    /// [`&Rc<str>`] receiver and losing the by-value semantics, dropping
+    /// the [`Rc<str>`] wrapper entirely and demanding a [`String`], or
+    /// returning a different variant than [`FromStr`] would) fails here
+    /// at compile time or at the assertion instead of at every downstream
+    /// generic call site. Structural mirror of
+    /// `test_per_attempt_region_try_from_rc_str_carries_through_generic_consumer`
+    /// (commit 0e9bc9f) and
+    /// `test_admission_tier_try_from_rc_str_carries_through_generic_consumer`
+    /// (commit 9545b4d) at the version-bump-magnitude ladder.
+    #[test]
+    fn test_bump_level_try_from_rc_str_carries_through_generic_consumer() {
+        fn parse<T>(s: std::rc::Rc<str>) -> T
+        where
+            T: std::convert::TryFrom<std::rc::Rc<str>>,
+            <T as std::convert::TryFrom<std::rc::Rc<str>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::rc::Rc<str>>>::try_from(s)
+                .expect("canonical label must parse through generic TryFrom<Rc<str>>")
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                parse::<BumpLevel>(std::rc::Rc::<str>::from(level.as_str())),
+                level,
+                "generic TryFrom<Rc<str>> consumer must recover canonical variant at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<str>> for BumpLevel`] rejects non-canonical input
+    /// with the same strictness [`std::str::FromStr`] enforces — empty
+    /// string, UpperCamel rendering, uppercase, whitespace padding, and
+    /// mangled labels all reject when wrapped in an [`Rc<str>`]. Pins
+    /// the strict-rejection contract at the by-value [`Rc<str>`] try-
+    /// conversion surface so a downstream consumer bound by
+    /// [`TryFrom<Rc<str>>`] (a serde `try_from = "Rc<str>"` container, a
+    /// builder that consumes a thread-local shared-owned canonical label
+    /// at the thread-local-shared-owned frontier for cheap same-thread
+    /// [`Rc::clone`] semantics on the input) inherits the same
+    /// canonical-only grammar the direct `.parse::<BumpLevel>()` call
+    /// sites and the sibling [`TryFrom<&str>`] / [`TryFrom<String>`] /
+    /// [`TryFrom<Cow<'_, str>>`] / [`TryFrom<Box<str>>`] /
+    /// [`TryFrom<Arc<str>>`] impls already read, and a future permissive-
+    /// parse regression at the underlying [`FromStr`] impl lights up here
+    /// rather than drifting silently through the thread-local-shared-
+    /// owned-frontier try-conversion surface. Structural mirror of
+    /// `test_per_attempt_region_try_from_rc_str_rejects_non_canonical_input`
+    /// (commit 0e9bc9f) and
+    /// `test_admission_tier_try_from_rc_str_rejects_non_canonical_input`
+    /// (commit 9545b4d) at the version-bump-magnitude ladder.
+    #[test]
+    fn test_bump_level_try_from_rc_str_rejects_non_canonical_input() {
+        for bad in [
+            "", "Patch", "Minor", "Major", "PATCH", " patch", "patch ", "pat",
+        ] {
+            assert!(
+                <BumpLevel as std::convert::TryFrom<std::rc::Rc<str>>>::try_from(
+                    std::rc::Rc::<str>::from(bad)
+                )
+                .is_err(),
+                "TryFrom<Rc<str>> must reject non-canonical input {bad:?}",
             );
         }
     }
