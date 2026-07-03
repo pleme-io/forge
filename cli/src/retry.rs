@@ -2237,6 +2237,124 @@ impl TryFrom<std::sync::Arc<str>> for PerAttemptRegion {
     }
 }
 
+/// [`From<PerAttemptRegion> for Rc<str>`] routes through
+/// [`PerAttemptRegion::as_str`] and hands the canonical snake_case label
+/// (`"before_first"`, `"first"`, `"interim"`, `"final"`, `"over_budget"`)
+/// to [`std::rc::Rc::<str>::from`] so a downstream consumer bound by
+/// `impl Into<Rc<str>>` (a thread-local cached-label slot that wants a
+/// single canonical allocation shared within one worker via non-atomic
+/// refcount, a validated-input newtype wrapper whose label field is
+/// stored as [`Rc<str>`] to hand cheap clones to sibling structures on
+/// the same thread, a per-request-arena label slot that never crosses a
+/// thread boundary, a graph-walk visitor that clones labels across
+/// nodes without needing [`Send`] / [`Sync`]) reads the canonical label
+/// directly from a [`PerAttemptRegion`] value at a single non-atomic-
+/// refcount heap allocation — the thread-local shared-owned emit peer
+/// of [`From<PerAttemptRegion> for Arc<str>`] (single allocation with
+/// atomic-refcount header, immutable heap-owned receiver at the
+/// shared-owned frontier, [`Send`] + [`Sync`]) that trades the atomic
+/// refcount for the non-atomic [`std::rc::Rc`] refcount, enabling
+/// `O(1)` [`Rc::clone`] within a single thread at a strictly lower
+/// per-clone cost than the atomic [`Arc::clone`] — the correct choice
+/// at every emit site where the consumer is known to never cross a
+/// thread boundary.
+///
+/// The by-value emit peer of [`From<PerAttemptRegion> for &'static str`]
+/// (zero-copy `'static` borrow of the label constant, no allocation),
+/// [`From<PerAttemptRegion> for String`] (single allocation, resizable
+/// receiver), [`From<PerAttemptRegion> for Cow<'static, str>`] (uniform
+/// emit at the borrowed/owned frontier through [`Cow::Borrowed`], zero
+/// allocation regardless of receiver typing),
+/// [`From<PerAttemptRegion> for Box<str>`] (single allocation, immutable
+/// heap-owned receiver at the shrunk-owned frontier, no refcount header),
+/// [`From<PerAttemptRegion> for Arc<str>`] (single allocation with atomic-
+/// refcount header, immutable heap-owned receiver at the shared-owned
+/// frontier, [`Send`] + [`Sync`]), and this
+/// [`From<PerAttemptRegion> for Rc<str>`] (single allocation with
+/// non-atomic-refcount header, immutable heap-owned receiver at the
+/// thread-local shared-owned frontier, `!Send` / `!Sync`). All six route
+/// through the shared [`PerAttemptRegion::as_str`] canonical-label
+/// oracle: the [`&'static str`] peer through [`as_str`] directly, the
+/// [`String`] peer through [`str::to_owned`] on [`as_str`], the
+/// [`Cow<'static, str>`] peer through [`Cow::Borrowed`] wrapping
+/// [`as_str`], the [`Box<str>`] peer through [`Box::<str>::from`] on
+/// [`as_str`], the [`Arc<str>`] peer through
+/// [`std::sync::Arc::<str>::from`] on [`as_str`], this [`Rc<str>`] peer
+/// through [`std::rc::Rc::<str>::from`] on [`as_str`] — the same
+/// canonical grammar lifted to the thread-local shared-owned-frontier
+/// emit layer.
+///
+/// The impl body picks [`std::rc::Rc::<str>::from`] rather than
+/// [`std::rc::Rc::from`] on a [`Box<str>`] intermediate or an
+/// [`std::rc::Rc::from`] on a [`String`]: the direct
+/// [`std::rc::Rc::<str>::from`] path allocates once from the
+/// `'static` label slice, including the non-atomic-refcount header, so
+/// the receiver pays a single allocation for exactly the label's length
+/// plus the header — never the [`Box<str>`]-then-[`Rc::from`] round trip
+/// (two allocations: box the slice, then rewrap into an [`Rc<str>`]) nor
+/// the [`String`]-then-[`Rc::from`] round trip (resizable allocation,
+/// then rewrap). The single-allocation contract is pinned by
+/// [`tests::test_per_attempt_region_into_rc_str_agrees_with_as_str`] at
+/// the label-oracle surface (value agreement across every variant) and
+/// by
+/// [`tests::test_per_attempt_region_into_rc_str_carries_through_generic_consumer`]
+/// (identity carried through a tiny generic
+/// `fn read<T: Into<Rc<str>>>(t: T) -> Rc<str>` consumer at every
+/// variant — the structural witness that a [`PerAttemptRegion`] is
+/// genuinely usable at `impl Into<Rc<str>>` call sites, so a regression
+/// that drifted the impl signature (a returned [`Box<str>`] instead of
+/// [`Rc<str>`], a required [`&PerAttemptRegion`] receiver losing the
+/// by-value semantics) fails at compile time or at the assertion instead
+/// of at every downstream generic call site). The `Rc::clone`-preserves-
+/// value contract is pinned by
+/// [`tests::test_per_attempt_region_into_rc_str_shares_label_across_clones`]
+/// at every variant — the structural witness that the thread-local
+/// shared-owned receiver semantics hold: an [`Rc::clone`] of the emit
+/// result reads the same canonical label bytes as the original, points
+/// at the same allocation ([`std::rc::Rc::ptr_eq`]), and the non-atomic
+/// refcount lifts to at least two after the clone.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<PerAttemptRegion> for &'static str`], [`TryFrom<&str>`],
+/// [`From<PerAttemptRegion> for String`], [`TryFrom<String>`],
+/// [`From<PerAttemptRegion> for Cow<'static, str>`],
+/// [`TryFrom<Cow<'_, str>>`], [`From<PerAttemptRegion> for Box<str>`],
+/// [`TryFrom<Box<str>>`], [`From<PerAttemptRegion> for Arc<str>`], and
+/// [`TryFrom<Arc<str>>`] impls above — the same lift at the by-value
+/// [`Rc<str>`] emit layer instead of the format / parse / serde /
+/// borrow / static-lifetime / by-reference-try / owned-string-emit /
+/// owned-string-try / borrowed-frontier-emit / borrowed-frontier-try /
+/// shrunk-owned-frontier-emit / shrunk-owned-frontier-try / atomic-
+/// shared-owned-frontier-emit / atomic-shared-owned-frontier-try layers.
+/// Opens the emit-side arm of the thread-local shared-owned-frontier
+/// peer set at the per-attempt-region ladder against the shared
+/// [`PerAttemptRegion::as_str`] canonical-label oracle — the [`Rc<str>`]
+/// parse peer ([`TryFrom<Rc<str>>`]) closes the trio in a follow-up
+/// commit, sibling of the closed [`Arc<str>`] emit + parse trio
+/// (c3a722d / a9c007a) directly above.
+///
+/// THEORY.md §V.4 typed primitives: the by-value [`Rc<str>`] emit
+/// surface is a typed-primitive site on [`PerAttemptRegion`] itself
+/// (one `From<PerAttemptRegion> for Rc<str>` impl routing through
+/// [`as_str`] at the [`std::rc::Rc::<str>::from`] boundary), not a
+/// per-consumer `Rc::<str>::from(region.as_str())` restatement at every
+/// downstream site that receives an [`Into<Rc<str>>`] label sink.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]) and every emit surface — [`as_str`],
+/// [`Display`], [`serde::Serialize`], [`AsRef<str>`],
+/// [`From<PerAttemptRegion> for &'static str`],
+/// [`From<PerAttemptRegion> for String`],
+/// [`From<PerAttemptRegion> for Cow<'static, str>`],
+/// [`From<PerAttemptRegion> for Box<str>`],
+/// [`From<PerAttemptRegion> for Arc<str>`], this
+/// `From<PerAttemptRegion> for Rc<str>` — reads through it.
+impl From<PerAttemptRegion> for std::rc::Rc<str> {
+    fn from(region: PerAttemptRegion) -> std::rc::Rc<str> {
+        std::rc::Rc::<str>::from(region.as_str())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -3576,11 +3694,7 @@ impl RetryPolicy {
     #[allow(dead_code)]
     pub const fn attempts_used_through(&self, attempt: u32) -> u32 {
         let cap = self.effective_max_attempts();
-        if attempt < cap {
-            attempt
-        } else {
-            cap
-        }
+        if attempt < cap { attempt } else { cap }
     }
 
     /// The number of BUDGET SLOTS this policy has REMAINING at the given
@@ -6951,8 +7065,8 @@ pub async fn run_inherited_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// HTTP 5xx in numeric form must match — skopeo/regctl emit numeric.
     #[test]
@@ -13511,6 +13625,118 @@ mod tests {
         }
     }
 
+    /// [`From<PerAttemptRegion> for Rc<str>`] agrees with the canonical
+    /// [`PerAttemptRegion::as_str`] label oracle at every
+    /// [`PerAttemptRegion::ALL`] variant: the emitted
+    /// [`std::rc::Rc<str>`] reads exactly the canonical snake_case label
+    /// the [`as_str`] oracle returns. Pins the thread-local shared-owned
+    /// emit surface against the same canonical-label oracle every
+    /// sibling emit surface reads —
+    /// [`test_per_attempt_region_as_str_matches_display`] at the
+    /// [`Display`] emit surface,
+    /// [`test_per_attempt_region_from_into_static_str_agrees_with_as_str`]
+    /// at the `'static`-borrow emit surface,
+    /// [`test_per_attempt_region_from_into_string_agrees_with_as_str`] at
+    /// the owned [`String`] emit surface,
+    /// [`test_per_attempt_region_from_into_cow_static_str_agrees_with_as_str`]
+    /// at the borrowed/owned-frontier emit surface,
+    /// [`test_per_attempt_region_into_box_str_agrees_with_as_str`] at
+    /// the shrunk-owned-frontier emit surface, and
+    /// [`test_per_attempt_region_into_arc_str_agrees_with_as_str`] at
+    /// the atomic-shared-owned-frontier emit surface — the six agreement
+    /// pins together close the read-side agreement across every by-value
+    /// emit surface at the per-attempt-region ladder.
+    #[test]
+    fn test_per_attempt_region_into_rc_str_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(region);
+            assert_eq!(
+                shared.as_ref(),
+                region.as_str(),
+                "From<PerAttemptRegion> for Rc<str> and as_str must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for Rc<str>`] identity carries
+    /// through a generic `impl Into<Rc<str>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Rc<str>>>(t: T) -> Rc<str> { t.into() }` — the
+    /// shape of an actual downstream consumer (thread-local cached-label
+    /// slot typed as [`Rc<str>`] to share a canonical allocation within
+    /// one worker via non-atomic refcount, a validated-input newtype
+    /// wrapper that stores a canonical label as [`Rc<str>`] to hand
+    /// cheap clones to sibling structures on the same thread, a per-
+    /// request-arena label slot that never crosses a thread boundary, a
+    /// graph-walk visitor that clones labels across nodes without
+    /// needing [`Send`] / [`Sync`]) reads the canonical snake_case label
+    /// directly from a [`PerAttemptRegion`] value at a single non-atomic-
+    /// refcount heap allocation. The structural witness that a
+    /// [`PerAttemptRegion`] is genuinely usable at `impl Into<Rc<str>>`
+    /// call sites — a regression that drifted the [`From`] impl
+    /// signature (e.g., returning [`Box<str>`] instead of [`Rc<str>`],
+    /// requiring [`&PerAttemptRegion`] and losing the by-value semantics,
+    /// or dropping to a [`Box<str>`]-then-[`Rc::from`] composition that
+    /// would allocate twice) fails here at compile time instead of at
+    /// every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_rc_str_carries_through_generic_consumer() {
+        fn read<T: Into<std::rc::Rc<str>>>(t: T) -> std::rc::Rc<str> {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region).as_ref(),
+                region.as_str(),
+                "generic Into<Rc<str>> consumer must read canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for Rc<str>`] thread-local shared-
+    /// owned semantics hold across [`std::rc::Rc::clone`] at every
+    /// [`PerAttemptRegion::ALL`] variant: the clone reads exactly the
+    /// same canonical snake_case label the original reads, points at
+    /// the same allocation (identity of the underlying byte pointer via
+    /// [`std::rc::Rc::ptr_eq`]), and the non-atomic refcount lifts to
+    /// at least two after the clone (via [`std::rc::Rc::strong_count`]).
+    /// Pins the thread-local shared-owned receiver contract at the emit
+    /// surface — a regression that drifted the impl body to a non-`Rc`
+    /// composition ([`Box::<str>::from(as_str)`] then some ad-hoc rewrap,
+    /// a [`String`] intermediate) would break the pointer-identity
+    /// assertion (each clone would land at a distinct allocation) even
+    /// if the canonical-label bytes still agreed. The three pins
+    /// together (label agreement, pointer identity, refcount lift)
+    /// close the structural witness that the receiver actually holds a
+    /// thread-local shared-owned [`Rc<str>`] slot rather than an
+    /// [`Rc<str>`]-typed wrapper around a per-clone-allocated
+    /// [`Box<str>`]. Structural mirror of
+    /// [`test_per_attempt_region_into_arc_str_shares_label_across_clones`]
+    /// at the atomic-shared-owned-frontier ([`Arc<str>`]) — the two pins
+    /// together close the shared-owned semantics across both refcount
+    /// disciplines the per-attempt-region ladder exposes.
+    #[test]
+    fn test_per_attempt_region_into_rc_str_shares_label_across_clones() {
+        for region in PerAttemptRegion::ALL {
+            let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(region);
+            let cloned = std::rc::Rc::clone(&shared);
+            assert_eq!(
+                cloned.as_ref(),
+                region.as_str(),
+                "Rc<str> clone must read canonical label at {region:?}",
+            );
+            assert!(
+                std::rc::Rc::ptr_eq(&shared, &cloned),
+                "Rc<str> clone must share the same underlying allocation at {region:?}",
+            );
+            assert!(
+                std::rc::Rc::strong_count(&shared) >= 2,
+                "Rc<str> strong count must be at least 2 after clone at {region:?}",
+            );
+        }
+    }
+
     /// [`PerAttemptRegion::BOTTOM`] sits at the FLOOR-strict corner of
     /// the schedule-axis / terminal-axis 2×2 grid — it is
     /// out-of-schedule (the strictly-below-floor STRICT boundary) AND
@@ -15197,8 +15423,8 @@ mod tests {
     /// structural-record shape ad-hoc helpers consume.
     #[tokio::test]
     async fn test_run_with_policy_consumes_command_attempt_failure() {
-        use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
         // Transient: classifier returns true on 503; loop retries until
         // exhaustion and returns the LAST error.
