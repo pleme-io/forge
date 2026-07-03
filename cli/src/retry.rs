@@ -2099,6 +2099,144 @@ impl From<PerAttemptRegion> for std::sync::Arc<str> {
     }
 }
 
+/// [`TryFrom<Arc<str>> for PerAttemptRegion`] routes through
+/// [`<PerAttemptRegion as std::str::FromStr>::from_str`] on the
+/// borrowed `&str` view of the caller-supplied
+/// [`std::sync::Arc<str>`], so a downstream consumer bound by
+/// `impl TryFrom<Arc<str>>` (a serde container that opts into
+/// `#[serde(try_from = "Arc<str>")]` on a wrapper field to consume
+/// a shared-owned label without a per-consumer allocation, a
+/// validated-input newtype builder whose parse contract accepts a
+/// caller-supplied [`Arc<str>`] label slot at the shared-owned
+/// frontier for cross-thread cheap-clone semantics on the input, a
+/// dashmap-style keyed-table consumer whose key slot arrives as a
+/// shared-owned label from an upstream table build) recovers a
+/// [`PerAttemptRegion`] value from its canonical snake_case label
+/// through the same one-oracle grammar the direct
+/// `.parse::<PerAttemptRegion>()` call sites and the sibling
+/// [`TryFrom<&str>`] / [`TryFrom<String>`] /
+/// [`TryFrom<Cow<'_, str>>`] / [`TryFrom<Box<str>>`] impls already
+/// read.
+///
+/// The by-value [`Arc<str>`] parse peer of the [`TryFrom<&str>`]
+/// (borrowed-view input), [`TryFrom<String>`] (owned-string input
+/// with [`String`] resize headroom), [`TryFrom<Cow<'_, str>>`]
+/// (borrowed/owned-frontier input), and [`TryFrom<Box<str>>`]
+/// (shrunk-owned-frontier input, no refcount header) impls above
+/// — all five are parse surfaces of the label-axis conversion set,
+/// differing only on the input string-owner shape: [`TryFrom<&str>`]
+/// takes a borrowed `&str` view for consumers that already hold a
+/// borrow, [`TryFrom<String>`] takes an owned resizable [`String`]
+/// for consumers that own the input buffer with growth headroom,
+/// [`TryFrom<Cow<'_, str>>`] takes either uniformly at the
+/// borrowed/owned-frontier receiver shape, [`TryFrom<Box<str>>`]
+/// takes an immutable heap-owned [`Box<str>`] with no refcount
+/// header, this [`TryFrom<Arc<str>>`] takes an immutable
+/// shared-owned [`std::sync::Arc<str>`] with an atomic-refcount
+/// header preceding the label bytes for consumers whose upstream
+/// produced a shared-owned label already refcounted across worker
+/// threads (a cross-thread cached-label slot handed cheaply via
+/// [`Arc::clone`], a dashmap-style value slot, a validated-input
+/// newtype whose label field is stored as [`Arc<str>`]). All five
+/// route through the shared
+/// [`<Self as std::str::FromStr>::from_str`] canonical-grammar
+/// oracle: the [`&str`] peer through `from_str` directly, the
+/// [`String`] peer through `from_str(s.as_str())`, the
+/// [`Cow<'_, str>`] peer through `from_str(s.as_ref())`, the
+/// [`Box<str>`] peer through `from_str(s.as_ref())`, this
+/// [`Arc<str>`] peer through `from_str(s.as_ref())` — the same
+/// canonical grammar lifted to the shared-owned-frontier parse
+/// layer, with the receiver-side
+/// [`<std::sync::Arc<str> as AsRef<str>>::as_ref`] call yielding a
+/// borrowed `&str` view of the shared allocation without touching
+/// the atomic refcount and without a redundant clone.
+///
+/// The parse-side mirror of [`From<PerAttemptRegion> for Arc<str>`]
+/// above — the emit peer closes the shared-owned-frontier emit
+/// surface (single atomic-refcount allocation for exactly the
+/// label's length plus refcount header, `O(1)` [`Arc::clone`]
+/// across worker threads without a per-clone allocation), this
+/// parse peer closes the shared-owned-frontier parse surface
+/// (single [`FromStr`] read through the shared allocation's
+/// borrowed view, no [`String`]-allocation round trip, no refcount
+/// touch during the parse). Together the two impls close both
+/// directions of the shared-owned-frontier conversion at the
+/// per-attempt-region ladder, giving a downstream site that types
+/// its label sink or source as [`Arc<str>`] (rather than one of the
+/// five owned/borrowed cross products [`&str`] / [`String`] /
+/// [`Cow<'_, str>`] / [`Box<str>`] / [`Arc<str>`] on the emit or
+/// parse side) a first-class typed-primitive surface at both ends,
+/// not a per-consumer `shared.parse::<PerAttemptRegion>()`
+/// restatement.
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`],
+/// [`serde::Serialize`], [`serde::Deserialize`], [`AsRef<str>`],
+/// [`From<PerAttemptRegion> for &'static str`], [`TryFrom<&str>`],
+/// [`From<PerAttemptRegion> for String`], [`TryFrom<String>`],
+/// [`From<PerAttemptRegion> for Cow<'static, str>`],
+/// [`TryFrom<Cow<'_, str>>`], [`From<PerAttemptRegion> for
+/// Box<str>`], [`TryFrom<Box<str>>`], and
+/// [`From<PerAttemptRegion> for Arc<str>`] impls above — the same
+/// lift at the by-value [`Arc<str>`] parse layer instead of the
+/// format / parse / serde / borrow / static-lifetime /
+/// by-reference-try / owned-string-emit / owned-string-try /
+/// borrowed-frontier-emit / borrowed-frontier-try /
+/// shrunk-owned-frontier-emit / shrunk-owned-frontier-try /
+/// shared-owned-frontier-emit layers. Opens the parse-side arm of
+/// the shared-owned-frontier peer set at the per-attempt-region
+/// ladder against the shared
+/// [`<Self as std::str::FromStr>::from_str`] canonical-grammar
+/// oracle.
+///
+/// The impl body picks
+/// [`<std::sync::Arc<str> as AsRef<str>>::as_ref`] rather than an
+/// [`std::sync::Arc::try_unwrap`]-then-conversion cascade or a
+/// per-branch consumption: [`AsRef::as_ref`] yields a borrowed
+/// `&str` view of the shared allocation without allocation and
+/// without touching the atomic refcount, so the parse-side receiver
+/// pays the by-reference `from_str` cost only, not the
+/// [`String`]-allocation cost of an
+/// [`Arc::try_unwrap`]-fallback-clone-then-`from_str` composition
+/// nor the [`String`]-copy cost of an `Arc::to_string`-then-
+/// `from_str` round trip — the same discipline the sibling
+/// [`TryFrom<Box<str>>`] peer applies at the [`Box::as_ref`]
+/// boundary and the sibling [`TryFrom<Cow<'_, str>>`] peer applies
+/// at the [`Cow::as_ref`] boundary.
+///
+/// The identity
+/// `PerAttemptRegion::try_from(std::sync::Arc::<str>::from(region.as_str())).unwrap()
+/// == region` at every [`PerAttemptRegion::ALL`] variant is pinned
+/// by
+/// [`tests::test_per_attempt_region_try_from_arc_str_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<Arc<str>>` consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_arc_str_carries_through_generic_consumer`];
+/// the strict-rejection contract at non-canonical input is pinned
+/// by
+/// [`tests::test_per_attempt_region_try_from_arc_str_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value [`Arc<str>`] parse
+/// surface is a typed-primitive site on [`PerAttemptRegion`] itself
+/// (one `TryFrom<Arc<str>>` impl routing through
+/// [`<Self as std::str::FromStr>::from_str`] on
+/// [`<std::sync::Arc<str> as AsRef<str>>::as_ref`]), not a
+/// per-consumer `shared.parse::<PerAttemptRegion>()` restatement at
+/// every downstream site that receives an [`Arc<str>`] label.
+/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at
+/// one site
+/// ([`<PerAttemptRegion as std::str::FromStr>::from_str`]) and every
+/// parse surface — [`FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], this [`TryFrom<Arc<str>>`] — reads
+/// through it.
+impl TryFrom<std::sync::Arc<str>> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(s: std::sync::Arc<str>) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s.as_ref())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -13250,6 +13388,125 @@ mod tests {
             assert!(
                 std::sync::Arc::strong_count(&shared) >= 2,
                 "Arc<str> strong count must be at least 2 after clone at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Arc<str>> for PerAttemptRegion`] round-trips through
+    /// the shared canonical-label oracle at every
+    /// [`PerAttemptRegion::ALL`] variant: the caller emits the
+    /// canonical label through [`PerAttemptRegion::as_str`], wraps it
+    /// via [`std::sync::Arc::<str>::from`] at the shared-owned
+    /// frontier, and this parse peer recovers the variant from the
+    /// shared allocation through the shared
+    /// [`<Self as std::str::FromStr>::from_str`] oracle. Pins the
+    /// round-trip identity
+    /// `PerAttemptRegion::try_from(std::sync::Arc::<str>::from(region.as_str())).unwrap()
+    /// == region` at every variant against the shared canonical-label
+    /// oracle. The structural witness that the by-value [`Arc<str>`]
+    /// try-conversion parse surface (this [`TryFrom<Arc<str>>`])
+    /// reads the same one-oracle grammar the by-reference
+    /// try-conversion parse surface ([`TryFrom<&str>`]), the by-value
+    /// owned-string try-conversion parse surface
+    /// ([`TryFrom<String>`]), the by-value borrowed/owned-frontier
+    /// try-conversion parse surface ([`TryFrom<Cow<'_, str>>`]), the
+    /// by-value shrunk-owned-frontier try-conversion parse surface
+    /// ([`TryFrom<Box<str>>`]), and the by-value shared-owned-
+    /// frontier emit surface ([`From<PerAttemptRegion> for Arc<str>`])
+    /// all read — one round-trip pin per variant, refuses a future
+    /// variant insertion that drops the `TryFrom<Arc<str>>`/`as_str`
+    /// agreement.
+    #[test]
+    fn test_per_attempt_region_try_from_arc_str_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(region.as_str());
+            let parsed =
+                <PerAttemptRegion as std::convert::TryFrom<std::sync::Arc<str>>>::try_from(shared)
+                    .expect("canonical label must parse through TryFrom<Arc<str>>");
+            assert_eq!(
+                parsed, region,
+                "TryFrom<Arc<str>> must round-trip through Arc::<str>::from(as_str) at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Arc<str>> for PerAttemptRegion`] identity carries
+    /// through a generic `impl TryFrom<Arc<str>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn parse<T: TryFrom<Arc<str>>>(s: Arc<str>) -> T` — the shape
+    /// of an actual downstream consumer (validated-input newtype
+    /// builder that accepts a caller-supplied [`Arc<str>`] label at
+    /// the shared-owned frontier, serde `try_from = "Arc<str>"`
+    /// wrapper, generic try-conversion helper that opts into the
+    /// [`TryFrom<Arc<str>>`] contract rather than
+    /// [`std::str::FromStr`] / [`TryFrom<&str>`] / [`TryFrom<String>`]
+    /// / [`TryFrom<Cow<'_, str>>`] / [`TryFrom<Box<str>>`] to compose
+    /// with the shared-owned-frontier receiver shape) — recovers the
+    /// canonical variant from the canonical snake_case label at every
+    /// variant. The structural witness that a [`PerAttemptRegion`] is
+    /// genuinely usable at `impl TryFrom<Arc<str>>` call sites — a
+    /// regression that drifted the [`TryFrom`] impl signature (e.g.,
+    /// requiring a [`&Arc<str>`] receiver and losing the by-value
+    /// semantics, dropping the [`Arc<str>`] wrapper entirely and
+    /// demanding a [`String`], or returning a different variant than
+    /// [`FromStr`] would) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_try_from_arc_str_carries_through_generic_consumer() {
+        fn parse<T>(s: std::sync::Arc<str>) -> T
+        where
+            T: std::convert::TryFrom<std::sync::Arc<str>>,
+            <T as std::convert::TryFrom<std::sync::Arc<str>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::sync::Arc<str>>>::try_from(s)
+                .expect("canonical label must parse through generic TryFrom<Arc<str>>")
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                parse::<PerAttemptRegion>(std::sync::Arc::<str>::from(region.as_str())),
+                region,
+                "generic TryFrom<Arc<str>> consumer must recover canonical variant at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Arc<str>> for PerAttemptRegion`] rejects non-canonical
+    /// input with the same strictness [`std::str::FromStr`] enforces —
+    /// empty string, UpperCamel rendering, uppercase, whitespace
+    /// padding, and snake_case labels with a dropped underscore all
+    /// reject when wrapped in an [`Arc<str>`]. Pins the strict-rejection
+    /// contract at the by-value [`Arc<str>`] try-conversion surface so
+    /// a downstream consumer bound by [`TryFrom<Arc<str>>`] (a serde
+    /// `try_from = "Arc<str>"` container, a builder that consumes a
+    /// shared-owned canonical label at the shared-owned frontier for
+    /// cross-thread cheap-clone semantics on the input) inherits the
+    /// same canonical-only grammar the direct
+    /// `.parse::<PerAttemptRegion>()` call sites and the sibling
+    /// [`TryFrom<&str>`] / [`TryFrom<String>`] /
+    /// [`TryFrom<Cow<'_, str>>`] / [`TryFrom<Box<str>>`] impls already
+    /// read, and a future permissive-parse regression at the
+    /// underlying [`FromStr`] impl lights up here rather than drifting
+    /// silently through the shared-owned-frontier try-conversion
+    /// surface.
+    #[test]
+    fn test_per_attempt_region_try_from_arc_str_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "BeforeFirst",
+            "OverBudget",
+            "FIRST",
+            " first",
+            "first ",
+            "beforefirst",
+            "overbudget",
+        ] {
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<std::sync::Arc<str>>>::try_from(
+                    std::sync::Arc::<str>::from(bad)
+                )
+                .is_err(),
+                "TryFrom<Arc<str>> must reject non-canonical input {bad:?}",
             );
         }
     }
