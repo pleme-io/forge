@@ -2499,6 +2499,84 @@ impl TryFrom<std::rc::Rc<str>> for PerAttemptRegion {
     }
 }
 
+/// [`AsRef<[u8]>`] routes through
+/// `<PerAttemptRegion as AsRef<str>>::as_ref` composed with
+/// [`str::as_bytes`] at the canonical-label oracle so a downstream
+/// consumer that takes a borrowed byte-slice view via
+/// [`AsRef<[u8]>`] (a `blake3` / `sha2` streaming hasher `update`
+/// slot, a byte-oriented `std::io::Write` sink, a
+/// [`std::collections::HashMap<Box<[u8]>, _>`] key lookup that
+/// hashes canonical labels as UTF-8 byte sequences, an
+/// [`std::os::unix::ffi::OsStrExt`] label bridge, a memchr-driven
+/// classifier over canonical labels) reads the canonical
+/// snake_case label (`"before_first"`, `"first"`, `"interim"`,
+/// `"final"`, `"over_budget"`) as a borrowed `&[u8]` view of the
+/// static-lifetime label constant without a `String` allocation,
+/// a `Vec<u8>` copy, or an intermediate [`std::fmt::Display`]
+/// format-buffer step.
+///
+/// Sibling of [`AsRef<str>`] (commit 8c8cffe) directly above — the
+/// same borrowed-view surface at the same canonical-label oracle,
+/// projected onto the byte-slice frontier instead of the UTF-8
+/// string frontier. Opens a new NON-string-owner-shape ladder at
+/// the borrowed-view axis parallel to the [`AsRef<str>`] surface:
+/// the [`AsRef<str>`] impl (8c8cffe) yields `&str`, this
+/// [`AsRef<[u8]>`] impl yields `&[u8]` — the same routing
+/// discipline (`self.as_str().as_bytes()` == one composition
+/// through [`PerAttemptRegion::as_str`] and [`str::as_bytes`], both
+/// zero-copy views of the static-lifetime label constant) so a
+/// future consumer that requires the byte-slice frontier reads the
+/// canonical label through one typed-primitive surface at the same
+/// oracle instead of restating the two-step `region.as_str()
+/// .as_bytes()` composition at every call site. The natural bridge
+/// to consumers that work over the byte-slice frontier at the
+/// borrowed-view axis: streaming hashers (`blake3::Hasher::update`,
+/// `sha2::Sha256::update`, `blake2::Blake2b::update`, etc.) take
+/// [`impl AsRef<[u8]>`] as their standard input surface, so a
+/// consumer that hashes a canonical [`PerAttemptRegion`] label
+/// reads it directly from a [`PerAttemptRegion`] value without an
+/// [`str::as_bytes`] restatement at the hash boundary.
+///
+/// Opens the byte-slice borrowed-view trio at the per-attempt-
+/// region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the [`AsRef<str>`]
+/// opening order (8c8cffe → 7acca19 → f1ca293).
+///
+/// Zero-cost by construction: the returned `&[u8]` is a
+/// zero-length-check-free view of the static-lifetime label
+/// constant table's UTF-8 bytes — [`str::as_bytes`] is a
+/// zero-cost transmute at the borrow-view boundary, no allocation,
+/// no copy, no branching over the variant discriminant beyond what
+/// [`PerAttemptRegion::as_str`] itself does at its match body.
+///
+/// The identity `<PerAttemptRegion as AsRef<[u8]>>::as_ref(&region)
+/// == region.as_str().as_bytes()` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_as_ref_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carried through a generic `impl AsRef<[u8]>`
+/// consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_as_ref_bytes_carries_through_generic_consumer`];
+/// the round-trip through [`std::str::from_utf8`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_per_attempt_region_as_ref_bytes_round_trips_through_from_utf8`].
+///
+/// THEORY.md §V.4 typed primitives: the byte-slice borrowed-view
+/// surface is a typed-primitive site on [`PerAttemptRegion`] itself
+/// (one `AsRef<[u8]>` impl routing through [`AsRef<str>`] and
+/// [`str::as_bytes`]), not a per-consumer
+/// `region.as_str().as_bytes()` restatement at every downstream
+/// site that accepts `impl AsRef<[u8]>`. THEORY.md §VI.1
+/// one-oracle: the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]) and every borrowed-view surface —
+/// [`AsRef<str>`] (yields `&str`), this [`AsRef<[u8]>`] (yields
+/// `&[u8]`) — reads through it.
+impl AsRef<[u8]> for PerAttemptRegion {
+    fn as_ref(&self) -> &[u8] {
+        <Self as AsRef<str>>::as_ref(self).as_bytes()
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -14002,6 +14080,105 @@ mod tests {
                 )
                 .is_err(),
                 "TryFrom<Rc<str>> must reject non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], `<PerAttemptRegion as AsRef<[u8]>>::
+    /// as_ref(&region)` (the [`AsRef<[u8]>`] impl body) equals
+    /// `region.as_str().as_bytes()` (the composition of the
+    /// canonical-label oracle and [`str::as_bytes`]) exactly. The
+    /// load-bearing structural pin that ties the byte-slice borrowed-
+    /// view surface to the shared `as_str` oracle at the byte
+    /// frontier: a regression that swapped [`AsRef<[u8]>`] to route
+    /// through an intermediate [`String::into_bytes`] path (a per-
+    /// call `Vec<u8>` allocation from an owned label, discarding the
+    /// zero-copy static-lifetime borrow) or drifted the byte grammar
+    /// from [`PerAttemptRegion::as_str`]'s snake_case labels (yielding
+    /// UpperCamel bytes via the derived [`std::fmt::Debug`] surface,
+    /// or a numeric-discriminant byte cast) fails here at ONE named
+    /// site instead of leaking to every downstream `impl AsRef<[u8]>`
+    /// consumer (streaming hasher `update`, byte-write sink,
+    /// `HashMap<Box<[u8]>, _>` key builder). Sibling of
+    /// [`test_per_attempt_region_as_ref_str_agrees_with_as_str`] at
+    /// the UTF-8 borrowed-view surface — the two agreement pins
+    /// together close the borrowed-view axis across both the string
+    /// (`&str`) and byte-slice (`&[u8]`) frontiers against the same
+    /// canonical-label oracle.
+    #[test]
+    fn test_per_attempt_region_as_ref_bytes_agrees_with_as_str_as_bytes() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &[u8] = region.as_ref();
+            assert_eq!(
+                borrowed,
+                region.as_str().as_bytes(),
+                "AsRef<[u8]> and as_str().as_bytes() must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<[u8]>`] identity carries through a generic
+    /// `impl AsRef<[u8]>` consumer at every [`PerAttemptRegion::ALL`]
+    /// variant. A tiny generic function `fn read<T: AsRef<[u8]>>(t:
+    /// &T) -> &[u8] { t.as_ref() }` — the shape of an actual
+    /// downstream consumer (a `blake3::Hasher::update` call, a
+    /// `std::io::Write::write_all` sink, a
+    /// `HashMap<Box<[u8]>, _>::get` key lookup, a memchr-driven
+    /// classifier over canonical labels) — reads the canonical
+    /// snake_case label directly from a [`PerAttemptRegion`] value
+    /// without going through the [`std::fmt::Display`] formatter
+    /// buffer or an intermediate [`String::into_bytes`] `Vec<u8>`
+    /// allocation. The structural witness that a `PerAttemptRegion`
+    /// is genuinely usable at `impl AsRef<[u8]>` call sites — a
+    /// regression that drifted the [`AsRef<[u8]>`] impl signature
+    /// (e.g., returning an owned [`Vec<u8>`] instead of a `&[u8]`, or
+    /// requiring a `&mut self`) fails here at compile time instead of
+    /// at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_as_ref_bytes_carries_through_generic_consumer() {
+        fn read<T: AsRef<[u8]>>(t: &T) -> &[u8] {
+            t.as_ref()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(&region),
+                region.as_str().as_bytes(),
+                "generic AsRef<[u8]> consumer must read canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], the borrowed byte-slice view from
+    /// the [`AsRef<[u8]>`] impl round-trips through
+    /// [`std::str::from_utf8`] back to the canonical snake_case label
+    /// exactly. The load-bearing structural pin that ties the byte
+    /// frontier to the UTF-8 frontier through the standard library's
+    /// UTF-8 validator, without a per-consumer restatement of "the
+    /// canonical labels are ASCII and UTF-8-valid" at every downstream
+    /// site: a regression that drifted [`AsRef<[u8]>`] to yield non-
+    /// UTF-8 bytes (a numeric-discriminant byte cast, a byte-swapped
+    /// label, a mangled encoding) fails here at ONE named site with a
+    /// `Utf8Error` at the [`std::str::from_utf8`] boundary or a label
+    /// mismatch at the round-trip assertion. Together with
+    /// [`test_per_attempt_region_as_ref_bytes_agrees_with_as_str_as_bytes`]
+    /// this closes the byte-slice borrowed-view surface against both
+    /// the composition oracle (`.as_str().as_bytes()`) and the UTF-8
+    /// validity oracle ([`std::str::from_utf8`]) at every
+    /// [`PerAttemptRegion::ALL`] variant.
+    #[test]
+    fn test_per_attempt_region_as_ref_bytes_round_trips_through_from_utf8() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &[u8] = region.as_ref();
+            let decoded = std::str::from_utf8(borrowed).unwrap_or_else(|err| {
+                panic!("AsRef<[u8]> bytes for {region:?} must be valid UTF-8 (got {err})")
+            });
+            assert_eq!(
+                decoded,
+                region.as_str(),
+                "from_utf8 round-trip must recover canonical label at {region:?}",
             );
         }
     }
