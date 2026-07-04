@@ -2577,6 +2577,98 @@ impl AsRef<[u8]> for PerAttemptRegion {
     }
 }
 
+/// [`From<PerAttemptRegion> for &'static [u8]`] routes through
+/// [`PerAttemptRegion::as_str`] composed with [`str::as_bytes`] at
+/// the canonical-label oracle so a downstream consumer that takes
+/// an owned `&'static [u8]` via `Into<&'static [u8]>` (a
+/// `const`-adjacent hasher input slot that stashes the region label
+/// in a `&'static [u8]` field, a `phf`-style static lookup table
+/// keyed by canonical label bytes, a `blake3` / `sha2` hasher
+/// factory that pre-materializes update inputs as `&'static [u8]`,
+/// a [`std::borrow::Cow<'static, [u8]>`] sink taking
+/// `Into<Cow<'static, [u8]>>`) reads the canonical snake_case label
+/// (`"before_first"`, `"first"`, `"interim"`, `"final"`,
+/// `"over_budget"`) as an owned `&'static [u8]` view of the
+/// static-lifetime label constant table's UTF-8 bytes with
+/// `'static` lifetime preserved. The zero-cost by-value conversion
+/// peer of the [`AsRef<[u8]>`] borrow surface directly above, both
+/// routing through the same [`PerAttemptRegion::as_str`] canonical-
+/// label oracle composed with [`str::as_bytes`] — the difference is
+/// that [`AsRef<[u8]>`] borrows through the receiver's lifetime (a
+/// caller with a short-lived [`PerAttemptRegion`] gets a short-
+/// lived `&[u8]` back), whereas this [`From`] impl consumes the
+/// receiver by value and returns `&'static [u8]` (a caller that no
+/// longer needs the [`PerAttemptRegion`] value gets a `'static`-
+/// lived byte-slice label back).
+///
+/// Structural mirror of [`From<PerAttemptRegion> for &'static str`]
+/// (commit c8614e9) above — the same by-value static-lifetime emit
+/// surface at the same one-oracle discipline, projected onto the
+/// byte-slice frontier instead of the UTF-8 string frontier. Opens
+/// a new by-value static-lifetime byte-slice-emit trio at the per-
+/// attempt-region ladder parallel to the `From<T> for &'static str`
+/// surface: `From<T> for &'static str` (c8614e9) yields
+/// `&'static str`, this `From<T> for &'static [u8]` yields
+/// `&'static [u8]` — the same routing discipline
+/// (`region.as_str().as_bytes()` == one composition through
+/// [`PerAttemptRegion::as_str`] and [`str::as_bytes`], both zero-
+/// copy views of the static-lifetime label constant preserving
+/// `'static` end-to-end) so a future consumer that requires the
+/// byte-slice frontier reads the canonical label through one
+/// typed-primitive surface at the same oracle instead of restating
+/// the two-step `region.as_str().as_bytes()` composition at every
+/// call site — this time with `'static` lifetime preserved through
+/// the by-value conversion rather than borrowed through the
+/// receiver.
+///
+/// Opens the by-value static-lifetime byte-slice-emit trio at the
+/// per-attempt-region ladder; two subsequent commits close it at
+/// the [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// `From<T> for &'static str` opening order
+/// (c8614e9 → c041b0b → 819a4c3) and the `AsRef<[u8]>` opening
+/// order (af44439 → 13abcc4 → 833d706).
+///
+/// Zero-cost by construction: the returned `&'static [u8]` is a
+/// zero-length-check-free view of the static-lifetime label
+/// constant table's UTF-8 bytes — [`str::as_bytes`] is a
+/// zero-cost transmute at the borrow-view boundary, no allocation,
+/// no copy, no branching over the variant discriminant beyond
+/// what [`PerAttemptRegion::as_str`] itself does at its match
+/// body. The `'static` lifetime is preserved through the
+/// composition because [`PerAttemptRegion::as_str`] returns
+/// `&'static str` and [`str::as_bytes`] preserves the receiver's
+/// lifetime.
+///
+/// The identity `<&'static [u8]>::from(region) ==
+/// region.as_str().as_bytes()` at every [`PerAttemptRegion::ALL`]
+/// variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_static_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carried through a generic `impl Into<&'static [u8]>`
+/// consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_into_static_bytes_carries_through_generic_consumer`];
+/// the round-trip through [`std::str::from_utf8`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_static_bytes_round_trips_through_from_utf8`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// byte-slice-emit surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
+/// &'static [u8]` impl routing through [`as_str`] and
+/// [`str::as_bytes`]), not a per-consumer
+/// `.as_str().as_bytes()` restatement at every downstream site
+/// that accepts `impl Into<&'static [u8]>`. THEORY.md §VI.1
+/// one-oracle: the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]) and every surface — `as_str`,
+/// `Display`, `Serialize`, `AsRef<str>`, `AsRef<[u8]>`,
+/// `From<T> for &'static str`, this `From<T> for &'static [u8]` —
+/// reads through it.
+impl From<PerAttemptRegion> for &'static [u8] {
+    fn from(region: PerAttemptRegion) -> &'static [u8] {
+        region.as_str().as_bytes()
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -14174,6 +14266,110 @@ mod tests {
             let borrowed: &[u8] = region.as_ref();
             let decoded = std::str::from_utf8(borrowed).unwrap_or_else(|err| {
                 panic!("AsRef<[u8]> bytes for {region:?} must be valid UTF-8 (got {err})")
+            });
+            assert_eq!(
+                decoded,
+                region.as_str(),
+                "from_utf8 round-trip must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], `<&'static [u8]>::from(region)` (the
+    /// [`From<PerAttemptRegion> for &'static [u8]`] impl body) equals
+    /// `region.as_str().as_bytes()` (the composition through the
+    /// canonical-label oracle and [`str::as_bytes`]). Pins the
+    /// agreement identity that the by-value static-lifetime byte-
+    /// slice emit surface reads the same canonical label the
+    /// borrowed-view surface reads at the byte-slice frontier: a
+    /// regression that swapped [`From<PerAttemptRegion> for
+    /// &'static [u8]`] to route through an intermediate
+    /// [`std::fmt::Display`] format buffer or a fresh [`String`]
+    /// allocation would fail here at ONE named site instead of
+    /// leaking to every downstream `impl Into<&'static [u8]>`
+    /// consumer (streaming hasher preloaded input slot,
+    /// `phf`-style static byte-key lookup table, `Cow<'static,
+    /// [u8]>` sink, etc.). Structural mirror of
+    /// [`test_per_attempt_region_from_into_static_str_agrees_with_as_str`]
+    /// at the UTF-8 emit surface — the two agreement pins together
+    /// close the by-value static-lifetime emit axis across both the
+    /// string (`&'static str`) and byte-slice (`&'static [u8]`)
+    /// frontiers against the same canonical-label oracle.
+    #[test]
+    fn test_per_attempt_region_from_into_static_bytes_agrees_with_as_str_as_bytes() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &'static [u8] = <&'static [u8]>::from(region);
+            assert_eq!(
+                borrowed,
+                region.as_str().as_bytes(),
+                "From<PerAttemptRegion> for &'static [u8] and as_str().as_bytes() must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for &'static [u8]`] identity
+    /// carries through a generic `impl Into<&'static [u8]>` consumer
+    /// at every [`PerAttemptRegion::ALL`] variant. A tiny generic
+    /// function `fn read<T: Into<&'static [u8]>>(t: T) -> &'static [u8]
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (a hasher factory holding `&'static [u8]` update slots, a
+    /// `phf`-style static lookup table keyed by canonical label
+    /// bytes, a [`std::borrow::Cow<'static, [u8]>`] sink taking
+    /// `Into<Cow<'static, [u8]>>`) — reads the canonical snake_case
+    /// label bytes directly from a [`PerAttemptRegion`] value with
+    /// `'static` lifetime preserved end-to-end. The structural
+    /// witness that a [`PerAttemptRegion`] is genuinely usable at
+    /// `impl Into<&'static [u8]>` call sites — a regression that
+    /// drifted the [`From`] impl signature (e.g., returning an
+    /// owned [`Vec<u8>`] instead of `&'static [u8]`, or requiring
+    /// `&PerAttemptRegion` and losing the `'static` lifetime through
+    /// a receiver borrow) fails here at compile time instead of at
+    /// every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_static_bytes_carries_through_generic_consumer() {
+        fn read<T: Into<&'static [u8]>>(t: T) -> &'static [u8] {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region),
+                region.as_str().as_bytes(),
+                "generic Into<&'static [u8]> consumer must read canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], the owned `&'static [u8]` view
+    /// from the [`From<PerAttemptRegion> for &'static [u8]`] impl
+    /// round-trips through [`std::str::from_utf8`] back to the
+    /// canonical snake_case label exactly. Ties the by-value
+    /// static-lifetime byte frontier to the UTF-8 frontier through
+    /// the standard library's UTF-8 validator at ONE named site: a
+    /// regression that drifted [`From<PerAttemptRegion> for
+    /// &'static [u8]`] to yield non-UTF-8 bytes (a numeric-
+    /// discriminant byte cast, a byte-swapped label, a mangled
+    /// encoding) fails here with a [`std::str::Utf8Error`] at the
+    /// [`std::str::from_utf8`] boundary or a label mismatch at the
+    /// round-trip assertion. Together with
+    /// [`test_per_attempt_region_from_into_static_bytes_agrees_with_as_str_as_bytes`]
+    /// this closes the by-value static-lifetime byte-slice emit
+    /// surface against both the composition oracle
+    /// (`.as_str().as_bytes()`) and the UTF-8 validity oracle
+    /// ([`std::str::from_utf8`]) at every [`PerAttemptRegion::ALL`]
+    /// variant, matching the discipline the borrowed-view pin
+    /// [`test_per_attempt_region_as_ref_bytes_round_trips_through_from_utf8`]
+    /// already reads at the [`AsRef<[u8]>`] surface.
+    #[test]
+    fn test_per_attempt_region_from_into_static_bytes_round_trips_through_from_utf8() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &'static [u8] = <&'static [u8]>::from(region);
+            let decoded = std::str::from_utf8(borrowed).unwrap_or_else(|err| {
+                panic!(
+                    "From<PerAttemptRegion> for &'static [u8] bytes for {region:?} must be valid UTF-8 (got {err})"
+                )
             });
             assert_eq!(
                 decoded,
