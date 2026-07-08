@@ -6285,6 +6285,101 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, [u8]> {
     }
 }
 
+/// [`From<AdmissionTier> for Box<[u8]>`] routes through
+/// [`AdmissionTier::as_str`] composed with [`str::as_bytes`] and
+/// [`<Box<[u8]> as From<&[u8]>>::from`] so a downstream consumer
+/// bound by [`Into<Box<[u8]>>`] (a validated-input newtype whose
+/// byte-slice payload field is typed [`Box<[u8]>`] to carry the
+/// canonical label bytes at a single exact-capacity allocation
+/// with no [`Vec<u8>`] growth-header slack, a `phf`-style keyed-
+/// table byte-key value slot at the shrunk-owned frontier, a SLSA
+/// / sigstore attestation-subject bytes builder whose payload
+/// sink is typed as an immutable heap-owned byte slice, an OCI /
+/// GHCR annotation-value sink that owns the label bytes without
+/// the [`Vec<u8>`] growth-header cost for the network round-trip)
+/// receives the canonical snake_case label bytes (`b"refused"`,
+/// `b"staging_only"`, `b"strict"`) as an immutable heap-owned
+/// [`Box<[u8]>`] with a single exact-capacity allocation — no
+/// [`Vec<u8>`] growth-header, no [`Vec::with_capacity`] over-
+/// allocation slack, no [`Vec::into_boxed_slice`] realloc-plus-
+/// shrink round trip — through ONE composition rather than a per-
+/// consumer `Box::<[u8]>::from(tier.as_str().as_bytes())`
+/// restatement.
+///
+/// Structural mirror of [`From<AdmissionTier> for Box<str>`]
+/// below — the same by-value shrunk-owned emit surface at the
+/// same one-oracle discipline, projected onto the byte-slice
+/// frontier instead of the UTF-8 string frontier. Mid-trio peer
+/// of the by-value [`Box<[u8]>`]-emit trio at the second ordered
+/// typed sum: [`From<PerAttemptRegion> for Box<[u8]>`] (commit
+/// 7045474) opened the trio at the per-attempt-region ladder;
+/// this impl carries the mid-trio slot at the admission-tier
+/// ladder; one subsequent commit closes it at the
+/// [`crate::version::BumpLevel`] ladder, matching the
+/// [`From<T> for Box<str>`] opening order
+/// (c54e10a → f8e0e02 → 5308841), the [`From<T> for &'static [u8]`]
+/// opening order (70e813b → 694dff9 → 762437f), the
+/// [`From<T> for Vec<u8>`] opening order
+/// (2ad52bc → 491db4d → 6701191), and the
+/// [`From<T> for Cow<'static, [u8]>`] opening order
+/// (912a5ff → 89af285 → 7c465d1).
+///
+/// The natural bridge from the [`Vec<u8>`] peer above to any
+/// downstream site that types its byte-slice sink as
+/// `impl Into<Box<[u8]>>` — the emit peer that answers the
+/// receiver-side question "does this byte-oriented API want a
+/// growable [`Vec<u8>`] with resize headroom or a shrunk-owned
+/// immutable heap-owned buffer?" with "the immutable shrunk-owned
+/// [`Box<[u8]>`]." A receiver typed as [`Box<[u8]>`] (rather than
+/// [`Vec<u8>`]) pays the exact-capacity single-allocation cost
+/// without the growth-header slack, and cannot silently grow past
+/// its allocated end — the load-bearing discipline for a keyed-
+/// table byte-key slot, a validated-input newtype byte-payload
+/// field, or an SLSA subject-bytes sink that must not reallocate
+/// after signing. The routing discipline picks
+/// [`<Box<[u8]> as From<&[u8]>>::from`] rather than
+/// `tier.as_str().as_bytes().to_vec().into_boxed_slice()`:
+/// [`<Box<[u8]> as From<&[u8]>>::from`] allocates the boxed slice
+/// at exactly the canonical label bytes' length in one call, so
+/// the emit-side receiver pays exactly one exact-capacity heap
+/// allocation, not the [`Vec<u8>`]-with-growth-header allocation
+/// plus [`Vec::into_boxed_slice`] realloc-and-shrink round trip
+/// that a `.to_vec().into_boxed_slice()` composition would pay.
+///
+/// The identity `Box::<[u8]>::from(tier).as_ref() ==
+/// tier.as_str().as_bytes()` at every [`AdmissionTier::ALL`]
+/// variant is pinned by
+/// [`tests::test_admission_tier_from_into_boxed_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carried through a generic
+/// `impl Into<Box<[u8]>>` consumer at every variant is pinned by
+/// [`tests::test_admission_tier_into_boxed_bytes_carries_through_generic_consumer`];
+/// the UTF-8 validity of the emitted boxed bytes decoding back to
+/// [`AdmissionTier::as_str`] at every variant is pinned by
+/// [`tests::test_admission_tier_from_into_boxed_bytes_round_trips_through_from_utf8`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// [`Box<[u8]>`] emit surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one `From<AdmissionTier> for
+/// Box<[u8]>` impl routing through [`as_str`] + [`str::as_bytes`]
+/// composed with [`<Box<[u8]> as From<&[u8]>>::from`]), not a
+/// per-consumer `Box::<[u8]>::from(tier.as_str().as_bytes())`
+/// restatement at every downstream site that accepts
+/// `impl Into<Box<[u8]>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`AdmissionTier::as_str`]) and every byte-slice emit
+/// surface — [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
+/// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
+/// this [`From<T> for Box<[u8]>`] — reads through it composed
+/// with [`str::as_bytes`], so the shrunk-owned allocation shape
+/// sits ON TOP of the same canonical-label oracle every borrowed-
+/// view, static-lifetime, owned-buffer, and borrowed/owned-
+/// frontier emit peer already reads.
+impl From<AdmissionTier> for Box<[u8]> {
+    fn from(tier: AdmissionTier) -> Box<[u8]> {
+        Box::<[u8]>::from(tier.as_str().as_bytes())
+    }
+}
+
 /// [`TryFrom<&[u8]> for AdmissionTier`] routes through
 /// [`std::str::from_utf8`] at the byte-slice / UTF-8 frontier composed
 /// with [`<Self as std::str::FromStr>::from_str`] at the canonical-
@@ -18835,6 +18930,135 @@ mod tests {
                 matches!(cow, std::borrow::Cow::Borrowed(_)),
                 "From<AdmissionTier> for Cow<'static, [u8]> must return Cow::Borrowed \
                  (zero-allocation branch) at {tier:?}, not Cow::Owned",
+            );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`], `Box::<[u8]>::from(tier)` (the
+    /// [`From<AdmissionTier> for Box<[u8]>`] impl body) yields
+    /// the same byte-slice view as `tier.as_str().as_bytes()` —
+    /// the composition through the canonical-label oracle and
+    /// [`str::as_bytes`]. Pins the agreement identity that the
+    /// by-value shrunk-owned byte-slice emit surface reads the
+    /// same canonical label the borrowed-view [`AsRef<[u8]>`],
+    /// the by-value static-lifetime
+    /// [`From<AdmissionTier> for &'static [u8]`], the by-value
+    /// owned-buffer [`From<AdmissionTier> for Vec<u8>`], and the
+    /// by-value borrowed/owned-frontier
+    /// [`From<AdmissionTier> for Cow<'static, [u8]>`] surfaces
+    /// already read at the byte-slice frontier. Structural mirror
+    /// of the [`Box<str>`] agreement pin
+    /// [`test_admission_tier_from_into_boxed_str_agrees_with_as_str`]
+    /// at the UTF-8 frontier — the two agreement pins together
+    /// close the by-value shrunk-owned emit axis across both
+    /// string and byte-slice frontiers against the same oracle.
+    /// A regression that swapped the [`From`] impl body to route
+    /// through
+    /// `tier.as_str().as_bytes().to_vec().into_boxed_slice()`
+    /// (paying a [`Vec<u8>`] growth-header allocation plus a
+    /// [`Vec::into_boxed_slice`] realloc-and-shrink round trip)
+    /// or through [`String::from`]-then-[`String::into_bytes`]-
+    /// then-[`Vec::into_boxed_slice`] (adding a [`String`]
+    /// growth-header allocation on top) fails here at ONE named
+    /// site instead of leaking to every downstream
+    /// `impl Into<Box<[u8]>>` consumer. Structural mirror of
+    /// `test_per_attempt_region_from_into_boxed_bytes_agrees_with_as_str_as_bytes`
+    /// (commit 7045474) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_from_into_boxed_bytes_agrees_with_as_str_as_bytes() {
+        for tier in AdmissionTier::ALL {
+            let boxed: Box<[u8]> = Box::<[u8]>::from(tier);
+            assert_eq!(
+                boxed.as_ref(),
+                tier.as_str().as_bytes(),
+                "From<AdmissionTier> for Box<[u8]> and as_str().as_bytes() must agree at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for Box<[u8]>`] identity carries
+    /// through a generic `impl Into<Box<[u8]>>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Box<[u8]>>>(t: T) -> Box<[u8]> {
+    /// t.into() }` — the shape of an actual downstream consumer
+    /// (a validated-input newtype whose byte-slice payload field
+    /// is typed [`Box<[u8]>`], a `phf`-style keyed-table byte-key
+    /// value slot at the shrunk-owned frontier, an SLSA /
+    /// sigstore attestation-subject bytes builder whose payload
+    /// sink is typed as an immutable heap-owned byte slice, an
+    /// OCI / GHCR annotation-value sink that owns the label bytes
+    /// without the [`Vec<u8>`] growth-header cost) — reads the
+    /// canonical snake_case label bytes directly from an
+    /// [`AdmissionTier`] value as an immutable heap-owned
+    /// [`Box<[u8]>`]. The structural witness that an
+    /// [`AdmissionTier`] is genuinely usable at
+    /// `impl Into<Box<[u8]>>` call sites — a regression that
+    /// drifted the [`From`] impl signature (returning
+    /// [`Vec<u8>`] instead of [`Box<[u8]>`], returning a
+    /// [`std::borrow::Cow<'_, [u8]>`] wrapper instead of the bare
+    /// boxed slice, requiring `&AdmissionTier` and losing the
+    /// by-value semantics) fails here at compile time instead of
+    /// at every downstream generic call site. Structural mirror
+    /// of
+    /// `test_per_attempt_region_into_boxed_bytes_carries_through_generic_consumer`
+    /// (commit 7045474) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_into_boxed_bytes_carries_through_generic_consumer() {
+        fn read<T: Into<Box<[u8]>>>(t: T) -> Box<[u8]> {
+            t.into()
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(tier).as_ref(),
+                tier.as_str().as_bytes(),
+                "generic Into<Box<[u8]>> consumer must read canonical label bytes at {tier:?}",
+            );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`], the shrunk-owned [`Box<[u8]>`]
+    /// emitted by [`From<AdmissionTier> for Box<[u8]>`] decodes
+    /// back through [`std::str::from_utf8`] to
+    /// [`AdmissionTier::as_str`]. Pins that the emitted bytes are
+    /// valid UTF-8 and equal the canonical label bytes at the
+    /// standard library's UTF-8 validator at ONE named site: a
+    /// regression that drifted
+    /// [`From<AdmissionTier> for Box<[u8]>`] to yield non-UTF-8
+    /// bytes (a numeric-discriminant byte cast, a byte-swapped
+    /// label, a mangled encoding) fails here with a
+    /// [`std::str::Utf8Error`] at the [`std::str::from_utf8`]
+    /// boundary or a label mismatch at the round-trip assertion.
+    /// Together with
+    /// [`test_admission_tier_from_into_boxed_bytes_agrees_with_as_str_as_bytes`]
+    /// this closes the by-value shrunk-owned byte-slice emit
+    /// surface against both the composition oracle
+    /// (`.as_str().as_bytes()`) and the UTF-8 validity oracle
+    /// ([`std::str::from_utf8`]) at every
+    /// [`AdmissionTier::ALL`] variant, matching the discipline
+    /// the by-value static-lifetime pin
+    /// [`test_admission_tier_from_into_static_bytes_round_trips_through_from_utf8`]
+    /// and the borrowed-view pin
+    /// [`test_admission_tier_as_ref_bytes_round_trips_through_from_utf8`]
+    /// already read at the [`&'static [u8]`] and [`AsRef<[u8]>`]
+    /// surfaces. Structural mirror of
+    /// `test_per_attempt_region_from_into_boxed_bytes_round_trips_through_from_utf8`
+    /// (commit 7045474) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_from_into_boxed_bytes_round_trips_through_from_utf8() {
+        for tier in AdmissionTier::ALL {
+            let boxed: Box<[u8]> = Box::<[u8]>::from(tier);
+            let decoded = std::str::from_utf8(&boxed).unwrap_or_else(|err| {
+                panic!(
+                    "From<AdmissionTier> for Box<[u8]> bytes for {tier:?} must be valid UTF-8 (got {err})"
+                )
+            });
+            assert_eq!(
+                decoded,
+                tier.as_str(),
+                "from_utf8 round-trip must recover canonical label at {tier:?}",
             );
         }
     }
