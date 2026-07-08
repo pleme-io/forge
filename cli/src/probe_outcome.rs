@@ -6086,6 +6086,90 @@ impl From<AdmissionTier> for &'static [u8] {
     }
 }
 
+/// [`From<AdmissionTier> for Cow<'static, [u8]>`] routes through
+/// [`AdmissionTier::as_str`] composed with [`str::as_bytes`] and
+/// wraps the resulting `'static`-lived byte view at the
+/// [`std::borrow::Cow::Borrowed`] branch so a downstream consumer
+/// that takes an [`Into<Cow<'static, [u8]>>`] (a hasher factory
+/// keyed on either a static label or a caller-owned owned
+/// [`Vec<u8>`] uniformly, a SLSA / sigstore attestation-subject
+/// bytes sink typed as `Cow<'static, [u8]>`, a `phf`-style static
+/// byte-key lookup table over canonical labels, an OCI / GHCR
+/// manifest annotation-value sink at the byte-slice frontier)
+/// reads the canonical snake_case label bytes (`"refused"`,
+/// `"staging_only"`, `"strict"` as UTF-8 byte-slices) directly
+/// from an [`AdmissionTier`] value with **zero allocation** at the
+/// emit boundary — the [`Cow::Borrowed`] branch preserves the
+/// `'static` lifetime end-to-end so a receiver bound by
+/// [`Into<Cow<'static, [u8]>>`] pays the `'static`-borrow cost of
+/// [`From<AdmissionTier> for &'static [u8]`], not the [`Vec<u8>`]-
+/// allocation cost that a [`Cow::Owned`] branch would silently pay.
+///
+/// Structural mirror of [`From<AdmissionTier> for
+/// std::borrow::Cow<'static, str>`] below — the same by-value
+/// borrowed/owned-frontier emit surface at the same one-oracle
+/// discipline, projected onto the byte-slice frontier instead of
+/// the UTF-8 string frontier. Mid-trio peer of the by-value
+/// borrowed/owned-frontier byte-slice-emit trio:
+/// `From<PerAttemptRegion> for Cow<'static, [u8]>` (commit 912a5ff)
+/// opened the trio at the per-attempt-region ladder; this impl
+/// carries the mid-trio slot at the second ordered typed sum,
+/// matching the `From<T> for Cow<'static, str>` opening order
+/// (79113dd → 65b1e77 → 133769a) and the `From<T> for &'static [u8]`
+/// opening order (70e813b → 694dff9 → 762437f); one subsequent
+/// commit closes the trio at the [`crate::version::BumpLevel`]
+/// ladder.
+///
+/// The natural bridge from the [`From<AdmissionTier> for &'static
+/// [u8]`] peer above to any downstream site that types its byte-
+/// slice sink as [`Into<Cow<'static, [u8]>>`] — the emit peer that
+/// answers the receiver-side question "does this byte-oriented API
+/// want a borrow or an owned [`Vec<u8>`]?" with "either, and in
+/// the [`AdmissionTier`] case, always the zero-allocation
+/// [`Cow::Borrowed`] branch." A receiver typed as
+/// `Cow<'static, [u8]>` (rather than `&'static [u8]`) permits the
+/// caller to interleave [`AdmissionTier`] label bytes with computed
+/// [`Vec<u8>`]s in the same sink; a receiver typed as
+/// `Cow<'static, [u8]>` (rather than `Vec<u8>`) permits the caller
+/// to elide the allocation when the label is already `'static` —
+/// which every [`AdmissionTier`] label is. The [`Cow::Borrowed`]
+/// branch is the load-bearing choice at this impl body:
+/// [`Cow::Owned`] would drift the impl toward a [`Vec<u8>`]-
+/// allocation cost, defeating the borrowed/owned-frontier
+/// discipline this impl mid-slots at the byte-slice frontier.
+///
+/// The identity `Cow::<'static, [u8]>::from(tier) ==
+/// tier.as_str().as_bytes()` at every [`AdmissionTier::ALL`]
+/// variant is pinned by
+/// [`tests::test_admission_tier_from_into_cow_static_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carried through a generic
+/// `impl Into<Cow<'static, [u8]>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_admission_tier_into_cow_static_bytes_carries_through_generic_consumer`];
+/// the [`Cow::Borrowed`]-not-[`Cow::Owned`] zero-allocation
+/// contract at the emit boundary is pinned by
+/// [`tests::test_admission_tier_into_cow_static_bytes_is_borrowed`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value
+/// `Cow<'static, [u8]>`-emit surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one `From<AdmissionTier> for
+/// Cow<'static, [u8]>` impl routing through [`AdmissionTier::as_str`]
+/// and [`str::as_bytes`] at the [`Cow::Borrowed`] branch), not a
+/// per-consumer `Cow::Borrowed(tier.as_str().as_bytes())`
+/// restatement at every downstream site that accepts
+/// `impl Into<Cow<'static, [u8]>>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`AdmissionTier::as_str`])
+/// and every emit surface — `as_str`, `Display`, `Serialize`,
+/// `AsRef<str>`, `AsRef<[u8]>`, `From<T> for &'static str`,
+/// `From<T> for &'static [u8]`, `From<T> for String`,
+/// `From<T> for Cow<'static, str>`, this `From<T> for Cow<'static,
+/// [u8]>` — reads through it.
+impl From<AdmissionTier> for std::borrow::Cow<'static, [u8]> {
+    fn from(tier: AdmissionTier) -> std::borrow::Cow<'static, [u8]> {
+        std::borrow::Cow::Borrowed(tier.as_str().as_bytes())
+    }
+}
+
 /// [`TryFrom<&str> for AdmissionTier`] routes through
 /// [`<AdmissionTier as std::str::FromStr>::from_str`] so a downstream
 /// consumer bound by `impl TryFrom<&str>` (a serde container that opts
@@ -18067,6 +18151,106 @@ mod tests {
                 decoded,
                 tier.as_str(),
                 "from_utf8 round-trip must recover canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`], `Cow::<'static, [u8]>::from(tier)`
+    /// (the [`From<AdmissionTier> for Cow<'static, [u8]>`] impl
+    /// body) yields the same byte-slice view as
+    /// `tier.as_str().as_bytes()` — the composition through the
+    /// canonical-label oracle and [`str::as_bytes`]. Pins the
+    /// agreement identity that the by-value borrowed/owned-
+    /// frontier byte-slice emit surface reads the same canonical
+    /// label the [`&'static [u8]`] emit surface and the borrowed-
+    /// view [`AsRef<[u8]>`] surface already read at the byte-slice
+    /// frontier. Structural mirror of the [`Cow<'static, str>`]
+    /// agreement pin
+    /// [`test_admission_tier_from_into_cow_static_str_agrees_with_as_str`]
+    /// at the UTF-8 frontier — the two agreement pins together
+    /// close the by-value borrowed/owned-frontier emit axis across
+    /// both string and byte frontiers against the same oracle.
+    /// Structural mirror of
+    /// `test_per_attempt_region_from_into_cow_static_bytes_agrees_with_as_str_as_bytes`
+    /// (commit 912a5ff) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_from_into_cow_static_bytes_agrees_with_as_str_as_bytes() {
+        for tier in AdmissionTier::ALL {
+            let cow: std::borrow::Cow<'static, [u8]> = std::borrow::Cow::from(tier);
+            assert_eq!(
+                cow.as_ref(),
+                tier.as_str().as_bytes(),
+                "From<AdmissionTier> for Cow<'static, [u8]> and as_str().as_bytes() must agree at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for Cow<'static, [u8]>`] identity
+    /// carries through a generic `impl Into<Cow<'static, [u8]>>`
+    /// consumer at every [`AdmissionTier::ALL`] variant. A tiny
+    /// generic function `fn read<T: Into<Cow<'static, [u8]>>>(t: T)
+    /// -> Cow<'static, [u8]> { t.into() }` — the shape of an actual
+    /// downstream consumer (a SLSA / sigstore attestation-subject
+    /// bytes sink, an OCI / GHCR manifest annotation-value sink, a
+    /// `blake3` hasher factory keyed on either a static label or a
+    /// caller-owned [`Vec<u8>`] uniformly) — reads the canonical
+    /// snake_case label bytes directly from an [`AdmissionTier`]
+    /// value with the `'static` lifetime preserved through the
+    /// [`Cow<'static, [u8]>`] wrapper. A regression that drifted the
+    /// [`From`] impl signature (returning [`Cow<'_, [u8]>`] with a
+    /// non-`'static` lifetime, returning an owned [`Vec<u8>`]
+    /// instead of the [`Cow`] wrapper, requiring [`&AdmissionTier`]
+    /// and losing the by-value semantics) fails here at compile
+    /// time instead of at every downstream generic call site.
+    /// Structural mirror of
+    /// `test_per_attempt_region_into_cow_static_bytes_carries_through_generic_consumer`
+    /// (commit 912a5ff) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_into_cow_static_bytes_carries_through_generic_consumer() {
+        fn read<T: Into<std::borrow::Cow<'static, [u8]>>>(t: T) -> std::borrow::Cow<'static, [u8]> {
+            t.into()
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(tier).as_ref(),
+                tier.as_str().as_bytes(),
+                "generic Into<Cow<'static, [u8]>> consumer must read canonical label bytes at {tier:?}",
+            );
+        }
+    }
+
+    /// [`From<AdmissionTier> for Cow<'static, [u8]>`] returns the
+    /// [`Cow::Borrowed`] branch, not [`Cow::Owned`], at every
+    /// [`AdmissionTier::ALL`] variant. Pins the zero-allocation
+    /// contract at the emit boundary: because
+    /// [`AdmissionTier::as_str`] returns a `'static`-lived borrow
+    /// into the static-string constant table and [`str::as_bytes`]
+    /// preserves the receiver's lifetime, this impl composes with
+    /// an [`Into<Cow<'static, [u8]>>`] receiver at the
+    /// [`Cow::Borrowed`] branch — the receiver pays the `'static`-
+    /// borrow cost of [`From<AdmissionTier> for &'static [u8]`], not
+    /// the [`Vec<u8>`]-allocation cost a [`Cow::Owned`] branch
+    /// would silently pay. A regression that drifted the impl body
+    /// toward `Cow::Owned(tier.as_str().as_bytes().to_vec())` would
+    /// silently allocate at every byte-oriented emit site and defeat
+    /// the borrowed/owned-frontier discipline this impl mid-slots.
+    /// Structural mirror of the [`Cow<'static, str>`] pin
+    /// [`test_admission_tier_into_cow_static_str_is_borrowed`] at
+    /// the UTF-8 frontier — the two pins together close the zero-
+    /// allocation branch-choice contract across both string and
+    /// byte-slice frontiers. Structural mirror of
+    /// `test_per_attempt_region_into_cow_static_bytes_is_borrowed`
+    /// (commit 912a5ff) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_into_cow_static_bytes_is_borrowed() {
+        for tier in AdmissionTier::ALL {
+            let cow: std::borrow::Cow<'static, [u8]> = std::borrow::Cow::from(tier);
+            assert!(
+                matches!(cow, std::borrow::Cow::Borrowed(_)),
+                "From<AdmissionTier> for Cow<'static, [u8]> must return Cow::Borrowed \
+                 (zero-allocation branch) at {tier:?}, not Cow::Owned",
             );
         }
     }
