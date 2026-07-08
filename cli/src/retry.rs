@@ -2669,6 +2669,127 @@ impl From<PerAttemptRegion> for &'static [u8] {
     }
 }
 
+/// [`From<PerAttemptRegion> for Vec<u8>`] routes through
+/// [`PerAttemptRegion::as_str`] composed with [`str::as_bytes`] and
+/// clones the resulting byte-slice view into a caller-owned
+/// [`Vec<u8>`] through [`slice::to_vec`], so a downstream consumer
+/// that takes an [`Into<Vec<u8>>`] (an OCI / GHCR blob-upload sink
+/// whose input is an owned [`Vec<u8>`] payload, a
+/// `bytes::Bytes::from` bridge that takes an owned [`Vec<u8>`] before
+/// it hands the buffer to a shared-owned reader, a
+/// `reqwest::Body::from` request-body builder over an owned buffer,
+/// a SLSA / sigstore attestation-subject bytes builder that owns its
+/// payload for signing, a `tokio::io::AsyncWriteExt::write_all` sink
+/// typed as `Vec<u8>`, a `blake3::Hasher::update` sink that consumes
+/// an owned buffer) reads the canonical snake_case label bytes
+/// (`"before_first"`, `"first"`, `"interim"`, `"final"`,
+/// `"over_budget"` as UTF-8 byte-slices) as an owned [`Vec<u8>`] with
+/// EXACT-CAPACITY allocation at the emit boundary — the
+/// [`slice::to_vec`] route allocates a fresh [`Vec<u8>`] of exactly
+/// the canonical label's byte length, no
+/// [`String`]-realloc-plus-shrink round trip through a
+/// [`String::into_bytes`] composition, no [`Vec::with_capacity`] +
+/// [`Vec::extend_from_slice`] restatement per consumer.
+///
+/// The by-value owned-buffer byte-slice emit peer of the
+/// [`AsRef<[u8]>`] (borrowed-view byte-slice emit, af44439) and
+/// [`From<PerAttemptRegion> for &'static [u8]`] (by-value static-
+/// lifetime byte-slice emit, 70e813b) impls above — the three impls
+/// together close the borrowed-view / by-value static-lifetime /
+/// by-value owned-buffer emit triangle at the byte-slice frontier
+/// against the shared [`PerAttemptRegion::as_str`] +
+/// [`str::as_bytes`] canonical-label-bytes oracle. The
+/// [`AsRef<[u8]>`] impl is the borrowed-view surface (zero
+/// allocation, caller pays receiver lifetime), the
+/// [`From<PerAttemptRegion> for &'static [u8]`] impl is the by-value
+/// `'static`-lifetime surface (zero allocation, receiver pays
+/// `'static`-borrow cost), this [`From<PerAttemptRegion> for
+/// Vec<u8>`] impl is the by-value owned-buffer surface (single
+/// exact-capacity allocation, receiver pays owned-[`Vec<u8>`] cost)
+/// — the same one-oracle discipline projected onto the three
+/// distinct byte-slice ownership shapes.
+///
+/// Structural mirror of [`From<PerAttemptRegion> for String`] above
+/// — the same by-value owned-buffer emit surface at the same one-
+/// oracle discipline, projected onto the byte-slice frontier instead
+/// of the UTF-8 string frontier. Opens a new by-value owned-buffer
+/// byte-slice emit trio at the per-attempt-region ladder parallel to
+/// the `From<T> for String` surface at the UTF-8 frontier
+/// (a5a379f → 463b31b → 37d172c) and the `From<T> for &'static [u8]`
+/// surface at the byte-slice frontier (70e813b → 694dff9 → 762437f):
+/// [`From<T> for String`] yields an owned [`String`] through
+/// `region.as_str().to_owned()`, this [`From<T> for Vec<u8>`] yields
+/// an owned [`Vec<u8>`] through
+/// `region.as_str().as_bytes().to_vec()` — the same by-value
+/// owned-buffer emit discipline projected onto the byte-slice
+/// frontier. Two subsequent commits close this trio at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the opening order
+/// every prior byte-slice emit trio has kept
+/// (`AsRef<[u8]>`: af44439 → 13abcc4 → 833d706,
+/// `From<T> for &'static [u8]`: 70e813b → 694dff9 → 762437f,
+/// `From<T> for Cow<'static, [u8]>`: 912a5ff → 89af285 → 7c465d1).
+///
+/// The natural bridge from the borrowed-view [`AsRef<[u8]>`] and
+/// by-value static-lifetime [`From<T> for &'static [u8]`] emit peers
+/// above to any downstream site that types its byte-slice sink as
+/// [`Into<Vec<u8>>`] — the emit peer that answers the receiver-side
+/// question "does this byte-oriented API want a borrow, a
+/// `'static`-lifetime view, or a caller-owned buffer?" with "the
+/// owned buffer, allocated exactly once at the canonical label
+/// length." A receiver typed as [`Vec<u8>`] (rather than
+/// `&'static [u8]`) permits the caller to hand the byte-buffer
+/// through a shared-owned reader (`bytes::Bytes::from`,
+/// [`std::sync::Arc<[u8]>`]) or a mutable buffer sink
+/// ([`Vec::extend_from_slice`], [`Vec::push`]) that requires an
+/// owned allocation; a receiver typed as [`Vec<u8>`] (rather than
+/// [`std::borrow::Cow<'static, [u8]>`]) commits to the owned branch
+/// up-front (avoiding the [`std::borrow::Cow`] enum tag and the
+/// borrowed-branch dispatch) when the downstream contract requires
+/// an owned buffer regardless of provenance.
+///
+/// The impl body picks [`slice::to_vec`] rather than
+/// [`String::from`]-then-[`String::into_bytes`] or
+/// [`Vec::with_capacity`]-then-[`Vec::extend_from_slice`]:
+/// [`slice::to_vec`] issues ONE allocation at exactly the byte-
+/// slice's length (no [`String`] growth-header, no
+/// [`Vec::with_capacity`] over-allocation slack), and the composed
+/// call [`PerAttemptRegion::as_str`] + [`str::as_bytes`] +
+/// [`slice::to_vec`] yields the same discipline the sibling
+/// [`From<PerAttemptRegion> for String`] peer applies at the UTF-8
+/// frontier through [`str::to_owned`] — a single exact-capacity
+/// allocation per emit.
+///
+/// The identity `Vec::<u8>::from(region) ==
+/// region.as_str().as_bytes()` at every [`PerAttemptRegion::ALL`]
+/// variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_owned_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carried through a generic `impl Into<Vec<u8>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_into_owned_bytes_carries_through_generic_consumer`];
+/// the round-trip identity `Vec::<u8>::from(region)` fed back through
+/// [`TryFrom<Vec<u8>>`] at every variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_owned_bytes_round_trips_through_try_from`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned-buffer byte-
+/// slice emit surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
+/// Vec<u8>` impl routing through [`as_str`] + [`str::as_bytes`] +
+/// [`slice::to_vec`]), not a per-consumer
+/// `region.as_str().as_bytes().to_vec()` restatement at every
+/// downstream site that accepts `impl Into<Vec<u8>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`PerAttemptRegion::as_str`]) and every emit surface —
+/// `as_str`, `Display`, `Serialize`, `AsRef<str>`, `AsRef<[u8]>`,
+/// `From<T> for &'static str`, `From<T> for &'static [u8]`,
+/// `From<T> for String`, this `From<T> for Vec<u8>` — reads through
+/// it.
+impl From<PerAttemptRegion> for Vec<u8> {
+    fn from(region: PerAttemptRegion) -> Vec<u8> {
+        region.as_str().as_bytes().to_vec()
+    }
+}
+
 /// [`From<PerAttemptRegion> for Cow<'static, [u8]>`] routes through
 /// [`PerAttemptRegion::as_str`] composed with [`str::as_bytes`] and
 /// wraps the resulting `'static`-lived byte view at the
@@ -14894,6 +15015,120 @@ mod tests {
                 decoded,
                 region.as_str(),
                 "from_utf8 round-trip must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], `Vec::<u8>::from(region)` (the
+    /// [`From<PerAttemptRegion> for Vec<u8>`] impl body) equals
+    /// `region.as_str().as_bytes()` (the composition through the
+    /// canonical-label oracle and [`str::as_bytes`]). Pins the
+    /// agreement identity that the by-value owned-buffer byte-slice
+    /// emit surface reads the same canonical label the borrowed-
+    /// view [`AsRef<[u8]>`] surface and the by-value static-
+    /// lifetime [`From<PerAttemptRegion> for &'static [u8]`] surface
+    /// already read at the byte-slice frontier: a regression that
+    /// swapped the [`From`] impl body to route through
+    /// [`String::from`]-then-[`String::into_bytes`] (adding a
+    /// [`String`] growth-header allocation slack), or through a
+    /// [`Vec::with_capacity`] + [`Vec::extend_from_slice`]
+    /// restatement (over-allocating capacity headroom), or through
+    /// an intermediate [`std::fmt::Display`] format buffer, would
+    /// fail here at ONE named site instead of leaking to every
+    /// downstream `impl Into<Vec<u8>>` consumer (an owned-buffer
+    /// blob-upload sink, a `bytes::Bytes::from` bridge, a mutable
+    /// byte-buffer accumulator). Structural mirror of
+    /// [`test_per_attempt_region_from_into_string_agrees_with_as_str`]
+    /// at the UTF-8 owned-buffer emit surface — the two agreement
+    /// pins together close the by-value owned-buffer emit axis
+    /// across both the string ([`String`]) and byte-slice
+    /// ([`Vec<u8>`]) frontiers against the same canonical-label
+    /// oracle.
+    #[test]
+    fn test_per_attempt_region_from_into_owned_bytes_agrees_with_as_str_as_bytes() {
+        for region in PerAttemptRegion::ALL {
+            let owned: Vec<u8> = Vec::<u8>::from(region);
+            assert_eq!(
+                owned.as_slice(),
+                region.as_str().as_bytes(),
+                "From<PerAttemptRegion> for Vec<u8> and as_str().as_bytes() must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for Vec<u8>`] identity carries
+    /// through a generic `impl Into<Vec<u8>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Vec<u8>>>(t: T) -> Vec<u8> { t.into() }` —
+    /// the shape of an actual downstream consumer (an OCI / GHCR
+    /// blob-upload sink whose input is an owned [`Vec<u8>`] payload,
+    /// a `bytes::Bytes::from` bridge that takes an owned [`Vec<u8>`]
+    /// before handing the buffer to a shared-owned reader, a
+    /// `reqwest::Body::from` request-body builder over an owned
+    /// buffer, a SLSA / sigstore attestation-subject bytes builder
+    /// that owns its payload for signing) — reads the canonical
+    /// snake_case label bytes directly from a [`PerAttemptRegion`]
+    /// value as an owned [`Vec<u8>`]. The structural witness that a
+    /// [`PerAttemptRegion`] is genuinely usable at
+    /// `impl Into<Vec<u8>>` call sites — a regression that drifted
+    /// the [`From`] impl signature (returning `&'static [u8]`
+    /// instead of `Vec<u8>`, returning a
+    /// [`std::borrow::Cow<'_, [u8]>`] wrapper instead of the bare
+    /// owned buffer, requiring `&PerAttemptRegion` and losing the
+    /// by-value semantics) fails here at compile time instead of at
+    /// every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_owned_bytes_carries_through_generic_consumer() {
+        fn read<T: Into<Vec<u8>>>(t: T) -> Vec<u8> {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region),
+                region.as_str().as_bytes(),
+                "generic Into<Vec<u8>> consumer must read canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], the owned [`Vec<u8>`] emitted by
+    /// [`From<PerAttemptRegion> for Vec<u8>`] round-trips back
+    /// through [`TryFrom<Vec<u8>>`] to the original variant. Ties
+    /// the by-value owned-buffer byte-slice emit surface to its
+    /// byte-slice parse-side sibling
+    /// [`TryFrom<Vec<u8>> for PerAttemptRegion`] (91ba4bf) at the
+    /// same one-oracle discipline: a regression that drifted the
+    /// emit impl body toward non-canonical bytes (a byte-swapped
+    /// label, a mangled encoding, a numeric-discriminant byte cast)
+    /// OR drifted the parse impl body away from the shared
+    /// [`std::str::from_utf8`] + [`std::str::FromStr`] composition
+    /// fails here at ONE named site instead of leaking to every
+    /// downstream owned-byte-buffer round-trip consumer (an OCI /
+    /// GHCR annotation-value writer that reads its own emitted
+    /// label back, a SLSA / sigstore attestation-subject bytes
+    /// replay verifier, a cache-index owned-key re-parse). Together
+    /// with
+    /// [`test_per_attempt_region_from_into_owned_bytes_agrees_with_as_str_as_bytes`]
+    /// this closes the by-value owned-buffer byte-slice emit surface
+    /// against both the composition oracle (`.as_str().as_bytes()`)
+    /// and the round-trip parse oracle ([`TryFrom<Vec<u8>>`]) at
+    /// every [`PerAttemptRegion::ALL`] variant, matching the
+    /// discipline the by-value static-lifetime pin
+    /// [`test_per_attempt_region_from_into_static_bytes_round_trips_through_from_utf8`]
+    /// already reads at the `'static`-lifetime byte-slice emit
+    /// surface.
+    #[test]
+    fn test_per_attempt_region_from_into_owned_bytes_round_trips_through_try_from() {
+        for region in PerAttemptRegion::ALL {
+            let owned: Vec<u8> = Vec::<u8>::from(region);
+            let parsed = <PerAttemptRegion as std::convert::TryFrom<Vec<u8>>>::try_from(owned)
+                .expect("emitted owned bytes must parse through TryFrom<Vec<u8>>");
+            assert_eq!(
+                parsed, region,
+                "From<PerAttemptRegion> for Vec<u8> must round-trip through TryFrom<Vec<u8>> at {region:?}",
             );
         }
     }
