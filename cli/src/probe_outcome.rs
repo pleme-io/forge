@@ -6170,6 +6170,135 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, [u8]> {
     }
 }
 
+/// [`TryFrom<&[u8]> for AdmissionTier`] routes through
+/// [`std::str::from_utf8`] at the byte-slice / UTF-8 frontier composed
+/// with [`<Self as std::str::FromStr>::from_str`] at the canonical-
+/// label parse oracle so a downstream consumer bound by
+/// `impl for<'a> TryFrom<&'a [u8]>` (a `memchr`-driven line-splitter
+/// that hands slice tokens straight to a typed parser, an OCI /
+/// GHCR manifest annotation-value reader that surfaces raw
+/// `&[u8]` payloads, a SLSA / sigstore attestation-subject bytes
+/// reader that rehydrates variant labels from the byte-slice
+/// frontier, a `blake3` / `sha2` digest-input replay verifier that
+/// re-parses the pre-hashed canonical label bytes, an
+/// [`std::os::unix::ffi::OsStrExt`] label bridge that carries the
+/// canonical label as `&[u8]` across the OS-string boundary,
+/// a `nom` / `winnow` byte-parser combinator that hands a token
+/// slice to a typed-sum parser) recovers an [`AdmissionTier`]
+/// value from a canonical snake_case label byte-sequence
+/// (`b"refused"`, `b"staging_only"`, `b"strict"`) through the same
+/// one-oracle grammar the direct `.parse::<AdmissionTier>()` call
+/// sites, the sibling [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<Box<str>>`],
+/// [`TryFrom<Arc<str>>`], and [`TryFrom<Rc<str>>`] parse peers
+/// already read.
+///
+/// The by-reference byte-slice parse peer of [`AsRef<[u8]>`]
+/// (commit 13abcc4, the borrowed-view byte-slice emit surface) and
+/// [`From<AdmissionTier> for &'static [u8]`] (commit 694dff9, the
+/// by-value static-lifetime byte-slice emit surface) directly
+/// above — the three impls together close the borrowed-view /
+/// by-value-emit / by-reference-parse triangle at the byte-slice
+/// frontier against the shared [`AdmissionTier::as_str`] +
+/// [`str::as_bytes`] canonical-label-bytes oracle. The
+/// [`AsRef<[u8]>`] and [`From<AdmissionTier> for &'static [u8]`]
+/// impls are the emit side (canonical label bytes out), this
+/// [`TryFrom<&[u8]>`] impl is the parse side (canonical label
+/// bytes in) — the byte-slice frontier's parse peer of the emit
+/// pair, symmetric with [`TryFrom<&str>`] (the parse peer of the
+/// UTF-8 frontier emit pair [`AsRef<str>`] +
+/// [`From<AdmissionTier> for &'static str`]) at the UTF-8
+/// frontier.
+///
+/// Mid-trio peer of the byte-slice parse trio at the second
+/// ordered typed sum: [`TryFrom<&[u8]>`] for
+/// [`crate::retry::PerAttemptRegion`] (commit 5c0c827) opened the
+/// trio at the per-attempt-region ladder; this impl carries the
+/// mid-trio slot at the admission-tier ladder; one subsequent
+/// commit closes the trio at the [`crate::version::BumpLevel`]
+/// ladder, matching the [`AsRef<[u8]>`] opening order
+/// (af44439 → 13abcc4 → 833d706), the [`From<T> for &'static [u8]`]
+/// opening order (70e813b → 694dff9 → 762437f), the
+/// [`From<T> for Cow<'static, [u8]>`] opening order
+/// (912a5ff → 89af285 → 7c465d1), and the [`TryFrom<&str>`]
+/// opening order (1be3c49 → a17cd83 → 1fb1f1d) at the UTF-8
+/// frontier's parse-side counterpart.
+///
+/// The natural bridge to any downstream site that types its
+/// byte-slice parse contract as `impl for<'a> TryFrom<&'a [u8]>`
+/// rather than [`std::str::FromStr`] or [`TryFrom<&str>`] — the
+/// byte-slice frontier's `serde` `try_from` container attribute
+/// (`#[serde(try_from = "&[u8]")]` — which keys off
+/// [`TryFrom<&[u8]>`], not [`std::str::FromStr`]), a validated-
+/// input newtype builder whose canonical parse contract is stated
+/// as `TryFrom<&[u8]>`, a byte-slice classifier that composes over
+/// the `TryFrom<&[u8]>` contract. The [`FromStr`] impl carries the
+/// load-bearing match body against the canonical grammar; this
+/// [`TryFrom<&[u8]>`] impl delegates through [`std::str::from_utf8`]
+/// composed with [`FromStr`], so the parse-oracle discipline is
+/// preserved end-to-end and a future variant insertion / grammar
+/// refinement remains a one-site edit at [`AdmissionTier::as_str`]
+/// plus the matching [`FromStr`] arm addition.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at TWO frontiers. First, non-UTF-8 byte
+/// sequences reject at [`std::str::from_utf8`] with the standard
+/// [`std::str::Utf8Error`] diagnostic surfaced through
+/// [`anyhow::Error`] — an invalid UTF-8 payload never reaches the
+/// canonical-label match body, so a downstream consumer bound by
+/// [`TryFrom<&[u8]>`] inherits the same encoding-strictness a
+/// direct [`std::str::from_utf8`] + [`str::parse`] composition
+/// would offer, at one typed-primitive site rather than a per-
+/// consumer two-step restatement. Second, valid-UTF-8 byte
+/// sequences that decode to a non-canonical label
+/// (`b"Refused"`, `b"StagingOnly"`, `b"Strict"`, `b"REFUSED"`,
+/// `b" refused"`, `b"refused "`, `b"stagingonly"`, the empty byte
+/// sequence `b""`) reject at the underlying [`FromStr`] impl —
+/// the same canonical-only strictness the by-reference UTF-8 parse
+/// peer [`TryFrom<&str>`] and the direct
+/// `.parse::<AdmissionTier>()` call sites already carry, now
+/// lifted to the byte-slice frontier at ONE composition through
+/// [`std::str::from_utf8`] and [`FromStr`].
+///
+/// The identity `AdmissionTier::try_from(tier.as_str()
+/// .as_bytes()).unwrap() == tier` at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_try_from_bytes_agrees_with_from_str`];
+/// the identity carried through a generic `impl for<'a>
+/// TryFrom<&'a [u8]>` consumer at every variant is pinned by
+/// [`tests::test_admission_tier_try_from_bytes_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-UTF-8 input is pinned by
+/// [`tests::test_admission_tier_try_from_bytes_rejects_non_utf8_input`];
+/// the strict-rejection contract on valid-UTF-8 non-canonical
+/// input is pinned by
+/// [`tests::test_admission_tier_try_from_bytes_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-reference byte-slice
+/// try-conversion surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one `TryFrom<&[u8]>` impl routing
+/// through [`std::str::from_utf8`] + [`FromStr`]), not a per-
+/// consumer `std::str::from_utf8(bytes).and_then(|s|
+/// s.parse::<AdmissionTier>())` restatement at every downstream
+/// site that receives canonical-label byte sequences. THEORY.md
+/// §VI.1 one-oracle: the canonical-label grammar is named at one
+/// site ([`AdmissionTier::as_str`]), inverted at one site
+/// ([`AdmissionTier::from_str`]), and every parse surface —
+/// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
+/// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`],
+/// [`TryFrom<Rc<str>>`], this [`TryFrom<&[u8]>`] — reads through
+/// it.
+impl TryFrom<&[u8]> for AdmissionTier {
+    type Error = anyhow::Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let s = std::str::from_utf8(bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in admission tier bytes: {e}"))?;
+        <Self as std::str::FromStr>::from_str(s)
+    }
+}
+
 /// [`TryFrom<&str> for AdmissionTier`] routes through
 /// [`<AdmissionTier as std::str::FromStr>::from_str`] so a downstream
 /// consumer bound by `impl TryFrom<&str>` (a serde container that opts
@@ -18251,6 +18380,151 @@ mod tests {
                 matches!(cow, std::borrow::Cow::Borrowed(_)),
                 "From<AdmissionTier> for Cow<'static, [u8]> must return Cow::Borrowed \
                  (zero-allocation branch) at {tier:?}, not Cow::Owned",
+            );
+        }
+    }
+
+    /// [`TryFrom<&[u8]> for AdmissionTier`] recovers the original
+    /// variant at every [`AdmissionTier::ALL`] variant when the
+    /// canonical label bytes emitted by
+    /// `tier.as_str().as_bytes()` are fed back through it. Pins
+    /// the round-trip identity
+    /// `AdmissionTier::try_from(tier.as_str().as_bytes()).unwrap()
+    /// == tier` at every variant against the shared
+    /// [`AdmissionTier::as_str`] + [`str::as_bytes`] canonical-
+    /// label-bytes oracle. The structural witness that the by-
+    /// reference byte-slice try-conversion parse surface (this
+    /// [`TryFrom<&[u8]>`]) reads the same one-oracle grammar the
+    /// by-value emit surface [`From<AdmissionTier> for &'static
+    /// [u8]`] and the borrowed-view surface [`AsRef<[u8]>`] write —
+    /// one round-trip pin per variant, refuses a future variant
+    /// insertion that drops the `TryFrom<&[u8]>`/`as_str().as_bytes()`
+    /// agreement. Structural mirror of
+    /// `test_per_attempt_region_try_from_bytes_agrees_with_from_str`
+    /// (commit 5c0c827) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_try_from_bytes_agrees_with_from_str() {
+        for tier in AdmissionTier::ALL {
+            let parsed =
+                <AdmissionTier as std::convert::TryFrom<&[u8]>>::try_from(tier.as_str().as_bytes())
+                    .expect("canonical label bytes must parse through TryFrom<&[u8]>");
+            assert_eq!(
+                parsed, tier,
+                "TryFrom<&[u8]> must round-trip through as_str().as_bytes() at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<&[u8]> for AdmissionTier`] identity carries
+    /// through a generic `impl for<'a> TryFrom<&'a [u8]>` consumer
+    /// at every [`AdmissionTier::ALL`] variant. A tiny generic
+    /// function `fn parse<T>(b: &[u8]) -> T where T: for<'a>
+    /// TryFrom<&'a [u8]>, T::Error: std::fmt::Debug` — the shape of
+    /// an actual downstream consumer (a `memchr`-driven line-
+    /// splitter, an OCI / GHCR manifest annotation-value reader
+    /// that surfaces `&[u8]` payloads, a SLSA / sigstore
+    /// attestation-subject bytes reader, a `nom` / `winnow`
+    /// byte-parser combinator) — recovers the canonical variant
+    /// from the canonical snake_case label byte-sequence at every
+    /// variant. The structural witness that an [`AdmissionTier`]
+    /// is genuinely usable at `impl for<'a> TryFrom<&'a [u8]>` call
+    /// sites — a regression that drifted the [`TryFrom`] impl
+    /// signature (requiring an owned [`Vec<u8>`] input, returning
+    /// a different variant than [`FromStr`] would, dropping the
+    /// UTF-8 decode step and misparsing non-UTF-8 input) fails here
+    /// at compile time or at the assertion instead of at every
+    /// downstream generic call site. Structural mirror of
+    /// `test_per_attempt_region_try_from_bytes_carries_through_generic_consumer`
+    /// (commit 5c0c827) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_try_from_bytes_carries_through_generic_consumer() {
+        fn parse<T>(b: &[u8]) -> T
+        where
+            T: for<'a> std::convert::TryFrom<&'a [u8]>,
+            for<'a> <T as std::convert::TryFrom<&'a [u8]>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<&[u8]>>::try_from(b)
+                .expect("canonical label bytes must parse through generic TryFrom<&[u8]>")
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                parse::<AdmissionTier>(tier.as_str().as_bytes()),
+                tier,
+                "generic TryFrom<&[u8]> consumer must recover canonical variant at {tier:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&[u8]> for AdmissionTier`] rejects non-UTF-8 byte
+    /// sequences at the [`std::str::from_utf8`] decode frontier.
+    /// Pins the encoding-strictness contract at the byte-slice
+    /// frontier's first strictness gate so a downstream consumer
+    /// bound by [`TryFrom<&[u8]>`] (a `memchr`-driven line-splitter
+    /// over an unknown-encoding input buffer, an OCI / GHCR
+    /// manifest annotation-value reader that surfaces raw byte
+    /// payloads, a byte-slice classifier that composes over the
+    /// `TryFrom<&[u8]>` contract) inherits the same UTF-8-only
+    /// encoding discipline a direct [`std::str::from_utf8`] +
+    /// [`str::parse`] composition would offer, at ONE typed-
+    /// primitive site rather than a per-consumer two-step
+    /// restatement. A regression that dropped the UTF-8 decode
+    /// step (e.g., a naive `unsafe { from_utf8_unchecked }`)
+    /// would light up here rather than drifting silently to a
+    /// mis-parsed variant. Structural mirror of
+    /// `test_per_attempt_region_try_from_bytes_rejects_non_utf8_input`
+    /// (commit 5c0c827) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_try_from_bytes_rejects_non_utf8_input() {
+        for bad in [
+            &[0xffu8][..],
+            &[0xffu8, 0xfe][..],
+            &[0x80][..],
+            &[b'r', b'e', 0xff, b'u', b's', b'e', b'd'][..],
+            &[b's', b't', b'r', b'i', b'c', b't', 0xff][..],
+        ] {
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<&[u8]>>::try_from(bad).is_err(),
+                "TryFrom<&[u8]> must reject non-UTF-8 input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&[u8]> for AdmissionTier`] rejects valid-UTF-8
+    /// non-canonical byte sequences at the underlying [`FromStr`]
+    /// strictness gate — empty byte sequence, UpperCamel rendering,
+    /// uppercase, whitespace padding, and snake_case labels with a
+    /// dropped underscore all reject. Pins the canonical-label
+    /// strictness contract at the byte-slice frontier's second
+    /// strictness gate so a downstream consumer bound by
+    /// [`TryFrom<&[u8]>`] inherits the same canonical-only grammar
+    /// the direct `.parse::<AdmissionTier>()` call sites and the
+    /// sibling [`TryFrom<&str>`] impl already read, and a future
+    /// permissive-parse regression at the underlying [`FromStr`]
+    /// impl lights up here rather than drifting silently through
+    /// the byte-slice try-conversion surface. Sibling of the UTF-8-
+    /// frontier pin
+    /// [`test_admission_tier_try_from_str_rejects_non_canonical_input`]
+    /// at the by-reference UTF-8 parse peer — the two pins together
+    /// close the canonical-only strictness contract across both
+    /// UTF-8 and byte-slice frontiers. Structural mirror of
+    /// `test_per_attempt_region_try_from_bytes_rejects_non_canonical_input`
+    /// (commit 5c0c827) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_try_from_bytes_rejects_non_canonical_input() {
+        for bad in [
+            &b""[..],
+            &b"Refused"[..],
+            &b"StagingOnly"[..],
+            &b"Strict"[..],
+            &b"REFUSED"[..],
+            &b" refused"[..],
+            &b"refused "[..],
+            &b"stagingonly"[..],
+        ] {
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<&[u8]>>::try_from(bad).is_err(),
+                "TryFrom<&[u8]> must reject valid-UTF-8 non-canonical input {bad:?}",
             );
         }
     }
