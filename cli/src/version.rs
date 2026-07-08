@@ -1685,6 +1685,95 @@ impl From<BumpLevel> for &'static [u8] {
     }
 }
 
+/// [`From<BumpLevel> for Cow<'static, [u8]>`] routes through
+/// [`BumpLevel::as_str`] composed with [`str::as_bytes`] and wraps
+/// the resulting `'static`-lived byte view at the
+/// [`std::borrow::Cow::Borrowed`] branch so a downstream consumer
+/// that takes an [`Into<Cow<'static, [u8]>>`] (a hasher factory
+/// keyed on either a static label or a caller-owned owned
+/// [`Vec<u8>`] uniformly, a SLSA / sigstore attestation-subject
+/// bytes sink typed as [`std::borrow::Cow<'static, [u8]>`], a
+/// `phf`-style static byte-key lookup table over canonical labels,
+/// an OCI / GHCR manifest annotation-value sink at the byte-slice
+/// frontier) reads the canonical lowercase label bytes (`"patch"`,
+/// `"minor"`, `"major"` as UTF-8 byte-slices) directly from a
+/// [`BumpLevel`] value with **zero allocation** at the emit
+/// boundary — the [`std::borrow::Cow::Borrowed`] branch preserves
+/// the `'static` lifetime end-to-end through the composition
+/// [`BumpLevel::as_str`] → [`str::as_bytes`], not the
+/// [`std::borrow::Cow::Owned`] branch that would allocate a fresh
+/// [`Vec<u8>`] per call.
+///
+/// Structural mirror of [`From<BumpLevel> for Cow<'static, str>`]
+/// (commit 133769a) at the UTF-8 frontier — the same by-value
+/// borrowed/owned-frontier emit surface at the same one-oracle
+/// discipline, projected onto the byte-slice frontier. Trio-closing
+/// peer of the by-value borrowed/owned-frontier byte-slice-emit
+/// trio: `From<PerAttemptRegion> for Cow<'static, [u8]>` (commit
+/// 912a5ff) opened the trio at the per-attempt-region ladder;
+/// `From<AdmissionTier> for Cow<'static, [u8]>` (commit 89af285)
+/// carried the mid-trio slot at the admission-tier ladder; this
+/// impl closes the trio at the version-bump-magnitude ladder,
+/// matching the `From<T> for Cow<'static, str>` closure order
+/// (79113dd → 65b1e77 → 133769a) and the `From<T> for &'static [u8]`
+/// closure order (70e813b → 694dff9 → 762437f). After this commit
+/// the by-value borrowed/owned-frontier emit axis spans BOTH the
+/// UTF-8 string frontier (`From<T> for Cow<'static, str>`) and the
+/// byte-slice frontier (`From<T> for Cow<'static, [u8]>`) across
+/// all three ordered typed sums on the ladder set against ONE
+/// canonical-label oracle each at the same
+/// [`std::borrow::Cow::Borrowed`] branch discipline.
+///
+/// Zero-cost by construction: the returned
+/// [`std::borrow::Cow<'static, [u8]>`] wraps a zero-length-check-
+/// free view of the static-lifetime label constant table's UTF-8
+/// bytes — [`str::as_bytes`] is a zero-cost transmute at the borrow-
+/// view boundary, and the [`std::borrow::Cow::Borrowed`] wrapping
+/// is a discriminant tag with no runtime work at the emit site. No
+/// allocation, no copy, no branching over the variant discriminant
+/// beyond what [`BumpLevel::as_str`] itself does at its match body.
+/// The `'static` lifetime is preserved through the composition
+/// because [`BumpLevel::as_str`] returns `&'static str`,
+/// [`str::as_bytes`] preserves the receiver's lifetime, and
+/// [`std::borrow::Cow::Borrowed`] carries the byte-slice's lifetime
+/// through the [`Cow`] wrapper.
+///
+/// The identity `Cow::<'static, [u8]>::from(level).as_ref() ==
+/// level.as_str().as_bytes()` at every [`BumpLevel::ALL`] variant is
+/// pinned by
+/// [`tests::test_bump_level_from_into_cow_static_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carried through a generic `impl Into<Cow<'static,
+/// [u8]>>` consumer at every variant is pinned by
+/// [`tests::test_bump_level_into_cow_static_bytes_carries_through_generic_consumer`];
+/// the [`std::borrow::Cow::Borrowed`]-not-[`std::borrow::Cow::Owned`]
+/// zero-allocation branch choice at every variant is pinned by
+/// [`tests::test_bump_level_into_cow_static_bytes_is_borrowed`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// frontier byte-slice-emit surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one `From<BumpLevel> for Cow<'static, [u8]>`
+/// impl routing through [`BumpLevel::as_str`] composed with
+/// [`str::as_bytes`] at the [`std::borrow::Cow::Borrowed`] branch),
+/// not a per-consumer `Cow::Borrowed(level.as_str().as_bytes())`
+/// restatement at every downstream site that accepts
+/// `impl Into<Cow<'static, [u8]>>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`BumpLevel::as_str`]) and
+/// every emit surface — `as_str`, [`std::fmt::Display`],
+/// [`serde::Serialize`], [`AsRef<str>`], [`AsRef<[u8]>`],
+/// `From<T> for &'static str`, `From<T> for &'static [u8]`,
+/// `From<T> for String`, `From<T> for Cow<'static, str>`, this
+/// `From<T> for Cow<'static, [u8]>` — reads through it. Closing
+/// the trio at the version-bump-magnitude ladder extends the one-
+/// oracle surface across the byte-slice frontier at the borrowed/
+/// owned-frontier receiver shape at the third ordered typed sum
+/// without introducing a second canonical-label site or a second
+/// grammar path.
+impl From<BumpLevel> for std::borrow::Cow<'static, [u8]> {
+    fn from(level: BumpLevel) -> std::borrow::Cow<'static, [u8]> {
+        std::borrow::Cow::Borrowed(level.as_str().as_bytes())
+    }
+}
+
 /// [`TryFrom<&str> for BumpLevel`] routes through
 /// [`<BumpLevel as std::str::FromStr>::from_str`] so a downstream
 /// consumer bound by `impl TryFrom<&str>` (a serde container that opts
@@ -5666,6 +5755,112 @@ mod tests {
                 decoded,
                 level.as_str(),
                 "from_utf8 round-trip must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`], `Cow::<'static, [u8]>::from(level)` (the
+    /// [`From<BumpLevel> for Cow<'static, [u8]>`] impl body) yields
+    /// the same byte-slice view as `level.as_str().as_bytes()` — the
+    /// composition through the canonical-label oracle and
+    /// [`str::as_bytes`]. Pins the agreement identity that the by-
+    /// value borrowed/owned-frontier byte-slice emit surface reads
+    /// the same canonical label the [`&'static [u8]`] emit surface
+    /// and the borrowed-view [`AsRef<[u8]>`] surface already read at
+    /// the byte-slice frontier. Structural mirror of the
+    /// [`Cow<'static, str>`] agreement pin
+    /// [`test_bump_level_from_into_cow_static_str_agrees_with_as_str`]
+    /// at the UTF-8 frontier — the two agreement pins together close
+    /// the by-value borrowed/owned-frontier emit axis across both
+    /// string and byte frontiers against the same oracle. Structural
+    /// mirror of
+    /// `test_per_attempt_region_from_into_cow_static_bytes_agrees_with_as_str_as_bytes`
+    /// (commit 912a5ff) at the per-attempt-region ladder and
+    /// `test_admission_tier_from_into_cow_static_bytes_agrees_with_as_str_as_bytes`
+    /// (commit 89af285) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_from_into_cow_static_bytes_agrees_with_as_str_as_bytes() {
+        for level in BumpLevel::ALL {
+            let cow: std::borrow::Cow<'static, [u8]> = std::borrow::Cow::from(level);
+            assert_eq!(
+                cow.as_ref(),
+                level.as_str().as_bytes(),
+                "From<BumpLevel> for Cow<'static, [u8]> and as_str().as_bytes() must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Cow<'static, [u8]>`] identity
+    /// carries through a generic `impl Into<Cow<'static, [u8]>>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny generic
+    /// function `fn read<T: Into<Cow<'static, [u8]>>>(t: T) ->
+    /// Cow<'static, [u8]> { t.into() }` — the shape of an actual
+    /// downstream consumer (a SLSA / sigstore attestation-subject
+    /// bytes sink, an OCI / GHCR manifest annotation-value sink, a
+    /// `blake3` hasher factory keyed on either a static label or a
+    /// caller-owned [`Vec<u8>`] uniformly) — reads the canonical
+    /// lowercase label bytes directly from a [`BumpLevel`] value
+    /// with the `'static` lifetime preserved through the
+    /// [`Cow<'static, [u8]>`] wrapper. A regression that drifted
+    /// the [`From`] impl signature (returning `Cow<'_, [u8]>` with
+    /// a non-`'static` lifetime, returning an owned [`Vec<u8>`]
+    /// instead of the [`Cow`] wrapper, requiring `&BumpLevel` and
+    /// losing the by-value semantics) fails here at compile time
+    /// instead of at every downstream generic call site. Structural
+    /// mirror of
+    /// `test_per_attempt_region_into_cow_static_bytes_carries_through_generic_consumer`
+    /// (commit 912a5ff) at the per-attempt-region ladder and
+    /// `test_admission_tier_into_cow_static_bytes_carries_through_generic_consumer`
+    /// (commit 89af285) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_into_cow_static_bytes_carries_through_generic_consumer() {
+        fn read<T: Into<std::borrow::Cow<'static, [u8]>>>(t: T) -> std::borrow::Cow<'static, [u8]> {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).as_ref(),
+                level.as_str().as_bytes(),
+                "generic Into<Cow<'static, [u8]>> consumer must read canonical label bytes at {level:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for Cow<'static, [u8]>`] returns the
+    /// [`std::borrow::Cow::Borrowed`] branch, not
+    /// [`std::borrow::Cow::Owned`], at every [`BumpLevel::ALL`]
+    /// variant. Pins the zero-allocation contract at the emit
+    /// boundary: because [`BumpLevel::as_str`] returns a
+    /// `'static`-lived borrow into the static-string constant table
+    /// and [`str::as_bytes`] preserves the receiver's lifetime, this
+    /// impl composes with an [`Into<Cow<'static, [u8]>>`] receiver
+    /// at the [`std::borrow::Cow::Borrowed`] branch — the receiver
+    /// pays the `'static`-borrow cost of
+    /// [`From<BumpLevel> for &'static [u8]`], not the [`Vec<u8>`]-
+    /// allocation cost a [`std::borrow::Cow::Owned`] branch would
+    /// silently pay. A regression that drifted the impl body toward
+    /// `Cow::Owned(level.as_str().as_bytes().to_vec())` would
+    /// silently allocate at every byte-oriented emit site and defeat
+    /// the borrowed/owned-frontier discipline this impl closes.
+    /// Structural mirror of the [`Cow<'static, str>`] pin
+    /// [`test_bump_level_into_cow_static_str_is_borrowed`] at the
+    /// UTF-8 frontier — the two pins together close the zero-
+    /// allocation branch-choice contract across both string and
+    /// byte-slice frontiers. Structural mirror of
+    /// `test_per_attempt_region_into_cow_static_bytes_is_borrowed`
+    /// (commit 912a5ff) at the per-attempt-region ladder and
+    /// `test_admission_tier_into_cow_static_bytes_is_borrowed`
+    /// (commit 89af285) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_into_cow_static_bytes_is_borrowed() {
+        for level in BumpLevel::ALL {
+            let cow: std::borrow::Cow<'static, [u8]> = std::borrow::Cow::from(level);
+            assert!(
+                matches!(cow, std::borrow::Cow::Borrowed(_)),
+                "From<BumpLevel> for Cow<'static, [u8]> must return Cow::Borrowed \
+                 (zero-allocation branch) at {level:?}, not Cow::Owned",
             );
         }
     }
