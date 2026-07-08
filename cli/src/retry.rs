@@ -2992,6 +2992,126 @@ impl From<PerAttemptRegion> for Box<[u8]> {
     }
 }
 
+/// [`From<PerAttemptRegion> for Arc<[u8]>`] routes through
+/// [`PerAttemptRegion::as_str`] composed with [`str::as_bytes`] and
+/// then [`std::sync::Arc::<[u8]>::from`] so a downstream consumer
+/// bound by `impl Into<Arc<[u8]>>` (a cross-thread cached-payload
+/// slot that wants a single canonical allocation of the label bytes
+/// shared across worker threads via atomic refcount, a validated-
+/// input newtype wrapper whose byte-slice payload field is stored
+/// as [`Arc<[u8]>`] to hand cheap [`Arc::clone`]s to sibling
+/// structures on other threads, a serde container that opts into
+/// `#[serde(from = "Arc<[u8]>")]` on a byte-payload field, a
+/// dashmap-style keyed-table byte-value slot whose readers want an
+/// [`Arc`] clone rather than a per-lookup allocation, an SLSA /
+/// sigstore attestation-subject bytes builder whose signed payload
+/// is shared read-only across a signing-and-verification worker
+/// pool, an OCI / GHCR annotation-value sink that hands the same
+/// label-bytes allocation to multiple upload workers without
+/// re-allocating per worker) receives the canonical snake_case
+/// label bytes (`b"before_first"`, `b"first"`, `b"interim"`,
+/// `b"final"`, `b"over_budget"`) as a shared-owned immutable heap-
+/// owned [`Arc<[u8]>`] with a single allocation for the atomic-
+/// refcount header plus the exact-length label bytes, enabling
+/// `O(1)` [`Arc::clone`] on the emit result across threads without
+/// a per-clone allocation — through ONE composition rather than a
+/// per-consumer `Arc::<[u8]>::from(region.as_str().as_bytes())`
+/// restatement.
+///
+/// Structural mirror of [`From<PerAttemptRegion> for Arc<str>`]
+/// above at the byte-slice frontier — the same by-value shared-
+/// owned emit surface at the same one-oracle discipline, projected
+/// onto the byte-slice frontier instead of the UTF-8 string
+/// frontier. Opens a new by-value [`Arc<[u8]>`]-emit trio at the
+/// per-attempt-region ladder parallel to the [`From<T> for
+/// Arc<str>`] surface closed at the [`Arc<str>`] trio
+/// (c3a722d → 6bab1ab → fc894ef): [`From<T> for Arc<str>`] yields
+/// [`Arc<str>`] through `Arc::<str>::from(region.as_str())`, this
+/// [`From<T> for Arc<[u8]>`] yields [`Arc<[u8]>`] through
+/// `Arc::<[u8]>::from(region.as_str().as_bytes())` — the same
+/// routing discipline composed through [`PerAttemptRegion::as_str`]
+/// and [`str::as_bytes`] at the shared-owned frontier, both single
+/// allocations of the canonical label bytes plus the atomic-refcount
+/// header, without the [`String`] / [`Vec<u8>`] growth-header cost
+/// and without a [`Box<str>`]-then-[`Arc::from`] or
+/// [`Vec<u8>`]-then-[`Arc::from`] two-allocation round trip. Opens
+/// the by-value [`Arc<[u8]>`]-emit trio at the per-attempt-region
+/// ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// [`From<T> for Arc<str>`] opening order
+/// (c3a722d → 6bab1ab → fc894ef), the [`From<T> for Box<[u8]>`]
+/// opening order (7045474 → e78e47a → 23f8696), the
+/// [`From<T> for Vec<u8>`] opening order
+/// (2ad52bc → 491db4d → 6701191), and the
+/// [`From<T> for Cow<'static, [u8]>`] opening order
+/// (912a5ff → 89af285 → 7c465d1).
+///
+/// The natural bridge from the [`Box<[u8]>`] peer above to any
+/// downstream site that types its byte-slice sink as
+/// `impl Into<Arc<[u8]>>` — the emit peer that answers the
+/// receiver-side question "does this byte-oriented API want an
+/// exclusively-owned [`Box<[u8]>`] immutable buffer or a shared-
+/// owned [`Arc<[u8]>`] immutable buffer clonable in `O(1)` across
+/// threads?" with "the shared-owned [`Arc<[u8]>`]." A receiver
+/// typed as [`Arc<[u8]>`] (rather than [`Box<[u8]>`]) pays one
+/// extra atomic-refcount-header slot preceding the label bytes in
+/// exchange for `O(1)` [`Arc::clone`] across every fan-out worker
+/// on any thread, so a `rayon` / `tokio` fan-out that wants the
+/// same canonical label bytes at every worker receives one clone-
+/// cheap [`Arc<[u8]>`] handle at each fan-out edge rather than a
+/// per-worker [`Box<[u8]>`] allocation. The routing discipline
+/// picks [`std::sync::Arc::<[u8]>::from`] rather than
+/// `Arc::from(Box::<[u8]>::from(region.as_str().as_bytes()))`
+/// (two allocations: box the slice, then rewrap into an
+/// [`Arc<[u8]>`]) or `Arc::from(region.as_str().as_bytes().to_vec()
+/// .into_boxed_slice())` (three allocations plus a realloc-and-
+/// shrink round trip): the direct
+/// [`std::sync::Arc::<[u8]>::from`] path allocates once from the
+/// `'static` label byte-slice, including the atomic-refcount
+/// header, so the emit-side receiver pays exactly one allocation
+/// for the header plus the label's byte-length.
+///
+/// The identity `Arc::<[u8]>::from(region).as_ref() ==
+/// region.as_str().as_bytes()` at every [`PerAttemptRegion::ALL`]
+/// variant is pinned by
+/// [`tests::test_per_attempt_region_into_arc_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carried through a generic
+/// `impl Into<Arc<[u8]>>` consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_into_arc_bytes_carries_through_generic_consumer`];
+/// the shared-owned receiver contract — [`Arc::clone`] reads the
+/// same canonical label bytes, [`Arc::ptr_eq`] holds after
+/// [`Arc::clone`], and [`Arc::strong_count`] lifts to at least two
+/// after the clone — at every variant is pinned by
+/// [`tests::test_per_attempt_region_into_arc_bytes_shares_label_across_clones`],
+/// mirroring the `Arc::clone`-preserves-value pin at the
+/// [`Arc<str>`] surface
+/// ([`tests::test_per_attempt_region_into_arc_str_shares_label_across_clones`]).
+///
+/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// [`Arc<[u8]>`] emit surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
+/// Arc<[u8]>` impl routing through [`as_str`] + [`str::as_bytes`]
+/// composed with [`std::sync::Arc::<[u8]>::from`]), not a per-
+/// consumer `Arc::<[u8]>::from(region.as_str().as_bytes())`
+/// restatement at every downstream site that accepts
+/// `impl Into<Arc<[u8]>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`PerAttemptRegion::as_str`]) and every byte-slice emit
+/// surface — [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
+/// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
+/// [`From<T> for Box<[u8]>`], this [`From<T> for Arc<[u8]>`] —
+/// reads through it composed with [`str::as_bytes`], so the shared-
+/// owned allocation shape sits ON TOP of the same canonical-label
+/// oracle every borrowed-view, static-lifetime, owned-buffer,
+/// borrowed/owned-frontier, and shrunk-owned emit peer already
+/// reads.
+impl From<PerAttemptRegion> for std::sync::Arc<[u8]> {
+    fn from(region: PerAttemptRegion) -> std::sync::Arc<[u8]> {
+        std::sync::Arc::<[u8]>::from(region.as_str().as_bytes())
+    }
+}
+
 /// [`TryFrom<&[u8]> for PerAttemptRegion`] routes through
 /// [`std::str::from_utf8`] at the byte-slice / UTF-8 frontier composed
 /// with [`<Self as std::str::FromStr>::from_str`] at the canonical-
@@ -15447,6 +15567,133 @@ mod tests {
                 decoded,
                 region.as_str(),
                 "from_utf8 round-trip must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], `Arc::<[u8]>::from(region)` (the
+    /// [`From<PerAttemptRegion> for Arc<[u8]>`] impl body) yields
+    /// the same byte-slice view as `region.as_str().as_bytes()` —
+    /// the composition through the canonical-label oracle and
+    /// [`str::as_bytes`]. Pins the agreement identity that the by-
+    /// value shared-owned byte-slice emit surface reads the same
+    /// canonical label the borrowed-view [`AsRef<[u8]>`], the by-
+    /// value static-lifetime [`From<PerAttemptRegion> for &'static
+    /// [u8]`], the by-value owned-buffer [`From<PerAttemptRegion>
+    /// for Vec<u8>`], the by-value borrowed/owned-frontier
+    /// [`From<PerAttemptRegion> for Cow<'static, [u8]>`], and the
+    /// by-value shrunk-owned [`From<PerAttemptRegion> for Box<[u8]>`]
+    /// surfaces already read at the byte-slice frontier. Structural
+    /// mirror of the [`Arc<str>`] agreement pin
+    /// [`test_per_attempt_region_into_arc_str_agrees_with_as_str`]
+    /// at the UTF-8 frontier — the two agreement pins together
+    /// close the by-value shared-owned emit axis across both string
+    /// and byte-slice frontiers against the same oracle. A
+    /// regression that swapped the [`From`] impl body to route
+    /// through
+    /// `Arc::from(Box::<[u8]>::from(region.as_str().as_bytes()))`
+    /// (paying an extra [`Box<[u8]>`] allocation before the
+    /// [`Arc<[u8]>`] rewrap) or through
+    /// `Arc::from(region.as_str().as_bytes().to_vec().into_boxed_slice())`
+    /// (paying a [`Vec<u8>`] growth-header allocation plus a
+    /// [`Vec::into_boxed_slice`] realloc-and-shrink round trip
+    /// before the [`Arc<[u8]>`] rewrap) fails here at ONE named site
+    /// instead of leaking to every downstream
+    /// `impl Into<Arc<[u8]>>` consumer.
+    #[test]
+    fn test_per_attempt_region_into_arc_bytes_agrees_with_as_str_as_bytes() {
+        for region in PerAttemptRegion::ALL {
+            let shared: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(region);
+            assert_eq!(
+                shared.as_ref(),
+                region.as_str().as_bytes(),
+                "From<PerAttemptRegion> for Arc<[u8]> and as_str().as_bytes() must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for Arc<[u8]>`] identity carries
+    /// through a generic `impl Into<Arc<[u8]>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Arc<[u8]>>>(t: T) -> Arc<[u8]> { t.into() }`
+    /// — the shape of an actual downstream consumer (a cross-thread
+    /// cached-payload slot typed as [`Arc<[u8]>`] to share a
+    /// canonical byte-payload allocation across worker threads via
+    /// atomic refcount, a validated-input newtype wrapper that
+    /// stores canonical label bytes as [`Arc<[u8]>`] to hand cheap
+    /// [`Arc::clone`]s to sibling structures, a serde container
+    /// that opts into `#[serde(from = "Arc<[u8]>")]` at the shared-
+    /// owned byte-frontier, a dashmap-style keyed-table byte-value
+    /// slot whose readers want an [`Arc`] clone rather than a per-
+    /// lookup allocation, an SLSA / sigstore attestation-subject
+    /// bytes builder that shares the signed payload across a
+    /// signing-and-verification worker pool) reads the canonical
+    /// snake_case label bytes directly from a [`PerAttemptRegion`]
+    /// value as a shared-owned immutable heap-owned [`Arc<[u8]>`].
+    /// The structural witness that a [`PerAttemptRegion`] is
+    /// genuinely usable at `impl Into<Arc<[u8]>>` call sites — a
+    /// regression that drifted the [`From`] impl signature
+    /// (returning [`Box<[u8]>`] instead of [`Arc<[u8]>`], returning
+    /// a [`Vec<u8>`] instead of the shared-owned handle, requiring
+    /// `&PerAttemptRegion` and losing the by-value semantics, or
+    /// dropping to a [`Box<[u8]>`]-then-[`Arc::from`] composition
+    /// that would allocate twice) fails here at compile time or at
+    /// the assertion instead of at every downstream generic call
+    /// site.
+    #[test]
+    fn test_per_attempt_region_into_arc_bytes_carries_through_generic_consumer() {
+        fn read<T: Into<std::sync::Arc<[u8]>>>(t: T) -> std::sync::Arc<[u8]> {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region).as_ref(),
+                region.as_str().as_bytes(),
+                "generic Into<Arc<[u8]>> consumer must read canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for Arc<[u8]>`] shared-owned
+    /// semantics hold across [`std::sync::Arc::clone`] at every
+    /// [`PerAttemptRegion::ALL`] variant: the clone reads exactly
+    /// the same canonical snake_case label bytes the original
+    /// reads, points at the same allocation (identity of the
+    /// underlying byte pointer via [`std::sync::Arc::ptr_eq`]), and
+    /// the atomic refcount lifts to at least two after the clone
+    /// (via [`std::sync::Arc::strong_count`]). Pins the shared-
+    /// owned receiver contract at the byte-slice emit surface — a
+    /// regression that drifted the impl body to a non-`Arc`
+    /// composition ([`Box::<[u8]>::from`]-then-ad-hoc-rewrap, a
+    /// [`Vec<u8>`] intermediate) would break the pointer-identity
+    /// assertion (each clone would land at a distinct allocation)
+    /// even if the canonical-label bytes still agreed. Structural
+    /// mirror of the [`Arc<str>`] clone-identity pin
+    /// [`test_per_attempt_region_into_arc_str_shares_label_across_clones`]
+    /// at the UTF-8 frontier — the two clone-identity pins together
+    /// close the structural witness that the receiver actually
+    /// holds a shared-owned [`Arc<[u8]>`] slot rather than an
+    /// [`Arc<[u8]>`]-typed wrapper around a per-clone-allocated
+    /// [`Box<[u8]>`], across both string and byte-slice frontiers.
+    #[test]
+    fn test_per_attempt_region_into_arc_bytes_shares_label_across_clones() {
+        for region in PerAttemptRegion::ALL {
+            let shared: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(region);
+            let cloned = std::sync::Arc::clone(&shared);
+            assert_eq!(
+                cloned.as_ref(),
+                region.as_str().as_bytes(),
+                "Arc<[u8]> clone must read canonical label bytes at {region:?}",
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(&shared, &cloned),
+                "Arc<[u8]> clone must share the same underlying allocation at {region:?}",
+            );
+            assert!(
+                std::sync::Arc::strong_count(&shared) >= 2,
+                "Arc<[u8]> strong count must be at least 2 after clone at {region:?}",
             );
         }
     }
