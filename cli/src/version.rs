@@ -1912,6 +1912,134 @@ impl TryFrom<&[u8]> for BumpLevel {
     }
 }
 
+/// [`TryFrom<Vec<u8>> for BumpLevel`] routes through the by-reference
+/// [`TryFrom<&[u8]>`] parse peer directly above on the `.as_slice()` borrow
+/// of the caller-owned byte buffer, so a downstream consumer bound by
+/// `impl TryFrom<Vec<u8>>` (a `serde` container that opts into
+/// `#[serde(try_from = "Vec<u8>")]` on a wrapper field, a generic
+/// try-conversion helper `fn parse_bytes_field<T: TryFrom<Vec<u8>>>` that
+/// owns the input buffer, a validated-input newtype builder that consumes an
+/// owned [`Vec<u8>`] and returns a validated [`BumpLevel`], an OCI / GHCR
+/// manifest annotation-value reader that materializes payload bytes as
+/// owned [`Vec<u8>`] rather than borrowed `&[u8]`, a SLSA / sigstore
+/// attestation-subject bytes reader that reads through a
+/// [`std::io::Read::read_to_end`] surface into an owned buffer, a
+/// `bytes::Bytes::to_vec` round-trip point at the async HTTP-body /
+/// registry-response frontier, a `blake3` / `sha2` pre-hashed input replay
+/// verifier that owns the input buffer to feed both the hasher and the
+/// canonical parse) recovers a [`BumpLevel`] value from a canonical
+/// lowercase label byte-sequence (`b"patch"`, `b"minor"`, `b"major"`)
+/// through the same one-oracle grammar the direct `.parse::<BumpLevel>()`
+/// call sites, the sibling [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`],
+/// [`TryFrom<Rc<str>>`], and [`TryFrom<&[u8]>`] parse peers already read.
+///
+/// The by-value owned-buffer parse peer of [`TryFrom<&[u8]> for BumpLevel`]
+/// directly above — both are parse surfaces of the byte-slice frontier,
+/// differing only on the input byte-buffer ownership: [`TryFrom<&[u8]>`]
+/// takes a borrowed `&[u8]` view for consumers that already hold a borrow,
+/// this [`TryFrom<Vec<u8>>`] takes an owned [`Vec<u8>`] for consumers that
+/// own the input buffer (a serde `try_from = "Vec<u8>"` container, a
+/// byte-buffer-consuming builder). Both delegate through the shared
+/// [`FromStr`] parse oracle: the borrowed peer through
+/// [`std::str::from_utf8`] + [`FromStr`] directly, this owned peer through
+/// the borrowed peer via `.as_slice()` at the boundary — the same canonical
+/// grammar lifted to the owned-buffer input layer.
+///
+/// Structural mirror of [`TryFrom<String> for BumpLevel`] (commit 760e7d9)
+/// at the UTF-8 frontier — the same by-value owned-input parse surface at
+/// the same one-oracle discipline, projected onto the byte-slice frontier
+/// instead of the UTF-8 string frontier.
+///
+/// Trio-closing peer of the by-value owned-buffer byte-slice-parse trio at
+/// the third ordered typed sum: [`TryFrom<Vec<u8>>`] for
+/// [`crate::retry::PerAttemptRegion`] (commit 91ba4bf) opened the trio at
+/// the per-attempt-region ladder; [`TryFrom<Vec<u8>>`] for
+/// [`crate::probe_outcome::AdmissionTier`] (commit f4a2052) carried the
+/// mid-trio slot at the admission-tier ladder; this impl closes the trio at
+/// the version-bump-magnitude ladder, matching the [`TryFrom<&[u8]>`]
+/// closure order (5c0c827 → cdb192c → 629b242), the [`TryFrom<String>`]
+/// closure order (9f6feb3 → affb017 → 760e7d9) at the UTF-8 frontier's
+/// owned-input counterpart, the [`From<T> for &'static [u8]`] closure order
+/// (70e813b → 694dff9 → 762437f), the [`From<T> for Cow<'static, [u8]>`]
+/// closure order (912a5ff → 89af285 → 7c465d1), and the [`AsRef<[u8]>`]
+/// closure order (af44439 → 13abcc4 → 833d706). After this commit the
+/// by-value owned-buffer byte-slice-parse axis spans all three ordered
+/// typed sums on the ladder set through ONE `.as_slice()` delegation into
+/// the by-reference [`TryFrom<&[u8]>`] peer each.
+///
+/// The natural bridge to any downstream site that types its byte-slice
+/// parse contract as `impl TryFrom<Vec<u8>>` rather than
+/// [`TryFrom<&[u8]>`] — the byte-slice frontier's `serde` `try_from`
+/// container attribute at the owned-buffer layer
+/// (`#[serde(try_from = "Vec<u8>")]` — which keys off
+/// [`TryFrom<Vec<u8>>`], not [`TryFrom<&[u8]>`]), a validated-input newtype
+/// builder whose canonical parse contract is stated as `TryFrom<Vec<u8>>`
+/// (consumes the caller's input buffer end-to-end), a `bytes::Bytes::to_vec`
+/// / [`std::io::Read::read_to_end`] pipeline terminus that hands the
+/// accumulated buffer to a typed parser. The [`FromStr`] impl carries the
+/// load-bearing match body against the canonical grammar; this
+/// [`TryFrom<Vec<u8>>`] impl delegates through the [`TryFrom<&[u8]>`] parse
+/// peer (which itself delegates through [`std::str::from_utf8`] +
+/// [`FromStr`]), so the parse-oracle discipline is preserved end-to-end and
+/// a future variant insertion (a `Prerelease` band strictly below
+/// [`BumpLevel::Patch`], an `Epoch` ceiling strictly above
+/// [`BumpLevel::Major`]) remains a one-site edit at [`BumpLevel::as_str`]
+/// plus the matching [`std::str::FromStr`] arm addition.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at the same TWO frontiers the [`TryFrom<&[u8]>`]
+/// peer directly above is strict at, inherited through the delegation:
+/// non-UTF-8 byte sequences reject at [`std::str::from_utf8`] with the
+/// standard [`std::str::Utf8Error`] diagnostic surfaced through
+/// [`anyhow::Error`], and valid-UTF-8 byte sequences that decode to a
+/// non-canonical label (`b"Patch"`, `b"Minor"`, `b"Major"`, `b"PATCH"`,
+/// `b" patch"`, `b"patch "`, the empty byte sequence `b""`) reject at the
+/// underlying [`FromStr`] impl — the same canonical-only strictness the
+/// byte-slice frontier already carries at the by-reference peer, now lifted
+/// to the owned-buffer input layer at ONE composition through the borrowed
+/// [`TryFrom<&[u8]>`] peer.
+///
+/// The identity `BumpLevel::try_from(level.as_str().as_bytes().to_vec())
+/// .unwrap() == level` at every [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_try_from_vec_bytes_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<Vec<u8>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_bump_level_try_from_vec_bytes_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-UTF-8 owned-buffer input is pinned
+/// by
+/// [`tests::test_bump_level_try_from_vec_bytes_rejects_non_utf8_input`];
+/// the strict-rejection contract on valid-UTF-8 non-canonical owned-buffer
+/// input is pinned by
+/// [`tests::test_bump_level_try_from_vec_bytes_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned-buffer byte-slice
+/// try-conversion surface is a typed-primitive site on [`BumpLevel`]
+/// itself (one `TryFrom<Vec<u8>>` impl routing through the borrowed
+/// [`TryFrom<&[u8]>`] parse peer), not a per-consumer
+/// `BumpLevel::try_from(buf.as_slice())` bridge at every downstream site
+/// that types its parse contract as `impl TryFrom<Vec<u8>>` rather than
+/// [`TryFrom<&[u8]>`] or [`std::str::FromStr`]. THEORY.md §VI.1 one-oracle:
+/// the canonical-label grammar is named at one site
+/// ([`BumpLevel::as_str`]), inverted at one site
+/// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
+/// surface — [`std::str::FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<&[u8]>`], this [`TryFrom<Vec<u8>>`] — reads through it.
+/// Closing the trio at the version-bump-magnitude ladder extends the
+/// one-oracle owned-buffer parse-side surface across the byte-slice
+/// frontier at the third ordered typed sum without introducing a second
+/// canonical-label site or a second grammar path.
+impl TryFrom<Vec<u8>> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&[u8]>>::try_from(bytes.as_slice())
+    }
+}
+
 /// [`TryFrom<&str> for BumpLevel`] routes through
 /// [`<BumpLevel as std::str::FromStr>::from_str`] so a downstream
 /// consumer bound by `impl TryFrom<&str>` (a serde container that opts
@@ -6151,6 +6279,162 @@ mod tests {
             assert!(
                 <BumpLevel as std::convert::TryFrom<&[u8]>>::try_from(bad).is_err(),
                 "TryFrom<&[u8]> must reject valid-UTF-8 non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Vec<u8>> for BumpLevel`] recovers the original variant
+    /// at every [`BumpLevel::ALL`] variant when the canonical label bytes
+    /// emitted by `level.as_str().as_bytes().to_vec()` are fed back
+    /// through it. Pins the round-trip identity
+    /// `BumpLevel::try_from(level.as_str().as_bytes().to_vec()).unwrap()
+    /// == level` at every variant against the shared
+    /// [`BumpLevel::as_str`] + [`str::as_bytes`] canonical-label-bytes
+    /// oracle. The structural witness that the by-value owned-buffer
+    /// byte-slice try-conversion parse surface (this
+    /// [`TryFrom<Vec<u8>>`]) reads the same one-oracle grammar the
+    /// by-reference byte-slice parse peer [`TryFrom<&[u8]>`] reads —
+    /// one round-trip pin per variant, refuses a future variant insertion
+    /// that drops the `TryFrom<Vec<u8>>`/`as_str().as_bytes().to_vec()`
+    /// agreement. Structural mirror of
+    /// `test_per_attempt_region_try_from_vec_bytes_agrees_with_from_str`
+    /// (commit 91ba4bf) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_vec_bytes_agrees_with_from_str`
+    /// (commit f4a2052) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_vec_bytes_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let parsed = <BumpLevel as std::convert::TryFrom<Vec<u8>>>::try_from(
+                level.as_str().as_bytes().to_vec(),
+            )
+            .expect("canonical label bytes must parse through TryFrom<Vec<u8>>");
+            assert_eq!(
+                parsed, level,
+                "TryFrom<Vec<u8>> must round-trip through as_str().as_bytes().to_vec() at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Vec<u8>> for BumpLevel`] identity carries through a
+    /// generic `impl TryFrom<Vec<u8>>` consumer at every
+    /// [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(b: Vec<u8>) -> T where T: TryFrom<Vec<u8>>, T::Error:
+    /// std::fmt::Debug` — the shape of an actual downstream consumer (a
+    /// serde container `#[serde(try_from = "Vec<u8>")]` deserializer, an
+    /// [`std::io::Read::read_to_end`] pipeline terminus that hands an
+    /// owned buffer to a typed parser, a `bytes::Bytes::to_vec`
+    /// round-trip point at an async HTTP-body / registry-response
+    /// frontier, an OCI / GHCR annotation-value reader that materializes
+    /// payload bytes as owned [`Vec<u8>`], a SLSA / sigstore
+    /// attestation-subject bytes reader that owns its buffer end-to-end)
+    /// — recovers the canonical variant from the canonical lowercase
+    /// label byte-sequence at every variant. The structural witness that
+    /// a [`BumpLevel`] is genuinely usable at `impl TryFrom<Vec<u8>>`
+    /// call sites — a regression that drifted the [`TryFrom`] impl
+    /// signature (taking `&Vec<u8>` instead of by-value, returning a
+    /// different variant than [`TryFrom<&[u8]>`] would, dropping the
+    /// UTF-8 decode step and misparsing non-UTF-8 input) fails here at
+    /// compile time or at the assertion instead of at every downstream
+    /// generic call site. Structural mirror of
+    /// `test_per_attempt_region_try_from_vec_bytes_carries_through_generic_consumer`
+    /// (commit 91ba4bf) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_vec_bytes_carries_through_generic_consumer`
+    /// (commit f4a2052) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_vec_bytes_carries_through_generic_consumer() {
+        fn parse<T>(b: Vec<u8>) -> T
+        where
+            T: std::convert::TryFrom<Vec<u8>>,
+            <T as std::convert::TryFrom<Vec<u8>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<Vec<u8>>>::try_from(b)
+                .expect("canonical label bytes must parse through generic TryFrom<Vec<u8>>")
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                parse::<BumpLevel>(level.as_str().as_bytes().to_vec()),
+                level,
+                "generic TryFrom<Vec<u8>> consumer must recover canonical variant at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Vec<u8>> for BumpLevel`] rejects non-UTF-8 owned-buffer
+    /// input at the [`std::str::from_utf8`] decode frontier inherited
+    /// through delegation to the by-reference [`TryFrom<&[u8]>`] parse
+    /// peer. Pins the encoding-strictness contract at the byte-slice
+    /// frontier's owned-buffer parse layer so a downstream consumer bound
+    /// by [`TryFrom<Vec<u8>>`] (a serde container that opts into
+    /// `#[serde(try_from = "Vec<u8>")]`, an
+    /// [`std::io::Read::read_to_end`] pipeline terminus, an OCI / GHCR
+    /// annotation-value reader that surfaces raw byte payloads as owned
+    /// [`Vec<u8>`], a byte-slice classifier that composes over the
+    /// `TryFrom<Vec<u8>>` contract) inherits the same UTF-8-only encoding
+    /// discipline the by-reference [`TryFrom<&[u8]>`] peer already
+    /// carries, at ONE typed-primitive site rather than a per-consumer
+    /// `String::from_utf8` + `.parse` restatement. A regression that
+    /// dropped the delegation to [`TryFrom<&[u8]>`] (e.g., a naive
+    /// `String::from_utf8_unchecked` bypass) would light up here rather
+    /// than drifting silently to a mis-parsed variant. Structural mirror
+    /// of
+    /// `test_per_attempt_region_try_from_vec_bytes_rejects_non_utf8_input`
+    /// (commit 91ba4bf) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_vec_bytes_rejects_non_utf8_input`
+    /// (commit f4a2052) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_vec_bytes_rejects_non_utf8_input() {
+        for bad in [
+            vec![0xffu8],
+            vec![0xffu8, 0xfe],
+            vec![0x80u8],
+            vec![b'p', b'a', 0xff, b'c', b'h'],
+            vec![b'm', b'a', b'j', b'o', b'r', 0xff],
+        ] {
+            assert!(
+                <BumpLevel as std::convert::TryFrom<Vec<u8>>>::try_from(bad.clone()).is_err(),
+                "TryFrom<Vec<u8>> must reject non-UTF-8 input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Vec<u8>> for BumpLevel`] rejects valid-UTF-8
+    /// non-canonical owned-buffer input at the underlying [`FromStr`]
+    /// strictness gate inherited through delegation to [`TryFrom<&[u8]>`]
+    /// — empty byte sequence, UpperCamel rendering, uppercase, and
+    /// whitespace-padded lowercase labels all reject. Pins the
+    /// canonical-label strictness contract at the byte-slice frontier's
+    /// owned-buffer parse layer so a downstream consumer bound by
+    /// [`TryFrom<Vec<u8>>`] inherits the same canonical-only grammar the
+    /// direct `.parse::<BumpLevel>()` call sites, the sibling
+    /// [`TryFrom<&str>`], [`TryFrom<String>`], and [`TryFrom<&[u8]>`]
+    /// impls already read, and a future permissive-parse regression at
+    /// the underlying [`FromStr`] impl lights up here rather than
+    /// drifting silently through the owned-buffer try-conversion surface.
+    /// Sibling of the by-reference byte-slice pin
+    /// [`test_bump_level_try_from_bytes_rejects_non_canonical_input`] at
+    /// the by-reference [`TryFrom<&[u8]>`] peer — the two pins together
+    /// close the canonical-only strictness contract across both borrowed
+    /// and owned byte-slice input ownership at the byte-slice frontier.
+    /// Structural mirror of
+    /// `test_per_attempt_region_try_from_vec_bytes_rejects_non_canonical_input`
+    /// (commit 91ba4bf) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_vec_bytes_rejects_non_canonical_input`
+    /// (commit f4a2052) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_vec_bytes_rejects_non_canonical_input() {
+        for bad in [
+            b"".to_vec(),
+            b"Patch".to_vec(),
+            b"Minor".to_vec(),
+            b"Major".to_vec(),
+            b"PATCH".to_vec(),
+            b" patch".to_vec(),
+            b"patch ".to_vec(),
+        ] {
+            assert!(
+                <BumpLevel as std::convert::TryFrom<Vec<u8>>>::try_from(bad.clone()).is_err(),
+                "TryFrom<Vec<u8>> must reject valid-UTF-8 non-canonical input {bad:?}",
             );
         }
     }
