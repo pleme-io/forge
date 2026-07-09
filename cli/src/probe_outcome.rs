@@ -8705,6 +8705,116 @@ impl From<AdmissionTier> for std::ffi::OsString {
     }
 }
 
+/// [`From<AdmissionTier> for std::path::PathBuf`] routes through
+/// [`AdmissionTier::as_str`] composed with
+/// [`std::path::PathBuf::from`] so a downstream consumer bound by
+/// `impl Into<std::path::PathBuf>` (a
+/// [`std::path::PathBuf::push`] segment consumer that owns its
+/// receiver, a [`std::path::PathBuf::join`] argument that owns
+/// its input, a [`std::fs::create_dir_all`] argument via
+/// [`std::path::PathBuf`], a
+/// [`std::collections::HashMap<std::path::PathBuf, _>::insert`]
+/// key builder, a serde container that opts into
+/// `#[serde(into = "PathBuf")]` on a wrapper field) recovers the
+/// canonical snake_case label (`"refused"`, `"staging_only"`,
+/// `"strict"`) as an owned [`std::path::PathBuf`] directly from
+/// an [`AdmissionTier`] value without a per-consumer
+/// `PathBuf::from(tier.as_str())` two-step restatement at every
+/// by-value boundary.
+///
+/// Mid-trio peer at the second ordered typed sum of the owned-
+/// buffer filesystem-path emit trio: `From<PerAttemptRegion> for
+/// std::path::PathBuf` (commit 6333c31) opened the trio at the
+/// first typed sum; the closing peer at the third typed sum is
+/// `From<BumpLevel> for std::path::PathBuf` in a follow-up
+/// commit, matching the [`AsRef<std::path::Path>`] opening order
+/// (17718d2 → f6c4c75 → dfd887a), the
+/// [`From<T> for std::ffi::OsString`] opening order (976f5af →
+/// 0791fc7 → b069eec), the [`From<T> for String`] opening order,
+/// and the [`From<T> for Vec<u8>`] opening order (2ad52bc →
+/// 491db4d → 6701191). The by-value owned peer of
+/// [`AsRef<std::path::Path>`] above — both are filesystem-path
+/// surfaces at the same canonical-label oracle, differing only
+/// on the receiver's ownership: [`AsRef<std::path::Path>`]
+/// yields `&Path` for consumers that already hold a borrow, this
+/// [`From<AdmissionTier> for std::path::PathBuf`] yields
+/// [`std::path::PathBuf`] for consumers that own the input
+/// buffer. The str-frontier parallel is
+/// [`AsRef<str>`] → [`From<AdmissionTier> for String`]; the
+/// byte-slice-frontier parallel is
+/// [`AsRef<[u8]>`] → [`From<AdmissionTier> for Vec<u8>`]; the
+/// OS-string-frontier parallel is
+/// [`AsRef<std::ffi::OsStr>`] →
+/// [`From<AdmissionTier> for std::ffi::OsString`]; this
+/// [`AsRef<std::path::Path>`] →
+/// [`From<AdmissionTier> for std::path::PathBuf`] closes the
+/// same borrowed-view → owned-buffer emit peer at the filesystem-
+/// path frontier, extending the by-value owned-buffer emit axis
+/// from three frontiers (str, `[u8]`, `OsStr`) to four (str,
+/// `[u8]`, `OsStr`, `Path`) at the admission-tier ladder to
+/// match the four-frontier borrowed-view closure ([`AsRef<str>`],
+/// [`AsRef<[u8]>`], [`AsRef<std::ffi::OsStr>`],
+/// [`AsRef<std::path::Path>`]).
+///
+/// The natural bridge to consumers that work over the filesystem-
+/// path frontier at the owned-buffer emit axis: directory-
+/// composition machinery ([`std::path::PathBuf::push`],
+/// [`std::path::PathBuf::join`]) that owns its receiver,
+/// directory-creation machinery ([`std::fs::create_dir_all`])
+/// that owns its argument, keyed-index machinery
+/// ([`std::collections::HashMap<std::path::PathBuf, _>::insert`],
+/// [`std::collections::BTreeMap<std::path::PathBuf, _>::insert`])
+/// that owns its key, and serde container round-trip machinery
+/// (`#[serde(into = "PathBuf")]`) that owns its serialized shape,
+/// so a consumer that hands a canonical [`AdmissionTier`] label
+/// to any of these boundaries reads it directly from an
+/// [`AdmissionTier`] value without a `PathBuf::from(tier.as_str())`
+/// restatement at the boundary — a per-admission-tier-scoped
+/// audit-log directory keyed by owned [`std::path::PathBuf`]
+/// (`tier_log_map.insert(tier.into(), events)`), a per-
+/// admission-tier-scoped artifact directory that owns the
+/// segment (`let mut p = cache_root.clone(); p.push(tier);`
+/// against an owned [`std::path::PathBuf`] slot), or a per-
+/// admission-tier-scoped serde container that opts into
+/// `#[serde(into = "PathBuf")]` on a filesystem-path field
+/// reads directly from an [`AdmissionTier`] value at these
+/// boundaries.
+///
+/// The identity `std::path::PathBuf::from(tier) ==
+/// std::path::PathBuf::from(tier.as_str())` at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_from_into_pathbuf_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<std::path::PathBuf>` consumer at every variant is
+/// pinned by
+/// [`tests::test_admission_tier_into_pathbuf_carries_through_generic_consumer`];
+/// the round-trip through [`std::path::PathBuf::into_os_string`]
+/// then [`std::ffi::OsString::into_string`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_admission_tier_from_into_pathbuf_round_trips_through_into_os_string`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned filesystem-
+/// path emit surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one
+/// `From<AdmissionTier> for std::path::PathBuf` impl routing
+/// through [`AdmissionTier::as_str`] and
+/// [`std::path::PathBuf::from`]), not a per-consumer
+/// `PathBuf::from(tier.as_str())` restatement at every
+/// downstream site that accepts `impl Into<std::path::PathBuf>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`AdmissionTier::as_str`]) and every owned-buffer
+/// emit surface — [`From<T> for String`] (yields [`String`]),
+/// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]),
+/// [`From<T> for std::ffi::OsString`] (yields
+/// [`std::ffi::OsString`]), this
+/// [`From<T> for std::path::PathBuf`] (yields
+/// [`std::path::PathBuf`]) — reads through it.
+impl From<AdmissionTier> for std::path::PathBuf {
+    fn from(tier: AdmissionTier) -> std::path::PathBuf {
+        std::path::PathBuf::from(tier.as_str())
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -22351,6 +22461,98 @@ mod tests {
                 decoded,
                 tier.as_str(),
                 "OsString::into_string round-trip must recover canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`], `std::path::PathBuf::from(tier)`
+    /// equals `std::path::PathBuf::from(tier.as_str())`. Pins the
+    /// agreement identity that the by-value owned filesystem-path
+    /// emit surface reads the same canonical label the
+    /// [`AsRef<str>`] surface reads, projected through
+    /// [`std::path::PathBuf::from`]. A regression that swapped the
+    /// [`From`] impl to route through an intermediate
+    /// [`std::fmt::Display`] format buffer or a
+    /// [`std::ffi::OsString`] round-trip would break this
+    /// composition equality at at least one variant and fail here
+    /// at the canonical-label pin, not at every downstream
+    /// `impl Into<std::path::PathBuf>` call site. Structural
+    /// mirror of `test_per_attempt_region_from_into_pathbuf_agrees_with_as_str`
+    /// (commit 6333c31) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_from_into_pathbuf_agrees_with_as_str() {
+        for tier in AdmissionTier::ALL {
+            let owned: std::path::PathBuf = std::path::PathBuf::from(tier);
+            assert_eq!(
+                owned,
+                std::path::PathBuf::from(tier.as_str()),
+                "From<AdmissionTier> for PathBuf and PathBuf::from(as_str()) must agree at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for std::path::PathBuf`] identity
+    /// carries through a generic `impl Into<std::path::PathBuf>`
+    /// consumer at every [`AdmissionTier::ALL`] variant. A tiny
+    /// generic function `fn read<T: Into<PathBuf>>(t: T) -> PathBuf
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (a [`std::path::PathBuf::push`] segment consumer that owns
+    /// its receiver, a [`std::fs::create_dir_all`] argument, a
+    /// [`std::collections::HashMap<std::path::PathBuf, _>::insert`]
+    /// key builder) — reads the canonical snake_case label
+    /// directly from an [`AdmissionTier`] value as an owned
+    /// [`std::path::PathBuf`]. The structural witness that an
+    /// [`AdmissionTier`] is genuinely usable at
+    /// `impl Into<std::path::PathBuf>` call sites — a regression
+    /// that drifted the [`From`] impl signature (e.g., returning
+    /// `&std::path::Path` instead of [`std::path::PathBuf`],
+    /// requiring `&AdmissionTier` and losing the by-value
+    /// semantics) fails here at compile time instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_admission_tier_into_pathbuf_carries_through_generic_consumer() {
+        fn read<T: Into<std::path::PathBuf>>(t: T) -> std::path::PathBuf {
+            t.into()
+        }
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(tier),
+                std::path::PathBuf::from(tier.as_str()),
+                "generic Into<PathBuf> consumer must recover canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for std::path::PathBuf`] output
+    /// round-trips through [`std::path::PathBuf::into_os_string`]
+    /// composed with [`std::ffi::OsString::into_string`] recovering
+    /// the canonical snake_case label byte-for-byte at every
+    /// [`AdmissionTier::ALL`] variant. Pins the UTF-8 validity
+    /// contract on the by-value owned filesystem-path emit
+    /// surface: the produced [`std::path::PathBuf`] is always a
+    /// valid UTF-8 sequence because the canonical labels are pure
+    /// ASCII, and [`std::path::PathBuf::into_os_string`] +
+    /// [`std::ffi::OsString::into_string`] recovers exactly the
+    /// [`AdmissionTier::as_str`] emission. Together with
+    /// [`test_admission_tier_from_into_pathbuf_agrees_with_as_str`]
+    /// this closes the owned filesystem-path emit surface against
+    /// both the composition oracle (`PathBuf::from(as_str())`) and
+    /// the UTF-8 validity oracle
+    /// (`PathBuf::into_os_string ∘ OsString::into_string`) at every
+    /// [`AdmissionTier::ALL`] variant.
+    #[test]
+    fn test_admission_tier_from_into_pathbuf_round_trips_through_into_os_string() {
+        for tier in AdmissionTier::ALL {
+            let owned: std::path::PathBuf = std::path::PathBuf::from(tier);
+            let decoded = owned
+                .into_os_string()
+                .into_string()
+                .unwrap_or_else(|s| panic!("PathBuf for {tier:?} must be valid UTF-8 (got {s:?})"));
+            assert_eq!(
+                decoded,
+                tier.as_str(),
+                "PathBuf::into_os_string ∘ OsString::into_string round-trip must recover canonical label at {tier:?}",
             );
         }
     }
