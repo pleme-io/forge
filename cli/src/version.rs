@@ -1611,6 +1611,128 @@ impl AsRef<std::ffi::OsStr> for BumpLevel {
     }
 }
 
+/// Zero-copy borrowed filesystem-path view of the canonical
+/// lowercase label (`"patch"`, `"minor"`, `"major"`) at the
+/// [`std::path::Path`] frontier — a downstream consumer bound
+/// by `impl AsRef<std::path::Path>` (a [`std::fs::create_dir`] /
+/// [`std::fs::create_dir_all`] name component, a
+/// [`std::fs::read_dir`] entry key, a
+/// [`std::path::PathBuf::push`] / [`std::path::PathBuf::join`]
+/// path segment, a [`std::fs::File::open`] /
+/// [`std::fs::File::create`] path argument, a
+/// [`std::fs::metadata`] / [`std::fs::remove_dir_all`] input, a
+/// [`std::path::PathBuf::from`] sink over a caller-owned buffer)
+/// reads the canonical lowercase label as a borrowed
+/// `&std::path::Path` view of the static-lifetime label constant
+/// without a [`String`] allocation, a [`std::path::PathBuf`]
+/// copy, or an intermediate [`std::fmt::Display`] format-buffer
+/// step.
+///
+/// Sibling of [`AsRef<str>`] (commit f1ca293), [`AsRef<[u8]>`]
+/// (commit 833d706), and [`AsRef<std::ffi::OsStr>`] (commit
+/// 242ed89) above — the same borrowed-view surface at the same
+/// canonical-label oracle, projected onto the filesystem-path
+/// frontier instead of the UTF-8 string frontier, the byte-slice
+/// frontier, or the OS-string frontier. Closing peer at the
+/// third ordered typed sum of the filesystem-path borrowed-view
+/// trio: `AsRef<Path>` for [`crate::retry::PerAttemptRegion`]
+/// (commit 17718d2) opened the trio at the first typed sum;
+/// `AsRef<Path>` for [`crate::probe_outcome::AdmissionTier`]
+/// (commit f6c4c75) is the mid-trio peer at the second typed
+/// sum; this commit closes it at the third, matching the
+/// [`AsRef<std::ffi::OsStr>`] closing order
+/// (70e1ab5 → 1d708f4 → 242ed89), the [`AsRef<[u8]>`] closing
+/// order (af44439 → 13abcc4 → 833d706), and the [`AsRef<str>`]
+/// closing order (8c8cffe → 7acca19 → f1ca293). The
+/// [`AsRef<str>`] impl yields `&str`, the [`AsRef<[u8]>`] impl
+/// yields `&[u8]`, the [`AsRef<std::ffi::OsStr>`] impl yields
+/// `&OsStr`, this [`AsRef<std::path::Path>`] impl yields
+/// `&Path` — the same routing discipline
+/// (`Path::new(self.as_str())` == one composition through
+/// [`BumpLevel::as_str`] and [`std::path::Path::new`], both
+/// zero-copy views of the static-lifetime label constant since
+/// [`std::path::Path`] is an [`std::ffi::OsStr`] newtype on
+/// every supported platform) so a future consumer that requires
+/// the filesystem-path frontier reads the canonical label
+/// through one typed-primitive surface at the same oracle
+/// instead of restating the two-step `Path::new(level.as_str())`
+/// composition at every call site.
+///
+/// The natural bridge to consumers that work over the filesystem-
+/// path frontier at the borrowed-view axis: directory-creation
+/// machinery ([`std::fs::create_dir`],
+/// [`std::fs::create_dir_all`]), directory-enumeration machinery
+/// ([`std::fs::read_dir`]), path-composition machinery
+/// ([`std::path::PathBuf::push`], [`std::path::PathBuf::join`]),
+/// file-open machinery ([`std::fs::File::open`],
+/// [`std::fs::File::create`]), and metadata machinery
+/// ([`std::fs::metadata`], [`std::fs::symlink_metadata`],
+/// [`std::fs::remove_dir_all`]) all take
+/// [`impl AsRef<std::path::Path>`] as their standard input
+/// surface, so a consumer that hands a canonical [`BumpLevel`]
+/// label to any of these boundaries reads it directly from a
+/// [`BumpLevel`] value without a [`std::path::Path::new`]
+/// restatement at the boundary — a per-bump-magnitude-scoped
+/// release-manifest directory (`release_root.join(level)`), a
+/// per-bump-magnitude-scoped changelog artifact
+/// (`std::fs::File::create(changelog_root.join(level))`), or a
+/// per-bump-magnitude-scoped metadata probe reads directly from
+/// a [`BumpLevel`] value at these boundaries.
+///
+/// Closing peer of the filesystem-path borrowed-view trio: the
+/// opening peer at the per-attempt-region ladder is
+/// `impl AsRef<std::path::Path> for`
+/// [`crate::retry::PerAttemptRegion`] (commit 17718d2); the
+/// mid-trio peer at the admission-tier ladder is
+/// `impl AsRef<std::path::Path> for`
+/// [`crate::probe_outcome::AdmissionTier`] (commit f6c4c75).
+/// After this commit the filesystem-path borrowed-view surface
+/// is closed across all three canonical-label typed primitives
+/// on the ladder set against ONE canonical-label oracle each,
+/// alongside the closed [`AsRef<str>`], [`AsRef<[u8]>`], and
+/// [`AsRef<std::ffi::OsStr>`] borrowed-view surfaces — the
+/// borrowed-view axis is now a four-frontier closure at every
+/// ordered typed sum in the ladder set.
+///
+/// Zero-cost by construction: the returned `&Path` is a view of
+/// the static-lifetime label constant table's UTF-8 bytes —
+/// [`std::path::Path::new`] on an [`AsRef<std::ffi::OsStr>`]
+/// input is a zero-cost transmute at the borrow-view boundary
+/// ([`std::path::Path`] is an [`std::ffi::OsStr`] newtype on
+/// every supported platform), no allocation, no copy, no
+/// branching over the variant discriminant beyond what
+/// [`BumpLevel::as_str`] itself does at its match body.
+///
+/// The identity `<BumpLevel as AsRef<std::path::Path>>::as_ref(&level)
+/// == std::path::Path::new(level.as_str())` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_as_ref_path_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl AsRef<std::path::Path>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_as_ref_path_carries_through_generic_consumer`];
+/// the round-trip through [`std::path::Path::to_str`] recovering
+/// the canonical label at every variant is pinned by
+/// [`tests::test_bump_level_as_ref_path_round_trips_through_to_str`].
+///
+/// THEORY.md §V.4 typed primitives: the filesystem-path borrowed-
+/// view surface is a typed-primitive site on [`BumpLevel`]
+/// itself (one `AsRef<std::path::Path>` impl routing through
+/// [`AsRef<str>`] and [`std::path::Path::new`]), not a
+/// per-consumer `Path::new(level.as_str())` restatement at every
+/// downstream site that accepts `impl AsRef<std::path::Path>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`BumpLevel::as_str`]) and every borrowed-view
+/// surface — [`AsRef<str>`] (yields `&str`), [`AsRef<[u8]>`]
+/// (yields `&[u8]`), [`AsRef<std::ffi::OsStr>`] (yields
+/// `&OsStr`), this [`AsRef<std::path::Path>`] (yields `&Path`) —
+/// reads through it.
+impl AsRef<std::path::Path> for BumpLevel {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(<Self as AsRef<str>>::as_ref(self))
+    }
+}
+
 /// [`From<BumpLevel> for &'static str`] routes through
 /// [`BumpLevel::as_str`] so a downstream consumer that takes an owned
 /// [`&'static str`] via [`Into<&'static str>`] (a `const`-adjacent
@@ -6855,6 +6977,105 @@ mod tests {
                 decoded,
                 level.as_str(),
                 "OsStr::to_str round-trip must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`],
+    /// `<Self as AsRef<std::path::Path>>::as_ref(&level)` equals
+    /// `std::path::Path::new(level.as_str())`. Pins the agreement
+    /// identity that the filesystem-path borrowed-view surface
+    /// reads the same canonical label the [`AsRef<str>`] surface
+    /// reads, projected through [`std::path::Path::new`]. A
+    /// regression that swapped the [`AsRef<std::path::Path>`] impl
+    /// to route through an intermediate [`std::fmt::Display`]
+    /// format buffer or a fresh [`std::path::PathBuf`] allocation
+    /// would break this composition equality at at least one
+    /// variant and fail here at the canonical-label pin, not at
+    /// every downstream `impl AsRef<std::path::Path>` call site.
+    /// Structural mirror of
+    /// `test_per_attempt_region_as_ref_path_agrees_with_as_str`
+    /// (commit 17718d2) at the per-attempt-region ladder and
+    /// `test_admission_tier_as_ref_path_agrees_with_as_str`
+    /// (commit f6c4c75) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_as_ref_path_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let borrowed: &std::path::Path = <BumpLevel as AsRef<std::path::Path>>::as_ref(&level);
+            assert_eq!(
+                borrowed,
+                std::path::Path::new(level.as_str()),
+                "AsRef<Path> and Path::new(as_str()) must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<std::path::Path>`] identity carries through a
+    /// generic `impl AsRef<std::path::Path>` consumer at every
+    /// [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn read<T: AsRef<Path>>(t: &T) -> &Path { t.as_ref() }` —
+    /// the shape of an actual downstream consumer (a
+    /// [`std::fs::create_dir`] call, a
+    /// [`std::path::PathBuf::push`] segment, a
+    /// [`std::fs::File::open`] argument, a [`std::fs::metadata`]
+    /// input) — reads the canonical lowercase label directly
+    /// from a [`BumpLevel`] value without going through the
+    /// [`std::fmt::Display`] formatter buffer or an intermediate
+    /// [`std::path::PathBuf`] allocation. The structural witness
+    /// that a [`BumpLevel`] is genuinely usable at
+    /// `impl AsRef<std::path::Path>` call sites — a regression
+    /// that drifted the [`AsRef<std::path::Path>`] impl signature
+    /// (e.g., returning an owned [`std::path::PathBuf`] instead of
+    /// a `&Path`, or requiring a `&mut self`) fails here at
+    /// compile time instead of at every downstream generic call
+    /// site. Structural mirror of
+    /// `test_per_attempt_region_as_ref_path_carries_through_generic_consumer`
+    /// (commit 17718d2) at the per-attempt-region ladder and
+    /// `test_admission_tier_as_ref_path_carries_through_generic_consumer`
+    /// (commit f6c4c75) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_as_ref_path_carries_through_generic_consumer() {
+        fn read<T: AsRef<std::path::Path>>(t: &T) -> &std::path::Path {
+            t.as_ref()
+        }
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(&level),
+                std::path::Path::new(level.as_str()),
+                "generic AsRef<Path> consumer must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<std::path::Path>`] output round-trips through
+    /// [`std::path::Path::to_str`] recovering the canonical
+    /// lowercase label at every [`BumpLevel::ALL`] variant. Pins
+    /// the UTF-8 validity contract on the filesystem-path
+    /// borrowed-view surface: the returned `&Path` is always a
+    /// valid UTF-8 sequence because the canonical labels are pure
+    /// ASCII, and [`std::path::Path::to_str`] recovers exactly the
+    /// [`BumpLevel::as_str`] emission. Together with
+    /// [`test_bump_level_as_ref_path_agrees_with_as_str`] this
+    /// closes the filesystem-path borrowed-view surface against
+    /// both the composition oracle (`Path::new(as_str())`) and
+    /// the UTF-8 validity oracle ([`std::path::Path::to_str`]) at
+    /// every [`BumpLevel::ALL`] variant. Structural mirror of
+    /// `test_per_attempt_region_as_ref_path_round_trips_through_to_str`
+    /// (commit 17718d2) at the per-attempt-region ladder and
+    /// `test_admission_tier_as_ref_path_round_trips_through_to_str`
+    /// (commit f6c4c75) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_as_ref_path_round_trips_through_to_str() {
+        for level in BumpLevel::ALL {
+            let borrowed: &std::path::Path = <BumpLevel as AsRef<std::path::Path>>::as_ref(&level);
+            let decoded = borrowed
+                .to_str()
+                .unwrap_or_else(|| panic!("AsRef<Path> bytes for {level:?} must be valid UTF-8"));
+            assert_eq!(
+                decoded,
+                level.as_str(),
+                "Path::to_str round-trip must recover canonical label at {level:?}",
             );
         }
     }
