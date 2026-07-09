@@ -4162,6 +4162,113 @@ impl From<PerAttemptRegion> for std::ffi::OsString {
     }
 }
 
+/// [`From<PerAttemptRegion> for std::path::PathBuf`] routes through
+/// [`PerAttemptRegion::as_str`] composed with
+/// [`std::path::PathBuf::from`] so a downstream consumer bound by
+/// `impl Into<std::path::PathBuf>` (a
+/// [`std::path::PathBuf::push`] segment consumer that owns its
+/// receiver, a [`std::path::PathBuf::join`] argument that owns
+/// its input, a [`std::fs::create_dir_all`] argument via
+/// [`std::path::PathBuf`], a
+/// [`std::collections::HashMap<std::path::PathBuf, _>::insert`]
+/// key builder, a serde container that opts into
+/// `#[serde(into = "PathBuf")]` on a wrapper field) recovers the
+/// canonical snake_case label (`"before_first"`, `"first"`,
+/// `"interim"`, `"final"`, `"over_budget"`) as an owned
+/// [`std::path::PathBuf`] directly from a [`PerAttemptRegion`]
+/// value without a per-consumer `PathBuf::from(region.as_str())`
+/// two-step restatement at every by-value boundary.
+///
+/// Opens the owned-buffer filesystem-path emit trio at the per-
+/// attempt-region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// [`AsRef<std::path::Path>`] opening order (17718d2 → f6c4c75 →
+/// dfd887a), the [`From<T> for std::ffi::OsString`] opening order
+/// (976f5af → 0791fc7 → b069eec), the [`From<T> for String`]
+/// opening order, and the [`From<T> for Vec<u8>`] opening order
+/// (2ad52bc → 491db4d → 6701191). The by-value owned peer of
+/// [`AsRef<std::path::Path>`] above — both are filesystem-path
+/// surfaces at the same canonical-label oracle, differing only
+/// on the receiver's ownership: [`AsRef<std::path::Path>`]
+/// yields `&Path` for consumers that already hold a borrow, this
+/// [`From<PerAttemptRegion> for std::path::PathBuf`] yields
+/// [`std::path::PathBuf`] for consumers that own the input
+/// buffer. The str-frontier parallel is
+/// [`AsRef<str>`] → [`From<PerAttemptRegion> for String`]; the
+/// byte-slice-frontier parallel is
+/// [`AsRef<[u8]>`] → [`From<PerAttemptRegion> for Vec<u8>`]; the
+/// OS-string-frontier parallel is
+/// [`AsRef<std::ffi::OsStr>`] →
+/// [`From<PerAttemptRegion> for std::ffi::OsString`]; this
+/// [`AsRef<std::path::Path>`] →
+/// [`From<PerAttemptRegion> for std::path::PathBuf`] closes the
+/// same borrowed-view → owned-buffer emit peer at the filesystem-
+/// path frontier, extending the by-value owned-buffer emit axis
+/// from three frontiers (str, `[u8]`, `OsStr`) to four (str,
+/// `[u8]`, `OsStr`, `Path`) to match the four-frontier borrowed-
+/// view closure ([`AsRef<str>`], [`AsRef<[u8]>`],
+/// [`AsRef<std::ffi::OsStr>`], [`AsRef<std::path::Path>`]).
+///
+/// The natural bridge to consumers that work over the filesystem-
+/// path frontier at the owned-buffer emit axis: directory-
+/// composition machinery ([`std::path::PathBuf::push`],
+/// [`std::path::PathBuf::join`]) that owns its receiver,
+/// directory-creation machinery ([`std::fs::create_dir_all`])
+/// that owns its argument, keyed-index machinery
+/// ([`std::collections::HashMap<std::path::PathBuf, _>::insert`],
+/// [`std::collections::BTreeMap<std::path::PathBuf, _>::insert`])
+/// that owns its key, and serde container round-trip machinery
+/// (`#[serde(into = "PathBuf")]`) that owns its serialized shape,
+/// so a consumer that hands a canonical [`PerAttemptRegion`]
+/// label to any of these boundaries reads it directly from a
+/// [`PerAttemptRegion`] value without a `PathBuf::from(region.as_str())`
+/// restatement at the boundary — a per-attempt-region-scoped
+/// event-log directory keyed by owned [`std::path::PathBuf`]
+/// (`region_log_map.insert(region.into(), events)`), a per-
+/// attempt-region-scoped artifact directory that owns the
+/// segment (`let mut p = cache_root.clone(); p.push(region);`
+/// against an owned [`std::path::PathBuf`] slot), or a per-
+/// attempt-region-scoped serde container that opts into
+/// `#[serde(into = "PathBuf")]` on a filesystem-path field
+/// reads directly from a [`PerAttemptRegion`] value at these
+/// boundaries.
+///
+/// The identity `std::path::PathBuf::from(region) ==
+/// std::path::PathBuf::from(region.as_str())` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_pathbuf_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<std::path::PathBuf>` consumer at every variant is
+/// pinned by
+/// [`tests::test_per_attempt_region_into_pathbuf_carries_through_generic_consumer`];
+/// the round-trip through [`std::path::PathBuf::into_os_string`]
+/// then [`std::ffi::OsString::into_string`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_pathbuf_round_trips_through_into_os_string`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned filesystem-
+/// path emit surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one
+/// `From<PerAttemptRegion> for std::path::PathBuf` impl routing
+/// through [`PerAttemptRegion::as_str`] and
+/// [`std::path::PathBuf::from`]), not a per-consumer
+/// `PathBuf::from(region.as_str())` restatement at every
+/// downstream site that accepts `impl Into<std::path::PathBuf>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`PerAttemptRegion::as_str`]) and every owned-buffer
+/// emit surface — [`From<T> for String`] (yields [`String`]),
+/// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]),
+/// [`From<T> for std::ffi::OsString`] (yields
+/// [`std::ffi::OsString`]), this
+/// [`From<T> for std::path::PathBuf`] (yields
+/// [`std::path::PathBuf`]) — reads through it.
+impl From<PerAttemptRegion> for std::path::PathBuf {
+    fn from(region: PerAttemptRegion) -> std::path::PathBuf {
+        std::path::PathBuf::from(region.as_str())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -17470,6 +17577,96 @@ mod tests {
                 decoded,
                 region.as_str(),
                 "OsString::into_string round-trip must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], `std::path::PathBuf::from(region)`
+    /// equals `std::path::PathBuf::from(region.as_str())`. Pins the
+    /// agreement identity that the by-value owned filesystem-path
+    /// emit surface reads the same canonical label the
+    /// [`AsRef<str>`] surface reads, projected through
+    /// [`std::path::PathBuf::from`]. A regression that swapped the
+    /// [`From`] impl to route through an intermediate
+    /// [`std::fmt::Display`] format buffer or a
+    /// [`std::ffi::OsString`] round-trip would break this
+    /// composition equality at at least one variant and fail here
+    /// at the canonical-label pin, not at every downstream
+    /// `impl Into<std::path::PathBuf>` call site.
+    #[test]
+    fn test_per_attempt_region_from_into_pathbuf_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let owned: std::path::PathBuf = std::path::PathBuf::from(region);
+            assert_eq!(
+                owned,
+                std::path::PathBuf::from(region.as_str()),
+                "From<PerAttemptRegion> for PathBuf and PathBuf::from(as_str()) must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for std::path::PathBuf`]
+    /// identity carries through a generic
+    /// `impl Into<std::path::PathBuf>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<PathBuf>>(t: T) -> PathBuf { t.into() }` —
+    /// the shape of an actual downstream consumer (a
+    /// [`std::path::PathBuf::push`] segment consumer that owns its
+    /// receiver, a [`std::fs::create_dir_all`] argument, a
+    /// [`std::collections::HashMap<std::path::PathBuf, _>::insert`]
+    /// key builder) — reads the canonical snake_case label
+    /// directly from a [`PerAttemptRegion`] value as an owned
+    /// [`std::path::PathBuf`]. The structural witness that a
+    /// [`PerAttemptRegion`] is genuinely usable at
+    /// `impl Into<std::path::PathBuf>` call sites — a regression
+    /// that drifted the [`From`] impl signature (e.g., returning
+    /// `&std::path::Path` instead of [`std::path::PathBuf`],
+    /// requiring `&PerAttemptRegion` and losing the by-value
+    /// semantics) fails here at compile time instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_pathbuf_carries_through_generic_consumer() {
+        fn read<T: Into<std::path::PathBuf>>(t: T) -> std::path::PathBuf {
+            t.into()
+        }
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region),
+                std::path::PathBuf::from(region.as_str()),
+                "generic Into<PathBuf> consumer must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for std::path::PathBuf`] output
+    /// round-trips through [`std::path::PathBuf::into_os_string`]
+    /// composed with [`std::ffi::OsString::into_string`] recovering
+    /// the canonical snake_case label byte-for-byte at every
+    /// [`PerAttemptRegion::ALL`] variant. Pins the UTF-8 validity
+    /// contract on the by-value owned filesystem-path emit
+    /// surface: the produced [`std::path::PathBuf`] is always a
+    /// valid UTF-8 sequence because the canonical labels are pure
+    /// ASCII, and [`std::path::PathBuf::into_os_string`] +
+    /// [`std::ffi::OsString::into_string`] recovers exactly the
+    /// [`PerAttemptRegion::as_str`] emission. Together with
+    /// [`test_per_attempt_region_from_into_pathbuf_agrees_with_as_str`]
+    /// this closes the owned filesystem-path emit surface against
+    /// both the composition oracle (`PathBuf::from(as_str())`) and
+    /// the UTF-8 validity oracle
+    /// (`PathBuf::into_os_string ∘ OsString::into_string`) at every
+    /// [`PerAttemptRegion::ALL`] variant.
+    #[test]
+    fn test_per_attempt_region_from_into_pathbuf_round_trips_through_into_os_string() {
+        for region in PerAttemptRegion::ALL {
+            let owned: std::path::PathBuf = std::path::PathBuf::from(region);
+            let decoded = owned.into_os_string().into_string().unwrap_or_else(|s| {
+                panic!("PathBuf for {region:?} must be valid UTF-8 (got {s:?})")
+            });
+            assert_eq!(
+                decoded,
+                region.as_str(),
+                "PathBuf::into_os_string ∘ OsString::into_string round-trip must recover canonical label at {region:?}",
             );
         }
     }
