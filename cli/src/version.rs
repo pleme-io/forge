@@ -1511,6 +1511,106 @@ impl AsRef<[u8]> for BumpLevel {
     }
 }
 
+/// [`AsRef<std::ffi::OsStr>`] routes through
+/// `<BumpLevel as AsRef<str>>::as_ref` composed with
+/// [`std::ffi::OsStr::new`] at the canonical-label oracle so a
+/// downstream consumer that takes a borrowed OS-string view via
+/// [`AsRef<std::ffi::OsStr>`] (a [`std::process::Command::env`] /
+/// [`std::process::Command::arg`] / [`std::process::Command::current_dir`]
+/// slot that keys by [`AsRef<std::ffi::OsStr>`], a
+/// [`std::env::set_var`] / [`std::env::var_os`] telemetry-key bridge,
+/// a [`std::path::PathBuf::push`] / [`std::fs::create_dir`] path-
+/// segment component built from a canonical bump-level label, a
+/// [`std::ffi::OsString::push`] sink over a caller-owned buffer)
+/// reads the canonical lowercase label (`"patch"`, `"minor"`,
+/// `"major"`) as a borrowed `&OsStr` view of the static-lifetime
+/// label constant without a [`String`] allocation, an
+/// [`std::ffi::OsString`] copy, or an intermediate
+/// [`std::fmt::Display`] format-buffer step.
+///
+/// Sibling of [`AsRef<str>`] and [`AsRef<[u8]>`] directly above —
+/// the same borrowed-view surface at the same canonical-label
+/// oracle, projected onto the OS-string frontier instead of the
+/// UTF-8 string frontier or the byte-slice frontier. Extends the
+/// borrowed-view axis at the bump-level ladder parallel to the
+/// [`AsRef<str>`] and [`AsRef<[u8]>`] surfaces: the [`AsRef<str>`]
+/// impl yields `&str`, the [`AsRef<[u8]>`] impl yields `&[u8]`,
+/// this [`AsRef<std::ffi::OsStr>`] impl yields `&OsStr` — the same
+/// routing discipline (`OsStr::new(self.as_str())` == one
+/// composition through [`BumpLevel::as_str`] and
+/// [`std::ffi::OsStr::new`], both zero-copy views of the static-
+/// lifetime label constant on Unix and a valid WTF-8 view of the
+/// same UTF-8 bytes on Windows since the labels are pure ASCII) so
+/// a future consumer that requires the OS-string frontier reads the
+/// canonical label through one typed-primitive surface at the same
+/// oracle instead of restating the two-step
+/// `OsStr::new(level.as_str())` composition at every call site.
+///
+/// The natural bridge to consumers that work over the OS-string
+/// frontier at the borrowed-view axis: process-spawn machinery
+/// ([`std::process::Command::env`], [`std::process::Command::arg`],
+/// [`std::process::Command::current_dir`]), environment machinery
+/// ([`std::env::set_var`], [`std::env::var_os`]), and filesystem
+/// path components (a canonical [`BumpLevel`] label used as a
+/// release-manifest directory or file segment via
+/// [`std::path::PathBuf::push`]) all take
+/// [`impl AsRef<std::ffi::OsStr>`] as their standard input surface,
+/// so a consumer that hands a canonical [`BumpLevel`] label to any
+/// of these boundaries reads it directly from a [`BumpLevel`] value
+/// without an [`std::ffi::OsStr::new`] restatement at the boundary.
+///
+/// Closing peer of the OS-string borrowed-view trio: the opening
+/// peer at the per-attempt-region ladder is
+/// `impl AsRef<std::ffi::OsStr> for` [`crate::retry::PerAttemptRegion`]
+/// (commit 70e1ab5); the mid-trio peer at the admission-tier ladder
+/// is `impl AsRef<std::ffi::OsStr> for`
+/// [`crate::probe_outcome::AdmissionTier`] (commit 1d708f4). This
+/// commit matches the [`AsRef<[u8]>`] closure order
+/// (af44439 → 13abcc4 → 833d706) and the [`AsRef<str>`] closure
+/// order (8c8cffe → 7acca19 → f1ca293), closing the OS-string
+/// borrowed-view surface across all three canonical-label typed
+/// primitives on the ladder set against ONE canonical-label oracle
+/// each.
+///
+/// Zero-cost by construction: the returned `&OsStr` is a
+/// zero-length-check-free view of the static-lifetime label
+/// constant table's UTF-8 bytes — [`std::ffi::OsStr::new`] on a
+/// `&str` is a zero-cost transmute at the borrow-view boundary
+/// (on Unix, `OsStr` is a `[u8]` newtype; on Windows, `OsStr` is a
+/// WTF-8 slice which is a strict superset of UTF-8, so a valid
+/// `&str` is always a valid `&OsStr`), no allocation, no copy, no
+/// branching over the variant discriminant beyond what
+/// [`BumpLevel::as_str`] itself does at its match body.
+///
+/// The identity `<BumpLevel as AsRef<std::ffi::OsStr>>::as_ref(&level)
+/// == std::ffi::OsStr::new(level.as_str())` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_as_ref_osstr_agrees_with_as_str`]; the
+/// identity carried through a generic
+/// `impl AsRef<std::ffi::OsStr>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_as_ref_osstr_carries_through_generic_consumer`];
+/// the round-trip through [`std::ffi::OsStr::to_str`] recovering
+/// the canonical label at every variant is pinned by
+/// [`tests::test_bump_level_as_ref_osstr_round_trips_through_to_str`].
+///
+/// THEORY.md §V.4 typed primitives: the OS-string borrowed-view
+/// surface is a typed-primitive site on [`BumpLevel`] itself
+/// (one `AsRef<std::ffi::OsStr>` impl routing through
+/// [`AsRef<str>`] and [`std::ffi::OsStr::new`]), not a per-consumer
+/// `OsStr::new(level.as_str())` restatement at every downstream
+/// site that accepts `impl AsRef<std::ffi::OsStr>`. THEORY.md
+/// §VI.1 one-oracle: the canonical label is named at one site
+/// ([`BumpLevel::as_str`]) and every borrowed-view surface —
+/// [`AsRef<str>`] (yields `&str`), [`AsRef<[u8]>`] (yields
+/// `&[u8]`), this [`AsRef<std::ffi::OsStr>`] (yields `&OsStr`) —
+/// reads through it.
+impl AsRef<std::ffi::OsStr> for BumpLevel {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        std::ffi::OsStr::new(<Self as AsRef<str>>::as_ref(self))
+    }
+}
+
 /// [`From<BumpLevel> for &'static str`] routes through
 /// [`BumpLevel::as_str`] so a downstream consumer that takes an owned
 /// [`&'static str`] via [`Into<&'static str>`] (a `const`-adjacent
@@ -6658,6 +6758,103 @@ mod tests {
                 decoded,
                 level.as_str(),
                 "from_utf8 round-trip must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`],
+    /// `<Self as AsRef<std::ffi::OsStr>>::as_ref(&level)` equals
+    /// `std::ffi::OsStr::new(level.as_str())`. Pins the agreement
+    /// identity that the OS-string borrowed-view surface reads the
+    /// same canonical label the [`AsRef<str>`] surface reads,
+    /// projected through [`std::ffi::OsStr::new`]. A regression that
+    /// swapped the [`AsRef<std::ffi::OsStr>`] impl to route through
+    /// an intermediate [`std::fmt::Display`] format buffer or a
+    /// fresh [`std::ffi::OsString`] allocation would break this
+    /// composition equality at at least one variant and fail here
+    /// at the canonical-label pin, not at every downstream
+    /// `impl AsRef<std::ffi::OsStr>` call site. Structural mirror of
+    /// `test_per_attempt_region_as_ref_osstr_agrees_with_as_str`
+    /// (commit 70e1ab5) at the per-attempt-region ladder and
+    /// `test_admission_tier_as_ref_osstr_agrees_with_as_str`
+    /// (commit 1d708f4) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_as_ref_osstr_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let borrowed: &std::ffi::OsStr = <BumpLevel as AsRef<std::ffi::OsStr>>::as_ref(&level);
+            assert_eq!(
+                borrowed,
+                std::ffi::OsStr::new(level.as_str()),
+                "AsRef<OsStr> and OsStr::new(as_str()) must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<std::ffi::OsStr>`] identity carries through a
+    /// generic `impl AsRef<std::ffi::OsStr>` consumer at every
+    /// [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn read<T: AsRef<OsStr>>(t: &T) -> &OsStr { t.as_ref() }` —
+    /// the shape of an actual downstream consumer (a
+    /// [`std::process::Command::env`] call, a
+    /// [`std::env::set_var`] key, a [`std::path::PathBuf::push`]
+    /// segment, a [`std::fs::create_dir`] name) — reads the
+    /// canonical lowercase label directly from a [`BumpLevel`]
+    /// value without going through the [`std::fmt::Display`]
+    /// formatter buffer or an intermediate [`std::ffi::OsString`]
+    /// allocation. The structural witness that a [`BumpLevel`] is
+    /// genuinely usable at `impl AsRef<std::ffi::OsStr>` call sites
+    /// — a regression that drifted the [`AsRef<std::ffi::OsStr>`]
+    /// impl signature (e.g., returning an owned
+    /// [`std::ffi::OsString`] instead of a `&OsStr`, or requiring a
+    /// `&mut self`) fails here at compile time instead of at every
+    /// downstream generic call site. Structural mirror of
+    /// `test_per_attempt_region_as_ref_osstr_carries_through_generic_consumer`
+    /// (commit 70e1ab5) at the per-attempt-region ladder and
+    /// `test_admission_tier_as_ref_osstr_carries_through_generic_consumer`
+    /// (commit 1d708f4) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_as_ref_osstr_carries_through_generic_consumer() {
+        fn read<T: AsRef<std::ffi::OsStr>>(t: &T) -> &std::ffi::OsStr {
+            t.as_ref()
+        }
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(&level),
+                std::ffi::OsStr::new(level.as_str()),
+                "generic AsRef<OsStr> consumer must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<std::ffi::OsStr>`] output round-trips through
+    /// [`std::ffi::OsStr::to_str`] recovering the canonical
+    /// lowercase label at every [`BumpLevel::ALL`] variant. Pins
+    /// the UTF-8 validity contract on the OS-string borrowed-view
+    /// surface: the returned `&OsStr` is always a valid UTF-8
+    /// sequence because the canonical labels are pure ASCII, and
+    /// [`std::ffi::OsStr::to_str`] recovers exactly the
+    /// [`BumpLevel::as_str`] emission. Together with
+    /// [`test_bump_level_as_ref_osstr_agrees_with_as_str`] this
+    /// closes the OS-string borrowed-view surface against both the
+    /// composition oracle (`OsStr::new(as_str())`) and the UTF-8
+    /// validity oracle ([`std::ffi::OsStr::to_str`]) at every
+    /// [`BumpLevel::ALL`] variant. Structural mirror of
+    /// `test_per_attempt_region_as_ref_osstr_round_trips_through_to_str`
+    /// (commit 70e1ab5) at the per-attempt-region ladder and
+    /// `test_admission_tier_as_ref_osstr_round_trips_through_to_str`
+    /// (commit 1d708f4) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_as_ref_osstr_round_trips_through_to_str() {
+        for level in BumpLevel::ALL {
+            let borrowed: &std::ffi::OsStr = <BumpLevel as AsRef<std::ffi::OsStr>>::as_ref(&level);
+            let decoded = borrowed
+                .to_str()
+                .unwrap_or_else(|| panic!("AsRef<OsStr> bytes for {level:?} must be valid UTF-8"));
+            assert_eq!(
+                decoded,
+                level.as_str(),
+                "OsStr::to_str round-trip must recover canonical label at {level:?}",
             );
         }
     }
