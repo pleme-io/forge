@@ -3807,6 +3807,88 @@ impl TryFrom<std::sync::Arc<[u8]>> for PerAttemptRegion {
     }
 }
 
+/// [`TryFrom<Rc<[u8]>> for PerAttemptRegion`] routes through the
+/// by-reference [`TryFrom<&[u8]>`] parse peer above on the
+/// caller-supplied [`std::rc::Rc<[u8]>`]'s [`AsRef<[u8]>`] view, so a
+/// downstream consumer bound by `impl TryFrom<Rc<[u8]>>` (a single-
+/// threaded validated-input newtype builder whose canonical parse
+/// contract is stated as `TryFrom<Rc<[u8]>>` rather than
+/// [`std::str::FromStr`], a generic try-conversion helper
+/// `fn parse<T: TryFrom<Rc<[u8]>>>` that composes with a caller-
+/// shared refcounted byte-buffer uniformly on the current thread, an
+/// [`std::rc::Rc<[u8]>`]-carrying event log replay that hands the
+/// canonical label bytes to a typed-sum parser without unsharing the
+/// non-atomic refcount) recovers a [`PerAttemptRegion`] value from
+/// its canonical snake_case label bytes (`"before_first"`, `"first"`,
+/// `"interim"`, `"final"`, `"over_budget"`) through the same one-
+/// oracle byte-slice grammar the direct
+/// `PerAttemptRegion::try_from(&bytes[..])` call sites already read —
+/// the caller's non-atomic-refcounted thread-local shared byte-buffer
+/// is inspected end-to-end without unsharing the refcount.
+///
+/// The by-value thread-local shared-owned byte-slice parse peer of
+/// the by-value shared-owned byte-slice parse peer
+/// [`TryFrom<Arc<[u8]>> for PerAttemptRegion`] directly above: both
+/// route through the same by-reference [`TryFrom<&[u8]>`] parse
+/// oracle, but this impl consumes a caller-supplied
+/// [`std::rc::Rc<[u8]>`] (the non-atomic-refcount-header thread-local
+/// shared buffer, whose refcount drops by one when the parse returns)
+/// whereas the [`Arc<[u8]>`] impl consumes an atomic-refcount-header
+/// cross-thread shared buffer. Structural mirror of
+/// [`TryFrom<Rc<str>> for PerAttemptRegion`] at the UTF-8 frontier —
+/// the same thread-local shared-owned parse discipline, projected
+/// onto the byte-slice frontier. Closes the byte-slice parse matrix
+/// on [`PerAttemptRegion`] at every owned/borrowed pointer flavor the
+/// UTF-8 parse matrix already covers.
+///
+/// Opens the by-value thread-local shared-owned byte-slice-parse trio
+/// at the per-attempt-region ladder; two subsequent commits close it
+/// at the [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the opening order
+/// of every prior byte-slice parse peer.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is:
+/// only the canonical snake_case labels parse. Empty input, UpperCamel
+/// rendering, whitespace padding, uppercase, and non-UTF-8 byte
+/// sequences all reject — the strictness is delegated from the
+/// underlying [`TryFrom<&[u8]>`] impl through
+/// [`std::str::from_utf8`] and then [`std::str::FromStr`].
+///
+/// The identity `PerAttemptRegion::try_from(Rc::<[u8]>::from(
+/// region.as_str().as_bytes())).unwrap() == region` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_rc_bytes_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<Rc<[u8]>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_rc_bytes_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical input is pinned by
+/// [`tests::test_per_attempt_region_try_from_rc_bytes_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// shared-owned byte-slice-parse surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one `TryFrom<Rc<[u8]>>` impl routing
+/// through the by-reference [`TryFrom<&[u8]>`] parse oracle), not a
+/// per-consumer
+/// `PerAttemptRegion::try_from(std::str::from_utf8(&bytes)?.trim())`
+/// restatement at every downstream site that types its parse contract
+/// as `impl TryFrom<Rc<[u8]>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// at one site ([`PerAttemptRegion::as_str`]), inverted at one site
+/// ([`PerAttemptRegion::from_str`]), and every parse surface —
+/// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
+/// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`], [`TryFrom<Cow<'_, [u8]>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`], this
+/// [`TryFrom<Rc<[u8]>>`] — reads through it.
+impl TryFrom<std::rc::Rc<[u8]>> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(bytes: std::rc::Rc<[u8]>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&[u8]>>::try_from(bytes.as_ref())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -16765,6 +16847,97 @@ mod tests {
                 <PerAttemptRegion as std::convert::TryFrom<std::sync::Arc<[u8]>>>::try_from(arced)
                     .is_err(),
                 "TryFrom<Arc<[u8]>> must reject non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// Round-trip identity: every [`PerAttemptRegion::ALL`] variant
+    /// rendered as its canonical snake_case label bytes and wrapped
+    /// in an [`std::rc::Rc<[u8]>`] parses back through
+    /// [`TryFrom<Rc<[u8]>>`] to the same variant. Pins at ONE named
+    /// site the round-trip identity that the by-value thread-local
+    /// shared-owned byte-slice parse surface reads the same canonical
+    /// grammar the borrowed [`TryFrom<&[u8]>`], owned-buffer
+    /// [`TryFrom<Vec<u8>>`], borrowed/owned-frontier
+    /// [`TryFrom<Cow<'_, [u8]>>`], shrunk-owned
+    /// [`TryFrom<Box<[u8]>>`], and shared-owned
+    /// [`TryFrom<Arc<[u8]>>`] peers already read at the byte-slice
+    /// frontier.
+    #[test]
+    fn test_per_attempt_region_try_from_rc_bytes_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let rced: std::rc::Rc<[u8]> = std::rc::Rc::from(region.as_str().as_bytes());
+            let parsed: PerAttemptRegion =
+                <PerAttemptRegion as std::convert::TryFrom<std::rc::Rc<[u8]>>>::try_from(rced)
+                    .unwrap();
+            assert_eq!(
+                parsed, region,
+                "TryFrom<Rc<[u8]>> must round-trip canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Rc<[u8]>>`] identity carries through a generic
+    /// `impl TryFrom<Rc<[u8]>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn parse<T: TryFrom<Rc<[u8]>, Error = anyhow::Error>>(bytes:
+    /// Rc<[u8]>) -> Result<T> { T::try_from(bytes) }` — the shape of
+    /// an actual downstream consumer (a single-threaded validated-
+    /// input newtype builder whose canonical parse contract is stated
+    /// as `TryFrom<Rc<[u8]>>`, a thread-local event log replay that
+    /// hands the canonical label bytes to a typed-sum parser) —
+    /// recovers a [`PerAttemptRegion`] value from its canonical
+    /// snake_case label bytes with the non-atomic-refcounted shared
+    /// buffer consumed end-to-end. Compile-time witness that a
+    /// [`PerAttemptRegion`] is genuinely usable at
+    /// `impl TryFrom<Rc<[u8]>>` call sites.
+    #[test]
+    fn test_per_attempt_region_try_from_rc_bytes_carries_through_generic_consumer() {
+        fn parse<T>(bytes: std::rc::Rc<[u8]>) -> anyhow::Result<T>
+        where
+            T: std::convert::TryFrom<std::rc::Rc<[u8]>, Error = anyhow::Error>,
+        {
+            T::try_from(bytes)
+        }
+
+        for region in PerAttemptRegion::ALL {
+            let rced: std::rc::Rc<[u8]> = std::rc::Rc::from(region.as_str().as_bytes());
+            let parsed: PerAttemptRegion = parse(rced).unwrap();
+            assert_eq!(
+                parsed, region,
+                "generic TryFrom<Rc<[u8]>> consumer must recover canonical variant at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<[u8]>> for PerAttemptRegion`] strict-rejects
+    /// non-canonical input at every non-canonical byte-buffer shape
+    /// the underlying [`std::str::from_utf8`] + [`std::str::FromStr`]
+    /// pipeline rejects: empty, UpperCamel rendering, whitespace
+    /// padding, uppercase, and lowercase-concatenated variants that
+    /// drop the snake_case underscore. Pins the strict-rejection
+    /// contract at ONE named site so a regression that loosened the
+    /// underlying [`TryFrom<&[u8]>`] parser (e.g., trimming whitespace,
+    /// case-folding, or accepting alternative spellings) would fail
+    /// here instead of leaking to every downstream
+    /// `impl TryFrom<Rc<[u8]>>` consumer.
+    #[test]
+    fn test_per_attempt_region_try_from_rc_bytes_rejects_non_canonical_input() {
+        for bad in [
+            b"".to_vec(),
+            b"BeforeFirst".to_vec(),
+            b"OverBudget".to_vec(),
+            b"FIRST".to_vec(),
+            b" first".to_vec(),
+            b"first ".to_vec(),
+            b"beforefirst".to_vec(),
+            b"overbudget".to_vec(),
+        ] {
+            let rced: std::rc::Rc<[u8]> = std::rc::Rc::from(bad.as_slice());
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<std::rc::Rc<[u8]>>>::try_from(rced)
+                    .is_err(),
+                "TryFrom<Rc<[u8]>> must reject non-canonical input {bad:?}",
             );
         }
     }
