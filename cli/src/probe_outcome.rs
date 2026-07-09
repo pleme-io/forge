@@ -6948,6 +6948,85 @@ impl<'a> TryFrom<std::borrow::Cow<'a, [u8]>> for AdmissionTier {
     }
 }
 
+/// [`TryFrom<Box<[u8]>> for AdmissionTier`] routes through the by-reference
+/// [`TryFrom<&[u8]>`] parse peer on the caller-supplied [`Box<[u8]>`]'s
+/// [`AsRef<[u8]>`] view, so a downstream consumer bound by
+/// `impl TryFrom<Box<[u8]>>` (a serde container that opts into
+/// `#[serde(try_from = "Box<[u8]>")]` on a wrapper field, a generic
+/// try-conversion helper `fn parse<T: TryFrom<Box<[u8]>>>` that composes
+/// with a caller-owned shrunk byte-buffer uniformly, a validated-input
+/// newtype builder whose canonical parse contract is stated as
+/// `TryFrom<Box<[u8]>>` rather than [`std::str::FromStr`]) recovers an
+/// [`AdmissionTier`] value from its canonical snake_case label bytes
+/// (`b"refused"`, `b"staging_only"`, `b"strict"`) through the same
+/// one-oracle byte-slice grammar the by-reference [`TryFrom<&[u8]>`],
+/// by-value owned-buffer [`TryFrom<Vec<u8>>`], and by-value
+/// borrowed/owned-frontier [`TryFrom<Cow<'_, [u8]>>`] parse peers above
+/// already read — the caller-owned shrunk buffer is consumed end-to-end,
+/// matching the discipline [`TryFrom<Box<str>>`] reads at the UTF-8
+/// frontier.
+///
+/// Mid-trio peer of the by-value shrunk-owned byte-slice-parse trio at the
+/// second ordered typed sum:
+/// [`TryFrom<Box<[u8]>>`] for [`crate::retry::PerAttemptRegion`] (commit
+/// 51dcd67) opened the trio at the per-attempt-region ladder; this impl
+/// carries the mid-trio slot at the admission-tier ladder; one subsequent
+/// commit closes the trio at the [`crate::version::BumpLevel`] ladder,
+/// matching the [`TryFrom<&[u8]>`] opening order (5c0c827 → cdb192c →
+/// 629b242), the [`TryFrom<Vec<u8>>`] opening order (91ba4bf → f4a2052 →
+/// 5b6f488), the [`TryFrom<Cow<'_, [u8]>>`] opening order (506c183 →
+/// ac5b862 → 51c42d7), and the sibling UTF-8-frontier
+/// [`TryFrom<Box<str>>`] opening order (3b8c512 → 1a34d2a → 3b8a8e7).
+///
+/// The by-value shrunk-owned parse peer of the by-value
+/// borrowed/owned-frontier byte-slice parse peer
+/// [`TryFrom<Cow<'_, [u8]>> for AdmissionTier`] directly above: both route
+/// through the same by-reference [`TryFrom<&[u8]>`] parse oracle, but this
+/// impl consumes a caller-owned [`Box<[u8]>`] (dropped after the parse)
+/// whereas the [`Cow`] impl carries either borrowed or owned bytes.
+/// Structural mirror of [`TryFrom<Box<str>> for AdmissionTier`] at the
+/// UTF-8 frontier — the same shrunk-owned parse discipline, projected
+/// onto the byte-slice frontier.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is:
+/// only the canonical snake_case labels parse. Empty input, UpperCamel
+/// rendering, whitespace padding, uppercase, and non-UTF-8 byte sequences
+/// all reject — the strictness is delegated from the underlying
+/// [`TryFrom<&[u8]>`] impl through [`std::str::from_utf8`] and then
+/// [`std::str::FromStr`].
+///
+/// The identity `AdmissionTier::try_from(Box::<[u8]>::from(
+/// tier.as_str().as_bytes())).unwrap() == tier` at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_try_from_box_bytes_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<Box<[u8]>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_admission_tier_try_from_box_bytes_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical input is pinned by
+/// [`tests::test_admission_tier_try_from_box_bytes_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// byte-slice-parse surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one `TryFrom<Box<[u8]>>` impl routing through
+/// the by-reference [`TryFrom<&[u8]>`] parse oracle), not a per-consumer
+/// `AdmissionTier::try_from(std::str::from_utf8(&bytes)?.trim())`
+/// restatement at every downstream site.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at one
+/// site ([`AdmissionTier::as_str`]), inverted at one site
+/// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every parse
+/// surface — [`std::str::FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`], [`TryFrom<Cow<'_, [u8]>>`],
+/// this [`TryFrom<Box<[u8]>>`] — reads through it.
+impl TryFrom<Box<[u8]>> for AdmissionTier {
+    type Error = anyhow::Error;
+
+    fn try_from(bytes: Box<[u8]>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&[u8]>>::try_from(bytes.as_ref())
+    }
+}
+
 /// [`TryFrom<&str> for AdmissionTier`] routes through
 /// [`<AdmissionTier as std::str::FromStr>::from_str`] so a downstream
 /// consumer bound by `impl TryFrom<&str>` (a serde container that opts
@@ -20053,6 +20132,101 @@ mod tests {
                 )
                 .is_err(),
                 "TryFrom<Cow<'_, [u8]>> must reject non-canonical Cow::Owned input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<[u8]>> for AdmissionTier`] recovers the original
+    /// variant at every [`AdmissionTier::ALL`] variant when the canonical
+    /// label bytes emitted by [`AdmissionTier::as_str`] are wrapped in a
+    /// [`Box<[u8]>`] and fed back through it. Pins the round-trip identity
+    /// `AdmissionTier::try_from(Box::<[u8]>::from(tier.as_str()
+    /// .as_bytes())).unwrap() == tier` at every variant against the
+    /// shared canonical-label oracle, applied to the caller-owned shrunk
+    /// buffer input shape. Pins the round-trip identity that the by-value
+    /// shrunk-owned byte-slice parse surface reads the same canonical
+    /// grammar the borrowed [`TryFrom<&[u8]>`], owned-buffer
+    /// [`TryFrom<Vec<u8>>`], and borrowed/owned-frontier
+    /// [`TryFrom<Cow<'_, [u8]>>`] peers read at the byte-slice frontier.
+    /// Structural mirror of
+    /// `test_per_attempt_region_try_from_box_bytes_agrees_with_from_str`
+    /// (commit 51dcd67) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_try_from_box_bytes_agrees_with_from_str() {
+        for tier in AdmissionTier::ALL {
+            let boxed: Box<[u8]> = Box::from(tier.as_str().as_bytes());
+            let parsed: AdmissionTier =
+                <AdmissionTier as std::convert::TryFrom<Box<[u8]>>>::try_from(boxed).unwrap();
+            assert_eq!(
+                parsed, tier,
+                "TryFrom<Box<[u8]>> must round-trip canonical label bytes at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Box<[u8]>>`] identity carries through a generic
+    /// `impl TryFrom<Box<[u8]>>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn parse<T: TryFrom<Box<[u8]>, Error = anyhow::Error>>(bytes:
+    /// Box<[u8]>) -> Result<T> { T::try_from(bytes) }` — the shape of an
+    /// actual downstream consumer (a `serde` container with
+    /// `#[serde(try_from = "Box<[u8]>")]` on a wrapper field, a
+    /// validated-input newtype builder whose canonical parse contract is
+    /// stated as `TryFrom<Box<[u8]>>`) — recovers an [`AdmissionTier`]
+    /// value from its canonical snake_case label bytes with the
+    /// shrunk-owned buffer consumed end-to-end. Compile-time witness that
+    /// an [`AdmissionTier`] is genuinely usable at
+    /// `impl TryFrom<Box<[u8]>>` call sites. Structural mirror of
+    /// `test_per_attempt_region_try_from_box_bytes_carries_through_generic_consumer`
+    /// (commit 51dcd67) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_try_from_box_bytes_carries_through_generic_consumer() {
+        fn parse<T>(bytes: Box<[u8]>) -> anyhow::Result<T>
+        where
+            T: std::convert::TryFrom<Box<[u8]>, Error = anyhow::Error>,
+        {
+            T::try_from(bytes)
+        }
+
+        for tier in AdmissionTier::ALL {
+            let boxed: Box<[u8]> = Box::from(tier.as_str().as_bytes());
+            let parsed: AdmissionTier = parse(boxed).unwrap();
+            assert_eq!(
+                parsed, tier,
+                "generic TryFrom<Box<[u8]>> consumer must recover canonical variant at {tier:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<[u8]>> for AdmissionTier`] strict-rejects
+    /// non-canonical input at every non-canonical byte-buffer shape the
+    /// underlying [`std::str::from_utf8`] + [`std::str::FromStr`] pipeline
+    /// rejects: empty, UpperCamel rendering, whitespace padding,
+    /// uppercase, and lowercase-concatenated variants that drop the
+    /// snake_case underscore. Pins the strict-rejection contract at ONE
+    /// named site so a regression that loosened the underlying
+    /// [`TryFrom<&[u8]>`] parser (e.g., trimming whitespace, case-folding,
+    /// or accepting alternative spellings) would fail here instead of
+    /// leaking to every downstream `impl TryFrom<Box<[u8]>>` consumer.
+    /// Structural mirror of
+    /// `test_per_attempt_region_try_from_box_bytes_rejects_non_canonical_input`
+    /// (commit 51dcd67) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_try_from_box_bytes_rejects_non_canonical_input() {
+        for bad in [
+            b"".to_vec(),
+            b"Refused".to_vec(),
+            b"StagingOnly".to_vec(),
+            b"Strict".to_vec(),
+            b"REFUSED".to_vec(),
+            b" refused".to_vec(),
+            b"refused ".to_vec(),
+            b"stagingonly".to_vec(),
+        ] {
+            let boxed: Box<[u8]> = Box::from(bad.as_slice());
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<Box<[u8]>>>::try_from(boxed).is_err(),
+                "TryFrom<Box<[u8]>> must reject non-canonical input {bad:?}",
             );
         }
     }
