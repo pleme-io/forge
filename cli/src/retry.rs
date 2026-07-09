@@ -3986,6 +3986,114 @@ impl AsRef<std::ffi::OsStr> for PerAttemptRegion {
     }
 }
 
+/// Zero-copy borrowed filesystem-path view of the canonical
+/// snake_case label (`"before_first"`, `"first"`, `"interim"`,
+/// `"final"`, `"over_budget"`) at the [`std::path::Path`]
+/// frontier — a downstream consumer bound by
+/// `impl AsRef<std::path::Path>` (a [`std::fs::create_dir`] /
+/// [`std::fs::create_dir_all`] name component, a
+/// [`std::fs::read_dir`] entry key, a
+/// [`std::path::PathBuf::push`] path segment, a
+/// [`std::fs::File::open`] / [`std::fs::File::create`] path
+/// argument, a [`std::fs::metadata`] /
+/// [`std::fs::remove_dir_all`] input, a
+/// [`std::path::PathBuf::from`] sink over a caller-owned buffer)
+/// reads the canonical snake_case label as a borrowed
+/// `&std::path::Path` view of the static-lifetime label constant
+/// without a [`String`] allocation, a [`std::path::PathBuf`]
+/// copy, or an intermediate [`std::fmt::Display`] format-buffer
+/// step.
+///
+/// Sibling of [`AsRef<str>`] (commit 8c8cffe), [`AsRef<[u8]>`]
+/// (commit af44439), and [`AsRef<std::ffi::OsStr>`] (commit
+/// 70e1ab5) above — the same borrowed-view surface at the same
+/// canonical-label oracle, projected onto the filesystem-path
+/// frontier instead of the UTF-8 string frontier, the byte-slice
+/// frontier, or the OS-string frontier. Opens a NEW string-owner-
+/// shape ladder at the borrowed-view axis parallel to those three
+/// surfaces: the [`AsRef<str>`] impl yields `&str`, the
+/// [`AsRef<[u8]>`] impl yields `&[u8]`, the
+/// [`AsRef<std::ffi::OsStr>`] impl yields `&OsStr`, this
+/// [`AsRef<std::path::Path>`] impl yields `&Path` — the same
+/// routing discipline (`Path::new(self.as_str())` == one
+/// composition through [`PerAttemptRegion::as_str`] and
+/// [`std::path::Path::new`], both zero-copy views of the static-
+/// lifetime label constant since [`std::path::Path`] is an
+/// [`std::ffi::OsStr`] newtype on every supported platform) so a
+/// future consumer that requires the filesystem-path frontier
+/// reads the canonical label through one typed-primitive surface
+/// at the same oracle instead of restating the two-step
+/// `Path::new(region.as_str())` composition at every call site.
+///
+/// The natural bridge to consumers that work over the filesystem-
+/// path frontier at the borrowed-view axis: directory-creation
+/// machinery ([`std::fs::create_dir`],
+/// [`std::fs::create_dir_all`]), directory-enumeration machinery
+/// ([`std::fs::read_dir`]), path-composition machinery
+/// ([`std::path::PathBuf::push`], [`std::path::PathBuf::join`]),
+/// file-open machinery ([`std::fs::File::open`],
+/// [`std::fs::File::create`]), and metadata machinery
+/// ([`std::fs::metadata`], [`std::fs::symlink_metadata`],
+/// [`std::fs::remove_dir_all`]) all take
+/// [`impl AsRef<std::path::Path>`] as their standard input
+/// surface, so a consumer that hands a canonical
+/// [`PerAttemptRegion`] label to any of these boundaries reads it
+/// directly from a [`PerAttemptRegion`] value without a
+/// [`std::path::Path::new`] restatement at the boundary — a
+/// per-attempt-region-scoped event-log directory
+/// (`retry_log_root.join(region)`), a per-attempt-region-scoped
+/// artifact file (`std::fs::File::create(cache_root.join(region))`),
+/// or a per-attempt-region-scoped metadata probe reads directly
+/// from a [`PerAttemptRegion`] value at these boundaries.
+///
+/// Opens the filesystem-path borrowed-view trio at the per-
+/// attempt-region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// [`AsRef<std::ffi::OsStr>`] opening order (70e1ab5 → 1d708f4 →
+/// 242ed89), the [`AsRef<[u8]>`] opening order (af44439 → 13abcc4
+/// → 833d706), and the [`AsRef<str>`] opening order (8c8cffe →
+/// 7acca19 → f1ca293).
+///
+/// Zero-cost by construction: the returned `&Path` is a view of
+/// the static-lifetime label constant table's UTF-8 bytes —
+/// [`std::path::Path::new`] on an [`AsRef<std::ffi::OsStr>`]
+/// input is a zero-cost transmute at the borrow-view boundary
+/// ([`std::path::Path`] is an [`std::ffi::OsStr`] newtype on
+/// every supported platform), no allocation, no copy, no
+/// branching over the variant discriminant beyond what
+/// [`PerAttemptRegion::as_str`] itself does at its match body.
+///
+/// The identity `<PerAttemptRegion as AsRef<std::path::Path>>::as_ref(&region)
+/// == std::path::Path::new(region.as_str())` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_as_ref_path_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl AsRef<std::path::Path>` consumer at every variant is
+/// pinned by
+/// [`tests::test_per_attempt_region_as_ref_path_carries_through_generic_consumer`];
+/// the round-trip through [`std::path::Path::to_str`] recovering
+/// the canonical label at every variant is pinned by
+/// [`tests::test_per_attempt_region_as_ref_path_round_trips_through_to_str`].
+///
+/// THEORY.md §V.4 typed primitives: the filesystem-path borrowed-
+/// view surface is a typed-primitive site on [`PerAttemptRegion`]
+/// itself (one `AsRef<std::path::Path>` impl routing through
+/// [`AsRef<str>`] and [`std::path::Path::new`]), not a
+/// per-consumer `Path::new(region.as_str())` restatement at every
+/// downstream site that accepts `impl AsRef<std::path::Path>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`PerAttemptRegion::as_str`]) and every borrowed-view
+/// surface — [`AsRef<str>`] (yields `&str`), [`AsRef<[u8]>`]
+/// (yields `&[u8]`), [`AsRef<std::ffi::OsStr>`] (yields `&OsStr`),
+/// this [`AsRef<std::path::Path>`] (yields `&Path`) — reads
+/// through it.
+impl AsRef<std::path::Path> for PerAttemptRegion {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(<Self as AsRef<str>>::as_ref(self))
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -17122,6 +17230,93 @@ mod tests {
                 decoded,
                 region.as_str(),
                 "OsStr::to_str round-trip must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`],
+    /// `<Self as AsRef<std::path::Path>>::as_ref(&region)` equals
+    /// `std::path::Path::new(region.as_str())`. Pins the agreement
+    /// identity that the filesystem-path borrowed-view surface reads
+    /// the same canonical label the [`AsRef<str>`] surface reads,
+    /// projected through [`std::path::Path::new`]. A regression that
+    /// swapped the [`AsRef<std::path::Path>`] impl to route through
+    /// an intermediate [`std::fmt::Display`] format buffer or a fresh
+    /// [`std::path::PathBuf`] allocation would break this composition
+    /// equality at at least one variant and fail here at the
+    /// canonical-label pin, not at every downstream
+    /// `impl AsRef<std::path::Path>` call site.
+    #[test]
+    fn test_per_attempt_region_as_ref_path_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &std::path::Path =
+                <PerAttemptRegion as AsRef<std::path::Path>>::as_ref(&region);
+            assert_eq!(
+                borrowed,
+                std::path::Path::new(region.as_str()),
+                "AsRef<Path> and Path::new(as_str()) must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<std::path::Path>`] identity carries through a
+    /// generic `impl AsRef<std::path::Path>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: AsRef<Path>>(t: &T) -> &Path { t.as_ref() }` —
+    /// the shape of an actual downstream consumer (a
+    /// [`std::fs::create_dir`] call, a
+    /// [`std::path::PathBuf::push`] segment, a
+    /// [`std::fs::File::open`] argument, a [`std::fs::metadata`]
+    /// input) — reads the canonical snake_case label directly from
+    /// a [`PerAttemptRegion`] value without going through the
+    /// [`std::fmt::Display`] formatter buffer or an intermediate
+    /// [`std::path::PathBuf`] allocation. The structural witness
+    /// that a [`PerAttemptRegion`] is genuinely usable at
+    /// `impl AsRef<std::path::Path>` call sites — a regression that
+    /// drifted the [`AsRef<std::path::Path>`] impl signature (e.g.,
+    /// returning an owned [`std::path::PathBuf`] instead of a
+    /// `&Path`, or requiring a `&mut self`) fails here at compile
+    /// time instead of at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_as_ref_path_carries_through_generic_consumer() {
+        fn read<T: AsRef<std::path::Path>>(t: &T) -> &std::path::Path {
+            t.as_ref()
+        }
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(&region),
+                std::path::Path::new(region.as_str()),
+                "generic AsRef<Path> consumer must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<std::path::Path>`] output round-trips through
+    /// [`std::path::Path::to_str`] recovering the canonical
+    /// snake_case label at every [`PerAttemptRegion::ALL`] variant.
+    /// Pins the UTF-8 validity contract on the filesystem-path
+    /// borrowed-view surface: the returned `&Path` is always a
+    /// valid UTF-8 sequence because the canonical labels are pure
+    /// ASCII, and [`std::path::Path::to_str`] recovers exactly the
+    /// [`PerAttemptRegion::as_str`] emission. Together with
+    /// [`test_per_attempt_region_as_ref_path_agrees_with_as_str`]
+    /// this closes the filesystem-path borrowed-view surface
+    /// against both the composition oracle (`Path::new(as_str())`)
+    /// and the UTF-8 validity oracle (`Path::to_str`) at every
+    /// [`PerAttemptRegion::ALL`] variant.
+    #[test]
+    fn test_per_attempt_region_as_ref_path_round_trips_through_to_str() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &std::path::Path =
+                <PerAttemptRegion as AsRef<std::path::Path>>::as_ref(&region);
+            let decoded = borrowed
+                .to_str()
+                .unwrap_or_else(|| panic!("AsRef<Path> bytes for {region:?} must be valid UTF-8"));
+            assert_eq!(
+                decoded,
+                region.as_str(),
+                "Path::to_str round-trip must recover canonical label at {region:?}",
             );
         }
     }
