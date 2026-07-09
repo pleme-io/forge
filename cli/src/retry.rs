@@ -4094,6 +4094,74 @@ impl AsRef<std::path::Path> for PerAttemptRegion {
     }
 }
 
+/// [`From<PerAttemptRegion> for std::ffi::OsString`] routes through
+/// [`PerAttemptRegion::as_str`] composed with
+/// [`std::ffi::OsString::from`] so a downstream consumer bound by
+/// `impl Into<std::ffi::OsString>` (a [`std::process::Command::env`]
+/// key/value that owns its slot, a [`std::env::set_var`] owned key,
+/// a [`std::path::PathBuf::push`] segment consumer, a
+/// [`std::collections::HashMap<std::ffi::OsString, _>::insert`]
+/// key builder, a serde container that opts into
+/// `#[serde(into = "OsString")]` on a wrapper field) recovers the
+/// canonical snake_case label (`"before_first"`, `"first"`,
+/// `"interim"`, `"final"`, `"over_budget"`) as an owned
+/// [`std::ffi::OsString`] directly from a [`PerAttemptRegion`]
+/// value without a per-consumer `OsString::from(region.as_str())`
+/// two-step restatement at every by-value boundary.
+///
+/// Opens the owned-buffer OS-string emit trio at the per-attempt-
+/// region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// [`AsRef<std::ffi::OsStr>`] opening order (70e1ab5 → 1d708f4 →
+/// 242ed89), the [`From<T> for String`] opening order (07eff6c →
+/// … → f1ca293), and the [`From<T> for Vec<u8>`] opening order
+/// (2ad52bc → 491db4d → 6701191). The by-value owned peer of
+/// [`AsRef<std::ffi::OsStr>`] above — both are OS-string surfaces
+/// at the same canonical-label oracle, differing only on the
+/// receiver's ownership: [`AsRef<std::ffi::OsStr>`] yields
+/// `&OsStr` for consumers that already hold a borrow, this
+/// [`From<PerAttemptRegion> for std::ffi::OsString`] yields
+/// [`std::ffi::OsString`] for consumers that own the input buffer.
+/// The str-frontier parallel is
+/// [`AsRef<str>`] → [`From<PerAttemptRegion> for String`]; the
+/// byte-slice-frontier parallel is
+/// [`AsRef<[u8]>`] → [`From<PerAttemptRegion> for Vec<u8>`]; this
+/// [`AsRef<OsStr>`] → [`From<PerAttemptRegion> for OsString`]
+/// closes the same borrowed-view → owned-buffer emit peer at the
+/// OS-string frontier.
+///
+/// The identity `std::ffi::OsString::from(region) ==
+/// std::ffi::OsString::from(region.as_str())` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_osstring_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<std::ffi::OsString>` consumer at every variant is
+/// pinned by
+/// [`tests::test_per_attempt_region_into_osstring_carries_through_generic_consumer`];
+/// the round-trip through [`std::ffi::OsString::into_string`]
+/// recovering the canonical label at every variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_osstring_round_trips_through_into_string`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned OS-string
+/// emit surface is a typed-primitive site on [`PerAttemptRegion`]
+/// itself (one `From<PerAttemptRegion> for std::ffi::OsString`
+/// impl routing through [`PerAttemptRegion::as_str`] and
+/// [`std::ffi::OsString::from`]), not a per-consumer
+/// `OsString::from(region.as_str())` restatement at every
+/// downstream site that accepts `impl Into<std::ffi::OsString>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`PerAttemptRegion::as_str`]) and every owned-buffer
+/// emit surface — [`From<T> for String`] (yields [`String`]),
+/// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]), this
+/// [`From<T> for std::ffi::OsString`] (yields
+/// [`std::ffi::OsString`]) — reads through it.
+impl From<PerAttemptRegion> for std::ffi::OsString {
+    fn from(region: PerAttemptRegion) -> std::ffi::OsString {
+        std::ffi::OsString::from(region.as_str())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -17317,6 +17385,91 @@ mod tests {
                 decoded,
                 region.as_str(),
                 "Path::to_str round-trip must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`], `std::ffi::OsString::from(region)`
+    /// equals `std::ffi::OsString::from(region.as_str())`. Pins the
+    /// agreement identity that the by-value owned OS-string emit
+    /// surface reads the same canonical label the [`AsRef<str>`]
+    /// surface reads, projected through [`std::ffi::OsString::from`].
+    /// A regression that swapped the [`From`] impl to route through
+    /// an intermediate [`std::fmt::Display`] format buffer or a
+    /// [`std::path::PathBuf`] round-trip would break this
+    /// composition equality at at least one variant and fail here
+    /// at the canonical-label pin, not at every downstream
+    /// `impl Into<std::ffi::OsString>` call site.
+    #[test]
+    fn test_per_attempt_region_from_into_osstring_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let owned: std::ffi::OsString = std::ffi::OsString::from(region);
+            assert_eq!(
+                owned,
+                std::ffi::OsString::from(region.as_str()),
+                "From<PerAttemptRegion> for OsString and OsString::from(as_str()) must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for std::ffi::OsString`] identity
+    /// carries through a generic `impl Into<std::ffi::OsString>`
+    /// consumer at every [`PerAttemptRegion::ALL`] variant. A tiny
+    /// generic function `fn read<T: Into<OsString>>(t: T) -> OsString
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (a [`std::process::Command::env`] key/value that owns its
+    /// slot, a [`std::env::set_var`] owned key, a
+    /// [`std::path::PathBuf::push`] segment consumer) — reads the
+    /// canonical snake_case label directly from a
+    /// [`PerAttemptRegion`] value as an owned
+    /// [`std::ffi::OsString`]. The structural witness that a
+    /// [`PerAttemptRegion`] is genuinely usable at
+    /// `impl Into<std::ffi::OsString>` call sites — a regression
+    /// that drifted the [`From`] impl signature (e.g., returning
+    /// `&std::ffi::OsStr` instead of [`std::ffi::OsString`],
+    /// requiring `&PerAttemptRegion` and losing the by-value
+    /// semantics) fails here at compile time instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_osstring_carries_through_generic_consumer() {
+        fn read<T: Into<std::ffi::OsString>>(t: T) -> std::ffi::OsString {
+            t.into()
+        }
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region),
+                std::ffi::OsString::from(region.as_str()),
+                "generic Into<OsString> consumer must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for std::ffi::OsString`] output
+    /// round-trips through [`std::ffi::OsString::into_string`]
+    /// recovering the canonical snake_case label byte-for-byte at
+    /// every [`PerAttemptRegion::ALL`] variant. Pins the UTF-8
+    /// validity contract on the by-value owned OS-string emit
+    /// surface: the produced [`std::ffi::OsString`] is always a
+    /// valid UTF-8 sequence because the canonical labels are pure
+    /// ASCII, and [`std::ffi::OsString::into_string`] recovers
+    /// exactly the [`PerAttemptRegion::as_str`] emission. Together
+    /// with [`test_per_attempt_region_from_into_osstring_agrees_with_as_str`]
+    /// this closes the owned OS-string emit surface against both
+    /// the composition oracle (`OsString::from(as_str())`) and the
+    /// UTF-8 validity oracle (`OsString::into_string`) at every
+    /// [`PerAttemptRegion::ALL`] variant.
+    #[test]
+    fn test_per_attempt_region_from_into_osstring_round_trips_through_into_string() {
+        for region in PerAttemptRegion::ALL {
+            let owned: std::ffi::OsString = std::ffi::OsString::from(region);
+            let decoded = owned.into_string().unwrap_or_else(|s| {
+                panic!("OsString for {region:?} must be valid UTF-8 (got {s:?})")
+            });
+            assert_eq!(
+                decoded,
+                region.as_str(),
+                "OsString::into_string round-trip must recover canonical label at {region:?}",
             );
         }
     }
