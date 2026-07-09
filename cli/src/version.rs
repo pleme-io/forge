@@ -1733,6 +1733,105 @@ impl AsRef<std::path::Path> for BumpLevel {
     }
 }
 
+/// [`From<BumpLevel> for std::ffi::OsString`] routes through
+/// [`BumpLevel::as_str`] composed with [`std::ffi::OsString::from`]
+/// so a downstream consumer bound by `impl Into<std::ffi::OsString>`
+/// (a [`std::process::Command::env`] owned key/value slot, a
+/// [`std::env::set_var`] owned key, a
+/// [`std::path::PathBuf::push`] segment consumer, a
+/// [`std::collections::HashMap<std::ffi::OsString, _>::insert`]
+/// key builder, a serde container that opts into
+/// `#[serde(into = "OsString")]` on a wrapper field) recovers the
+/// canonical lowercase label (`"patch"`, `"minor"`, `"major"`) as
+/// an owned [`std::ffi::OsString`] directly from a [`BumpLevel`]
+/// value without a per-consumer `OsString::from(level.as_str())`
+/// two-step restatement at every by-value boundary.
+///
+/// Closing peer at the third ordered typed sum of the owned-buffer
+/// OS-string emit trio: `From<PerAttemptRegion> for
+/// std::ffi::OsString` (commit 976f5af) opened the trio at the
+/// first typed sum; `From<AdmissionTier> for std::ffi::OsString`
+/// (commit 0791fc7) carried the mid-trio slot at the second typed
+/// sum; this commit closes the trio at the third, matching the
+/// [`AsRef<std::ffi::OsStr>`] closing order (70e1ab5 → 1d708f4 →
+/// 242ed89), the [`AsRef<std::path::Path>`] closing order
+/// (17718d2 → f6c4c75 → dfd887a), the [`From<T> for Vec<u8>`]
+/// closing order (2ad52bc → 491db4d → 6701191), and the
+/// [`From<T> for String`] closing order at the UTF-8 owned-buffer
+/// frontier. The by-value owned peer of [`AsRef<std::ffi::OsStr>`]
+/// above — both are OS-string surfaces at the same canonical-
+/// label oracle, differing only on the receiver's ownership:
+/// [`AsRef<std::ffi::OsStr>`] yields `&OsStr` for consumers that
+/// already hold a borrow, this [`From<BumpLevel> for
+/// std::ffi::OsString`] yields [`std::ffi::OsString`] for
+/// consumers that own the input buffer. The str-frontier parallel
+/// is [`AsRef<str>`] → [`From<BumpLevel> for String`]; the byte-
+/// slice-frontier parallel is [`AsRef<[u8]>`] →
+/// [`From<BumpLevel> for Vec<u8>`]; this [`AsRef<OsStr>`] →
+/// [`From<BumpLevel> for OsString`] closes the same borrowed-view
+/// → owned-buffer emit peer at the OS-string frontier at the
+/// version-bump-magnitude ladder.
+///
+/// After this commit the owned-buffer emit axis spans BOTH the
+/// UTF-8 string frontier ([`From<T> for String`]), the byte-slice
+/// frontier ([`From<T> for Vec<u8>`]), and the OS-string frontier
+/// ([`From<T> for std::ffi::OsString`]) across all three ordered
+/// typed sums on the ladder set against ONE canonical-label
+/// oracle each — a three-frontier × three-typed-sum closure at
+/// the by-value owned-buffer emit axis.
+///
+/// The natural bridge to consumers that work over the OS-string
+/// frontier at the owned-buffer axis: process-environment
+/// machinery ([`std::process::Command::env`],
+/// [`std::env::set_var`]), owned-key hash-map machinery
+/// ([`std::collections::HashMap<std::ffi::OsString, _>::insert`]),
+/// path-composition machinery over an owned buffer
+/// ([`std::path::PathBuf::push`]), and serde
+/// `#[serde(into = "OsString")]` wrappers all take
+/// [`impl Into<std::ffi::OsString>`] as their standard input
+/// surface, so a consumer that hands a canonical [`BumpLevel`]
+/// label to any of these boundaries reads it directly from a
+/// [`BumpLevel`] value without a
+/// [`std::ffi::OsString::from`]-plus-[`BumpLevel::as_str`]
+/// two-step restatement at the boundary — a per-bump-magnitude-
+/// scoped release-manifest environment variable
+/// (`Command::env("BUMP_LEVEL", level)`), a per-bump-magnitude
+/// process-scope side effect (`env::set_var("BUMP_LEVEL", level)`),
+/// or a per-bump-magnitude telemetry index
+/// (`HashMap::<OsString, T>::insert(level.into(), ...)`) reads
+/// directly from a [`BumpLevel`] value at these boundaries.
+///
+/// The identity `std::ffi::OsString::from(level) ==
+/// std::ffi::OsString::from(level.as_str())` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_from_into_osstring_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<std::ffi::OsString>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_into_osstring_carries_through_generic_consumer`];
+/// the round-trip through [`std::ffi::OsString::into_string`]
+/// recovering the canonical label at every variant is pinned by
+/// [`tests::test_bump_level_from_into_osstring_round_trips_through_into_string`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned OS-string
+/// emit surface is a typed-primitive site on [`BumpLevel`]
+/// itself (one `From<BumpLevel> for std::ffi::OsString` impl
+/// routing through [`BumpLevel::as_str`] and
+/// [`std::ffi::OsString::from`]), not a per-consumer
+/// `OsString::from(level.as_str())` restatement at every
+/// downstream site that accepts `impl Into<std::ffi::OsString>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`BumpLevel::as_str`]) and every owned-buffer
+/// emit surface — [`From<T> for String`] (yields [`String`]),
+/// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]), this
+/// [`From<T> for std::ffi::OsString`] (yields
+/// [`std::ffi::OsString`]) — reads through it.
+impl From<BumpLevel> for std::ffi::OsString {
+    fn from(level: BumpLevel) -> std::ffi::OsString {
+        std::ffi::OsString::from(level.as_str())
+    }
+}
+
 /// [`From<BumpLevel> for &'static str`] routes through
 /// [`BumpLevel::as_str`] so a downstream consumer that takes an owned
 /// [`&'static str`] via [`Into<&'static str>`] (a `const`-adjacent
@@ -7076,6 +7175,99 @@ mod tests {
                 decoded,
                 level.as_str(),
                 "Path::to_str round-trip must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`], `std::ffi::OsString::from(level)`
+    /// equals `std::ffi::OsString::from(level.as_str())`. Pins the
+    /// agreement identity that the by-value owned OS-string emit
+    /// surface reads the same canonical label the [`AsRef<str>`]
+    /// surface reads, projected through [`std::ffi::OsString::from`].
+    /// A regression that swapped the [`From`] impl to route through
+    /// an intermediate [`std::fmt::Display`] format buffer or a
+    /// [`std::path::PathBuf`] round-trip would break this
+    /// composition equality at at least one variant and fail here
+    /// at the canonical-label pin, not at every downstream
+    /// `impl Into<std::ffi::OsString>` call site. Structural mirror
+    /// of `test_per_attempt_region_from_into_osstring_agrees_with_as_str`
+    /// (commit 976f5af) at the per-attempt-region ladder and
+    /// `test_admission_tier_from_into_osstring_agrees_with_as_str`
+    /// (commit 0791fc7) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_from_into_osstring_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let owned: std::ffi::OsString = std::ffi::OsString::from(level);
+            assert_eq!(
+                owned,
+                std::ffi::OsString::from(level.as_str()),
+                "From<BumpLevel> for OsString and OsString::from(as_str()) must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for std::ffi::OsString`] identity
+    /// carries through a generic `impl Into<std::ffi::OsString>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny
+    /// generic function `fn read<T: Into<OsString>>(t: T) -> OsString
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (a [`std::process::Command::env`] key/value that owns its
+    /// slot, a [`std::env::set_var`] owned key, a
+    /// [`std::path::PathBuf::push`] segment consumer) — reads the
+    /// canonical lowercase label directly from a [`BumpLevel`]
+    /// value as an owned [`std::ffi::OsString`]. The structural
+    /// witness that a [`BumpLevel`] is genuinely usable at
+    /// `impl Into<std::ffi::OsString>` call sites — a regression
+    /// that drifted the [`From`] impl signature (e.g., returning
+    /// `&std::ffi::OsStr` instead of [`std::ffi::OsString`],
+    /// requiring `&BumpLevel` and losing the by-value semantics)
+    /// fails here at compile time instead of at every downstream
+    /// generic call site.
+    #[test]
+    fn test_bump_level_into_osstring_carries_through_generic_consumer() {
+        fn read<T: Into<std::ffi::OsString>>(t: T) -> std::ffi::OsString {
+            t.into()
+        }
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level),
+                std::ffi::OsString::from(level.as_str()),
+                "generic Into<OsString> consumer must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for std::ffi::OsString`] output
+    /// round-trips through [`std::ffi::OsString::into_string`]
+    /// recovering the canonical lowercase label byte-for-byte at
+    /// every [`BumpLevel::ALL`] variant. Pins the UTF-8 validity
+    /// contract on the by-value owned OS-string emit surface: the
+    /// produced [`std::ffi::OsString`] is always a valid UTF-8
+    /// sequence because the canonical labels are pure ASCII, and
+    /// [`std::ffi::OsString::into_string`] recovers exactly the
+    /// [`BumpLevel::as_str`] emission. Together with
+    /// [`test_bump_level_from_into_osstring_agrees_with_as_str`]
+    /// this closes the owned OS-string emit surface against both
+    /// the composition oracle (`OsString::from(as_str())`) and
+    /// the UTF-8 validity oracle
+    /// ([`std::ffi::OsString::into_string`]) at every
+    /// [`BumpLevel::ALL`] variant. Structural mirror of
+    /// `test_per_attempt_region_from_into_osstring_round_trips_through_into_string`
+    /// (commit 976f5af) at the per-attempt-region ladder and
+    /// `test_admission_tier_from_into_osstring_round_trips_through_into_string`
+    /// (commit 0791fc7) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_from_into_osstring_round_trips_through_into_string() {
+        for level in BumpLevel::ALL {
+            let owned: std::ffi::OsString = std::ffi::OsString::from(level);
+            let decoded = owned.into_string().unwrap_or_else(|s| {
+                panic!("OsString for {level:?} must be valid UTF-8 (got {s:?})")
+            });
+            assert_eq!(
+                decoded,
+                level.as_str(),
+                "OsString::into_string round-trip must recover canonical label at {level:?}",
             );
         }
     }
