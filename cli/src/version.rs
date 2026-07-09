@@ -2691,6 +2691,95 @@ impl TryFrom<Box<[u8]>> for BumpLevel {
     }
 }
 
+/// [`TryFrom<Arc<[u8]>> for BumpLevel`] routes through the by-reference
+/// [`TryFrom<&[u8]>`] parse peer above on the caller-supplied
+/// [`std::sync::Arc<[u8]>`]'s [`AsRef<[u8]>`] view, so a downstream
+/// consumer bound by `impl TryFrom<Arc<[u8]>>` (a serde container that
+/// opts into `#[serde(try_from = "Arc<[u8]>")]` on a wrapper field, a
+/// generic try-conversion helper `fn parse<T: TryFrom<Arc<[u8]>>>`
+/// that composes with a caller-shared refcounted byte-buffer uniformly,
+/// a validated-input newtype builder whose canonical parse contract is
+/// stated as `TryFrom<Arc<[u8]>>` rather than [`std::str::FromStr`])
+/// recovers a [`BumpLevel`] value from its canonical lowercase label
+/// bytes (`b"patch"`, `b"minor"`, `b"major"`) through the same
+/// one-oracle byte-slice grammar the by-reference [`TryFrom<&[u8]>`],
+/// by-value owned-buffer [`TryFrom<Vec<u8>>`], by-value
+/// borrowed/owned-frontier [`TryFrom<Cow<'_, [u8]>>`], and by-value
+/// shrunk-owned [`TryFrom<Box<[u8]>>`] parse peers above already read —
+/// the caller's atomic-refcounted shared byte-buffer is inspected
+/// end-to-end without unsharing the refcount, matching the discipline
+/// [`TryFrom<Arc<str>>`] reads at the UTF-8 frontier.
+///
+/// Trio-closing peer of the by-value shared-owned byte-slice-parse trio
+/// at the third ordered typed sum:
+/// [`TryFrom<Arc<[u8]>>`] for [`crate::retry::PerAttemptRegion`] (commit
+/// eca99cc) opened the trio at the per-attempt-region ladder;
+/// [`TryFrom<Arc<[u8]>>`] for [`crate::probe_outcome::AdmissionTier`]
+/// (commit 9874d09) carried the mid-trio slot at the admission-tier
+/// ladder; this impl closes the trio at the version-bump-magnitude
+/// ladder, matching the [`TryFrom<&[u8]>`] closing order (5c0c827 →
+/// cdb192c → 629b242), the [`TryFrom<Vec<u8>>`] closing order (91ba4bf
+/// → f4a2052 → 5b6f488), the [`TryFrom<Cow<'_, [u8]>>`] closing order
+/// (506c183 → ac5b862 → 51c42d7), the [`TryFrom<Box<[u8]>>`] closing
+/// order (51dcd67 → c03b846 → 78229cd), and the sibling UTF-8-frontier
+/// [`TryFrom<Arc<str>>`] closing order (a9c007a → 64ec99e → bc8b5be).
+///
+/// The by-value shared-owned parse peer of the by-value shrunk-owned
+/// byte-slice parse peer [`TryFrom<Box<[u8]>> for BumpLevel`] directly
+/// above: both route through the same by-reference [`TryFrom<&[u8]>`]
+/// parse oracle, but this impl consumes a caller-supplied
+/// [`std::sync::Arc<[u8]>`] (the atomic-refcount-header shared buffer,
+/// whose refcount drops by one when the parse returns) whereas the
+/// [`Box<[u8]>`] impl consumes a caller-owned shrunk buffer (dropped
+/// after the parse). Structural mirror of [`TryFrom<Arc<str>> for
+/// BumpLevel`] at the UTF-8 frontier — the same shared-owned parse
+/// discipline, projected onto the byte-slice frontier.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is:
+/// only the canonical lowercase labels parse. Empty input, UpperCamel
+/// rendering, whitespace padding, uppercase, and non-UTF-8 byte
+/// sequences all reject — the strictness is delegated from the
+/// underlying [`TryFrom<&[u8]>`] impl through [`std::str::from_utf8`]
+/// and then [`std::str::FromStr`].
+///
+/// The identity `BumpLevel::try_from(Arc::<[u8]>::from(
+/// level.as_str().as_bytes())).unwrap() == level` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_try_from_arc_bytes_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<Arc<[u8]>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_bump_level_try_from_arc_bytes_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical input is pinned by
+/// [`tests::test_bump_level_try_from_arc_bytes_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// byte-slice-parse surface is a typed-primitive site on [`BumpLevel`]
+/// itself (one `TryFrom<Arc<[u8]>>` impl routing through the
+/// by-reference [`TryFrom<&[u8]>`] parse oracle), not a per-consumer
+/// `BumpLevel::try_from(std::str::from_utf8(&bytes)?.trim())`
+/// restatement at every downstream site that types its parse contract
+/// as `impl TryFrom<Arc<[u8]>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// one site ([`BumpLevel::as_str`]), inverted at one site
+/// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
+/// surface — [`std::str::FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`], [`TryFrom<Cow<'_, [u8]>>`],
+/// [`TryFrom<Box<[u8]>>`], this [`TryFrom<Arc<[u8]>>`] — reads through
+/// it. Closing the trio at the version-bump-magnitude ladder extends
+/// the one-oracle shared-owned byte-slice parse-side surface across
+/// every repo-internal ordered typed sum at the byte-slice frontier
+/// without introducing a second canonical-label site or a second
+/// grammar path.
+impl TryFrom<std::sync::Arc<[u8]>> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(bytes: std::sync::Arc<[u8]>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&[u8]>>::try_from(bytes.as_ref())
+    }
+}
+
 /// [`TryFrom<&str> for BumpLevel`] routes through
 /// [`<BumpLevel as std::str::FromStr>::from_str`] so a downstream
 /// consumer bound by `impl TryFrom<&str>` (a serde container that opts
@@ -7925,6 +8014,104 @@ mod tests {
             assert!(
                 <BumpLevel as std::convert::TryFrom<Box<[u8]>>>::try_from(boxed).is_err(),
                 "TryFrom<Box<[u8]>> must reject non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// Round-trip identity: every [`BumpLevel::ALL`] variant rendered as
+    /// its canonical lowercase label bytes and wrapped in an
+    /// [`std::sync::Arc<[u8]>`] parses back through
+    /// [`TryFrom<Arc<[u8]>>`] to the same variant. Pins at ONE named
+    /// site the round-trip identity that the by-value shared-owned
+    /// byte-slice parse surface reads the same canonical grammar the
+    /// borrowed [`TryFrom<&[u8]>`], owned-buffer [`TryFrom<Vec<u8>>`],
+    /// borrowed/owned-frontier [`TryFrom<Cow<'_, [u8]>>`], and
+    /// shrunk-owned [`TryFrom<Box<[u8]>>`] peers already read at the
+    /// byte-slice frontier. Structural mirror of
+    /// `test_per_attempt_region_try_from_arc_bytes_agrees_with_from_str`
+    /// (commit eca99cc) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_arc_bytes_agrees_with_from_str`
+    /// (commit 9874d09) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_arc_bytes_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let arced: std::sync::Arc<[u8]> = std::sync::Arc::from(level.as_str().as_bytes());
+            let parsed: BumpLevel =
+                <BumpLevel as std::convert::TryFrom<std::sync::Arc<[u8]>>>::try_from(arced)
+                    .unwrap();
+            assert_eq!(
+                parsed, level,
+                "TryFrom<Arc<[u8]>> must round-trip canonical label bytes at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Arc<[u8]>>`] identity carries through a generic
+    /// `impl TryFrom<Arc<[u8]>>` consumer at every [`BumpLevel::ALL`]
+    /// variant. A tiny generic function
+    /// `fn parse<T: TryFrom<Arc<[u8]>, Error = anyhow::Error>>(bytes:
+    /// Arc<[u8]>) -> Result<T> { T::try_from(bytes) }` — the shape of
+    /// an actual downstream consumer (a `serde` container with
+    /// `#[serde(try_from = "Arc<[u8]>")]` on a wrapper field, a
+    /// validated-input newtype builder whose canonical parse contract
+    /// is stated as `TryFrom<Arc<[u8]>>`) — recovers a [`BumpLevel`]
+    /// value from its canonical lowercase label bytes with the
+    /// atomic-refcounted shared buffer consumed end-to-end.
+    /// Compile-time witness that a [`BumpLevel`] is genuinely usable at
+    /// `impl TryFrom<Arc<[u8]>>` call sites. Structural mirror of
+    /// `test_per_attempt_region_try_from_arc_bytes_carries_through_generic_consumer`
+    /// (commit eca99cc) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_arc_bytes_carries_through_generic_consumer`
+    /// (commit 9874d09) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_arc_bytes_carries_through_generic_consumer() {
+        fn parse<T>(bytes: std::sync::Arc<[u8]>) -> anyhow::Result<T>
+        where
+            T: std::convert::TryFrom<std::sync::Arc<[u8]>, Error = anyhow::Error>,
+        {
+            T::try_from(bytes)
+        }
+
+        for level in BumpLevel::ALL {
+            let arced: std::sync::Arc<[u8]> = std::sync::Arc::from(level.as_str().as_bytes());
+            let parsed: BumpLevel = parse(arced).unwrap();
+            assert_eq!(
+                parsed, level,
+                "generic TryFrom<Arc<[u8]>> consumer must recover canonical variant at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Arc<[u8]>> for BumpLevel`] strict-rejects non-canonical
+    /// input at every non-canonical byte-buffer shape the underlying
+    /// [`std::str::from_utf8`] + [`std::str::FromStr`] pipeline rejects:
+    /// empty, UpperCamel rendering, whitespace padding, and uppercase.
+    /// Pins the strict-rejection contract at ONE named site so a
+    /// regression that loosened the underlying [`TryFrom<&[u8]>`] parser
+    /// (e.g., trimming whitespace, case-folding, or accepting
+    /// alternative spellings) would fail here instead of leaking to
+    /// every downstream `impl TryFrom<Arc<[u8]>>` consumer. Structural
+    /// mirror of
+    /// `test_per_attempt_region_try_from_arc_bytes_rejects_non_canonical_input`
+    /// (commit eca99cc) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_arc_bytes_rejects_non_canonical_input`
+    /// (commit 9874d09) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_arc_bytes_rejects_non_canonical_input() {
+        for bad in [
+            b"".to_vec(),
+            b"Patch".to_vec(),
+            b"Minor".to_vec(),
+            b"Major".to_vec(),
+            b"PATCH".to_vec(),
+            b" patch".to_vec(),
+            b"patch ".to_vec(),
+        ] {
+            let arced: std::sync::Arc<[u8]> = std::sync::Arc::from(bad.as_slice());
+            assert!(
+                <BumpLevel as std::convert::TryFrom<std::sync::Arc<[u8]>>>::try_from(arced)
+                    .is_err(),
+                "TryFrom<Arc<[u8]>> must reject non-canonical input {bad:?}",
             );
         }
     }
