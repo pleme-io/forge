@@ -6488,6 +6488,116 @@ impl From<AdmissionTier> for std::sync::Arc<[u8]> {
     }
 }
 
+/// [`From<AdmissionTier> for Rc<[u8]>`] routes through
+/// [`AdmissionTier::as_str`] composed with [`str::as_bytes`] and
+/// then [`std::rc::Rc::<[u8]>::from`] so a downstream consumer bound
+/// by `impl Into<Rc<[u8]>>` (a thread-local cached-payload slot that
+/// wants a single canonical allocation of the label bytes shared
+/// within one worker thread via non-atomic refcount, a validated-
+/// input newtype wrapper whose byte-slice payload field is stored
+/// as [`Rc<[u8]>`] to hand cheap [`Rc::clone`]s to sibling
+/// structures on the same thread, a serde container that opts into
+/// `#[serde(from = "Rc<[u8]>")]` on a byte-payload field, a per-
+/// request-arena byte-value slot whose readers want an [`Rc`] clone
+/// rather than a per-lookup allocation on a single-threaded pipeline
+/// stage, a graph-walk visitor that clones canonical byte-payloads
+/// across nodes without needing [`Send`] / [`Sync`], a same-thread
+/// SLSA / sigstore attestation-subject bytes builder whose signed
+/// payload is shared read-only across a single-threaded signing
+/// pipeline, an OCI / GHCR annotation-value sink that hands the same
+/// label-bytes allocation to multiple within-thread emit stages
+/// without re-allocating per stage) receives the canonical
+/// snake_case label bytes (`b"refused"`, `b"staging_only"`,
+/// `b"strict"`) as a thread-local shared-owned immutable heap-owned
+/// [`Rc<[u8]>`] with a single allocation for the non-atomic-
+/// refcount header plus the exact-length label bytes, enabling
+/// `O(1)` [`Rc::clone`] on the emit result within the emitting
+/// thread at a strictly lower per-clone cost than the atomic
+/// [`Arc::clone`] — through ONE composition rather than a per-
+/// consumer `Rc::<[u8]>::from(tier.as_str().as_bytes())`
+/// restatement.
+///
+/// Structural mirror of [`From<AdmissionTier> for Rc<str>`] below at
+/// the byte-slice frontier — the same by-value thread-local shared-
+/// owned emit surface at the same one-oracle discipline, projected
+/// onto the byte-slice frontier instead of the UTF-8 string frontier.
+/// Mid-trio peer of the by-value [`Rc<[u8]>`]-emit trio at the
+/// second ordered typed sum:
+/// [`From<crate::retry::PerAttemptRegion> for Rc<[u8]>`] (commit
+/// b27865d) opened the trio at the per-attempt-region ladder; this
+/// impl carries the mid-trio slot at the admission-tier ladder; one
+/// subsequent commit closes it at the [`crate::version::BumpLevel`]
+/// ladder, matching the [`From<T> for Rc<str>`] opening order
+/// (8950199 → 62c49a0 → ae286b7), the [`From<T> for Arc<[u8]>`]
+/// opening order (c922ae1 → 5e869fc → c6b636b), the
+/// [`From<T> for Box<[u8]>`] opening order
+/// (7045474 → e78e47a → 23f8696), the [`From<T> for Vec<u8>`]
+/// opening order (2ad52bc → 491db4d → 6701191), and the
+/// [`From<T> for Cow<'static, [u8]>`] opening order
+/// (912a5ff → 89af285 → 7c465d1).
+///
+/// The natural bridge from the [`Arc<[u8]>`] peer above to any
+/// downstream site that types its byte-slice sink as
+/// `impl Into<Rc<[u8]>>` — the emit peer that answers the receiver-
+/// side question "does this byte-oriented API want an atomic-
+/// refcounted [`Arc<[u8]>`] shared-owned buffer clonable across
+/// threads or a non-atomic-refcounted [`Rc<[u8]>`] shared-owned
+/// buffer clonable only within one thread at a strictly lower per-
+/// clone cost?" with "the non-atomic [`Rc<[u8]>`]." A receiver typed
+/// as [`Rc<[u8]>`] (rather than [`Arc<[u8]>`]) trades the
+/// [`Send`] / [`Sync`] cross-thread guarantee for a strictly lower
+/// per-clone cost — the correct choice at every emit site where the
+/// consumer is known to never cross a thread boundary. The routing
+/// discipline picks [`std::rc::Rc::<[u8]>::from`] rather than
+/// `Rc::from(Box::<[u8]>::from(tier.as_str().as_bytes()))` (two
+/// allocations: box the slice, then rewrap into an [`Rc<[u8]>`]) or
+/// `Rc::from(tier.as_str().as_bytes().to_vec().into_boxed_slice())`
+/// (three allocations plus a realloc-and-shrink round trip): the
+/// direct [`std::rc::Rc::<[u8]>::from`] path allocates once from the
+/// `'static` label byte-slice, including the non-atomic-refcount
+/// header, so the emit-side receiver pays exactly one allocation for
+/// the header plus the label's byte-length.
+///
+/// The identity `Rc::<[u8]>::from(tier).as_ref() ==
+/// tier.as_str().as_bytes()` at every [`AdmissionTier::ALL`]
+/// variant is pinned by
+/// [`tests::test_admission_tier_into_rc_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carried through a generic `impl Into<Rc<[u8]>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_admission_tier_into_rc_bytes_carries_through_generic_consumer`];
+/// the thread-local shared-owned receiver contract — [`Rc::clone`]
+/// reads the same canonical label bytes, [`Rc::ptr_eq`] holds after
+/// [`Rc::clone`], and [`Rc::strong_count`] lifts to at least two
+/// after the clone — at every variant is pinned by
+/// [`tests::test_admission_tier_into_rc_bytes_shares_label_across_clones`],
+/// mirroring the `Rc::clone`-preserves-value pin at the [`Rc<str>`]
+/// surface
+/// ([`tests::test_admission_tier_into_rc_str_shares_label_across_clones`]).
+///
+/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// shared-owned [`Rc<[u8]>`] emit surface is a typed-primitive site
+/// on [`AdmissionTier`] itself (one `From<AdmissionTier> for
+/// Rc<[u8]>` impl routing through [`as_str`] + [`str::as_bytes`]
+/// composed with [`std::rc::Rc::<[u8]>::from`]), not a per-consumer
+/// `Rc::<[u8]>::from(tier.as_str().as_bytes())` restatement at
+/// every downstream site that accepts `impl Into<Rc<[u8]>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`AdmissionTier::as_str`]) and every byte-slice emit
+/// surface — [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
+/// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
+/// [`From<T> for Box<[u8]>`], [`From<T> for Arc<[u8]>`], this
+/// [`From<T> for Rc<[u8]>`] — reads through it composed with
+/// [`str::as_bytes`], so the thread-local shared-owned allocation
+/// shape sits ON TOP of the same canonical-label oracle every
+/// borrowed-view, static-lifetime, owned-buffer, borrowed/owned-
+/// frontier, shrunk-owned, and atomic-shared-owned emit peer
+/// already reads.
+impl From<AdmissionTier> for std::rc::Rc<[u8]> {
+    fn from(tier: AdmissionTier) -> std::rc::Rc<[u8]> {
+        std::rc::Rc::<[u8]>::from(tier.as_str().as_bytes())
+    }
+}
+
 /// [`TryFrom<&[u8]> for AdmissionTier`] routes through
 /// [`std::str::from_utf8`] at the byte-slice / UTF-8 frontier composed
 /// with [`<Self as std::str::FromStr>::from_str`] at the canonical-
@@ -19300,6 +19410,148 @@ mod tests {
             assert!(
                 std::sync::Arc::strong_count(&shared) >= 2,
                 "Arc<[u8]> strong count must be at least 2 after clone at {tier:?}",
+            );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`], `Rc::<[u8]>::from(tier)` (the
+    /// [`From<AdmissionTier> for Rc<[u8]>`] impl body) yields the
+    /// same byte-slice view as `tier.as_str().as_bytes()` — the
+    /// composition through the canonical-label oracle and
+    /// [`str::as_bytes`]. Pins the agreement identity that the by-
+    /// value thread-local shared-owned byte-slice emit surface reads
+    /// the same canonical label the borrowed-view [`AsRef<[u8]>`],
+    /// the by-value static-lifetime [`From<AdmissionTier> for
+    /// &'static [u8]`], the by-value owned-buffer
+    /// [`From<AdmissionTier> for Vec<u8>`], the by-value borrowed/
+    /// owned-frontier [`From<AdmissionTier> for Cow<'static, [u8]>`],
+    /// the by-value shrunk-owned [`From<AdmissionTier> for
+    /// Box<[u8]>`], and the by-value atomic-shared-owned
+    /// [`From<AdmissionTier> for Arc<[u8]>`] surfaces already read
+    /// at the byte-slice frontier. Structural mirror of the
+    /// [`Rc<str>`] agreement pin
+    /// [`test_admission_tier_into_rc_str_agrees_with_as_str`] at the
+    /// UTF-8 frontier — the two agreement pins together close the
+    /// by-value thread-local shared-owned emit axis across both
+    /// string and byte-slice frontiers against the same oracle. A
+    /// regression that swapped the [`From`] impl body to route
+    /// through
+    /// `Rc::from(Box::<[u8]>::from(tier.as_str().as_bytes()))`
+    /// (paying an extra [`Box<[u8]>`] allocation before the
+    /// [`Rc<[u8]>`] rewrap) or through
+    /// `Rc::from(tier.as_str().as_bytes().to_vec().into_boxed_slice())`
+    /// (paying a [`Vec<u8>`] growth-header allocation plus a
+    /// [`Vec::into_boxed_slice`] realloc-and-shrink round trip
+    /// before the [`Rc<[u8]>`] rewrap) fails here at ONE named site
+    /// instead of leaking to every downstream
+    /// `impl Into<Rc<[u8]>>` consumer. Structural mirror of
+    /// `test_per_attempt_region_into_rc_bytes_agrees_with_as_str_as_bytes`
+    /// (commit b27865d) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_into_rc_bytes_agrees_with_as_str_as_bytes() {
+        for tier in AdmissionTier::ALL {
+            let shared: std::rc::Rc<[u8]> = std::rc::Rc::<[u8]>::from(tier);
+            assert_eq!(
+                shared.as_ref(),
+                tier.as_str().as_bytes(),
+                "From<AdmissionTier> for Rc<[u8]> and as_str().as_bytes() must agree at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for Rc<[u8]>`] identity carries
+    /// through a generic `impl Into<Rc<[u8]>>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Rc<[u8]>>>(t: T) -> Rc<[u8]> { t.into() }`
+    /// — the shape of an actual downstream consumer (a thread-local
+    /// cached-payload slot typed as [`Rc<[u8]>`] to share a
+    /// canonical byte-payload allocation within one worker thread
+    /// via non-atomic refcount, a validated-input newtype wrapper
+    /// that stores canonical label bytes as [`Rc<[u8]>`] to hand
+    /// cheap [`Rc::clone`]s to sibling structures on the same
+    /// thread, a serde container that opts into
+    /// `#[serde(from = "Rc<[u8]>")]` at the thread-local shared-
+    /// owned byte-frontier, a per-request-arena byte-value slot
+    /// whose readers want an [`Rc`] clone rather than a per-lookup
+    /// allocation on a single-threaded pipeline stage, a same-thread
+    /// SLSA / sigstore attestation-subject bytes builder that shares
+    /// the signed payload within a single-threaded signing pipeline)
+    /// reads the canonical snake_case label bytes directly from an
+    /// [`AdmissionTier`] value as a thread-local shared-owned
+    /// immutable heap-owned [`Rc<[u8]>`]. The structural witness
+    /// that an [`AdmissionTier`] is genuinely usable at
+    /// `impl Into<Rc<[u8]>>` call sites — a regression that drifted
+    /// the [`From`] impl signature (returning [`Box<[u8]>`] instead
+    /// of [`Rc<[u8]>`], returning [`Arc<[u8]>`] and paying the
+    /// atomic-refcount cost at every clone, returning a [`Vec<u8>`]
+    /// instead of the shared-owned handle, requiring
+    /// `&AdmissionTier` and losing the by-value semantics, or
+    /// dropping to a [`Box<[u8]>`]-then-[`Rc::from`] composition
+    /// that would allocate twice) fails here at compile time or at
+    /// the assertion instead of at every downstream generic call
+    /// site. Structural mirror of
+    /// `test_per_attempt_region_into_rc_bytes_carries_through_generic_consumer`
+    /// (commit b27865d) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_into_rc_bytes_carries_through_generic_consumer() {
+        fn read<T: Into<std::rc::Rc<[u8]>>>(t: T) -> std::rc::Rc<[u8]> {
+            t.into()
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(tier).as_ref(),
+                tier.as_str().as_bytes(),
+                "generic Into<Rc<[u8]>> consumer must read canonical label bytes at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for Rc<[u8]>`] thread-local shared-
+    /// owned semantics hold across [`std::rc::Rc::clone`] at every
+    /// [`AdmissionTier::ALL`] variant: the clone reads exactly the
+    /// same canonical snake_case label bytes the original reads,
+    /// points at the same allocation (identity of the underlying
+    /// byte pointer via [`std::rc::Rc::ptr_eq`]), and the non-atomic
+    /// refcount lifts to at least two after the clone (via
+    /// [`std::rc::Rc::strong_count`]). Pins the thread-local shared-
+    /// owned receiver contract at the byte-slice emit surface — a
+    /// regression that drifted the impl body to a non-`Rc`
+    /// composition ([`Box::<[u8]>::from`]-then-ad-hoc-rewrap, a
+    /// [`Vec<u8>`] intermediate) would break the pointer-identity
+    /// assertion (each clone would land at a distinct allocation)
+    /// even if the canonical-label bytes still agreed. Structural
+    /// mirror of the [`Rc<str>`] clone-identity pin
+    /// [`test_admission_tier_into_rc_str_shares_label_across_clones`]
+    /// at the UTF-8 frontier and of the [`Arc<[u8]>`] clone-identity
+    /// pin
+    /// [`test_admission_tier_into_arc_bytes_shares_label_across_clones`]
+    /// at the atomic-shared-owned byte-slice frontier — the three
+    /// pins together close the structural witness that the receiver
+    /// actually holds a thread-local shared-owned [`Rc<[u8]>`] slot
+    /// rather than an [`Rc<[u8]>`]-typed wrapper around a per-clone-
+    /// allocated [`Box<[u8]>`], across both refcount disciplines and
+    /// both string and byte-slice frontiers. Structural mirror of
+    /// `test_per_attempt_region_into_rc_bytes_shares_label_across_clones`
+    /// (commit b27865d) at the per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_into_rc_bytes_shares_label_across_clones() {
+        for tier in AdmissionTier::ALL {
+            let shared: std::rc::Rc<[u8]> = std::rc::Rc::<[u8]>::from(tier);
+            let cloned = std::rc::Rc::clone(&shared);
+            assert_eq!(
+                cloned.as_ref(),
+                tier.as_str().as_bytes(),
+                "Rc<[u8]> clone must read canonical label bytes at {tier:?}",
+            );
+            assert!(
+                std::rc::Rc::ptr_eq(&shared, &cloned),
+                "Rc<[u8]> clone must share the same underlying allocation at {tier:?}",
+            );
+            assert!(
+                std::rc::Rc::strong_count(&shared) >= 2,
+                "Rc<[u8]> strong count must be at least 2 after clone at {tier:?}",
             );
         }
     }
