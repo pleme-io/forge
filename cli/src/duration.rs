@@ -13,7 +13,7 @@
 //! the single grammar oracle both collapse onto, so a future unit or
 //! call site cannot drift on what "a valid timeout" means.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::time::Duration;
 
 /// Parse a forge timeout string into a [`Duration`].
@@ -60,6 +60,38 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     // Saturate rather than overflow-panic on absurd magnitudes; any value
     // this large is already far past any sane deploy/test timeout.
     Ok(Duration::from_secs(value.saturating_mul(unit_secs)))
+}
+
+/// Parse a `deploy.yaml` timeout field, echoing the offending value and
+/// the offending field name when the grammar rejects the string.
+///
+/// The composed shape three deploy-pipeline call sites need — a
+/// [`parse_duration`] call fused with an [`anyhow::Context`] that names
+/// the field — so the "malformed timeout at `deploy.yaml`" fail-fast
+/// surface is named at ONE grammar-plus-context site rather than three
+/// restatements of
+/// `parse_duration(&s).with_context(|| format!("invalid timeout ..."))`.
+///
+/// # Load-bearing
+///
+/// The two runtime call sites at
+/// [`crate::commands::test`]`::run_test_suite` and
+/// [`crate::commands::integration_tests`]`::execute_pre_deployment_tests`
+/// previously silently swallowed a malformed suite timeout to
+/// `Duration::from_secs(300)` via `.unwrap_or(...)` — the same "swallow
+/// to a silent default at run time" hole the module docs at the top of
+/// this file describe. Routing through this helper closes both: a
+/// malformed `timeout: "5min"` now fails LOUD at run time, echoing the
+/// offending value and the field name, matching the fail-fast fidelity
+/// [`parse_duration`] gives config-load through
+/// [`crate::config::deployment::PreDeploymentTestsConfig::validate`].
+///
+/// The magnitude-layer peer of the grammar-layer [`reject_zero_timeout`]:
+/// this helper composes the grammar and the field-naming context; a caller
+/// that also forbids zero chains [`reject_zero_timeout`] onto the returned
+/// [`Duration`] in one expression.
+pub fn parse_timeout_field(value: &str, field: &str) -> Result<Duration> {
+    parse_duration(value).with_context(|| format!("invalid timeout '{value}' for {field}"))
 }
 
 /// Reject a zero-length timeout, naming the offending field.
@@ -196,6 +228,65 @@ mod tests {
         assert!(
             msg.contains("nix_connect_timeout_secs"),
             "error must echo the field label: {msg}"
+        );
+    }
+
+    /// A well-formed timeout string parses to the same [`Duration`]
+    /// [`parse_duration`] would return; the field-naming context is
+    /// present only on the error path, so the happy path is byte-for-byte
+    /// [`parse_duration`].
+    #[test]
+    fn parse_timeout_field_parses_well_formed_values() {
+        assert_eq!(
+            parse_timeout_field("30s", "test suite 'unit'").unwrap(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_timeout_field("5m", "test suite 'unit'").unwrap(),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            parse_timeout_field("120", "test suite 'unit'").unwrap(),
+            Duration::from_secs(120)
+        );
+    }
+
+    /// The load-bearing invariant this helper enforces: a malformed
+    /// timeout at a runtime call site now surfaces both the offending
+    /// value AND the field name, so a `deploy.yaml` author sees which
+    /// suite forge rejected rather than watching every suite silently
+    /// run under the 300-second fallback the prior `.unwrap_or(...)`
+    /// swallowed to.
+    #[test]
+    fn parse_timeout_field_error_names_field_and_value() {
+        let msg = parse_timeout_field("5min", "test suite 'unit'")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("test suite 'unit'"),
+            "error must echo the field label: {msg}"
+        );
+        assert!(
+            msg.contains("5min"),
+            "error must echo the offending value: {msg}"
+        );
+    }
+
+    /// The magnitude-layer / grammar-layer split survives the fused
+    /// helper: a caller that forbids zero chains [`reject_zero_timeout`]
+    /// onto the returned [`Duration`] in one expression. `"0s"` is a
+    /// well-formed zero at the grammar layer, so [`parse_timeout_field`]
+    /// returns it; [`reject_zero_timeout`] then rejects it.
+    #[test]
+    fn parse_timeout_field_composes_with_reject_zero_timeout() {
+        let d = parse_timeout_field("0s", "test suite 'unit'").unwrap();
+        assert_eq!(d, Duration::ZERO);
+        assert!(reject_zero_timeout(d, "test suite 'unit'").is_err());
+
+        let d = parse_timeout_field("5m", "test suite 'unit'").unwrap();
+        assert_eq!(
+            reject_zero_timeout(d, "test suite 'unit'").unwrap(),
+            Duration::from_secs(300)
         );
     }
 }

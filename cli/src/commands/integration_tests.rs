@@ -889,11 +889,12 @@ pub async fn execute_manual(
     // Load deploy.yaml - check deploy/{service_name}.yaml first (outside Nix source tree),
     // then fall back to service_dir/deploy.yaml for backward compatibility.
     let service_dir_path = PathBuf::from(service_dir);
-    let deploy_yaml_path = if let Some(product_dir) = find_product_dir_from_service(&service_dir_path) {
-        crate::config::resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
-    } else {
-        service_dir_path.join("deploy.yaml")
-    };
+    let deploy_yaml_path =
+        if let Some(product_dir) = find_product_dir_from_service(&service_dir_path) {
+            crate::config::resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
+        } else {
+            service_dir_path.join("deploy.yaml")
+        };
     if !deploy_yaml_path.exists() {
         anyhow::bail!("No deploy.yaml found at: {}", deploy_yaml_path.display());
     }
@@ -1061,7 +1062,16 @@ pub async fn execute_pre_deployment_tests(
         println!("   Command: {}", suite.command.dimmed());
 
         let suite_working_dir = working_dir.join(&suite.working_dir);
-        let test_timeout = parse_duration(&suite.timeout).unwrap_or(Duration::from_secs(300));
+        // Malformed `timeout: "5min"` etc. was previously silently
+        // swallowed to a 300s default here — the load-bearing hole
+        // `crate::duration::parse_timeout_field` closes. `PreDeploymentTestsConfig::validate`
+        // catches it at config-load; this fails LOUD if a runtime path
+        // ever bypasses that validator (e.g. a hand-constructed test
+        // config, a future partial-load code path).
+        let test_timeout = crate::duration::parse_timeout_field(
+            &suite.timeout,
+            &format!("pre-deployment test suite '{}'", suite.name),
+        )?;
 
         let mut attempts = 0;
         let max_attempts = if suite.retry_on_failure {
