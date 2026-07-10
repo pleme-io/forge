@@ -2144,6 +2144,136 @@ impl From<BumpLevel> for &'static std::path::Path {
     }
 }
 
+/// [`From<BumpLevel> for std::borrow::Cow<'static,
+/// std::ffi::OsStr>`] routes through [`BumpLevel::as_str`] composed
+/// with the lifetime-preserving [`std::ffi::OsStr::new`] constructor
+/// and wrapped in [`std::borrow::Cow::Borrowed`] so a downstream
+/// consumer bound by `impl Into<Cow<'static, std::ffi::OsStr>>` (a
+/// config-schema builder that accepts either a static OS-string label
+/// or a caller-supplied [`std::ffi::OsString`] uniformly, a
+/// subprocess-argv sink taking [`Cow<'static, std::ffi::OsStr>`] slots
+/// at a [`std::process::Command`] boundary — the release-plumbing
+/// `cargo release`-adjacent bump-magnitude argv sink is the natural
+/// consumer, `phf`-style static lookup table keyed by canonical label
+/// OS-strings) reads the canonical lowercase label (`"patch"`,
+/// `"minor"`, `"major"`) as a borrowed
+/// [`Cow<'static, std::ffi::OsStr>`] view of the static-lifetime label
+/// constant with `'static` lifetime preserved end-to-end and zero
+/// allocation at the emit boundary.
+///
+/// The by-value borrowed/owned-frontier peer of the by-value static-
+/// lifetime [`From<BumpLevel> for &'static std::ffi::OsStr`] and
+/// by-value owned [`From<BumpLevel> for std::ffi::OsString`] surfaces
+/// above — all three are OS-string emit surfaces at the same
+/// canonical-label oracle, differing only on receiver-side shape:
+/// [`From<T> for &'static std::ffi::OsStr`] returns a borrowed
+/// `'static`-lived view for consumers that want the borrow,
+/// [`From<T> for std::ffi::OsString`] returns an owned buffer for
+/// consumers that own the label, this
+/// [`From<T> for Cow<'static, std::ffi::OsStr>`] returns either
+/// uniformly at the borrowed/owned-frontier receiver shape. All three
+/// route through the same canonical-label oracle at
+/// [`BumpLevel::as_str`]: the `&'static std::ffi::OsStr` peer through
+/// [`std::ffi::OsStr::new`] directly, the [`std::ffi::OsString`] peer
+/// through [`std::ffi::OsString::from`], this
+/// [`Cow<'static, std::ffi::OsStr>`] peer through
+/// [`std::ffi::OsStr::new`] composed with
+/// [`std::borrow::Cow::Borrowed`] — the same one-oracle discipline
+/// lifted to the borrowed/owned-frontier emit layer, with the
+/// [`std::borrow::Cow::Borrowed`] branch taken uniformly because the
+/// canonical label already has `'static` lifetime.
+///
+/// Structural mirror of
+/// [`From<BumpLevel> for std::borrow::Cow<'static, str>`] and
+/// [`From<BumpLevel> for std::borrow::Cow<'static, [u8]>`] at the
+/// UTF-8 and byte-slice frontiers respectively — the same by-value
+/// borrowed/owned-frontier emit surface at the same one-oracle
+/// discipline, projected onto the OS-string frontier this time; both
+/// siblings similarly wrap [`std::borrow::Cow::Borrowed`] around the
+/// `'static`-lived borrowed view produced by their frontier
+/// constructor (`&'static str` directly for the UTF-8 sibling,
+/// `str::as_bytes` for the byte-slice sibling, [`std::ffi::OsStr::new`]
+/// here for the OS-string frontier).
+///
+/// Trio-closing peer at the third ordered typed sum of the by-value
+/// borrowed/owned-frontier OS-string emit trio:
+/// `From<PerAttemptRegion> for Cow<'static, std::ffi::OsStr>` (commit
+/// 24f6110) opened the trio at the per-attempt-region ladder;
+/// `From<AdmissionTier> for Cow<'static, std::ffi::OsStr>` (commit
+/// 4e94fc5) carried the mid-trio slot at the admission-tier ladder;
+/// this impl closes the trio at the version-bump-magnitude ladder,
+/// matching the [`From<T> for &'static std::ffi::OsStr`] closure order
+/// (be57ac3 → b69f733 → 3cbc7bc), the
+/// [`From<T> for std::ffi::OsString`] closure order
+/// (976f5af → 0791fc7 → b069eec), the [`AsRef<std::ffi::OsStr>`]
+/// closure order (70e1ab5 → 1d708f4 → 242ed89), and the
+/// [`From<T> for std::borrow::Cow<'static, [u8]>`] closure order at
+/// the byte-slice sibling frontier (912a5ff → 89af285 → 7c465d1).
+/// After this commit the by-value borrowed/owned-frontier emit axis
+/// spans THREE frontiers — UTF-8 string, byte-slice, OS-string —
+/// across all three ordered typed sums
+/// ([`crate::retry::PerAttemptRegion`],
+/// [`crate::probe_outcome::AdmissionTier`], [`BumpLevel`]) against
+/// ONE canonical-label oracle each, matching the three-frontier x
+/// three-typed-sum closure patterns already carried at the by-value
+/// owned-buffer emit axis (`From<T> for String`, `From<T> for
+/// Vec<u8>`, `From<T> for std::ffi::OsString`), the by-value
+/// static-lifetime emit axis (`From<T> for &'static str`,
+/// `From<T> for &'static [u8]`, `From<T> for &'static std::ffi::OsStr`),
+/// and the borrowed-view axis (`AsRef<str>`, `AsRef<[u8]>`,
+/// `AsRef<std::ffi::OsStr>`).
+///
+/// Zero-cost by construction: [`std::ffi::OsStr::new`] on an
+/// [`AsRef<std::ffi::OsStr>`] input is a zero-cost transmute at the
+/// borrow-view boundary — [`std::ffi::OsStr`] is a `[u8]` newtype on
+/// Unix and a `[u16]`-wide newtype on Windows, both accepting a `&str`
+/// view without allocation — and [`std::borrow::Cow::Borrowed`] is a
+/// plain enum-variant construction carrying the reference verbatim; no
+/// copy, no branching over the variant discriminant beyond what
+/// [`BumpLevel::as_str`] itself does at its match body. The `'static`
+/// lifetime is preserved through the composition because
+/// [`BumpLevel::as_str`] returns `&'static str`,
+/// [`std::ffi::OsStr::new`] preserves the receiver's lifetime, and
+/// [`std::borrow::Cow::Borrowed`] preserves the inner reference's
+/// lifetime.
+///
+/// The identity `<Cow<'static, std::ffi::OsStr>>::from(level) ==
+/// Cow::Borrowed(std::ffi::OsStr::new(level.as_str()))` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_from_into_cow_static_os_str_agrees_with_cow_borrowed_os_str_new_as_str`];
+/// the identity carried through a generic
+/// `impl Into<Cow<'static, std::ffi::OsStr>>` consumer at every variant
+/// is pinned by
+/// [`tests::test_bump_level_into_cow_static_os_str_carries_through_generic_consumer`];
+/// the zero-allocation contract (impl returns the
+/// [`std::borrow::Cow::Borrowed`] branch rather than
+/// [`std::borrow::Cow::Owned`]) at every variant is pinned by
+/// [`tests::test_bump_level_into_cow_static_os_str_is_borrowed`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// frontier OS-string emit surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one
+/// `From<BumpLevel> for Cow<'static, std::ffi::OsStr>` impl routing
+/// through [`BumpLevel::as_str`], [`std::ffi::OsStr::new`], and
+/// [`std::borrow::Cow::Borrowed`]), not a per-consumer
+/// `Cow::Borrowed(std::ffi::OsStr::new(level.as_str()))` restatement
+/// at every downstream site that accepts
+/// `impl Into<Cow<'static, std::ffi::OsStr>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`BumpLevel::as_str`]) and every by-value borrowed/owned-
+/// frontier emit surface —
+/// [`From<T> for std::borrow::Cow<'static, str>`] (yields
+/// `Cow<'static, str>`),
+/// [`From<T> for std::borrow::Cow<'static, [u8]>`] (yields
+/// `Cow<'static, [u8]>`), this
+/// [`From<T> for std::borrow::Cow<'static, std::ffi::OsStr>`] (yields
+/// `Cow<'static, std::ffi::OsStr>`) — reads through it.
+impl From<BumpLevel> for std::borrow::Cow<'static, std::ffi::OsStr> {
+    fn from(level: BumpLevel) -> std::borrow::Cow<'static, std::ffi::OsStr> {
+        std::borrow::Cow::Borrowed(std::ffi::OsStr::new(level.as_str()))
+    }
+}
+
 /// [`From<BumpLevel> for &'static str`] routes through
 /// [`BumpLevel::as_str`] so a downstream consumer that takes an owned
 /// [`&'static str`] via [`Into<&'static str>`] (a `const`-adjacent
@@ -7893,6 +8023,143 @@ mod tests {
                 decoded,
                 level.as_str(),
                 "Path::to_str round-trip must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`],
+    /// `<std::borrow::Cow<'static, std::ffi::OsStr>>::from(level)` (the
+    /// [`From<BumpLevel> for Cow<'static, std::ffi::OsStr>`] impl body)
+    /// equals `Cow::Borrowed(std::ffi::OsStr::new(level.as_str()))`
+    /// (the composition through the canonical-label oracle,
+    /// [`std::ffi::OsStr::new`], and [`std::borrow::Cow::Borrowed`]).
+    /// Pins the agreement identity that the by-value borrowed/owned-
+    /// frontier OS-string emit surface reads the same canonical label
+    /// the borrowed-view [`AsRef<std::ffi::OsStr>`] surface, the by-
+    /// value owned [`From<BumpLevel> for std::ffi::OsString`] surface,
+    /// and the by-value static-lifetime
+    /// [`From<BumpLevel> for &'static std::ffi::OsStr`] surface
+    /// already read at the OS-string frontier: a regression that
+    /// swapped the [`From`] impl body to route through
+    /// [`std::ffi::OsString::from`]-then-into-[`std::borrow::Cow::Owned`]
+    /// (dropping the zero-allocation branch), or through an intermediate
+    /// [`String`] buffer, or through a bare [`std::borrow::Cow::Borrowed`]
+    /// wrap of a [`&'static str`] cast that leaks the wrong frontier,
+    /// would break this composition equality at at least one variant
+    /// and fail here at the canonical-label pin, not at every
+    /// downstream `impl Into<Cow<'static, std::ffi::OsStr>>` call site.
+    /// Structural mirror of
+    /// `test_per_attempt_region_from_into_cow_static_os_str_agrees_with_cow_borrowed_os_str_new_as_str`
+    /// (commit 24f6110) at the per-attempt-region ladder and
+    /// `test_admission_tier_from_into_cow_static_os_str_agrees_with_cow_borrowed_os_str_new_as_str`
+    /// (commit 4e94fc5) at the admission-tier ladder — the same lift
+    /// at the by-value borrowed/owned-frontier OS-string emit layer at
+    /// this third and last ordered typed sum, closing the trio.
+    #[test]
+    fn test_bump_level_from_into_cow_static_os_str_agrees_with_cow_borrowed_os_str_new_as_str() {
+        for level in BumpLevel::ALL {
+            let cow: std::borrow::Cow<'static, std::ffi::OsStr> = std::borrow::Cow::from(level);
+            let borrowed: &std::ffi::OsStr = &cow;
+            assert_eq!(
+                borrowed,
+                std::ffi::OsStr::new(level.as_str()),
+                "From<BumpLevel> for Cow<'static, OsStr> and Cow::Borrowed(OsStr::new(as_str())) must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The
+    /// [`From<BumpLevel> for std::borrow::Cow<'static, std::ffi::OsStr>`]
+    /// identity carries through a generic
+    /// `impl Into<Cow<'static, std::ffi::OsStr>>` consumer at every
+    /// [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Cow<'static, OsStr>>>(t: T) -> Cow<'static, OsStr>
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (config-schema builder that accepts either a static OS-string
+    /// label or a caller-supplied [`std::ffi::OsString`] uniformly,
+    /// subprocess-argv sink taking [`std::borrow::Cow<'static, std::ffi::OsStr>`]
+    /// slots at a [`std::process::Command`] boundary, a `phf`-style
+    /// static lookup table keyed by canonical label OS-strings) —
+    /// reads the canonical lowercase label directly from a
+    /// [`BumpLevel`] value with the `'static` lifetime preserved
+    /// through the [`std::borrow::Cow<'static, std::ffi::OsStr>`]
+    /// wrapper. The structural witness that a [`BumpLevel`] is
+    /// genuinely usable at `impl Into<Cow<'static, std::ffi::OsStr>>`
+    /// call sites — a regression that drifted the [`From`] impl
+    /// signature (e.g., returning
+    /// [`std::borrow::Cow<'_, std::ffi::OsStr>`] with a non-`'static`
+    /// lifetime, requiring [`&BumpLevel`] and losing the by-value
+    /// semantics, or dropping the [`std::borrow::Cow`] wrapper
+    /// entirely) fails here at compile time instead of at every
+    /// downstream generic call site. Structural mirror of
+    /// `test_per_attempt_region_into_cow_static_os_str_carries_through_generic_consumer`
+    /// (commit 24f6110) at the per-attempt-region ladder and
+    /// `test_admission_tier_into_cow_static_os_str_carries_through_generic_consumer`
+    /// (commit 4e94fc5) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_into_cow_static_os_str_carries_through_generic_consumer() {
+        fn read<T: Into<std::borrow::Cow<'static, std::ffi::OsStr>>>(
+            t: T,
+        ) -> std::borrow::Cow<'static, std::ffi::OsStr> {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            let cow = read(level);
+            let borrowed: &std::ffi::OsStr = &cow;
+            assert_eq!(
+                borrowed,
+                std::ffi::OsStr::new(level.as_str()),
+                "generic Into<Cow<'static, OsStr>> consumer must read canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for std::borrow::Cow<'static, std::ffi::OsStr>`]
+    /// returns the [`std::borrow::Cow::Borrowed`] branch, not
+    /// [`std::borrow::Cow::Owned`], at every [`BumpLevel::ALL`]
+    /// variant. Pins the zero-allocation contract at the emit
+    /// boundary: because [`BumpLevel::as_str`] returns a
+    /// `'static`-lived borrow into the static-string constant table
+    /// and [`std::ffi::OsStr::new`] preserves the borrow's lifetime,
+    /// this impl composes with an
+    /// [`Into<std::borrow::Cow<'static, std::ffi::OsStr>>`] receiver
+    /// at the [`std::borrow::Cow::Borrowed`] branch — the receiver
+    /// pays the `'static`-borrow cost of
+    /// [`From<BumpLevel> for &'static std::ffi::OsStr`], not the
+    /// [`std::ffi::OsString`]-allocation cost of
+    /// [`From<BumpLevel> for std::ffi::OsString`]. The structural
+    /// witness that the impl body picks the load-bearing
+    /// [`std::borrow::Cow::Borrowed`] branch — a regression that
+    /// drifted the impl body toward
+    /// `Cow::Owned(std::ffi::OsString::from(level.as_str()))` would
+    /// silently allocate at every emit site and defeat the
+    /// borrowed/owned-frontier discipline this impl trio-closes; the
+    /// [`matches!`] pin lights up here at ONE named site instead of
+    /// leaking to every downstream
+    /// `impl Into<Cow<'static, std::ffi::OsStr>>` consumer as a
+    /// hidden per-call allocation. Sibling of the agreement pin
+    /// [`test_bump_level_from_into_cow_static_os_str_agrees_with_cow_borrowed_os_str_new_as_str`]
+    /// at the label-oracle surface — the two pins together close both
+    /// the value-agreement contract and the branch-choice / zero-
+    /// allocation contract at the by-value
+    /// [`std::borrow::Cow<'static, std::ffi::OsStr>`] emit surface.
+    /// Structural mirror of
+    /// `test_per_attempt_region_into_cow_static_os_str_is_borrowed`
+    /// (commit 24f6110) at the per-attempt-region ladder and
+    /// `test_admission_tier_into_cow_static_os_str_is_borrowed`
+    /// (commit 4e94fc5) at the admission-tier ladder — closing the
+    /// zero-allocation-branch contract at the third and last ordered
+    /// typed sum.
+    #[test]
+    fn test_bump_level_into_cow_static_os_str_is_borrowed() {
+        for level in BumpLevel::ALL {
+            let cow: std::borrow::Cow<'static, std::ffi::OsStr> = std::borrow::Cow::from(level);
+            assert!(
+                matches!(cow, std::borrow::Cow::Borrowed(_)),
+                "From<BumpLevel> for Cow<'static, OsStr> must return Cow::Borrowed \
+                 (zero-allocation branch) at {level:?}, not Cow::Owned",
             );
         }
     }
