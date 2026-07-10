@@ -1832,6 +1832,121 @@ impl From<BumpLevel> for std::ffi::OsString {
     }
 }
 
+/// [`From<BumpLevel> for std::path::PathBuf`] routes through
+/// [`BumpLevel::as_str`] composed with
+/// [`std::path::PathBuf::from`] so a downstream consumer bound by
+/// `impl Into<std::path::PathBuf>` (a
+/// [`std::path::PathBuf::push`] segment consumer that owns its
+/// receiver, a [`std::path::PathBuf::join`] argument that owns
+/// its input, a [`std::fs::create_dir_all`] argument via
+/// [`std::path::PathBuf`], a
+/// [`std::collections::HashMap<std::path::PathBuf, _>::insert`]
+/// key builder, a serde container that opts into
+/// `#[serde(into = "PathBuf")]` on a wrapper field) recovers the
+/// canonical lowercase label (`"patch"`, `"minor"`, `"major"`)
+/// as an owned [`std::path::PathBuf`] directly from a
+/// [`BumpLevel`] value without a per-consumer
+/// `PathBuf::from(level.as_str())` two-step restatement at every
+/// by-value boundary.
+///
+/// Closing peer at the third ordered typed sum of the owned-
+/// buffer filesystem-path emit trio: `From<PerAttemptRegion> for
+/// std::path::PathBuf` (commit 6333c31) opened the trio at the
+/// first typed sum; `From<AdmissionTier> for std::path::PathBuf`
+/// (commit 75a37d4) carried the mid-trio slot at the second
+/// typed sum; this commit closes the trio at the third, matching
+/// the [`AsRef<std::path::Path>`] closing order (17718d2 →
+/// f6c4c75 → dfd887a), the [`From<T> for std::ffi::OsString`]
+/// closing order (976f5af → 0791fc7 → b069eec), the
+/// [`From<T> for Vec<u8>`] closing order (2ad52bc → 491db4d →
+/// 6701191), and the [`From<T> for String`] closing order at the
+/// UTF-8 owned-buffer frontier. The by-value owned peer of
+/// [`AsRef<std::path::Path>`] above — both are filesystem-path
+/// surfaces at the same canonical-label oracle, differing only
+/// on the receiver's ownership: [`AsRef<std::path::Path>`]
+/// yields `&Path` for consumers that already hold a borrow, this
+/// [`From<BumpLevel> for std::path::PathBuf`] yields
+/// [`std::path::PathBuf`] for consumers that own the input
+/// buffer. The str-frontier parallel is
+/// [`AsRef<str>`] → [`From<BumpLevel> for String`]; the byte-
+/// slice-frontier parallel is [`AsRef<[u8]>`] →
+/// [`From<BumpLevel> for Vec<u8>`]; the OS-string-frontier
+/// parallel is [`AsRef<std::ffi::OsStr>`] →
+/// [`From<BumpLevel> for std::ffi::OsString`]; this
+/// [`AsRef<std::path::Path>`] →
+/// [`From<BumpLevel> for std::path::PathBuf`] closes the same
+/// borrowed-view → owned-buffer emit peer at the filesystem-
+/// path frontier at the version-bump-magnitude ladder.
+///
+/// After this commit the owned-buffer emit axis spans the UTF-8
+/// string frontier ([`From<T> for String`]), the byte-slice
+/// frontier ([`From<T> for Vec<u8>`]), the OS-string frontier
+/// ([`From<T> for std::ffi::OsString`]), and the filesystem-path
+/// frontier ([`From<T> for std::path::PathBuf`]) across all
+/// three ordered typed sums on the ladder set against ONE
+/// canonical-label oracle each — a four-frontier × three-typed-
+/// sum closure at the by-value owned-buffer emit axis, matching
+/// the four-frontier × three-typed-sum closure at the borrowed-
+/// view axis (dfd887a).
+///
+/// The natural bridge to consumers that work over the filesystem-
+/// path frontier at the owned-buffer emit axis: directory-
+/// composition machinery ([`std::path::PathBuf::push`],
+/// [`std::path::PathBuf::join`]) that owns its receiver,
+/// directory-creation machinery ([`std::fs::create_dir_all`])
+/// that owns its argument, keyed-index machinery
+/// ([`std::collections::HashMap<std::path::PathBuf, _>::insert`],
+/// [`std::collections::BTreeMap<std::path::PathBuf, _>::insert`])
+/// that owns its key, and serde container round-trip machinery
+/// (`#[serde(into = "PathBuf")]`) that owns its serialized
+/// shape, so a consumer that hands a canonical [`BumpLevel`]
+/// label to any of these boundaries reads it directly from a
+/// [`BumpLevel`] value without a `PathBuf::from(level.as_str())`
+/// restatement at the boundary — a per-bump-magnitude-scoped
+/// release-manifest directory keyed by owned
+/// [`std::path::PathBuf`]
+/// (`manifest_dir_map.insert(level.into(), events)`), a per-
+/// bump-magnitude-scoped artifact directory that owns the
+/// segment (`let mut p = release_root.clone(); p.push(level);`
+/// against an owned [`std::path::PathBuf`] slot), or a per-bump-
+/// magnitude-scoped serde container that opts into
+/// `#[serde(into = "PathBuf")]` on a filesystem-path field reads
+/// directly from a [`BumpLevel`] value at these boundaries.
+///
+/// The identity `std::path::PathBuf::from(level) ==
+/// std::path::PathBuf::from(level.as_str())` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_from_into_pathbuf_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<std::path::PathBuf>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_into_pathbuf_carries_through_generic_consumer`];
+/// the round-trip through [`std::path::PathBuf::into_os_string`]
+/// then [`std::ffi::OsString::into_string`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_bump_level_from_into_pathbuf_round_trips_through_into_os_string`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned filesystem-
+/// path emit surface is a typed-primitive site on [`BumpLevel`]
+/// itself (one `From<BumpLevel> for std::path::PathBuf` impl
+/// routing through [`BumpLevel::as_str`] and
+/// [`std::path::PathBuf::from`]), not a per-consumer
+/// `PathBuf::from(level.as_str())` restatement at every
+/// downstream site that accepts `impl Into<std::path::PathBuf>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`BumpLevel::as_str`]) and every owned-buffer
+/// emit surface — [`From<T> for String`] (yields [`String`]),
+/// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]),
+/// [`From<T> for std::ffi::OsString`] (yields
+/// [`std::ffi::OsString`]), this
+/// [`From<T> for std::path::PathBuf`] (yields
+/// [`std::path::PathBuf`]) — reads through it.
+impl From<BumpLevel> for std::path::PathBuf {
+    fn from(level: BumpLevel) -> std::path::PathBuf {
+        std::path::PathBuf::from(level.as_str())
+    }
+}
+
 /// [`From<BumpLevel> for &'static str`] routes through
 /// [`BumpLevel::as_str`] so a downstream consumer that takes an owned
 /// [`&'static str`] via [`Into<&'static str>`] (a `const`-adjacent
@@ -7268,6 +7383,104 @@ mod tests {
                 decoded,
                 level.as_str(),
                 "OsString::into_string round-trip must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`], `std::path::PathBuf::from(level)`
+    /// equals `std::path::PathBuf::from(level.as_str())`. Pins
+    /// the agreement identity that the by-value owned
+    /// filesystem-path emit surface reads the same canonical
+    /// label the [`AsRef<str>`] surface reads, projected through
+    /// [`std::path::PathBuf::from`]. A regression that swapped
+    /// the [`From`] impl to route through an intermediate
+    /// [`std::fmt::Display`] format buffer or a
+    /// [`std::ffi::OsString`] round-trip would break this
+    /// composition equality at at least one variant and fail
+    /// here at the canonical-label pin, not at every downstream
+    /// `impl Into<std::path::PathBuf>` call site. Structural
+    /// mirror of `test_per_attempt_region_from_into_pathbuf_agrees_with_as_str`
+    /// (commit 6333c31) at the per-attempt-region ladder and
+    /// `test_admission_tier_from_into_pathbuf_agrees_with_as_str`
+    /// (commit 75a37d4) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_from_into_pathbuf_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let owned: std::path::PathBuf = std::path::PathBuf::from(level);
+            assert_eq!(
+                owned,
+                std::path::PathBuf::from(level.as_str()),
+                "From<BumpLevel> for PathBuf and PathBuf::from(as_str()) must agree at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for std::path::PathBuf`] identity
+    /// carries through a generic `impl Into<std::path::PathBuf>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny
+    /// generic function `fn read<T: Into<PathBuf>>(t: T) ->
+    /// PathBuf { t.into() }` — the shape of an actual
+    /// downstream consumer (a [`std::path::PathBuf::push`]
+    /// segment consumer that owns its receiver, a
+    /// [`std::fs::create_dir_all`] argument, a
+    /// [`std::collections::HashMap<std::path::PathBuf, _>::insert`]
+    /// key builder) — reads the canonical lowercase label
+    /// directly from a [`BumpLevel`] value as an owned
+    /// [`std::path::PathBuf`]. The structural witness that a
+    /// [`BumpLevel`] is genuinely usable at
+    /// `impl Into<std::path::PathBuf>` call sites — a regression
+    /// that drifted the [`From`] impl signature (e.g., returning
+    /// `&std::path::Path` instead of [`std::path::PathBuf`],
+    /// requiring `&BumpLevel` and losing the by-value
+    /// semantics) fails here at compile time instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_bump_level_into_pathbuf_carries_through_generic_consumer() {
+        fn read<T: Into<std::path::PathBuf>>(t: T) -> std::path::PathBuf {
+            t.into()
+        }
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level),
+                std::path::PathBuf::from(level.as_str()),
+                "generic Into<PathBuf> consumer must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for std::path::PathBuf`] output
+    /// round-trips through [`std::path::PathBuf::into_os_string`]
+    /// composed with [`std::ffi::OsString::into_string`]
+    /// recovering the canonical lowercase label byte-for-byte at
+    /// every [`BumpLevel::ALL`] variant. Pins the UTF-8 validity
+    /// contract on the by-value owned filesystem-path emit
+    /// surface: the produced [`std::path::PathBuf`] is always a
+    /// valid UTF-8 sequence because the canonical labels are
+    /// pure ASCII, and [`std::path::PathBuf::into_os_string`] +
+    /// [`std::ffi::OsString::into_string`] recovers exactly the
+    /// [`BumpLevel::as_str`] emission. Together with
+    /// [`test_bump_level_from_into_pathbuf_agrees_with_as_str`]
+    /// this closes the owned filesystem-path emit surface
+    /// against both the composition oracle
+    /// (`PathBuf::from(as_str())`) and the UTF-8 validity oracle
+    /// (`PathBuf::into_os_string ∘ OsString::into_string`) at
+    /// every [`BumpLevel::ALL`] variant. Structural mirror of
+    /// `test_per_attempt_region_from_into_pathbuf_round_trips_through_into_os_string`
+    /// (commit 6333c31) at the per-attempt-region ladder and
+    /// `test_admission_tier_from_into_pathbuf_round_trips_through_into_os_string`
+    /// (commit 75a37d4) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_from_into_pathbuf_round_trips_through_into_os_string() {
+        for level in BumpLevel::ALL {
+            let owned: std::path::PathBuf = std::path::PathBuf::from(level);
+            let decoded = owned.into_os_string().into_string().unwrap_or_else(|s| {
+                panic!("PathBuf for {level:?} must be valid UTF-8 (got {s:?})")
+            });
+            assert_eq!(
+                decoded,
+                level.as_str(),
+                "PathBuf::into_os_string ∘ OsString::into_string round-trip must recover canonical label at {level:?}",
             );
         }
     }
