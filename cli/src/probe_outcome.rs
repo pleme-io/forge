@@ -8815,6 +8815,90 @@ impl From<AdmissionTier> for std::path::PathBuf {
     }
 }
 
+/// [`From<AdmissionTier> for &'static std::ffi::OsStr`] routes
+/// through [`AdmissionTier::as_str`] composed with the
+/// lifetime-preserving [`std::ffi::OsStr::new`] constructor so a
+/// downstream consumer bound by `impl Into<&'static std::ffi::OsStr>`
+/// (a `const`-adjacent OS-string sink that stashes the tier label
+/// in a `&'static std::ffi::OsStr` field, a
+/// [`std::borrow::Cow<'static, std::ffi::OsStr>`] sink taking
+/// `Into<Cow<'static, OsStr>>`, a `phf`-style static lookup table
+/// keyed by canonical label OS-strings) reads the canonical
+/// snake_case label (`"refused"`, `"staging_only"`, `"strict"`) as
+/// an owned `&'static std::ffi::OsStr` view of the static-lifetime
+/// label constant with `'static` lifetime preserved.
+///
+/// The by-value static-lifetime peer of the [`AsRef<std::ffi::OsStr>`]
+/// borrow surface — both are OS-string surfaces at the same
+/// canonical-label oracle, differing only on ownership and lifetime:
+/// [`AsRef<std::ffi::OsStr>`] borrows through the receiver's
+/// lifetime (a caller with a short-lived [`AdmissionTier`] gets a
+/// short-lived `&std::ffi::OsStr` back), whereas this [`From`] impl
+/// consumes the receiver by value and returns
+/// `&'static std::ffi::OsStr` (a caller that no longer needs the
+/// [`AdmissionTier`] value gets a `'static`-lived
+/// [`std::ffi::OsStr`] label back). Structural mirror of
+/// [`From<AdmissionTier> for &'static str`] and
+/// [`From<AdmissionTier> for &'static [u8]`] at the UTF-8 and
+/// byte-slice frontiers respectively — the same by-value static-
+/// lifetime emit surface at the same one-oracle discipline,
+/// projected onto the OS-string frontier this time.
+///
+/// Mid-trio peer at the second ordered typed sum of the by-value
+/// static-lifetime OS-string emit trio:
+/// `From<PerAttemptRegion> for &'static std::ffi::OsStr` (commit
+/// be57ac3) opened the trio at the first typed sum; the closing
+/// peer at the third typed sum is
+/// `From<BumpLevel> for &'static std::ffi::OsStr` in a follow-up
+/// commit, matching the [`From<T> for &'static [u8]`] opening
+/// order (70e813b → 694dff9 → 762437f), the
+/// [`AsRef<std::ffi::OsStr>`] opening order (70e1ab5 → 1d708f4 →
+/// 242ed89), and the [`From<T> for std::ffi::OsString`] opening
+/// order (976f5af → 0791fc7 → b069eec).
+///
+/// Zero-cost by construction: [`std::ffi::OsStr::new`] on an
+/// [`AsRef<std::ffi::OsStr>`] input is a zero-cost transmute at the
+/// borrow-view boundary — [`std::ffi::OsStr`] is a `[u8]` newtype on
+/// Unix and a `[u16]`-wide newtype on Windows, both accepting a
+/// `&str` view without allocation — no copy, no branching over the
+/// variant discriminant beyond what [`AdmissionTier::as_str`]
+/// itself does at its match body. The `'static` lifetime is
+/// preserved through the composition because
+/// [`AdmissionTier::as_str`] returns `&'static str` and
+/// [`std::ffi::OsStr::new`] preserves the receiver's lifetime.
+///
+/// The identity `<&'static std::ffi::OsStr>::from(tier) ==
+/// std::ffi::OsStr::new(tier.as_str())` at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_from_into_static_os_str_agrees_with_os_str_new_as_str`];
+/// the identity carried through a generic
+/// `impl Into<&'static std::ffi::OsStr>` consumer at every variant
+/// is pinned by
+/// [`tests::test_admission_tier_into_static_os_str_carries_through_generic_consumer`];
+/// the round-trip through [`std::ffi::OsStr::to_str`] recovering
+/// the canonical label at every variant is pinned by
+/// [`tests::test_admission_tier_from_into_static_os_str_round_trips_through_to_str`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// OS-string emit surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one
+/// `From<AdmissionTier> for &'static std::ffi::OsStr` impl routing
+/// through [`AdmissionTier::as_str`] and
+/// [`std::ffi::OsStr::new`]), not a per-consumer
+/// `OsStr::new(tier.as_str())` restatement at every downstream
+/// site that accepts `impl Into<&'static std::ffi::OsStr>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`AdmissionTier::as_str`]) and every by-value
+/// static-lifetime emit surface — [`From<T> for &'static str`]
+/// (yields `&'static str`), [`From<T> for &'static [u8]`] (yields
+/// `&'static [u8]`), this [`From<T> for &'static std::ffi::OsStr`]
+/// (yields `&'static std::ffi::OsStr`) — reads through it.
+impl From<AdmissionTier> for &'static std::ffi::OsStr {
+    fn from(tier: AdmissionTier) -> &'static std::ffi::OsStr {
+        std::ffi::OsStr::new(tier.as_str())
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -22553,6 +22637,108 @@ mod tests {
                 decoded,
                 tier.as_str(),
                 "PathBuf::into_os_string ∘ OsString::into_string round-trip must recover canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`],
+    /// `<&'static std::ffi::OsStr>::from(tier)` (the
+    /// [`From<AdmissionTier> for &'static std::ffi::OsStr`] impl body)
+    /// equals `std::ffi::OsStr::new(tier.as_str())` (the composition
+    /// through the canonical-label oracle and
+    /// [`std::ffi::OsStr::new`]). Pins the agreement identity that
+    /// the by-value static-lifetime OS-string emit surface reads the
+    /// same canonical label the borrowed-view
+    /// [`AsRef<std::ffi::OsStr>`] surface and the by-value owned
+    /// [`From<AdmissionTier> for std::ffi::OsString`] surface already
+    /// read at the OS-string frontier: a regression that swapped the
+    /// [`From`] impl body to route through
+    /// [`std::ffi::OsString::from`]-then-[`std::ffi::OsString::as_os_str`]
+    /// (dropping the `'static` lifetime through an owned buffer), or
+    /// through an intermediate [`std::fmt::Display`] format buffer,
+    /// or through a [`std::path::Path::as_os_str`] round-trip, would
+    /// break this composition equality at at least one variant and
+    /// fail here at the canonical-label pin, not at every downstream
+    /// `impl Into<&'static std::ffi::OsStr>` call site. Structural
+    /// mirror of
+    /// `test_per_attempt_region_from_into_static_os_str_agrees_with_os_str_new_as_str`
+    /// (commit be57ac3) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_from_into_static_os_str_agrees_with_os_str_new_as_str() {
+        for tier in AdmissionTier::ALL {
+            let borrowed: &'static std::ffi::OsStr = <&'static std::ffi::OsStr>::from(tier);
+            assert_eq!(
+                borrowed,
+                std::ffi::OsStr::new(tier.as_str()),
+                "From<AdmissionTier> for &'static OsStr and OsStr::new(as_str()) must agree at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for &'static std::ffi::OsStr`]
+    /// identity carries through a generic
+    /// `impl Into<&'static std::ffi::OsStr>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<&'static OsStr>>(t: T) -> &'static OsStr
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (a `const`-adjacent OS-string sink holding
+    /// `&'static std::ffi::OsStr` slots, a
+    /// [`std::borrow::Cow<'static, std::ffi::OsStr>`] sink taking
+    /// `Into<Cow<'static, OsStr>>`, a `phf`-style static lookup
+    /// table keyed by canonical label OS-strings) — reads the
+    /// canonical snake_case label directly from an
+    /// [`AdmissionTier`] value as a borrowed
+    /// `&'static std::ffi::OsStr` with `'static` lifetime preserved
+    /// end-to-end. The structural witness that an
+    /// [`AdmissionTier`] is genuinely usable at
+    /// `impl Into<&'static std::ffi::OsStr>` call sites — a
+    /// regression that drifted the [`From`] impl signature (e.g.,
+    /// returning an owned [`std::ffi::OsString`] instead of
+    /// `&'static std::ffi::OsStr`, or requiring `&AdmissionTier`
+    /// and losing the `'static` lifetime through a receiver borrow)
+    /// fails here at compile time instead of at every downstream
+    /// generic call site.
+    #[test]
+    fn test_admission_tier_into_static_os_str_carries_through_generic_consumer() {
+        fn read<T: Into<&'static std::ffi::OsStr>>(t: T) -> &'static std::ffi::OsStr {
+            t.into()
+        }
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(tier),
+                std::ffi::OsStr::new(tier.as_str()),
+                "generic Into<&'static OsStr> consumer must recover canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for &'static std::ffi::OsStr`]
+    /// output round-trips through [`std::ffi::OsStr::to_str`]
+    /// recovering the canonical snake_case label byte-for-byte at
+    /// every [`AdmissionTier::ALL`] variant. Pins the UTF-8
+    /// validity contract on the by-value static-lifetime OS-string
+    /// emit surface: the produced `&'static std::ffi::OsStr` is
+    /// always a valid UTF-8 sequence because the canonical labels
+    /// are pure ASCII, and [`std::ffi::OsStr::to_str`] recovers
+    /// exactly the [`AdmissionTier::as_str`] emission. Together
+    /// with
+    /// [`test_admission_tier_from_into_static_os_str_agrees_with_os_str_new_as_str`]
+    /// this closes the by-value static-lifetime OS-string emit
+    /// surface against both the composition oracle
+    /// (`OsStr::new(as_str())`) and the UTF-8 validity oracle
+    /// (`OsStr::to_str`) at every [`AdmissionTier::ALL`] variant.
+    #[test]
+    fn test_admission_tier_from_into_static_os_str_round_trips_through_to_str() {
+        for tier in AdmissionTier::ALL {
+            let borrowed: &'static std::ffi::OsStr = <&'static std::ffi::OsStr>::from(tier);
+            let decoded = borrowed
+                .to_str()
+                .unwrap_or_else(|| panic!("&'static OsStr bytes for {tier:?} must be valid UTF-8"));
+            assert_eq!(
+                decoded,
+                tier.as_str(),
+                "OsStr::to_str round-trip must recover canonical label at {tier:?}",
             );
         }
     }
