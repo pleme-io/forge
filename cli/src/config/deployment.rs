@@ -377,15 +377,19 @@ impl DeploymentConfig {
         }
 
         // Validate timeouts are reasonable. Both magnitude fields route
-        // through the canonical `crate::duration` oracle — including
-        // `nix_connect_timeout_secs`, which previously had no zero-guard, so
-        // a zero connect timeout reached the `nix` invocation unchecked.
-        crate::duration::reject_zero_timeout(
-            std::time::Duration::from_secs(self.deployment_wait_timeout_secs),
+        // through the canonical `crate::duration` u64-secs oracle — the
+        // `Duration::from_secs(_) + reject_zero_timeout(_, label)` composition
+        // fused at one site so `deployment_wait_timeout_secs` and
+        // `nix_connect_timeout_secs` cannot drift on what "a valid zero-guard"
+        // means. Includes `nix_connect_timeout_secs`, which previously had
+        // no zero-guard, so a zero connect timeout reached the `nix`
+        // invocation unchecked.
+        crate::duration::reject_zero_timeout_secs(
+            self.deployment_wait_timeout_secs,
             "deployment_wait_timeout_secs",
         )?;
-        crate::duration::reject_zero_timeout(
-            std::time::Duration::from_secs(self.nix_connect_timeout_secs),
+        crate::duration::reject_zero_timeout_secs(
+            self.nix_connect_timeout_secs,
             "nix_connect_timeout_secs",
         )?;
 

@@ -310,10 +310,14 @@ impl ServiceFederationTestsConfig {
         }
 
         // Validate timeout is reasonable. The zero-rejection routes through
-        // the canonical `crate::duration` magnitude oracle so this field
-        // cannot drift on what "a valid timeout" means.
-        crate::duration::reject_zero_timeout(
-            std::time::Duration::from_secs(self.timeout_seconds),
+        // the canonical `crate::duration` u64-secs oracle so this field
+        // cannot drift on what "a valid zero-guard on a u64-secs timeout"
+        // means — the `Duration::from_secs(_) + reject_zero_timeout(_, label)`
+        // composition is fused at one site across the three `deploy.yaml`
+        // u64-secs timeout fields (`deployment_wait_timeout_secs`,
+        // `nix_connect_timeout_secs`, `timeout_seconds`).
+        crate::duration::reject_zero_timeout_secs(
+            self.timeout_seconds,
             &format!("Federation test timeout for service '{service_name}'"),
         )?;
 
