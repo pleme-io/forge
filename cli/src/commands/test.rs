@@ -21,8 +21,6 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::info;
 
-use crate::commands::integration_tests::parse_duration;
-
 /// Test type to run
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TestType {
@@ -137,7 +135,8 @@ fn find_product_dir_from_path(start: &Path) -> Option<PathBuf> {
 /// Load web tests configuration from deploy.yaml
 fn load_web_tests_config(service: &str, service_dir: &str) -> Result<WebTestsConfig> {
     let service_dir_path = PathBuf::from(service_dir);
-    let deploy_yaml_path = if let Some(product_dir) = find_product_dir_from_path(&service_dir_path) {
+    let deploy_yaml_path = if let Some(product_dir) = find_product_dir_from_path(&service_dir_path)
+    {
         crate::config::resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
     } else {
         service_dir_path.join("deploy.yaml")
@@ -391,7 +390,15 @@ async fn run_test_suite(
     println!("     Command: {}", config.command.dimmed());
     println!();
 
-    let test_timeout = parse_duration(&config.timeout).unwrap_or(Duration::from_secs(300));
+    // Malformed `timeout: "5min"` etc. was previously silently swallowed
+    // to a 300s default here — the load-bearing hole
+    // `crate::duration::parse_timeout_field` closes. `WebTestsConfig` has
+    // no `.validate()` on load so this is the sole fail-fast surface for
+    // its timeout grammar.
+    let test_timeout = crate::duration::parse_timeout_field(
+        &config.timeout,
+        &format!("test suite '{suite_name}' for service '{service}'"),
+    )?;
 
     let max_attempts = if config.retry_on_failure {
         config.max_retries + 1
@@ -507,7 +514,10 @@ mod tests {
 
     #[test]
     fn test_test_type_from_str_integration() {
-        assert_eq!(TestType::from_str("integration").unwrap(), TestType::Integration);
+        assert_eq!(
+            TestType::from_str("integration").unwrap(),
+            TestType::Integration
+        );
     }
 
     #[test]
