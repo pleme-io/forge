@@ -120,11 +120,42 @@ pub fn parse_timeout_field(value: &str, field: &str) -> Result<Duration> {
 /// validated [`Duration`] in one expression. On zero, errors naming
 /// `label` so a `deploy.yaml` author sees which field forge refused —
 /// the same fail-at-load fidelity [`parse_duration`] gives the grammar.
+///
+/// For a `deploy.yaml` timeout field that arrives as a `u64` count of
+/// seconds rather than an already-constructed [`Duration`], call
+/// [`reject_zero_timeout_secs`] — the u64-secs peer that fuses the
+/// [`Duration::from_secs`] construction with this zero-guard at one site.
 pub fn reject_zero_timeout(d: Duration, label: &str) -> Result<Duration> {
     if d.is_zero() {
         bail!("{label} must be greater than 0 seconds");
     }
     Ok(d)
+}
+
+/// Reject a zero-length `u64`-seconds timeout field, returning the
+/// constructed [`Duration`] on a positive value.
+///
+/// The u64-secs-field peer of [`reject_zero_timeout`]. `deploy.yaml`
+/// timeout fields arrive in two shapes: an `&str` (grammar via
+/// [`parse_duration`] / [`parse_timeout_field`]) or a `u64` count of
+/// seconds (`deployment_wait_timeout_secs`, `nix_connect_timeout_secs`,
+/// `timeout_seconds`) that a `Duration::from_secs(_)` call at the
+/// validate site then routed through [`reject_zero_timeout`]. Three call
+/// sites past the duplication threshold (THEORY §VI.1) restating the same
+/// `reject_zero_timeout(Duration::from_secs(self.foo), "foo")?` composition
+/// — where the `Duration::from_secs(self.foo)` construction and the
+/// `"foo"` label are always paired. This is the single oracle that pair
+/// collapses onto: pass the raw `u64` and the label, get back a validated
+/// [`Duration`] or a `"{label} must be greater than 0 seconds"` error
+/// naming the offending field.
+///
+/// On a positive `secs`, returns `Duration::from_secs(secs)` so a caller
+/// can bind the validated [`Duration`] in one expression. On zero, errors
+/// with the same shape [`reject_zero_timeout`] emits so a `deploy.yaml`
+/// author reads ONE zero-timeout-rejected grammar across every field
+/// regardless of whether it arrived as an `&str` or a `u64`.
+pub fn reject_zero_timeout_secs(secs: u64, label: &str) -> Result<Duration> {
+    reject_zero_timeout(Duration::from_secs(secs), label)
 }
 
 #[cfg(test)]
@@ -294,6 +325,70 @@ mod tests {
         assert_eq!(
             reject_zero_timeout(d, "test suite 'unit'").unwrap(),
             Duration::from_secs(300)
+        );
+    }
+
+    /// A positive `u64`-seconds field constructs and validates in one
+    /// expression: the returned [`Duration`] is byte-for-byte
+    /// [`Duration::from_secs`] of the input, so a caller can bind the
+    /// validated value directly.
+    #[test]
+    fn reject_zero_timeout_secs_passes_positive_through() {
+        assert_eq!(
+            reject_zero_timeout_secs(30, "field").unwrap(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            reject_zero_timeout_secs(600, "deployment_wait_timeout_secs").unwrap(),
+            Duration::from_secs(600)
+        );
+        // Saturating u64 sanity: a positive `u64::MAX` seconds is well-formed
+        // at the magnitude layer, just like [`parse_duration`]'s saturation
+        // arm on an absurd grammar magnitude.
+        assert_eq!(
+            reject_zero_timeout_secs(u64::MAX, "field").unwrap(),
+            Duration::from_secs(u64::MAX)
+        );
+    }
+
+    /// A zero `u64`-seconds field is rejected with the same shape
+    /// [`reject_zero_timeout`] emits — so a `deploy.yaml` author reads
+    /// ONE zero-rejected grammar across every field regardless of whether
+    /// it arrived as an `&str` or a `u64`.
+    #[test]
+    fn reject_zero_timeout_secs_rejects_zero() {
+        assert!(reject_zero_timeout_secs(0, "field").is_err());
+    }
+
+    /// The error names the offending field so a `deploy.yaml` author sees
+    /// which timeout forge refused — matching the field-naming discipline
+    /// [`reject_zero_timeout`] and [`parse_timeout_field`] enforce.
+    #[test]
+    fn reject_zero_timeout_secs_error_names_field() {
+        let msg = reject_zero_timeout_secs(0, "nix_connect_timeout_secs")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("nix_connect_timeout_secs"),
+            "error must echo the field label: {msg}"
+        );
+    }
+
+    /// Load-bearing shape-uniformity: the u64-secs peer emits the
+    /// byte-for-byte same error prose the already-constructed-[`Duration`]
+    /// oracle emits, so an ops `grep 'must be greater than 0 seconds'`
+    /// alert scoops up zero-rejected timeouts regardless of whether they
+    /// arrived as an `&str` (via [`parse_timeout_field`]) or a `u64` field.
+    #[test]
+    fn reject_zero_timeout_secs_error_shape_matches_reject_zero_timeout() {
+        let secs_err = reject_zero_timeout_secs(0, "field").unwrap_err().to_string();
+        let dur_err = reject_zero_timeout(Duration::ZERO, "field")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            secs_err, dur_err,
+            "u64-secs and Duration zero-rejection must emit the same shape: \
+             u64='{secs_err}' Duration='{dur_err}'"
         );
     }
 }
