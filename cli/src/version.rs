@@ -2414,6 +2414,125 @@ impl From<BumpLevel> for std::borrow::Cow<'static, std::path::Path> {
     }
 }
 
+/// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] routes through
+/// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
+/// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
+/// `impl for<'a> TryFrom<&'a std::ffi::OsStr>` (a [`std::env::var_os`]
+/// reader that surfaces a canonical [`BumpLevel`] label as a `&OsStr`
+/// view of the process-environment slot without a
+/// [`std::ffi::OsString`] intermediate, a [`std::process::Command::get_args`]
+/// iterator inspector reading a canonical label CLI argument, a
+/// [`std::path::Path::file_name`] receiver that returns an
+/// [`Option<&OsStr>`] over a bump-magnitude-labeled path segment, an
+/// [`std::os::unix::ffi::OsStrExt`]-styled byte-boundary parser at a
+/// POSIX interop frontier, a generic try-conversion helper
+/// `fn parse<T: for<'a> TryFrom<&'a OsStr>>` that composes with borrowed
+/// OS-string inputs uniformly) recovers a [`BumpLevel`] value from a
+/// borrowed OS-string label view (`OsStr::new("patch")`,
+/// `OsStr::new("minor")`, `OsStr::new("major")`) through the same
+/// one-oracle grammar the direct `.parse::<BumpLevel>()` call sites,
+/// the sibling [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<Box<str>>`],
+/// [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`], [`TryFrom<&[u8]>`],
+/// [`TryFrom<Vec<u8>>`], [`TryFrom<Cow<'_, [u8]>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`], and
+/// [`TryFrom<Rc<[u8]>>`] parse peers already read.
+///
+/// The by-reference OS-string parse peer of the by-reference UTF-8
+/// [`TryFrom<&str> for BumpLevel`] parse peer below at the
+/// borrowed-view axis, and the parse-side dual of the emit-only
+/// borrowed-view [`AsRef<std::ffi::OsStr>`] surface (commit 242ed89)
+/// above at the OS-string frontier. The [`AsRef<std::ffi::OsStr>`]
+/// surface yields a canonical `&OsStr` view out of a [`BumpLevel`]
+/// value, this [`TryFrom<&std::ffi::OsStr>`] surface reads a canonical
+/// `&OsStr` view IN to a [`BumpLevel`] value at the same OS-string
+/// frontier — closing the emit/parse pair at the borrowed-view axis at
+/// the OS-string frontier that the UTF-8 frontier already closes
+/// through [`AsRef<str>`] paired with [`TryFrom<&str>`] and the
+/// byte-slice frontier closes through [`AsRef<[u8]>`] paired with
+/// [`TryFrom<&[u8]>`].
+///
+/// Closing peer of the OS-string borrowed-view parse trio at the
+/// version-bump-magnitude ladder: `TryFrom<&OsStr>` for
+/// [`crate::retry::PerAttemptRegion`] (commit d37e6fe) opened the trio
+/// at the first ordered typed sum; `TryFrom<&OsStr>` for
+/// [`crate::probe_outcome::AdmissionTier`] (commit 9fca3bb) carried
+/// the mid-trio slot at the second ordered typed sum; this impl closes
+/// the trio at the third ordered typed sum, matching the
+/// [`TryFrom<&[u8]>`] byte-slice frontier's borrowed-view parse
+/// closing order (5c0c827 → cdb192c → 629b242) at the byte-slice
+/// sibling, and the emit-side [`AsRef<std::ffi::OsStr>`] borrowed-view
+/// emit closing order (70e1ab5 → 1d708f4 → 242ed89) at this OS-string
+/// frontier's emit-side dual. After this commit the OS-string
+/// borrowed-view parse axis spans all three ordered typed sums on the
+/// ladder set through ONE [`std::ffi::OsStr::to_str`] +
+/// [`TryFrom<&str>`] composition each.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at the same TWO frontiers a direct
+/// [`std::ffi::OsStr::to_str`] + [`str::parse`] composition would be
+/// strict at, lifted to ONE typed-primitive site:
+///
+/// - Non-Unicode OS-string sequences (on Unix, a `&OsStr` may hold any
+///   byte sequence — an invalid-UTF-8 filesystem path segment from a
+///   foreign locale or a malformed shell-quoted CLI argument) reject
+///   at the [`std::ffi::OsStr::to_str`] Unicode-decode frontier with a
+///   diagnostic naming the offending OS-string.
+/// - Valid-Unicode OS-string sequences that decode to a non-canonical
+///   label (`OsStr::new("Patch")`, `OsStr::new("Minor")`,
+///   `OsStr::new("Major")`, `OsStr::new("PATCH")`,
+///   `OsStr::new(" patch")`, `OsStr::new("patch ")`,
+///   `OsStr::new("pat")`, `OsStr::new("")`) reject at the underlying
+///   [`std::str::FromStr`] impl — the same canonical-only strictness
+///   the UTF-8 frontier already carries at the by-reference parse
+///   peer, now lifted to the OS-string input layer at ONE composition
+///   through the borrowed [`TryFrom<&str>`] peer.
+///
+/// The identity `BumpLevel::try_from(std::ffi::OsStr::new(
+/// level.as_str())).unwrap() == level` at every [`BumpLevel::ALL`]
+/// variant is pinned by
+/// [`tests::test_bump_level_try_from_os_str_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl for<'a> TryFrom<&'a std::ffi::OsStr>` consumer at every
+/// variant is pinned by
+/// [`tests::test_bump_level_try_from_os_str_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-Unicode OS-string input is
+/// pinned by
+/// [`tests::test_bump_level_try_from_os_str_rejects_non_unicode_input`];
+/// the strict-rejection contract on valid-Unicode non-canonical
+/// OS-string input is pinned by
+/// [`tests::test_bump_level_try_from_os_str_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-reference OS-string parse
+/// surface is a typed-primitive site on [`BumpLevel`] itself (one
+/// `TryFrom<&std::ffi::OsStr>` impl routing through
+/// [`std::ffi::OsStr::to_str`] and the by-reference [`TryFrom<&str>`]
+/// parse peer), not a per-consumer
+/// `BumpLevel::try_from(os_str.to_str().ok_or(...)?)` restatement at
+/// every downstream site that types its parse contract as
+/// `impl for<'a> TryFrom<&'a std::ffi::OsStr>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// at one site ([`BumpLevel::as_str`]), inverted at one site
+/// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
+/// surface — [`std::str::FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Cow<'_, [u8]>>`], [`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`], this
+/// [`TryFrom<&std::ffi::OsStr>`] — reads through it.
+impl TryFrom<&std::ffi::OsStr> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(os: &std::ffi::OsStr) -> Result<Self, Self::Error> {
+        let decoded = os
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid Unicode in bump level OsStr input {os:?}"))?;
+        <Self as std::convert::TryFrom<&str>>::try_from(decoded)
+    }
+}
+
 /// [`From<BumpLevel> for &'static str`] routes through
 /// [`BumpLevel::as_str`] so a downstream consumer that takes an owned
 /// [`&'static str`] via [`Into<&'static str>`] (a `const`-adjacent
@@ -11300,6 +11419,151 @@ mod tests {
                 )
                 .is_err(),
                 "TryFrom<Rc<str>> must reject non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] recovers the
+    /// original variant at every [`BumpLevel::ALL`] variant when the
+    /// canonical label emitted by
+    /// [`std::ffi::OsStr::new`]`(level.as_str())` is fed back through
+    /// it. Pins the round-trip identity `BumpLevel::try_from(
+    /// std::ffi::OsStr::new(level.as_str())).unwrap() == level` at
+    /// every variant against the shared [`BumpLevel::as_str`] +
+    /// [`std::ffi::OsStr::new`] canonical-label OS-string oracle. The
+    /// structural witness that the by-reference OS-string parse
+    /// surface (this [`TryFrom<&std::ffi::OsStr>`]) reads the same
+    /// one-oracle grammar the by-reference UTF-8 parse peer
+    /// [`TryFrom<&str>`] and the by-reference byte-slice parse peer
+    /// [`TryFrom<&[u8]>`] read — one round-trip pin per variant,
+    /// refuses a future variant insertion that drops the
+    /// `TryFrom<&OsStr>`/`OsStr::new(as_str())` agreement. Structural
+    /// mirror of
+    /// `test_per_attempt_region_try_from_os_str_agrees_with_from_str`
+    /// (commit d37e6fe) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_os_str_agrees_with_from_str`
+    /// (commit 9fca3bb) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_os_str_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let parsed = <BumpLevel as std::convert::TryFrom<&std::ffi::OsStr>>::try_from(
+                std::ffi::OsStr::new(level.as_str()),
+            )
+            .expect("canonical label OsStr must parse through TryFrom<&OsStr>");
+            assert_eq!(
+                parsed, level,
+                "TryFrom<&OsStr> must round-trip through OsStr::new(as_str()) at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<&std::ffi::OsStr> for BumpLevel`] identity
+    /// carries through a generic `impl for<'a> TryFrom<&'a
+    /// std::ffi::OsStr>` consumer at every [`BumpLevel::ALL`]
+    /// variant. A tiny generic function `fn parse<T>(o: &OsStr) -> T
+    /// where T: for<'a> TryFrom<&'a OsStr>, T::Error: std::fmt::Debug`
+    /// — the shape of an actual downstream consumer (a
+    /// [`std::env::var_os`] reader that decodes a canonical
+    /// [`BumpLevel`] label from a process-environment slot without a
+    /// [`std::ffi::OsString`] intermediate, a
+    /// [`std::process::Command::get_args`] iterator inspector reading
+    /// a canonical label CLI argument, a
+    /// [`std::path::Path::file_name`] receiver over a
+    /// bump-magnitude-labeled path segment, a generic try-conversion
+    /// helper) — recovers the canonical variant from the canonical
+    /// lowercase label OS-string at every variant. The structural
+    /// witness that a [`BumpLevel`] is genuinely usable at
+    /// `impl for<'a> TryFrom<&'a std::ffi::OsStr>` call sites — a
+    /// regression that drifted the [`TryFrom`] impl signature
+    /// (requiring an owned [`std::ffi::OsString`] input, dropping the
+    /// [`std::ffi::OsStr::to_str`] decode step and misparsing
+    /// non-Unicode input, returning a different variant than
+    /// [`std::str::FromStr`] would) fails here at compile time or at
+    /// the assertion instead of at every downstream generic call
+    /// site.
+    #[test]
+    fn test_bump_level_try_from_os_str_carries_through_generic_consumer() {
+        fn parse<T>(o: &std::ffi::OsStr) -> T
+        where
+            T: for<'a> std::convert::TryFrom<&'a std::ffi::OsStr>,
+            for<'a> <T as std::convert::TryFrom<&'a std::ffi::OsStr>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<&std::ffi::OsStr>>::try_from(o)
+                .expect("canonical label OsStr must parse through generic TryFrom<&OsStr>")
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                parse::<BumpLevel>(std::ffi::OsStr::new(level.as_str())),
+                level,
+                "generic TryFrom<&OsStr> consumer must recover canonical variant at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] rejects non-Unicode
+    /// OS-string sequences at the [`std::ffi::OsStr::to_str`] decode
+    /// frontier. On Unix a `&OsStr` may hold any byte sequence — an
+    /// invalid-UTF-8 filesystem path segment from a foreign locale or
+    /// a malformed shell-quoted CLI argument. Pins the
+    /// encoding-strictness contract at the OS-string frontier's first
+    /// strictness gate so a downstream consumer bound by
+    /// [`TryFrom<&std::ffi::OsStr>`] inherits the same Unicode-only
+    /// encoding discipline a direct [`std::ffi::OsStr::to_str`] +
+    /// [`str::parse`] composition would offer, at ONE typed-primitive
+    /// site rather than a per-consumer two-step restatement. Sibling
+    /// of the UTF-8-frontier pin
+    /// [`test_bump_level_try_from_bytes_rejects_non_utf8_input`] at
+    /// the byte-slice frontier — both pin the encoding-strictness
+    /// contract at the parse peer's first strictness gate.
+    #[cfg(unix)]
+    #[test]
+    fn test_bump_level_try_from_os_str_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStrExt;
+        for bad in [
+            &[0xffu8][..],
+            &[0xffu8, 0xfe][..],
+            &[0x80][..],
+            &[b'p', b'a', 0xff, b't', b'c', b'h'][..],
+            &[b'm', b'a', b'j', b'o', b'r', 0xff][..],
+        ] {
+            let bad_os = std::ffi::OsStr::from_bytes(bad);
+            assert!(
+                <BumpLevel as std::convert::TryFrom<&std::ffi::OsStr>>::try_from(bad_os).is_err(),
+                "TryFrom<&OsStr> must reject non-Unicode input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] rejects
+    /// valid-Unicode non-canonical OS-string sequences at the
+    /// underlying [`std::str::FromStr`] strictness gate — empty
+    /// OS-string, UpperCamel rendering, uppercase, whitespace
+    /// padding, and truncated labels all reject. Pins the
+    /// canonical-label strictness contract at the OS-string
+    /// frontier's second strictness gate so a downstream consumer
+    /// bound by [`TryFrom<&std::ffi::OsStr>`] inherits the same
+    /// canonical-only grammar the direct `.parse::<BumpLevel>()` call
+    /// sites and the sibling [`TryFrom<&str>`], [`TryFrom<&[u8]>`]
+    /// impls already read, and a future permissive-parse regression
+    /// at the underlying [`std::str::FromStr`] impl lights up here
+    /// rather than drifting silently through the OS-string
+    /// try-conversion surface. Sibling of the UTF-8-frontier pin
+    /// [`test_bump_level_try_from_str_rejects_non_canonical_input`]
+    /// and the byte-slice-frontier pin
+    /// [`test_bump_level_try_from_bytes_rejects_non_canonical_input`]
+    /// at the by-reference parse peers — the three pins together
+    /// close the canonical-only strictness contract across the UTF-8,
+    /// byte-slice, and OS-string frontiers.
+    #[test]
+    fn test_bump_level_try_from_os_str_rejects_non_canonical_input() {
+        for bad in [
+            "", "Patch", "Minor", "Major", "PATCH", " patch", "patch ", "pat",
+        ] {
+            let bad_os = std::ffi::OsStr::new(bad);
+            assert!(
+                <BumpLevel as std::convert::TryFrom<&std::ffi::OsStr>>::try_from(bad_os).is_err(),
+                "TryFrom<&OsStr> must reject valid-Unicode non-canonical input {bad:?}",
             );
         }
     }
