@@ -4352,6 +4352,93 @@ impl From<PerAttemptRegion> for &'static std::ffi::OsStr {
     }
 }
 
+/// [`From<PerAttemptRegion> for &'static std::path::Path`] routes
+/// through [`PerAttemptRegion::as_str`] composed with the
+/// lifetime-preserving [`std::path::Path::new`] constructor so a
+/// downstream consumer bound by `impl Into<&'static std::path::Path>`
+/// (a `const`-adjacent filesystem-path sink that stashes the region
+/// label in a `&'static std::path::Path` field, a
+/// [`std::borrow::Cow<'static, std::path::Path>`] sink taking
+/// `Into<Cow<'static, Path>>`, a `phf`-style static lookup table
+/// keyed by canonical label paths) reads the canonical snake_case
+/// label (`"before_first"`, `"first"`, `"interim"`, `"final"`,
+/// `"over_budget"`) as an owned `&'static std::path::Path` view of
+/// the static-lifetime label constant with `'static` lifetime
+/// preserved.
+///
+/// The by-value static-lifetime peer of the [`AsRef<std::path::Path>`]
+/// borrow surface — both are filesystem-path surfaces at the same
+/// canonical-label oracle, differing only on ownership and lifetime:
+/// [`AsRef<std::path::Path>`] borrows through the receiver's
+/// lifetime (a caller with a short-lived [`PerAttemptRegion`] gets a
+/// short-lived `&std::path::Path` back), whereas this [`From`] impl
+/// consumes the receiver by value and returns
+/// `&'static std::path::Path` (a caller that no longer needs the
+/// [`PerAttemptRegion`] value gets a `'static`-lived
+/// [`std::path::Path`] label back). Structural mirror of
+/// [`From<PerAttemptRegion> for &'static str`],
+/// [`From<PerAttemptRegion> for &'static [u8]`], and
+/// [`From<PerAttemptRegion> for &'static std::ffi::OsStr`] at the
+/// UTF-8, byte-slice, and OS-string frontiers respectively — the
+/// same by-value static-lifetime emit surface at the same one-oracle
+/// discipline, projected onto the filesystem-path frontier this
+/// time.
+///
+/// Opens the by-value static-lifetime filesystem-path emit trio at
+/// the per-attempt-region ladder; two subsequent commits close it
+/// at the [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// [`From<T> for &'static std::ffi::OsStr`] opening order
+/// (be57ac3 → b69f733 → 3cbc7bc), the [`AsRef<std::path::Path>`]
+/// opening order (17718d2 → f6c4c75 → dfd887a), and the
+/// [`From<T> for std::path::PathBuf`] opening order
+/// (6333c31 → 75a37d4 → 9e544b8).
+///
+/// Zero-cost by construction: [`std::path::Path::new`] on an
+/// [`AsRef<std::ffi::OsStr>`] input is a zero-cost transmute at the
+/// borrow-view boundary — [`std::path::Path`] is an
+/// [`std::ffi::OsStr`] newtype on all platforms, accepting a `&str`
+/// view without allocation — no copy, no branching over the variant
+/// discriminant beyond what [`PerAttemptRegion::as_str`] itself does
+/// at its match body. The `'static` lifetime is preserved through
+/// the composition because [`PerAttemptRegion::as_str`] returns
+/// `&'static str` and [`std::path::Path::new`] preserves the
+/// receiver's lifetime.
+///
+/// The identity `<&'static std::path::Path>::from(region) ==
+/// std::path::Path::new(region.as_str())` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_static_path_agrees_with_path_new_as_str`];
+/// the identity carried through a generic
+/// `impl Into<&'static std::path::Path>` consumer at every variant
+/// is pinned by
+/// [`tests::test_per_attempt_region_into_static_path_carries_through_generic_consumer`];
+/// the round-trip through [`std::path::Path::to_str`] recovering
+/// the canonical label at every variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_static_path_round_trips_through_to_str`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// filesystem-path emit surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one
+/// `From<PerAttemptRegion> for &'static std::path::Path` impl
+/// routing through [`PerAttemptRegion::as_str`] and
+/// [`std::path::Path::new`]), not a per-consumer
+/// `Path::new(region.as_str())` restatement at every downstream
+/// site that accepts `impl Into<&'static std::path::Path>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`PerAttemptRegion::as_str`]) and every by-value
+/// static-lifetime emit surface — [`From<T> for &'static str`]
+/// (yields `&'static str`), [`From<T> for &'static [u8]`] (yields
+/// `&'static [u8]`), [`From<T> for &'static std::ffi::OsStr`]
+/// (yields `&'static std::ffi::OsStr`), this
+/// [`From<T> for &'static std::path::Path`] (yields
+/// `&'static std::path::Path`) — reads through it.
+impl From<PerAttemptRegion> for &'static std::path::Path {
+    fn from(region: PerAttemptRegion) -> &'static std::path::Path {
+        std::path::Path::new(region.as_str())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -17849,6 +17936,105 @@ mod tests {
                 decoded,
                 region.as_str(),
                 "OsStr::to_str round-trip must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`],
+    /// `<&'static std::path::Path>::from(region)` (the
+    /// [`From<PerAttemptRegion> for &'static std::path::Path`] impl
+    /// body) equals `std::path::Path::new(region.as_str())` (the
+    /// composition through the canonical-label oracle and
+    /// [`std::path::Path::new`]). Pins the agreement identity that
+    /// the by-value static-lifetime filesystem-path emit surface
+    /// reads the same canonical label the borrowed-view
+    /// [`AsRef<std::path::Path>`] surface and the by-value owned
+    /// [`From<PerAttemptRegion> for std::path::PathBuf`] surface
+    /// already read at the filesystem-path frontier: a regression
+    /// that swapped the [`From`] impl body to route through
+    /// [`std::path::PathBuf::from`]-then-[`std::path::PathBuf::as_path`]
+    /// (dropping the `'static` lifetime through an owned buffer), or
+    /// through an intermediate [`std::fmt::Display`] format buffer,
+    /// or through a [`std::ffi::OsStr`] round-trip that leaks a
+    /// non-`'static` lifetime, would break this composition
+    /// equality at at least one variant and fail here at the
+    /// canonical-label pin, not at every downstream
+    /// `impl Into<&'static std::path::Path>` call site.
+    #[test]
+    fn test_per_attempt_region_from_into_static_path_agrees_with_path_new_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &'static std::path::Path = <&'static std::path::Path>::from(region);
+            assert_eq!(
+                borrowed,
+                std::path::Path::new(region.as_str()),
+                "From<PerAttemptRegion> for &'static Path and Path::new(as_str()) must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for &'static std::path::Path`]
+    /// identity carries through a generic
+    /// `impl Into<&'static std::path::Path>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<&'static Path>>(t: T) -> &'static Path
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (a `const`-adjacent filesystem-path sink holding
+    /// `&'static std::path::Path` slots, a
+    /// [`std::borrow::Cow<'static, std::path::Path>`] sink taking
+    /// `Into<Cow<'static, Path>>`, a `phf`-style static lookup
+    /// table keyed by canonical label paths) — reads the canonical
+    /// snake_case label directly from a [`PerAttemptRegion`] value
+    /// as a borrowed `&'static std::path::Path` with `'static`
+    /// lifetime preserved end-to-end. The structural witness that a
+    /// [`PerAttemptRegion`] is genuinely usable at
+    /// `impl Into<&'static std::path::Path>` call sites — a
+    /// regression that drifted the [`From`] impl signature (e.g.,
+    /// returning an owned [`std::path::PathBuf`] instead of
+    /// `&'static std::path::Path`, or requiring `&PerAttemptRegion`
+    /// and losing the `'static` lifetime through a receiver borrow)
+    /// fails here at compile time instead of at every downstream
+    /// generic call site.
+    #[test]
+    fn test_per_attempt_region_into_static_path_carries_through_generic_consumer() {
+        fn read<T: Into<&'static std::path::Path>>(t: T) -> &'static std::path::Path {
+            t.into()
+        }
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region),
+                std::path::Path::new(region.as_str()),
+                "generic Into<&'static Path> consumer must recover canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for &'static std::path::Path`]
+    /// output round-trips through [`std::path::Path::to_str`]
+    /// recovering the canonical snake_case label byte-for-byte at
+    /// every [`PerAttemptRegion::ALL`] variant. Pins the UTF-8
+    /// validity contract on the by-value static-lifetime
+    /// filesystem-path emit surface: the produced
+    /// `&'static std::path::Path` is always a valid UTF-8 sequence
+    /// because the canonical labels are pure ASCII, and
+    /// [`std::path::Path::to_str`] recovers exactly the
+    /// [`PerAttemptRegion::as_str`] emission. Together with
+    /// [`test_per_attempt_region_from_into_static_path_agrees_with_path_new_as_str`]
+    /// this closes the by-value static-lifetime filesystem-path emit
+    /// surface against both the composition oracle
+    /// (`Path::new(as_str())`) and the UTF-8 validity oracle
+    /// (`Path::to_str`) at every [`PerAttemptRegion::ALL`] variant.
+    #[test]
+    fn test_per_attempt_region_from_into_static_path_round_trips_through_to_str() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &'static std::path::Path = <&'static std::path::Path>::from(region);
+            let decoded = borrowed.to_str().unwrap_or_else(|| {
+                panic!("&'static Path bytes for {region:?} must be valid UTF-8")
+            });
+            assert_eq!(
+                decoded,
+                region.as_str(),
+                "Path::to_str round-trip must recover canonical label at {region:?}",
             );
         }
     }
