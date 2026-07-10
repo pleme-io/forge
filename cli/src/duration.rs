@@ -65,12 +65,19 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 /// Parse a `deploy.yaml` timeout field, echoing the offending value and
 /// the offending field name when the grammar rejects the string.
 ///
-/// The composed shape three deploy-pipeline call sites need — a
+/// The composed shape six forge timeout-parse call sites need — a
 /// [`parse_duration`] call fused with an [`anyhow::Context`] that names
 /// the field — so the "malformed timeout at `deploy.yaml`" fail-fast
-/// surface is named at ONE grammar-plus-context site rather than three
+/// surface is named at ONE grammar-plus-context site rather than six
 /// restatements of
 /// `parse_duration(&s).with_context(|| format!("invalid timeout ..."))`.
+/// The five `deploy.yaml` sites (`PreDeploymentTestsConfig::validate`,
+/// `run_test_suite`, `execute_pre_deployment_tests`,
+/// `execute::warmup_delay`, `execute_suite`) plus the `rollout --timeout`
+/// CLI flag all route through here, so an ops
+/// `grep 'invalid timeout' deploy.log` alert scoops up every stage's
+/// grammar rejection — config-load, runtime, AND CLI — without
+/// stage-specific pattern branches.
 ///
 /// # Load-bearing
 ///

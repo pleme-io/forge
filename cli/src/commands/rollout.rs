@@ -362,11 +362,21 @@ pub async fn execute(
     Ok(())
 }
 
-/// Parse timeout string (e.g., "5m", "30s", "2h") into number of poll
+/// Parse the `rollout --timeout` CLI flag into a number of poll
 /// iterations at the 3-second poll interval. The string grammar is the
 /// canonical [`crate::duration::parse_duration`] oracle (lifted out of
 /// this module's prior hand-rolled suffix match); an empty string keeps
 /// this CLI's historical default of 200 iterations (≈10 minutes).
+///
+/// Routes through [`crate::duration::parse_timeout_field`] so a malformed
+/// `--timeout 5min` surfaces both the offending value AND the field name
+/// (`rollout --timeout`) — byte-for-byte the same
+/// `"invalid timeout '{value}' for {field}"` shape the five `deploy.yaml`
+/// timeout-parse sites (`PreDeploymentTestsConfig::validate`,
+/// `run_test_suite`, `execute_pre_deployment_tests`, `execute::warmup_delay`,
+/// `execute_suite`) already emit. Was the last inline
+/// `parse_duration(&s)?` call outside the tests module that named the
+/// offending value without naming the field.
 fn parse_timeout(timeout_str: &str) -> Result<u64> {
     let timeout_str = timeout_str.trim();
 
@@ -374,8 +384,99 @@ fn parse_timeout(timeout_str: &str) -> Result<u64> {
         return Ok(200); // Default
     }
 
-    let total_seconds = crate::duration::parse_duration(timeout_str)?.as_secs();
+    let total_seconds =
+        crate::duration::parse_timeout_field(timeout_str, "rollout --timeout")?.as_secs();
 
     // Convert to iterations (assuming 3 second interval); at least 1.
     Ok((total_seconds / 3).max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An empty timeout string keeps the historical default of 200
+    /// iterations (≈10 minutes at the 3-second poll interval), so the
+    /// caller pattern `parse_timeout(&timeout_str)?` at line ~75 keeps
+    /// the same default the old inline `200 // Default` fallback gave
+    /// when no `--timeout` was provided.
+    #[test]
+    fn empty_returns_default_iterations() {
+        assert_eq!(parse_timeout("").unwrap(), 200);
+        assert_eq!(parse_timeout("   ").unwrap(), 200);
+    }
+
+    /// Well-formed timeouts convert to iteration counts at the 3-second
+    /// poll interval. `"5m"` = 300s ÷ 3 = 100 iterations; `"2h"` =
+    /// 7200s ÷ 3 = 2400 iterations; a bare `"30"` = 30s ÷ 3 = 10.
+    #[test]
+    fn well_formed_timeouts_convert_to_iteration_count() {
+        assert_eq!(parse_timeout("5m").unwrap(), 100);
+        assert_eq!(parse_timeout("2h").unwrap(), 2400);
+        assert_eq!(parse_timeout("30").unwrap(), 10);
+        assert_eq!(parse_timeout("30s").unwrap(), 10);
+    }
+
+    /// Sub-poll-interval timeouts saturate to a single iteration rather
+    /// than 0, so the poll loop still runs once and either succeeds or
+    /// reports timeout — the same `.max(1)` guard the prior inline
+    /// arithmetic used.
+    #[test]
+    fn sub_interval_timeout_saturates_to_one_iteration() {
+        assert_eq!(parse_timeout("1s").unwrap(), 1);
+        assert_eq!(parse_timeout("2s").unwrap(), 1);
+        assert_eq!(parse_timeout("3s").unwrap(), 1);
+    }
+
+    /// The load-bearing shape-uniformity assertion: a malformed
+    /// `rollout --timeout` value now emits the canonical
+    /// `"invalid timeout '{value}' for {field}"` shape — byte-for-byte
+    /// the same shape the five `deploy.yaml` timeout-parse sites emit
+    /// through [`crate::duration::parse_timeout_field`]. Before this
+    /// commit the CLI site called `parse_duration` bare and propagated a
+    /// naked `"invalid timeout '5min': magnitude '5mi' is not a base-10
+    /// integer …"` — the offending value was echoed but the field
+    /// (`--timeout`) was not, breaking the ONE-shape discipline the five
+    /// `deploy.yaml` sites established.
+    #[test]
+    fn malformed_error_names_offending_value_and_field() {
+        let err = parse_timeout("5min").unwrap_err().to_string();
+        assert!(
+            err.contains("5min"),
+            "error must echo the offending value: {err}"
+        );
+        assert!(
+            err.contains("rollout --timeout"),
+            "error must name the field (rollout --timeout) so a user sees \
+             which CLI flag forge rejected: {err}"
+        );
+        assert!(
+            err.contains("invalid timeout"),
+            "error must use the canonical `invalid timeout '{{v}}' for {{f}}` \
+             shape parse_timeout_field emits at the five deploy.yaml sites, \
+             so a `grep 'invalid timeout'` alert scoops up CLI grammar \
+             rejections uniformly with config-load + runtime rejections: {err}"
+        );
+    }
+
+    /// The other malformed shapes — English-phrase units, non-numeric
+    /// magnitudes, negative magnitudes — all route through the same
+    /// oracle so a user cannot land on a `deploy.yaml` timeout error
+    /// grammar that differs from the `--timeout` CLI grammar for the
+    /// same input.
+    #[test]
+    fn other_malformed_shapes_error_through_same_oracle() {
+        for bad in ["10 minutes", "abc", "-5s"] {
+            let err = parse_timeout(bad).unwrap_err().to_string();
+            assert!(
+                err.contains("rollout --timeout"),
+                "malformed input {bad:?} must route through parse_timeout_field \
+                 and name the field: {err}"
+            );
+            assert!(
+                err.contains(bad),
+                "malformed input {bad:?} must be echoed in the error: {err}"
+            );
+        }
+    }
 }
