@@ -4795,6 +4795,171 @@ impl TryFrom<&std::ffi::OsStr> for PerAttemptRegion {
     }
 }
 
+/// [`TryFrom<std::ffi::OsString> for PerAttemptRegion`] routes through the
+/// by-reference [`TryFrom<&std::ffi::OsStr>`] parse peer directly above on
+/// [`std::ffi::OsString::as_os_str`] of the caller-owned OS-string buffer,
+/// so a downstream consumer bound by `impl TryFrom<std::ffi::OsString>` (a
+/// `serde` container that opts into `#[serde(try_from = "OsString")]` on a
+/// wrapper field, a generic try-conversion helper `fn parse_os_field<T:
+/// TryFrom<OsString>>` that owns the input OS-string, a validated-input
+/// newtype builder that consumes an owned [`std::ffi::OsString`] and returns
+/// a validated [`PerAttemptRegion`], a `std::env::var_os` reader that owns
+/// the [`std::ffi::OsString`] returned by the process-environment slot, a
+/// `std::env::args_os` iterator consumer that owns each CLI-argument
+/// [`std::ffi::OsString`], a [`std::path::PathBuf::into_os_string`]
+/// terminus at the filesystem-frontier layer, a
+/// [`std::process::Command::get_program`] +
+/// [`std::ffi::OsStr::to_owned`] compose at the child-process-frontier
+/// layer) recovers a [`PerAttemptRegion`] value from a canonical
+/// snake_case-label OS-string through the same one-oracle grammar the
+/// direct `.parse::<PerAttemptRegion>()` call sites, the sibling
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<std::borrow::Cow<'_,
+/// str>>`], [`TryFrom<Box<str>>`], [`TryFrom<std::sync::Arc<str>>`],
+/// [`TryFrom<std::rc::Rc<str>>`], [`TryFrom<&[u8]>`],
+/// [`TryFrom<Vec<u8>>`], [`TryFrom<std::borrow::Cow<'_, [u8]>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<std::sync::Arc<[u8]>>`],
+/// [`TryFrom<std::rc::Rc<[u8]>>`], and [`TryFrom<&std::ffi::OsStr>`] parse
+/// peers already read.
+///
+/// The by-value owned-buffer parse peer of [`TryFrom<&std::ffi::OsStr>
+/// for PerAttemptRegion`] directly above — both are parse surfaces of the
+/// OS-string frontier, differing only on the input OS-string ownership:
+/// [`TryFrom<&std::ffi::OsStr>`] takes a borrowed [`&std::ffi::OsStr`]
+/// view for consumers that already hold a borrow, this
+/// [`TryFrom<std::ffi::OsString>`] takes an owned
+/// [`std::ffi::OsString`] for consumers that own the input OS-string
+/// buffer (a `serde` `try_from = "OsString"` container, an OS-string-
+/// consuming builder, a [`std::env::var_os`] receiver, a
+/// [`std::env::args_os`] iterator consumer). Both delegate through the
+/// shared [`FromStr`] parse oracle: the borrowed peer through
+/// [`std::ffi::OsStr::to_str`] + [`TryFrom<&str>`] (which itself composes
+/// through [`FromStr`]), this owned peer through the borrowed peer via
+/// [`std::ffi::OsString::as_os_str`] at the boundary — the same canonical
+/// grammar lifted to the owned-buffer input layer.
+///
+/// Structural mirror of [`TryFrom<String> for PerAttemptRegion`] (commit
+/// 9f6feb3) at the UTF-8 frontier and [`TryFrom<Vec<u8>> for
+/// PerAttemptRegion`] (commit 91ba4bf) at the byte-slice frontier — the
+/// same by-value owned-input parse surface at the same one-oracle
+/// discipline, projected onto the OS-string frontier instead of the UTF-8
+/// string frontier or the byte-slice frontier. Opens a new by-value
+/// owned-buffer OS-string-parse trio at the per-attempt-region ladder
+/// parallel to the [`TryFrom<String>`] and [`TryFrom<Vec<u8>>`] surfaces:
+/// [`TryFrom<String>`] takes an owned [`String`] input for consumers that
+/// own a UTF-8-decoded buffer, [`TryFrom<Vec<u8>>`] takes an owned
+/// [`Vec<u8>`] input for consumers that own a raw-bytes buffer at the
+/// pre-UTF-8-decode layer, this [`TryFrom<std::ffi::OsString>`] takes an
+/// owned [`std::ffi::OsString`] input for consumers that own an
+/// OS-encoded buffer at the process-environment / CLI-argument /
+/// filesystem-path frontier.
+///
+/// Opens the by-value owned-buffer OS-string-parse trio at the
+/// per-attempt-region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// [`TryFrom<&std::ffi::OsStr>`] opening order (d37e6fe → 9fca3bb →
+/// 1ea7110), the [`TryFrom<String>`] opening order (9f6feb3 → affb017 →
+/// 760e7d9) at the UTF-8 frontier's owned-input counterpart, the
+/// [`TryFrom<Vec<u8>>`] opening order (91ba4bf → f4a2052 → 5b6f488) at
+/// the byte-slice frontier's owned-input counterpart, and the
+/// [`From<PerAttemptRegion> for std::ffi::OsString`] opening order
+/// (976f5af → 0791fc7 → b069eec) at the OS-string frontier's emit-side
+/// owned-buffer dual.
+///
+/// The natural bridge to any downstream site that types its OS-string
+/// parse contract as `impl TryFrom<std::ffi::OsString>` rather than
+/// [`TryFrom<&std::ffi::OsStr>`] — the OS-string frontier's `serde`
+/// `try_from` container attribute at the owned-buffer layer
+/// (`#[serde(try_from = "OsString")]` — which keys off
+/// [`TryFrom<std::ffi::OsString>`], not
+/// [`TryFrom<&std::ffi::OsStr>`]), a validated-input newtype builder whose
+/// canonical parse contract is stated as `TryFrom<std::ffi::OsString>`
+/// (consumes the caller's input OS-string end-to-end), a
+/// [`std::env::var_os`] reader that owns the returned
+/// [`std::ffi::OsString`] and hands it to a typed parser without a
+/// borrow-then-clone round trip, a [`std::env::args_os`] iterator
+/// consumer that owns each yielded [`std::ffi::OsString`] element. The
+/// [`FromStr`] impl carries the load-bearing match body against the
+/// canonical grammar; this [`TryFrom<std::ffi::OsString>`] impl delegates
+/// through the [`TryFrom<&std::ffi::OsStr>`] parse peer (which itself
+/// composes [`std::ffi::OsStr::to_str`] with [`TryFrom<&str>`] which
+/// composes [`FromStr`]), so the parse-oracle discipline is preserved
+/// end-to-end and a future variant insertion / grammar refinement remains
+/// a one-site edit at [`PerAttemptRegion::as_str`] plus the matching
+/// [`FromStr`] arm addition.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at the same TWO frontiers the
+/// [`TryFrom<&std::ffi::OsStr>`] peer directly above is strict at,
+/// inherited through the delegation: non-Unicode OS-string byte
+/// sequences reject at [`std::ffi::OsStr::to_str`] with the standard
+/// "invalid Unicode in per-attempt region OsStr input" diagnostic surfaced
+/// through [`anyhow::Error`], and valid-Unicode OS-string sequences that
+/// decode to a non-canonical label (`""`, `"BeforeFirst"`,
+/// `"OverBudget"`, `"FIRST"`, `" first"`, `"first "`, `"beforefirst"`,
+/// `"overbudget"`) reject at the underlying [`FromStr`] impl — the same
+/// canonical-only strictness the OS-string frontier already carries at
+/// the by-reference peer, now lifted to the owned-buffer input layer at
+/// ONE composition through the borrowed [`TryFrom<&std::ffi::OsStr>`]
+/// peer.
+///
+/// The impl body picks [`std::ffi::OsString::as_os_str`] rather than
+/// [`std::ffi::OsString::into_string`] or an intermediate `to_str` +
+/// [`str::parse`] restatement: [`std::ffi::OsString::as_os_str`] yields
+/// a borrowed [`&std::ffi::OsStr`] view of the caller-owned buffer
+/// without allocation, so the parse-side receiver pays the by-reference
+/// [`TryFrom<&std::ffi::OsStr>`] cost, not the [`String`]-allocation
+/// cost of an [`OsString::into_string`] round trip. The owned
+/// [`std::ffi::OsString`] input is dropped at return, freeing its buffer
+/// exactly once — the same discipline the sibling [`TryFrom<Vec<u8>>`]
+/// and [`TryFrom<String>`] owned-buffer parse peers apply at the
+/// [`Vec::as_slice`] and [`String::as_str`] boundaries at the byte-slice
+/// and UTF-8 frontiers.
+///
+/// The identity `PerAttemptRegion::try_from(std::ffi::OsString::from(
+/// region.as_str())).unwrap() == region` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_os_string_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<std::ffi::OsString>` consumer at every variant is pinned
+/// by
+/// [`tests::test_per_attempt_region_try_from_os_string_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-Unicode owned-buffer input is
+/// pinned by
+/// [`tests::test_per_attempt_region_try_from_os_string_rejects_non_unicode_input`];
+/// the strict-rejection contract on valid-Unicode non-canonical
+/// owned-buffer input is pinned by
+/// [`tests::test_per_attempt_region_try_from_os_string_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.1 typed primitives: the by-value owned-buffer OS-string
+/// try-conversion surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one `TryFrom<std::ffi::OsString>` impl
+/// routing through the borrowed [`TryFrom<&std::ffi::OsStr>`] parse peer
+/// on [`std::ffi::OsString::as_os_str`]), not a per-consumer
+/// `PerAttemptRegion::try_from(buf.as_os_str())` bridge at every
+/// downstream site that types its parse contract as
+/// `impl TryFrom<std::ffi::OsString>` rather than
+/// [`TryFrom<&std::ffi::OsStr>`] or [`std::str::FromStr`]. THEORY.md §VI.1
+/// generation over composition: the canonical-label grammar is named at
+/// one site ([`PerAttemptRegion::as_str`]), inverted at one site
+/// ([`PerAttemptRegion::from_str`]), and every parse surface —
+/// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
+/// [`TryFrom<String>`], [`TryFrom<std::borrow::Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<std::sync::Arc<str>>`],
+/// [`TryFrom<std::rc::Rc<str>>`], [`TryFrom<&[u8]>`],
+/// [`TryFrom<Vec<u8>>`], [`TryFrom<std::borrow::Cow<'_, [u8]>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<std::sync::Arc<[u8]>>`],
+/// [`TryFrom<std::rc::Rc<[u8]>>`], [`TryFrom<&std::ffi::OsStr>`], this
+/// [`TryFrom<std::ffi::OsString>`] — reads through it.
+impl TryFrom<std::ffi::OsString> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(os: std::ffi::OsString) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::ffi::OsStr>>::try_from(os.as_os_str())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -18791,6 +18956,163 @@ mod tests {
                 <PerAttemptRegion as std::convert::TryFrom<&std::ffi::OsStr>>::try_from(bad_os)
                     .is_err(),
                 "TryFrom<&OsStr> must reject valid-Unicode non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::ffi::OsString> for PerAttemptRegion`] agrees with
+    /// [`FromStr`] at every [`PerAttemptRegion::ALL`] variant. Owning the
+    /// [`std::ffi::OsString`] input round-trips through
+    /// [`std::ffi::OsString::from(region.as_str())`] and the by-value
+    /// owned-buffer OS-string try-conversion recovers the canonical
+    /// variant — the by-value owned-buffer OS-string parse peer of the
+    /// by-reference [`TryFrom<&std::ffi::OsStr>`] surface reads the same
+    /// one-oracle grammar the by-value owned-buffer UTF-8 parse peer
+    /// [`TryFrom<String>`] and the by-value owned-buffer byte-slice parse
+    /// peer [`TryFrom<Vec<u8>>`] read — one round-trip pin per variant,
+    /// refuses a future variant insertion that drops the
+    /// `TryFrom<OsString>`/`OsString::from(as_str())` agreement.
+    #[test]
+    fn test_per_attempt_region_try_from_os_string_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let parsed = <PerAttemptRegion as std::convert::TryFrom<std::ffi::OsString>>::try_from(
+                std::ffi::OsString::from(region.as_str()),
+            )
+            .expect("canonical label OsString must parse through TryFrom<OsString>");
+            assert_eq!(
+                parsed, region,
+                "TryFrom<OsString> must round-trip through OsString::from(as_str()) at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<std::ffi::OsString> for PerAttemptRegion`] identity
+    /// carries through a generic `impl TryFrom<std::ffi::OsString>`
+    /// consumer at every [`PerAttemptRegion::ALL`] variant. A tiny generic
+    /// function `fn parse<T>(o: OsString) -> T where T:
+    /// TryFrom<OsString>, T::Error: std::fmt::Debug` — the shape of an
+    /// actual downstream consumer (a [`std::env::var_os`] receiver that
+    /// owns the returned [`std::ffi::OsString`] and decodes a canonical
+    /// [`PerAttemptRegion`] label from a process-environment slot without
+    /// a borrow-then-clone round trip, a [`std::env::args_os`] iterator
+    /// consumer over owned CLI-argument [`std::ffi::OsString`] elements,
+    /// a [`std::path::PathBuf::into_os_string`] terminus at the
+    /// filesystem-frontier layer, a generic try-conversion helper) —
+    /// recovers the canonical variant from the canonical snake_case label
+    /// owned OS-string at every variant. The structural witness that a
+    /// [`PerAttemptRegion`] is genuinely usable at
+    /// `impl TryFrom<std::ffi::OsString>` call sites — a regression that
+    /// drifted the [`TryFrom`] impl signature (requiring a borrowed
+    /// [`&std::ffi::OsStr`] input, dropping the
+    /// [`std::ffi::OsString::as_os_str`] borrow step and misparsing
+    /// non-Unicode input, returning a different variant than [`FromStr`]
+    /// would) fails here at compile time or at the assertion instead of
+    /// at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_try_from_os_string_carries_through_generic_consumer() {
+        fn parse<T>(o: std::ffi::OsString) -> T
+        where
+            T: std::convert::TryFrom<std::ffi::OsString>,
+            <T as std::convert::TryFrom<std::ffi::OsString>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::ffi::OsString>>::try_from(o)
+                .expect("canonical label OsString must parse through generic TryFrom<OsString>")
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                parse::<PerAttemptRegion>(std::ffi::OsString::from(region.as_str())),
+                region,
+                "generic TryFrom<OsString> consumer must recover canonical variant at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::ffi::OsString> for PerAttemptRegion`] rejects
+    /// non-Unicode owned OS-string sequences at the
+    /// [`std::ffi::OsStr::to_str`] decode frontier inherited through the
+    /// by-reference [`TryFrom<&std::ffi::OsStr>`] delegation. On Unix a
+    /// [`std::ffi::OsString`] may hold any byte sequence — an owned
+    /// invalid-UTF-8 filesystem path segment from a foreign locale, an
+    /// owned malformed shell-quoted CLI argument yielded by
+    /// [`std::env::args_os`], an owned [`std::env::var_os`] payload from
+    /// a locale-tainted process-environment slot. Pins the encoding-
+    /// strictness contract at the owned-buffer OS-string frontier's first
+    /// strictness gate so a downstream consumer bound by
+    /// [`TryFrom<std::ffi::OsString>`] inherits the same Unicode-only
+    /// encoding discipline the by-reference peer offers, at ONE typed-
+    /// primitive site rather than a per-consumer
+    /// [`std::ffi::OsString::into_string`] + [`str::parse`] restatement.
+    /// Sibling of the by-reference OS-string pin
+    /// [`test_per_attempt_region_try_from_os_str_rejects_non_unicode_input`]
+    /// at the by-reference peer, the UTF-8-frontier pin
+    /// [`test_per_attempt_region_try_from_bytes_rejects_non_utf8_input`]
+    /// at the byte-slice frontier, and the byte-slice-owned-buffer pin
+    /// [`test_per_attempt_region_try_from_vec_bytes_rejects_non_utf8_input`]
+    /// — all pin the encoding-strictness contract at the parse peer's
+    /// first strictness gate.
+    #[cfg(unix)]
+    #[test]
+    fn test_per_attempt_region_try_from_os_string_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStringExt;
+        for bad in [
+            vec![0xffu8],
+            vec![0xffu8, 0xfe],
+            vec![0x80],
+            vec![b'f', b'i', 0xff, b'r', b's', b't'],
+            vec![b'f', b'i', b'n', b'a', b'l', 0xff],
+        ] {
+            let bad_os = std::ffi::OsString::from_vec(bad.clone());
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<std::ffi::OsString>>::try_from(bad_os)
+                    .is_err(),
+                "TryFrom<OsString> must reject non-Unicode input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::ffi::OsString> for PerAttemptRegion`] rejects
+    /// valid-Unicode non-canonical owned OS-string sequences at the
+    /// underlying [`FromStr`] strictness gate inherited through the
+    /// by-reference [`TryFrom<&std::ffi::OsStr>`] delegation — empty
+    /// OS-string, UpperCamel rendering, uppercase, whitespace padding,
+    /// and snake_case labels with a dropped underscore all reject. Pins
+    /// the canonical-label strictness contract at the owned-buffer
+    /// OS-string frontier's second strictness gate so a downstream
+    /// consumer bound by [`TryFrom<std::ffi::OsString>`] inherits the
+    /// same canonical-only grammar the direct
+    /// `.parse::<PerAttemptRegion>()` call sites and the sibling
+    /// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<&[u8]>`],
+    /// [`TryFrom<Vec<u8>>`], and [`TryFrom<&std::ffi::OsStr>`] impls
+    /// already read, and a future permissive-parse regression at the
+    /// underlying [`FromStr`] impl lights up here rather than drifting
+    /// silently through the owned-buffer OS-string try-conversion
+    /// surface. Sibling of the by-reference OS-string pin
+    /// [`test_per_attempt_region_try_from_os_str_rejects_non_canonical_input`]
+    /// at the by-reference peer, the UTF-8-owned-buffer pin
+    /// [`test_per_attempt_region_try_from_string_rejects_non_canonical_input`]
+    /// at the UTF-8 frontier, and the byte-slice-owned-buffer pin
+    /// [`test_per_attempt_region_try_from_vec_bytes_rejects_non_canonical_input`]
+    /// at the byte-slice frontier — the four pins together close the
+    /// canonical-only strictness contract across the UTF-8, byte-slice,
+    /// and OS-string frontiers' owned-buffer parse surfaces.
+    #[test]
+    fn test_per_attempt_region_try_from_os_string_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "BeforeFirst",
+            "OverBudget",
+            "FIRST",
+            " first",
+            "first ",
+            "beforefirst",
+            "overbudget",
+        ] {
+            let bad_os = std::ffi::OsString::from(bad);
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<std::ffi::OsString>>::try_from(bad_os)
+                    .is_err(),
+                "TryFrom<OsString> must reject valid-Unicode non-canonical input {bad:?}",
             );
         }
     }
