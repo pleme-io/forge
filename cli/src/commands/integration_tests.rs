@@ -83,11 +83,44 @@ pub struct TestResult {
     pub test_counts: Option<TestCounts>,
 }
 
-/// Timeout-grammar parser ("30s", "5m", "1h", bare seconds), re-exported
-/// from the canonical [`crate::duration`] oracle. Kept as a module-level
-/// re-export so the existing call sites here and in `commands/test.rs`
-/// resolve unchanged after the grammar was lifted out of this module.
-pub use crate::duration::parse_duration;
+/// Parse the `deployment.integration_tests.execution.warmup_delay`
+/// `deploy.yaml` field through the canonical [`crate::duration`] grammar
+/// oracle, echoing both the offending value and the field name on grammar
+/// rejection.
+///
+/// Post-deployment peer of the four other `deploy.yaml` timeout-field
+/// parse sites the [`crate::duration::parse_timeout_field`] helper serves
+/// (`PreDeploymentTestsConfig::validate` at config-load, `run_test_suite`
+/// in [`crate::commands::test`], [`execute_pre_deployment_tests`], and
+/// [`parse_post_deployment_suite_timeout`] here). Before this rerouting,
+/// a malformed `warmup_delay: "5min"` fired an error that named the
+/// offending value but NOT the field name — a `deploy.yaml` author had to
+/// hunt through the file to find which timeout forge rejected. Fails
+/// LOUD now, naming both.
+fn parse_post_deployment_warmup_delay(value: &str) -> Result<Duration> {
+    crate::duration::parse_timeout_field(
+        value,
+        "post-deployment integration tests execution.warmup_delay",
+    )
+}
+
+/// Parse a post-deployment `deployment.integration_tests.test_suites[]`
+/// entry's `timeout` field through the canonical [`crate::duration`]
+/// grammar oracle, naming the offending suite alongside the offending
+/// value on grammar rejection.
+///
+/// The post-deployment peer of the pre-deployment inline
+/// `parse_timeout_field(&s, &format!("pre-deployment test suite '{}'",
+/// ...))` shape at [`execute_pre_deployment_tests`]: the label prefix
+/// distinguishes pre-deployment from post-deployment so a `deploy.yaml`
+/// author with a shared suite name ("e2e") in both stages sees which
+/// stage's suite forge refused.
+fn parse_post_deployment_suite_timeout(suite: &TestSuite) -> Result<Duration> {
+    crate::duration::parse_timeout_field(
+        &suite.timeout,
+        &format!("post-deployment integration test suite '{}'", suite.name),
+    )
+}
 
 /// Parse test counts from test runner output
 /// Supports multiple formats: Vitest, Cargo test, Playwright, Jest
@@ -237,7 +270,14 @@ pub async fn execute(
 
     // Wait for application to be ready by polling health endpoint
     info!("🔍 Waiting for application to be ready...");
-    let max_wait = parse_duration(&config.execution.warmup_delay)?;
+    // Malformed `warmup_delay: "5min"` etc. previously errored without
+    // naming which `deploy.yaml` field forge refused — `?` propagates the
+    // grammar-oracle error verbatim, but the outer context was missing.
+    // Routing through the field-naming helper closes the residual gap
+    // the `parse_timeout_field` module was built to close: a
+    // `deploy.yaml` timeout parse names BOTH the offending value AND
+    // the offending field at every deploy-pipeline call site.
+    let max_wait = parse_post_deployment_warmup_delay(&config.execution.warmup_delay)?;
     let health_url = format!("{}/health", config.environment.base_url);
 
     let start = std::time::Instant::now();
@@ -493,7 +533,13 @@ async fn execute_suite(
     working_dir: &PathBuf,
     env_vars: &HashMap<String, String>,
 ) -> Result<TestResult> {
-    let suite_timeout = parse_duration(&suite.timeout)?;
+    // Malformed `timeout: "5min"` etc. on a post-deployment suite
+    // previously errored without naming which suite forge refused —
+    // symmetric with the pre-deployment path this module already routes
+    // through `parse_timeout_field` at line ~1071. Closes the final
+    // `deploy.yaml` timeout-field parse site whose error lacked
+    // field-name context.
+    let suite_timeout = parse_post_deployment_suite_timeout(suite)?;
     let mut attempts = 0;
     let max_attempts = if suite.retry_on_failure {
         suite.max_retries + 1
@@ -1299,5 +1345,116 @@ mod tests {
         assert_eq!(counts.failed, 0);
         assert_eq!(counts.skipped, 0);
         assert_eq!(counts.total(), 0);
+    }
+
+    /// The happy path is byte-for-byte the shared grammar oracle: a
+    /// well-formed `warmup_delay: "30s"` parses to `Duration::from_secs(30)`.
+    /// The field-naming context is present only on the error path.
+    #[test]
+    fn parse_post_deployment_warmup_delay_parses_well_formed_values() {
+        assert_eq!(
+            parse_post_deployment_warmup_delay("30s").unwrap(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_post_deployment_warmup_delay("5m").unwrap(),
+            Duration::from_secs(300)
+        );
+    }
+
+    /// The load-bearing invariant: a malformed `warmup_delay` surfaces
+    /// BOTH the offending value AND the field name at the runtime call
+    /// site, so a `deploy.yaml` author no longer has to hunt through the
+    /// file to find which timeout forge rejected.
+    #[test]
+    fn parse_post_deployment_warmup_delay_error_names_field_and_value() {
+        let msg = parse_post_deployment_warmup_delay("5min")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("execution.warmup_delay"),
+            "error must echo the field label: {msg}"
+        );
+        assert!(
+            msg.contains("5min"),
+            "error must echo the offending value: {msg}"
+        );
+    }
+
+    /// A post-deployment suite whose `timeout` string is a unit typo
+    /// surfaces the offending suite name and value at the runtime call
+    /// site, matching the pre-deployment path's fail-fast fidelity.
+    #[test]
+    fn parse_post_deployment_suite_timeout_error_names_suite_and_value() {
+        let suite = TestSuite {
+            name: "e2e".to_string(),
+            description: String::new(),
+            command: String::new(),
+            working_dir: String::new(),
+            timeout: "5min".to_string(),
+            retry_on_failure: false,
+            max_retries: 0,
+        };
+        let msg = parse_post_deployment_suite_timeout(&suite)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("post-deployment integration test suite 'e2e'"),
+            "error must echo the field label naming stage and suite: {msg}"
+        );
+        assert!(
+            msg.contains("5min"),
+            "error must echo the offending value: {msg}"
+        );
+    }
+
+    /// Both pre-deployment (`execute_pre_deployment_tests`) and
+    /// post-deployment (`execute_suite`) parse a `deploy.yaml` suite
+    /// `timeout` field; the label prefix distinguishes the two so a
+    /// shared suite name ("e2e") appearing in both stages doesn't leave
+    /// a `deploy.yaml` author guessing which stage's suite forge refused.
+    #[test]
+    fn parse_post_deployment_suite_timeout_stage_prefix_distinguishes_pre_from_post() {
+        let suite = TestSuite {
+            name: "e2e".to_string(),
+            description: String::new(),
+            command: String::new(),
+            working_dir: String::new(),
+            timeout: "not-a-timeout".to_string(),
+            retry_on_failure: false,
+            max_retries: 0,
+        };
+        let msg = parse_post_deployment_suite_timeout(&suite)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("post-deployment"),
+            "post-deployment label must distinguish from pre-deployment: {msg}"
+        );
+        assert!(
+            !msg.contains("pre-deployment"),
+            "must not accidentally re-emit the pre-deployment label: {msg}"
+        );
+    }
+
+    /// A post-deployment suite's happy-path parse is byte-for-byte the
+    /// shared grammar oracle: a well-formed `timeout: "5m"` parses to
+    /// `Duration::from_secs(300)`, mirroring the parity the pre-deployment
+    /// path already has.
+    #[test]
+    fn parse_post_deployment_suite_timeout_parses_well_formed_values() {
+        let suite = TestSuite {
+            name: "e2e".to_string(),
+            description: String::new(),
+            command: String::new(),
+            working_dir: String::new(),
+            timeout: "5m".to_string(),
+            retry_on_failure: false,
+            max_retries: 0,
+        };
+        assert_eq!(
+            parse_post_deployment_suite_timeout(&suite).unwrap(),
+            Duration::from_secs(300)
+        );
     }
 }
