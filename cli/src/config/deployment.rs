@@ -237,14 +237,21 @@ impl PreDeploymentTestsConfig {
             }
             // Reject a malformed timeout at config-load rather than letting
             // the test-execution path silently swallow it to a default
-            // (the prior `parse_duration(..).unwrap_or(300s)` hole). The
-            // grammar is the canonical `crate::duration` oracle.
-            let timeout = crate::duration::parse_duration(&suite.timeout).with_context(|| {
-                format!(
-                    "Pre-deployment test suite '{}' has an invalid timeout '{}' for '{}'",
-                    suite.name, suite.timeout, service_name
-                )
-            })?;
+            // (the prior `parse_duration(..).unwrap_or(300s)` hole). Route
+            // through the composed `parse_timeout_field` oracle so the
+            // config-load error shape is byte-for-byte the same
+            // "invalid timeout '{value}' for {field}" shape the runtime
+            // sibling paths (`run_test_suite`, `execute_pre_deployment_tests`,
+            // `execute`, `execute_suite`) already emit — one named grammar
+            // + context site across every `deploy.yaml` timeout parse
+            // instead of an inline `.with_context(|| ...)` restatement.
+            let timeout = crate::duration::parse_timeout_field(
+                &suite.timeout,
+                &format!(
+                    "pre-deployment test suite '{}' for '{}'",
+                    suite.name, service_name
+                ),
+            )?;
             // A zero timeout fires immediately and fails every suite; reject
             // it through the same canonical `crate::duration` oracle that
             // guards every other forge timeout field.
@@ -691,6 +698,77 @@ mod tests {
         assert!(
             err.contains("5min") && err.contains("unit"),
             "error must name the offending suite and value: {err}"
+        );
+    }
+
+    /// The load-bearing invariant this refactor pins: the config-load
+    /// validate error and the runtime `parse_timeout_field` oracle emit
+    /// the same "invalid timeout '{value}' for {field}" shape, so a
+    /// `deploy.yaml` author reads one error grammar across every stage
+    /// of the deploy pipeline. Config-load echoing "invalid timeout"
+    /// (not the prior "has an invalid timeout" restatement) also names
+    /// the service so a per-service `deploy.yaml` is disambiguated in a
+    /// multi-service log.
+    #[test]
+    fn test_pre_deployment_tests_validate_error_matches_parse_timeout_field_shape() {
+        let config = PreDeploymentTestsConfig {
+            enabled: true,
+            test_suites: vec![PreDeploymentTestSuite {
+                name: "unit".to_string(),
+                description: "d".to_string(),
+                command: "npm test".to_string(),
+                working_dir: ".".to_string(),
+                timeout: "5min".to_string(),
+                retry_on_failure: false,
+                max_retries: 0,
+            }],
+            execution: PreDeploymentTestExecution::default(),
+            on_failure: PreDeploymentTestOnFailure::default(),
+        };
+        let err = config.validate("my-svc").unwrap_err().to_string();
+        assert!(
+            err.contains("invalid timeout '5min'"),
+            "error must use the canonical parse_timeout_field shape: {err}"
+        );
+        assert!(
+            err.contains("pre-deployment test suite 'unit'"),
+            "error must name the offending suite: {err}"
+        );
+        assert!(
+            err.contains("my-svc"),
+            "error must name the offending service: {err}"
+        );
+    }
+
+    /// The magnitude-layer sibling: a zero suite timeout is rejected via
+    /// [`crate::duration::reject_zero_timeout`], and the error names the
+    /// offending suite and service so a `deploy.yaml` author sees which
+    /// field forge refused — the same one-oracle discipline the grammar
+    /// layer already reaches.
+    #[test]
+    fn test_pre_deployment_tests_validate_zero_timeout_error_names_suite_and_service() {
+        let config = PreDeploymentTestsConfig {
+            enabled: true,
+            test_suites: vec![PreDeploymentTestSuite {
+                name: "unit".to_string(),
+                description: "d".to_string(),
+                command: "npm test".to_string(),
+                working_dir: ".".to_string(),
+                timeout: "0s".to_string(),
+                retry_on_failure: false,
+                max_retries: 0,
+            }],
+            execution: PreDeploymentTestExecution::default(),
+            on_failure: PreDeploymentTestOnFailure::default(),
+        };
+        let err = config.validate("my-svc").unwrap_err().to_string();
+        assert!(
+            err.contains("unit"),
+            "error must name the offending suite: {err}"
+        );
+        assert!(
+            err.contains("my-svc"),
+            "error must name the offending service: {err}"
         );
     }
 
