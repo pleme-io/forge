@@ -3232,6 +3232,99 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::path::Path>> for BumpLevel {
     }
 }
 
+/// Structural mirror of `impl TryFrom<Box<std::path::Path>> for
+/// PerAttemptRegion` (commit 315c145) and `impl TryFrom<Box<
+/// std::path::Path>> for AdmissionTier` (commit 657434c) — the
+/// shrunk-owned filesystem-path parse peer at the third ordered typed
+/// sum (trio-closing slot). Routes through
+/// [`std::boxed::Box::<std::path::Path>::as_ref`] on the caller-
+/// supplied shrunk-owned filesystem-path and the by-reference
+/// filesystem-path parse peer [`TryFrom<&std::path::Path>`] (which
+/// itself composes [`std::path::Path::as_os_str`] with the by-
+/// reference OS-string parse peer [`TryFrom<&std::ffi::OsStr>`] which
+/// composes [`std::ffi::OsStr::to_str`] with [`TryFrom<&str>`] which
+/// itself delegates through
+/// [`<BumpLevel as std::str::FromStr>::from_str`]), so a downstream
+/// consumer bound by `impl TryFrom<Box<std::path::Path>>` (a serde
+/// container that opts into `#[serde(try_from = "Box<Path>")]` on a
+/// wrapper field, a [`std::path::PathBuf::into_boxed_path`]-shrunk
+/// release-manifest path-segment input at a slot arena that trades
+/// the resizable-buffer [`std::path::PathBuf`] receiver footprint for
+/// a single-allocation immutable [`Box<std::path::Path>`], a generic
+/// try-conversion helper `fn parse<T: TryFrom<Box<std::path::Path>>>`
+/// that composes with shrunk-owned filesystem-path inputs) recovers a
+/// [`BumpLevel`] value from a shrunk-owned canonical filesystem-path
+/// label through the same one-oracle grammar the sibling
+/// [`TryFrom<&std::path::Path>`], [`TryFrom<std::path::PathBuf>`],
+/// [`TryFrom<Cow<'_, std::path::Path>>`], and (one frontier below)
+/// [`TryFrom<Box<str>>`], [`TryFrom<Box<[u8]>>`] shrunk-owned parse
+/// peers already read at neighboring OsStr/UTF-8/byte-slice
+/// frontiers.
+///
+/// The two-stage strictness discipline (Unicode validity at the OS-
+/// string decode frontier gated by [`std::ffi::OsStr::to_str`]
+/// reached through [`std::path::Path::as_os_str`], canonical-label
+/// grammar at the parse frontier gated by [`FromStr`]) is inherited
+/// unchanged from the by-reference [`TryFrom<&std::path::Path>`]
+/// peer via [`std::boxed::Box::<std::path::Path>::as_ref`] which
+/// yields a `&std::path::Path` view of the boxed inner payload
+/// without moving out or reallocating.
+///
+/// The impl body picks [`std::boxed::Box::<std::path::Path>::as_ref`]
+/// rather than an intermediate `Box::<std::path::Path>::into` +
+/// `TryFrom<PathBuf>` restatement: the [`AsRef`] view yields a
+/// borrowed `&std::path::Path` window over the boxed heap allocation
+/// without converting the shrunk-owned receiver into a resizable
+/// [`std::path::PathBuf`] first, so the receiver pays no
+/// reallocation and no capacity-vs-length metadata rebuild on the
+/// fast path — the same borrow-then-drop discipline the sibling
+/// [`TryFrom<std::path::PathBuf>`] and
+/// [`TryFrom<Cow<'_, std::path::Path>>`] peers apply at the
+/// resizable-buffer and borrowed/owned-frontier axes, lifted to the
+/// shrunk-owned axis via
+/// [`std::boxed::Box::<std::path::Path>::as_ref`].
+///
+/// Trio-closing slot in the shrunk-owned filesystem-path parse trio
+/// at the bump-level ladder — the opening peer at
+/// [`crate::retry::PerAttemptRegion`] was carried at 315c145
+/// (`TryFrom<Box<std::path::Path>> for PerAttemptRegion` — opens
+/// shrunk-owned filesystem-path parse trio), the mid-trio peer at
+/// [`crate::probe_outcome::AdmissionTier`] followed at 657434c, and
+/// this impl carries the closing slot at the third ordered typed
+/// sum. After this commit the shrunk-owned filesystem-path parse
+/// axis spans all three ordered typed sums on the ladder set through
+/// ONE [`std::boxed::Box::<std::path::Path>::as_ref`] +
+/// [`TryFrom<&std::path::Path>`] composition each — matching the
+/// [`TryFrom<Cow<'_, std::path::Path>>`] borrowed/owned-frontier
+/// filesystem-path parse closing order
+/// (47c471f → b52ed1e → 87eda90), the [`TryFrom<&std::path::Path>`]
+/// borrowed-view filesystem-path parse closing order
+/// (dba4c6b → 321b2d8 → 7863a1d), and the
+/// [`TryFrom<std::path::PathBuf>`] owned-buffer filesystem-path parse
+/// closing order (33e4e48 → 2855792 → b1945f4) at neighboring
+/// OsStr/Path frontiers.
+///
+/// THEORY.md §V.4 typed primitives: the shrunk-owned filesystem-path
+/// try-conversion parse surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one `TryFrom<Box<std::path::Path>>` impl
+/// routing through [`std::boxed::Box::<std::path::Path>::as_ref`]
+/// and the by-reference [`TryFrom<&std::path::Path>`] peer), not a
+/// per-consumer `BumpLevel::try_from(boxed.as_ref())` bridge at
+/// every downstream site that types its parse contract as
+/// `impl TryFrom<Box<std::path::Path>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// at one site ([`BumpLevel::as_str`]), inverted at one site
+/// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
+/// surface — including this shrunk-owned filesystem-path peer —
+/// reads through it.
+impl TryFrom<Box<std::path::Path>> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(path: Box<std::path::Path>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::path::Path>>::try_from(path.as_ref())
+    }
+}
+
 /// [`From<BumpLevel> for &'static str`] routes through
 /// [`BumpLevel::as_str`] so a downstream consumer that takes an owned
 /// [`&'static str`] via [`Into<&'static str>`] (a `const`-adjacent
@@ -13121,6 +13214,129 @@ mod tests {
                 >>::try_from(owned)
                 .is_err(),
                 "TryFrom<Cow<'_, Path>> must reject valid-Unicode non-canonical Cow::Owned input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<std::path::Path>> for BumpLevel`] recovers the
+    /// original variant at every [`BumpLevel::ALL`] variant when the
+    /// canonical label emitted by [`BumpLevel::as_str`] is materialized
+    /// as a [`std::path::PathBuf`] and shrunk to a
+    /// [`Box<std::path::Path>`] via
+    /// [`std::path::PathBuf::into_boxed_path`] and fed back through it.
+    /// Pins the round-trip identity at the shrunk-owned filesystem-path
+    /// frontier against the shared canonical-label oracle at the
+    /// trio-closing slot of the shrunk-owned filesystem-path parse trio,
+    /// structural mirror of
+    /// [`crate::retry::tests::test_per_attempt_region_try_from_box_path_agrees_with_from_str`]
+    /// (opening slot) and
+    /// [`crate::probe_outcome::tests::test_admission_tier_try_from_box_path_agrees_with_from_str`]
+    /// (mid-trio slot).
+    #[test]
+    fn test_bump_level_try_from_box_path_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::path::Path> =
+                std::path::PathBuf::from(level.as_str()).into_boxed_path();
+            let parsed =
+                <BumpLevel as std::convert::TryFrom<Box<std::path::Path>>>::try_from(boxed)
+                    .expect("canonical Box<Path> must parse through TryFrom<Box<Path>>");
+            assert_eq!(
+                parsed, level,
+                "TryFrom<Box<Path>> must round-trip at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Box<std::path::Path>> for BumpLevel`] identity
+    /// carries through a generic `impl TryFrom<Box<std::path::Path>>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny generic
+    /// function `fn parse<T>(b: Box<Path>) -> T where T: TryFrom<Box<
+    /// Path>>, T::Error: Debug` — the shape of an actual downstream
+    /// consumer (validated-input newtype builder, serde `try_from`
+    /// wrapper, generic try-conversion helper that opts into the
+    /// [`TryFrom<Box<std::path::Path>>`] contract) — recovers the
+    /// canonical variant at every variant. The structural witness that
+    /// a [`BumpLevel`] is genuinely usable at
+    /// `impl TryFrom<Box<std::path::Path>>` call sites — a regression
+    /// that drifted the [`TryFrom`] impl signature fails here at
+    /// compile time or at the assertion instead of at every downstream
+    /// generic call site.
+    #[test]
+    fn test_bump_level_try_from_box_path_carries_through_generic_consumer() {
+        fn parse<T>(path: Box<std::path::Path>) -> T
+        where
+            T: std::convert::TryFrom<Box<std::path::Path>>,
+            <T as std::convert::TryFrom<Box<std::path::Path>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<Box<std::path::Path>>>::try_from(path)
+                .expect("canonical Box<Path> must parse through generic TryFrom<Box<Path>>")
+        }
+
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::path::Path> =
+                std::path::PathBuf::from(level.as_str()).into_boxed_path();
+            assert_eq!(
+                parse::<BumpLevel>(boxed),
+                level,
+                "generic TryFrom<Box<Path>> consumer must recover canonical variant at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<std::path::Path>> for BumpLevel`] rejects
+    /// non-Unicode filesystem-path sequences at the
+    /// [`std::ffi::OsStr::to_str`] Unicode-decode frontier reached
+    /// through [`std::path::Path::as_os_str`] via
+    /// [`std::boxed::Box::<std::path::Path>::as_ref`] before the
+    /// [`FromStr`] canonical-grammar gate is reached — the input is a
+    /// [`std::os::unix::ffi::OsStringExt::from_vec`]-constructed
+    /// [`std::ffi::OsString`] materialized as a [`std::path::PathBuf`]
+    /// and shrunk to a [`Box<std::path::Path>`] via
+    /// [`std::path::PathBuf::into_boxed_path`]. Pins the Unicode-decode
+    /// strict-rejection contract at the shrunk-owned filesystem-path
+    /// try-conversion surface so a downstream consumer bound by
+    /// [`TryFrom<Box<std::path::Path>>`] inherits the same Unicode-only
+    /// grammar the sibling [`TryFrom<&std::path::Path>`] impl and the
+    /// direct `.parse::<BumpLevel>()` call sites already read. Unix-
+    /// only because the only stable public API for constructing a
+    /// non-Unicode [`std::ffi::OsString`] view is via
+    /// [`std::os::unix::ffi::OsStringExt::from_vec`].
+    #[cfg(unix)]
+    #[test]
+    fn test_bump_level_try_from_box_path_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_unicode_bytes: Vec<u8> = vec![0x80, 0xC3, 0xC0, 0x80, 0xFF];
+        let owned_os = std::ffi::OsString::from_vec(non_unicode_bytes);
+        let boxed: Box<std::path::Path> = std::path::PathBuf::from(owned_os).into_boxed_path();
+        assert!(
+            <BumpLevel as std::convert::TryFrom<Box<std::path::Path>>>::try_from(boxed).is_err(),
+            "TryFrom<Box<Path>> must reject non-Unicode input",
+        );
+    }
+
+    /// [`TryFrom<Box<std::path::Path>> for BumpLevel`] rejects
+    /// valid-Unicode non-canonical filesystem-path sequences with the
+    /// same strictness [`std::str::FromStr`] enforces — empty string,
+    /// UpperCamel rendering, uppercase, whitespace padding, and
+    /// truncated labels all reject after the Unicode-decode stage
+    /// passes. Pins the FromStr-gate strict-rejection contract at the
+    /// shrunk-owned filesystem-path try-conversion surface so a
+    /// downstream consumer bound by [`TryFrom<Box<std::path::Path>>`]
+    /// inherits the same canonical-only grammar the direct
+    /// `.parse::<BumpLevel>()` call sites and the sibling
+    /// [`TryFrom<&std::path::Path>`] / [`TryFrom<std::path::PathBuf>`] /
+    /// [`TryFrom<Cow<'_, std::path::Path>>`] impls already read.
+    #[test]
+    fn test_bump_level_try_from_box_path_rejects_non_canonical_input() {
+        for bad in [
+            "", "Patch", "Minor", "Major", "PATCH", " patch", "patch ", "pat",
+        ] {
+            let boxed: Box<std::path::Path> = std::path::PathBuf::from(bad).into_boxed_path();
+            assert!(
+                <BumpLevel as std::convert::TryFrom<Box<std::path::Path>>>::try_from(boxed)
+                    .is_err(),
+                "TryFrom<Box<Path>> must reject valid-Unicode non-canonical input {bad:?}",
             );
         }
     }
