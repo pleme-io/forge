@@ -9475,6 +9475,116 @@ impl TryFrom<std::ffi::OsString> for AdmissionTier {
     }
 }
 
+/// [`TryFrom<&std::path::Path> for AdmissionTier`] routes through the
+/// by-reference [`TryFrom<&std::ffi::OsStr>`] parse peer directly above
+/// on [`std::path::Path::as_os_str`] of the caller-borrowed
+/// filesystem-path view, so a downstream consumer bound by
+/// `impl for<'a> TryFrom<&'a std::path::Path>` (a
+/// [`std::path::Path::file_name`] receiver decoding a canonical
+/// [`AdmissionTier`] label from a filesystem-path segment, a
+/// [`std::fs::read_dir`] iterator inspector reading each entry's
+/// borrowed [`&std::path::Path`] view, a `walkdir` traversal borrowing
+/// each visited [`&std::path::Path`] without a [`std::path::PathBuf`]
+/// allocation, a generic try-conversion helper, a `serde` container
+/// whose deserializer routes through a [`&std::path::Path`]
+/// intermediate at a config-file-path parse frontier) recovers an
+/// [`AdmissionTier`] value from a canonical snake_case-label
+/// filesystem path through the same one-oracle grammar the direct
+/// `.parse::<AdmissionTier>()` call sites, the sibling
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`], [`TryFrom<Cow<'_, [u8]>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`],
+/// [`TryFrom<&std::ffi::OsStr>`], and [`TryFrom<std::ffi::OsString>`]
+/// parse peers already read.
+///
+/// The by-reference filesystem-path parse peer of the by-reference
+/// [`TryFrom<&std::ffi::OsStr>`] OS-string surface directly above —
+/// both are parse surfaces reading the same one-oracle canonical
+/// grammar, differing only on the input frontier:
+/// [`TryFrom<&std::ffi::OsStr>`] takes a borrowed OS-string view for
+/// consumers that already hold a [`&std::ffi::OsStr`], this
+/// [`TryFrom<&std::path::Path>`] takes a borrowed filesystem-path view
+/// for consumers whose input arrives at the filesystem-path layer
+/// (a [`std::path::Path::file_name`] receiver, a [`std::fs::read_dir`]
+/// entry inspector, a `walkdir` traversal element, a `serde`
+/// deserializer routed through a [`&std::path::Path`] intermediate).
+/// Both delegate through the shared [`std::str::FromStr`] parse
+/// oracle: the OS-string peer through [`std::ffi::OsStr::to_str`] +
+/// [`TryFrom<&str>`], this filesystem-path peer through the OS-string
+/// peer via [`std::path::Path::as_os_str`] at the boundary — no
+/// intermediate [`std::path::Path::to_str`] + [`str::parse`]
+/// restatement: [`std::path::Path::as_os_str`] yields a borrowed
+/// [`&std::ffi::OsStr`] view of the caller's [`&std::path::Path`]
+/// view without allocation, so the parse-side receiver pays the
+/// by-reference [`TryFrom<&std::ffi::OsStr>`] cost, not the
+/// [`String`]-allocation cost of an intermediate UTF-8 decode
+/// restatement. The delegation preserves the two-stage strictness
+/// end-to-end: the Unicode-decode gate lives at
+/// [`std::ffi::OsStr::to_str`] inside the
+/// [`TryFrom<&std::ffi::OsStr>`] peer, and the canonical-label gate
+/// lives at the underlying [`std::str::FromStr`] impl — the same
+/// one-oracle discipline the sibling [`TryFrom<&std::ffi::OsStr>`]
+/// peer applies at the OS-string input layer.
+///
+/// Mid-trio peer of the by-reference filesystem-path parse trio at
+/// the admission-tier ladder: [`TryFrom<&std::path::Path>`] for
+/// [`crate::retry::PerAttemptRegion`] (commit dba4c6b) opened the
+/// trio at the first ordered typed sum; the closing peer at the third
+/// ordered typed sum is [`TryFrom<&std::path::Path>`] for
+/// [`crate::version::BumpLevel`] in a follow-up commit, matching the
+/// [`TryFrom<&std::ffi::OsStr>`] OS-string by-reference parse opening
+/// order (d37e6fe → 9fca3bb → 1ea7110) at this ladder's OS-string
+/// borrowed-view sibling, the [`TryFrom<&[u8]>`] byte-slice
+/// by-reference parse opening order (5c0c827 → cdb192c → 629b242) at
+/// the byte-slice borrowed-view counterpart, and the emit-side
+/// [`AsRef<std::path::Path>`] borrowed-view emit opening order
+/// (17718d2 → f6c4c75 → dfd887a) at this filesystem-path frontier's
+/// emit-side dual.
+///
+/// The identity `AdmissionTier::try_from(std::path::Path::new(
+/// tier.as_str())).unwrap() == tier` at every [`AdmissionTier::ALL`]
+/// variant is pinned by
+/// [`tests::test_admission_tier_try_from_path_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl for<'a> TryFrom<&'a std::path::Path>` consumer at every
+/// variant is pinned by
+/// [`tests::test_admission_tier_try_from_path_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-Unicode filesystem-path input
+/// is pinned by
+/// [`tests::test_admission_tier_try_from_path_rejects_non_unicode_input`];
+/// the strict-rejection contract on valid-Unicode non-canonical
+/// filesystem-path input is pinned by
+/// [`tests::test_admission_tier_try_from_path_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-reference filesystem-path
+/// try-conversion surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one `TryFrom<&std::path::Path>` impl
+/// routing through [`std::path::Path::as_os_str`] and the
+/// by-reference [`TryFrom<&std::ffi::OsStr>`] parse peer), not a
+/// per-consumer `AdmissionTier::try_from(path.as_os_str())` bridge at
+/// every downstream site that types its parse contract as
+/// `impl for<'a> TryFrom<&'a std::path::Path>` rather than
+/// [`TryFrom<&std::ffi::OsStr>`] or [`std::str::FromStr`].
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// at one site ([`AdmissionTier::as_str`]), inverted at one site
+/// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
+/// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Cow<'_, [u8]>>`], [`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`],
+/// [`TryFrom<&std::ffi::OsStr>`], [`TryFrom<std::ffi::OsString>`],
+/// this [`TryFrom<&std::path::Path>`] — reads through it.
+impl TryFrom<&std::path::Path> for AdmissionTier {
+    type Error = anyhow::Error;
+
+    fn try_from(path: &std::path::Path) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::ffi::OsStr>>::try_from(path.as_os_str())
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -30403,6 +30513,178 @@ mod tests {
                 <AdmissionTier as std::convert::TryFrom<std::ffi::OsString>>::try_from(bad_os)
                     .is_err(),
                 "TryFrom<OsString> must reject valid-Unicode non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::path::Path> for AdmissionTier`] agrees with
+    /// [`FromStr`] at every [`AdmissionTier::ALL`] variant. The
+    /// borrowed [`&std::path::Path`] input round-trips through
+    /// [`std::path::Path::new(tier.as_str())`] and the by-reference
+    /// filesystem-path try-conversion recovers the canonical variant
+    /// — the by-reference filesystem-path parse peer of the
+    /// by-reference OS-string [`TryFrom<&std::ffi::OsStr>`] surface
+    /// reads the same one-oracle grammar the sibling frontiers'
+    /// by-reference parse peers already read. One round-trip pin per
+    /// variant, refuses a future variant insertion that drops the
+    /// `TryFrom<&Path>`/`Path::new(as_str())` agreement. Structural
+    /// mirror of
+    /// `test_per_attempt_region_try_from_path_agrees_with_from_str`
+    /// (commit dba4c6b) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_try_from_path_agrees_with_from_str() {
+        for tier in AdmissionTier::ALL {
+            let parsed = <AdmissionTier as std::convert::TryFrom<&std::path::Path>>::try_from(
+                std::path::Path::new(tier.as_str()),
+            )
+            .expect("canonical label &Path must parse through TryFrom<&Path>");
+            assert_eq!(
+                parsed, tier,
+                "TryFrom<&Path> must round-trip through Path::new(as_str()) at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<&std::path::Path> for AdmissionTier`] identity
+    /// carries through a generic
+    /// `impl for<'a> TryFrom<&'a std::path::Path>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(p: &Path) -> T where T: for<'a> TryFrom<&'a Path>,
+    /// T::Error: std::fmt::Debug` — the shape of an actual downstream
+    /// consumer (a [`std::path::Path::file_name`] receiver decoding a
+    /// canonical [`AdmissionTier`] label from a filesystem-path
+    /// segment, a [`std::fs::read_dir`] iterator inspector reading
+    /// each entry's borrowed [`&std::path::Path`] view, a `walkdir`
+    /// traversal borrowing each visited [`&std::path::Path`] without
+    /// a [`std::path::PathBuf`] allocation, a generic try-conversion
+    /// helper) — recovers the canonical variant from the canonical
+    /// snake_case label borrowed [`&std::path::Path`] at every
+    /// variant. The structural witness that an [`AdmissionTier`] is
+    /// genuinely usable at `impl for<'a> TryFrom<&'a std::path::Path>`
+    /// call sites — a regression that drifted the [`TryFrom`] impl
+    /// signature (requiring an owned [`std::path::PathBuf`] input,
+    /// dropping the [`std::path::Path::as_os_str`] borrow step and
+    /// misparsing non-Unicode input, returning a different variant
+    /// than [`FromStr`] would) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_admission_tier_try_from_path_carries_through_generic_consumer() {
+        fn parse<T>(p: &std::path::Path) -> T
+        where
+            for<'a> T: std::convert::TryFrom<&'a std::path::Path>,
+            for<'a> <T as std::convert::TryFrom<&'a std::path::Path>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<&std::path::Path>>::try_from(p)
+                .expect("canonical label &Path must parse through generic TryFrom<&Path>")
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                parse::<AdmissionTier>(std::path::Path::new(tier.as_str())),
+                tier,
+                "generic TryFrom<&Path> consumer must recover canonical variant at {tier:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::path::Path> for AdmissionTier`] rejects
+    /// non-Unicode borrowed filesystem-path sequences at the
+    /// [`std::ffi::OsStr::to_str`] decode frontier reached through
+    /// [`std::path::Path::as_os_str`] inherited through the
+    /// by-reference [`TryFrom<&std::ffi::OsStr>`] delegation. On Unix
+    /// a [`&std::path::Path`] wraps a [`&std::ffi::OsStr`] that may
+    /// hold any byte sequence — an invalid-UTF-8 filesystem path
+    /// segment from a foreign locale, a `walkdir` traversal element
+    /// whose [`std::path::Path::file_name`] returns a non-Unicode
+    /// [`&std::ffi::OsStr`], a [`std::fs::read_dir`] iterator entry
+    /// whose [`std::fs::DirEntry::path`] returns a
+    /// [`std::path::PathBuf`] whose borrowed
+    /// [`std::path::Path::file_name`] view is not valid Unicode. Pins
+    /// the encoding-strictness contract at the borrowed-view
+    /// filesystem-path frontier's first strictness gate so a
+    /// downstream consumer bound by [`TryFrom<&std::path::Path>`]
+    /// inherits the same Unicode-only encoding discipline the
+    /// by-reference OS-string peer offers, at ONE typed-primitive
+    /// site rather than a per-consumer
+    /// [`std::path::Path::to_str`] + [`str::parse`] restatement.
+    /// Sibling of the by-reference OS-string pin
+    /// [`test_admission_tier_try_from_os_str_rejects_non_unicode_input`]
+    /// at the by-reference OS-string peer, the owned-buffer OS-string
+    /// pin
+    /// [`test_admission_tier_try_from_os_string_rejects_non_unicode_input`]
+    /// at the by-value OS-string peer, and the UTF-8-frontier pin
+    /// [`test_admission_tier_try_from_bytes_rejects_non_utf8_input`]
+    /// at the byte-slice frontier — all pin the encoding-strictness
+    /// contract at the parse peer's first strictness gate.
+    #[cfg(unix)]
+    #[test]
+    fn test_admission_tier_try_from_path_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStrExt;
+        for bad in [
+            vec![0xffu8],
+            vec![0xffu8, 0xfe],
+            vec![0x80],
+            vec![b's', b't', 0xff, b'r', b'i', b'c', b't'],
+            vec![b'r', b'e', b'f', b'u', b's', b'e', b'd', 0xff],
+        ] {
+            let bad_os = std::ffi::OsStr::from_bytes(&bad);
+            let bad_path = std::path::Path::new(bad_os);
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<&std::path::Path>>::try_from(bad_path)
+                    .is_err(),
+                "TryFrom<&Path> must reject non-Unicode input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::path::Path> for AdmissionTier`] rejects
+    /// valid-Unicode non-canonical borrowed filesystem-path sequences
+    /// at the underlying [`FromStr`] strictness gate inherited through
+    /// the by-reference [`TryFrom<&std::ffi::OsStr>`] delegation via
+    /// [`std::path::Path::as_os_str`] — empty path, UpperCamel
+    /// rendering, uppercase, whitespace padding, and snake_case labels
+    /// with a dropped underscore all reject. Pins the canonical-label
+    /// strictness contract at the borrowed-view filesystem-path
+    /// frontier's second strictness gate so a downstream consumer
+    /// bound by [`TryFrom<&std::path::Path>`] inherits the same
+    /// canonical-only grammar the direct `.parse::<AdmissionTier>()`
+    /// call sites and the sibling [`TryFrom<&str>`],
+    /// [`TryFrom<String>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+    /// [`TryFrom<&std::ffi::OsStr>`], and
+    /// [`TryFrom<std::ffi::OsString>`] impls already read, and a
+    /// future permissive-parse regression at the underlying
+    /// [`FromStr`] impl lights up here rather than drifting silently
+    /// through the borrowed-view filesystem-path try-conversion
+    /// surface. Sibling of the by-reference OS-string pin
+    /// [`test_admission_tier_try_from_os_str_rejects_non_canonical_input`]
+    /// at the by-reference OS-string peer, the owned-buffer OS-string
+    /// pin
+    /// [`test_admission_tier_try_from_os_string_rejects_non_canonical_input`]
+    /// at the by-value OS-string peer, the UTF-8-owned-buffer pin
+    /// [`test_admission_tier_try_from_string_rejects_non_canonical_input`]
+    /// at the UTF-8 frontier, and the byte-slice-owned-buffer pin
+    /// [`test_admission_tier_try_from_vec_bytes_rejects_non_canonical_input`]
+    /// at the byte-slice frontier — the pins together close the
+    /// canonical-only strictness contract across the UTF-8,
+    /// byte-slice, OS-string, and filesystem-path frontiers' parse
+    /// surfaces.
+    #[test]
+    fn test_admission_tier_try_from_path_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            " refused",
+            "refused ",
+            "stagingonly",
+        ] {
+            let bad_path = std::path::Path::new(bad);
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<&std::path::Path>>::try_from(bad_path)
+                    .is_err(),
+                "TryFrom<&Path> must reject valid-Unicode non-canonical input {bad:?}",
             );
         }
     }
