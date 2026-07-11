@@ -2780,6 +2780,137 @@ impl TryFrom<&std::path::Path> for BumpLevel {
     }
 }
 
+/// [`TryFrom<std::path::PathBuf> for BumpLevel`] routes through
+/// [`std::path::PathBuf::as_path`] and the by-reference filesystem-path
+/// parse peer [`TryFrom<&std::path::Path> for BumpLevel`] directly above,
+/// so a downstream consumer bound by `impl TryFrom<std::path::PathBuf>`
+/// (a [`std::fs::read_dir`] iterator element whose
+/// [`std::fs::DirEntry::path`] returns an owned [`std::path::PathBuf`]
+/// naming a bump-level-labeled release-manifest subdirectory, a
+/// `walkdir::DirEntry::into_path` sink surrendering an owned
+/// [`std::path::PathBuf`] at the end of a release-directory-tree walk, a
+/// [`std::env::current_dir`] receiver decoding a canonical [`BumpLevel`]
+/// label from the working-directory name, a `clap` argument-parse
+/// frontier materializing a [`std::path::PathBuf`] value from a CLI flag
+/// before try-conversion, a generic try-conversion helper
+/// `fn parse<T: TryFrom<PathBuf>>` composing with owned filesystem-path
+/// inputs uniformly) recovers a [`BumpLevel`] value from an owned
+/// filesystem-path label buffer (`PathBuf::from("patch")`,
+/// `PathBuf::from("minor")`, `PathBuf::from("major")`) through the same
+/// one-oracle grammar the direct `.parse::<BumpLevel>()` call sites, the
+/// sibling [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<Box<str>>`],
+/// [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`], [`TryFrom<&[u8]>`],
+/// [`TryFrom<Vec<u8>>`], [`TryFrom<Cow<'_, [u8]>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`],
+/// [`TryFrom<&std::ffi::OsStr>`], [`TryFrom<std::ffi::OsString>`], and
+/// [`TryFrom<&std::path::Path>`] parse peers already read.
+///
+/// The by-value owned-buffer filesystem-path parse peer of the
+/// by-reference [`TryFrom<&std::path::Path>`] surface directly above at
+/// the borrowed/owned-buffer axis, and the owned-buffer sibling of the
+/// [`TryFrom<std::ffi::OsString>`] owned OS-string parse peer at the
+/// owned-buffer axis one frontier below via
+/// [`std::path::PathBuf::as_path`] → [`std::path::Path::as_os_str`].
+///
+/// Closing peer of the by-value owned-buffer filesystem-path parse trio
+/// at the version-bump-magnitude ladder:
+/// [`TryFrom<std::path::PathBuf>`] for [`crate::retry::PerAttemptRegion`]
+/// (commit 33e4e48) opened the trio at the first ordered typed sum;
+/// [`TryFrom<std::path::PathBuf>`] for
+/// [`crate::probe_outcome::AdmissionTier`] (commit 2855792) carried the
+/// mid-trio at the second ordered typed sum; this impl closes it at the
+/// third ordered typed sum — matching the [`TryFrom<&std::path::Path>`]
+/// borrowed-view filesystem-path parse closing order
+/// (dba4c6b → 321b2d8 → 7863a1d) at this filesystem-path frontier's
+/// borrowed-view sibling, the [`TryFrom<std::ffi::OsString>`] OS-string
+/// owned-buffer parse closing order (e629465 → 810794b → 6544330) at
+/// the OS-string owned-buffer sibling one frontier below, the
+/// [`TryFrom<String>`] UTF-8 owned-buffer parse closing order at the
+/// UTF-8 frontier's owned-buffer counterpart, and the [`TryFrom<Vec<u8>>`]
+/// byte-slice owned-buffer parse closing order at the byte-slice
+/// frontier's owned-buffer counterpart. After this commit the
+/// owned-buffer filesystem-path parse axis spans all three ordered typed
+/// sums on the ladder set through ONE [`std::path::PathBuf::as_path`] +
+/// [`TryFrom<&std::path::Path>`] composition each.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at the same TWO frontiers the
+/// [`TryFrom<&std::path::Path>`] peer directly above is strict at,
+/// inherited through the [`std::path::PathBuf::as_path`] +
+/// [`TryFrom<&std::path::Path>`] delegation:
+///
+/// - Non-Unicode filesystem-path sequences (on Unix, a
+///   [`std::path::PathBuf`] wraps a [`std::ffi::OsString`] that may hold
+///   any byte sequence — an owned [`std::fs::DirEntry::path`] return
+///   that is not valid Unicode, a `walkdir::DirEntry::into_path` sink
+///   whose owned [`std::path::PathBuf`] carries a foreign-locale byte
+///   segment, a [`std::env::current_dir`] receiver whose owned
+///   working-directory name is non-Unicode) reject at the
+///   [`std::ffi::OsStr::to_str`] Unicode-decode frontier reached through
+///   [`std::path::PathBuf::as_path`] → [`std::path::Path::as_os_str`]
+///   with a diagnostic naming the offending OS-string.
+/// - Valid-Unicode filesystem-path sequences that decode to a
+///   non-canonical label (`PathBuf::from("Patch")`,
+///   `PathBuf::from("Minor")`, `PathBuf::from("Major")`,
+///   `PathBuf::from("PATCH")`, `PathBuf::from(" patch")`,
+///   `PathBuf::from("patch ")`, `PathBuf::from("pat")`,
+///   `PathBuf::from("")`) reject at the underlying [`std::str::FromStr`]
+///   impl — the same canonical-only strictness the borrowed-view
+///   filesystem-path peer already carries, now lifted to the owned-buffer
+///   filesystem-path input layer at ONE composition through the
+///   by-reference [`TryFrom<&std::path::Path>`] peer via
+///   [`std::path::PathBuf::as_path`].
+///
+/// The impl body picks [`std::path::PathBuf::as_path`] rather than an
+/// intermediate [`std::path::PathBuf::into_os_string`] +
+/// `TryFrom<OsString>` restatement: [`std::path::PathBuf::as_path`]
+/// yields a borrowed [`&std::path::Path`] view of the caller's owned
+/// [`std::path::PathBuf`] buffer without moving the underlying
+/// [`std::ffi::OsString`] out of the [`std::path::PathBuf`], so the
+/// parse-side receiver pays the by-reference
+/// [`TryFrom<&std::path::Path>`] cost — the same borrow-then-drop
+/// discipline the sibling [`TryFrom<std::ffi::OsString>`] peer applies
+/// at the OS-string owned-buffer axis via
+/// [`std::ffi::OsString::as_os_str`].
+///
+/// The identity `BumpLevel::try_from(std::path::PathBuf::from(
+/// level.as_str())).unwrap() == level` at every [`BumpLevel::ALL`]
+/// variant is pinned by
+/// [`tests::test_bump_level_try_from_path_buf_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<std::path::PathBuf>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_try_from_path_buf_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-Unicode owned filesystem-path
+/// input is pinned by
+/// [`tests::test_bump_level_try_from_path_buf_rejects_non_unicode_input`];
+/// the strict-rejection contract on valid-Unicode non-canonical
+/// owned filesystem-path input is pinned by
+/// [`tests::test_bump_level_try_from_path_buf_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned-buffer
+/// filesystem-path try-conversion surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one `TryFrom<std::path::PathBuf>` impl routing
+/// through [`std::path::PathBuf::as_path`] and the by-reference
+/// [`TryFrom<&std::path::Path>`] parse peer), not a per-consumer
+/// `BumpLevel::try_from(path_buf.as_path())` bridge at every downstream
+/// site that types its parse contract as
+/// `impl TryFrom<std::path::PathBuf>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// one site ([`BumpLevel::as_str`]), inverted at one site
+/// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
+/// surface — including this by-value owned-buffer filesystem-path peer
+/// — reads through it.
+impl TryFrom<std::path::PathBuf> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(path: std::path::PathBuf) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::path::Path>>::try_from(path.as_path())
+    }
+}
+
 /// [`From<BumpLevel> for &'static str`] routes through
 /// [`BumpLevel::as_str`] so a downstream consumer that takes an owned
 /// [`&'static str`] via [`Into<&'static str>`] (a `const`-adjacent
@@ -12132,6 +12263,157 @@ mod tests {
             assert!(
                 <BumpLevel as std::convert::TryFrom<&std::path::Path>>::try_from(bad_path).is_err(),
                 "TryFrom<&Path> must reject valid-Unicode non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::path::PathBuf> for BumpLevel`] agrees with
+    /// [`FromStr`] at every [`BumpLevel::ALL`] variant. The owned
+    /// [`std::path::PathBuf`] input round-trips through
+    /// [`std::path::PathBuf::from(level.as_str())`] and the by-value
+    /// owned-buffer filesystem-path try-conversion recovers the
+    /// canonical variant — the by-value owned-buffer filesystem-path
+    /// parse peer of the by-reference [`TryFrom<&std::path::Path>`]
+    /// surface reads the same one-oracle grammar the by-value
+    /// owned-buffer OS-string parse peer [`TryFrom<std::ffi::OsString>`]
+    /// and the by-value owned-buffer UTF-8 parse peer
+    /// [`TryFrom<String>`] read — one round-trip pin per variant,
+    /// refuses a future variant insertion that drops the
+    /// `TryFrom<PathBuf>`/`PathBuf::from(as_str())` agreement.
+    /// Structural mirror of
+    /// `test_per_attempt_region_try_from_path_buf_agrees_with_from_str`
+    /// (commit 33e4e48) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_path_buf_agrees_with_from_str`
+    /// (commit 2855792) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_path_buf_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let parsed = <BumpLevel as std::convert::TryFrom<std::path::PathBuf>>::try_from(
+                std::path::PathBuf::from(level.as_str()),
+            )
+            .expect("canonical label PathBuf must parse through TryFrom<PathBuf>");
+            assert_eq!(
+                parsed, level,
+                "TryFrom<PathBuf> must round-trip through PathBuf::from(as_str()) at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<std::path::PathBuf> for BumpLevel`] identity
+    /// carries through a generic `impl TryFrom<std::path::PathBuf>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny generic
+    /// function `fn parse<T>(p: PathBuf) -> T where T: TryFrom<PathBuf>,
+    /// T::Error: std::fmt::Debug` — the shape of an actual downstream
+    /// consumer (a [`std::fs::read_dir`] iterator element whose
+    /// [`std::fs::DirEntry::path`] returns an owned
+    /// [`std::path::PathBuf`] naming a bump-level-labeled release-
+    /// manifest subdirectory, a `walkdir::DirEntry::into_path` sink
+    /// surrendering an owned [`std::path::PathBuf`], a
+    /// [`std::env::current_dir`] receiver decoding a canonical
+    /// [`BumpLevel`] label from the working-directory name, a `clap`
+    /// argument-parse frontier materializing an owned
+    /// [`std::path::PathBuf`] from a CLI flag, a generic
+    /// try-conversion helper) — recovers the canonical variant from
+    /// the canonical lowercase-label owned filesystem-path buffer at
+    /// every variant. The structural witness that a [`BumpLevel`] is
+    /// genuinely usable at `impl TryFrom<std::path::PathBuf>` call
+    /// sites — a regression that drifted the [`TryFrom`] impl
+    /// signature (requiring a borrowed [`&std::path::Path`] input,
+    /// dropping the [`std::path::PathBuf::as_path`] borrow step and
+    /// misparsing non-Unicode input, returning a different variant
+    /// than [`FromStr`] would) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_bump_level_try_from_path_buf_carries_through_generic_consumer() {
+        fn parse<T>(p: std::path::PathBuf) -> T
+        where
+            T: std::convert::TryFrom<std::path::PathBuf>,
+            <T as std::convert::TryFrom<std::path::PathBuf>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::path::PathBuf>>::try_from(p)
+                .expect("canonical label PathBuf must parse through generic TryFrom<PathBuf>")
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                parse::<BumpLevel>(std::path::PathBuf::from(level.as_str())),
+                level,
+                "generic TryFrom<PathBuf> consumer must recover canonical variant at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::path::PathBuf> for BumpLevel`] rejects
+    /// non-Unicode owned filesystem-path sequences at the
+    /// [`std::ffi::OsStr::to_str`] decode frontier reached through
+    /// [`std::path::PathBuf::as_path`] →
+    /// [`std::path::Path::as_os_str`] inherited through the
+    /// by-reference [`TryFrom<&std::path::Path>`] delegation. On Unix
+    /// a [`std::path::PathBuf`] wraps a [`std::ffi::OsString`] that
+    /// may hold any byte sequence — an owned
+    /// [`std::fs::DirEntry::path`] return that is not valid Unicode,
+    /// a `walkdir::DirEntry::into_path` sink whose owned
+    /// [`std::path::PathBuf`] carries a foreign-locale byte segment,
+    /// a [`std::env::current_dir`] receiver whose owned
+    /// working-directory name is non-Unicode. Pins the
+    /// encoding-strictness contract at the owned-buffer
+    /// filesystem-path frontier's first strictness gate so a
+    /// downstream consumer bound by [`TryFrom<std::path::PathBuf>`]
+    /// inherits the same Unicode-only encoding discipline the
+    /// by-reference filesystem-path peer offers, at ONE typed-
+    /// primitive site rather than a per-consumer
+    /// [`std::path::PathBuf::into_os_string`] + [`str::parse`]
+    /// restatement.
+    #[cfg(unix)]
+    #[test]
+    fn test_bump_level_try_from_path_buf_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStringExt;
+        for bad in [
+            vec![0xffu8],
+            vec![0xffu8, 0xfe],
+            vec![0x80],
+            vec![b'p', b'a', 0xff, b't', b'c', b'h'],
+            vec![b'm', b'a', b'j', b'o', b'r', 0xff],
+        ] {
+            let bad_os = std::ffi::OsString::from_vec(bad.clone());
+            let bad_path_buf = std::path::PathBuf::from(bad_os);
+            assert!(
+                <BumpLevel as std::convert::TryFrom<std::path::PathBuf>>::try_from(bad_path_buf)
+                    .is_err(),
+                "TryFrom<PathBuf> must reject non-Unicode input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::path::PathBuf> for BumpLevel`] rejects
+    /// valid-Unicode non-canonical owned filesystem-path sequences at
+    /// the underlying [`FromStr`] strictness gate inherited through
+    /// the by-reference [`TryFrom<&std::path::Path>`] delegation via
+    /// [`std::path::PathBuf::as_path`] — empty path, UpperCamel
+    /// rendering, uppercase, whitespace padding, and truncated labels
+    /// all reject. Pins the canonical-label strictness contract at
+    /// the owned-buffer filesystem-path frontier's second strictness
+    /// gate so a downstream consumer bound by
+    /// [`TryFrom<std::path::PathBuf>`] inherits the same
+    /// canonical-only grammar the direct `.parse::<BumpLevel>()` call
+    /// sites and the sibling [`TryFrom<&str>`], [`TryFrom<String>`],
+    /// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+    /// [`TryFrom<&std::ffi::OsStr>`], [`TryFrom<std::ffi::OsString>`],
+    /// and [`TryFrom<&std::path::Path>`] impls already read, and a
+    /// future permissive-parse regression at the underlying
+    /// [`FromStr`] impl lights up here rather than drifting silently
+    /// through the owned-buffer filesystem-path try-conversion
+    /// surface.
+    #[test]
+    fn test_bump_level_try_from_path_buf_rejects_non_canonical_input() {
+        for bad in [
+            "", "Patch", "Minor", "Major", "PATCH", " patch", "patch ", "pat",
+        ] {
+            let bad_path_buf = std::path::PathBuf::from(bad);
+            assert!(
+                <BumpLevel as std::convert::TryFrom<std::path::PathBuf>>::try_from(bad_path_buf)
+                    .is_err(),
+                "TryFrom<PathBuf> must reject valid-Unicode non-canonical input {bad:?}",
             );
         }
     }
