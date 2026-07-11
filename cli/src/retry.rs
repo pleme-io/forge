@@ -4960,6 +4960,148 @@ impl TryFrom<std::ffi::OsString> for PerAttemptRegion {
     }
 }
 
+/// [`TryFrom<&std::path::Path> for PerAttemptRegion`] routes through
+/// [`std::path::Path::as_os_str`] and the by-reference OS-string parse
+/// peer [`TryFrom<&std::ffi::OsStr> for PerAttemptRegion`] directly above,
+/// so a downstream consumer bound by `impl for<'a> TryFrom<&'a
+/// std::path::Path>` (a `std::path::Path::file_name` receiver that hands a
+/// borrowed [`&std::path::Path`] view of a per-attempt-region-labeled
+/// filesystem-path segment to a typed parser, a `walkdir::DirEntry::path`
+/// walker that borrows each traversed [`&std::path::Path`] without a
+/// [`std::path::PathBuf`] allocation, a `std::fs::read_dir` iterator
+/// consumer that inspects each entry's borrowed [`&std::path::Path`] view,
+/// a generic try-conversion helper `fn parse<T: for<'a> TryFrom<&'a
+/// std::path::Path>>` that composes with borrowed filesystem-path inputs
+/// uniformly, a canonical-config-directory-layout reader that treats each
+/// child [`&std::path::Path`] segment as a canonical
+/// [`PerAttemptRegion`]-labeled subdirectory) recovers a
+/// [`PerAttemptRegion`] value from a borrowed filesystem-path label view
+/// (`Path::new("before_first")`, `Path::new("first")`,
+/// `Path::new("interim")`, `Path::new("final")`,
+/// `Path::new("over_budget")`) through the same one-oracle grammar the
+/// direct `.parse::<PerAttemptRegion>()` call sites, the sibling
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Cow<'_, [u8]>>`], [`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`],
+/// [`TryFrom<&std::ffi::OsStr>`], and [`TryFrom<std::ffi::OsString>`]
+/// parse peers already read.
+///
+/// The by-reference filesystem-path parse peer of the by-reference
+/// OS-string [`TryFrom<&std::ffi::OsStr> for PerAttemptRegion`] parse peer
+/// directly above at the borrowed-view axis, and the parse-side dual of
+/// the emit-only borrowed-view [`AsRef<std::path::Path>`] surface (commit
+/// 17718d2 → f6c4c75 → dfd887a) above at the filesystem-path frontier.
+/// The [`AsRef<std::path::Path>`] surface yields a canonical
+/// [`&std::path::Path`] view OUT of a [`PerAttemptRegion`] value, this
+/// [`TryFrom<&std::path::Path>`] surface reads a canonical
+/// [`&std::path::Path`] view IN to a [`PerAttemptRegion`] value at the
+/// same filesystem-path frontier — closing the emit/parse pair at the
+/// borrowed-view axis at the filesystem-path frontier that the OS-string
+/// frontier already closes through [`AsRef<std::ffi::OsStr>`] paired with
+/// [`TryFrom<&std::ffi::OsStr>`], the UTF-8 frontier through
+/// [`AsRef<str>`] paired with [`TryFrom<&str>`], and the byte-slice
+/// frontier through [`AsRef<[u8]>`] paired with [`TryFrom<&[u8]>`].
+///
+/// Opens the filesystem-path borrowed-view parse trio at the per-attempt-
+/// region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the parse peers'
+/// opening orders at every prior frontier — the
+/// [`TryFrom<&std::ffi::OsStr>`] OS-string frontier's borrowed-view parse
+/// opening order (d37e6fe → 9fca3bb → 1ea7110) at the OS-string sibling
+/// directly above, the [`TryFrom<&[u8]>`] byte-slice frontier's
+/// borrowed-view parse opening order (5c0c827 → cdb192c → 629b242) at the
+/// byte-slice sibling, and the emit-side [`AsRef<std::path::Path>`]
+/// borrowed-view emit opening order (17718d2 → f6c4c75 → dfd887a) at this
+/// filesystem-path frontier's emit-side dual.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at the same TWO frontiers the
+/// [`TryFrom<&std::ffi::OsStr>`] peer directly above is strict at,
+/// inherited through the [`std::path::Path::as_os_str`] +
+/// [`TryFrom<&std::ffi::OsStr>`] delegation:
+///
+/// - Non-Unicode filesystem-path sequences (on Unix, a
+///   [`&std::path::Path`] wraps a [`&std::ffi::OsStr`] that may hold any
+///   byte sequence — an invalid-UTF-8 filesystem path segment from a
+///   foreign locale, a `walkdir` traversal of a directory holding a
+///   non-Unicode child name, a `std::fs::read_dir` iterator element whose
+///   [`std::fs::DirEntry::path`] returns a [`std::path::PathBuf`] whose
+///   [`std::path::Path::file_name`] is not valid Unicode) reject at the
+///   [`std::ffi::OsStr::to_str`] Unicode-decode frontier reached through
+///   [`std::path::Path::as_os_str`] with a diagnostic naming the offending
+///   OS-string.
+/// - Valid-Unicode filesystem-path sequences that decode to a
+///   non-canonical label (`Path::new("BeforeFirst")`,
+///   `Path::new("OverBudget")`, `Path::new("FIRST")`,
+///   `Path::new(" first")`, `Path::new("first ")`,
+///   `Path::new("beforefirst")`, `Path::new("overbudget")`,
+///   `Path::new("")`) reject at the underlying [`std::str::FromStr`] impl
+///   — the same canonical-only strictness the OS-string frontier already
+///   carries at the by-reference peer, now lifted to the filesystem-path
+///   input layer at ONE composition through the borrowed
+///   [`TryFrom<&std::ffi::OsStr>`] peer via
+///   [`std::path::Path::as_os_str`].
+///
+/// The impl body picks [`std::path::Path::as_os_str`] rather than an
+/// intermediate [`std::path::Path::to_str`] + [`str::parse`] restatement:
+/// [`std::path::Path::as_os_str`] yields a borrowed [`&std::ffi::OsStr`]
+/// view of the caller's [`&std::path::Path`] view without allocation, so
+/// the parse-side receiver pays the by-reference
+/// [`TryFrom<&std::ffi::OsStr>`] cost, not the [`String`]-allocation cost
+/// of an intermediate UTF-8 decode restatement. The delegation preserves
+/// the two-stage strictness end-to-end: the Unicode-decode gate lives at
+/// [`std::ffi::OsStr::to_str`] inside the [`TryFrom<&std::ffi::OsStr>`]
+/// peer, and the canonical-label gate lives at the underlying
+/// [`std::str::FromStr`] impl — the same one-oracle discipline the
+/// sibling [`TryFrom<&std::ffi::OsStr>`] peer applies at the OS-string
+/// input layer.
+///
+/// The identity `PerAttemptRegion::try_from(std::path::Path::new(
+/// region.as_str())).unwrap() == region` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_path_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl for<'a> TryFrom<&'a std::path::Path>` consumer at every variant
+/// is pinned by
+/// [`tests::test_per_attempt_region_try_from_path_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-Unicode filesystem-path input is
+/// pinned by
+/// [`tests::test_per_attempt_region_try_from_path_rejects_non_unicode_input`];
+/// the strict-rejection contract on valid-Unicode non-canonical
+/// filesystem-path input is pinned by
+/// [`tests::test_per_attempt_region_try_from_path_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-reference filesystem-path
+/// parse surface is a typed-primitive site on [`PerAttemptRegion`] itself
+/// (one `TryFrom<&std::path::Path>` impl routing through
+/// [`std::path::Path::as_os_str`] and the by-reference
+/// [`TryFrom<&std::ffi::OsStr>`] parse peer), not a per-consumer
+/// `PerAttemptRegion::try_from(path.as_os_str())` bridge at every
+/// downstream site that types its parse contract as
+/// `impl for<'a> TryFrom<&'a std::path::Path>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// one site ([`PerAttemptRegion::as_str`]), inverted at one site
+/// ([`PerAttemptRegion::from_str`]), and every parse surface —
+/// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
+/// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Cow<'_, [u8]>>`], [`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`],
+/// [`TryFrom<&std::ffi::OsStr>`], [`TryFrom<std::ffi::OsString>`], this
+/// [`TryFrom<&std::path::Path>`] — reads through it.
+impl TryFrom<&std::path::Path> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(path: &std::path::Path) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::ffi::OsStr>>::try_from(path.as_os_str())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -19113,6 +19255,174 @@ mod tests {
                 <PerAttemptRegion as std::convert::TryFrom<std::ffi::OsString>>::try_from(bad_os)
                     .is_err(),
                 "TryFrom<OsString> must reject valid-Unicode non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::path::Path> for PerAttemptRegion`] agrees with
+    /// [`FromStr`] at every [`PerAttemptRegion::ALL`] variant. The
+    /// borrowed [`&std::path::Path`] input round-trips through
+    /// [`std::path::Path::new(region.as_str())`] and the by-reference
+    /// filesystem-path try-conversion recovers the canonical variant —
+    /// the by-reference filesystem-path parse peer of the by-reference
+    /// OS-string [`TryFrom<&std::ffi::OsStr>`] surface reads the same
+    /// one-oracle grammar the sibling frontiers' by-reference parse
+    /// peers already read. One round-trip pin per variant, refuses a
+    /// future variant insertion that drops the
+    /// `TryFrom<&Path>`/`Path::new(as_str())` agreement.
+    #[test]
+    fn test_per_attempt_region_try_from_path_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let parsed = <PerAttemptRegion as std::convert::TryFrom<&std::path::Path>>::try_from(
+                std::path::Path::new(region.as_str()),
+            )
+            .expect("canonical label &Path must parse through TryFrom<&Path>");
+            assert_eq!(
+                parsed, region,
+                "TryFrom<&Path> must round-trip through Path::new(as_str()) at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<&std::path::Path> for PerAttemptRegion`] identity
+    /// carries through a generic
+    /// `impl for<'a> TryFrom<&'a std::path::Path>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(p: &Path) -> T where T: for<'a> TryFrom<&'a Path>,
+    /// T::Error: std::fmt::Debug` — the shape of an actual downstream
+    /// consumer (a [`std::path::Path::file_name`] receiver decoding a
+    /// canonical [`PerAttemptRegion`] label from a filesystem-path
+    /// segment, a `std::fs::read_dir` iterator inspector reading each
+    /// entry's borrowed [`&std::path::Path`] view, a `walkdir` traversal
+    /// borrowing each visited [`&std::path::Path`] without a
+    /// [`std::path::PathBuf`] allocation, a generic try-conversion
+    /// helper) — recovers the canonical variant from the canonical
+    /// snake_case label borrowed [`&std::path::Path`] at every variant.
+    /// The structural witness that a [`PerAttemptRegion`] is genuinely
+    /// usable at `impl for<'a> TryFrom<&'a std::path::Path>` call sites
+    /// — a regression that drifted the [`TryFrom`] impl signature
+    /// (requiring an owned [`std::path::PathBuf`] input, dropping the
+    /// [`std::path::Path::as_os_str`] borrow step and misparsing
+    /// non-Unicode input, returning a different variant than [`FromStr`]
+    /// would) fails here at compile time or at the assertion instead of
+    /// at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_try_from_path_carries_through_generic_consumer() {
+        fn parse<T>(p: &std::path::Path) -> T
+        where
+            for<'a> T: std::convert::TryFrom<&'a std::path::Path>,
+            for<'a> <T as std::convert::TryFrom<&'a std::path::Path>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<&std::path::Path>>::try_from(p)
+                .expect("canonical label &Path must parse through generic TryFrom<&Path>")
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                parse::<PerAttemptRegion>(std::path::Path::new(region.as_str())),
+                region,
+                "generic TryFrom<&Path> consumer must recover canonical variant at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::path::Path> for PerAttemptRegion`] rejects
+    /// non-Unicode borrowed filesystem-path sequences at the
+    /// [`std::ffi::OsStr::to_str`] decode frontier reached through
+    /// [`std::path::Path::as_os_str`] inherited through the by-reference
+    /// [`TryFrom<&std::ffi::OsStr>`] delegation. On Unix a
+    /// [`&std::path::Path`] wraps a [`&std::ffi::OsStr`] that may hold
+    /// any byte sequence — an invalid-UTF-8 filesystem path segment from
+    /// a foreign locale, a `walkdir` traversal element whose
+    /// [`std::path::Path::file_name`] returns a non-Unicode
+    /// [`&std::ffi::OsStr`], a [`std::fs::read_dir`] iterator entry
+    /// whose [`std::fs::DirEntry::path`] returns a
+    /// [`std::path::PathBuf`] whose borrowed
+    /// [`std::path::Path::file_name`] view is not valid Unicode. Pins
+    /// the encoding-strictness contract at the borrowed-view
+    /// filesystem-path frontier's first strictness gate so a downstream
+    /// consumer bound by [`TryFrom<&std::path::Path>`] inherits the same
+    /// Unicode-only encoding discipline the by-reference OS-string peer
+    /// offers, at ONE typed-primitive site rather than a per-consumer
+    /// [`std::path::Path::to_str`] + [`str::parse`] restatement. Sibling
+    /// of the by-reference OS-string pin
+    /// [`test_per_attempt_region_try_from_os_str_rejects_non_unicode_input`]
+    /// at the by-reference OS-string peer directly above, the
+    /// owned-buffer OS-string pin
+    /// [`test_per_attempt_region_try_from_os_string_rejects_non_unicode_input`]
+    /// at the by-value OS-string peer, the UTF-8-frontier pin
+    /// [`test_per_attempt_region_try_from_bytes_rejects_non_utf8_input`]
+    /// at the byte-slice frontier, and the byte-slice-owned-buffer pin
+    /// [`test_per_attempt_region_try_from_vec_bytes_rejects_non_utf8_input`]
+    /// — all pin the encoding-strictness contract at the parse peer's
+    /// first strictness gate.
+    #[cfg(unix)]
+    #[test]
+    fn test_per_attempt_region_try_from_path_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStrExt;
+        for bad in [
+            vec![0xffu8],
+            vec![0xffu8, 0xfe],
+            vec![0x80],
+            vec![b'f', b'i', 0xff, b'r', b's', b't'],
+            vec![b'f', b'i', b'n', b'a', b'l', 0xff],
+        ] {
+            let bad_os = std::ffi::OsStr::from_bytes(&bad);
+            let bad_path = std::path::Path::new(bad_os);
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<&std::path::Path>>::try_from(bad_path)
+                    .is_err(),
+                "TryFrom<&Path> must reject non-Unicode input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::path::Path> for PerAttemptRegion`] rejects
+    /// valid-Unicode non-canonical borrowed filesystem-path sequences at
+    /// the underlying [`FromStr`] strictness gate inherited through the
+    /// by-reference [`TryFrom<&std::ffi::OsStr>`] delegation via
+    /// [`std::path::Path::as_os_str`] — empty path, UpperCamel
+    /// rendering, uppercase, whitespace padding, and snake_case labels
+    /// with a dropped underscore all reject. Pins the canonical-label
+    /// strictness contract at the borrowed-view filesystem-path
+    /// frontier's second strictness gate so a downstream consumer bound
+    /// by [`TryFrom<&std::path::Path>`] inherits the same canonical-only
+    /// grammar the direct `.parse::<PerAttemptRegion>()` call sites and
+    /// the sibling [`TryFrom<&str>`], [`TryFrom<String>`],
+    /// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+    /// [`TryFrom<&std::ffi::OsStr>`], and [`TryFrom<std::ffi::OsString>`]
+    /// impls already read, and a future permissive-parse regression at
+    /// the underlying [`FromStr`] impl lights up here rather than
+    /// drifting silently through the borrowed-view filesystem-path
+    /// try-conversion surface. Sibling of the by-reference OS-string pin
+    /// [`test_per_attempt_region_try_from_os_str_rejects_non_canonical_input`]
+    /// at the by-reference OS-string peer directly above, the
+    /// owned-buffer OS-string pin
+    /// [`test_per_attempt_region_try_from_os_string_rejects_non_canonical_input`]
+    /// at the by-value OS-string peer, the UTF-8-owned-buffer pin
+    /// [`test_per_attempt_region_try_from_string_rejects_non_canonical_input`]
+    /// at the UTF-8 frontier, and the byte-slice-owned-buffer pin
+    /// [`test_per_attempt_region_try_from_vec_bytes_rejects_non_canonical_input`]
+    /// at the byte-slice frontier — the pins together close the
+    /// canonical-only strictness contract across the UTF-8, byte-slice,
+    /// OS-string, and filesystem-path frontiers' parse surfaces.
+    #[test]
+    fn test_per_attempt_region_try_from_path_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "BeforeFirst",
+            "OverBudget",
+            "FIRST",
+            " first",
+            "first ",
+            "beforefirst",
+            "overbudget",
+        ] {
+            let bad_path = std::path::Path::new(bad);
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<&std::path::Path>>::try_from(bad_path)
+                    .is_err(),
+                "TryFrom<&Path> must reject valid-Unicode non-canonical input {bad:?}",
             );
         }
     }
