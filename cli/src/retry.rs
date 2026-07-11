@@ -5770,6 +5770,105 @@ impl TryFrom<std::sync::Arc<std::ffi::OsStr>> for PerAttemptRegion {
     }
 }
 
+/// [`TryFrom<Arc<std::path::Path>> for PerAttemptRegion`] routes through
+/// [`std::sync::Arc::<std::path::Path>::as_ref`] on the caller-supplied
+/// shared-owned filesystem-path and the by-reference filesystem-path
+/// parse peer [`TryFrom<&std::path::Path>`] (which itself composes
+/// [`std::path::Path::as_os_str`] with the by-reference OS-string parse
+/// peer [`TryFrom<&std::ffi::OsStr>`] which composes
+/// [`std::ffi::OsStr::to_str`] with [`TryFrom<&str>`] which itself
+/// delegates through [`<PerAttemptRegion as
+/// std::str::FromStr>::from_str`]), so a downstream consumer bound by
+/// `impl TryFrom<Arc<std::path::Path>>` (a shared-owned filesystem-path
+/// wrapper handed to sibling threads through an atomic-refcount header,
+/// a [`Box<std::path::Path>::into`] shared-buffer input that trades
+/// exclusive shrunk-owned single-owner semantics for a shared reader-
+/// count of the same immutable filesystem-path, a generic try-conversion
+/// helper `fn parse<T: TryFrom<Arc<std::path::Path>>>` that composes
+/// with shared-owned filesystem-path inputs) recovers a
+/// [`PerAttemptRegion`] value from a shared-owned canonical filesystem-
+/// path label through the same one-oracle grammar the sibling
+/// [`TryFrom<&std::path::Path>`], [`TryFrom<std::path::PathBuf>`],
+/// [`TryFrom<std::borrow::Cow<'_, std::path::Path>>`],
+/// [`TryFrom<Box<std::path::Path>>`], and (one frontier below)
+/// [`TryFrom<std::sync::Arc<std::ffi::OsStr>>`] shared-owned parse peers
+/// read.
+///
+/// The by-value shared-owned filesystem-path parse peer of
+/// [`TryFrom<Box<std::path::Path>>`] above — both are shrunk/shared
+/// immutable-heap filesystem-path parse surfaces of the label-axis
+/// conversion set, differing on ownership discipline:
+/// [`TryFrom<Box<std::path::Path>>`] consumes a single-owner shrunk
+/// buffer with exclusive ownership semantics,
+/// this [`TryFrom<Arc<std::path::Path>>`] consumes a shared-owner
+/// atomic-refcount buffer that may have surviving clones outside the
+/// receiver. Both route through the shared
+/// [`PerAttemptRegion::from_str`] canonical-label parse oracle: the
+/// shrunk-owned peer through
+/// [`std::boxed::Box::<std::path::Path>::as_ref`] composed with
+/// [`TryFrom<&std::path::Path>`], this shared-owned peer through
+/// [`std::sync::Arc::<std::path::Path>::as_ref`] composed with
+/// [`TryFrom<&std::path::Path>`] — the same canonical grammar lifted
+/// to the shared-owned filesystem-path layer.
+///
+/// Opens the shared-owned filesystem-path parse trio at the per-attempt-
+/// region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching every prior parse-
+/// trio opening order at the per-attempt-region ladder — the shared-
+/// owned OS-string parse trio opening order (478313f → 7f411bc →
+/// 140d9c2) at the sibling OS-string frontier, and the shrunk-owned
+/// filesystem-path parse trio opening order (315c145 → 657434c →
+/// 336e453) at the sibling shrunk-owned filesystem-path frontier.
+///
+/// The parser inherits the two-stage strict-rejection discipline of
+/// the underlying [`TryFrom<&std::path::Path>`] impl: non-Unicode
+/// [`std::path::Path`] input reaches the [`std::ffi::OsStr::to_str`]
+/// Unicode-decode boundary via [`std::path::Path::as_os_str`] and
+/// returns an [`anyhow::Error`] before the [`FromStr`] canonical-
+/// grammar gate; valid-Unicode but non-canonical input (empty,
+/// UpperCamel, whitespace-padded, uppercase, snake_case-with-dropped-
+/// underscore) reaches the [`FromStr`] canonical-grammar gate and
+/// returns an [`anyhow::Error`] there.
+///
+/// The identity
+/// `PerAttemptRegion::try_from(std::sync::Arc::<std::path::Path>::from(
+/// std::path::PathBuf::from(region.as_str()).into_boxed_path()))
+/// .unwrap() == region` at every [`PerAttemptRegion::ALL`] variant is
+/// pinned by
+/// [`tests::test_per_attempt_region_try_from_arc_path_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<Arc<std::path::Path>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_per_attempt_region_try_from_arc_path_carries_through_generic_consumer`];
+/// the Unicode-decode strict-rejection contract at the shared-owned
+/// filesystem-path boundary is pinned (Unix-only, per the same platform
+/// constraint the sibling
+/// [`TryFrom<Box<std::path::Path>>`] non-Unicode pin reads) by
+/// [`tests::test_per_attempt_region_try_from_arc_path_rejects_non_unicode_input`];
+/// the FromStr-gate strict-rejection contract on valid-Unicode non-
+/// canonical shared-owned filesystem-path input is pinned by
+/// [`tests::test_per_attempt_region_try_from_arc_path_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the shared-owned filesystem-path
+/// parse surface is a typed-primitive site on [`PerAttemptRegion`]
+/// itself (one [`TryFrom<Arc<std::path::Path>>`] impl routing through
+/// [`Arc::<std::path::Path>::as_ref`] and [`TryFrom<&std::path::Path>`]),
+/// not a per-consumer `.as_ref().as_os_str().to_str().parse()`
+/// composition at every downstream site that types its parse contract
+/// as `impl TryFrom<Arc<std::path::Path>>`. THEORY.md §VI.1 one-oracle:
+/// the canonical label grammar is named at one site
+/// ([`PerAttemptRegion::as_str`]), inverted at one site
+/// ([`PerAttemptRegion::from_str`]), and every parse surface —
+/// including this shared-owned filesystem-path peer — reads through it.
+impl TryFrom<std::sync::Arc<std::path::Path>> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(path: std::sync::Arc<std::path::Path>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::path::Path>>::try_from(path.as_ref())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -21035,6 +21134,131 @@ mod tests {
                 >>::try_from(arc)
                 .is_err(),
                 "TryFrom<Arc<OsStr>> must reject valid-Unicode non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::sync::Arc<std::path::Path>> for PerAttemptRegion`]
+    /// recovers the original variant at every [`PerAttemptRegion::ALL`]
+    /// variant when the canonical label emitted by
+    /// [`PerAttemptRegion::as_str`] is materialized as a
+    /// [`std::path::PathBuf`], shrunk to a [`Box<std::path::Path>`] via
+    /// [`std::path::PathBuf::into_boxed_path`], and lifted to a
+    /// [`std::sync::Arc<std::path::Path>`] via
+    /// [`std::sync::Arc::<std::path::Path>::from`] before being fed back
+    /// through it. Pins the round-trip identity at the shared-owned
+    /// filesystem-path frontier against the shared canonical-label
+    /// oracle.
+    #[test]
+    fn test_per_attempt_region_try_from_arc_path_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let boxed: Box<std::path::Path> =
+                std::path::PathBuf::from(region.as_str()).into_boxed_path();
+            let arc: std::sync::Arc<std::path::Path> = std::sync::Arc::from(boxed);
+            let parsed = <PerAttemptRegion as std::convert::TryFrom<
+                std::sync::Arc<std::path::Path>,
+            >>::try_from(arc)
+            .expect("canonical Arc<Path> must parse through TryFrom<Arc<Path>>");
+            assert_eq!(
+                parsed, region,
+                "TryFrom<Arc<Path>> must round-trip at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<std::sync::Arc<std::path::Path>> for
+    /// PerAttemptRegion`] identity carries through a generic
+    /// `impl TryFrom<Arc<std::path::Path>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. Structural witness that a
+    /// [`PerAttemptRegion`] is genuinely usable at
+    /// `impl TryFrom<Arc<std::path::Path>>` call sites — a regression
+    /// that drifted the [`TryFrom`] impl signature fails here at compile
+    /// time or at the assertion instead of at every downstream generic
+    /// call site.
+    #[test]
+    fn test_per_attempt_region_try_from_arc_path_carries_through_generic_consumer() {
+        fn parse<T>(path: std::sync::Arc<std::path::Path>) -> T
+        where
+            T: std::convert::TryFrom<std::sync::Arc<std::path::Path>>,
+            <T as std::convert::TryFrom<std::sync::Arc<std::path::Path>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::sync::Arc<std::path::Path>>>::try_from(path)
+                .expect("canonical Arc<Path> must parse through generic TryFrom<Arc<Path>>")
+        }
+
+        for region in PerAttemptRegion::ALL {
+            let boxed: Box<std::path::Path> =
+                std::path::PathBuf::from(region.as_str()).into_boxed_path();
+            let arc: std::sync::Arc<std::path::Path> = std::sync::Arc::from(boxed);
+            assert_eq!(
+                parse::<PerAttemptRegion>(arc),
+                region,
+                "generic TryFrom<Arc<Path>> consumer must recover canonical variant at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::sync::Arc<std::path::Path>> for PerAttemptRegion`]
+    /// rejects non-Unicode filesystem-path sequences at the
+    /// [`std::ffi::OsStr::to_str`] Unicode-decode frontier reached
+    /// through [`std::path::Path::as_os_str`] via
+    /// [`std::sync::Arc::<std::path::Path>::as_ref`] before the
+    /// [`FromStr`] canonical-grammar gate is reached. Unix-only because
+    /// the only stable public API for constructing a non-Unicode
+    /// [`std::ffi::OsString`] view is via
+    /// [`std::os::unix::ffi::OsStringExt::from_vec`].
+    #[cfg(unix)]
+    #[test]
+    fn test_per_attempt_region_try_from_arc_path_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_unicode_bytes: Vec<u8> = vec![0x80, 0xC3, 0xC0, 0x80, 0xFF];
+        let owned_os = std::ffi::OsString::from_vec(non_unicode_bytes);
+        let boxed: Box<std::path::Path> = std::path::PathBuf::from(owned_os).into_boxed_path();
+        let arc: std::sync::Arc<std::path::Path> = std::sync::Arc::from(boxed);
+        assert!(
+            <PerAttemptRegion as std::convert::TryFrom<std::sync::Arc<std::path::Path>>>::try_from(
+                arc
+            )
+            .is_err(),
+            "TryFrom<Arc<Path>> must reject non-Unicode input",
+        );
+    }
+
+    /// [`TryFrom<std::sync::Arc<std::path::Path>> for PerAttemptRegion`]
+    /// rejects valid-Unicode non-canonical filesystem-path sequences
+    /// with the same strictness [`std::str::FromStr`] enforces — empty
+    /// string, UpperCamel rendering, uppercase, whitespace padding, and
+    /// snake_case labels with a dropped underscore all reject after the
+    /// Unicode-decode stage passes. Pins the FromStr-gate strict-
+    /// rejection contract at the shared-owned filesystem-path try-
+    /// conversion surface so a downstream consumer bound by
+    /// [`TryFrom<std::sync::Arc<std::path::Path>>`] inherits the same
+    /// canonical-only grammar the direct `.parse::<PerAttemptRegion>()`
+    /// call sites and the sibling [`TryFrom<&std::path::Path>`],
+    /// [`TryFrom<std::path::PathBuf>`], [`TryFrom<Cow<'_,
+    /// std::path::Path>>`], and [`TryFrom<Box<std::path::Path>>`] impls
+    /// already read.
+    #[test]
+    fn test_per_attempt_region_try_from_arc_path_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "BeforeFirst",
+            "OverBudget",
+            "FIRST",
+            " first",
+            "first ",
+            "beforefirst",
+            "overbudget",
+        ] {
+            let boxed: Box<std::path::Path> = std::path::PathBuf::from(bad).into_boxed_path();
+            let arc: std::sync::Arc<std::path::Path> = std::sync::Arc::from(boxed);
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<
+                    std::sync::Arc<std::path::Path>,
+                >>::try_from(arc)
+                .is_err(),
+                "TryFrom<Arc<Path>> must reject valid-Unicode non-canonical input {bad:?}",
             );
         }
     }
