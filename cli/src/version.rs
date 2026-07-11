@@ -3067,6 +3067,171 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::OsStr>> for BumpLevel {
     }
 }
 
+/// [`TryFrom<Cow<'_, std::path::Path>> for BumpLevel`] routes through
+/// [`std::borrow::Cow::as_ref`] on the caller-supplied borrowed/owned-
+/// frontier filesystem-path and the by-reference filesystem-path parse
+/// peer [`TryFrom<&std::path::Path>`] (which itself composes
+/// [`std::path::Path::as_os_str`] with the by-reference OS-string parse
+/// peer [`TryFrom<&std::ffi::OsStr>`] which composes
+/// [`std::ffi::OsStr::to_str`] with [`TryFrom<&str>`] which itself
+/// delegates through [`<BumpLevel as std::str::FromStr>::from_str`]), so
+/// a downstream consumer bound by `impl for<'a> TryFrom<Cow<'a,
+/// std::path::Path>>` (a serde container that opts into
+/// `#[serde(try_from = "Cow<'_, Path>")]` on a wrapper field, a
+/// [`std::path::Path::components`]/[`std::path::Component::as_os_str`]
+/// walk that materializes some segments as a borrowed static
+/// [`std::path::Path`] and others as an owned [`std::path::PathBuf`]
+/// before wrapping in a [`std::borrow::Cow`], a generic try-conversion
+/// helper `fn parse<T: for<'a> TryFrom<Cow<'a, std::path::Path>>>` that
+/// composes with borrowed/owned-frontier filesystem-path inputs
+/// uniformly) recovers a [`BumpLevel`] value from a borrowed-or-owned
+/// canonical filesystem-path label
+/// (`Cow::Borrowed(Path::new("patch"))`,
+/// `Cow::Owned(PathBuf::from("patch"))`, and analogously for `"minor"`
+/// / `"major"`) through the same one-oracle grammar the direct
+/// `.parse::<BumpLevel>()` call sites and the sibling
+/// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`], [`TryFrom<Cow<'_, [u8]>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`],
+/// [`TryFrom<&std::ffi::OsStr>`], [`TryFrom<std::ffi::OsString>`],
+/// [`TryFrom<Cow<'_, std::ffi::OsStr>>`], [`TryFrom<&std::path::Path>`],
+/// and [`TryFrom<std::path::PathBuf>`] parse peers already read.
+///
+/// The borrowed/owned-frontier filesystem-path parse peer of the
+/// [`From<BumpLevel> for Cow<'static, std::path::Path>`] emit surface at
+/// the filesystem-path borrowed/owned-frontier axis: the emit side yields
+/// a `Cow::Borrowed` view of the `'static`-lived filesystem-path label
+/// constant, this parse side accepts a `Cow<'_, std::path::Path>` whose
+/// contents may be borrowed (`Cow::Borrowed(&Path)`) or owned
+/// (`Cow::Owned(PathBuf)`) — the two-stage strictness discipline
+/// (Unicode validity at the OS-string decode frontier gated by
+/// [`std::ffi::OsStr::to_str`] reached through
+/// [`std::path::Path::as_os_str`], canonical-label grammar at the parse
+/// frontier gated by [`std::str::FromStr`]) is inherited unchanged from
+/// the by-reference [`TryFrom<&std::path::Path>`] peer via
+/// [`std::borrow::Cow::as_ref`] which yields a `&std::path::Path` view of
+/// either the borrowed or owned inner variant.
+///
+/// Closing peer of the borrowed/owned-frontier filesystem-path parse trio
+/// at the version-bump-magnitude ladder:
+/// [`TryFrom<std::borrow::Cow<'_, std::path::Path>>`] for
+/// [`crate::retry::PerAttemptRegion`] (commit 47c471f) opened the trio at
+/// the first ordered typed sum;
+/// [`TryFrom<std::borrow::Cow<'_, std::path::Path>>`] for
+/// [`crate::probe_outcome::AdmissionTier`] (commit b52ed1e) carried the
+/// mid-trio at the second ordered typed sum; this impl closes it at the
+/// third ordered typed sum — matching the [`TryFrom<Cow<'_,
+/// std::ffi::OsStr>>`] borrowed/owned-frontier OS-string parse closing
+/// order (16f6b8e → d68695f → 7e37e95) at the OS-string sibling one
+/// frontier below, the [`TryFrom<Cow<'_, str>>`] borrowed/owned-frontier
+/// UTF-8-string parse closing order (0b85b4f → 03d977b → 6301ac4) at the
+/// UTF-8 string sibling two frontiers below, the
+/// [`TryFrom<&std::path::Path>`] borrowed-view filesystem-path parse
+/// closing order (dba4c6b → 321b2d8 → 7863a1d) at this filesystem-path
+/// frontier's borrowed-view sibling above, the
+/// [`TryFrom<std::path::PathBuf>`] owned-buffer filesystem-path parse
+/// closing order (33e4e48 → 2855792 → b1945f4) at this frontier's
+/// owned-buffer sibling above, and the [`From<BumpLevel> for Cow<'static,
+/// std::path::Path>`] borrowed/owned-frontier filesystem-path emit
+/// closing order (cfb6125 → f11faad → 9e12c75) at this frontier's
+/// borrowed/owned-frontier emit sibling above. After this commit the
+/// borrowed/owned-frontier filesystem-path parse axis spans all three
+/// ordered typed sums on the ladder set through ONE
+/// [`std::borrow::Cow::as_ref`] + [`TryFrom<&std::path::Path>`]
+/// composition each. Opens the next OsStr/Path parse layer — a
+/// shrunk-owned filesystem-path peer at `TryFrom<Box<std::path::Path>>`,
+/// or the shared-owned filesystem-path peer at
+/// `TryFrom<Arc<std::path::Path>>` / `TryFrom<Rc<std::path::Path>>` —
+/// routing through this typed-primitive rather than restating the
+/// three-stage decode-then-parse discipline at every Cow-typed
+/// filesystem-path sum.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at the same TWO frontiers the by-reference
+/// [`TryFrom<&std::path::Path>`] peer above is strict at, inherited
+/// through the [`std::borrow::Cow::as_ref`] +
+/// [`TryFrom<&std::path::Path>`] delegation:
+///
+/// - Non-Unicode filesystem-path sequences (on Unix, a
+///   [`std::path::PathBuf`] wraps a [`std::ffi::OsString`] that may hold
+///   any byte sequence via
+///   [`std::os::unix::ffi::OsStringExt::from_vec`], and a
+///   [`&std::path::Path`] wraps a [`&std::ffi::OsStr`] whose bytes may be
+///   non-Unicode via [`std::os::unix::ffi::OsStrExt::from_bytes`] — a
+///   foreign-locale filesystem path segment materialized as an owned
+///   [`std::path::PathBuf`] wrapped in [`std::borrow::Cow::Owned`], a
+///   `walkdir`-yielded borrowed [`&std::path::Path`] with a non-Unicode
+///   filename wrapped in [`std::borrow::Cow::Borrowed`]) reject at the
+///   [`std::ffi::OsStr::to_str`] Unicode-decode frontier reached through
+///   [`std::path::Path::as_os_str`] via [`std::borrow::Cow::as_ref`] with
+///   a diagnostic naming the offending filesystem path.
+/// - Valid-Unicode filesystem-path sequences that decode to a
+///   non-canonical label (`Cow::Owned(PathBuf::from("Patch"))`,
+///   `Cow::Borrowed(Path::new("Minor"))`,
+///   `Cow::Borrowed(Path::new("Major"))`,
+///   `Cow::Borrowed(Path::new("PATCH"))`,
+///   `Cow::Owned(PathBuf::from(" patch"))`,
+///   `Cow::Owned(PathBuf::from("patch "))`,
+///   `Cow::Borrowed(Path::new("pat"))`,
+///   `Cow::Borrowed(Path::new(""))`) reject at the underlying
+///   [`std::str::FromStr`] impl — the same canonical-only strictness the
+///   borrowed-view filesystem-path peer already carries, now lifted to
+///   the borrowed/owned-frontier filesystem-path input layer at ONE
+///   composition through the by-reference [`TryFrom<&std::path::Path>`]
+///   peer via [`std::borrow::Cow::as_ref`].
+///
+/// The impl body picks [`std::borrow::Cow::as_ref`] rather than an
+/// intermediate [`std::borrow::Cow::into_owned`] + `TryFrom<PathBuf>`
+/// restatement: [`std::borrow::Cow::as_ref`] yields a borrowed
+/// [`&std::path::Path`] view of either variant without cloning the
+/// borrowed side or moving the owned side, so a
+/// [`std::borrow::Cow::Borrowed`] input pays zero allocation and a
+/// [`std::borrow::Cow::Owned`] input pays zero clone — the
+/// borrow-then-drop discipline the sibling [`TryFrom<std::path::PathBuf>`]
+/// peer applies at the filesystem-path owned-buffer axis via
+/// [`std::path::PathBuf::as_path`] lifted to the borrowed/owned-frontier
+/// axis via [`std::borrow::Cow::as_ref`].
+///
+/// The identity `BumpLevel::try_from(std::borrow::Cow::Owned(
+/// std::path::PathBuf::from(level.as_str()))).unwrap() == level` and
+/// `BumpLevel::try_from(std::borrow::Cow::Borrowed(
+/// std::path::Path::new(level.as_str()))).unwrap() == level` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_try_from_cow_path_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl for<'a> TryFrom<Cow<'a, std::path::Path>>` consumer at every
+/// variant is pinned by
+/// [`tests::test_bump_level_try_from_cow_path_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-Unicode borrowed/owned
+/// filesystem-path input is pinned by
+/// [`tests::test_bump_level_try_from_cow_path_rejects_non_unicode_input`];
+/// the strict-rejection contract on valid-Unicode non-canonical
+/// borrowed/owned filesystem-path input is pinned by
+/// [`tests::test_bump_level_try_from_cow_path_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the borrowed/owned-frontier
+/// filesystem-path try-conversion parse surface is a typed-primitive site
+/// on [`BumpLevel`] itself (one `TryFrom<Cow<'_, std::path::Path>>` impl
+/// routing through [`std::borrow::Cow::as_ref`] and the by-reference
+/// [`TryFrom<&std::path::Path>`] peer), not a per-consumer
+/// `BumpLevel::try_from(cow.as_ref())` bridge at every downstream site
+/// that types its parse contract as
+/// `impl for<'a> TryFrom<Cow<'a, std::path::Path>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// one site ([`BumpLevel::as_str`]), inverted at one site
+/// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
+/// surface — including this borrowed/owned-frontier filesystem-path peer
+/// — reads through it.
+impl<'a> TryFrom<std::borrow::Cow<'a, std::path::Path>> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(path: std::borrow::Cow<'a, std::path::Path>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::path::Path>>::try_from(path.as_ref())
+    }
+}
+
 /// [`From<BumpLevel> for &'static str`] routes through
 /// [`BumpLevel::as_str`] so a downstream consumer that takes an owned
 /// [`&'static str`] via [`Into<&'static str>`] (a `const`-adjacent
@@ -12764,6 +12929,198 @@ mod tests {
                 >>::try_from(owned)
                 .is_err(),
                 "TryFrom<Cow<'_, OsStr>> must reject valid-Unicode non-canonical Cow::Owned input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, std::path::Path>> for BumpLevel`] recovers the
+    /// original variant at every [`BumpLevel::ALL`] variant when the
+    /// canonical label emitted by [`BumpLevel::as_str`] is fed back
+    /// through it in BOTH [`std::borrow::Cow::Borrowed`] (a
+    /// [`std::path::Path::new`] view over the canonical label wrapped in
+    /// [`std::borrow::Cow::Borrowed`]) and [`std::borrow::Cow::Owned`] (a
+    /// [`std::path::PathBuf::from`] materialization wrapped in
+    /// [`std::borrow::Cow::Owned`]) forms. Pins the round-trip identity
+    /// at both variants of the borrowed/owned frontier against the shared
+    /// canonical-label oracle. Structural mirror of
+    /// [`crate::retry::tests::test_per_attempt_region_try_from_cow_path_agrees_with_from_str`]
+    /// and
+    /// [`crate::probe_outcome::tests::test_admission_tier_try_from_cow_path_agrees_with_from_str`]
+    /// at the version-bump-magnitude ladder.
+    #[test]
+    fn test_bump_level_try_from_cow_path_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let borrowed: std::borrow::Cow<'_, std::path::Path> =
+                std::borrow::Cow::Borrowed(std::path::Path::new(level.as_str()));
+            let parsed_borrowed = <BumpLevel as std::convert::TryFrom<
+                std::borrow::Cow<'_, std::path::Path>,
+            >>::try_from(borrowed)
+            .expect("canonical Cow::Borrowed(Path) must parse through TryFrom<Cow<'_, Path>>");
+            assert_eq!(
+                parsed_borrowed, level,
+                "TryFrom<Cow<'_, Path>> must round-trip Cow::Borrowed at {level:?}",
+            );
+
+            let owned: std::borrow::Cow<'_, std::path::Path> =
+                std::borrow::Cow::Owned(std::path::PathBuf::from(level.as_str()));
+            let parsed_owned = <BumpLevel as std::convert::TryFrom<
+                std::borrow::Cow<'_, std::path::Path>,
+            >>::try_from(owned)
+            .expect("canonical Cow::Owned(PathBuf) must parse through TryFrom<Cow<'_, Path>>");
+            assert_eq!(
+                parsed_owned, level,
+                "TryFrom<Cow<'_, Path>> must round-trip Cow::Owned at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Cow<'_, std::path::Path>> for BumpLevel`] identity
+    /// carries through a generic
+    /// `impl for<'a> TryFrom<Cow<'a, std::path::Path>>` consumer at every
+    /// [`BumpLevel::ALL`] variant on BOTH the borrowed and owned Cow
+    /// branches. A tiny generic function
+    /// `fn parse<T>(p: Cow<'_, Path>) -> T where T: for<'a>
+    /// TryFrom<Cow<'a, Path>>, T::Error: Debug` — the shape of an actual
+    /// downstream consumer (validated-input newtype builder, serde
+    /// `try_from` wrapper, generic try-conversion helper that opts into
+    /// the [`TryFrom<Cow<'_, std::path::Path>>`] contract) — recovers the
+    /// canonical variant from BOTH borrowed and owned Cow variants at
+    /// every variant. The structural witness that a [`BumpLevel`] is
+    /// genuinely usable at `impl for<'a> TryFrom<Cow<'a, Path>>` call
+    /// sites — a regression that drifted the [`TryFrom`] impl signature
+    /// (e.g., requiring only owned [`std::borrow::Cow::Owned`]`(PathBuf)`
+    /// instead of accepting both variants, or returning a different
+    /// variant on the borrowed branch than on the owned branch) fails
+    /// here at compile time or at the assertion instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_bump_level_try_from_cow_path_carries_through_generic_consumer() {
+        fn parse<T>(path: std::borrow::Cow<'_, std::path::Path>) -> T
+        where
+            T: for<'a> std::convert::TryFrom<std::borrow::Cow<'a, std::path::Path>>,
+            for<'a> <T as std::convert::TryFrom<std::borrow::Cow<'a, std::path::Path>>>::Error:
+                std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::borrow::Cow<'_, std::path::Path>>>::try_from(path)
+                .expect("canonical Cow<'_, Path> must parse through generic TryFrom<Cow<'_, Path>>")
+        }
+
+        for level in BumpLevel::ALL {
+            let borrowed: std::borrow::Cow<'_, std::path::Path> =
+                std::borrow::Cow::Borrowed(std::path::Path::new(level.as_str()));
+            assert_eq!(
+                parse::<BumpLevel>(borrowed),
+                level,
+                "generic TryFrom<Cow<'_, Path>> consumer must recover canonical variant on Cow::Borrowed at {level:?}",
+            );
+
+            let owned: std::borrow::Cow<'_, std::path::Path> =
+                std::borrow::Cow::Owned(std::path::PathBuf::from(level.as_str()));
+            assert_eq!(
+                parse::<BumpLevel>(owned),
+                level,
+                "generic TryFrom<Cow<'_, Path>> consumer must recover canonical variant on Cow::Owned at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, std::path::Path>> for BumpLevel`] rejects
+    /// non-Unicode filesystem-path sequences at the
+    /// [`std::ffi::OsStr::to_str`] Unicode-decode frontier reached
+    /// through [`std::path::Path::as_os_str`] via
+    /// [`std::borrow::Cow::as_ref`] before the [`std::str::FromStr`]
+    /// canonical-grammar gate is reached — on BOTH
+    /// [`std::borrow::Cow::Borrowed`] (a `std::path::Path::new`-borrowed
+    /// non-Unicode [`std::ffi::OsStr`] via
+    /// [`std::os::unix::ffi::OsStrExt::from_bytes`]) and
+    /// [`std::borrow::Cow::Owned`] (a `std::path::PathBuf::from`-owned
+    /// non-Unicode [`std::ffi::OsString`] via
+    /// [`std::os::unix::ffi::OsStringExt::from_vec`]) branches. Pins the
+    /// Unicode-decode strict-rejection contract at the borrowed/owned-
+    /// frontier filesystem-path try-conversion surface so a downstream
+    /// consumer bound by [`TryFrom<Cow<'_, std::path::Path>>`] inherits
+    /// the same Unicode-only grammar the sibling
+    /// [`TryFrom<&std::path::Path>`] impl and the direct
+    /// `.parse::<BumpLevel>()` call sites already read on both branches
+    /// of the borrowed/owned frontier. Unix-only because the only stable
+    /// public API for constructing a non-Unicode [`std::ffi::OsString`] /
+    /// [`std::ffi::OsStr`] view is via
+    /// [`std::os::unix::ffi::OsStringExt::from_vec`] /
+    /// [`std::os::unix::ffi::OsStrExt::from_bytes`]; the equivalent
+    /// Windows discipline goes through
+    /// [`std::os::windows::ffi::OsStringExt::from_wide`] with a lone
+    /// surrogate, which is not portable across all non-Unix platforms.
+    #[cfg(unix)]
+    #[test]
+    fn test_bump_level_try_from_cow_path_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_unicode_bytes: Vec<u8> = vec![0x80, 0xC3, 0xC0, 0x80, 0xFF];
+
+        let owned_os = std::ffi::OsString::from_vec(non_unicode_bytes.clone());
+        let owned =
+            std::borrow::Cow::<'_, std::path::Path>::Owned(std::path::PathBuf::from(owned_os));
+        assert!(
+            <BumpLevel as std::convert::TryFrom<std::borrow::Cow<'_, std::path::Path>>>::try_from(
+                owned
+            )
+            .is_err(),
+            "TryFrom<Cow<'_, Path>> must reject non-Unicode Cow::Owned input",
+        );
+
+        let borrowed_os_str = std::ffi::OsStr::from_bytes(&non_unicode_bytes);
+        let borrowed_path = std::path::Path::new(borrowed_os_str);
+        let borrowed = std::borrow::Cow::<'_, std::path::Path>::Borrowed(borrowed_path);
+        assert!(
+            <BumpLevel as std::convert::TryFrom<std::borrow::Cow<'_, std::path::Path>>>::try_from(
+                borrowed
+            )
+            .is_err(),
+            "TryFrom<Cow<'_, Path>> must reject non-Unicode Cow::Borrowed input",
+        );
+    }
+
+    /// [`TryFrom<Cow<'_, std::path::Path>> for BumpLevel`] rejects
+    /// valid-Unicode non-canonical borrowed/owned filesystem-path
+    /// sequences with the same strictness [`std::str::FromStr`] enforces
+    /// — empty string, UpperCamel rendering, uppercase, whitespace
+    /// padding, and truncated labels all reject after the Unicode-decode
+    /// stage passes, on BOTH [`std::borrow::Cow::Borrowed`] and
+    /// [`std::borrow::Cow::Owned`] branches. Pins the FromStr-gate
+    /// strict-rejection contract at the borrowed/owned-frontier
+    /// filesystem-path try-conversion surface so a downstream consumer
+    /// bound by [`TryFrom<Cow<'_, std::path::Path>>`] inherits the same
+    /// canonical-only grammar the direct `.parse::<BumpLevel>()` call
+    /// sites and the sibling [`TryFrom<&std::path::Path>`] /
+    /// [`TryFrom<std::path::PathBuf>`] impls already read, and a future
+    /// permissive-parse regression at the underlying
+    /// [`std::str::FromStr`] impl lights up here rather than drifting
+    /// silently through the borrowed/owned-frontier filesystem-path
+    /// try-conversion surface.
+    #[test]
+    fn test_bump_level_try_from_cow_path_rejects_non_canonical_input() {
+        for bad in [
+            "", "Patch", "Minor", "Major", "PATCH", " patch", "patch ", "pat",
+        ] {
+            let borrowed =
+                std::borrow::Cow::<'_, std::path::Path>::Borrowed(std::path::Path::new(bad));
+            assert!(
+                <BumpLevel as std::convert::TryFrom<
+                    std::borrow::Cow<'_, std::path::Path>,
+                >>::try_from(borrowed)
+                .is_err(),
+                "TryFrom<Cow<'_, Path>> must reject valid-Unicode non-canonical Cow::Borrowed input {bad:?}",
+            );
+
+            let owned =
+                std::borrow::Cow::<'_, std::path::Path>::Owned(std::path::PathBuf::from(bad));
+            assert!(
+                <BumpLevel as std::convert::TryFrom<
+                    std::borrow::Cow<'_, std::path::Path>,
+                >>::try_from(owned)
+                .is_err(),
+                "TryFrom<Cow<'_, Path>> must reject valid-Unicode non-canonical Cow::Owned input {bad:?}",
             );
         }
     }
