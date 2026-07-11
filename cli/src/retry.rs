@@ -5354,6 +5354,151 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::OsStr>> for PerAttemptRegion {
     }
 }
 
+/// [`TryFrom<Cow<'_, std::path::Path>> for PerAttemptRegion`] routes
+/// through [`std::borrow::Cow::as_ref`] on the caller-supplied
+/// borrowed/owned-frontier filesystem-path and the by-reference
+/// filesystem-path parse peer [`TryFrom<&std::path::Path>`] (which
+/// itself composes [`std::path::Path::as_os_str`] with the by-reference
+/// OS-string parse peer [`TryFrom<&std::ffi::OsStr>`] which composes
+/// [`std::ffi::OsStr::to_str`] with [`TryFrom<&str>`] which itself
+/// delegates through [`<PerAttemptRegion as FromStr>::from_str`]), so a
+/// downstream consumer bound by `impl for<'a> TryFrom<Cow<'a,
+/// std::path::Path>>` (a serde container that opts into
+/// `#[serde(try_from = "Cow<'_, Path>")]` on a wrapper field, a
+/// [`std::path::Path::components`]/[`std::path::Component::as_os_str`]
+/// walk that materializes some segments as a borrowed static
+/// [`std::path::Path`] and others as an owned [`std::path::PathBuf`]
+/// before wrapping in a [`std::borrow::Cow`], a generic try-conversion
+/// helper `fn parse<T: for<'a> TryFrom<Cow<'a, std::path::Path>>>` that
+/// composes with borrowed/owned-frontier filesystem-path inputs
+/// uniformly) recovers a [`PerAttemptRegion`] value from a borrowed-or-
+/// owned canonical filesystem-path label through the same one-oracle
+/// grammar the sibling [`TryFrom<&std::path::Path>`],
+/// [`TryFrom<std::path::PathBuf>`], [`TryFrom<&std::ffi::OsStr>`],
+/// [`TryFrom<std::ffi::OsString>`], [`TryFrom<Cow<'_, std::ffi::OsStr>>`],
+/// and (one frontier below) [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Cow<'_, [u8]>>`] parse peers already read.
+///
+/// The borrowed/owned-frontier filesystem-path parse peer of the
+/// [`From<PerAttemptRegion> for Cow<'static, std::path::Path>`] emit
+/// surface above at the filesystem-path borrowed/owned-frontier axis:
+/// the emit side yields a `Cow::Borrowed` view of the `'static`-lived
+/// filesystem-path label constant, this parse side accepts a `Cow<'_,
+/// std::path::Path>` whose contents may be borrowed
+/// (`Cow::Borrowed(&Path)`) or owned (`Cow::Owned(PathBuf)`) — the
+/// two-stage strictness discipline (Unicode validity at the OS-string
+/// decode frontier gated by [`std::ffi::OsStr::to_str`] reached through
+/// [`std::path::Path::as_os_str`], canonical-label grammar at the parse
+/// frontier gated by [`FromStr`]) is inherited unchanged from the
+/// by-reference [`TryFrom<&std::path::Path>`] peer via
+/// [`std::borrow::Cow::as_ref`] which yields a `&std::path::Path` view
+/// of either the borrowed or owned inner variant.
+///
+/// Opens the borrowed/owned-frontier filesystem-path parse trio at the
+/// per-attempt-region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the parse peers'
+/// opening orders at every prior frontier — the [`TryFrom<Cow<'_,
+/// std::ffi::OsStr>>`] borrowed/owned-frontier OS-string parse opening
+/// order (16f6b8e → d68695f → 7e37e95) at the OS-string sibling one
+/// frontier below, the [`TryFrom<Cow<'_, str>>`] borrowed/owned-frontier
+/// UTF-8-string parse opening order (0b85b4f → 03d977b → 6301ac4) at
+/// the UTF-8 string sibling two frontiers below, the
+/// [`TryFrom<&std::path::Path>`] borrowed-view filesystem-path parse
+/// opening order (dba4c6b → 321b2d8 → 7863a1d) at this filesystem-path
+/// frontier's borrowed-view sibling above, and the
+/// [`From<PerAttemptRegion> for Cow<'static, std::path::Path>`]
+/// borrowed/owned-frontier filesystem-path emit opening order (cfb6125
+/// → f11faad → 9e12c75) at this frontier's borrowed/owned-frontier
+/// emit sibling above.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at the same TWO frontiers the by-reference
+/// [`TryFrom<&std::path::Path>`] peer above is strict at, inherited
+/// through the [`std::borrow::Cow::as_ref`] + [`TryFrom<&std::path::Path>`]
+/// delegation:
+///
+/// - Non-Unicode filesystem-path sequences (on Unix, a
+///   [`std::path::PathBuf`] wraps a [`std::ffi::OsString`] that may
+///   hold any byte sequence via
+///   [`std::os::unix::ffi::OsStringExt::from_vec`], and a
+///   [`&std::path::Path`] wraps a [`&std::ffi::OsStr`] whose bytes
+///   may be non-Unicode via
+///   [`std::os::unix::ffi::OsStrExt::from_bytes`] — a foreign-locale
+///   filesystem path segment materialized as an owned
+///   [`std::path::PathBuf`] wrapped in [`Cow::Owned`], a
+///   `walkdir`-yielded borrowed [`&std::path::Path`] with a non-
+///   Unicode filename wrapped in [`Cow::Borrowed`]) reject at the
+///   [`std::ffi::OsStr::to_str`] Unicode-decode frontier reached
+///   through [`std::path::Path::as_os_str`] via
+///   [`std::borrow::Cow::as_ref`] with a diagnostic naming the
+///   offending filesystem path.
+/// - Valid-Unicode filesystem-path sequences that decode to a
+///   non-canonical label (`Cow::Owned(PathBuf::from("BeforeFirst"))`,
+///   `Cow::Borrowed(Path::new("OverBudget"))`,
+///   `Cow::Borrowed(Path::new("FIRST"))`,
+///   `Cow::Owned(PathBuf::from(" first"))`,
+///   `Cow::Owned(PathBuf::from("first "))`,
+///   `Cow::Borrowed(Path::new("beforefirst"))`,
+///   `Cow::Borrowed(Path::new("overbudget"))`,
+///   `Cow::Borrowed(Path::new(""))`) reject at the underlying
+///   [`std::str::FromStr`] impl — the same canonical-only strictness
+///   the borrowed-view filesystem-path peer already carries, now
+///   lifted to the borrowed/owned-frontier filesystem-path input
+///   layer at ONE composition through the by-reference
+///   [`TryFrom<&std::path::Path>`] peer via
+///   [`std::borrow::Cow::as_ref`].
+///
+/// The impl body picks [`std::borrow::Cow::as_ref`] rather than an
+/// intermediate [`std::borrow::Cow::into_owned`] + `TryFrom<PathBuf>`
+/// restatement: [`std::borrow::Cow::as_ref`] yields a borrowed
+/// [`&std::path::Path`] view of either variant without cloning the
+/// borrowed side or moving the owned side, so a [`Cow::Borrowed`]
+/// input pays zero allocation and a [`Cow::Owned`] input pays zero
+/// clone — the borrow-then-drop discipline the sibling
+/// [`TryFrom<std::path::PathBuf>`] peer applies at the filesystem-path
+/// owned-buffer axis via [`std::path::PathBuf::as_path`] lifted to the
+/// borrowed/owned-frontier axis via [`std::borrow::Cow::as_ref`].
+///
+/// The identity `PerAttemptRegion::try_from(std::borrow::Cow::Owned(
+/// std::path::PathBuf::from(region.as_str()))).unwrap() == region` and
+/// `PerAttemptRegion::try_from(std::borrow::Cow::Borrowed(
+/// std::path::Path::new(region.as_str()))).unwrap() == region` at
+/// every [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_cow_path_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl for<'a> TryFrom<Cow<'a, std::path::Path>>` consumer at every
+/// variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_cow_path_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-Unicode borrowed/owned
+/// filesystem-path input is pinned by
+/// [`tests::test_per_attempt_region_try_from_cow_path_rejects_non_unicode_input`];
+/// the strict-rejection contract on valid-Unicode non-canonical
+/// borrowed/owned filesystem-path input is pinned by
+/// [`tests::test_per_attempt_region_try_from_cow_path_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the borrowed/owned-frontier
+/// filesystem-path try-conversion parse surface is a typed-primitive
+/// site on [`PerAttemptRegion`] itself (one `TryFrom<Cow<'_,
+/// std::path::Path>>` impl routing through [`std::borrow::Cow::as_ref`]
+/// and the by-reference [`TryFrom<&std::path::Path>`] peer), not a
+/// per-consumer `PerAttemptRegion::try_from(cow.as_ref())` bridge at
+/// every downstream site that types its parse contract as
+/// `impl for<'a> TryFrom<Cow<'a, std::path::Path>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// one site ([`PerAttemptRegion::as_str`]), inverted at one site
+/// ([`PerAttemptRegion::from_str`]), and every parse surface —
+/// including this borrowed/owned-frontier filesystem-path peer — reads
+/// through it.
+impl<'a> TryFrom<std::borrow::Cow<'a, std::path::Path>> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(path: std::borrow::Cow<'a, std::path::Path>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::path::Path>>::try_from(path.as_ref())
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -20040,6 +20185,210 @@ mod tests {
                 >>::try_from(owned)
                 .is_err(),
                 "TryFrom<Cow<'_, OsStr>> must reject valid-Unicode non-canonical Cow::Owned input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, std::path::Path>> for PerAttemptRegion`] recovers
+    /// the original variant at every [`PerAttemptRegion::ALL`] variant
+    /// when the canonical label emitted by [`PerAttemptRegion::as_str`]
+    /// is fed back through it in BOTH [`std::borrow::Cow::Borrowed`]
+    /// (a [`std::path::Path::new`] view over the canonical label
+    /// wrapped in [`Cow::Borrowed`]) and [`std::borrow::Cow::Owned`]
+    /// (a [`std::path::PathBuf::from`] materialization wrapped in
+    /// [`Cow::Owned`]) forms. Pins the round-trip identity at both
+    /// variants of the borrowed/owned frontier against the shared
+    /// canonical-label oracle. The structural witness that the
+    /// borrowed/owned-frontier filesystem-path try-conversion parse
+    /// surface (this [`TryFrom<Cow<'_, std::path::Path>>`]) reads the
+    /// same one-oracle grammar the by-reference filesystem-path parse
+    /// surface ([`TryFrom<&std::path::Path>`], the earlier sibling) and
+    /// the by-value owned-buffer filesystem-path parse surface
+    /// ([`TryFrom<std::path::PathBuf>`], the earlier sibling) both
+    /// read — one round-trip pin per (variant, Cow variant) pair,
+    /// refuses a future insertion that drops the `TryFrom<Cow<'_,
+    /// Path>>`/`as_str` agreement on either borrowed or owned side.
+    #[test]
+    fn test_per_attempt_region_try_from_cow_path_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: std::borrow::Cow<'_, std::path::Path> =
+                std::borrow::Cow::Borrowed(std::path::Path::new(region.as_str()));
+            let parsed_borrowed = <PerAttemptRegion as std::convert::TryFrom<
+                std::borrow::Cow<'_, std::path::Path>,
+            >>::try_from(borrowed)
+            .expect("canonical Cow::Borrowed(Path) must parse through TryFrom<Cow<'_, Path>>");
+            assert_eq!(
+                parsed_borrowed, region,
+                "TryFrom<Cow<'_, Path>> must round-trip Cow::Borrowed at {region:?}",
+            );
+
+            let owned: std::borrow::Cow<'_, std::path::Path> =
+                std::borrow::Cow::Owned(std::path::PathBuf::from(region.as_str()));
+            let parsed_owned = <PerAttemptRegion as std::convert::TryFrom<
+                std::borrow::Cow<'_, std::path::Path>,
+            >>::try_from(owned)
+            .expect("canonical Cow::Owned(PathBuf) must parse through TryFrom<Cow<'_, Path>>");
+            assert_eq!(
+                parsed_owned, region,
+                "TryFrom<Cow<'_, Path>> must round-trip Cow::Owned at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Cow<'_, std::path::Path>> for PerAttemptRegion`]
+    /// identity carries through a generic
+    /// `impl for<'a> TryFrom<Cow<'a, std::path::Path>>` consumer at
+    /// every [`PerAttemptRegion::ALL`] variant on BOTH the borrowed
+    /// and owned Cow branches. A tiny generic function
+    /// `fn parse<T>(p: Cow<'_, Path>) -> T where T: for<'a>
+    /// TryFrom<Cow<'a, Path>>, T::Error: Debug` — the shape of an
+    /// actual downstream consumer (validated-input newtype builder,
+    /// serde `try_from` wrapper, generic try-conversion helper that
+    /// opts into the [`TryFrom<Cow<'_, std::path::Path>>`] contract) —
+    /// recovers the canonical variant from BOTH borrowed and owned
+    /// Cow variants at every variant. The structural witness that a
+    /// [`PerAttemptRegion`] is genuinely usable at `impl for<'a>
+    /// TryFrom<Cow<'a, Path>>` call sites — a regression that drifted
+    /// the [`TryFrom`] impl signature (e.g., requiring only owned
+    /// `Cow::Owned(PathBuf)` instead of accepting both variants, or
+    /// returning a different variant on the borrowed branch than on
+    /// the owned branch) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_try_from_cow_path_carries_through_generic_consumer() {
+        fn parse<T>(path: std::borrow::Cow<'_, std::path::Path>) -> T
+        where
+            T: for<'a> std::convert::TryFrom<std::borrow::Cow<'a, std::path::Path>>,
+            for<'a> <T as std::convert::TryFrom<std::borrow::Cow<'a, std::path::Path>>>::Error:
+                std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::borrow::Cow<'_, std::path::Path>>>::try_from(path)
+                .expect("canonical Cow<'_, Path> must parse through generic TryFrom<Cow<'_, Path>>")
+        }
+
+        for region in PerAttemptRegion::ALL {
+            let borrowed: std::borrow::Cow<'_, std::path::Path> =
+                std::borrow::Cow::Borrowed(std::path::Path::new(region.as_str()));
+            assert_eq!(
+                parse::<PerAttemptRegion>(borrowed),
+                region,
+                "generic TryFrom<Cow<'_, Path>> consumer must recover canonical variant on Cow::Borrowed at {region:?}",
+            );
+
+            let owned: std::borrow::Cow<'_, std::path::Path> =
+                std::borrow::Cow::Owned(std::path::PathBuf::from(region.as_str()));
+            assert_eq!(
+                parse::<PerAttemptRegion>(owned),
+                region,
+                "generic TryFrom<Cow<'_, Path>> consumer must recover canonical variant on Cow::Owned at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, std::path::Path>> for PerAttemptRegion`]
+    /// rejects non-Unicode filesystem-path sequences at the
+    /// [`std::ffi::OsStr::to_str`] Unicode-decode frontier reached
+    /// through [`std::path::Path::as_os_str`] via
+    /// [`std::borrow::Cow::as_ref`] before the [`FromStr`] canonical-
+    /// grammar gate is reached — on BOTH [`Cow::Borrowed`] (a
+    /// `std::path::Path::new`-borrowed non-Unicode
+    /// [`std::ffi::OsStr`] via
+    /// [`std::os::unix::ffi::OsStrExt::from_bytes`]) and
+    /// [`Cow::Owned`] (a `std::path::PathBuf::from`-owned non-Unicode
+    /// [`std::ffi::OsString`] via
+    /// [`std::os::unix::ffi::OsStringExt::from_vec`]) branches. Pins
+    /// the Unicode-decode strict-rejection contract at the borrowed/
+    /// owned-frontier filesystem-path try-conversion surface so a
+    /// downstream consumer bound by [`TryFrom<Cow<'_, std::path::Path>>`]
+    /// inherits the same Unicode-only grammar the sibling
+    /// [`TryFrom<&std::path::Path>`] impl and the direct
+    /// `.parse::<PerAttemptRegion>()` call sites already read on both
+    /// branches of the borrowed/owned frontier. Unix-only because the
+    /// only stable public API for constructing a non-Unicode
+    /// [`std::ffi::OsString`] / [`std::ffi::OsStr`] view is via
+    /// [`std::os::unix::ffi::OsStringExt::from_vec`] /
+    /// [`std::os::unix::ffi::OsStrExt::from_bytes`]; the equivalent
+    /// Windows discipline goes through
+    /// [`std::os::windows::ffi::OsStringExt::from_wide`] with a lone
+    /// surrogate, which is not portable across all non-Unix platforms.
+    #[cfg(unix)]
+    #[test]
+    fn test_per_attempt_region_try_from_cow_path_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_unicode_bytes: Vec<u8> = vec![0x80, 0xC3, 0xC0, 0x80, 0xFF];
+
+        let owned_os = std::ffi::OsString::from_vec(non_unicode_bytes.clone());
+        let owned =
+            std::borrow::Cow::<'_, std::path::Path>::Owned(std::path::PathBuf::from(owned_os));
+        assert!(
+            <PerAttemptRegion as std::convert::TryFrom<
+                std::borrow::Cow<'_, std::path::Path>,
+            >>::try_from(owned)
+            .is_err(),
+            "TryFrom<Cow<'_, Path>> must reject non-Unicode Cow::Owned input",
+        );
+
+        let borrowed_os_str = std::ffi::OsStr::from_bytes(&non_unicode_bytes);
+        let borrowed_path = std::path::Path::new(borrowed_os_str);
+        let borrowed = std::borrow::Cow::<'_, std::path::Path>::Borrowed(borrowed_path);
+        assert!(
+            <PerAttemptRegion as std::convert::TryFrom<
+                std::borrow::Cow<'_, std::path::Path>,
+            >>::try_from(borrowed)
+            .is_err(),
+            "TryFrom<Cow<'_, Path>> must reject non-Unicode Cow::Borrowed input",
+        );
+    }
+
+    /// [`TryFrom<Cow<'_, std::path::Path>> for PerAttemptRegion`]
+    /// rejects valid-Unicode non-canonical borrowed/owned filesystem-
+    /// path sequences with the same strictness [`std::str::FromStr`]
+    /// enforces — empty string, UpperCamel rendering, uppercase,
+    /// whitespace padding, and snake_case labels with a dropped
+    /// underscore all reject after the Unicode-decode stage passes,
+    /// on BOTH [`Cow::Borrowed`] and [`Cow::Owned`] branches. Pins
+    /// the FromStr-gate strict-rejection contract at the borrowed/
+    /// owned-frontier filesystem-path try-conversion surface so a
+    /// downstream consumer bound by [`TryFrom<Cow<'_, std::path::Path>>`]
+    /// inherits the same canonical-only grammar the direct
+    /// `.parse::<PerAttemptRegion>()` call sites and the sibling
+    /// [`TryFrom<&std::path::Path>`] / [`TryFrom<std::path::PathBuf>`]
+    /// impls already read, and a future permissive-parse regression
+    /// at the underlying [`FromStr`] impl lights up here rather than
+    /// drifting silently through the borrowed/owned-frontier
+    /// filesystem-path try-conversion surface.
+    #[test]
+    fn test_per_attempt_region_try_from_cow_path_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "BeforeFirst",
+            "OverBudget",
+            "FIRST",
+            " first",
+            "first ",
+            "beforefirst",
+            "overbudget",
+        ] {
+            let borrowed =
+                std::borrow::Cow::<'_, std::path::Path>::Borrowed(std::path::Path::new(bad));
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<
+                    std::borrow::Cow<'_, std::path::Path>,
+                >>::try_from(borrowed)
+                .is_err(),
+                "TryFrom<Cow<'_, Path>> must reject valid-Unicode non-canonical Cow::Borrowed input {bad:?}",
+            );
+
+            let owned =
+                std::borrow::Cow::<'_, std::path::Path>::Owned(std::path::PathBuf::from(bad));
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<
+                    std::borrow::Cow<'_, std::path::Path>,
+                >>::try_from(owned)
+                .is_err(),
+                "TryFrom<Cow<'_, Path>> must reject valid-Unicode non-canonical Cow::Owned input {bad:?}",
             );
         }
     }
