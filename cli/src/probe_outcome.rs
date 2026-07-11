@@ -9969,6 +9969,90 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::path::Path>> for AdmissionTier {
     }
 }
 
+/// Structural mirror of `impl TryFrom<Box<std::ffi::OsStr>> for
+/// PerAttemptRegion` — the shrunk-owned OS-string parse peer at the
+/// second ordered typed sum (mid-trio slot). Routes through
+/// [`std::boxed::Box::<std::ffi::OsStr>::as_ref`] on the caller-
+/// supplied shrunk-owned OS-string and the by-reference OS-string
+/// parse peer [`TryFrom<&std::ffi::OsStr>`] (which itself composes
+/// [`std::ffi::OsStr::to_str`] with [`TryFrom<&str>`] which itself
+/// delegates through
+/// [`<AdmissionTier as std::str::FromStr>::from_str`]), so a
+/// downstream consumer bound by `impl TryFrom<Box<std::ffi::OsStr>>`
+/// (a serde container that opts into
+/// `#[serde(try_from = "Box<OsStr>")]` on a wrapper field, a
+/// [`std::ffi::OsString::into_boxed_os_str`] shrunk-buffer input at
+/// the OS-string frontier that trades the resizable-buffer
+/// [`std::ffi::OsString`] receiver footprint for a single-allocation
+/// immutable [`Box<std::ffi::OsStr>`], a generic try-conversion
+/// helper `fn parse<T: TryFrom<Box<std::ffi::OsStr>>>` that composes
+/// with shrunk-owned OS-string inputs) recovers an [`AdmissionTier`]
+/// value from a shrunk-owned canonical OS-string label through the
+/// same one-oracle grammar the sibling [`TryFrom<&std::ffi::OsStr>`],
+/// [`TryFrom<std::ffi::OsString>`],
+/// [`TryFrom<Cow<'_, std::ffi::OsStr>>`], and (one frontier below)
+/// [`TryFrom<Box<str>>`], [`TryFrom<Box<[u8]>>`] shrunk-owned parse
+/// peers already read at neighboring UTF-8/byte-slice frontiers.
+///
+/// The two-stage strictness discipline (Unicode validity at the OS-
+/// string decode frontier gated by [`std::ffi::OsStr::to_str`],
+/// canonical-label grammar at the parse frontier gated by
+/// [`FromStr`]) is inherited unchanged from the by-reference
+/// [`TryFrom<&std::ffi::OsStr>`] peer via
+/// [`std::boxed::Box::<std::ffi::OsStr>::as_ref`] which yields a
+/// `&std::ffi::OsStr` view of the boxed inner payload without moving
+/// out or reallocating.
+///
+/// The impl body picks [`std::boxed::Box::<std::ffi::OsStr>::as_ref`]
+/// rather than an intermediate `Box::<std::ffi::OsStr>::into` +
+/// `TryFrom<OsString>` restatement: the [`AsRef`] view yields a
+/// borrowed `&std::ffi::OsStr` window over the boxed heap allocation
+/// without converting the shrunk-owned receiver into a resizable
+/// [`std::ffi::OsString`] first, so the receiver pays no reallocation
+/// and no capacity-vs-length metadata rebuild on the fast path — the
+/// same borrow-then-drop discipline the sibling
+/// [`TryFrom<std::ffi::OsString>`] and
+/// [`TryFrom<Cow<'_, std::ffi::OsStr>>`] peers apply at the
+/// resizable-buffer and borrowed/owned-frontier axes, lifted to the
+/// shrunk-owned axis via
+/// [`std::boxed::Box::<std::ffi::OsStr>::as_ref`].
+///
+/// Mid-trio slot in the shrunk-owned OS-string parse trio at the
+/// admission-tier ladder — the opening peer at
+/// [`crate::retry::PerAttemptRegion`] was carried at b6c015b
+/// (`TryFrom<Box<std::ffi::OsStr>> for PerAttemptRegion` — opens
+/// shrunk-owned OS-string parse trio), the closing peer at
+/// [`crate::version::BumpLevel`] follows next, matching the opening
+/// order at every prior OS-string parse trio at
+/// [`crate::retry::PerAttemptRegion`]
+/// (borrowed → owned → borrowed/owned-frontier: `&OsStr` opened at
+/// d37e6fe, `OsString` opened at e629465, `Cow<'_, OsStr>` opened at
+/// 16f6b8e) and the shrunk-owned filesystem-path trio at the
+/// filesystem-path sibling directly above (`Box<Path>` opened at
+/// 315c145 and closed at 336e453), with the shrunk-owned UTF-8/byte-
+/// slice parse peers at the sibling frontiers one and two below.
+///
+/// THEORY.md §V.4 typed primitives: the shrunk-owned OS-string
+/// try-conversion parse surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one `TryFrom<Box<std::ffi::OsStr>>`
+/// impl routing through [`std::boxed::Box::<std::ffi::OsStr>::as_ref`]
+/// and the by-reference [`TryFrom<&std::ffi::OsStr>`] peer), not a
+/// per-consumer `AdmissionTier::try_from(boxed.as_ref())` bridge at
+/// every downstream site that types its parse contract as
+/// `impl TryFrom<Box<std::ffi::OsStr>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// at one site ([`AdmissionTier::as_str`]), inverted at one site
+/// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
+/// parse surface — including this shrunk-owned OS-string peer —
+/// reads through it.
+impl TryFrom<Box<std::ffi::OsStr>> for AdmissionTier {
+    type Error = anyhow::Error;
+
+    fn try_from(os_str: Box<std::ffi::OsStr>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::ffi::OsStr>>::try_from(os_str.as_ref())
+    }
+}
+
 /// Structural mirror of `impl TryFrom<Box<std::path::Path>> for
 /// PerAttemptRegion` — the shrunk-owned filesystem-path parse peer at
 /// the second ordered typed sum (mid-trio slot). Routes through
@@ -31711,6 +31795,135 @@ mod tests {
                 >>::try_from(owned)
                 .is_err(),
                 "TryFrom<Cow<'_, Path>> must reject valid-Unicode non-canonical Cow::Owned input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<std::ffi::OsStr>> for AdmissionTier`] recovers
+    /// the original variant at every [`AdmissionTier::ALL`] variant
+    /// when the canonical label emitted by [`AdmissionTier::as_str`]
+    /// is materialized as a [`std::ffi::OsString`] and shrunk to a
+    /// [`Box<std::ffi::OsStr>`] via
+    /// [`std::ffi::OsString::into_boxed_os_str`] and fed back through
+    /// it. Pins the round-trip identity at the shrunk-owned OS-string
+    /// frontier against the shared canonical-label oracle at the mid-
+    /// trio slot of the shrunk-owned OS-string parse trio, structural
+    /// mirror of
+    /// [`crate::retry::tests::test_per_attempt_region_try_from_box_os_str_agrees_with_from_str`]
+    /// carried at the first ordered typed sum.
+    #[test]
+    fn test_admission_tier_try_from_box_os_str_agrees_with_from_str() {
+        for tier in AdmissionTier::ALL {
+            let boxed: Box<std::ffi::OsStr> =
+                std::ffi::OsString::from(tier.as_str()).into_boxed_os_str();
+            let parsed =
+                <AdmissionTier as std::convert::TryFrom<Box<std::ffi::OsStr>>>::try_from(boxed)
+                    .expect("canonical Box<OsStr> must parse through TryFrom<Box<OsStr>>");
+            assert_eq!(
+                parsed, tier,
+                "TryFrom<Box<OsStr>> must round-trip at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Box<std::ffi::OsStr>> for AdmissionTier`]
+    /// identity carries through a generic
+    /// `impl TryFrom<Box<std::ffi::OsStr>>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(b: Box<OsStr>) -> T where T: TryFrom<Box<OsStr>>,
+    /// T::Error: Debug` — the shape of an actual downstream consumer
+    /// (validated-input newtype builder, serde `try_from` wrapper,
+    /// generic try-conversion helper that opts into the
+    /// [`TryFrom<Box<std::ffi::OsStr>>`] contract) — recovers the
+    /// canonical variant at every variant. The structural witness
+    /// that an [`AdmissionTier`] is genuinely usable at
+    /// `impl TryFrom<Box<std::ffi::OsStr>>` call sites — a regression
+    /// that drifted the [`TryFrom`] impl signature fails here at
+    /// compile time or at the assertion instead of at every downstream
+    /// generic call site.
+    #[test]
+    fn test_admission_tier_try_from_box_os_str_carries_through_generic_consumer() {
+        fn parse<T>(os_str: Box<std::ffi::OsStr>) -> T
+        where
+            T: std::convert::TryFrom<Box<std::ffi::OsStr>>,
+            <T as std::convert::TryFrom<Box<std::ffi::OsStr>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<Box<std::ffi::OsStr>>>::try_from(os_str)
+                .expect("canonical Box<OsStr> must parse through generic TryFrom<Box<OsStr>>")
+        }
+
+        for tier in AdmissionTier::ALL {
+            let boxed: Box<std::ffi::OsStr> =
+                std::ffi::OsString::from(tier.as_str()).into_boxed_os_str();
+            assert_eq!(
+                parse::<AdmissionTier>(boxed),
+                tier,
+                "generic TryFrom<Box<OsStr>> consumer must recover canonical variant at {tier:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<std::ffi::OsStr>> for AdmissionTier`] rejects
+    /// non-Unicode OS-string sequences at the
+    /// [`std::ffi::OsStr::to_str`] Unicode-decode frontier reached
+    /// through [`std::boxed::Box::<std::ffi::OsStr>::as_ref`] before
+    /// the [`FromStr`] canonical-grammar gate is reached — the input
+    /// is a [`std::os::unix::ffi::OsStringExt::from_vec`]-constructed
+    /// [`std::ffi::OsString`] shrunk to a [`Box<std::ffi::OsStr>`]
+    /// via [`std::ffi::OsString::into_boxed_os_str`]. Pins the
+    /// Unicode-decode strict-rejection contract at the shrunk-owned
+    /// OS-string try-conversion surface so a downstream consumer
+    /// bound by [`TryFrom<Box<std::ffi::OsStr>>`] inherits the same
+    /// Unicode-only grammar the sibling [`TryFrom<&std::ffi::OsStr>`]
+    /// impl and the direct `.parse::<AdmissionTier>()` call sites
+    /// already read. Unix-only because the only stable public API
+    /// for constructing a non-Unicode [`std::ffi::OsString`] view is
+    /// via [`std::os::unix::ffi::OsStringExt::from_vec`].
+    #[cfg(unix)]
+    #[test]
+    fn test_admission_tier_try_from_box_os_str_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_unicode_bytes: Vec<u8> = vec![0x80, 0xC3, 0xC0, 0x80, 0xFF];
+        let owned_os = std::ffi::OsString::from_vec(non_unicode_bytes);
+        let boxed: Box<std::ffi::OsStr> = owned_os.into_boxed_os_str();
+        assert!(
+            <AdmissionTier as std::convert::TryFrom<Box<std::ffi::OsStr>>>::try_from(boxed)
+                .is_err(),
+            "TryFrom<Box<OsStr>> must reject non-Unicode input",
+        );
+    }
+
+    /// [`TryFrom<Box<std::ffi::OsStr>> for AdmissionTier`] rejects
+    /// valid-Unicode non-canonical OS-string sequences with the same
+    /// strictness [`std::str::FromStr`] enforces — empty string,
+    /// UpperCamel rendering, uppercase, whitespace padding, and
+    /// snake_case labels with a dropped underscore all reject after
+    /// the Unicode-decode stage passes. Pins the FromStr-gate strict-
+    /// rejection contract at the shrunk-owned OS-string try-
+    /// conversion surface so a downstream consumer bound by
+    /// [`TryFrom<Box<std::ffi::OsStr>>`] inherits the same canonical-
+    /// only grammar the direct `.parse::<AdmissionTier>()` call sites
+    /// and the sibling [`TryFrom<&std::ffi::OsStr>`] /
+    /// [`TryFrom<std::ffi::OsString>`] /
+    /// [`TryFrom<Cow<'_, std::ffi::OsStr>>`] impls already read.
+    #[test]
+    fn test_admission_tier_try_from_box_os_str_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            " refused",
+            "refused ",
+            "stagingonly",
+        ] {
+            let boxed: Box<std::ffi::OsStr> = std::ffi::OsString::from(bad).into_boxed_os_str();
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<Box<std::ffi::OsStr>>>::try_from(boxed)
+                    .is_err(),
+                "TryFrom<Box<OsStr>> must reject valid-Unicode non-canonical input {bad:?}",
             );
         }
     }
