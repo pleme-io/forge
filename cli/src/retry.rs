@@ -8491,7 +8491,7 @@ impl Default for RetryPolicy {
 /// retryable set. The terminal 4xx family (400/401/403/404 — bad request,
 /// auth, not-found) is absent by construction: retrying cannot help, so
 /// failing fast preserves the budget.
-const TRANSIENT_HTTP_STATUS_CODES: &[&str] = &["500", "502", "503", "504", "408", "429"];
+const TRANSIENT_HTTP_STATUS_CODES: &[&str] = &["500", "502", "503", "504", "408", "421", "429"];
 
 /// Named/phrase markers in captured stderr that signal a transient
 /// network/server failure worth retrying. The list is canonical across
@@ -8596,6 +8596,73 @@ const TRANSIENT_NETWORK_STDERR_MARKERS: &[&str] = &[
     // carried above (TCP-read-budget exhaustion on an established
     // socket, distinct from the HTTP-status-layer 408 signal here).
     "Request Timeout",
+    // HTTP 421 Misdirected Request — named form. RFC 9110 §15.5.20 names
+    // the contract verbatim: "The client MAY retry the request, whether
+    // or not the request method is idempotent, over a different
+    // connection." The third RFC-explicit safe-retry 4xx code, peer to
+    // 408 (`Request Timeout`, RFC 9110 §15.5.9 — server never began
+    // processing) and 429 (`Too Many Requests`, RFC 6585 §4 — rate-limit
+    // backoff). Structurally distinct from both: 421 says "I received
+    // your request but I'm not the authoritative origin for this URI —
+    // reopen a fresh connection and send it again". The retry MUST land
+    // on a NEW connection (the reused connection is misdirected by
+    // construction), but the retry-policy oracle here only classifies
+    // transient vs terminal; the fresh-connection discipline is upstream
+    // of the classifier (every external CLI forge invokes opens a new
+    // process per attempt, so the retry inherits fresh connection state
+    // by construction).
+    //
+    // forge's pipeline trips on this shape during HTTP/2 connection
+    // reuse against SNI-mismatched origins: skopeo / regctl pushing to
+    // GHCR when the client's HTTP/2 pool reuses a connection whose
+    // ALPN-negotiated SAN covers multiple GHCR org tenants but the
+    // per-request Host header maps to a different backend routing
+    // (multi-repo image push in a single run, where the h2 pool
+    // opportunistically reuses the ghcr.io connection across `docker.io/
+    // org1/*` and `docker.io/org2/*` requests and the edge returns 421
+    // to force fresh connection state); attic-client hitting attic-server
+    // fronted by a wildcard-cert ingress (`*.attic.example.com`) where
+    // the h2 client reuses a connection across cache tenants and the
+    // ingress emits 421 when routing detects the reused connection's
+    // ALPN identity doesn't match the current request's virtual host.
+    // Every one is reconvergent within the existing retry-policy budget:
+    // the next attempt opens a fresh connection whose ALPN + SNI + Host
+    // triple is coherent, and the request completes. The fix here is
+    // recognizing the 421 named phrase the prior `"Request Timeout"` /
+    // `"Too Many Requests"` markers covered only the 408 / 429 axes,
+    // silently short-circuiting the third RFC-named safe-retry 4xx code
+    // at every consumer that reads the named-form dialect.
+    //
+    // Across the dialects forge's external CLIs emit:
+    // - Go net/http (skopeo, regctl, kubectl, helm-cli's HTTPS surface):
+    //   `http.StatusText(421)` returns `"Misdirected Request"` and Go's
+    //   http2 transport surfaces `"received unexpected HTTP status: 421
+    //   Misdirected Request"` when its internal retry-on-421 policy is
+    //   exhausted or disabled (transport's `NoRetryOnMisdirectedRequest`
+    //   / connection-pool-drained fallback);
+    // - curl (git-over-HTTPS, container-registry probes): emits `"The
+    //   requested URL returned error: 421 Misdirected Request"` from
+    //   `CURLE_HTTP_RETURNED_ERROR` when `--fail` is set;
+    // - reqwest / hyper (attic-client Rust surface): reqwest does NOT
+    //   auto-retry 421 (unlike Go's http2 transport), so the signal
+    //   surfaces directly through the error formatter: `"HTTP status
+    //   client error (421 Misdirected Request) for url <url>"` with
+    //   `reqwest::StatusCode::MISDIRECTED_REQUEST.canonical_reason()`
+    //   returning `"Misdirected Request"`;
+    // - nginx / envoy ingress emitting 421 on ALPN/SNI-vs-Host mismatch:
+    //   the response body carries the named text `"421 Misdirected
+    //   Request"` surfaced through whatever client dialect parses the
+    //   response.
+    // One casing only — every emitter passes through the canonical IANA
+    // HTTP Status Code Registry title-case (`Misdirected Request`) from
+    // the same static table Go's `http.StatusText`, reqwest's
+    // `canonical_reason`, libcurl's `Curl_strcase` lookup, and nginx's
+    // `ngx_http_error_pages` all source. Distinct from unrelated
+    // diagnostic phrases: `"misdirected"` in isolation could appear in
+    // routing-config docs, but the required leading `"Misdirected "`
+    // qualifier plus the following `"Request"` word keeps the signal
+    // to the HTTP-421 status-text surface.
+    "Misdirected Request",
     // Connection-level failures — both Go-stdlib lowercase and curl mixed-case.
     "Connection refused",
     "connection refused",
@@ -12775,6 +12842,88 @@ mod tests {
         // With advisory metadata still classifies transient.
         assert!(is_transient_network_stderr(
             "408 Request Timeout (client_body_timeout=60s exceeded)"
+        ));
+    }
+
+    /// HTTP 421 (Misdirected Request, RFC 9110 §15.5.20) is the third
+    /// RFC-explicit safe-retry 4xx code beyond 408 and 429: the spec
+    /// names the contract verbatim ("The client MAY retry the request,
+    /// whether or not the request method is idempotent, over a different
+    /// connection") so the shared `retry_command` / `run_with_policy`
+    /// driver MUST classify it transient and back off instead of failing
+    /// fast. Covers the dialects forge's CLIs emit against HTTP/2
+    /// connection-pool reuse against SNI-mismatched origins: skopeo /
+    /// regctl multi-repo GHCR pushes where the h2 pool reuses a
+    /// connection across org tenants, attic-client against a
+    /// wildcard-cert ingress-fronted attic-server where the h2 client
+    /// reuses a connection across cache tenants, and any Go/reqwest
+    /// client whose internal 421-retry policy is disabled or exhausted.
+    /// This is the load-bearing pin: the pre-fix marker set carried 408
+    /// and 429 as retryable 4xx but silently short-circuited 421 to
+    /// terminal at every consumer that reads the named-form dialect —
+    /// reqwest's `"HTTP status client error (Misdirected Request) for
+    /// url"` carries no standalone `"421"` token for the numeric matcher
+    /// (it sits inside the paren before the named text), and the
+    /// pre-existing `"Request Timeout"` / `"Too Many Requests"` markers
+    /// cover the 408 / 429 axes but never the HTTP-421
+    /// connection-misdirection axis the h2 transport surfaces on
+    /// SNI/ALPN-vs-Host mismatch.
+    ///
+    /// Fail-before: the pre-fix marker set carried numeric "408" / "429"
+    /// and named "Request Timeout" / "Too Many Requests" but not "421"
+    /// or "Misdirected Request", so every realistic skopeo / regctl /
+    /// attic-client / curl / hyper-reqwest HTTP/2-pool-reuse 421 that
+    /// emitted the misdirection signal short-circuited to terminal —
+    /// the typed retry loop refused to back off, burning the multi-repo
+    /// push against a transient HTTP/2 connection-affinity event.
+    /// Pass-after: every realistic dialect classifies transient and the
+    /// shared `retry_command` / `run_with_policy` driver backs off and
+    /// retries the request; the fresh process (fresh HTTP/2 connection
+    /// pool) inherits a coherent SNI + ALPN + Host triple and the
+    /// request completes.
+    #[test]
+    fn test_transient_classifier_matches_421_misdirected_request() {
+        // skopeo / regctl: numeric + named in one line via Go's
+        // `http.StatusText(421)` formatter when the h2 transport's
+        // internal `NoRetryOnMisdirectedRequest` fallback fires.
+        assert!(is_transient_network_stderr(
+            "Error: writing blob: received unexpected HTTP status: 421 Misdirected Request"
+        ));
+        // curl (git-over-HTTPS, container-registry probes): numeric +
+        // named via `CURLE_HTTP_RETURNED_ERROR` when `--fail` is set.
+        assert!(is_transient_network_stderr(
+            "curl: (22) The requested URL returned error: 421 Misdirected Request"
+        ));
+        // curl numeric-only variant the matcher must catch via the
+        // token-wise status code list (no named text after the number).
+        assert!(is_transient_network_stderr(
+            "The requested URL returned error: 421"
+        ));
+        // reqwest / attic: named form within paren — the numeric "421"
+        // appears in the paren but the named phrase carries the signal.
+        assert!(is_transient_network_stderr(
+            "HTTP status client error (421 Misdirected Request) for url"
+        ));
+        // reqwest variant emitting only the canonical_reason inside the
+        // paren without the numeric prefix (older reqwest formats).
+        assert!(is_transient_network_stderr(
+            "HTTP status client error (Misdirected Request) for url"
+        ));
+        // Go net/http client formatted error against an ingress that
+        // returned 421 on SNI/ALPN-vs-Host mismatch during h2 pool reuse.
+        assert!(is_transient_network_stderr(
+            "Put \"https://ghcr.io/v2/org/repo/blobs/upload\": 421 Misdirected Request"
+        ));
+        // nginx / envoy ingress body passthrough — the default `421
+        // Misdirected Request` response body when the ingress detects
+        // ALPN identity vs virtual-host mismatch on the reused
+        // connection.
+        assert!(is_transient_network_stderr(
+            "<html><head><title>421 Misdirected Request</title></head>"
+        ));
+        // With advisory metadata still classifies transient.
+        assert!(is_transient_network_stderr(
+            "421 Misdirected Request (h2 pool: reused connection SAN mismatch)"
         ));
     }
 
