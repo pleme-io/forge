@@ -10450,6 +10450,100 @@ impl TryFrom<std::rc::Rc<std::ffi::OsStr>> for AdmissionTier {
     }
 }
 
+/// [`TryFrom<Rc<std::path::Path>> for AdmissionTier`] routes through
+/// [`std::rc::Rc::<std::path::Path>::as_ref`] on the caller-supplied
+/// thread-local shared-owned filesystem path and the by-reference
+/// filesystem-path parse peer [`TryFrom<&std::path::Path>`] (which itself
+/// composes [`std::path::Path::as_os_str`] with [`std::ffi::OsStr::to_str`]
+/// and [`TryFrom<&str>`], which delegates through
+/// [`<AdmissionTier as std::str::FromStr>::from_str`]), so a downstream
+/// consumer bound by `impl TryFrom<Rc<std::path::Path>>` (a non-`Sync`
+/// filesystem-walk renderer that stashes canonical admission-tier labels
+/// in an [`Rc`] cell for cheap in-thread clone, a `Box<std::path::Path>::
+/// into` shared-buffer input that trades exclusive shrunk-owned single-
+/// owner semantics for a shared reader-count of the same immutable
+/// filesystem path within a single thread, a generic try-conversion
+/// helper `fn parse<T: TryFrom<Rc<std::path::Path>>>` that composes with
+/// thread-local shared-owned filesystem-path inputs) recovers an
+/// [`AdmissionTier`] value from a thread-local shared-owned canonical
+/// filesystem-path label through the same one-oracle grammar the sibling
+/// [`TryFrom<&std::path::Path>`], [`TryFrom<std::path::PathBuf>`],
+/// [`TryFrom<std::borrow::Cow<'_, std::path::Path>>`],
+/// [`TryFrom<Box<std::path::Path>>`], and (one refcount discipline above)
+/// [`TryFrom<std::sync::Arc<std::path::Path>>`] shared-owned parse peers
+/// read.
+///
+/// The thread-local shared-owned filesystem-path parse peer of
+/// [`TryFrom<std::sync::Arc<std::path::Path>>`] above and the filesystem-
+/// path frontier peer of [`TryFrom<std::rc::Rc<std::ffi::OsStr>>`]
+/// directly above — all three route through the shared
+/// [`<AdmissionTier as std::str::FromStr>::from_str`] canonical-label
+/// parse oracle, differing on refcount discipline and frontier:
+/// [`Arc<Path>`] carries an atomic-refcount header safe across sibling
+/// threads, this [`Rc<Path>`] carries a single-threaded refcount header
+/// restricted to the receiver's thread, and [`Rc<OsStr>`] carries the
+/// same thread-local refcount discipline at the OS-string frontier
+/// (one layer below the filesystem-path frontier — [`std::path::Path`]
+/// is a newtype wrapper over [`std::ffi::OsStr`]).
+///
+/// Mid-trio slot in the thread-local shared-owned filesystem-path parse
+/// trio at the admission-tier ladder — the opening peer at
+/// [`crate::retry::PerAttemptRegion`] was carried at 4497115
+/// (`TryFrom<Rc<std::path::Path>> for PerAttemptRegion` — opens the
+/// thread-local shared-owned filesystem-path parse trio), the closing
+/// peer at [`crate::version::BumpLevel`] follows next, matching every
+/// prior parse-trio mid-slot ordering at the admission-tier ladder —
+/// the atomic-shared-owned filesystem-path parse trio mid-slot (aec69b1
+/// for [`TryFrom<std::sync::Arc<std::path::Path>>`]) at the sibling
+/// atomic-refcount filesystem-path frontier, and the thread-local
+/// shared-owned OS-string parse trio mid-slot (2adee36 for
+/// [`TryFrom<std::rc::Rc<std::ffi::OsStr>>`]) at the sibling OS-string
+/// frontier one layer below.
+///
+/// The parser inherits the two-stage strict-rejection discipline of the
+/// underlying [`TryFrom<&std::path::Path>`] impl: non-Unicode
+/// [`std::path::Path`] input reaches the [`std::ffi::OsStr::to_str`]
+/// Unicode-decode boundary and returns an [`anyhow::Error`] before the
+/// [`FromStr`] canonical-grammar gate; valid-Unicode but non-canonical
+/// input (empty, UpperCamel, whitespace-padded, uppercase, snake_case-
+/// with-dropped-underscore) reaches the [`FromStr`] canonical-grammar
+/// gate and returns an [`anyhow::Error`] there.
+///
+/// The identity `AdmissionTier::try_from(Rc::<Path>::from(
+/// PathBuf::from(tier.as_str()).into_boxed_path())).unwrap() == tier`
+/// at every [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_try_from_rc_path_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<Rc<std::path::Path>>` consumer is pinned by
+/// [`tests::test_admission_tier_try_from_rc_path_carries_through_generic_consumer`];
+/// the Unicode-decode strict-rejection contract at the thread-local
+/// shared-owned filesystem-path boundary is pinned (Unix-only) by
+/// [`tests::test_admission_tier_try_from_rc_path_rejects_non_unicode_input`];
+/// the FromStr-gate strict-rejection contract on valid-Unicode non-
+/// canonical thread-local shared-owned filesystem-path input is pinned
+/// by
+/// [`tests::test_admission_tier_try_from_rc_path_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// filesystem-path parse surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one
+/// [`TryFrom<std::rc::Rc<std::path::Path>>`] impl routing through
+/// [`Rc::<std::path::Path>::as_ref`] and [`TryFrom<&std::path::Path>`]),
+/// not a per-consumer `.as_ref().as_os_str().to_str().parse()`
+/// composition at every downstream site. THEORY.md §VI.1 one-oracle:
+/// the canonical label grammar is named at one site
+/// ([`AdmissionTier::as_str`]), inverted at one site
+/// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
+/// parse surface — including this thread-local shared-owned filesystem-
+/// path peer — reads through it.
+impl TryFrom<std::rc::Rc<std::path::Path>> for AdmissionTier {
+    type Error = anyhow::Error;
+
+    fn try_from(path: std::rc::Rc<std::path::Path>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::path::Path>>::try_from(path.as_ref())
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -32779,6 +32873,140 @@ mod tests {
                 )
                 .is_err(),
                 "TryFrom<Rc<OsStr>> must reject valid-Unicode non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::rc::Rc<std::path::Path>> for AdmissionTier`]
+    /// recovers the original variant at every [`AdmissionTier::ALL`]
+    /// variant when the canonical label emitted by
+    /// [`AdmissionTier::as_str`] is materialized as a
+    /// [`std::path::PathBuf`], shrunk to a [`Box<std::path::Path>`] via
+    /// [`std::path::PathBuf::into_boxed_path`], and lifted to a
+    /// [`std::rc::Rc<std::path::Path>`] via
+    /// [`std::rc::Rc::<std::path::Path>::from`] before being fed back
+    /// through it. Pins the round-trip identity at the thread-local
+    /// shared-owned filesystem-path frontier against the shared
+    /// canonical-label oracle at the mid-trio slot of the thread-local
+    /// shared-owned filesystem-path parse trio, structural mirror of
+    /// [`crate::retry::tests::test_per_attempt_region_try_from_rc_path_agrees_with_from_str`]
+    /// carried at the first ordered typed sum.
+    #[test]
+    fn test_admission_tier_try_from_rc_path_agrees_with_from_str() {
+        for tier in AdmissionTier::ALL {
+            let boxed: Box<std::path::Path> =
+                std::path::PathBuf::from(tier.as_str()).into_boxed_path();
+            let rc: std::rc::Rc<std::path::Path> = std::rc::Rc::from(boxed);
+            let parsed =
+                <AdmissionTier as std::convert::TryFrom<std::rc::Rc<std::path::Path>>>::try_from(
+                    rc,
+                )
+                .expect("canonical Rc<Path> must parse through TryFrom<Rc<Path>>");
+            assert_eq!(
+                parsed, tier,
+                "TryFrom<Rc<Path>> must round-trip at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<std::rc::Rc<std::path::Path>> for AdmissionTier`]
+    /// identity carries through a generic
+    /// `impl TryFrom<Rc<std::path::Path>>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(r: Rc<Path>) -> T where T: TryFrom<Rc<Path>>,
+    /// T::Error: Debug` — the shape of an actual downstream consumer
+    /// (validated-input newtype builder handing thread-local shared
+    /// filesystem-path clones to non-`Send` receivers, per-thread
+    /// memoized canonical-label cache, generic try-conversion helper
+    /// that opts into the [`TryFrom<std::rc::Rc<std::path::Path>>`]
+    /// contract) — recovers the canonical variant at every variant.
+    /// Structural witness that an [`AdmissionTier`] is genuinely
+    /// usable at `impl TryFrom<Rc<std::path::Path>>` call sites — a
+    /// regression that drifted the [`TryFrom`] impl signature fails
+    /// here at compile time or at the assertion instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_admission_tier_try_from_rc_path_carries_through_generic_consumer() {
+        fn parse<T>(path: std::rc::Rc<std::path::Path>) -> T
+        where
+            T: std::convert::TryFrom<std::rc::Rc<std::path::Path>>,
+            <T as std::convert::TryFrom<std::rc::Rc<std::path::Path>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::rc::Rc<std::path::Path>>>::try_from(path)
+                .expect("canonical Rc<Path> must parse through generic TryFrom<Rc<Path>>")
+        }
+
+        for tier in AdmissionTier::ALL {
+            let boxed: Box<std::path::Path> =
+                std::path::PathBuf::from(tier.as_str()).into_boxed_path();
+            let rc: std::rc::Rc<std::path::Path> = std::rc::Rc::from(boxed);
+            assert_eq!(
+                parse::<AdmissionTier>(rc),
+                tier,
+                "generic TryFrom<Rc<Path>> consumer must recover canonical variant at {tier:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::rc::Rc<std::path::Path>> for AdmissionTier`]
+    /// rejects non-Unicode filesystem-path sequences at the
+    /// [`std::ffi::OsStr::to_str`] Unicode-decode frontier reached
+    /// through [`std::path::Path::as_os_str`] via
+    /// [`std::rc::Rc::<std::path::Path>::as_ref`] before the
+    /// [`FromStr`] canonical-grammar gate is reached. Unix-only because
+    /// the only stable public API for constructing a non-Unicode
+    /// [`std::ffi::OsString`] view is via
+    /// [`std::os::unix::ffi::OsStringExt::from_vec`].
+    #[cfg(unix)]
+    #[test]
+    fn test_admission_tier_try_from_rc_path_rejects_non_unicode_input() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_unicode_bytes: Vec<u8> = vec![0x80, 0xC3, 0xC0, 0x80, 0xFF];
+        let owned_os = std::ffi::OsString::from_vec(non_unicode_bytes);
+        let boxed: Box<std::path::Path> = std::path::PathBuf::from(owned_os).into_boxed_path();
+        let rc: std::rc::Rc<std::path::Path> = std::rc::Rc::from(boxed);
+        assert!(
+            <AdmissionTier as std::convert::TryFrom<std::rc::Rc<std::path::Path>>>::try_from(rc)
+                .is_err(),
+            "TryFrom<Rc<Path>> must reject non-Unicode input",
+        );
+    }
+
+    /// [`TryFrom<std::rc::Rc<std::path::Path>> for AdmissionTier`]
+    /// rejects valid-Unicode non-canonical filesystem-path sequences
+    /// with the same strictness [`std::str::FromStr`] enforces — empty
+    /// string, UpperCamel rendering, uppercase, whitespace padding, and
+    /// snake_case labels with a dropped underscore all reject after the
+    /// Unicode-decode stage passes. Pins the FromStr-gate strict-
+    /// rejection contract at the thread-local shared-owned filesystem-
+    /// path try-conversion surface so a downstream consumer bound by
+    /// [`TryFrom<std::rc::Rc<std::path::Path>>`] inherits the same
+    /// canonical-only grammar the direct `.parse::<AdmissionTier>()`
+    /// call sites and the sibling [`TryFrom<&std::path::Path>`],
+    /// [`TryFrom<std::path::PathBuf>`], [`TryFrom<Cow<'_,
+    /// std::path::Path>>`], [`TryFrom<Box<std::path::Path>>`], and
+    /// [`TryFrom<std::sync::Arc<std::path::Path>>`] impls already read.
+    #[test]
+    fn test_admission_tier_try_from_rc_path_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            " refused",
+            "refused ",
+            "stagingonly",
+        ] {
+            let boxed: Box<std::path::Path> = std::path::PathBuf::from(bad).into_boxed_path();
+            let rc: std::rc::Rc<std::path::Path> = std::rc::Rc::from(boxed);
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<std::rc::Rc<std::path::Path>>>::try_from(
+                    rc
+                )
+                .is_err(),
+                "TryFrom<Rc<Path>> must reject valid-Unicode non-canonical input {bad:?}",
             );
         }
     }
