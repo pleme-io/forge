@@ -2414,6 +2414,123 @@ impl From<BumpLevel> for std::borrow::Cow<'static, std::path::Path> {
     }
 }
 
+/// [`From<BumpLevel> for Box<std::ffi::OsStr>`] routes through
+/// [`BumpLevel::as_str`] composed with [`std::ffi::OsStr::new`]
+/// composed with [`Box::<std::ffi::OsStr>::from`] so a downstream
+/// consumer that takes an owned [`Box<std::ffi::OsStr>`] via
+/// [`Into<Box<std::ffi::OsStr>>`] (a config-struct field typed as
+/// [`Box<std::ffi::OsStr>`] to shrink a canonical OS-string label off
+/// a resizable [`std::ffi::OsString`]'s spare-capacity tail, a
+/// [`std::env::args_os`] receiver that stashes a canonical
+/// [`BumpLevel`] argument in a
+/// [`std::collections::HashMap<Box<std::ffi::OsStr>, _>`] key without
+/// paying the [`std::ffi::OsString`] growth-header cost, a validated-
+/// input newtype wrapper that stores a canonical OS-string label as a
+/// fixed-size heap allocation, a serde container that opts into
+/// `#[serde(from = "Box<std::ffi::OsStr>")]` at the immutable-owned
+/// OS-string frontier) reads the canonical lowercase label
+/// (`"patch"`, `"minor"`, `"major"`) as a shrunk-owned
+/// [`Box<std::ffi::OsStr>`] with the single heap allocation named at
+/// this typed-primitive site rather than at every downstream
+/// `Box::<std::ffi::OsStr>::from(std::ffi::OsStr::new(level.as_str()))`
+/// call site.
+///
+/// The by-value shrunk-owned emit peer of the by-value owned
+/// [`From<BumpLevel> for std::ffi::OsString`] surface (line 1829) and
+/// the by-value borrowed [`From<BumpLevel> for &'static
+/// std::ffi::OsStr`] surface (line 2040) above — all three are OS-
+/// string emit surfaces at the same canonical-label oracle,
+/// differing only on receiver-side shape: [`From<T> for
+/// std::ffi::OsString`] returns a growth-header-carrying resizable
+/// owned buffer for consumers that will mutate or extend the label,
+/// [`From<T> for &'static std::ffi::OsStr`] returns a zero-copy
+/// `'static`-lived borrow into the static-string constant table for
+/// consumers that want the borrow, this [`From<T> for
+/// Box<std::ffi::OsStr>`] returns a shrunk immutable heap allocation
+/// with no growth-header for consumers that own the label but do not
+/// need mutation or resizing. All three route through the same
+/// [`BumpLevel::as_str`] canonical-label oracle.
+///
+/// Structural mirror of [`From<BumpLevel> for Box<str>`] (line 5946)
+/// and [`From<BumpLevel> for Box<[u8]>`] (line 4418) at the UTF-8 and
+/// byte-slice frontiers respectively — the same by-value shrunk-
+/// owned emit surface at the same one-oracle discipline, projected
+/// onto the OS-string frontier this time; all siblings shrink through
+/// the standard library `From<&T> for Box<T>` impl at their
+/// respective frontier constructor ([`Box::<str>::from`] for the
+/// UTF-8 sibling routing through the `&str` view,
+/// [`Box::<[u8]>::from`] for the byte-slice sibling routing through
+/// the `.as_bytes()` view, [`Box::<std::ffi::OsStr>::from`] here
+/// routing through [`std::ffi::OsStr::new`] over the same `&str`
+/// view). Single allocation:
+/// [`Box::<std::ffi::OsStr>::from(&std::ffi::OsStr)`] allocates
+/// exactly the number of bytes the borrowed OS-string view carries,
+/// matching the shrunk-owned discipline the [`Box<str>`] and
+/// [`Box<[u8]>`] emit peers already carry at their respective
+/// frontiers, whereas the [`std::ffi::OsString`] emit peer carries a
+/// growth-header for future extension.
+///
+/// Trio-closing peer at the third ordered typed sum of the by-value
+/// shrunk-owned OS-string emit trio:
+/// [`From<crate::retry::PerAttemptRegion> for Box<std::ffi::OsStr>`]
+/// (commit 4a4a9d7) opened the trio at the per-attempt-region ladder;
+/// [`From<crate::probe_outcome::AdmissionTier> for
+/// Box<std::ffi::OsStr>`] (commit ab2fdcd) carried the mid-trio slot
+/// at the admission-tier ladder; this impl closes the trio at the
+/// version-bump-magnitude ladder, matching the [`From<T> for
+/// std::borrow::Cow<'static, std::ffi::OsStr>`] closure order at the
+/// borrowed/owned-frontier OS-string emit sibling
+/// (24f6110 → 4e94fc5 → f305c9b), the [`From<T> for
+/// std::ffi::OsString`] closure order at the owned OS-string emit
+/// sibling, the [`From<T> for &'static std::ffi::OsStr`] closure
+/// order at the by-value static-lifetime OS-string emit sibling, and
+/// the [`From<T> for Box<str>`] and [`From<T> for Box<[u8]>`] closure
+/// orders at the shrunk-owned UTF-8 and byte-slice emit siblings one
+/// frontier below. After this commit the shrunk-owned OS-string emit
+/// frontier joins the closed-across-all-three-typed-sums set
+/// alongside the closed shrunk-owned UTF-8 (`Box<str>`) and byte-
+/// slice (`Box<[u8]>`) emit trios one frontier below — sharpens the
+/// case for a lifted derive-macro that generates the shrunk-owned
+/// emit cross-product across UTF-8 / byte-slice / OS-string /
+/// filesystem-path frontiers at every oracle-label-annotated enum.
+///
+/// The identity `Box::<std::ffi::OsStr>::from(level).as_ref() ==
+/// std::ffi::OsStr::new(level.as_str())` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_into_box_os_str_agrees_with_os_str_new_as_str`];
+/// the identity carried through a generic
+/// `impl Into<Box<std::ffi::OsStr>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_into_box_os_str_carries_through_generic_consumer`];
+/// the round-trip through [`std::ffi::OsStr::to_str`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_bump_level_into_box_os_str_round_trips_through_to_str`];
+/// the owned-independence contract (two independent shrunk-owned
+/// [`Box<std::ffi::OsStr>`] emits from the same variant carry
+/// distinct heap addresses and neither aliases the `'static` static-
+/// string constant table) is pinned by
+/// [`tests::test_bump_level_into_box_os_str_is_owned_independent`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned OS-
+/// string emit surface is a typed-primitive site on [`BumpLevel`]
+/// itself (one `From<BumpLevel> for Box<std::ffi::OsStr>` impl
+/// routing through [`BumpLevel::as_str`], [`std::ffi::OsStr::new`],
+/// and [`Box::<std::ffi::OsStr>::from`]), not a per-consumer
+/// `Box::<std::ffi::OsStr>::from(std::ffi::OsStr::new(level.as_str()))`
+/// restatement at every downstream site that accepts
+/// `impl Into<Box<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`BumpLevel::as_str`]) and
+/// every OS-string emit surface —
+/// [`From<T> for std::ffi::OsString`],
+/// [`From<T> for &'static std::ffi::OsStr`],
+/// [`From<T> for std::borrow::Cow<'static, std::ffi::OsStr>`], this
+/// [`From<T> for Box<std::ffi::OsStr>`] — reads through it.
+impl From<BumpLevel> for Box<std::ffi::OsStr> {
+    fn from(level: BumpLevel) -> Box<std::ffi::OsStr> {
+        Box::<std::ffi::OsStr>::from(std::ffi::OsStr::new(level.as_str()))
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -9969,6 +10086,157 @@ mod tests {
                 matches!(cow, std::borrow::Cow::Borrowed(_)),
                 "From<BumpLevel> for Cow<'static, Path> must return Cow::Borrowed \
                  (zero-allocation branch) at {level:?}, not Cow::Owned",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for Box<std::ffi::OsStr>`] agrees with the
+    /// canonical [`std::ffi::OsStr::new`]`(as_str())` label at every
+    /// [`BumpLevel::ALL`] variant. Pins the identity
+    /// `Box::<std::ffi::OsStr>::from(level).as_ref() ==
+    /// std::ffi::OsStr::new(level.as_str())` at every variant so a
+    /// future variant insertion / grammar refinement at the shared
+    /// [`BumpLevel::as_str`] oracle propagates to the by-value shrunk-
+    /// owned OS-string emit surface without a per-variant retype at
+    /// the [`From`] impl body. The structural agreement pin between
+    /// the by-value shrunk-owned OS-string emit surface
+    /// ([`From<BumpLevel> for Box<std::ffi::OsStr>`]) and the
+    /// canonical-label OS-string oracle
+    /// ([`std::ffi::OsStr::new`]`(BumpLevel::as_str)`) — structural
+    /// mirror of [`test_bump_level_into_box_str_agrees_with_as_str`]
+    /// at the UTF-8 sibling frontier and structural mirror of
+    /// `test_per_attempt_region_into_box_os_str_agrees_with_os_str_new_as_str`
+    /// (commit 4a4a9d7) at the trio-opener per-attempt-region ladder
+    /// and `test_admission_tier_into_box_os_str_agrees_with_os_str_new_as_str`
+    /// (commit ab2fdcd) at the mid-trio admission-tier ladder —
+    /// closing the shrunk-owned OS-string emit agreement pin at the
+    /// third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_box_os_str_agrees_with_os_str_new_as_str() {
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::ffi::OsStr> = Box::<std::ffi::OsStr>::from(level);
+            assert_eq!(
+                boxed.as_ref(),
+                std::ffi::OsStr::new(level.as_str()),
+                "From<BumpLevel> for Box<OsStr> must agree with OsStr::new(as_str()) at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Box<std::ffi::OsStr>`] identity
+    /// carries through a generic `impl Into<Box<std::ffi::OsStr>>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny generic
+    /// function
+    /// `fn read<T: Into<Box<std::ffi::OsStr>>>(t: T) ->
+    /// Box<std::ffi::OsStr> { t.into() }` — the shape of an actual
+    /// downstream consumer (config-struct field typed as
+    /// [`Box<std::ffi::OsStr>`] to shrink a canonical OS-string label
+    /// off a resizable [`std::ffi::OsString`], a
+    /// [`std::collections::HashMap<Box<std::ffi::OsStr>, _>`] key
+    /// builder, a serde container that opts into
+    /// `#[serde(from = "Box<OsStr>")]`) — reads the canonical
+    /// lowercase label directly from a [`BumpLevel`] value at a
+    /// single heap allocation. Structural mirror of
+    /// `test_per_attempt_region_into_box_os_str_carries_through_generic_consumer`
+    /// (commit 4a4a9d7) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_box_os_str_carries_through_generic_consumer`
+    /// (commit ab2fdcd) at the mid-trio admission-tier ladder —
+    /// closing the shrunk-owned OS-string generic-consumer pin at
+    /// the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_box_os_str_carries_through_generic_consumer() {
+        fn read<T: Into<Box<std::ffi::OsStr>>>(t: T) -> Box<std::ffi::OsStr> {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).as_ref(),
+                std::ffi::OsStr::new(level.as_str()),
+                "generic Into<Box<OsStr>> consumer must read canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`], the shrunk-owned [`Box<std::ffi::OsStr>`]
+    /// emitted by the [`From`] impl round-trips through
+    /// [`std::ffi::OsStr::to_str`] back to the canonical lowercase
+    /// label exactly. Ties the by-value shrunk-owned OS-string emit
+    /// frontier to the UTF-8 frontier through the standard library's
+    /// OS-string-to-UTF-8 decoder at ONE named site: a regression
+    /// that drifted [`From<T> for Box<std::ffi::OsStr>`] to yield
+    /// non-Unicode bytes (a byte-swapped label, a mangled locale
+    /// encoding, a truncated multi-byte sequence) fails here with an
+    /// [`Option::None`] at the [`std::ffi::OsStr::to_str`] boundary
+    /// or a label mismatch at the round-trip assertion. Structural
+    /// mirror of
+    /// `test_per_attempt_region_into_box_os_str_round_trips_through_to_str`
+    /// (commit 4a4a9d7) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_box_os_str_round_trips_through_to_str`
+    /// (commit ab2fdcd) at the mid-trio admission-tier ladder —
+    /// closing the shrunk-owned OS-string round-trip pin at the third
+    /// and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_box_os_str_round_trips_through_to_str() {
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::ffi::OsStr> = Box::<std::ffi::OsStr>::from(level);
+            let decoded = boxed.to_str().unwrap_or_else(|| {
+                panic!("From<BumpLevel> for Box<OsStr> bytes for {level:?} must decode as UTF-8")
+            });
+            assert_eq!(
+                decoded,
+                level.as_str(),
+                "OsStr::to_str round-trip must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for Box<std::ffi::OsStr>`] returns a heap-
+    /// allocated owned buffer distinct from the `'static` static-
+    /// string constant table backing [`BumpLevel::as_str`]. Pins the
+    /// shape-of-ownership contract at the shrunk-owned OS-string emit
+    /// frontier: two independent boxes emitted from the same variant
+    /// carry distinct heap addresses (each is its own owned
+    /// allocation, neither aliases the other), and neither box shares
+    /// its backing bytes with the static-string constant's address. A
+    /// regression that drifted the [`From`] impl to return a
+    /// hypothetical zero-allocation view over the `'static` constant
+    /// (e.g., an [`unsafe`] cast from `&'static std::ffi::OsStr` to
+    /// [`Box<std::ffi::OsStr>`]) would still pass the agreement pin
+    /// but fails this ownership-shape pin, mirroring the owned-
+    /// independence discipline the [`Box<str>`] and [`Box<[u8]>`]
+    /// emit siblings already carry at their frontiers. Structural
+    /// mirror of
+    /// `test_per_attempt_region_into_box_os_str_is_owned_independent`
+    /// (commit 4a4a9d7) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_box_os_str_is_owned_independent`
+    /// (commit ab2fdcd) at the mid-trio admission-tier ladder —
+    /// closing the shrunk-owned OS-string ownership-shape pin at the
+    /// third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_box_os_str_is_owned_independent() {
+        for level in BumpLevel::ALL {
+            let boxed_a: Box<std::ffi::OsStr> = Box::<std::ffi::OsStr>::from(level);
+            let boxed_b: Box<std::ffi::OsStr> = Box::<std::ffi::OsStr>::from(level);
+            let static_addr = std::ffi::OsStr::new(level.as_str()) as *const std::ffi::OsStr
+                as *const () as usize;
+            let addr_a = &*boxed_a as *const std::ffi::OsStr as *const () as usize;
+            let addr_b = &*boxed_b as *const std::ffi::OsStr as *const () as usize;
+            assert_ne!(
+                addr_a, addr_b,
+                "two independent Box<OsStr> emits must occupy distinct heap allocations at {level:?}",
+            );
+            assert_ne!(
+                addr_a, static_addr,
+                "Box<OsStr> must not alias the 'static canonical-label constant at {level:?}",
+            );
+            assert_ne!(
+                addr_b, static_addr,
+                "Box<OsStr> must not alias the 'static canonical-label constant at {level:?}",
             );
         }
     }
