@@ -2778,6 +2778,144 @@ impl From<BumpLevel> for std::sync::Arc<std::ffi::OsStr> {
     }
 }
 
+/// [`From<BumpLevel> for Arc<std::path::Path>`] routes through
+/// [`BumpLevel::as_str`] composed with [`std::path::Path::new`]
+/// composed with [`std::sync::Arc::<std::path::Path>::from`] so a
+/// downstream consumer that takes a shared-owned
+/// [`Arc<std::path::Path>`] via [`Into<Arc<std::path::Path>>`] (a
+/// cross-thread cached-filesystem-path slot typed as
+/// [`Arc<std::path::Path>`] to share a canonical [`BumpLevel`] label
+/// across worker threads via atomic refcount, a validated-input
+/// newtype wrapper whose canonical filesystem-path label field is
+/// stored as [`Arc<std::path::Path>`] to hand cheap
+/// [`std::sync::Arc::clone`]s to sibling structures, a serde container
+/// that opts into `#[serde(from = "Arc<std::path::Path>")]` at the
+/// shared-owned filesystem-path frontier, a dashmap-style keyed-table
+/// filesystem-path-value slot whose readers want an [`Arc`] clone
+/// rather than a per-lookup allocation, a per-request-arena
+/// filesystem-path slot cheap-cloned across worker threads without
+/// per-clone allocation) reads the canonical lowercase label
+/// (`"patch"`, `"minor"`, `"major"`) as a shared-owned
+/// [`Arc<std::path::Path>`] with a single allocation for the
+/// atomic-refcount header plus the exact-length label bytes, enabling
+/// `O(1)` [`std::sync::Arc::clone`] on the emit result across worker
+/// threads — through ONE composition rather than a per-consumer
+/// `Arc::<std::path::Path>::from(std::path::Path::new(level.as_str()))`
+/// restatement.
+///
+/// The by-value shared-owned emit peer of the by-value owned
+/// [`From<BumpLevel> for std::path::PathBuf`] surface (line 1944), the
+/// by-value borrowed [`From<BumpLevel> for &'static std::path::Path`]
+/// surface (line 2141), the by-value borrowed/owned
+/// [`From<BumpLevel> for std::borrow::Cow<'static, std::path::Path>`]
+/// surface (line 2411), and the by-value shrunk-owned
+/// [`From<BumpLevel> for Box<std::path::Path>`] surface (line 2646)
+/// above — all five are filesystem-path emit surfaces at the same
+/// canonical-label oracle, differing only on receiver-side shape:
+/// [`From<T> for std::path::PathBuf`] returns a growth-header-carrying
+/// resizable owned buffer, [`From<T> for &'static std::path::Path`]
+/// returns a zero-copy `'static`-lived borrow into the static-string
+/// constant table, [`From<T> for Cow<'static, std::path::Path>`]
+/// returns either uniformly at the borrowed/owned frontier,
+/// [`From<T> for Box<std::path::Path>`] returns a shrunk immutable
+/// heap allocation with no refcount header, this [`From<T> for
+/// Arc<std::path::Path>`] returns a shared-owned immutable heap
+/// allocation with an atomic-refcount header preceding the label
+/// bytes for consumers that will hand cheap [`Arc::clone`]s across
+/// worker threads. All five route through the same
+/// [`BumpLevel::as_str`] canonical-label oracle.
+///
+/// Structural mirror of [`From<BumpLevel> for Arc<str>`] (line 6547),
+/// [`From<BumpLevel> for Arc<[u8]>`] (line 4896), and
+/// [`From<BumpLevel> for Arc<std::ffi::OsStr>`] (line 2775, commit
+/// 3280cd3) at the UTF-8, byte-slice, and OS-string frontiers
+/// respectively — the same by-value shared-owned emit surface at the
+/// same one-oracle discipline, projected onto the filesystem-path
+/// frontier this time; all siblings route through the standard library
+/// `From<&T> for Arc<T>` impl at their respective frontier constructor
+/// ([`std::sync::Arc::<str>::from`] for the UTF-8 sibling routing
+/// through the `&str` view, [`std::sync::Arc::<[u8]>::from`] for the
+/// byte-slice sibling routing through the `.as_bytes()` view,
+/// [`std::sync::Arc::<std::ffi::OsStr>::from`] for the OS-string
+/// sibling routing through [`std::ffi::OsStr::new`] over the same
+/// `&str` view, [`std::sync::Arc::<std::path::Path>::from`] here
+/// routing through [`std::path::Path::new`] over the same `&str`
+/// view). Single allocation:
+/// [`std::sync::Arc::<std::path::Path>::from`] on a borrowed
+/// filesystem-path view allocates exactly the atomic-refcount header
+/// plus the label bytes, matching the shared-owned discipline the
+/// [`Arc<str>`], [`Arc<[u8]>`], and [`Arc<std::ffi::OsStr>`] emit
+/// peers already carry at their respective frontiers, whereas the
+/// [`Box<std::path::Path>`] emit peer carries no refcount header and
+/// the [`std::path::PathBuf`] emit peer carries a growth-header for
+/// future extension.
+///
+/// Trio-closing peer at the third ordered typed sum of the by-value
+/// shared-owned filesystem-path emit trio:
+/// [`From<crate::retry::PerAttemptRegion> for
+/// std::sync::Arc<std::path::Path>`] (commit 97a2228) opened the trio
+/// at the per-attempt-region ladder;
+/// [`From<crate::probe_outcome::AdmissionTier> for
+/// std::sync::Arc<std::path::Path>`] (commit 0b378c1) carried the
+/// mid-trio slot at the admission-tier ladder; this impl closes the
+/// trio at the version-bump-magnitude ladder, matching the
+/// [`From<T> for Box<std::path::Path>`] closure order at the shrunk-
+/// owned filesystem-path emit sibling one ownership shape below
+/// (7aa68e4 → a903972 → 41ec18a), the [`From<T> for Arc<std::ffi::OsStr>`]
+/// closure order at the shared-owned OS-string emit sibling one
+/// frontier above (aa7a860 → 99f9460 → 6fc3e70), and the
+/// [`From<T> for Arc<str>`] and [`From<T> for Arc<[u8]>`] closure
+/// orders at the shared-owned UTF-8 and byte-slice emit siblings one
+/// and two frontiers below. After this commit the shared-owned emit
+/// axis spans all four frontiers (UTF-8, byte-slice, OS-string,
+/// filesystem-path) across all three ordered typed sums on the ladder
+/// set against ONE canonical-label oracle each — matching the closed
+/// shrunk-owned tier's coverage (`Box<str>`, `Box<[u8]>`,
+/// `Box<std::ffi::OsStr>`, `Box<std::path::Path>` at every ladder) and
+/// sharpens the case for a lifted derive-macro that generates the
+/// shared-owned emit cross-product across UTF-8 / byte-slice /
+/// OS-string / filesystem-path frontiers at every oracle-label-
+/// annotated typed sum (the shared-owned filesystem-path emit surface
+/// now has three identical trio-parallel impls to templatize against,
+/// matching the shared-owned OS-string, byte-slice, and UTF-8 emit
+/// siblings' three-impl coverage).
+///
+/// The identity `Arc::<std::path::Path>::from(level).as_ref() ==
+/// std::path::Path::new(level.as_str())` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_into_arc_path_agrees_with_path_new_as_str`];
+/// the identity carried through a generic
+/// `impl Into<Arc<std::path::Path>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_into_arc_path_carries_through_generic_consumer`];
+/// the shared-owned receiver contract — [`std::sync::Arc::clone`]
+/// reads the same canonical label, [`std::sync::Arc::ptr_eq`] holds
+/// after the clone, and [`std::sync::Arc::strong_count`] lifts to at
+/// least two after the clone — at every variant is pinned by
+/// [`tests::test_bump_level_into_arc_path_shares_label_across_clones`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// filesystem-path emit surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one
+/// `From<BumpLevel> for std::sync::Arc<std::path::Path>` impl routing
+/// through [`BumpLevel::as_str`], [`std::path::Path::new`], and
+/// [`std::sync::Arc::<std::path::Path>::from`]), not a per-consumer
+/// `Arc::<std::path::Path>::from(std::path::Path::new(level.as_str()))`
+/// restatement at every downstream site that accepts
+/// `impl Into<Arc<std::path::Path>>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`BumpLevel::as_str`]) and
+/// every filesystem-path emit surface —
+/// [`From<T> for std::path::PathBuf`],
+/// [`From<T> for &'static std::path::Path`],
+/// [`From<T> for std::borrow::Cow<'static, std::path::Path>`],
+/// [`From<T> for Box<std::path::Path>`], this
+/// [`From<T> for std::sync::Arc<std::path::Path>`] — reads through it.
+impl From<BumpLevel> for std::sync::Arc<std::path::Path> {
+    fn from(level: BumpLevel) -> std::sync::Arc<std::path::Path> {
+        std::sync::Arc::<std::path::Path>::from(std::path::Path::new(level.as_str()))
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -10784,6 +10922,158 @@ mod tests {
             assert!(
                 std::sync::Arc::strong_count(&shared) >= 2,
                 "Arc<OsStr> strong count must be at least 2 after clone at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`],
+    /// `std::sync::Arc::<std::path::Path>::from(level)` (the
+    /// [`From<BumpLevel> for Arc<std::path::Path>`] impl body)
+    /// yields the same filesystem-path view as
+    /// `std::path::Path::new(level.as_str())` — the composition through
+    /// the canonical-label oracle and the filesystem-path constructor.
+    /// Pins the agreement identity that the by-value shared-owned
+    /// filesystem-path emit surface reads the same canonical label the
+    /// borrowed-view [`AsRef<std::path::Path>`], the by-value owned
+    /// [`From<BumpLevel> for std::path::PathBuf`], the by-value borrowed
+    /// [`From<BumpLevel> for &'static std::path::Path`], the by-value
+    /// borrowed/owned-frontier
+    /// [`From<BumpLevel> for Cow<'static, std::path::Path>`], and the
+    /// by-value shrunk-owned
+    /// [`From<BumpLevel> for Box<std::path::Path>`] surfaces already
+    /// read at the filesystem-path frontier. Structural mirror of
+    /// [`test_bump_level_into_arc_os_str_agrees_with_os_str_new_as_str`]
+    /// at the OS-string sibling frontier one frontier above,
+    /// [`test_bump_level_into_arc_str_agrees_with_as_str`] at the UTF-8
+    /// sibling frontier, and
+    /// [`test_bump_level_into_arc_bytes_agrees_with_as_str_as_bytes`]
+    /// at the byte-slice sibling frontier — projected onto the
+    /// filesystem-path frontier this time. Structural mirror of
+    /// `test_per_attempt_region_into_arc_path_agrees_with_path_new_as_str`
+    /// (commit 97a2228) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_arc_path_agrees_with_path_new_as_str`
+    /// (commit 0b378c1) at the mid-trio admission-tier ladder — closing
+    /// the shared-owned filesystem-path emit agreement pin at the third
+    /// and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_arc_path_agrees_with_path_new_as_str() {
+        for level in BumpLevel::ALL {
+            let shared: std::sync::Arc<std::path::Path> =
+                std::sync::Arc::<std::path::Path>::from(level);
+            assert_eq!(
+                shared.as_ref(),
+                std::path::Path::new(level.as_str()),
+                "From<BumpLevel> for Arc<Path> must agree with Path::new(as_str()) at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Arc<std::path::Path>`] identity carries
+    /// through a generic `impl Into<Arc<std::path::Path>>` consumer at
+    /// every [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Arc<std::path::Path>>>(t: T) ->
+    /// Arc<std::path::Path> { t.into() }` — the shape of an actual
+    /// downstream consumer (a cross-thread cached-filesystem-path slot
+    /// typed as [`Arc<std::path::Path>`] to share a canonical
+    /// filesystem-path label allocation across worker threads via
+    /// atomic refcount, a validated-input newtype wrapper that stores
+    /// canonical filesystem-path labels as [`Arc<std::path::Path>`] to
+    /// hand cheap [`std::sync::Arc::clone`]s to sibling structures, a
+    /// serde container that opts into
+    /// `#[serde(from = "Arc<std::path::Path>")]` at the shared-owned
+    /// filesystem-path frontier, a dashmap-style keyed-table
+    /// filesystem-path-value slot whose readers want an [`Arc`] clone
+    /// rather than a per-lookup allocation) reads the canonical
+    /// lowercase label directly from a [`BumpLevel`] value as a shared-
+    /// owned immutable heap-owned [`Arc<std::path::Path>`]. The
+    /// structural witness that a [`BumpLevel`] is genuinely usable at
+    /// `impl Into<Arc<std::path::Path>>` call sites — a regression that
+    /// drifted the [`From`] impl signature (returning
+    /// [`Box<std::path::Path>`] instead of [`Arc<std::path::Path>`],
+    /// returning a [`std::path::PathBuf`] instead of the shared-owned
+    /// handle, requiring `&BumpLevel` and losing the by-value semantics,
+    /// or dropping to a
+    /// [`Box<std::path::Path>`]-then-[`Arc::from`] composition that
+    /// would allocate twice) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    /// Structural mirror of
+    /// `test_per_attempt_region_into_arc_path_carries_through_generic_consumer`
+    /// (commit 97a2228) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_arc_path_carries_through_generic_consumer`
+    /// (commit 0b378c1) at the mid-trio admission-tier ladder — closing
+    /// the shared-owned filesystem-path generic-consumer pin at the
+    /// third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_arc_path_carries_through_generic_consumer() {
+        fn read<T: Into<std::sync::Arc<std::path::Path>>>(t: T) -> std::sync::Arc<std::path::Path> {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).as_ref(),
+                std::path::Path::new(level.as_str()),
+                "generic Into<Arc<Path>> consumer must read canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Arc<std::path::Path>`] shared-owned
+    /// semantics hold across [`std::sync::Arc::clone`] at every
+    /// [`BumpLevel::ALL`] variant: the clone reads exactly the same
+    /// canonical lowercase label the original reads, points at the
+    /// same allocation (identity of the underlying filesystem-path
+    /// pointer via [`std::sync::Arc::ptr_eq`]), and the atomic refcount
+    /// lifts to at least two after the clone (via
+    /// [`std::sync::Arc::strong_count`]). Pins the shared-owned
+    /// receiver contract at the filesystem-path emit surface — a
+    /// regression that drifted the impl body to a non-`Arc` composition
+    /// ([`Box::<std::path::Path>::from`]-then-ad-hoc-rewrap, a
+    /// [`std::path::PathBuf`] intermediate) would break the pointer-
+    /// identity assertion (each clone would land at a distinct
+    /// allocation) even if the canonical-label bytes still agreed.
+    /// Structural mirror of the [`Arc<std::ffi::OsStr>`] clone-identity
+    /// pin
+    /// [`test_bump_level_into_arc_os_str_shares_label_across_clones`]
+    /// at the OS-string frontier one frontier above, the [`Arc<str>`]
+    /// clone-identity pin
+    /// [`test_bump_level_into_arc_str_shares_label_across_clones`] at
+    /// the UTF-8 frontier, and the [`Arc<[u8]>`] clone-identity pin
+    /// [`test_bump_level_into_arc_bytes_shares_label_across_clones`] at
+    /// the byte-slice frontier — the four clone-identity pins together
+    /// close the structural witness that the receiver actually holds a
+    /// shared-owned [`Arc<std::path::Path>`] slot rather than an
+    /// [`Arc<std::path::Path>`]-typed wrapper around a per-clone-
+    /// allocated [`Box<std::path::Path>`], across UTF-8, byte-slice,
+    /// OS-string, and filesystem-path frontiers. Structural mirror of
+    /// `test_per_attempt_region_into_arc_path_shares_label_across_clones`
+    /// (commit 97a2228) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_arc_path_shares_label_across_clones`
+    /// (commit 0b378c1) at the mid-trio admission-tier ladder — closing
+    /// the shared-owned filesystem-path clone-identity pin at the third
+    /// and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_arc_path_shares_label_across_clones() {
+        for level in BumpLevel::ALL {
+            let shared: std::sync::Arc<std::path::Path> =
+                std::sync::Arc::<std::path::Path>::from(level);
+            let cloned = std::sync::Arc::clone(&shared);
+            assert_eq!(
+                cloned.as_ref(),
+                std::path::Path::new(level.as_str()),
+                "Arc<Path> clone must read canonical label at {level:?}",
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(&shared, &cloned),
+                "Arc<Path> clone must share the same underlying allocation at {level:?}",
+            );
+            assert!(
+                std::sync::Arc::strong_count(&shared) >= 2,
+                "Arc<Path> strong count must be at least 2 after clone at {level:?}",
             );
         }
     }
