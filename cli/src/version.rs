@@ -2531,6 +2531,124 @@ impl From<BumpLevel> for Box<std::ffi::OsStr> {
     }
 }
 
+/// [`From<BumpLevel> for Box<std::path::Path>`] routes through
+/// [`BumpLevel::as_str`] composed with [`std::path::Path::new`]
+/// composed with [`Box::<std::path::Path>::from`] so a downstream
+/// consumer that takes an owned [`Box<std::path::Path>`] via
+/// [`Into<Box<std::path::Path>>`] (a config-struct field typed as
+/// [`Box<std::path::Path>`] to shrink a canonical filesystem-path
+/// label off a resizable [`std::path::PathBuf`]'s spare-capacity tail,
+/// a [`std::collections::HashMap<Box<std::path::Path>, _>`] key that
+/// stashes a canonical [`BumpLevel`]-labeled path segment without
+/// paying the [`std::path::PathBuf`] growth-header cost, a validated-
+/// input newtype wrapper that stores a canonical filesystem-path
+/// label as a fixed-size heap allocation, a serde container that
+/// opts into `#[serde(from = "Box<std::path::Path>")]` at the
+/// immutable-owned filesystem-path frontier) reads the canonical
+/// lowercase label (`"patch"`, `"minor"`, `"major"`) as a shrunk-
+/// owned [`Box<std::path::Path>`] with the single heap allocation
+/// named at this typed-primitive site rather than at every downstream
+/// `Box::<std::path::Path>::from(std::path::Path::new(level.as_str()))`
+/// call site.
+///
+/// The by-value shrunk-owned emit peer of the by-value owned
+/// [`From<BumpLevel> for std::path::PathBuf`] surface (line 1944) and
+/// the by-value borrowed [`From<BumpLevel> for &'static
+/// std::path::Path`] surface (line 2141) above — all three are
+/// filesystem-path emit surfaces at the same canonical-label oracle,
+/// differing only on receiver-side shape:
+/// [`From<T> for std::path::PathBuf`] returns a growth-header-carrying
+/// resizable owned buffer for consumers that will mutate or extend the
+/// path, [`From<T> for &'static std::path::Path`] returns a zero-copy
+/// `'static`-lived borrow into the static-string constant table for
+/// consumers that want the borrow, this [`From<T> for
+/// Box<std::path::Path>`] returns a shrunk immutable heap allocation
+/// with no growth-header for consumers that own the path but do not
+/// need mutation or resizing. All three route through the same
+/// [`BumpLevel::as_str`] canonical-label oracle.
+///
+/// Structural mirror of [`From<BumpLevel> for Box<str>`] (line 6063),
+/// [`From<BumpLevel> for Box<[u8]>`] (line 4535), and
+/// [`From<BumpLevel> for Box<std::ffi::OsStr>`] (line 2528, commit
+/// 3280cd3) at the UTF-8, byte-slice, and OS-string frontiers
+/// respectively — the same by-value shrunk-owned emit surface at the
+/// same one-oracle discipline, projected onto the filesystem-path
+/// frontier this time; all siblings shrink through the standard
+/// library `From<&T> for Box<T>` impl at their respective frontier
+/// constructor ([`Box::<str>::from`] for the UTF-8 sibling routing
+/// through the `&str` view, [`Box::<[u8]>::from`] for the byte-slice
+/// sibling routing through the `.as_bytes()` view,
+/// [`Box::<std::ffi::OsStr>::from`] for the OS-string sibling routing
+/// through [`std::ffi::OsStr::new`] over the same `&str` view,
+/// [`Box::<std::path::Path>::from`] here routing through
+/// [`std::path::Path::new`] over the same `&str` view). Single
+/// allocation: [`Box::<std::path::Path>::from(&std::path::Path)`]
+/// allocates exactly the number of bytes the borrowed filesystem-path
+/// view carries, matching the shrunk-owned discipline the
+/// [`Box<str>`], [`Box<[u8]>`], and [`Box<std::ffi::OsStr>`] emit
+/// peers already carry at their respective frontiers, whereas the
+/// [`std::path::PathBuf`] emit peer carries a growth-header for
+/// future extension.
+///
+/// Trio-closing peer at the version-bump-magnitude ladder of the
+/// by-value shrunk-owned filesystem-path emit trio opened at the
+/// per-attempt-region ladder by [`From<crate::retry::PerAttemptRegion>
+/// for Box<std::path::Path>`] (commit 7aa68e4) and mid-slotted at the
+/// admission-tier ladder by
+/// [`From<crate::probe_outcome::AdmissionTier> for
+/// Box<std::path::Path>`] (commit a903972); this impl closes the trio
+/// at the third ordered typed sum, matching the
+/// [`From<T> for std::borrow::Cow<'static, std::path::Path>`] closure
+/// order at the borrowed/owned-frontier filesystem-path emit sibling
+/// (cfb6125 → f11faad → 9e12c75) and the
+/// [`From<T> for Box<std::ffi::OsStr>`] closure order at the shrunk-
+/// owned OS-string emit sibling one frontier above
+/// (4a4a9d7 → ab2fdcd → 3280cd3). After this commit the by-value
+/// shrunk-owned emit axis spans all four frontiers (UTF-8, byte-slice,
+/// OS-string, filesystem-path) across all three ordered typed sums on
+/// the ladder set against ONE canonical-label oracle each — sharpens
+/// the case for a lifted derive-macro that generates the shrunk-owned
+/// emit cross-product across UTF-8 / byte-slice / OS-string /
+/// filesystem-path frontiers at every oracle-label-annotated typed sum.
+///
+/// The identity `Box::<std::path::Path>::from(level).as_ref() ==
+/// std::path::Path::new(level.as_str())` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_into_box_path_agrees_with_path_new_as_str`];
+/// the identity carried through a generic
+/// `impl Into<Box<std::path::Path>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_into_box_path_carries_through_generic_consumer`];
+/// the round-trip through [`std::path::Path::to_str`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_bump_level_into_box_path_round_trips_through_to_str`];
+/// the owned-independence contract (two independent shrunk-owned
+/// [`Box<std::path::Path>`] emits from the same variant carry
+/// distinct heap addresses and neither aliases the `'static` static-
+/// string constant table) is pinned by
+/// [`tests::test_bump_level_into_box_path_is_owned_independent`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// filesystem-path emit surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one
+/// `From<BumpLevel> for Box<std::path::Path>` impl routing through
+/// [`BumpLevel::as_str`], [`std::path::Path::new`], and
+/// [`Box::<std::path::Path>::from`]), not a per-consumer
+/// `Box::<std::path::Path>::from(std::path::Path::new(level.as_str()))`
+/// restatement at every downstream site that accepts
+/// `impl Into<Box<std::path::Path>>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site
+/// ([`BumpLevel::as_str`]) and every filesystem-path emit surface —
+/// [`From<T> for std::path::PathBuf`],
+/// [`From<T> for &'static std::path::Path`],
+/// [`From<T> for std::borrow::Cow<'static, std::path::Path>`], this
+/// [`From<T> for Box<std::path::Path>`] — reads through it.
+impl From<BumpLevel> for Box<std::path::Path> {
+    fn from(level: BumpLevel) -> Box<std::path::Path> {
+        Box::<std::path::Path>::from(std::path::Path::new(level.as_str()))
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -10237,6 +10355,161 @@ mod tests {
             assert_ne!(
                 addr_b, static_addr,
                 "Box<OsStr> must not alias the 'static canonical-label constant at {level:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for Box<std::path::Path>`] agrees with the
+    /// canonical [`std::path::Path::new`]`(as_str())` label at every
+    /// [`BumpLevel::ALL`] variant. Pins the identity
+    /// `Box::<std::path::Path>::from(level).as_ref() ==
+    /// std::path::Path::new(level.as_str())` at every variant so a
+    /// future variant insertion / grammar refinement at the shared
+    /// [`BumpLevel::as_str`] oracle propagates to the by-value shrunk-
+    /// owned filesystem-path emit surface without a per-variant retype
+    /// at the [`From`] impl body. The structural agreement pin between
+    /// the by-value shrunk-owned filesystem-path emit surface
+    /// ([`From<BumpLevel> for Box<std::path::Path>`]) and the
+    /// canonical-label filesystem-path oracle
+    /// ([`std::path::Path::new`]`(BumpLevel::as_str)`) — structural
+    /// mirror of
+    /// [`test_bump_level_into_box_str_agrees_with_as_str`] at the
+    /// UTF-8 sibling frontier,
+    /// [`test_bump_level_into_box_os_str_agrees_with_os_str_new_as_str`]
+    /// at the OS-string sibling frontier one frontier above,
+    /// `test_per_attempt_region_into_box_path_agrees_with_path_new_as_str`
+    /// (commit 7aa68e4) at the trio-opener per-attempt-region ladder,
+    /// and
+    /// `test_admission_tier_into_box_path_agrees_with_path_new_as_str`
+    /// (commit a903972) at the mid-trio admission-tier ladder —
+    /// closing the shrunk-owned filesystem-path emit agreement pin at
+    /// the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_box_path_agrees_with_path_new_as_str() {
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::path::Path> = Box::<std::path::Path>::from(level);
+            assert_eq!(
+                boxed.as_ref(),
+                std::path::Path::new(level.as_str()),
+                "From<BumpLevel> for Box<Path> must agree with Path::new(as_str()) at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Box<std::path::Path>`] identity
+    /// carries through a generic `impl Into<Box<std::path::Path>>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny generic
+    /// function
+    /// `fn read<T: Into<Box<std::path::Path>>>(t: T) ->
+    /// Box<std::path::Path> { t.into() }` — the shape of an actual
+    /// downstream consumer (config-struct field typed as
+    /// [`Box<std::path::Path>`] to shrink a canonical filesystem-path
+    /// label off a resizable [`std::path::PathBuf`], a
+    /// [`std::collections::HashMap<Box<std::path::Path>, _>`] key
+    /// builder, a serde container that opts into
+    /// `#[serde(from = "Box<Path>")]`) — reads the canonical lowercase
+    /// label directly from a [`BumpLevel`] value at a single heap
+    /// allocation. Structural mirror of
+    /// `test_per_attempt_region_into_box_path_carries_through_generic_consumer`
+    /// (commit 7aa68e4) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_box_path_carries_through_generic_consumer`
+    /// (commit a903972) at the mid-trio admission-tier ladder —
+    /// closing the shrunk-owned filesystem-path generic-consumer pin
+    /// at the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_box_path_carries_through_generic_consumer() {
+        fn read<T: Into<Box<std::path::Path>>>(t: T) -> Box<std::path::Path> {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).as_ref(),
+                std::path::Path::new(level.as_str()),
+                "generic Into<Box<Path>> consumer must read canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`], the shrunk-owned [`Box<std::path::Path>`]
+    /// emitted by the [`From`] impl round-trips through
+    /// [`std::path::Path::to_str`] back to the canonical lowercase
+    /// label exactly. Ties the by-value shrunk-owned filesystem-path
+    /// emit frontier to the UTF-8 frontier through the standard
+    /// library's path-to-UTF-8 decoder at ONE named site: a regression
+    /// that drifted [`From<T> for Box<std::path::Path>`] to yield non-
+    /// Unicode bytes (a byte-swapped label, a mangled locale encoding,
+    /// a truncated multi-byte sequence) fails here with an
+    /// [`Option::None`] at the [`std::path::Path::to_str`] boundary or
+    /// a label mismatch at the round-trip assertion. Structural mirror
+    /// of
+    /// `test_per_attempt_region_into_box_path_round_trips_through_to_str`
+    /// (commit 7aa68e4) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_box_path_round_trips_through_to_str`
+    /// (commit a903972) at the mid-trio admission-tier ladder —
+    /// closing the shrunk-owned filesystem-path round-trip pin at the
+    /// third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_box_path_round_trips_through_to_str() {
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::path::Path> = Box::<std::path::Path>::from(level);
+            let decoded = boxed.to_str().unwrap_or_else(|| {
+                panic!("From<BumpLevel> for Box<Path> bytes for {level:?} must decode as UTF-8")
+            });
+            assert_eq!(
+                decoded,
+                level.as_str(),
+                "Path::to_str round-trip must recover canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for Box<std::path::Path>`] returns a heap-
+    /// allocated owned buffer distinct from the `'static` static-
+    /// string constant table backing [`BumpLevel::as_str`]. Pins the
+    /// shape-of-ownership contract at the shrunk-owned filesystem-path
+    /// emit frontier: two independent boxes emitted from the same
+    /// variant carry distinct heap addresses (each is its own owned
+    /// allocation, neither aliases the other), and neither box shares
+    /// its backing bytes with the static-string constant's address. A
+    /// regression that drifted the [`From`] impl to return a
+    /// hypothetical zero-allocation view over the `'static` constant
+    /// (e.g., an [`unsafe`] cast from `&'static std::path::Path` to
+    /// [`Box<std::path::Path>`]) would still pass the agreement pin
+    /// but fails this ownership-shape pin, mirroring the owned-
+    /// independence discipline the [`Box<str>`], [`Box<[u8]>`], and
+    /// [`Box<std::ffi::OsStr>`] emit siblings already carry at their
+    /// frontiers. Structural mirror of
+    /// `test_per_attempt_region_into_box_path_is_owned_independent`
+    /// (commit 7aa68e4) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_box_path_is_owned_independent`
+    /// (commit a903972) at the mid-trio admission-tier ladder —
+    /// closing the shrunk-owned filesystem-path ownership-shape pin at
+    /// the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_box_path_is_owned_independent() {
+        for level in BumpLevel::ALL {
+            let boxed_a: Box<std::path::Path> = Box::<std::path::Path>::from(level);
+            let boxed_b: Box<std::path::Path> = Box::<std::path::Path>::from(level);
+            let static_addr = std::path::Path::new(level.as_str()) as *const std::path::Path
+                as *const () as usize;
+            let addr_a = &*boxed_a as *const std::path::Path as *const () as usize;
+            let addr_b = &*boxed_b as *const std::path::Path as *const () as usize;
+            assert_ne!(
+                addr_a, addr_b,
+                "two independent Box<Path> emits must occupy distinct heap allocations at {level:?}",
+            );
+            assert_ne!(
+                addr_a, static_addr,
+                "Box<Path> must not alias the 'static canonical-label constant at {level:?}",
+            );
+            assert_ne!(
+                addr_b, static_addr,
+                "Box<Path> must not alias the 'static canonical-label constant at {level:?}",
             );
         }
     }
