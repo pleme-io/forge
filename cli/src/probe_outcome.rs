@@ -9451,6 +9451,120 @@ impl From<AdmissionTier> for Box<std::path::Path> {
     }
 }
 
+/// [`From<AdmissionTier> for Arc<std::ffi::OsStr>`] routes through
+/// [`AdmissionTier::as_str`] composed with [`std::ffi::OsStr::new`]
+/// composed with [`std::sync::Arc::<std::ffi::OsStr>::from`] so a
+/// downstream consumer that takes a shared-owned
+/// [`Arc<std::ffi::OsStr>`] via [`Into<Arc<std::ffi::OsStr>>`] (a
+/// cross-thread cached-OS-string slot typed as
+/// [`Arc<std::ffi::OsStr>`] to share a canonical [`AdmissionTier`]
+/// label across worker threads via atomic refcount, a validated-input
+/// newtype wrapper whose canonical OS-string label field is stored as
+/// [`Arc<std::ffi::OsStr>`] to hand cheap [`std::sync::Arc::clone`]s
+/// to sibling structures, a serde container that opts into
+/// `#[serde(from = "Arc<std::ffi::OsStr>")]` at the shared-owned
+/// OS-string frontier, a dashmap-style keyed-table OS-string-value
+/// slot whose readers want an [`Arc`] clone rather than a per-lookup
+/// allocation, a per-request-arena OS-string slot cheap-cloned across
+/// worker threads without per-clone allocation) reads the canonical
+/// lowercase label (`"refused"`, `"staging_only"`, `"strict"`) as a
+/// shared-owned [`Arc<std::ffi::OsStr>`] with a single allocation for
+/// the atomic-refcount header plus the exact-length label bytes,
+/// enabling `O(1)` [`std::sync::Arc::clone`] on the emit result across
+/// worker threads — through ONE composition rather than a per-consumer
+/// `Arc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(tier.as_str()))`
+/// restatement.
+///
+/// The by-value shared-owned emit peer of the by-value owned
+/// [`From<AdmissionTier> for std::ffi::OsString`] surface (line 8702),
+/// the by-value borrowed [`From<AdmissionTier> for &'static
+/// std::ffi::OsStr`] surface (line 8896), the by-value borrowed/owned
+/// [`From<AdmissionTier> for std::borrow::Cow<'static,
+/// std::ffi::OsStr>`] surface (line 9101), and the by-value shrunk-
+/// owned [`From<AdmissionTier> for Box<std::ffi::OsStr>`] surface
+/// (line 9335) above — all five are OS-string emit surfaces at the
+/// same canonical-label oracle, differing only on receiver-side shape:
+/// [`From<T> for std::ffi::OsString`] returns a growth-header-carrying
+/// resizable owned buffer, [`From<T> for &'static std::ffi::OsStr`]
+/// returns a zero-copy `'static`-lived borrow into the static-string
+/// constant table, [`From<T> for Cow<'static, std::ffi::OsStr>`]
+/// returns either uniformly at the borrowed/owned frontier,
+/// [`From<T> for Box<std::ffi::OsStr>`] returns a shrunk immutable
+/// heap allocation with no refcount header, this [`From<T> for
+/// Arc<std::ffi::OsStr>`] returns a shared-owned immutable heap
+/// allocation with an atomic-refcount header preceding the label bytes
+/// for consumers that will hand cheap [`Arc::clone`]s across worker
+/// threads. All five route through the same [`AdmissionTier::as_str`]
+/// canonical-label oracle.
+///
+/// Structural mirror of [`From<AdmissionTier> for Arc<str>`] (line
+/// 8011) and [`From<AdmissionTier> for Arc<[u8]>`] (line 6485) at the
+/// UTF-8 and byte-slice frontiers respectively — the same by-value
+/// shared-owned emit surface at the same one-oracle discipline,
+/// projected onto the OS-string frontier this time; all siblings route
+/// through the standard library `From<&T> for Arc<T>` impl at their
+/// respective frontier constructor
+/// ([`std::sync::Arc::<str>::from`] for the UTF-8 sibling routing
+/// through the `&str` view, [`std::sync::Arc::<[u8]>::from`] for the
+/// byte-slice sibling routing through the `.as_bytes()` view,
+/// [`std::sync::Arc::<std::ffi::OsStr>::from`] here routing through
+/// [`std::ffi::OsStr::new`] over the same `&str` view). Single
+/// allocation: [`std::sync::Arc::<std::ffi::OsStr>::from`] on a
+/// borrowed OS-string view allocates exactly the atomic-refcount
+/// header plus the label bytes, matching the shared-owned discipline
+/// the [`Arc<str>`] and [`Arc<[u8]>`] emit peers already carry at
+/// their respective frontiers, whereas the [`Box<std::ffi::OsStr>`]
+/// emit peer carries no refcount header and the [`std::ffi::OsString`]
+/// emit peer carries a growth-header for future extension.
+///
+/// Mid-trio peer at the admission-tier ladder of the by-value shared-
+/// owned OS-string emit trio opened at the per-attempt-region ladder
+/// by aa7a860 (`From<PerAttemptRegion> for Arc<std::ffi::OsStr>` at
+/// `retry.rs:5020`); one closing peer at [`crate::version::BumpLevel`]
+/// remains to close the trio across the full ladder set, matching the
+/// [`From<T> for Box<std::ffi::OsStr>`] opening order at the shrunk-
+/// owned OS-string emit sibling one ownership shape below
+/// (4a4a9d7 → ab2fdcd → 3280cd3) and the [`From<T> for
+/// std::borrow::Cow<'static, std::ffi::OsStr>`] opening order at the
+/// borrowed/owned-frontier OS-string emit sibling
+/// (24f6110 → 4e94fc5 → f305c9b).
+///
+/// The identity `Arc::<std::ffi::OsStr>::from(tier).as_ref() ==
+/// std::ffi::OsStr::new(tier.as_str())` at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_into_arc_os_str_agrees_with_os_str_new_as_str`];
+/// the identity carried through a generic
+/// `impl Into<Arc<std::ffi::OsStr>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_admission_tier_into_arc_os_str_carries_through_generic_consumer`];
+/// the shared-owned receiver contract — [`std::sync::Arc::clone`]
+/// reads the same canonical label, [`std::sync::Arc::ptr_eq`] holds
+/// after the clone, and [`std::sync::Arc::strong_count`] lifts to at
+/// least two after the clone — at every variant is pinned by
+/// [`tests::test_admission_tier_into_arc_os_str_shares_label_across_clones`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value shared-owned OS-
+/// string emit surface is a typed-primitive site on [`AdmissionTier`]
+/// itself (one `From<AdmissionTier> for std::sync::Arc<std::ffi::OsStr>`
+/// impl routing through [`AdmissionTier::as_str`],
+/// [`std::ffi::OsStr::new`], and
+/// [`std::sync::Arc::<std::ffi::OsStr>::from`]), not a per-consumer
+/// `Arc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(tier.as_str()))`
+/// restatement at every downstream site that accepts
+/// `impl Into<Arc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`AdmissionTier::as_str`])
+/// and every OS-string emit surface —
+/// [`From<T> for std::ffi::OsString`],
+/// [`From<T> for &'static std::ffi::OsStr`],
+/// [`From<T> for std::borrow::Cow<'static, std::ffi::OsStr>`],
+/// [`From<T> for Box<std::ffi::OsStr>`], this
+/// [`From<T> for std::sync::Arc<std::ffi::OsStr>`] — reads through it.
+impl From<AdmissionTier> for std::sync::Arc<std::ffi::OsStr> {
+    fn from(tier: AdmissionTier) -> std::sync::Arc<std::ffi::OsStr> {
+        std::sync::Arc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(tier.as_str()))
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for AdmissionTier`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for AdmissionTier`] so a downstream consumer bound by
@@ -25239,6 +25353,138 @@ mod tests {
             assert_ne!(
                 addr_b, static_addr,
                 "Box<Path> must not alias the 'static canonical-label constant at {tier:?}",
+            );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`],
+    /// `std::sync::Arc::<std::ffi::OsStr>::from(tier)` (the
+    /// [`From<AdmissionTier> for Arc<std::ffi::OsStr>`] impl body)
+    /// yields the same OS-string view as
+    /// `std::ffi::OsStr::new(tier.as_str())` — the composition through
+    /// the canonical-label oracle and the OS-string constructor. Pins
+    /// the agreement identity that the by-value shared-owned OS-string
+    /// emit surface reads the same canonical label the borrowed-view
+    /// [`AsRef<std::ffi::OsStr>`], the by-value owned
+    /// [`From<AdmissionTier> for std::ffi::OsString`], the by-value
+    /// borrowed [`From<AdmissionTier> for &'static std::ffi::OsStr`],
+    /// the by-value borrowed/owned-frontier
+    /// [`From<AdmissionTier> for Cow<'static, std::ffi::OsStr>`], and
+    /// the by-value shrunk-owned
+    /// [`From<AdmissionTier> for Box<std::ffi::OsStr>`] surfaces
+    /// already read at the OS-string frontier. Structural mirror of
+    /// [`test_admission_tier_into_arc_str_agrees_with_as_str`] at the
+    /// UTF-8 sibling frontier and
+    /// [`test_admission_tier_into_arc_bytes_agrees_with_as_str_as_bytes`]
+    /// at the byte-slice sibling frontier — projected onto the OS-
+    /// string frontier this time. Structural mirror of
+    /// `test_per_attempt_region_into_arc_os_str_agrees_with_os_str_new_as_str`
+    /// (commit aa7a860) at the trio-opener per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_into_arc_os_str_agrees_with_os_str_new_as_str() {
+        for tier in AdmissionTier::ALL {
+            let shared: std::sync::Arc<std::ffi::OsStr> =
+                std::sync::Arc::<std::ffi::OsStr>::from(tier);
+            assert_eq!(
+                shared.as_ref(),
+                std::ffi::OsStr::new(tier.as_str()),
+                "From<AdmissionTier> for Arc<OsStr> must agree with OsStr::new(as_str()) at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for Arc<std::ffi::OsStr>`] identity
+    /// carries through a generic `impl Into<Arc<std::ffi::OsStr>>`
+    /// consumer at every [`AdmissionTier::ALL`] variant. A tiny
+    /// generic function
+    /// `fn read<T: Into<Arc<std::ffi::OsStr>>>(t: T) ->
+    /// Arc<std::ffi::OsStr> { t.into() }` — the shape of an actual
+    /// downstream consumer (a cross-thread cached-OS-string slot typed
+    /// as [`Arc<std::ffi::OsStr>`] to share a canonical OS-string label
+    /// allocation across worker threads via atomic refcount, a
+    /// validated-input newtype wrapper that stores canonical OS-string
+    /// labels as [`Arc<std::ffi::OsStr>`] to hand cheap
+    /// [`std::sync::Arc::clone`]s to sibling structures, a serde
+    /// container that opts into
+    /// `#[serde(from = "Arc<std::ffi::OsStr>")]` at the shared-owned
+    /// OS-string frontier, a dashmap-style keyed-table OS-string-value
+    /// slot whose readers want an [`Arc`] clone rather than a per-
+    /// lookup allocation) reads the canonical lowercase label directly
+    /// from an [`AdmissionTier`] value as a shared-owned immutable
+    /// heap-owned [`Arc<std::ffi::OsStr>`]. The structural witness
+    /// that an [`AdmissionTier`] is genuinely usable at
+    /// `impl Into<Arc<std::ffi::OsStr>>` call sites — a regression
+    /// that drifted the [`From`] impl signature (returning
+    /// [`Box<std::ffi::OsStr>`] instead of [`Arc<std::ffi::OsStr>`],
+    /// returning an [`std::ffi::OsString`] instead of the shared-owned
+    /// handle, requiring `&AdmissionTier` and losing the by-value
+    /// semantics, or dropping to a
+    /// [`Box<std::ffi::OsStr>`]-then-[`Arc::from`] composition that
+    /// would allocate twice) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    /// Structural mirror of
+    /// `test_per_attempt_region_into_arc_os_str_carries_through_generic_consumer`
+    /// (commit aa7a860) at the trio-opener per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_into_arc_os_str_carries_through_generic_consumer() {
+        fn read<T: Into<std::sync::Arc<std::ffi::OsStr>>>(t: T) -> std::sync::Arc<std::ffi::OsStr> {
+            t.into()
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(tier).as_ref(),
+                std::ffi::OsStr::new(tier.as_str()),
+                "generic Into<Arc<OsStr>> consumer must read canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for Arc<std::ffi::OsStr>`] shared-
+    /// owned semantics hold across [`std::sync::Arc::clone`] at every
+    /// [`AdmissionTier::ALL`] variant: the clone reads exactly the
+    /// same canonical lowercase label the original reads, points at
+    /// the same allocation (identity of the underlying OS-string
+    /// pointer via [`std::sync::Arc::ptr_eq`]), and the atomic
+    /// refcount lifts to at least two after the clone (via
+    /// [`std::sync::Arc::strong_count`]). Pins the shared-owned
+    /// receiver contract at the OS-string emit surface — a regression
+    /// that drifted the impl body to a non-`Arc` composition
+    /// ([`Box::<std::ffi::OsStr>::from`]-then-ad-hoc-rewrap, an
+    /// [`std::ffi::OsString`] intermediate) would break the pointer-
+    /// identity assertion (each clone would land at a distinct
+    /// allocation) even if the canonical-label bytes still agreed.
+    /// Structural mirror of the [`Arc<str>`] clone-identity pin
+    /// [`test_admission_tier_into_arc_str_shares_label_across_clones`]
+    /// at the UTF-8 frontier and the [`Arc<[u8]>`] clone-identity pin
+    /// [`test_admission_tier_into_arc_bytes_shares_label_across_clones`]
+    /// at the byte-slice frontier — the three clone-identity pins
+    /// together close the structural witness that the receiver
+    /// actually holds a shared-owned [`Arc<std::ffi::OsStr>`] slot
+    /// rather than an [`Arc<std::ffi::OsStr>`]-typed wrapper around a
+    /// per-clone-allocated [`Box<std::ffi::OsStr>`], across UTF-8,
+    /// byte-slice, and OS-string frontiers. Structural mirror of
+    /// `test_per_attempt_region_into_arc_os_str_shares_label_across_clones`
+    /// (commit aa7a860) at the trio-opener per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_into_arc_os_str_shares_label_across_clones() {
+        for tier in AdmissionTier::ALL {
+            let shared: std::sync::Arc<std::ffi::OsStr> =
+                std::sync::Arc::<std::ffi::OsStr>::from(tier);
+            let cloned = std::sync::Arc::clone(&shared);
+            assert_eq!(
+                cloned.as_ref(),
+                std::ffi::OsStr::new(tier.as_str()),
+                "Arc<OsStr> clone must read canonical label at {tier:?}",
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(&shared, &cloned),
+                "Arc<OsStr> clone must share the same underlying allocation at {tier:?}",
+            );
+            assert!(
+                std::sync::Arc::strong_count(&shared) >= 2,
+                "Arc<OsStr> strong count must be at least 2 after clone at {tier:?}",
             );
         }
     }
