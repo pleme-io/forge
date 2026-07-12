@@ -5023,6 +5023,136 @@ impl From<PerAttemptRegion> for std::sync::Arc<std::ffi::OsStr> {
     }
 }
 
+/// [`From<PerAttemptRegion> for Arc<std::path::Path>`] routes through
+/// [`PerAttemptRegion::as_str`] composed with
+/// [`std::path::Path::new`] composed with
+/// [`std::sync::Arc::<std::path::Path>::from`] so a downstream
+/// consumer that takes a shared-owned [`Arc<std::path::Path>`] via
+/// [`Into<Arc<std::path::Path>>`] (a cross-thread cached-filesystem-
+/// path slot typed as [`Arc<std::path::Path>`] to share a canonical
+/// [`PerAttemptRegion`] label across worker threads via atomic
+/// refcount, a validated-input newtype wrapper whose canonical
+/// filesystem-path label field is stored as
+/// [`Arc<std::path::Path>`] to hand cheap
+/// [`std::sync::Arc::clone`]s to sibling structures, a serde
+/// container that opts into
+/// `#[serde(from = "Arc<std::path::Path>")]` at the shared-owned
+/// filesystem-path frontier, a dashmap-style keyed-table
+/// filesystem-path-value slot whose readers want an [`Arc`] clone
+/// rather than a per-lookup allocation, a per-request-arena
+/// filesystem-path slot cheap-cloned across worker threads without
+/// per-clone allocation) reads the canonical snake_case label
+/// (`"before_first"`, `"first"`, `"interim"`, `"final"`,
+/// `"over_budget"`) as a shared-owned [`Arc<std::path::Path>`] with
+/// a single allocation for the atomic-refcount header plus the
+/// exact-length label bytes, enabling `O(1)`
+/// [`std::sync::Arc::clone`] on the emit result across worker
+/// threads — through ONE composition rather than a per-consumer
+/// `Arc::<std::path::Path>::from(std::path::Path::new(region.as_str()))`
+/// restatement.
+///
+/// The by-value shared-owned emit peer of the by-value owned
+/// [`From<PerAttemptRegion> for std::path::PathBuf`] surface (line
+/// 4266), the by-value borrowed [`From<PerAttemptRegion> for
+/// &'static std::path::Path`] surface (line 4436), the by-value
+/// borrowed/owned [`From<PerAttemptRegion> for
+/// std::borrow::Cow<'static, std::path::Path>`] surface (line
+/// 4676), and the by-value shrunk-owned [`From<PerAttemptRegion>
+/// for Box<std::path::Path>`] surface (line 4900) above — all five
+/// are filesystem-path emit surfaces at the same canonical-label
+/// oracle, differing only on receiver-side shape:
+/// [`From<T> for std::path::PathBuf`] returns a growth-header-
+/// carrying resizable owned buffer, [`From<T> for &'static
+/// std::path::Path`] returns a zero-copy `'static`-lived borrow
+/// into the static-string constant table, [`From<T> for
+/// Cow<'static, std::path::Path>`] returns either uniformly at the
+/// borrowed/owned frontier, [`From<T> for Box<std::path::Path>`]
+/// returns a shrunk immutable heap allocation with no refcount
+/// header, this [`From<T> for Arc<std::path::Path>`] returns a
+/// shared-owned immutable heap allocation with an atomic-refcount
+/// header preceding the label bytes for consumers that will hand
+/// cheap [`Arc::clone`]s across worker threads. All five route
+/// through the same [`PerAttemptRegion::as_str`] canonical-label
+/// oracle.
+///
+/// Structural mirror of [`From<PerAttemptRegion> for Arc<str>`]
+/// (line 2096), [`From<PerAttemptRegion> for Arc<[u8]>`] (line
+/// 3109), and [`From<PerAttemptRegion> for
+/// Arc<std::ffi::OsStr>`] (line 5020) at the UTF-8, byte-slice,
+/// and OS-string frontiers respectively — the same by-value
+/// shared-owned emit surface at the same one-oracle discipline,
+/// projected onto the filesystem-path frontier this time; all
+/// siblings route through the standard library `From<&T> for
+/// Arc<T>` impl at their respective frontier constructor
+/// ([`std::sync::Arc::<str>::from`] for the UTF-8 sibling routing
+/// through the `&str` view, [`std::sync::Arc::<[u8]>::from`] for
+/// the byte-slice sibling routing through the `.as_bytes()` view,
+/// [`std::sync::Arc::<std::ffi::OsStr>::from`] for the OS-string
+/// sibling routing through [`std::ffi::OsStr::new`] over the same
+/// `&str` view, [`std::sync::Arc::<std::path::Path>::from`] here
+/// routing through [`std::path::Path::new`] over the same `&str`
+/// view). Single allocation:
+/// [`std::sync::Arc::<std::path::Path>::from`] on a borrowed
+/// filesystem-path view allocates exactly the atomic-refcount
+/// header plus the label bytes, matching the shared-owned
+/// discipline the [`Arc<str>`], [`Arc<[u8]>`], and
+/// [`Arc<std::ffi::OsStr>`] emit peers already carry at their
+/// respective frontiers, whereas the [`Box<std::path::Path>`]
+/// emit peer carries no refcount header and the
+/// [`std::path::PathBuf`] emit peer carries a growth-header for
+/// future extension.
+///
+/// Opens the by-value shared-owned filesystem-path emit trio at
+/// the per-attempt-region ladder; two subsequent commits close
+/// the trio at the [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// [`From<T> for Arc<std::ffi::OsStr>`] opening order at the
+/// shared-owned OS-string emit sibling one frontier above
+/// (aa7a860 → 99f9460 → 6fc3e70), the [`From<T> for
+/// Box<std::path::Path>`] opening order at the shrunk-owned
+/// filesystem-path emit sibling one ownership shape below, and
+/// the [`From<T> for Arc<[u8]>`] opening order at the shared-
+/// owned byte-slice emit sibling two frontiers below.
+///
+/// The identity `Arc::<std::path::Path>::from(region).as_ref() ==
+/// std::path::Path::new(region.as_str())` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_into_arc_path_agrees_with_path_new_as_str`];
+/// the identity carried through a generic
+/// `impl Into<Arc<std::path::Path>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_per_attempt_region_into_arc_path_carries_through_generic_consumer`];
+/// the shared-owned receiver contract — [`std::sync::Arc::clone`]
+/// reads the same canonical label,
+/// [`std::sync::Arc::ptr_eq`] holds after the clone, and
+/// [`std::sync::Arc::strong_count`] lifts to at least two after
+/// the clone — at every variant is pinned by
+/// [`tests::test_per_attempt_region_into_arc_path_shares_label_across_clones`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// filesystem-path emit surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one
+/// `From<PerAttemptRegion> for std::sync::Arc<std::path::Path>`
+/// impl routing through [`PerAttemptRegion::as_str`],
+/// [`std::path::Path::new`], and
+/// [`std::sync::Arc::<std::path::Path>::from`]), not a per-consumer
+/// `Arc::<std::path::Path>::from(std::path::Path::new(region.as_str()))`
+/// restatement at every downstream site that accepts
+/// `impl Into<Arc<std::path::Path>>`. THEORY.md §VI.1 one-oracle:
+/// the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]) and every filesystem-path emit
+/// surface — [`From<T> for std::path::PathBuf`],
+/// [`From<T> for &'static std::path::Path`],
+/// [`From<T> for std::borrow::Cow<'static, std::path::Path>`],
+/// [`From<T> for Box<std::path::Path>`], this
+/// [`From<T> for std::sync::Arc<std::path::Path>`] — reads
+/// through it.
+impl From<PerAttemptRegion> for std::sync::Arc<std::path::Path> {
+    fn from(region: PerAttemptRegion) -> std::sync::Arc<std::path::Path> {
+        std::sync::Arc::<std::path::Path>::from(std::path::Path::new(region.as_str()))
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for PerAttemptRegion`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for PerAttemptRegion`] so a downstream consumer bound
@@ -20638,6 +20768,147 @@ mod tests {
             assert!(
                 std::sync::Arc::strong_count(&shared) >= 2,
                 "Arc<OsStr> strong count must be at least 2 after clone at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`],
+    /// `std::sync::Arc::<std::path::Path>::from(region)` (the
+    /// [`From<PerAttemptRegion> for Arc<std::path::Path>`] impl
+    /// body) yields the same filesystem-path view as
+    /// `std::path::Path::new(region.as_str())` — the composition
+    /// through the canonical-label oracle and the filesystem-path
+    /// constructor. Pins the agreement identity that the by-value
+    /// shared-owned filesystem-path emit surface reads the same
+    /// canonical label the borrowed-view
+    /// [`AsRef<std::path::Path>`], the by-value owned
+    /// [`From<PerAttemptRegion> for std::path::PathBuf`], the
+    /// by-value borrowed [`From<PerAttemptRegion> for &'static
+    /// std::path::Path`], the by-value borrowed/owned-frontier
+    /// [`From<PerAttemptRegion> for Cow<'static, std::path::Path>`],
+    /// and the by-value shrunk-owned [`From<PerAttemptRegion> for
+    /// Box<std::path::Path>`] surfaces already read at the
+    /// filesystem-path frontier. Structural mirror of the
+    /// [`Arc<str>`] agreement pin
+    /// [`test_per_attempt_region_into_arc_str_agrees_with_as_str`],
+    /// the [`Arc<[u8]>`] agreement pin
+    /// [`test_per_attempt_region_into_arc_bytes_agrees_with_as_str_as_bytes`],
+    /// and the [`Arc<std::ffi::OsStr>`] agreement pin
+    /// [`test_per_attempt_region_into_arc_os_str_agrees_with_os_str_new_as_str`]
+    /// at the UTF-8, byte-slice, and OS-string frontiers
+    /// respectively, projected onto the filesystem-path frontier
+    /// this time — the four shared-owned agreement pins together
+    /// close the by-value shared-owned emit surface at the same
+    /// one-oracle discipline across UTF-8, byte-slice, OS-string,
+    /// and filesystem-path frontiers.
+    #[test]
+    fn test_per_attempt_region_into_arc_path_agrees_with_path_new_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let shared: std::sync::Arc<std::path::Path> =
+                std::sync::Arc::<std::path::Path>::from(region);
+            assert_eq!(
+                shared.as_ref(),
+                std::path::Path::new(region.as_str()),
+                "From<PerAttemptRegion> for Arc<Path> must agree with Path::new(as_str()) at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for Arc<std::path::Path>`]
+    /// identity carries through a generic `impl
+    /// Into<Arc<std::path::Path>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Arc<std::path::Path>>>(t: T) ->
+    /// Arc<std::path::Path> { t.into() }` — the shape of an actual
+    /// downstream consumer (a cross-thread cached-filesystem-path
+    /// slot typed as [`Arc<std::path::Path>`] to share a canonical
+    /// filesystem-path label allocation across worker threads via
+    /// atomic refcount, a validated-input newtype wrapper that
+    /// stores canonical filesystem-path labels as
+    /// [`Arc<std::path::Path>`] to hand cheap
+    /// [`std::sync::Arc::clone`]s to sibling structures, a serde
+    /// container that opts into
+    /// `#[serde(from = "Arc<std::path::Path>")]` at the shared-
+    /// owned filesystem-path frontier, a dashmap-style keyed-table
+    /// filesystem-path-value slot whose readers want an [`Arc`]
+    /// clone rather than a per-lookup allocation) reads the
+    /// canonical snake_case label directly from a
+    /// [`PerAttemptRegion`] value as a shared-owned immutable
+    /// heap-owned [`Arc<std::path::Path>`]. The structural witness
+    /// that a [`PerAttemptRegion`] is genuinely usable at `impl
+    /// Into<Arc<std::path::Path>>` call sites — a regression that
+    /// drifted the [`From`] impl signature (returning
+    /// [`Box<std::path::Path>`] instead of
+    /// [`Arc<std::path::Path>`], returning a [`std::path::PathBuf`]
+    /// instead of the shared-owned handle, requiring
+    /// `&PerAttemptRegion` and losing the by-value semantics, or
+    /// dropping to a [`Box<std::path::Path>`]-then-[`Arc::from`]
+    /// composition that would allocate twice) fails here at
+    /// compile time or at the assertion instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_arc_path_carries_through_generic_consumer() {
+        fn read<T: Into<std::sync::Arc<std::path::Path>>>(t: T) -> std::sync::Arc<std::path::Path> {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region).as_ref(),
+                std::path::Path::new(region.as_str()),
+                "generic Into<Arc<Path>> consumer must read canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for Arc<std::path::Path>`]
+    /// shared-owned semantics hold across [`std::sync::Arc::clone`]
+    /// at every [`PerAttemptRegion::ALL`] variant: the clone reads
+    /// exactly the same canonical snake_case label the original
+    /// reads, points at the same allocation (identity of the
+    /// underlying filesystem-path pointer via
+    /// [`std::sync::Arc::ptr_eq`]), and the atomic refcount lifts
+    /// to at least two after the clone (via
+    /// [`std::sync::Arc::strong_count`]). Pins the shared-owned
+    /// receiver contract at the filesystem-path emit surface — a
+    /// regression that drifted the impl body to a non-`Arc`
+    /// composition ([`Box::<std::path::Path>::from`]-then-ad-hoc-
+    /// rewrap, a [`std::path::PathBuf`] intermediate) would break
+    /// the pointer-identity assertion (each clone would land at a
+    /// distinct allocation) even if the canonical-label bytes
+    /// still agreed. Structural mirror of the [`Arc<str>`] clone-
+    /// identity pin
+    /// [`test_per_attempt_region_into_arc_str_shares_label_across_clones`]
+    /// at the UTF-8 frontier, the [`Arc<[u8]>`] clone-identity pin
+    /// [`test_per_attempt_region_into_arc_bytes_shares_label_across_clones`]
+    /// at the byte-slice frontier, and the [`Arc<std::ffi::OsStr>`]
+    /// clone-identity pin
+    /// [`test_per_attempt_region_into_arc_os_str_shares_label_across_clones`]
+    /// at the OS-string frontier — the four clone-identity pins
+    /// together close the structural witness that the receiver
+    /// actually holds a shared-owned [`Arc<std::path::Path>`] slot
+    /// rather than an [`Arc<std::path::Path>`]-typed wrapper around
+    /// a per-clone-allocated [`Box<std::path::Path>`], across
+    /// UTF-8, byte-slice, OS-string, and filesystem-path frontiers.
+    #[test]
+    fn test_per_attempt_region_into_arc_path_shares_label_across_clones() {
+        for region in PerAttemptRegion::ALL {
+            let shared: std::sync::Arc<std::path::Path> =
+                std::sync::Arc::<std::path::Path>::from(region);
+            let cloned = std::sync::Arc::clone(&shared);
+            assert_eq!(
+                cloned.as_ref(),
+                std::path::Path::new(region.as_str()),
+                "Arc<Path> clone must read canonical label at {region:?}",
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(&shared, &cloned),
+                "Arc<Path> clone must share the same underlying allocation at {region:?}",
+            );
+            assert!(
+                std::sync::Arc::strong_count(&shared) >= 2,
+                "Arc<Path> strong count must be at least 2 after clone at {region:?}",
             );
         }
     }
