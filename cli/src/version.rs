@@ -2916,6 +2916,164 @@ impl From<BumpLevel> for std::sync::Arc<std::path::Path> {
     }
 }
 
+/// [`From<BumpLevel> for std::rc::Rc<std::ffi::OsStr>`] routes
+/// through [`BumpLevel::as_str`] composed with
+/// [`std::ffi::OsStr::new`] composed with
+/// [`std::rc::Rc::<std::ffi::OsStr>::from`] at the shared canonical-
+/// label oracle so a downstream consumer that takes a thread-local
+/// shared-owned [`Rc<std::ffi::OsStr>`] via
+/// [`Into<Rc<std::ffi::OsStr>>`] (a same-thread cached-OS-string slot
+/// typed as [`Rc<std::ffi::OsStr>`] to share a canonical [`BumpLevel`]
+/// label allocation within one worker via non-atomic refcount, a
+/// validated-input newtype wrapper whose canonical OS-string label
+/// field is stored as [`Rc<std::ffi::OsStr>`] to hand cheap
+/// [`std::rc::Rc::clone`]s to sibling structures on the same thread, a
+/// serde container that opts into `#[serde(from = "Rc<std::ffi::OsStr>")]`
+/// at the thread-local shared-owned OS-string frontier, a single-
+/// threaded arena-keyed OS-string-value table whose readers want an
+/// [`Rc`] clone rather than a per-lookup allocation, a graph-walk
+/// visitor that clones OS-string labels across nodes without needing
+/// [`Send`] / [`Sync`]) reads the canonical lowercase label
+/// (`"patch"`, `"minor"`, `"major"`) as a thread-local shared-owned
+/// [`Rc<std::ffi::OsStr>`] with a single allocation for the
+/// non-atomic-refcount header plus the exact-length label bytes,
+/// enabling `O(1)` [`std::rc::Rc::clone`] within a single thread at a
+/// strictly lower per-clone cost than the atomic
+/// [`std::sync::Arc::clone`] — through ONE composition rather than a
+/// per-consumer
+/// `Rc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(level.as_str()))`
+/// restatement at every downstream site.
+///
+/// The by-value thread-local shared-owned emit peer of the by-value
+/// owned [`From<BumpLevel> for std::ffi::OsString`] surface
+/// (line 1829), the by-value borrowed
+/// [`From<BumpLevel> for &'static std::ffi::OsStr`] surface
+/// (line 2040), the by-value borrowed/owned
+/// [`From<BumpLevel> for std::borrow::Cow<'static, std::ffi::OsStr>`]
+/// surface (line 2271), the by-value shrunk-owned
+/// [`From<BumpLevel> for Box<std::ffi::OsStr>`] surface (line 2528),
+/// and the by-value atomic-shared-owned
+/// [`From<BumpLevel> for std::sync::Arc<std::ffi::OsStr>`] surface
+/// (line 2775) above — all six are OS-string emit surfaces at the same
+/// canonical-label oracle, differing only on receiver-side shape:
+/// [`From<T> for std::ffi::OsString`] returns a growth-header-carrying
+/// resizable owned buffer, [`From<T> for &'static std::ffi::OsStr`]
+/// returns a zero-copy `'static`-lived borrow into the static-string
+/// constant table, [`From<T> for Cow<'static, std::ffi::OsStr>`]
+/// returns either uniformly at the borrowed/owned frontier,
+/// [`From<T> for Box<std::ffi::OsStr>`] returns a shrunk immutable
+/// heap allocation with no refcount header,
+/// [`From<T> for Arc<std::ffi::OsStr>`] returns a shared-owned
+/// immutable heap allocation with an atomic-refcount header preceding
+/// the label bytes for consumers that will hand cheap [`Arc::clone`]s
+/// across worker threads, this [`From<T> for Rc<std::ffi::OsStr>`]
+/// returns a thread-local shared-owned immutable heap allocation with
+/// a non-atomic-refcount header for consumers whose upstream will
+/// never cross a thread boundary. All six route through the same
+/// [`BumpLevel::as_str`] canonical-label oracle.
+///
+/// Structural mirror of [`From<BumpLevel> for std::rc::Rc<str>`]
+/// (line 6944) and [`From<BumpLevel> for std::rc::Rc<[u8]>`]
+/// (line 5159) at the UTF-8 and byte-slice frontiers respectively —
+/// the same by-value thread-local shared-owned emit surface at the
+/// same one-oracle discipline, projected onto the OS-string frontier
+/// this time; all three route through the standard library
+/// `From<&T> for Rc<T>` impl at their respective frontier constructor
+/// ([`std::rc::Rc::<str>::from`] for the UTF-8 sibling routing through
+/// the `&str` view, [`std::rc::Rc::<[u8]>::from`] for the byte-slice
+/// sibling routing through the `.as_bytes()` view,
+/// [`std::rc::Rc::<std::ffi::OsStr>::from`] here routing through
+/// [`std::ffi::OsStr::new`] over the same `&str` view). Single
+/// allocation: [`std::rc::Rc::<std::ffi::OsStr>::from`] on a borrowed
+/// OS-string view allocates exactly the non-atomic-refcount header
+/// plus the label bytes, matching the thread-local shared-owned
+/// discipline the [`Rc<str>`] and [`Rc<[u8]>`] emit peers already
+/// carry at their respective frontiers, whereas the
+/// [`Arc<std::ffi::OsStr>`] emit peer carries an atomic-refcount
+/// header for cross-thread [`Send`] + [`Sync`] semantics and the
+/// [`Box<std::ffi::OsStr>`] emit peer carries no refcount header at
+/// all.
+///
+/// Trio-closing peer at the third ordered typed sum of the by-value
+/// thread-local shared-owned OS-string emit trio:
+/// [`From<crate::retry::PerAttemptRegion> for std::rc::Rc<std::ffi::OsStr>`]
+/// (commit d484f80 at `retry.rs:5283`) opened the trio at the per-
+/// attempt-region ladder;
+/// [`From<crate::probe_outcome::AdmissionTier> for std::rc::Rc<std::ffi::OsStr>`]
+/// (commit 2df36e3 at `probe_outcome.rs:9688`) carried the mid-trio
+/// slot at the admission-tier ladder; this impl closes the trio at the
+/// version-bump-magnitude ladder, matching the
+/// [`From<T> for Arc<std::ffi::OsStr>`] closure order at the atomic-
+/// shared-owned OS-string emit sibling one ownership shape above
+/// (aa7a860 → 99f9460 → 6fc3e70), the
+/// [`From<T> for Box<std::ffi::OsStr>`] closure order at the shrunk-
+/// owned OS-string emit sibling one ownership shape below
+/// (4a4a9d7 → ab2fdcd → 3280cd3), and the
+/// [`From<T> for Arc<std::path::Path>`] closure order at the atomic-
+/// shared-owned filesystem-path emit sibling one frontier above
+/// (97a2228 → 0b378c1 → 54c3104). After this commit the thread-local
+/// shared-owned OS-string emit surface joins the closed-across-all-
+/// three-typed-sums set alongside the closed thread-local shared-owned
+/// UTF-8 (`Rc<str>`) and byte-slice (`Rc<[u8]>`) emit trios one and
+/// two frontiers below and the closed atomic-shared-owned
+/// (`Arc<std::ffi::OsStr>`) emit trio one ownership shape above —
+/// sharpens the case for a lifted derive-macro that generates the
+/// thread-local shared-owned emit cross-product across UTF-8 /
+/// byte-slice / OS-string / filesystem-path frontiers at every
+/// oracle-label-annotated typed sum (the thread-local shared-owned
+/// OS-string emit surface now has three identical trio-parallel impls
+/// to templatize against, matching the shared-owned UTF-8, byte-slice,
+/// and OS-string emit siblings' three-impl coverage).
+///
+/// The impl body picks [`std::rc::Rc::<std::ffi::OsStr>::from`] on
+/// [`std::ffi::OsStr::new`]`(level.as_str())` rather than a
+/// [`Box::<std::ffi::OsStr>::from`]-then-[`Rc::from`] round trip
+/// (which would allocate twice — box the OS-string slice, then rewrap
+/// into an [`Rc<std::ffi::OsStr>`]) or an [`std::ffi::OsString`]-then-
+/// [`Rc::from`] round trip (which would allocate a growth-header-
+/// carrying resizable buffer, then rewrap): the direct
+/// [`std::rc::Rc::<std::ffi::OsStr>::from`] path allocates once from
+/// the `'static` label slice viewed through [`std::ffi::OsStr::new`],
+/// including the non-atomic-refcount header, so the receiver pays a
+/// single allocation for exactly the label's length plus the header.
+///
+/// The identity `Rc::<std::ffi::OsStr>::from(level).as_ref() ==
+/// std::ffi::OsStr::new(level.as_str())` at every
+/// [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_into_rc_os_str_agrees_with_os_str_new_as_str`];
+/// the identity carried through a generic
+/// `impl Into<Rc<std::ffi::OsStr>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_into_rc_os_str_carries_through_generic_consumer`];
+/// the thread-local shared-owned receiver contract —
+/// [`std::rc::Rc::clone`] reads the same canonical label,
+/// [`std::rc::Rc::ptr_eq`] holds after the clone, and
+/// [`std::rc::Rc::strong_count`] lifts to at least two after the
+/// clone — at every variant is pinned by
+/// [`tests::test_bump_level_into_rc_os_str_shares_label_across_clones`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value thread-local shared-
+/// owned OS-string emit surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one
+/// `From<BumpLevel> for std::rc::Rc<std::ffi::OsStr>` impl routing
+/// through [`BumpLevel::as_str`], [`std::ffi::OsStr::new`], and
+/// [`std::rc::Rc::<std::ffi::OsStr>::from`]), not a per-consumer
+/// `Rc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(level.as_str()))`
+/// restatement at every downstream site that accepts
+/// `impl Into<Rc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`BumpLevel::as_str`]) and
+/// every OS-string emit surface — [`From<T> for std::ffi::OsString`],
+/// [`From<T> for &'static std::ffi::OsStr`],
+/// [`From<T> for std::borrow::Cow<'static, std::ffi::OsStr>`],
+/// [`From<T> for Box<std::ffi::OsStr>`],
+/// [`From<T> for std::sync::Arc<std::ffi::OsStr>`], this
+/// [`From<T> for std::rc::Rc<std::ffi::OsStr>`] — reads through it.
+impl From<BumpLevel> for std::rc::Rc<std::ffi::OsStr> {
+    fn from(level: BumpLevel) -> std::rc::Rc<std::ffi::OsStr> {
+        std::rc::Rc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(level.as_str()))
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -11074,6 +11232,158 @@ mod tests {
             assert!(
                 std::sync::Arc::strong_count(&shared) >= 2,
                 "Arc<Path> strong count must be at least 2 after clone at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by
+    /// [`BumpLevel::ALL`],
+    /// `std::rc::Rc::<std::ffi::OsStr>::from(level)` (the
+    /// [`From<BumpLevel> for Rc<std::ffi::OsStr>`] impl body) yields
+    /// the same OS-string view as `std::ffi::OsStr::new(level.as_str())`
+    /// — the composition through the canonical-label oracle and the
+    /// OS-string constructor. Pins the agreement identity that the
+    /// by-value thread-local shared-owned OS-string emit surface reads
+    /// the same canonical label the borrowed-view
+    /// [`AsRef<std::ffi::OsStr>`], the by-value owned
+    /// [`From<BumpLevel> for std::ffi::OsString`], the by-value
+    /// borrowed [`From<BumpLevel> for &'static std::ffi::OsStr`], the
+    /// by-value borrowed/owned-frontier
+    /// [`From<BumpLevel> for Cow<'static, std::ffi::OsStr>`], the by-
+    /// value shrunk-owned [`From<BumpLevel> for Box<std::ffi::OsStr>`],
+    /// and the by-value atomic-shared-owned
+    /// [`From<BumpLevel> for Arc<std::ffi::OsStr>`] surfaces already
+    /// read at the OS-string frontier. Structural mirror of
+    /// [`test_bump_level_into_rc_str_agrees_with_as_str`] at the UTF-8
+    /// sibling frontier and
+    /// [`test_bump_level_into_rc_bytes_agrees_with_as_str_as_bytes`]
+    /// at the byte-slice sibling frontier, and
+    /// [`test_bump_level_into_arc_os_str_agrees_with_os_str_new_as_str`]
+    /// at the atomic-shared-owned OS-string sibling one ownership shape
+    /// above — projected onto the thread-local shared-owned OS-string
+    /// frontier this time. Structural mirror of
+    /// `test_per_attempt_region_into_rc_os_str_agrees_with_os_str_new_as_str`
+    /// (commit d484f80) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_rc_os_str_agrees_with_os_str_new_as_str`
+    /// (commit 2df36e3) at the mid-trio admission-tier ladder — closing
+    /// the thread-local shared-owned OS-string emit agreement pin at the
+    /// third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_rc_os_str_agrees_with_os_str_new_as_str() {
+        for level in BumpLevel::ALL {
+            let shared: std::rc::Rc<std::ffi::OsStr> = std::rc::Rc::<std::ffi::OsStr>::from(level);
+            assert_eq!(
+                shared.as_ref(),
+                std::ffi::OsStr::new(level.as_str()),
+                "From<BumpLevel> for Rc<OsStr> must agree with OsStr::new(as_str()) at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Rc<std::ffi::OsStr>`] identity carries
+    /// through a generic `impl Into<Rc<std::ffi::OsStr>>` consumer at
+    /// every [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Rc<std::ffi::OsStr>>>(t: T) ->
+    /// Rc<std::ffi::OsStr> { t.into() }` — the shape of an actual
+    /// downstream consumer (a same-thread cached-OS-string slot typed
+    /// as [`Rc<std::ffi::OsStr>`] to share a canonical OS-string label
+    /// allocation within one worker via non-atomic refcount, a
+    /// validated-input newtype wrapper that stores canonical OS-string
+    /// labels as [`Rc<std::ffi::OsStr>`] to hand cheap
+    /// [`std::rc::Rc::clone`]s to sibling structures on the same
+    /// thread, a serde container that opts into
+    /// `#[serde(from = "Rc<std::ffi::OsStr>")]` at the thread-local
+    /// shared-owned OS-string frontier, a single-threaded arena-keyed
+    /// OS-string-value table whose readers want an [`Rc`] clone rather
+    /// than a per-lookup allocation) reads the canonical lowercase
+    /// label directly from a [`BumpLevel`] value as a thread-local
+    /// shared-owned immutable heap-owned [`Rc<std::ffi::OsStr>`]. The
+    /// structural witness that a [`BumpLevel`] is genuinely usable at
+    /// `impl Into<Rc<std::ffi::OsStr>>` call sites — a regression that
+    /// drifted the [`From`] impl signature (returning
+    /// [`Box<std::ffi::OsStr>`] or [`Arc<std::ffi::OsStr>`] instead of
+    /// [`Rc<std::ffi::OsStr>`], returning an [`std::ffi::OsString`]
+    /// instead of the thread-local shared-owned handle, requiring
+    /// `&BumpLevel` and losing the by-value semantics, or dropping to a
+    /// [`Box<std::ffi::OsStr>`]-then-[`Rc::from`] composition that
+    /// would allocate twice) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    /// Structural mirror of
+    /// `test_per_attempt_region_into_rc_os_str_carries_through_generic_consumer`
+    /// (commit d484f80) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_rc_os_str_carries_through_generic_consumer`
+    /// (commit 2df36e3) at the mid-trio admission-tier ladder — closing
+    /// the thread-local shared-owned OS-string emit generic-consumer
+    /// pin at the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_rc_os_str_carries_through_generic_consumer() {
+        fn read<T: Into<std::rc::Rc<std::ffi::OsStr>>>(t: T) -> std::rc::Rc<std::ffi::OsStr> {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).as_ref(),
+                std::ffi::OsStr::new(level.as_str()),
+                "generic Into<Rc<OsStr>> consumer must read canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Rc<std::ffi::OsStr>`] thread-local
+    /// shared-owned semantics hold across [`std::rc::Rc::clone`] at
+    /// every [`BumpLevel::ALL`] variant: the clone reads exactly the
+    /// same canonical lowercase label the original reads, points at
+    /// the same allocation (identity of the underlying OS-string
+    /// pointer via [`std::rc::Rc::ptr_eq`]), and the non-atomic
+    /// refcount lifts to at least two after the clone (via
+    /// [`std::rc::Rc::strong_count`]). Pins the thread-local shared-
+    /// owned receiver contract at the OS-string emit surface — a
+    /// regression that drifted the impl body to a non-[`Rc`]
+    /// composition ([`Box::<std::ffi::OsStr>::from`]-then-ad-hoc-
+    /// rewrap, an [`std::ffi::OsString`] intermediate) would break the
+    /// pointer-identity assertion (each clone would land at a distinct
+    /// allocation) even if the canonical-label bytes still agreed.
+    /// Structural mirror of the [`Rc<str>`] clone-identity pin
+    /// [`test_bump_level_into_rc_str_shares_label_across_clones`] at
+    /// the UTF-8 frontier, the [`Rc<[u8]>`] clone-identity pin
+    /// [`test_bump_level_into_rc_bytes_shares_label_across_clones`] at
+    /// the byte-slice frontier, and the [`Arc<std::ffi::OsStr>`]
+    /// clone-identity pin
+    /// [`test_bump_level_into_arc_os_str_shares_label_across_clones`]
+    /// one ownership shape above — the four clone-identity pins
+    /// together close the structural witness that the receiver actually
+    /// holds a thread-local shared-owned [`Rc<std::ffi::OsStr>`] slot
+    /// rather than an [`Rc<std::ffi::OsStr>`]-typed wrapper around a
+    /// per-clone-allocated [`Box<std::ffi::OsStr>`], across UTF-8,
+    /// byte-slice, OS-string, and atomic-shared-owned OS-string
+    /// frontiers. Structural mirror of
+    /// `test_per_attempt_region_into_rc_os_str_shares_label_across_clones`
+    /// (commit d484f80) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_rc_os_str_shares_label_across_clones`
+    /// (commit 2df36e3) at the mid-trio admission-tier ladder — closing
+    /// the thread-local shared-owned OS-string clone-identity pin at
+    /// the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_rc_os_str_shares_label_across_clones() {
+        for level in BumpLevel::ALL {
+            let shared: std::rc::Rc<std::ffi::OsStr> = std::rc::Rc::<std::ffi::OsStr>::from(level);
+            let cloned = std::rc::Rc::clone(&shared);
+            assert_eq!(
+                cloned.as_ref(),
+                std::ffi::OsStr::new(level.as_str()),
+                "Rc<OsStr> clone must read canonical label at {level:?}",
+            );
+            assert!(
+                std::rc::Rc::ptr_eq(&shared, &cloned),
+                "Rc<OsStr> clone must share the same underlying allocation at {level:?}",
+            );
+            assert!(
+                std::rc::Rc::strong_count(&shared) >= 2,
+                "Rc<OsStr> strong count must be at least 2 after clone at {level:?}",
             );
         }
     }
