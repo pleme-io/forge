@@ -5428,6 +5428,114 @@ impl From<PerAttemptRegion> for std::rc::Rc<std::path::Path> {
     }
 }
 
+/// [`From<PerAttemptRegion> for std::ffi::CString`] routes through
+/// [`PerAttemptRegion::as_str`] composed with
+/// [`std::ffi::CString::new`] so a downstream consumer that takes a
+/// NUL-terminated owned C-string via [`Into<std::ffi::CString>`] (a
+/// [`libc`]/POSIX FFI call site that hands a canonical
+/// [`PerAttemptRegion`] label to a `*const c_char` argument via
+/// [`std::ffi::CString::as_ptr`], a [`std::process::Command::env`]
+/// wrapper that layers a NUL-terminated telemetry-region label at
+/// the child-process-frontier, a `syslog` / `journal` bridge that
+/// emits a canonical label to a C logger without an ad-hoc
+/// null-terminator staple, a [`std::ffi::CString::into_raw`]
+/// hand-off at a C-ABI boundary, a serde container that opts into
+/// `#[serde(from = "std::ffi::CString")]` at the NUL-terminated
+/// owned C-string frontier, a validated-input newtype builder that
+/// consumes a [`std::ffi::CString`] and returns a validated
+/// [`PerAttemptRegion`]-labeled handle) reads the canonical
+/// snake_case label (`"before_first"`, `"first"`, `"interim"`,
+/// `"final"`, `"over_budget"`) as an owned heap-allocated
+/// NUL-terminated C-string with a single allocation for the label
+/// bytes plus the trailing NUL — through ONE composition rather
+/// than a per-consumer
+/// `std::ffi::CString::new(region.as_str()).unwrap()` restatement
+/// that repeats the NUL-free-known invariant at every downstream
+/// site.
+///
+/// Opens the by-value owned NUL-terminated C-string emit trio at
+/// the per-attempt-region ladder at a fresh emit frontier the prior
+/// UTF-8, byte-slice, OS-string, and filesystem-path frontiers do
+/// not cover; two subsequent commits close the trio at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the opening
+/// order of every prior by-value owned emit trio at the sibling
+/// frontiers — the [`From<T> for String`] owned UTF-8 emit
+/// opening (line 1505 sibling ladder), the [`From<T> for
+/// std::ffi::OsString`] owned OS-string emit opening (line 4159
+/// sibling ladder), and the [`From<T> for std::path::PathBuf`]
+/// owned filesystem-path emit opening (line 4266 sibling ladder).
+/// All four by-value owned emit surfaces route through the same
+/// [`PerAttemptRegion::as_str`] canonical-label oracle, differing
+/// only on receiver-side shape: [`From<T> for String`] returns a
+/// growth-header-carrying resizable owned UTF-8 buffer, [`From<T>
+/// for std::ffi::OsString`] returns the same shape at the OS-
+/// string frontier, [`From<T> for std::path::PathBuf`] returns the
+/// same shape at the filesystem-path frontier, this [`From<T> for
+/// std::ffi::CString`] returns an owned heap-allocated
+/// NUL-terminated C-string suitable for direct hand-off to a C-ABI
+/// `*const c_char` frontier — the axis the prior three owned emit
+/// surfaces do not reach, because none of [`String`],
+/// [`std::ffi::OsString`], or [`std::path::PathBuf`] guarantees a
+/// trailing NUL byte after the label buffer.
+///
+/// # Infallibility
+///
+/// [`std::ffi::CString::new`] is fallible in the general case
+/// (rejecting interior-NUL byte sequences at the
+/// [`std::ffi::NulError`] frontier), but the canonical
+/// [`PerAttemptRegion::as_str`] label alphabet (`"before_first"`,
+/// `"first"`, `"interim"`, `"final"`, `"over_budget"`) is a subset
+/// of the printable-ASCII lowercase snake_case grammar and carries
+/// no interior NUL byte at any variant, so the
+/// [`std::ffi::CString::new`] call is guaranteed to succeed at
+/// every [`PerAttemptRegion::ALL`] value. The `.expect(...)` inside
+/// the impl body reads a compile-time-audited invariant, not a
+/// runtime failure mode; a future variant insertion that landed a
+/// label with an interior NUL byte would break the
+/// [`tests::test_per_attempt_region_into_cstring_agrees_with_as_str`]
+/// round-trip pin and the
+/// [`tests::test_per_attempt_region_into_cstring_carries_trailing_nul`]
+/// no-interior-NUL pin at the same test-suite gate the
+/// [`std::str::FromStr`] canonicity discipline refuses non-canonical
+/// label admission at.
+///
+/// The identity `std::ffi::CString::from(region).as_bytes() ==
+/// region.as_str().as_bytes()` at every [`PerAttemptRegion::ALL`]
+/// variant is pinned by
+/// [`tests::test_per_attempt_region_into_cstring_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<std::ffi::CString>` consumer at every variant is
+/// pinned by
+/// [`tests::test_per_attempt_region_into_cstring_carries_through_generic_consumer`];
+/// the NUL-terminator contract — [`std::ffi::CString::as_bytes`]
+/// contains no interior `0u8` byte and
+/// [`std::ffi::CString::as_bytes_with_nul`] ends in exactly one
+/// trailing `0u8` byte after the canonical label bytes — at every
+/// variant is pinned by
+/// [`tests::test_per_attempt_region_into_cstring_carries_trailing_nul`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned
+/// NUL-terminated C-string emit surface is a typed-primitive site
+/// on [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
+/// std::ffi::CString` impl routing through
+/// [`PerAttemptRegion::as_str`] and [`std::ffi::CString::new`]),
+/// not a per-consumer
+/// `std::ffi::CString::new(region.as_str()).unwrap()` restatement
+/// at every downstream site that accepts
+/// `impl Into<std::ffi::CString>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]) and every by-value owned emit
+/// surface — [`From<T> for String`], [`From<T> for
+/// std::ffi::OsString`], [`From<T> for std::path::PathBuf`], and
+/// this [`From<T> for std::ffi::CString`] — reads through it.
+impl From<PerAttemptRegion> for std::ffi::CString {
+    fn from(region: PerAttemptRegion) -> std::ffi::CString {
+        std::ffi::CString::new(region.as_str())
+            .expect("PerAttemptRegion canonical labels contain no interior NUL bytes")
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for PerAttemptRegion`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for PerAttemptRegion`] so a downstream consumer bound
@@ -21609,6 +21717,116 @@ mod tests {
             assert!(
                 std::rc::Rc::strong_count(&shared) >= 2,
                 "Rc<Path> strong count must be at least 2 after clone at {region:?}",
+            );
+        }
+    }
+
+    /// [`From<PerAttemptRegion> for std::ffi::CString`] emits the
+    /// canonical snake_case label byte-sequence at every
+    /// [`PerAttemptRegion::ALL`] variant, unchanged from the
+    /// [`PerAttemptRegion::as_str`] canonical-label oracle. Pins
+    /// the identity `std::ffi::CString::from(region).as_bytes() ==
+    /// region.as_str().as_bytes()` at every variant against the
+    /// shared canonical-label oracle, refusing a future variant
+    /// insertion that lands a label the [`std::ffi::CString::new`]
+    /// frontier would reject (a label with an interior `0u8` byte
+    /// would fail the `.expect(...)` at the same as_str() round-
+    /// trip), or that drifts the impl body off the
+    /// [`PerAttemptRegion::as_str`] oracle onto a stale label
+    /// table. The structural witness that the by-value owned
+    /// NUL-terminated C-string emit surface reads the same one-
+    /// oracle grammar the sibling [`From<T> for String`],
+    /// [`From<T> for std::ffi::OsString`], and [`From<T> for
+    /// std::path::PathBuf`] owned emit peers read — one round-
+    /// trip pin per variant at the C-string frontier.
+    #[test]
+    fn test_per_attempt_region_into_cstring_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let owned: std::ffi::CString = std::ffi::CString::from(region);
+            assert_eq!(
+                owned.as_bytes(),
+                region.as_str().as_bytes(),
+                "From<PerAttemptRegion> for CString must agree with as_str() bytes at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for std::ffi::CString`]
+    /// identity carries through a generic
+    /// `impl Into<std::ffi::CString>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<std::ffi::CString>>(t: T) ->
+    /// std::ffi::CString { t.into() }` — the shape of a
+    /// [`libc`]/POSIX FFI wrapper that binds a canonical
+    /// [`PerAttemptRegion`] label into a `*const c_char`
+    /// argument, a `syslog` bridge that hands a canonical label
+    /// to a C logger, a serde
+    /// `#[serde(from = "std::ffi::CString")]` container, a
+    /// validated-input newtype builder that consumes an owned
+    /// [`std::ffi::CString`] label — reads the canonical
+    /// snake_case label from a [`PerAttemptRegion`] value as an
+    /// owned NUL-terminated C-string. The structural witness that
+    /// a [`PerAttemptRegion`] is genuinely usable at
+    /// `impl Into<std::ffi::CString>` call sites; a regression
+    /// that drifted the impl signature (returning [`String`],
+    /// [`std::ffi::OsString`], or [`std::path::PathBuf`] instead
+    /// of [`std::ffi::CString`], requiring `&PerAttemptRegion`
+    /// and losing the by-value semantics) fails here at compile
+    /// time or at the assertion rather than at every downstream
+    /// generic call site.
+    #[test]
+    fn test_per_attempt_region_into_cstring_carries_through_generic_consumer() {
+        fn read<T: Into<std::ffi::CString>>(t: T) -> std::ffi::CString {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region).as_bytes(),
+                region.as_str().as_bytes(),
+                "generic Into<CString> consumer must read canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for std::ffi::CString`]
+    /// NUL-terminator contract — [`std::ffi::CString::as_bytes`]
+    /// contains no interior `0u8` byte, and
+    /// [`std::ffi::CString::as_bytes_with_nul`] ends in exactly
+    /// one trailing `0u8` byte after the canonical label bytes
+    /// (so `as_bytes_with_nul().len() == as_bytes().len() + 1`)
+    /// — holds at every [`PerAttemptRegion::ALL`] variant. Pins
+    /// the C-string boundary contract at the NUL-terminated
+    /// owned C-string emit surface: a regression that landed an
+    /// interior NUL byte in the label alphabet (a future variant
+    /// like `PerAttemptRegion::Custom("first\0malformed")`
+    /// admitted at the [`PerAttemptRegion::as_str`] oracle), or
+    /// that drifted the impl body to a shape omitting the
+    /// trailing NUL, would break the C-ABI hand-off — a downstream
+    /// [`std::ffi::CString::as_ptr`] hand into a
+    /// `strlen`/`printf`/`syslog` consumer would either read past
+    /// the label buffer (missing trailing NUL) or terminate mid-
+    /// label at the first NUL (interior NUL) — before this
+    /// assertion refuses the drift.
+    #[test]
+    fn test_per_attempt_region_into_cstring_carries_trailing_nul() {
+        for region in PerAttemptRegion::ALL {
+            let owned: std::ffi::CString = std::ffi::CString::from(region);
+            let bytes = owned.as_bytes();
+            let bytes_with_nul = owned.as_bytes_with_nul();
+            assert!(
+                !bytes.contains(&0u8),
+                "CString label bytes must not contain an interior NUL at {region:?}",
+            );
+            assert_eq!(
+                bytes_with_nul.last().copied(),
+                Some(0u8),
+                "CString label bytes_with_nul must end in a trailing NUL at {region:?}",
+            );
+            assert_eq!(
+                bytes_with_nul.len(),
+                bytes.len() + 1,
+                "CString label bytes_with_nul must be exactly one byte longer than as_bytes at {region:?}",
             );
         }
     }
