@@ -5942,6 +5942,129 @@ impl TryFrom<Box<std::ffi::CStr>> for PerAttemptRegion {
     }
 }
 
+/// [`TryFrom<Arc<std::ffi::CStr>> for PerAttemptRegion`] routes through
+/// [`std::sync::Arc::<std::ffi::CStr>::as_ref`] on the caller-supplied
+/// shared-owned NUL-terminated C-string and the by-reference
+/// NUL-terminated C-string parse peer [`TryFrom<&std::ffi::CStr>`]
+/// (which itself composes [`std::ffi::CStr::to_str`] with
+/// [`TryFrom<&str>`] which itself delegates through
+/// [`<PerAttemptRegion as std::str::FromStr>::from_str`]), so a
+/// downstream consumer bound by
+/// `impl TryFrom<std::sync::Arc<std::ffi::CStr>>` (a shared-owned
+/// NUL-terminated C-string wrapper handed to sibling threads through an
+/// atomic-refcount header, a [`Box<std::ffi::CStr>::into`] shared-buffer
+/// input that trades exclusive shrunk-owned single-owner semantics for
+/// a shared reader-count of the same immutable NUL-terminated C-string,
+/// a [`std::ffi::CStr::from_ptr`] + [`std::ffi::CStr::to_owned`] +
+/// [`std::ffi::CString::into_boxed_c_str`] +
+/// [`std::sync::Arc::<std::ffi::CStr>::from`] compose that shares the
+/// FFI-returned NUL-terminated buffer across threads without a per-
+/// reader clone of the label bytes, a generic try-conversion helper
+/// `fn parse<T: TryFrom<std::sync::Arc<std::ffi::CStr>>>` that composes
+/// with shared-owned NUL-terminated C-string inputs) recovers a
+/// [`PerAttemptRegion`] value from a shared-owned canonical
+/// NUL-terminated C-string label through the same one-oracle grammar
+/// the sibling [`TryFrom<&std::ffi::CStr>`], [`TryFrom<std::ffi::CString>`],
+/// [`TryFrom<Box<std::ffi::CStr>>`], [`TryFrom<std::sync::Arc<std::ffi::OsStr>>`],
+/// [`TryFrom<std::sync::Arc<std::path::Path>>`], and (one frontier
+/// below) [`TryFrom<std::sync::Arc<str>>`],
+/// [`TryFrom<std::sync::Arc<[u8]>>`] shared-owned parse peers already
+/// read at neighboring NUL-terminated-C-string, OS-string, filesystem-
+/// path, UTF-8, and byte-slice frontiers.
+///
+/// The by-value shared-owned NUL-terminated C-string parse peer of
+/// [`TryFrom<Box<std::ffi::CStr>>`] above — both are shrunk/shared
+/// immutable-heap NUL-terminated C-string parse surfaces of the label-
+/// axis conversion set, differing on ownership discipline:
+/// [`TryFrom<Box<std::ffi::CStr>>`] consumes a single-owner shrunk
+/// NUL-terminated buffer with exclusive ownership semantics,
+/// this [`TryFrom<std::sync::Arc<std::ffi::CStr>>`] consumes a
+/// shared-owner atomic-refcount NUL-terminated buffer that may have
+/// surviving clones outside the receiver. Both route through the shared
+/// [`PerAttemptRegion::from_str`] canonical-label parse oracle: the
+/// shrunk-owned peer through
+/// [`std::boxed::Box::<std::ffi::CStr>::as_ref`] composed with
+/// [`TryFrom<&std::ffi::CStr>`], this shared-owned peer through
+/// [`std::sync::Arc::<std::ffi::CStr>::as_ref`] composed with
+/// [`TryFrom<&std::ffi::CStr>`] — the same canonical grammar lifted to
+/// the shared-owned NUL-terminated C-string layer.
+///
+/// The two-stage strictness discipline (UTF-8 validity at the
+/// NUL-terminated C-string decode frontier gated by
+/// [`std::ffi::CStr::to_str`], canonical-label grammar at the parse
+/// frontier gated by [`std::str::FromStr`]) is inherited unchanged from
+/// the by-reference [`TryFrom<&std::ffi::CStr>`] peer via
+/// [`std::sync::Arc::<std::ffi::CStr>::as_ref`] which yields a
+/// `&std::ffi::CStr` view of the shared inner payload without cloning
+/// the atomic refcount or reallocating the label buffer.
+///
+/// The impl body picks [`std::sync::Arc::<std::ffi::CStr>::as_ref`]
+/// rather than an intermediate clone-into-`CString` + `TryFrom<CString>`
+/// restatement: the [`AsRef`] view yields a borrowed `&std::ffi::CStr`
+/// window over the shared heap allocation without a clone of the label
+/// bytes into a resizable [`std::ffi::CString`] first, so the receiver
+/// pays no clone and no capacity-vs-length metadata rebuild on the fast
+/// path — the borrow-then-drop discipline the sibling
+/// [`TryFrom<std::ffi::CString>`] and [`TryFrom<Box<std::ffi::CStr>>`]
+/// peers apply at the resizable-buffer and shrunk-owned axes, lifted to
+/// the shared-owned axis via
+/// [`std::sync::Arc::<std::ffi::CStr>::as_ref`].
+///
+/// Opens the shared-owned NUL-terminated C-string parse trio at the
+/// per-attempt-region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the parse peers'
+/// opening orders at every prior frontier — the [`TryFrom<Arc<str>>`]
+/// shared-owned UTF-8-string parse opening order at the UTF-8 sibling
+/// two frontiers below, the [`TryFrom<Arc<[u8]>>`] shared-owned
+/// byte-slice parse opening order at the byte-slice sibling three
+/// frontiers below, the [`TryFrom<Arc<std::ffi::OsStr>>`] shared-owned
+/// OS-string parse opening order at the OS-string sibling above, the
+/// [`TryFrom<Arc<std::path::Path>>`] shared-owned filesystem-path parse
+/// opening order at the filesystem-path sibling above, and the
+/// [`TryFrom<Box<std::ffi::CStr>>`] shrunk-owned NUL-terminated C-string
+/// parse opening order (1076700 → 16320c3 → 3a2edcd) at this
+/// NUL-terminated C-string frontier's shrunk-owned sibling above.
+///
+/// The identity
+/// `PerAttemptRegion::try_from(std::sync::Arc::<std::ffi::CStr>::from(
+/// std::ffi::CString::new(region.as_str()).unwrap().into_boxed_c_str()))
+/// .unwrap() == region` at every [`PerAttemptRegion::ALL`] variant is
+/// pinned by
+/// [`tests::test_per_attempt_region_try_from_arc_cstr_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<std::sync::Arc<std::ffi::CStr>>` consumer at every
+/// variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_arc_cstr_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-UTF-8 shared-owned
+/// NUL-terminated C-string input is pinned by
+/// [`tests::test_per_attempt_region_try_from_arc_cstr_rejects_non_utf8_input`];
+/// the strict-rejection contract on valid-UTF-8 non-canonical shared-
+/// owned NUL-terminated C-string input is pinned by
+/// [`tests::test_per_attempt_region_try_from_arc_cstr_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the shared-owned NUL-terminated
+/// C-string try-conversion parse surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one
+/// `TryFrom<std::sync::Arc<std::ffi::CStr>>` impl routing through
+/// [`std::sync::Arc::<std::ffi::CStr>::as_ref`] and the by-reference
+/// [`TryFrom<&std::ffi::CStr>`] peer), not a per-consumer
+/// `PerAttemptRegion::try_from(shared.as_ref())` bridge at every
+/// downstream site that types its parse contract as
+/// `impl TryFrom<std::sync::Arc<std::ffi::CStr>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// one site ([`PerAttemptRegion::as_str`]), inverted at one site
+/// ([`PerAttemptRegion::from_str`]), and every parse surface —
+/// including this shared-owned NUL-terminated C-string peer — reads
+/// through it.
+impl TryFrom<std::sync::Arc<std::ffi::CStr>> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(c: std::sync::Arc<std::ffi::CStr>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::ffi::CStr>>::try_from(c.as_ref())
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for PerAttemptRegion`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for PerAttemptRegion`] so a downstream consumer bound
@@ -22744,6 +22867,206 @@ mod tests {
                 <PerAttemptRegion as std::convert::TryFrom<Box<std::ffi::CStr>>>::try_from(boxed)
                     .is_err(),
                 "TryFrom<Box<CStr>> must reject valid-UTF-8 non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Arc<std::ffi::CStr>> for PerAttemptRegion`] agrees
+    /// with [`std::str::FromStr`] at every [`PerAttemptRegion::ALL`]
+    /// variant. Owning the [`std::sync::Arc<std::ffi::CStr>`] input
+    /// round-trips through
+    /// [`std::sync::Arc::<std::ffi::CStr>::from`] of the shrunk-owned
+    /// [`Box<std::ffi::CStr>`] view of
+    /// [`std::ffi::CString::new(region.as_str()).into_boxed_c_str()`]
+    /// and the by-value shared-owned NUL-terminated C-string
+    /// try-conversion recovers the canonical variant — the shared-owned
+    /// NUL-terminated C-string parse peer of the by-reference
+    /// [`TryFrom<&std::ffi::CStr>`] surface reads the same one-oracle
+    /// grammar the shared-owned UTF-8-string parse peer
+    /// [`TryFrom<Arc<str>>`], the shared-owned byte-slice parse peer
+    /// [`TryFrom<Arc<[u8]>>`], the shared-owned OS-string parse peer
+    /// [`TryFrom<Arc<std::ffi::OsStr>>`], and the shared-owned
+    /// filesystem-path parse peer [`TryFrom<Arc<std::path::Path>>`]
+    /// read — one round-trip pin per variant, refuses a future variant
+    /// insertion that drops the
+    /// `TryFrom<Arc<CStr>>`/`Arc::<CStr>::from(CString::new(as_str()).into_boxed_c_str())`
+    /// agreement.
+    #[test]
+    fn test_per_attempt_region_try_from_arc_cstr_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let boxed: Box<std::ffi::CStr> = std::ffi::CString::new(region.as_str())
+                .expect("canonical label must contain no interior NUL")
+                .into_boxed_c_str();
+            let shared: std::sync::Arc<std::ffi::CStr> =
+                std::sync::Arc::<std::ffi::CStr>::from(boxed);
+            let parsed = <PerAttemptRegion as std::convert::TryFrom<
+                std::sync::Arc<std::ffi::CStr>,
+            >>::try_from(shared)
+            .expect("canonical label Arc<CStr> must parse through TryFrom<Arc<CStr>>");
+            assert_eq!(
+                parsed, region,
+                "TryFrom<Arc<CStr>> must round-trip through Arc::<CStr>::from(CString::new(as_str()).into_boxed_c_str()) at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Arc<std::ffi::CStr>> for PerAttemptRegion`]
+    /// identity carries through a generic
+    /// `impl TryFrom<std::sync::Arc<std::ffi::CStr>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(c: Arc<CStr>) -> T where T:
+    /// TryFrom<Arc<CStr>>, T::Error: std::fmt::Debug` — the shape of an
+    /// actual downstream consumer (a
+    /// [`std::sync::Arc::<std::ffi::CStr>::from`]`(Box<CStr>)` receiver
+    /// that shares the shrunk NUL-terminated buffer across threads
+    /// through an atomic-refcount header, a
+    /// [`std::ffi::CStr::from_ptr`] + [`std::ffi::CStr::to_owned`] +
+    /// [`std::ffi::CString::into_boxed_c_str`] +
+    /// [`std::sync::Arc::<std::ffi::CStr>::from`] compose that shares a
+    /// freshly-allocated NUL-terminated buffer over a `*const c_char`
+    /// FFI return, a serde `#[serde(try_from = "Arc<CStr>")]` container,
+    /// a generic try-conversion helper) — recovers the canonical
+    /// variant from the canonical snake_case label shared-owned
+    /// NUL-terminated C-string at every variant. The structural witness
+    /// that a [`PerAttemptRegion`] is genuinely usable at
+    /// `impl TryFrom<std::sync::Arc<std::ffi::CStr>>` call sites — a
+    /// regression that drifted the [`TryFrom`] impl signature
+    /// (requiring a borrowed [`&std::ffi::CStr`] input, requiring an
+    /// owned [`std::ffi::CString`] input, requiring a shrunk-owned
+    /// [`Box<std::ffi::CStr>`] input, dropping the
+    /// [`std::sync::Arc::<std::ffi::CStr>::as_ref`] borrow step and
+    /// misparsing non-UTF-8 input, returning a different variant than
+    /// [`std::str::FromStr`] would) fails here at compile time or at
+    /// the assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_try_from_arc_cstr_carries_through_generic_consumer() {
+        fn parse<T>(c: std::sync::Arc<std::ffi::CStr>) -> T
+        where
+            T: std::convert::TryFrom<std::sync::Arc<std::ffi::CStr>>,
+            <T as std::convert::TryFrom<std::sync::Arc<std::ffi::CStr>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::sync::Arc<std::ffi::CStr>>>::try_from(c)
+                .expect("canonical label Arc<CStr> must parse through generic TryFrom<Arc<CStr>>")
+        }
+
+        for region in PerAttemptRegion::ALL {
+            let boxed: Box<std::ffi::CStr> = std::ffi::CString::new(region.as_str())
+                .expect("canonical label must contain no interior NUL")
+                .into_boxed_c_str();
+            let shared: std::sync::Arc<std::ffi::CStr> =
+                std::sync::Arc::<std::ffi::CStr>::from(boxed);
+            assert_eq!(
+                parse::<PerAttemptRegion>(shared),
+                region,
+                "generic TryFrom<Arc<CStr>> consumer must recover canonical variant at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Arc<std::ffi::CStr>> for PerAttemptRegion`] rejects
+    /// non-UTF-8 shared-owned NUL-terminated byte sequences at the
+    /// [`std::ffi::CStr::to_str`] decode frontier inherited through
+    /// the [`std::sync::Arc::<std::ffi::CStr>::as_ref`] +
+    /// [`TryFrom<&std::ffi::CStr>`] delegation. An
+    /// [`std::sync::Arc<std::ffi::CStr>`] may hold any byte sequence
+    /// excluding interior NUL — a shared-owned counterpart of the
+    /// borrowed [`&std::ffi::CStr`] non-UTF-8 fixtures returned by
+    /// legacy C libraries under foreign locales, and of the shrunk-
+    /// owned [`Box<std::ffi::CStr>`] non-UTF-8 fixtures the sibling
+    /// [`test_per_attempt_region_try_from_box_cstr_rejects_non_utf8_input`]
+    /// pin exercises. Pins the encoding-strictness contract at the
+    /// shared-owned NUL-terminated C-string frontier's first
+    /// strictness gate, matching the by-reference peer
+    /// [`test_per_attempt_region_try_from_cstr_rejects_non_utf8_input`]
+    /// discipline at the shared-owned axis — the shared-owned buffer
+    /// pays the same UTF-8-strictness at the same decode frontier a
+    /// direct [`std::ffi::CStr::to_str`] + [`str::parse`] composition
+    /// would offer, at ONE typed-primitive site rather than a per-
+    /// consumer two-step restatement. Sibling of the shared-owned
+    /// OS-string-frontier pin
+    /// [`test_per_attempt_region_try_from_arc_os_str_rejects_non_unicode_input`]
+    /// — the two pins together close the encoding-strictness
+    /// contract at the shared-owned OS-string and NUL-terminated
+    /// C-string frontiers.
+    #[test]
+    fn test_per_attempt_region_try_from_arc_cstr_rejects_non_utf8_input() {
+        for bad in [
+            &[0xffu8, 0u8][..],
+            &[0xffu8, 0xfe, 0u8][..],
+            &[0x80u8, 0u8][..],
+            &[b'f', b'i', 0xff, b'r', b's', b't', 0u8][..],
+            &[b'f', b'i', b'n', b'a', b'l', 0xff, 0u8][..],
+        ] {
+            let bad_c = std::ffi::CStr::from_bytes_with_nul(bad)
+                .expect("test fixture must be a valid NUL-terminated byte sequence");
+            let boxed: Box<std::ffi::CStr> = Box::from(bad_c);
+            let shared: std::sync::Arc<std::ffi::CStr> =
+                std::sync::Arc::<std::ffi::CStr>::from(boxed);
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<
+                    std::sync::Arc<std::ffi::CStr>,
+                >>::try_from(shared)
+                .is_err(),
+                "TryFrom<Arc<CStr>> must reject non-UTF-8 input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Arc<std::ffi::CStr>> for PerAttemptRegion`] rejects
+    /// valid-UTF-8 non-canonical shared-owned NUL-terminated C-string
+    /// sequences at the underlying [`std::str::FromStr`] strictness
+    /// gate inherited through the
+    /// [`std::sync::Arc::<std::ffi::CStr>::as_ref`] +
+    /// [`TryFrom<&std::ffi::CStr>`] + [`TryFrom<&str>`] delegation —
+    /// empty NUL-terminated C-string, UpperCamel rendering,
+    /// uppercase, whitespace padding, and snake_case labels with a
+    /// dropped underscore all reject. Pins the canonical-label
+    /// strictness contract at the shared-owned NUL-terminated
+    /// C-string frontier's second strictness gate so a downstream
+    /// consumer bound by [`TryFrom<std::sync::Arc<std::ffi::CStr>>`]
+    /// inherits the same canonical-only grammar the direct
+    /// `.parse::<PerAttemptRegion>()` call sites and the sibling
+    /// [`TryFrom<Arc<str>>`], [`TryFrom<Arc<[u8]>>`],
+    /// [`TryFrom<Arc<std::ffi::OsStr>>`],
+    /// [`TryFrom<Arc<std::path::Path>>`],
+    /// [`TryFrom<&std::ffi::CStr>`], [`TryFrom<std::ffi::CString>`],
+    /// and [`TryFrom<Box<std::ffi::CStr>>`] impls already read, and a
+    /// future permissive-parse regression at the underlying
+    /// [`std::str::FromStr`] impl lights up here rather than drifting
+    /// silently through the shared-owned NUL-terminated C-string
+    /// try-conversion surface. Sibling of the by-reference peer
+    /// [`test_per_attempt_region_try_from_cstr_rejects_non_canonical_input`],
+    /// the owned-buffer peer
+    /// [`test_per_attempt_region_try_from_cstring_rejects_non_canonical_input`],
+    /// and the shrunk-owned peer
+    /// [`test_per_attempt_region_try_from_box_cstr_rejects_non_canonical_input`]
+    /// at the NUL-terminated C-string frontier — the four pins
+    /// together close the canonical-only strictness contract across
+    /// the borrowed-view, owned-buffer, shrunk-owned, and shared-owned
+    /// axes of the NUL-terminated C-string frontier.
+    #[test]
+    fn test_per_attempt_region_try_from_arc_cstr_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "BeforeFirst",
+            "OverBudget",
+            "FIRST",
+            " first",
+            "first ",
+            "beforefirst",
+            "overbudget",
+        ] {
+            let bad_c =
+                std::ffi::CString::new(bad).expect("test fixture must not contain interior NUL");
+            let boxed: Box<std::ffi::CStr> = bad_c.into_boxed_c_str();
+            let shared: std::sync::Arc<std::ffi::CStr> =
+                std::sync::Arc::<std::ffi::CStr>::from(boxed);
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<
+                    std::sync::Arc<std::ffi::CStr>,
+                >>::try_from(shared)
+                .is_err(),
+                "TryFrom<Arc<CStr>> must reject valid-UTF-8 non-canonical input {bad:?}",
             );
         }
     }
