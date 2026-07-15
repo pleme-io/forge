@@ -3656,6 +3656,118 @@ impl TryFrom<std::ffi::CString> for BumpLevel {
     }
 }
 
+/// [`TryFrom<Box<std::ffi::CStr>> for BumpLevel`] routes through
+/// [`std::boxed::Box::<std::ffi::CStr>::as_ref`] on the caller-supplied
+/// shrunk-owned NUL-terminated C-string and the by-reference
+/// NUL-terminated C-string parse peer [`TryFrom<&std::ffi::CStr>`]
+/// (which itself composes [`std::ffi::CStr::to_str`] with
+/// [`TryFrom<&str>`] which itself delegates through
+/// [`<BumpLevel as std::str::FromStr>::from_str`]), so a downstream
+/// consumer bound by `impl TryFrom<Box<std::ffi::CStr>>` (a serde
+/// container that opts into `#[serde(try_from = "Box<CStr>")]` on a
+/// wrapper field, a [`std::ffi::CString::into_boxed_c_str`] shrunk-
+/// buffer input at the NUL-terminated C-string frontier that trades
+/// the resizable-buffer [`std::ffi::CString`] receiver footprint for
+/// a single-allocation immutable [`Box<std::ffi::CStr>`], a
+/// [`std::ffi::CStr::from_ptr`] + [`std::ffi::CStr::to_owned`] +
+/// [`std::ffi::CString::into_boxed_c_str`] compose that owns the
+/// FFI-returned NUL-terminated buffer with the resizable-buffer
+/// slack shed, a generic try-conversion helper
+/// `fn parse<T: TryFrom<Box<std::ffi::CStr>>>` that composes with
+/// shrunk-owned NUL-terminated C-string inputs) recovers a
+/// [`BumpLevel`] value from a shrunk-owned canonical
+/// NUL-terminated C-string label through the same one-oracle grammar
+/// the sibling [`TryFrom<&std::ffi::CStr>`],
+/// [`TryFrom<std::ffi::CString>`], [`TryFrom<Box<std::ffi::OsStr>>`],
+/// [`TryFrom<Box<std::path::Path>>`], and (one frontier below)
+/// [`TryFrom<Box<str>>`], [`TryFrom<Box<[u8]>>`] shrunk-owned parse
+/// peers already read at neighboring OS-string / Path / UTF-8 /
+/// byte-slice frontiers.
+///
+/// The two-stage strictness discipline (UTF-8 validity at the
+/// NUL-terminated C-string decode frontier gated by
+/// [`std::ffi::CStr::to_str`], canonical-label grammar at the parse
+/// frontier gated by [`FromStr`]) is inherited unchanged from the
+/// by-reference [`TryFrom<&std::ffi::CStr>`] peer via
+/// [`std::boxed::Box::<std::ffi::CStr>::as_ref`] which yields a
+/// `&std::ffi::CStr` view of the boxed inner payload without moving
+/// out or reallocating.
+///
+/// The impl body picks [`std::boxed::Box::<std::ffi::CStr>::as_ref`]
+/// rather than an intermediate `Box::<std::ffi::CStr>::into` +
+/// `TryFrom<CString>` restatement: the [`AsRef`] view yields a
+/// borrowed `&std::ffi::CStr` window over the boxed heap allocation
+/// without converting the shrunk-owned receiver into a resizable
+/// [`std::ffi::CString`] first, so the receiver pays no reallocation
+/// and no capacity-vs-length metadata rebuild on the fast path — the
+/// borrow-then-drop discipline the sibling [`TryFrom<std::ffi::CString>`]
+/// peer above applies at the resizable-buffer axis, lifted to the
+/// shrunk-owned axis via
+/// [`std::boxed::Box::<std::ffi::CStr>::as_ref`].
+///
+/// Closing peer of the shrunk-owned NUL-terminated C-string parse
+/// trio at the version-bump-magnitude ladder:
+/// [`TryFrom<Box<std::ffi::CStr>>`] for [`crate::retry::PerAttemptRegion`]
+/// (commit 1076700) opened the trio at the first ordered typed sum;
+/// [`TryFrom<Box<std::ffi::CStr>>`] for
+/// [`crate::probe_outcome::AdmissionTier`] (commit 16320c3) mid-slotted
+/// the trio at the second ordered typed sum; this impl closes the trio
+/// at the third and last ordered typed sum, matching the
+/// [`TryFrom<&std::ffi::CStr>`] borrowed-view NUL-terminated
+/// C-string parse closing order (8777e9f → 95ddf71 → 5073623) at the
+/// borrowed-view counterpart, the [`TryFrom<std::ffi::CString>`]
+/// owned-buffer NUL-terminated C-string parse closing order
+/// (e73daa7 → 77c0cdd → 20357c7) at the owned-buffer counterpart, the
+/// [`TryFrom<Box<str>>`] UTF-8 shrunk-owned parse closing order at
+/// the UTF-8 sibling one frontier below, the [`TryFrom<Box<[u8]>>`]
+/// byte-slice shrunk-owned parse closing order at the byte-slice
+/// sibling two frontiers below, the [`TryFrom<Box<std::ffi::OsStr>>`]
+/// OS-string shrunk-owned parse closing order at the OS-string
+/// sibling above, and the [`TryFrom<Box<std::path::Path>>`]
+/// filesystem-path shrunk-owned parse closing order
+/// (315c145 → 657434c → 336e453) at the filesystem-path sibling.
+/// After this commit the shrunk-owned NUL-terminated C-string parse
+/// axis spans all three ordered typed sums on the ladder set through
+/// ONE [`std::boxed::Box::<std::ffi::CStr>::as_ref`] +
+/// [`TryFrom<&std::ffi::CStr>`] composition each.
+///
+/// The identity `BumpLevel::try_from(
+/// std::ffi::CString::new(level.as_str()).unwrap().into_boxed_c_str()
+/// ).unwrap() == level` at every [`BumpLevel::ALL`] variant is
+/// pinned by
+/// [`tests::test_bump_level_try_from_box_cstr_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<Box<std::ffi::CStr>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_try_from_box_cstr_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-UTF-8 shrunk-owned
+/// NUL-terminated C-string input is pinned by
+/// [`tests::test_bump_level_try_from_box_cstr_rejects_non_utf8_input`];
+/// the strict-rejection contract on valid-UTF-8 non-canonical
+/// shrunk-owned NUL-terminated C-string input is pinned by
+/// [`tests::test_bump_level_try_from_box_cstr_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the shrunk-owned NUL-terminated
+/// C-string try-conversion parse surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one `TryFrom<Box<std::ffi::CStr>>` impl
+/// routing through [`std::boxed::Box::<std::ffi::CStr>::as_ref`] and
+/// the by-reference [`TryFrom<&std::ffi::CStr>`] peer), not a
+/// per-consumer `BumpLevel::try_from(boxed.as_ref())` bridge at
+/// every downstream site that types its parse contract as
+/// `impl TryFrom<Box<std::ffi::CStr>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// at one site ([`BumpLevel::as_str`]), inverted at one site
+/// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every
+/// parse surface — including this shrunk-owned NUL-terminated
+/// C-string peer — reads through it.
+impl TryFrom<Box<std::ffi::CStr>> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(c: Box<std::ffi::CStr>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::ffi::CStr>>::try_from(c.as_ref())
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -12584,6 +12696,176 @@ mod tests {
             assert!(
                 <BumpLevel as std::convert::TryFrom<std::ffi::CString>>::try_from(bad_c).is_err(),
                 "TryFrom<CString> must reject valid-UTF-8 non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<std::ffi::CStr>> for BumpLevel`] agrees with
+    /// [`FromStr`] at every [`BumpLevel::ALL`] variant. Owning the
+    /// [`Box<std::ffi::CStr>`] input round-trips through
+    /// [`std::ffi::CString::new(level.as_str()).into_boxed_c_str()`] and
+    /// the by-value shrunk-owned NUL-terminated C-string try-conversion
+    /// recovers the canonical variant — the shrunk-owned NUL-terminated
+    /// C-string parse peer of the by-reference
+    /// [`TryFrom<&std::ffi::CStr>`] surface reads the same one-oracle
+    /// grammar the shrunk-owned UTF-8-string parse peer
+    /// [`TryFrom<Box<str>>`], the shrunk-owned byte-slice parse peer
+    /// [`TryFrom<Box<[u8]>>`], the shrunk-owned OS-string parse peer
+    /// [`TryFrom<Box<std::ffi::OsStr>>`], and the shrunk-owned
+    /// filesystem-path parse peer [`TryFrom<Box<std::path::Path>>`]
+    /// read — one round-trip pin per variant, refuses a future variant
+    /// insertion that drops the
+    /// `TryFrom<Box<CStr>>`/`CString::new(as_str()).into_boxed_c_str()`
+    /// agreement. Structural mirror of
+    /// `test_per_attempt_region_try_from_box_cstr_agrees_with_from_str`
+    /// (commit 1076700) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_box_cstr_agrees_with_from_str`
+    /// (commit 16320c3) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_box_cstr_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::ffi::CStr> = std::ffi::CString::new(level.as_str())
+                .expect("canonical label must contain no interior NUL")
+                .into_boxed_c_str();
+            let parsed = <BumpLevel as std::convert::TryFrom<Box<std::ffi::CStr>>>::try_from(boxed)
+                .expect("canonical label Box<CStr> must parse through TryFrom<Box<CStr>>");
+            assert_eq!(
+                parsed, level,
+                "TryFrom<Box<CStr>> must round-trip through CString::new(as_str()).into_boxed_c_str() at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Box<std::ffi::CStr>> for BumpLevel`] identity
+    /// carries through a generic `impl TryFrom<Box<std::ffi::CStr>>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny generic
+    /// function `fn parse<T>(c: Box<CStr>) -> T where T:
+    /// TryFrom<Box<CStr>>, T::Error: std::fmt::Debug` — the shape of
+    /// an actual downstream consumer (a
+    /// [`std::ffi::CString::into_boxed_c_str`] receiver that owns the
+    /// shrunk NUL-terminated buffer, a
+    /// [`std::ffi::CStr::from_ptr`] + [`std::ffi::CStr::to_owned`] +
+    /// [`std::ffi::CString::into_boxed_c_str`] compose that owns a
+    /// freshly-allocated shrunk NUL-terminated buffer over a
+    /// `*const c_char` FFI return, a serde
+    /// `#[serde(try_from = "Box<CStr>")]` container, a generic
+    /// try-conversion helper) — recovers the canonical variant from
+    /// the canonical lowercase-label shrunk-owned NUL-terminated
+    /// C-string at every variant. The structural witness that a
+    /// [`BumpLevel`] is genuinely usable at
+    /// `impl TryFrom<Box<std::ffi::CStr>>` call sites — a regression
+    /// that drifted the [`TryFrom`] impl signature (requiring a
+    /// borrowed [`&std::ffi::CStr`] input, requiring an owned
+    /// [`std::ffi::CString`] input, dropping the
+    /// [`std::boxed::Box::<std::ffi::CStr>::as_ref`] borrow step and
+    /// misparsing non-UTF-8 input, returning a different variant than
+    /// [`FromStr`] would) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_bump_level_try_from_box_cstr_carries_through_generic_consumer() {
+        fn parse<T>(c: Box<std::ffi::CStr>) -> T
+        where
+            T: std::convert::TryFrom<Box<std::ffi::CStr>>,
+            <T as std::convert::TryFrom<Box<std::ffi::CStr>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<Box<std::ffi::CStr>>>::try_from(c)
+                .expect("canonical label Box<CStr> must parse through generic TryFrom<Box<CStr>>")
+        }
+
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::ffi::CStr> = std::ffi::CString::new(level.as_str())
+                .expect("canonical label must contain no interior NUL")
+                .into_boxed_c_str();
+            assert_eq!(
+                parse::<BumpLevel>(boxed),
+                level,
+                "generic TryFrom<Box<CStr>> consumer must recover canonical variant at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<std::ffi::CStr>> for BumpLevel`] rejects
+    /// non-UTF-8 shrunk-owned NUL-terminated byte sequences at the
+    /// [`std::ffi::CStr::to_str`] decode frontier inherited through
+    /// the [`std::boxed::Box::<std::ffi::CStr>::as_ref`] +
+    /// [`TryFrom<&std::ffi::CStr>`] delegation. A
+    /// [`Box<std::ffi::CStr>`] may hold any byte sequence excluding
+    /// interior NUL — a shrunk-owned counterpart of the borrowed
+    /// [`&std::ffi::CStr`] non-UTF-8 fixtures returned by legacy
+    /// C libraries under foreign locales. Pins the encoding-
+    /// strictness contract at the shrunk-owned NUL-terminated
+    /// C-string frontier's first strictness gate, matching the by-
+    /// reference peer [`test_bump_level_try_from_cstr_rejects_non_utf8_input`]
+    /// discipline at the shrunk-owned axis — the shrunk-owned buffer
+    /// pays the same UTF-8-strictness at the same decode frontier a
+    /// direct [`std::ffi::CStr::to_str`] + [`str::parse`] composition
+    /// would offer, at ONE typed-primitive site rather than a per-
+    /// consumer two-step restatement. Sibling of the shrunk-owned
+    /// OS-string-frontier pin
+    /// [`test_bump_level_try_from_box_os_str_rejects_non_unicode_input`]
+    /// — the two pins together close the encoding-strictness
+    /// contract at the shrunk-owned OS-string and NUL-terminated
+    /// C-string frontiers.
+    #[test]
+    fn test_bump_level_try_from_box_cstr_rejects_non_utf8_input() {
+        for bad in [
+            &[0xffu8, 0u8][..],
+            &[0xffu8, 0xfe, 0u8][..],
+            &[0x80u8, 0u8][..],
+            &[b'p', b'a', 0xff, b't', b'c', b'h', 0u8][..],
+            &[b'm', b'i', b'n', b'o', b'r', 0xff, 0u8][..],
+        ] {
+            let bad_c = std::ffi::CStr::from_bytes_with_nul(bad)
+                .expect("test fixture must be a valid NUL-terminated byte sequence");
+            let boxed: Box<std::ffi::CStr> = Box::from(bad_c);
+            assert!(
+                <BumpLevel as std::convert::TryFrom<Box<std::ffi::CStr>>>::try_from(boxed).is_err(),
+                "TryFrom<Box<CStr>> must reject non-UTF-8 input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<std::ffi::CStr>> for BumpLevel`] rejects
+    /// valid-UTF-8 non-canonical shrunk-owned NUL-terminated C-string
+    /// sequences at the underlying [`FromStr`] strictness gate
+    /// inherited through the
+    /// [`std::boxed::Box::<std::ffi::CStr>::as_ref`] +
+    /// [`TryFrom<&std::ffi::CStr>`] + [`TryFrom<&str>`] delegation —
+    /// empty NUL-terminated C-string, UpperCamel rendering,
+    /// uppercase, whitespace padding, and lowercase labels with a
+    /// dropped character all reject. Pins the canonical-label
+    /// strictness contract at the shrunk-owned NUL-terminated
+    /// C-string frontier's second strictness gate so a downstream
+    /// consumer bound by [`TryFrom<Box<std::ffi::CStr>>`] inherits the
+    /// same canonical-only grammar the direct
+    /// `.parse::<BumpLevel>()` call sites and the sibling
+    /// [`TryFrom<Box<str>>`], [`TryFrom<Box<[u8]>>`],
+    /// [`TryFrom<Box<std::ffi::OsStr>>`],
+    /// [`TryFrom<Box<std::path::Path>>`],
+    /// [`TryFrom<&std::ffi::CStr>`], and
+    /// [`TryFrom<std::ffi::CString>`] impls already read, and a future
+    /// permissive-parse regression at the underlying [`FromStr`] impl
+    /// lights up here rather than drifting silently through the
+    /// shrunk-owned NUL-terminated C-string try-conversion surface.
+    /// Sibling of the by-reference peer
+    /// [`test_bump_level_try_from_cstr_rejects_non_canonical_input`]
+    /// and the owned-buffer peer
+    /// [`test_bump_level_try_from_cstring_rejects_non_canonical_input`]
+    /// at the NUL-terminated C-string frontier — the three pins
+    /// together close the canonical-only strictness contract across
+    /// the borrowed-view, owned-buffer, and shrunk-owned axes of the
+    /// NUL-terminated C-string frontier.
+    #[test]
+    fn test_bump_level_try_from_box_cstr_rejects_non_canonical_input() {
+        for bad in [
+            "", "Patch", "Minor", "Major", "PATCH", " patch", "patch ", "pat",
+        ] {
+            let bad_c =
+                std::ffi::CString::new(bad).expect("test fixture must not contain interior NUL");
+            let boxed: Box<std::ffi::CStr> = bad_c.into_boxed_c_str();
+            assert!(
+                <BumpLevel as std::convert::TryFrom<Box<std::ffi::CStr>>>::try_from(boxed).is_err(),
+                "TryFrom<Box<CStr>> must reject valid-UTF-8 non-canonical input {bad:?}",
             );
         }
     }
