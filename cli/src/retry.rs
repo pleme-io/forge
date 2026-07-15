@@ -5667,6 +5667,178 @@ impl TryFrom<&std::ffi::CStr> for PerAttemptRegion {
     }
 }
 
+/// [`TryFrom<std::ffi::CString> for PerAttemptRegion`] routes through the
+/// by-reference [`TryFrom<&std::ffi::CStr>`] parse peer directly above on
+/// [`std::ffi::CString::as_c_str`] of the caller-owned NUL-terminated
+/// C-string buffer, so a downstream consumer bound by
+/// `impl TryFrom<std::ffi::CString>` (a `serde` container that opts into
+/// `#[serde(try_from = "CString")]` on a wrapper field, a generic
+/// try-conversion helper `fn parse_c_field<T: TryFrom<CString>>` that owns
+/// the input NUL-terminated C-string, a validated-input newtype builder
+/// that consumes an owned [`std::ffi::CString`] and returns a validated
+/// [`PerAttemptRegion`], a [`std::ffi::CString::from_vec_with_nul`]
+/// receiver that owns the returned [`std::ffi::CString`] over a
+/// FFI-produced buffer, a [`std::ffi::CString::new`] terminus that owns
+/// the freshly-allocated NUL-terminated buffer, a `libc::getenv` +
+/// [`std::ffi::CStr::from_ptr`] + [`std::ffi::CStr::to_owned`] compose
+/// that owns the process-environment slot's NUL-terminated payload) recovers
+/// a [`PerAttemptRegion`] value from a canonical snake_case-label owned
+/// NUL-terminated C-string through the same one-oracle grammar the direct
+/// `.parse::<PerAttemptRegion>()` call sites, the sibling [`TryFrom<&str>`],
+/// [`TryFrom<String>`], [`TryFrom<std::borrow::Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<std::sync::Arc<str>>`],
+/// [`TryFrom<std::rc::Rc<str>>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<std::borrow::Cow<'_, [u8]>>`], [`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<std::sync::Arc<[u8]>>`], [`TryFrom<std::rc::Rc<[u8]>>`],
+/// [`TryFrom<&std::ffi::OsStr>`], [`TryFrom<std::ffi::OsString>`],
+/// [`TryFrom<&std::path::Path>`], [`TryFrom<std::path::PathBuf>`], and
+/// [`TryFrom<&std::ffi::CStr>`] parse peers already read.
+///
+/// The by-value owned-buffer NUL-terminated C-string parse peer of
+/// [`TryFrom<&std::ffi::CStr> for PerAttemptRegion`] directly above — both
+/// are parse surfaces of the NUL-terminated C-string frontier, differing
+/// only on the input C-string ownership: [`TryFrom<&std::ffi::CStr>`] takes
+/// a borrowed [`&std::ffi::CStr`] view for consumers that already hold a
+/// borrow (a `*const c_char` FFI return surfaced through
+/// [`std::ffi::CStr::from_ptr`], a `getenv(3)` reader that keeps the
+/// process-environment slot borrowed, a `syslog(3)` / `journald` bridge
+/// that reads a canonical NUL-terminated label off a C-emitted log frame
+/// without allocating), this [`TryFrom<std::ffi::CString>`] takes an owned
+/// [`std::ffi::CString`] for consumers that own the input NUL-terminated
+/// C-string buffer (a `serde` `try_from = "CString"` container, a
+/// C-string-consuming builder, a [`std::ffi::CString::new`] receiver, a
+/// [`std::ffi::CString::from_vec_with_nul`] receiver). Both delegate
+/// through the shared [`FromStr`] parse oracle: the borrowed peer through
+/// [`std::ffi::CStr::to_str`] + [`TryFrom<&str>`] (which itself composes
+/// through [`FromStr`]), this owned peer through the borrowed peer via
+/// [`std::ffi::CString::as_c_str`] at the boundary — the same canonical
+/// grammar lifted to the owned-buffer input layer.
+///
+/// Structural mirror of [`TryFrom<String> for PerAttemptRegion`] at the
+/// UTF-8 frontier, [`TryFrom<Vec<u8>> for PerAttemptRegion`] at the
+/// byte-slice frontier, and [`TryFrom<std::ffi::OsString> for
+/// PerAttemptRegion`] at the OS-string frontier — the same by-value
+/// owned-input parse surface at the same one-oracle discipline, projected
+/// onto the NUL-terminated C-string frontier. Opens a new by-value
+/// owned-buffer NUL-terminated C-string parse trio at the per-attempt-
+/// region ladder parallel to the [`TryFrom<String>`], [`TryFrom<Vec<u8>>`],
+/// and [`TryFrom<std::ffi::OsString>`] surfaces: [`TryFrom<String>`] takes
+/// an owned [`String`] input for consumers that own a UTF-8-decoded buffer,
+/// [`TryFrom<Vec<u8>>`] takes an owned [`Vec<u8>`] input for consumers that
+/// own a raw-bytes buffer at the pre-UTF-8-decode layer,
+/// [`TryFrom<std::ffi::OsString>`] takes an owned [`std::ffi::OsString`]
+/// input for consumers that own an OS-encoded buffer at the process-
+/// environment / CLI-argument / filesystem-path frontier, this
+/// [`TryFrom<std::ffi::CString>`] takes an owned [`std::ffi::CString`]
+/// input for consumers that own a NUL-terminated C-string buffer at the
+/// FFI / `syslog(3)` / `journald` / C-ABI-crossing frontier.
+///
+/// Opens the by-value owned-buffer NUL-terminated C-string parse trio at
+/// the per-attempt-region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and [`crate::version::BumpLevel`]
+/// ladders, matching the [`TryFrom<&std::ffi::CStr>`] opening order
+/// (8777e9f → 95ddf71 → 5073623) at the borrowed-view counterpart, the
+/// [`TryFrom<String>`] opening order at the UTF-8 frontier's owned-input
+/// counterpart, the [`TryFrom<Vec<u8>>`] opening order at the byte-slice
+/// frontier's owned-input counterpart, the [`TryFrom<std::ffi::OsString>`]
+/// opening order at the OS-string frontier's owned-input counterpart, and
+/// the [`From<PerAttemptRegion> for std::ffi::CString`] opening order
+/// (020317a → 1e8ed3c → 6cff423) at the NUL-terminated C-string frontier's
+/// emit-side owned-buffer dual.
+///
+/// The natural bridge to any downstream site that types its NUL-terminated
+/// C-string parse contract as `impl TryFrom<std::ffi::CString>` rather than
+/// [`TryFrom<&std::ffi::CStr>`] — the NUL-terminated C-string frontier's
+/// `serde` `try_from` container attribute at the owned-buffer layer
+/// (`#[serde(try_from = "CString")]` — which keys off
+/// [`TryFrom<std::ffi::CString>`], not [`TryFrom<&std::ffi::CStr>`]), a
+/// validated-input newtype builder whose canonical parse contract is
+/// stated as `TryFrom<std::ffi::CString>` (consumes the caller's input
+/// NUL-terminated C-string end-to-end), a [`std::ffi::CString::from_vec_with_nul`]
+/// terminus that owns the returned [`std::ffi::CString`] and hands it to a
+/// typed parser without a borrow-then-clone round trip. The [`FromStr`]
+/// impl carries the load-bearing match body against the canonical grammar;
+/// this [`TryFrom<std::ffi::CString>`] impl delegates through the
+/// [`TryFrom<&std::ffi::CStr>`] parse peer (which itself composes
+/// [`std::ffi::CStr::to_str`] with [`TryFrom<&str>`] which composes
+/// [`FromStr`]), so the parse-oracle discipline is preserved end-to-end
+/// and a future variant insertion / grammar refinement remains a one-site
+/// edit at [`PerAttemptRegion::as_str`] plus the matching [`FromStr`] arm
+/// addition.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at the same TWO frontiers the
+/// [`TryFrom<&std::ffi::CStr>`] peer directly above is strict at,
+/// inherited through the delegation: non-UTF-8 NUL-terminated C-string
+/// byte sequences reject at [`std::ffi::CStr::to_str`] with the standard
+/// "invalid UTF-8 in per-attempt region CStr input" diagnostic surfaced
+/// through [`anyhow::Error`], and valid-UTF-8 NUL-terminated C-string
+/// sequences that decode to a non-canonical label (`""`, `"BeforeFirst"`,
+/// `"OverBudget"`, `"FIRST"`, `" first"`, `"first "`, `"beforefirst"`,
+/// `"overbudget"`) reject at the underlying [`FromStr`] impl — the same
+/// canonical-only strictness the NUL-terminated C-string frontier already
+/// carries at the by-reference peer, now lifted to the owned-buffer input
+/// layer at ONE composition through the borrowed [`TryFrom<&std::ffi::CStr>`]
+/// peer.
+///
+/// The impl body picks [`std::ffi::CString::as_c_str`] rather than
+/// [`std::ffi::CString::into_string`] or an intermediate `to_str` +
+/// [`str::parse`] restatement: [`std::ffi::CString::as_c_str`] yields a
+/// borrowed [`&std::ffi::CStr`] view of the caller-owned buffer without
+/// allocation, so the parse-side receiver pays the by-reference
+/// [`TryFrom<&std::ffi::CStr>`] cost, not the [`String`]-allocation cost
+/// of a [`std::ffi::CString::into_string`] round trip. The owned
+/// [`std::ffi::CString`] input is dropped at return, freeing its buffer
+/// exactly once — the same discipline the sibling [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<String>`], and [`TryFrom<std::ffi::OsString>`] owned-buffer
+/// parse peers apply at the [`Vec::as_slice`], [`String::as_str`], and
+/// [`std::ffi::OsString::as_os_str`] boundaries at the byte-slice, UTF-8,
+/// and OS-string frontiers.
+///
+/// The identity `PerAttemptRegion::try_from(std::ffi::CString::new(
+/// region.as_str()).unwrap()).unwrap() == region` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_cstring_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<std::ffi::CString>`
+/// consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_cstring_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-UTF-8 owned NUL-terminated
+/// C-string input is pinned by
+/// [`tests::test_per_attempt_region_try_from_cstring_rejects_non_utf8_input`];
+/// the strict-rejection contract on valid-UTF-8 non-canonical owned
+/// NUL-terminated C-string input is pinned by
+/// [`tests::test_per_attempt_region_try_from_cstring_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned-buffer
+/// NUL-terminated C-string try-conversion surface is a typed-primitive
+/// site on [`PerAttemptRegion`] itself (one `TryFrom<std::ffi::CString>`
+/// impl routing through the borrowed [`TryFrom<&std::ffi::CStr>`] parse
+/// peer on [`std::ffi::CString::as_c_str`]), not a per-consumer
+/// `PerAttemptRegion::try_from(c.as_c_str())` bridge at every downstream
+/// site that types its parse contract as `impl TryFrom<std::ffi::CString>`
+/// rather than [`TryFrom<&std::ffi::CStr>`] or [`std::str::FromStr`].
+/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// grammar is named at one site ([`PerAttemptRegion::as_str`]), inverted
+/// at one site ([`PerAttemptRegion::from_str`]), and every parse surface —
+/// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
+/// [`TryFrom<String>`], [`TryFrom<std::borrow::Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<std::sync::Arc<str>>`],
+/// [`TryFrom<std::rc::Rc<str>>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<std::borrow::Cow<'_, [u8]>>`], [`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<std::sync::Arc<[u8]>>`], [`TryFrom<std::rc::Rc<[u8]>>`],
+/// [`TryFrom<&std::ffi::OsStr>`], [`TryFrom<std::ffi::OsString>`],
+/// [`TryFrom<&std::path::Path>`], [`TryFrom<std::path::PathBuf>`],
+/// [`TryFrom<&std::ffi::CStr>`], this [`TryFrom<std::ffi::CString>`] —
+/// reads through it.
+impl TryFrom<std::ffi::CString> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(c: std::ffi::CString) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::ffi::CStr>>::try_from(c.as_c_str())
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for PerAttemptRegion`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for PerAttemptRegion`] so a downstream consumer bound
@@ -22126,6 +22298,172 @@ mod tests {
                 <PerAttemptRegion as std::convert::TryFrom<&std::ffi::CStr>>::try_from(bad_c)
                     .is_err(),
                 "TryFrom<&CStr> must reject valid-UTF-8 non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::ffi::CString> for PerAttemptRegion`] agrees with
+    /// [`FromStr`] at every [`PerAttemptRegion::ALL`] variant. Owning the
+    /// [`std::ffi::CString`] input round-trips through
+    /// [`std::ffi::CString::new(region.as_str())`] and the by-value
+    /// owned-buffer NUL-terminated C-string try-conversion recovers the
+    /// canonical variant — the by-value owned-buffer NUL-terminated
+    /// C-string parse peer of the by-reference [`TryFrom<&std::ffi::CStr>`]
+    /// surface reads the same one-oracle grammar the by-value owned-buffer
+    /// UTF-8 parse peer [`TryFrom<String>`], the by-value owned-buffer
+    /// byte-slice parse peer [`TryFrom<Vec<u8>>`], and the by-value
+    /// owned-buffer OS-string parse peer [`TryFrom<std::ffi::OsString>`]
+    /// read — one round-trip pin per variant, refuses a future variant
+    /// insertion that drops the
+    /// `TryFrom<CString>`/`CString::new(as_str())` agreement.
+    #[test]
+    fn test_per_attempt_region_try_from_cstring_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let owned = std::ffi::CString::new(region.as_str())
+                .expect("canonical label must contain no interior NUL");
+            let parsed =
+                <PerAttemptRegion as std::convert::TryFrom<std::ffi::CString>>::try_from(owned)
+                    .expect("canonical label CString must parse through TryFrom<CString>");
+            assert_eq!(
+                parsed, region,
+                "TryFrom<CString> must round-trip through CString::new(as_str()) at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<std::ffi::CString> for PerAttemptRegion`] identity
+    /// carries through a generic `impl TryFrom<std::ffi::CString>`
+    /// consumer at every [`PerAttemptRegion::ALL`] variant. A tiny generic
+    /// function `fn parse<T>(c: CString) -> T where T:
+    /// TryFrom<CString>, T::Error: std::fmt::Debug` — the shape of an
+    /// actual downstream consumer (a validated-input newtype builder that
+    /// consumes an owned [`std::ffi::CString`], a
+    /// [`std::ffi::CString::from_vec_with_nul`] receiver that owns the
+    /// returned [`std::ffi::CString`] over a FFI-produced buffer, a
+    /// [`std::ffi::CStr::from_ptr`] + [`std::ffi::CStr::to_owned`] compose
+    /// that owns a freshly-allocated NUL-terminated buffer over a
+    /// `*const c_char` FFI return, a generic try-conversion helper) —
+    /// recovers the canonical variant from the canonical snake_case label
+    /// owned NUL-terminated C-string at every variant. The structural
+    /// witness that a [`PerAttemptRegion`] is genuinely usable at
+    /// `impl TryFrom<std::ffi::CString>` call sites — a regression that
+    /// drifted the [`TryFrom`] impl signature (requiring a borrowed
+    /// [`&std::ffi::CStr`] input, dropping the
+    /// [`std::ffi::CString::as_c_str`] borrow step and misparsing
+    /// non-UTF-8 input, returning a different variant than [`FromStr`]
+    /// would) fails here at compile time or at the assertion instead of
+    /// at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_try_from_cstring_carries_through_generic_consumer() {
+        fn parse<T>(c: std::ffi::CString) -> T
+        where
+            T: std::convert::TryFrom<std::ffi::CString>,
+            <T as std::convert::TryFrom<std::ffi::CString>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::ffi::CString>>::try_from(c)
+                .expect("canonical label CString must parse through generic TryFrom<CString>")
+        }
+
+        for region in PerAttemptRegion::ALL {
+            let owned = std::ffi::CString::new(region.as_str())
+                .expect("canonical label must contain no interior NUL");
+            assert_eq!(
+                parse::<PerAttemptRegion>(owned),
+                region,
+                "generic TryFrom<CString> consumer must recover canonical variant at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::ffi::CString> for PerAttemptRegion`] rejects
+    /// non-UTF-8 owned NUL-terminated C-string sequences at the
+    /// [`std::ffi::CStr::to_str`] decode frontier inherited through the
+    /// by-reference [`TryFrom<&std::ffi::CStr>`] delegation. A
+    /// [`std::ffi::CString`] may hold any byte sequence excluding interior
+    /// NUL — an owned `getenv(3)` payload under a non-UTF-8 locale, an
+    /// owned C-emitted log frame under a foreign character set, an owned
+    /// [`std::ffi::CStr::to_owned`] of a raw `*const c_char` from a legacy
+    /// C library. Pins the encoding-strictness contract at the owned-buffer
+    /// NUL-terminated C-string frontier's first strictness gate so a
+    /// downstream consumer bound by [`TryFrom<std::ffi::CString>`] inherits
+    /// the same UTF-8-only encoding discipline the by-reference peer
+    /// offers, at ONE typed-primitive site rather than a per-consumer
+    /// [`std::ffi::CString::into_string`] + [`str::parse`] restatement.
+    /// Sibling of the by-reference NUL-terminated C-string pin
+    /// [`test_per_attempt_region_try_from_cstr_rejects_non_utf8_input`]
+    /// at the by-reference peer, the UTF-8-frontier pin
+    /// [`test_per_attempt_region_try_from_bytes_rejects_non_utf8_input`]
+    /// at the byte-slice frontier, and the OS-string-owned-buffer pin
+    /// [`test_per_attempt_region_try_from_os_string_rejects_non_unicode_input`]
+    /// — all pin the encoding-strictness contract at the parse peer's
+    /// first strictness gate.
+    #[test]
+    fn test_per_attempt_region_try_from_cstring_rejects_non_utf8_input() {
+        for bad in [
+            vec![0xffu8],
+            vec![0xffu8, 0xfe],
+            vec![0x80],
+            vec![b'f', b'i', 0xff, b'r', b's', b't'],
+            vec![b'f', b'i', b'n', b'a', b'l', 0xff],
+        ] {
+            let bad_c = std::ffi::CString::new(bad.clone())
+                .expect("test fixture must not contain interior NUL");
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<std::ffi::CString>>::try_from(bad_c)
+                    .is_err(),
+                "TryFrom<CString> must reject non-UTF-8 input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::ffi::CString> for PerAttemptRegion`] rejects
+    /// valid-UTF-8 non-canonical owned NUL-terminated C-string sequences
+    /// at the underlying [`FromStr`] strictness gate inherited through the
+    /// by-reference [`TryFrom<&std::ffi::CStr>`] delegation — empty owned
+    /// NUL-terminated C-string, UpperCamel rendering, uppercase, whitespace
+    /// padding, and snake_case labels with a dropped underscore all reject.
+    /// Pins the canonical-label strictness contract at the owned-buffer
+    /// NUL-terminated C-string frontier's second strictness gate so a
+    /// downstream consumer bound by [`TryFrom<std::ffi::CString>`] inherits
+    /// the same canonical-only grammar the direct
+    /// `.parse::<PerAttemptRegion>()` call sites and the sibling
+    /// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<&[u8]>`],
+    /// [`TryFrom<Vec<u8>>`], [`TryFrom<&std::ffi::OsStr>`],
+    /// [`TryFrom<std::ffi::OsString>`], and [`TryFrom<&std::ffi::CStr>`]
+    /// impls already read, and a future permissive-parse regression at the
+    /// underlying [`FromStr`] impl lights up here rather than drifting
+    /// silently through the owned-buffer NUL-terminated C-string
+    /// try-conversion surface. Sibling of the by-reference NUL-terminated
+    /// C-string pin
+    /// [`test_per_attempt_region_try_from_cstr_rejects_non_canonical_input`]
+    /// at the by-reference peer, the UTF-8-owned-buffer pin
+    /// [`test_per_attempt_region_try_from_string_rejects_non_canonical_input`]
+    /// at the UTF-8 frontier, the byte-slice-owned-buffer pin
+    /// [`test_per_attempt_region_try_from_vec_bytes_rejects_non_canonical_input`]
+    /// at the byte-slice frontier, and the OS-string-owned-buffer pin
+    /// [`test_per_attempt_region_try_from_os_string_rejects_non_canonical_input`]
+    /// at the OS-string frontier — the five pins together close the
+    /// canonical-only strictness contract across the UTF-8, byte-slice,
+    /// OS-string, and NUL-terminated C-string frontiers' owned-buffer
+    /// parse surfaces.
+    #[test]
+    fn test_per_attempt_region_try_from_cstring_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "BeforeFirst",
+            "OverBudget",
+            "FIRST",
+            " first",
+            "first ",
+            "beforefirst",
+            "overbudget",
+        ] {
+            let bad_c =
+                std::ffi::CString::new(bad).expect("test fixture must not contain interior NUL");
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<std::ffi::CString>>::try_from(bad_c)
+                    .is_err(),
+                "TryFrom<CString> must reject valid-UTF-8 non-canonical input {bad:?}",
             );
         }
     }
