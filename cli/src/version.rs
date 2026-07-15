@@ -3348,6 +3348,148 @@ impl From<BumpLevel> for std::ffi::CString {
     }
 }
 
+/// [`From<BumpLevel> for Box<std::ffi::CStr>`] routes through the
+/// by-value owned NUL-terminated C-string emit peer
+/// [`From<BumpLevel> for std::ffi::CString`] directly above composed
+/// with [`std::ffi::CString::into_boxed_c_str`] so a downstream
+/// consumer bound by `impl Into<Box<std::ffi::CStr>>` (a validated-
+/// input newtype whose NUL-terminated-C-string payload field is typed
+/// [`Box<std::ffi::CStr>`] to carry the label bytes at a single
+/// exact-capacity allocation with no [`std::ffi::CString`] growth-
+/// header slack, an FFI-boundary wrapper whose owned `*const c_char`
+/// slot arrives as a shrunk-owned [`Box<std::ffi::CStr>`] from an
+/// upstream table build without the resizable-buffer allocation
+/// overhead, a [`std::collections::HashMap<Box<std::ffi::CStr>, _>`]
+/// key slot that stores canonical labels at the shrunk-owned
+/// NUL-terminated-C-string frontier, a serde container that opts into
+/// `#[serde(from = "Box<std::ffi::CStr>")]` on a wrapper field to
+/// consume an immutable heap-owned NUL-terminated C-string without the
+/// [`std::ffi::CString`] growth-header cost) receives the canonical
+/// lowercase label bytes plus the trailing NUL byte (`b"patch\0"`,
+/// `b"minor\0"`, `b"major\0"`) as an immutable heap-owned
+/// [`Box<std::ffi::CStr>`] with a single exact-capacity allocation
+/// suitable for direct hand-off to a C-ABI `*const c_char` frontier —
+/// through ONE composition rather than a per-consumer
+/// `std::ffi::CString::new(level.as_str()).unwrap().into_boxed_c_str()`
+/// restatement that repeats the NUL-free-known invariant at every
+/// downstream site.
+///
+/// Structural mirror of [`From<BumpLevel> for Box<str>`] at the UTF-8-
+/// string frontier, [`From<BumpLevel> for Box<[u8]>`] at the byte-
+/// slice frontier, [`From<BumpLevel> for Box<std::ffi::OsStr>`] at
+/// the OS-string frontier (line 2528), and
+/// [`From<BumpLevel> for Box<std::path::Path>`] at the filesystem-path
+/// frontier (line 2646) — the same by-value shrunk-owned emit surface
+/// at the same one-oracle discipline, projected onto the
+/// NUL-terminated C-string frontier at the axis the prior four
+/// [`Box`]-shape emit peers do not reach, because none of
+/// [`Box<str>`], [`Box<[u8]>`], [`Box<std::ffi::OsStr>`], or
+/// [`Box<std::path::Path>`] guarantees a trailing NUL byte after the
+/// label buffer. Trio-closing peer at the version-bump-magnitude
+/// ladder of the by-value shrunk-owned NUL-terminated C-string emit
+/// trio opened at the per-attempt-region ladder by
+/// [`From<crate::retry::PerAttemptRegion> for Box<std::ffi::CStr>`]
+/// (commit 7eda876) and mid-slotted at the admission-tier ladder by
+/// [`From<crate::probe_outcome::AdmissionTier> for
+/// Box<std::ffi::CStr>`] (commit daaae30); this impl closes the trio
+/// at the third ordered typed sum, matching the
+/// [`From<T> for Box<std::ffi::OsStr>`] closing order at the shrunk-
+/// owned OS-string emit sibling one frontier over
+/// (4a4a9d7 → ab2fdcd → 3280cd3), the
+/// [`From<T> for Box<std::path::Path>`] closing order at the shrunk-
+/// owned filesystem-path emit sibling (7aa68e4 → a903972 → 41ec18a),
+/// and the [`From<T> for std::ffi::CString`] closing order at this
+/// NUL-terminated C-string frontier's owned-emit dual directly above
+/// (020317a → 1e8ed3c → 6cff423). After this commit the by-value
+/// shrunk-owned emit axis spans all five frontiers (UTF-8, byte-slice,
+/// OS-string, filesystem-path, NUL-terminated C-string) across all
+/// three ordered typed sums on the ladder set against ONE canonical-
+/// label oracle each — sharpens the case for a lifted derive-macro
+/// that generates the shrunk-owned emit cross-product across all five
+/// encoding frontiers at every oracle-label-annotated typed sum.
+///
+/// The natural bridge from the [`std::ffi::CString`] peer above to any
+/// downstream site that types its NUL-terminated-C-string sink as
+/// `impl Into<Box<std::ffi::CStr>>` — the emit peer that answers the
+/// receiver-side question "does this C-ABI-adjacent API want a
+/// growable [`std::ffi::CString`] with resize headroom or a shrunk-
+/// owned immutable heap-owned NUL-terminated buffer?" with "the
+/// immutable shrunk-owned [`Box<std::ffi::CStr>`]." A receiver typed
+/// as [`Box<std::ffi::CStr>`] (rather than [`std::ffi::CString`]) pays
+/// the exact-capacity single-allocation cost without the growth-header
+/// slack, and cannot silently grow past its allocated end — the
+/// load-bearing discipline for a keyed-table NUL-terminated-C-string
+/// key slot, a validated-input newtype NUL-terminated-C-string payload
+/// field, or an FFI-boundary sink that must not reallocate after
+/// publish. The routing discipline picks
+/// [`std::ffi::CString::into_boxed_c_str`] rather than
+/// `Box::<std::ffi::CStr>::from(std::ffi::CString::from(level).as_c_str())`:
+/// [`std::ffi::CString::into_boxed_c_str`] repurposes the existing
+/// [`std::ffi::CString`] heap allocation in place at the shrunk-owned
+/// frontier without a per-call clone of the NUL-terminated label bytes
+/// into a fresh boxed allocation, so the emit-side receiver pays
+/// exactly one heap allocation across the composition (the
+/// [`std::ffi::CString::new`] allocation the by-value owned emit peer
+/// already made) — never the second boxed-allocation-plus-clone round
+/// trip a `Box::<CStr>::from(cstring.as_c_str())` composition would
+/// pay.
+///
+/// # Infallibility
+///
+/// The infallibility contract is inherited unchanged from the upstream
+/// [`From<BumpLevel> for std::ffi::CString`] peer:
+/// [`std::ffi::CString::new`] is fallible in the general case
+/// (rejecting interior-NUL byte sequences at the
+/// [`std::ffi::NulError`] frontier), but the canonical
+/// [`BumpLevel::as_str`] label alphabet (`"patch"`, `"minor"`,
+/// `"major"`) is a subset of the printable-ASCII lowercase grammar and
+/// carries no interior NUL byte at any variant, so the
+/// [`std::ffi::CString::new`] call inside the upstream peer is
+/// guaranteed to succeed at every [`BumpLevel::ALL`] value, and
+/// [`std::ffi::CString::into_boxed_c_str`] is total on any well-formed
+/// [`std::ffi::CString`] receiver. A future variant insertion that
+/// landed a label with an interior NUL byte would break the upstream
+/// peer's `.expect(...)` at the same test-suite gate the
+/// [`std::str::FromStr`] canonicity discipline refuses non-canonical
+/// label admission at, before ever reaching this shrunk-owned emit
+/// surface.
+///
+/// The identity `Box::<std::ffi::CStr>::from(level).to_bytes() ==
+/// level.as_str().as_bytes()` at every [`BumpLevel::ALL`] variant is
+/// pinned by
+/// [`tests::test_bump_level_into_boxed_cstr_agrees_with_as_str`]; the
+/// identity carried through a generic
+/// `impl Into<Box<std::ffi::CStr>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_into_boxed_cstr_carries_through_generic_consumer`];
+/// the NUL-terminator contract — [`std::ffi::CStr::to_bytes`]
+/// contains no interior `0u8` byte and
+/// [`std::ffi::CStr::to_bytes_with_nul`] ends in exactly one trailing
+/// `0u8` byte after the canonical label bytes — at every variant is
+/// pinned by
+/// [`tests::test_bump_level_into_boxed_cstr_carries_trailing_nul`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// NUL-terminated C-string emit surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one
+/// `From<BumpLevel> for Box<std::ffi::CStr>` impl routing through the
+/// owned [`From<BumpLevel> for std::ffi::CString`] peer composed with
+/// [`std::ffi::CString::into_boxed_c_str`]), not a per-consumer
+/// `std::ffi::CString::new(level.as_str()).unwrap().into_boxed_c_str()`
+/// restatement at every downstream site that accepts
+/// `impl Into<Box<std::ffi::CStr>>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`BumpLevel::as_str`]) and
+/// every NUL-terminated C-string emit surface — [`From<T> for
+/// std::ffi::CString`], this [`From<T> for Box<std::ffi::CStr>`] —
+/// reads through it, so the shrunk-owned allocation shape sits ON TOP
+/// of the same canonical-label oracle the owned resizable-buffer emit
+/// peer already reads.
+impl From<BumpLevel> for Box<std::ffi::CStr> {
+    fn from(level: BumpLevel) -> Box<std::ffi::CStr> {
+        std::ffi::CString::from(level).into_boxed_c_str()
+    }
+}
+
 /// [`TryFrom<&std::ffi::CStr> for BumpLevel`] routes through
 /// [`std::ffi::CStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -12655,6 +12797,133 @@ mod tests {
                 bytes_with_nul.len(),
                 bytes.len() + 1,
                 "CString label bytes_with_nul must be exactly one byte longer than as_bytes at {level:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for Box<std::ffi::CStr>`] emits the canonical
+    /// lowercase label byte-sequence at every [`BumpLevel::ALL`]
+    /// variant, unchanged from the [`BumpLevel::as_str`] canonical-
+    /// label oracle. Pins the identity
+    /// `Box::<std::ffi::CStr>::from(level).to_bytes() ==
+    /// level.as_str().as_bytes()` at every variant against the shared
+    /// canonical-label oracle, refusing a future variant insertion
+    /// that drifts the impl body off the upstream
+    /// [`From<BumpLevel> for std::ffi::CString`] oracle or off
+    /// [`std::ffi::CString::into_boxed_c_str`]. The structural witness
+    /// that the by-value shrunk-owned NUL-terminated C-string emit
+    /// surface reads the same one-oracle grammar the owned
+    /// [`From<T> for std::ffi::CString`] emit peer, the sibling
+    /// [`From<T> for Box<str>`], [`From<T> for Box<[u8]>`],
+    /// [`From<T> for Box<std::ffi::OsStr>`], and
+    /// [`From<T> for Box<std::path::Path>`] shrunk-owned emit peers
+    /// read — one round-trip pin per variant at the NUL-terminated
+    /// C-string frontier. Structural mirror of
+    /// `test_per_attempt_region_into_boxed_cstr_agrees_with_as_str`
+    /// (commit 7eda876) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_boxed_cstr_agrees_with_as_str`
+    /// (commit daaae30) at the mid-trio admission-tier ladder —
+    /// closing the by-value shrunk-owned NUL-terminated C-string
+    /// round-trip pin at the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_boxed_cstr_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::ffi::CStr> = Box::<std::ffi::CStr>::from(level);
+            assert_eq!(
+                boxed.to_bytes(),
+                level.as_str().as_bytes(),
+                "From<BumpLevel> for Box<CStr> must agree with as_str() bytes at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Box<std::ffi::CStr>`] identity
+    /// carries through a generic `impl Into<Box<std::ffi::CStr>>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny generic
+    /// function
+    /// `fn read<T: Into<Box<std::ffi::CStr>>>(t: T) ->
+    /// Box<std::ffi::CStr> { t.into() }` — the shape of an actual
+    /// downstream consumer (a validated-input newtype whose
+    /// NUL-terminated-C-string payload slot arrives as
+    /// [`Box<std::ffi::CStr>`], an FFI-boundary wrapper that binds a
+    /// canonical [`BumpLevel`] label into a shrunk-owned
+    /// `*const c_char` handle, a
+    /// [`std::collections::HashMap<Box<std::ffi::CStr>, _>`] key slot
+    /// builder, a serde `#[serde(from = "Box<std::ffi::CStr>")]`
+    /// container) reads the canonical lowercase label from a
+    /// [`BumpLevel`] value as a shrunk-owned NUL-terminated C-string.
+    /// The structural witness that a [`BumpLevel`] is genuinely
+    /// usable at `impl Into<Box<std::ffi::CStr>>` call sites; a
+    /// regression that drifted the impl signature (returning
+    /// [`std::ffi::CString`] instead of [`Box<std::ffi::CStr>`],
+    /// requiring `&BumpLevel` and losing the by-value semantics)
+    /// fails here at compile time or at the assertion instead of at
+    /// every downstream generic call site. Structural mirror of
+    /// `test_per_attempt_region_into_boxed_cstr_carries_through_generic_consumer`
+    /// (commit 7eda876) at the trio-opener per-attempt-region
+    /// ladder and
+    /// `test_admission_tier_into_boxed_cstr_carries_through_generic_consumer`
+    /// (commit daaae30) at the mid-trio admission-tier ladder —
+    /// closing the by-value shrunk-owned NUL-terminated C-string
+    /// generic-consumer pin at the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_boxed_cstr_carries_through_generic_consumer() {
+        fn read<T: Into<Box<std::ffi::CStr>>>(t: T) -> Box<std::ffi::CStr> {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).to_bytes(),
+                level.as_str().as_bytes(),
+                "generic Into<Box<CStr>> consumer must read canonical label bytes at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for Box<std::ffi::CStr>`] NUL-terminator
+    /// contract — [`std::ffi::CStr::to_bytes`] contains no interior
+    /// `0u8` byte, and [`std::ffi::CStr::to_bytes_with_nul`] ends in
+    /// exactly one trailing `0u8` byte after the canonical label
+    /// bytes (so `to_bytes_with_nul().len() == to_bytes().len() + 1`)
+    /// — holds at every [`BumpLevel::ALL`] variant. Pins the C-string
+    /// boundary contract at the shrunk-owned NUL-terminated C-string
+    /// emit surface, inherited unchanged from the upstream owned
+    /// [`std::ffi::CString`] emit peer through
+    /// [`std::ffi::CString::into_boxed_c_str`], which repurposes the
+    /// [`std::ffi::CString`] heap allocation in place at the shrunk-
+    /// owned frontier without disturbing the NUL-terminator
+    /// invariant. A regression that landed an interior NUL byte in
+    /// the label alphabet, or that drifted the impl body to a shape
+    /// omitting the trailing NUL, would break the C-ABI hand-off
+    /// before this assertion refuses the drift. Structural mirror of
+    /// `test_per_attempt_region_into_boxed_cstr_carries_trailing_nul`
+    /// (commit 7eda876) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_boxed_cstr_carries_trailing_nul`
+    /// (commit daaae30) at the mid-trio admission-tier ladder —
+    /// closing the by-value shrunk-owned NUL-terminated C-string
+    /// boundary pin at the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_boxed_cstr_carries_trailing_nul() {
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::ffi::CStr> = Box::<std::ffi::CStr>::from(level);
+            let bytes = boxed.to_bytes();
+            let bytes_with_nul = boxed.to_bytes_with_nul();
+            assert!(
+                !bytes.contains(&0u8),
+                "Box<CStr> label bytes must not contain an interior NUL at {level:?}",
+            );
+            assert_eq!(
+                bytes_with_nul.last().copied(),
+                Some(0u8),
+                "Box<CStr> label bytes_with_nul must end in a trailing NUL at {level:?}",
+            );
+            assert_eq!(
+                bytes_with_nul.len(),
+                bytes.len() + 1,
+                "Box<CStr> label bytes_with_nul must be exactly one byte longer than to_bytes at {level:?}",
             );
         }
     }
