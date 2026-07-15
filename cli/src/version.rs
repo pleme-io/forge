@@ -3243,6 +3243,111 @@ impl From<BumpLevel> for std::rc::Rc<std::path::Path> {
     }
 }
 
+/// [`From<BumpLevel> for std::ffi::CString`] routes through
+/// [`BumpLevel::as_str`] composed with [`std::ffi::CString::new`] so a
+/// downstream consumer that takes a NUL-terminated owned C-string via
+/// [`Into<std::ffi::CString>`] (a [`libc`]/POSIX FFI call site that
+/// hands a canonical [`BumpLevel`] label to a `*const c_char` argument
+/// via [`std::ffi::CString::as_ptr`], a
+/// [`std::process::Command::env`] wrapper that layers a
+/// NUL-terminated bump-magnitude label at the child-process-frontier,
+/// a `syslog` / `journal` bridge that emits a canonical label to a C
+/// logger without an ad-hoc null-terminator staple, a
+/// [`std::ffi::CString::into_raw`] hand-off at a C-ABI boundary, a
+/// serde container that opts into
+/// `#[serde(from = "std::ffi::CString")]` at the NUL-terminated owned
+/// C-string frontier, a validated-input newtype builder that consumes
+/// a [`std::ffi::CString`] and returns a validated
+/// [`BumpLevel`]-labeled handle) reads the canonical snake_case label
+/// (`"patch"`, `"minor"`, `"major"`) as an owned heap-allocated
+/// NUL-terminated C-string with a single allocation for the label
+/// bytes plus the trailing NUL — through ONE composition rather than
+/// a per-consumer
+/// `std::ffi::CString::new(level.as_str()).unwrap()` restatement that
+/// repeats the NUL-free-known invariant at every downstream site.
+///
+/// Closes the by-value owned NUL-terminated C-string emit trio at the
+/// third and last ordered typed sum on the ladder set — opened at the
+/// per-attempt-region ladder by 020317a
+/// (`impl From<PerAttemptRegion> for std::ffi::CString` in
+/// [`crate::retry`]) and mid-slotted at the admission-tier ladder by
+/// 1e8ed3c (`impl From<AdmissionTier> for std::ffi::CString` in
+/// [`crate::probe_outcome`]). After this commit the by-value owned
+/// NUL-terminated C-string emit axis spans all three ordered typed
+/// sums on the ladder set against ONE canonical-label oracle each,
+/// matching the closed coverage the four prior owned emit surfaces
+/// already carry — the [`From<T> for String`] owned UTF-8 emit trio,
+/// the [`From<T> for std::ffi::OsString`] owned OS-string emit trio,
+/// and the [`From<T> for std::path::PathBuf`] owned filesystem-path
+/// emit trio. All four by-value owned emit surfaces at the version-
+/// bump-magnitude ladder route through the same [`BumpLevel::as_str`]
+/// canonical-label oracle, differing only on receiver-side shape:
+/// [`From<T> for String`] returns a growth-header-carrying resizable
+/// owned UTF-8 buffer, [`From<T> for std::ffi::OsString`] returns the
+/// same shape at the OS-string frontier, [`From<T> for
+/// std::path::PathBuf`] returns the same shape at the filesystem-path
+/// frontier, this [`From<T> for std::ffi::CString`] returns an owned
+/// heap-allocated NUL-terminated C-string suitable for direct hand-off
+/// to a C-ABI `*const c_char` frontier — the axis the prior three
+/// owned emit surfaces do not reach, because none of [`String`],
+/// [`std::ffi::OsString`], or [`std::path::PathBuf`] guarantees a
+/// trailing NUL byte after the label buffer.
+///
+/// # Infallibility
+///
+/// [`std::ffi::CString::new`] is fallible in the general case
+/// (rejecting interior-NUL byte sequences at the
+/// [`std::ffi::NulError`] frontier), but the canonical
+/// [`BumpLevel::as_str`] label alphabet (`"patch"`, `"minor"`,
+/// `"major"`) is a subset of the printable-ASCII lowercase snake_case
+/// grammar and carries no interior NUL byte at any variant, so the
+/// [`std::ffi::CString::new`] call is guaranteed to succeed at every
+/// [`BumpLevel::ALL`] value. The `.expect(...)` inside the impl body
+/// reads a compile-time-audited invariant, not a runtime failure
+/// mode; a future variant insertion that landed a label with an
+/// interior NUL byte would break the
+/// [`tests::test_bump_level_into_cstring_agrees_with_as_str`]
+/// round-trip pin and the
+/// [`tests::test_bump_level_into_cstring_carries_trailing_nul`]
+/// no-interior-NUL pin at the same test-suite gate the
+/// [`std::str::FromStr`] canonicity discipline refuses non-canonical
+/// label admission at.
+///
+/// The identity `std::ffi::CString::from(level).as_bytes() ==
+/// level.as_str().as_bytes()` at every [`BumpLevel::ALL`] variant is
+/// pinned by
+/// [`tests::test_bump_level_into_cstring_agrees_with_as_str`]; the
+/// identity carried through a generic
+/// `impl Into<std::ffi::CString>` consumer at every variant is
+/// pinned by
+/// [`tests::test_bump_level_into_cstring_carries_through_generic_consumer`];
+/// the NUL-terminator contract — [`std::ffi::CString::as_bytes`]
+/// contains no interior `0u8` byte and
+/// [`std::ffi::CString::as_bytes_with_nul`] ends in exactly one
+/// trailing `0u8` byte after the canonical label bytes — at every
+/// variant is pinned by
+/// [`tests::test_bump_level_into_cstring_carries_trailing_nul`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value owned NUL-terminated
+/// C-string emit surface is a typed-primitive site on [`BumpLevel`]
+/// itself (one `From<BumpLevel> for std::ffi::CString` impl routing
+/// through [`BumpLevel::as_str`] and [`std::ffi::CString::new`]), not
+/// a per-consumer
+/// `std::ffi::CString::new(level.as_str()).unwrap()` restatement at
+/// every downstream site that accepts
+/// `impl Into<std::ffi::CString>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`BumpLevel::as_str`]) and
+/// every by-value owned emit surface — [`From<T> for String`],
+/// [`From<T> for std::ffi::OsString`], [`From<T> for
+/// std::path::PathBuf`], and this [`From<T> for std::ffi::CString`]
+/// — reads through it.
+impl From<BumpLevel> for std::ffi::CString {
+    fn from(level: BumpLevel) -> std::ffi::CString {
+        std::ffi::CString::new(level.as_str())
+            .expect("BumpLevel canonical labels contain no interior NUL bytes")
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -11719,6 +11824,130 @@ mod tests {
             assert!(
                 std::rc::Rc::strong_count(&shared) >= 2,
                 "Rc<Path> strong count must be at least 2 after clone at {level:?}",
+            );
+        }
+    }
+
+    /// [`From<BumpLevel> for std::ffi::CString`] emits the canonical
+    /// snake_case label byte-sequence at every [`BumpLevel::ALL`]
+    /// variant, unchanged from the [`BumpLevel::as_str`] canonical-
+    /// label oracle. Pins the identity
+    /// `std::ffi::CString::from(level).as_bytes() ==
+    /// level.as_str().as_bytes()` at every variant against the shared
+    /// canonical-label oracle, refusing a future variant insertion
+    /// that lands a label the [`std::ffi::CString::new`] frontier
+    /// would reject (a label with an interior `0u8` byte would fail
+    /// the `.expect(...)` at the same `as_str()` round-trip), or that
+    /// drifts the impl body off the [`BumpLevel::as_str`] oracle onto
+    /// a stale label table. The structural witness that the by-value
+    /// owned NUL-terminated C-string emit surface reads the same
+    /// one-oracle grammar the sibling [`From<T> for String`],
+    /// [`From<T> for std::ffi::OsString`], and [`From<T> for
+    /// std::path::PathBuf`] owned emit peers read — one round-trip
+    /// pin per variant at the C-string frontier. Structural mirror of
+    /// `test_per_attempt_region_into_cstring_agrees_with_as_str`
+    /// (commit 020317a) at the trio-opener per-attempt-region ladder
+    /// and `test_admission_tier_into_cstring_agrees_with_as_str`
+    /// (commit 1e8ed3c) at the mid-trio admission-tier ladder —
+    /// closing the by-value owned NUL-terminated C-string emit round-
+    /// trip pin at the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_cstring_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let owned: std::ffi::CString = std::ffi::CString::from(level);
+            assert_eq!(
+                owned.as_bytes(),
+                level.as_str().as_bytes(),
+                "From<BumpLevel> for CString must agree with as_str() bytes at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for std::ffi::CString`] identity carries
+    /// through a generic `impl Into<std::ffi::CString>` consumer at
+    /// every [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<std::ffi::CString>>(t: T) ->
+    /// std::ffi::CString { t.into() }` — the shape of a
+    /// [`libc`]/POSIX FFI wrapper that binds a canonical
+    /// [`BumpLevel`] label into a `*const c_char` argument, a
+    /// `syslog` bridge that hands a canonical label to a C logger,
+    /// a serde `#[serde(from = "std::ffi::CString")]` container, a
+    /// validated-input newtype builder that consumes an owned
+    /// [`std::ffi::CString`] label — reads the canonical snake_case
+    /// label from a [`BumpLevel`] value as an owned NUL-terminated
+    /// C-string. The structural witness that a [`BumpLevel`] is
+    /// genuinely usable at `impl Into<std::ffi::CString>` call sites;
+    /// a regression that drifted the impl signature (returning
+    /// [`String`], [`std::ffi::OsString`], or [`std::path::PathBuf`]
+    /// instead of [`std::ffi::CString`], requiring `&BumpLevel` and
+    /// losing the by-value semantics) fails here at compile time or
+    /// at the assertion rather than at every downstream generic call
+    /// site. Structural mirror of
+    /// `test_per_attempt_region_into_cstring_carries_through_generic_consumer`
+    /// (commit 020317a) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_cstring_carries_through_generic_consumer`
+    /// (commit 1e8ed3c) at the mid-trio admission-tier ladder —
+    /// closing the by-value owned NUL-terminated C-string generic-
+    /// consumer pin at the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_cstring_carries_through_generic_consumer() {
+        fn read<T: Into<std::ffi::CString>>(t: T) -> std::ffi::CString {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).as_bytes(),
+                level.as_str().as_bytes(),
+                "generic Into<CString> consumer must read canonical label bytes at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for std::ffi::CString`] NUL-terminator
+    /// contract — [`std::ffi::CString::as_bytes`] contains no
+    /// interior `0u8` byte, and
+    /// [`std::ffi::CString::as_bytes_with_nul`] ends in exactly one
+    /// trailing `0u8` byte after the canonical label bytes (so
+    /// `as_bytes_with_nul().len() == as_bytes().len() + 1`) — holds
+    /// at every [`BumpLevel::ALL`] variant. Pins the C-string
+    /// boundary contract at the NUL-terminated owned C-string emit
+    /// surface: a regression that landed an interior NUL byte in the
+    /// label alphabet (a future variant admitted at the
+    /// [`BumpLevel::as_str`] oracle carrying an interior NUL), or
+    /// that drifted the impl body to a shape omitting the trailing
+    /// NUL, would break the C-ABI hand-off — a downstream
+    /// [`std::ffi::CString::as_ptr`] hand into a
+    /// `strlen`/`printf`/`syslog` consumer would either read past
+    /// the label buffer (missing trailing NUL) or terminate mid-
+    /// label at the first NUL (interior NUL) — before this
+    /// assertion refuses the drift. Structural mirror of
+    /// `test_per_attempt_region_into_cstring_carries_trailing_nul`
+    /// (commit 020317a) at the trio-opener per-attempt-region ladder
+    /// and `test_admission_tier_into_cstring_carries_trailing_nul`
+    /// (commit 1e8ed3c) at the mid-trio admission-tier ladder —
+    /// closing the by-value owned NUL-terminated C-string boundary
+    /// pin at the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_into_cstring_carries_trailing_nul() {
+        for level in BumpLevel::ALL {
+            let owned: std::ffi::CString = std::ffi::CString::from(level);
+            let bytes = owned.as_bytes();
+            let bytes_with_nul = owned.as_bytes_with_nul();
+            assert!(
+                !bytes.contains(&0u8),
+                "CString label bytes must not contain an interior NUL at {level:?}",
+            );
+            assert_eq!(
+                bytes_with_nul.last().copied(),
+                Some(0u8),
+                "CString label bytes_with_nul must end in a trailing NUL at {level:?}",
+            );
+            assert_eq!(
+                bytes_with_nul.len(),
+                bytes.len() + 1,
+                "CString label bytes_with_nul must be exactly one byte longer than as_bytes at {level:?}",
             );
         }
     }
