@@ -3348,6 +3348,140 @@ impl From<BumpLevel> for std::ffi::CString {
     }
 }
 
+/// [`TryFrom<&std::ffi::CStr> for BumpLevel`] routes through
+/// [`std::ffi::CStr::to_str`] and the by-reference UTF-8 parse peer
+/// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
+/// `impl for<'a> TryFrom<&'a std::ffi::CStr>` (a [`libc`]/POSIX FFI
+/// wrapper that decodes a canonical [`BumpLevel`] label from a
+/// `*const c_char` returned by a C-ABI callee via
+/// [`std::ffi::CStr::from_ptr`], a `getenv(3)` reader that surfaces a
+/// canonical label as a borrowed NUL-terminated view without an
+/// intervening [`std::ffi::CString`] allocation, a `syslog(3)` /
+/// `journald` bridge that reads a canonical NUL-terminated label off a
+/// C-emitted log frame, a generic try-conversion helper
+/// `fn parse<T: for<'a> TryFrom<&'a CStr>>` that composes over borrowed
+/// NUL-terminated C-string inputs uniformly) recovers a [`BumpLevel`]
+/// value from a borrowed NUL-terminated C-string label view
+/// (`std::ffi::CStr::from_bytes_with_nul(b"patch\0")`,
+/// `std::ffi::CStr::from_bytes_with_nul(b"minor\0")`,
+/// `std::ffi::CStr::from_bytes_with_nul(b"major\0")`) through the same
+/// one-oracle grammar the direct `.parse::<BumpLevel>()` call sites,
+/// the sibling [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<std::borrow::Cow<'_, str>>`], [`TryFrom<Box<str>>`],
+/// [`TryFrom<std::sync::Arc<str>>`], [`TryFrom<std::rc::Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<std::borrow::Cow<'_, [u8]>>`], [`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<std::sync::Arc<[u8]>>`], [`TryFrom<std::rc::Rc<[u8]>>`],
+/// [`TryFrom<&std::ffi::OsStr>`], [`TryFrom<std::ffi::OsString>`],
+/// [`TryFrom<&std::path::Path>`], and [`TryFrom<std::path::PathBuf>`]
+/// parse peers already read.
+///
+/// The by-reference NUL-terminated C-string parse peer of the by-value
+/// owned NUL-terminated C-string emit peer [`From<BumpLevel> for
+/// std::ffi::CString`] directly above at the borrowed-view axis, and
+/// the parse-side dual of the emit-side owned [`From<T> for
+/// std::ffi::CString`] surface at the C-string frontier. The
+/// [`From<BumpLevel> for std::ffi::CString`] surface emits an owned
+/// NUL-terminated C-string OUT of a [`BumpLevel`] value, this
+/// [`TryFrom<&std::ffi::CStr>`] surface reads a borrowed NUL-terminated
+/// C-string view IN to a [`BumpLevel`] value at the same C-string
+/// frontier — closing the emit/parse pair at the borrowed-view axis at
+/// the C-string frontier that the UTF-8 frontier already closes through
+/// [`AsRef<str>`] paired with [`TryFrom<&str>`], the byte-slice
+/// frontier through [`AsRef<[u8]>`] paired with [`TryFrom<&[u8]>`], and
+/// the OS-string frontier through [`AsRef<std::ffi::OsStr>`] paired
+/// with [`TryFrom<&std::ffi::OsStr>`].
+///
+/// Closing peer of the NUL-terminated C-string borrowed-view parse trio
+/// at the version-bump-magnitude ladder:
+/// [`TryFrom<&std::ffi::CStr>`] for [`crate::retry::PerAttemptRegion`]
+/// (commit 8777e9f) opened the trio at the first ordered typed sum;
+/// [`TryFrom<&std::ffi::CStr>`] for
+/// [`crate::probe_outcome::AdmissionTier`] (commit 95ddf71) mid-slotted
+/// the trio at the second ordered typed sum; this impl closes the trio
+/// at the third and last ordered typed sum, matching the
+/// [`TryFrom<&std::ffi::OsStr>`] OS-string borrowed-view parse closing
+/// order (d37e6fe → 9fca3bb → 1ea7110) at the OS-string sibling, the
+/// [`TryFrom<&[u8]>`] byte-slice borrowed-view parse closing order
+/// (5c0c827 → cdb192c → 629b242) at the byte-slice sibling, and the
+/// [`From<T> for std::ffi::CString`] C-string owned emit closing order
+/// (020317a → 1e8ed3c → 6cff423) at this C-string frontier's emit-side
+/// dual. After this commit the NUL-terminated C-string borrowed-view
+/// parse axis spans all three ordered typed sums on the ladder set
+/// through ONE [`std::ffi::CStr::to_str`] + [`TryFrom<&str>`]
+/// composition each, and the ladder set carries a fifth by-reference
+/// parse axis alongside the four existing ones (UTF-8, byte-slice,
+/// OS-string, filesystem-path) at a strictly one-oracle discipline.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at the same TWO frontiers a direct
+/// [`std::ffi::CStr::to_str`] + [`str::parse`] composition would be
+/// strict at, lifted to ONE typed-primitive site:
+///
+/// - Non-UTF-8 byte sequences (a [`&std::ffi::CStr`] carries any byte
+///   sequence excluding interior NUL — a `getenv(3)` return under a
+///   non-UTF-8 locale, a C-emitted log frame under a foreign character
+///   set, a raw `*const c_char` handed back by a legacy C library)
+///   reject at the [`std::ffi::CStr::to_str`] Unicode-decode frontier
+///   with a diagnostic naming the offending C-string.
+/// - Valid-UTF-8 C-string sequences that decode to a non-canonical
+///   label (`b"Patch\0"`, `b"Minor\0"`, `b"Major\0"`, `b"PATCH\0"`,
+///   `b" patch\0"`, `b"patch \0"`, `b"pat\0"`, `b"\0"` the empty
+///   NUL-terminated C-string) reject at the underlying
+///   [`std::str::FromStr`] impl — the same canonical-only strictness
+///   the UTF-8, byte-slice, and OS-string frontiers already carry at
+///   the by-reference parse peers, now lifted to the NUL-terminated
+///   C-string input layer at ONE composition through the borrowed
+///   [`TryFrom<&str>`] peer.
+///
+/// The identity `BumpLevel::try_from(std::ffi::CStr::from_bytes_with_nul(
+/// &nul_terminated(level.as_str().as_bytes())).unwrap()).unwrap() ==
+/// level` at every [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_try_from_cstr_agrees_with_from_str`]; the
+/// identity carried through a generic
+/// `impl for<'a> TryFrom<&'a std::ffi::CStr>` consumer at every variant
+/// is pinned by
+/// [`tests::test_bump_level_try_from_cstr_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-UTF-8 NUL-terminated C-string
+/// input is pinned by
+/// [`tests::test_bump_level_try_from_cstr_rejects_non_utf8_input`]; the
+/// strict-rejection contract on valid-UTF-8 non-canonical
+/// NUL-terminated C-string input is pinned by
+/// [`tests::test_bump_level_try_from_cstr_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-reference NUL-terminated
+/// C-string parse surface is a typed-primitive site on [`BumpLevel`]
+/// itself (one `TryFrom<&std::ffi::CStr>` impl routing through
+/// [`std::ffi::CStr::to_str`] and the by-reference [`TryFrom<&str>`]
+/// parse peer), not a per-consumer
+/// `BumpLevel::try_from(c.to_str().map_err(...)?)` restatement at every
+/// downstream site that types its parse contract as
+/// `impl for<'a> TryFrom<&'a std::ffi::CStr>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// one site ([`BumpLevel::as_str`]), inverted at one site
+/// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
+/// surface — [`std::str::FromStr`], [`serde::Deserialize`],
+/// [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<std::borrow::Cow<'_, str>>`], [`TryFrom<Box<str>>`],
+/// [`TryFrom<std::sync::Arc<str>>`], [`TryFrom<std::rc::Rc<str>>`],
+/// [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<std::borrow::Cow<'_, [u8]>>`], [`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<std::sync::Arc<[u8]>>`], [`TryFrom<std::rc::Rc<[u8]>>`],
+/// [`TryFrom<&std::ffi::OsStr>`], [`TryFrom<std::ffi::OsString>`],
+/// [`TryFrom<&std::path::Path>`], [`TryFrom<std::path::PathBuf>`], and
+/// this [`TryFrom<&std::ffi::CStr>`] — reads through it.
+impl TryFrom<&std::ffi::CStr> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(c: &std::ffi::CStr) -> Result<Self, Self::Error> {
+        let decoded = c
+            .to_str()
+            .map_err(|e| anyhow::anyhow!("invalid UTF-8 in bump level CStr input {c:?}: {e}"))?;
+        <Self as std::convert::TryFrom<&str>>::try_from(decoded)
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -11948,6 +12082,172 @@ mod tests {
                 bytes_with_nul.len(),
                 bytes.len() + 1,
                 "CString label bytes_with_nul must be exactly one byte longer than as_bytes at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::ffi::CStr> for BumpLevel`] recovers the original
+    /// variant at every [`BumpLevel::ALL`] variant when the canonical
+    /// label bytes emitted by [`BumpLevel::as_str`] plus a trailing NUL
+    /// byte are fed back through it as a borrowed [`&std::ffi::CStr`]
+    /// view. Pins the round-trip identity
+    /// `BumpLevel::try_from(std::ffi::CStr::from_bytes_with_nul(
+    /// &nul_terminated(level.as_str().as_bytes())).unwrap()).unwrap()
+    /// == level` at every variant against the shared
+    /// [`BumpLevel::as_str`] + trailing-NUL canonical-label C-string
+    /// oracle. The structural witness that the by-reference
+    /// NUL-terminated C-string parse surface (this
+    /// [`TryFrom<&std::ffi::CStr>`]) reads the same one-oracle grammar
+    /// the by-reference UTF-8 parse peer [`TryFrom<&str>`], the
+    /// by-reference byte-slice parse peer [`TryFrom<&[u8]>`], and the
+    /// by-reference OS-string parse peer [`TryFrom<&std::ffi::OsStr>`]
+    /// read — one round-trip pin per variant, refuses a future variant
+    /// insertion that drops the `TryFrom<&CStr>`/
+    /// `CStr::from_bytes_with_nul(as_str()||[0])` agreement. Structural
+    /// mirror of
+    /// `test_per_attempt_region_try_from_cstr_agrees_with_from_str`
+    /// (commit 8777e9f) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_cstr_agrees_with_from_str`
+    /// (commit 95ddf71) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_cstr_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let mut buf: Vec<u8> = level.as_str().as_bytes().to_vec();
+            buf.push(0u8);
+            let c = std::ffi::CStr::from_bytes_with_nul(&buf)
+                .expect("canonical label bytes plus trailing NUL must form a valid CStr");
+            let parsed = <BumpLevel as std::convert::TryFrom<&std::ffi::CStr>>::try_from(c)
+                .expect("canonical label CStr must parse through TryFrom<&CStr>");
+            assert_eq!(
+                parsed, level,
+                "TryFrom<&CStr> must round-trip through as_str() + trailing NUL at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<&std::ffi::CStr> for BumpLevel`] identity carries
+    /// through a generic `impl for<'a> TryFrom<&'a std::ffi::CStr>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny generic
+    /// function `fn parse<T>(c: &CStr) -> T where T: for<'a> TryFrom<&'a
+    /// CStr>, T::Error: std::fmt::Debug` — the shape of an actual
+    /// downstream consumer (a [`libc`]/POSIX FFI wrapper that decodes a
+    /// canonical [`BumpLevel`] label from a `*const c_char` returned by
+    /// a C-ABI callee via [`std::ffi::CStr::from_ptr`], a `getenv(3)`
+    /// reader that surfaces a canonical label as a borrowed
+    /// NUL-terminated view without an intervening [`std::ffi::CString`]
+    /// allocation, a `syslog(3)` / `journald` bridge that reads a
+    /// canonical NUL-terminated label off a C-emitted log frame, a
+    /// generic try-conversion helper) — recovers the canonical variant
+    /// from the canonical snake_case-label NUL-terminated C-string at
+    /// every variant. The structural witness that a [`BumpLevel`] is
+    /// genuinely usable at `impl for<'a> TryFrom<&'a std::ffi::CStr>`
+    /// call sites — a regression that drifted the [`TryFrom`] impl
+    /// signature (requiring an owned [`std::ffi::CString`] input,
+    /// dropping the [`std::ffi::CStr::to_str`] decode step and
+    /// misparsing non-UTF-8 input, returning a different variant than
+    /// [`std::str::FromStr`] would) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_bump_level_try_from_cstr_carries_through_generic_consumer() {
+        fn parse<T>(c: &std::ffi::CStr) -> T
+        where
+            T: for<'a> std::convert::TryFrom<&'a std::ffi::CStr>,
+            for<'a> <T as std::convert::TryFrom<&'a std::ffi::CStr>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<&std::ffi::CStr>>::try_from(c)
+                .expect("canonical label CStr must parse through generic TryFrom<&CStr>")
+        }
+
+        for level in BumpLevel::ALL {
+            let mut buf: Vec<u8> = level.as_str().as_bytes().to_vec();
+            buf.push(0u8);
+            let c = std::ffi::CStr::from_bytes_with_nul(&buf)
+                .expect("canonical label bytes plus trailing NUL must form a valid CStr");
+            assert_eq!(
+                parse::<BumpLevel>(c),
+                level,
+                "generic TryFrom<&CStr> consumer must recover canonical variant at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::ffi::CStr> for BumpLevel`] rejects non-UTF-8
+    /// NUL-terminated byte sequences at the [`std::ffi::CStr::to_str`]
+    /// decode frontier. A [`&std::ffi::CStr`] may hold any byte sequence
+    /// excluding interior NUL — a `getenv(3)` return under a non-UTF-8
+    /// locale, a C-emitted log frame under a foreign character set, a
+    /// raw `*const c_char` returned by a legacy C library. Pins the
+    /// encoding-strictness contract at the NUL-terminated C-string
+    /// frontier's first strictness gate so a downstream consumer bound
+    /// by [`TryFrom<&std::ffi::CStr>`] inherits the same UTF-8-only
+    /// encoding discipline a direct [`std::ffi::CStr::to_str`] +
+    /// [`str::parse`] composition would offer, at ONE typed-primitive
+    /// site rather than a per-consumer two-step restatement. Sibling of
+    /// the byte-slice-frontier pin
+    /// [`test_bump_level_try_from_bytes_rejects_non_utf8_input`] and the
+    /// OS-string-frontier pin
+    /// [`test_bump_level_try_from_os_str_rejects_non_unicode_input`] —
+    /// the three pins together close the encoding-strictness contract
+    /// across the byte-slice, OS-string, and NUL-terminated C-string
+    /// frontiers.
+    #[test]
+    fn test_bump_level_try_from_cstr_rejects_non_utf8_input() {
+        for bad in [
+            &[0xffu8, 0u8][..],
+            &[0xffu8, 0xfe, 0u8][..],
+            &[0x80u8, 0u8][..],
+            &[b'p', b'a', 0xff, b't', b'c', b'h', 0u8][..],
+            &[b'm', b'i', b'n', b'o', b'r', 0xff, 0u8][..],
+        ] {
+            let bad_c = std::ffi::CStr::from_bytes_with_nul(bad)
+                .expect("test fixture must be a valid NUL-terminated byte sequence");
+            assert!(
+                <BumpLevel as std::convert::TryFrom<&std::ffi::CStr>>::try_from(bad_c).is_err(),
+                "TryFrom<&CStr> must reject non-UTF-8 input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&std::ffi::CStr> for BumpLevel`] rejects valid-UTF-8
+    /// non-canonical NUL-terminated C-string sequences at the underlying
+    /// [`FromStr`] strictness gate — empty NUL-terminated C-string,
+    /// UpperCamel rendering, uppercase, whitespace padding, and
+    /// snake_case labels with dropped characters all reject. Pins the
+    /// canonical-label strictness contract at the NUL-terminated
+    /// C-string frontier's second strictness gate so a downstream
+    /// consumer bound by [`TryFrom<&std::ffi::CStr>`] inherits the same
+    /// canonical-only grammar the direct `.parse::<BumpLevel>()` call
+    /// sites and the sibling [`TryFrom<&str>`], [`TryFrom<&[u8]>`], and
+    /// [`TryFrom<&std::ffi::OsStr>`] impls already read, and a future
+    /// permissive-parse regression at the underlying [`FromStr`] impl
+    /// lights up here rather than drifting silently through the
+    /// NUL-terminated C-string try-conversion surface. Sibling of the
+    /// UTF-8-frontier pin
+    /// [`test_bump_level_try_from_str_rejects_non_canonical_input`], the
+    /// byte-slice-frontier pin
+    /// [`test_bump_level_try_from_bytes_rejects_non_canonical_input`],
+    /// and the OS-string-frontier pin
+    /// [`test_bump_level_try_from_os_str_rejects_non_canonical_input`]
+    /// at the by-reference parse peers — the four pins together close
+    /// the canonical-only strictness contract across the UTF-8,
+    /// byte-slice, OS-string, and NUL-terminated C-string frontiers.
+    #[test]
+    fn test_bump_level_try_from_cstr_rejects_non_canonical_input() {
+        for bad in [
+            &b"\0"[..],
+            &b"Patch\0"[..],
+            &b"Minor\0"[..],
+            &b"Major\0"[..],
+            &b"PATCH\0"[..],
+            &b" patch\0"[..],
+            &b"patch \0"[..],
+            &b"pat\0"[..],
+        ] {
+            let bad_c = std::ffi::CStr::from_bytes_with_nul(bad)
+                .expect("test fixture must be a valid NUL-terminated byte sequence");
+            assert!(
+                <BumpLevel as std::convert::TryFrom<&std::ffi::CStr>>::try_from(bad_c).is_err(),
+                "TryFrom<&CStr> must reject valid-UTF-8 non-canonical input {bad:?}",
             );
         }
     }
