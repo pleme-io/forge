@@ -10630,6 +10630,152 @@ impl TryFrom<std::sync::Arc<std::ffi::CStr>> for AdmissionTier {
     }
 }
 
+/// [`TryFrom<Rc<std::ffi::CStr>> for AdmissionTier`] routes through
+/// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] on the caller-supplied
+/// thread-local shared-owned NUL-terminated C-string and the
+/// by-reference NUL-terminated C-string parse peer
+/// [`TryFrom<&std::ffi::CStr>`] (which itself composes
+/// [`std::ffi::CStr::to_str`] with [`TryFrom<&str>`] which itself
+/// delegates through
+/// [`<AdmissionTier as std::str::FromStr>::from_str`]), so a
+/// downstream consumer bound by
+/// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>` (a thread-local
+/// shared-owned NUL-terminated C-string wrapper handed to sibling
+/// non-`Send` receivers through a single-threaded refcount header — a
+/// non-`Sync` FFI-callback renderer that stashes canonical labels
+/// returned from a `*const c_char` boundary in an [`std::rc::Rc`] cell
+/// for cheap in-thread clone, a [`Box<std::ffi::CStr>::into`]
+/// shared-buffer input that trades exclusive shrunk-owned single-owner
+/// semantics for a shared reader-count of the same immutable
+/// NUL-terminated C-string within a single thread, a
+/// [`std::ffi::CStr::from_ptr`] + [`std::ffi::CStr::to_owned`] +
+/// [`std::ffi::CString::into_boxed_c_str`] +
+/// [`std::rc::Rc::<std::ffi::CStr>::from`] compose that shares a
+/// freshly-allocated NUL-terminated buffer within a single thread
+/// without a per-reader clone of the label bytes, a generic
+/// try-conversion helper
+/// `fn parse<T: TryFrom<std::rc::Rc<std::ffi::CStr>>>` that composes
+/// with thread-local shared-owned NUL-terminated C-string inputs)
+/// recovers an [`AdmissionTier`] value from a thread-local
+/// shared-owned canonical NUL-terminated C-string label through the
+/// same one-oracle grammar the sibling [`TryFrom<&std::ffi::CStr>`],
+/// [`TryFrom<std::ffi::CString>`], [`TryFrom<Box<std::ffi::CStr>>`],
+/// [`TryFrom<std::sync::Arc<std::ffi::CStr>>`],
+/// [`TryFrom<std::rc::Rc<std::ffi::OsStr>>`],
+/// [`TryFrom<std::rc::Rc<std::path::Path>>`], and (one frontier below)
+/// [`TryFrom<std::rc::Rc<str>>`], [`TryFrom<std::rc::Rc<[u8]>>`]
+/// thread-local shared-owned parse peers already read at neighboring
+/// NUL-terminated-C-string, OS-string, filesystem-path, UTF-8, and
+/// byte-slice frontiers.
+///
+/// The thread-local shared-owned NUL-terminated C-string parse peer
+/// of [`TryFrom<std::sync::Arc<std::ffi::CStr>>`] above — both are
+/// shared-owned immutable-heap NUL-terminated C-string parse surfaces
+/// of the label-axis conversion set, differing on refcount discipline:
+/// [`TryFrom<std::sync::Arc<std::ffi::CStr>>`] consumes an atomic-
+/// refcount buffer that may have surviving clones across sibling
+/// threads, this [`TryFrom<std::rc::Rc<std::ffi::CStr>>`] consumes a
+/// single-threaded refcount buffer that may have surviving clones
+/// only within the receiver's thread. Both route through the shared
+/// [`<AdmissionTier as std::str::FromStr>::from_str`] canonical-label
+/// parse oracle: the atomic-refcount peer through
+/// [`std::sync::Arc::<std::ffi::CStr>::as_ref`] composed with
+/// [`TryFrom<&std::ffi::CStr>`], this single-threaded-refcount peer
+/// through [`std::rc::Rc::<std::ffi::CStr>::as_ref`] composed with
+/// [`TryFrom<&std::ffi::CStr>`] — the same canonical grammar lifted
+/// to the thread-local shared-owned NUL-terminated C-string layer,
+/// trading the atomic-refcount header cost for the single-threaded
+/// restriction.
+///
+/// Structural mirror of [`TryFrom<std::rc::Rc<str>>`] at the string
+/// frontier, [`TryFrom<std::rc::Rc<[u8]>>`] at the byte-slice
+/// frontier, [`TryFrom<std::rc::Rc<std::ffi::OsStr>>`] at the
+/// OS-string frontier (2adee36 mid-trio peer at this same
+/// admission-tier ladder), and [`TryFrom<std::rc::Rc<std::path::Path>>`]
+/// at the filesystem-path frontier (c973b49 mid-trio peer at this
+/// same admission-tier ladder) — the same thread-local shared-owned
+/// try-conversion discipline at the same one-oracle backing,
+/// projected onto the NUL-terminated C-string frontier. Mid-trio
+/// peer of the thread-local shared-owned NUL-terminated C-string
+/// parse trio at the admission-tier ladder:
+/// [`TryFrom<std::rc::Rc<std::ffi::CStr>>`] for
+/// [`crate::retry::PerAttemptRegion`] (commit 75227ec) opened the
+/// trio at the first ordered typed sum; the closing peer at the
+/// third ordered typed sum is
+/// [`TryFrom<std::rc::Rc<std::ffi::CStr>>`] for
+/// [`crate::version::BumpLevel`] in a follow-up commit, matching the
+/// atomic-shared-owned NUL-terminated C-string parse opening order
+/// (d0e9b09 → 57e7b7b → 5969966) at the sibling atomic-refcount
+/// NUL-terminated C-string frontier one refcount discipline above,
+/// the thread-local shared-owned OS-string parse opening order
+/// (63f6f55 → 2adee36 → b27263d) at the sibling thread-local
+/// shared-owned OS-string frontier one frontier above, and the
+/// thread-local shared-owned filesystem-path parse opening order
+/// (4497115 → c973b49 → 445f8a1) at the sibling thread-local
+/// shared-owned filesystem-path frontier one frontier above.
+///
+/// The two-stage strictness discipline (UTF-8 validity at the
+/// NUL-terminated C-string decode frontier gated by
+/// [`std::ffi::CStr::to_str`], canonical-label grammar at the parse
+/// frontier gated by [`std::str::FromStr`]) is inherited unchanged
+/// from the by-reference [`TryFrom<&std::ffi::CStr>`] peer via
+/// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] which yields a
+/// `&std::ffi::CStr` view of the shared inner payload without cloning
+/// the single-threaded refcount or reallocating the label buffer.
+///
+/// The impl body picks [`std::rc::Rc::<std::ffi::CStr>::as_ref`]
+/// rather than an intermediate clone-into-`CString` +
+/// `TryFrom<CString>` restatement: the [`AsRef`] view yields a
+/// borrowed `&std::ffi::CStr` window over the shared heap allocation
+/// without a clone of the label bytes into a resizable
+/// [`std::ffi::CString`] first, so the receiver pays no clone and no
+/// capacity-vs-length metadata rebuild on the fast path — the
+/// borrow-then-drop discipline the sibling
+/// [`TryFrom<std::ffi::CString>`], [`TryFrom<Box<std::ffi::CStr>>`],
+/// and [`TryFrom<std::sync::Arc<std::ffi::CStr>>`] peers apply at the
+/// resizable-buffer, shrunk-owned, and atomic-shared-owned axes,
+/// lifted to the thread-local shared-owned axis via
+/// [`std::rc::Rc::<std::ffi::CStr>::as_ref`].
+///
+/// The identity
+/// `AdmissionTier::try_from(std::rc::Rc::<std::ffi::CStr>::from(
+/// std::ffi::CString::new(tier.as_str()).unwrap().into_boxed_c_str()))
+/// .unwrap() == tier` at every [`AdmissionTier::ALL`] variant is
+/// pinned by
+/// [`tests::test_admission_tier_try_from_rc_cstr_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>` consumer at every
+/// variant is pinned by
+/// [`tests::test_admission_tier_try_from_rc_cstr_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-UTF-8 thread-local shared-
+/// owned NUL-terminated C-string input is pinned by
+/// [`tests::test_admission_tier_try_from_rc_cstr_rejects_non_utf8_input`];
+/// the strict-rejection contract on valid-UTF-8 non-canonical thread-
+/// local shared-owned NUL-terminated C-string input is pinned by
+/// [`tests::test_admission_tier_try_from_rc_cstr_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// NUL-terminated C-string try-conversion parse surface is a
+/// typed-primitive site on [`AdmissionTier`] itself (one
+/// `TryFrom<std::rc::Rc<std::ffi::CStr>>` impl routing through
+/// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] and the by-reference
+/// [`TryFrom<&std::ffi::CStr>`] peer), not a per-consumer
+/// `AdmissionTier::try_from(rc.as_ref())` bridge at every
+/// downstream site that types its parse contract as
+/// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// at one site ([`AdmissionTier::as_str`]), inverted at one site
+/// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
+/// parse surface — including this thread-local shared-owned
+/// NUL-terminated C-string peer — reads through it.
+impl TryFrom<std::rc::Rc<std::ffi::CStr>> for AdmissionTier {
+    type Error = anyhow::Error;
+
+    fn try_from(c: std::rc::Rc<std::ffi::CStr>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::ffi::CStr>>::try_from(c.as_ref())
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for AdmissionTier`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for AdmissionTier`] so a downstream consumer bound by
@@ -27815,6 +27961,212 @@ mod tests {
                 )
                 .is_err(),
                 "TryFrom<Arc<CStr>> must reject valid-UTF-8 non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<std::ffi::CStr>> for AdmissionTier`] agrees with
+    /// [`FromStr`] at every [`AdmissionTier::ALL`] variant. Owning the
+    /// [`std::rc::Rc<std::ffi::CStr>`] input round-trips through
+    /// [`std::rc::Rc::<std::ffi::CStr>::from`] of the shrunk-owned
+    /// [`Box<std::ffi::CStr>`] view of
+    /// [`std::ffi::CString::new(tier.as_str()).into_boxed_c_str()`] and
+    /// the by-value thread-local shared-owned NUL-terminated C-string
+    /// try-conversion recovers the canonical variant — the thread-
+    /// local shared-owned NUL-terminated C-string parse peer of the
+    /// by-reference [`TryFrom<&std::ffi::CStr>`] surface reads the
+    /// same one-oracle grammar the thread-local shared-owned
+    /// UTF-8-string parse peer [`TryFrom<Rc<str>>`], the thread-local
+    /// shared-owned byte-slice parse peer [`TryFrom<Rc<[u8]>>`], the
+    /// thread-local shared-owned OS-string parse peer
+    /// [`TryFrom<Rc<std::ffi::OsStr>>`], and the thread-local
+    /// shared-owned filesystem-path parse peer
+    /// [`TryFrom<Rc<std::path::Path>>`] read — one round-trip pin per
+    /// variant, refuses a future variant insertion that drops the
+    /// `TryFrom<Rc<CStr>>`/`Rc::<CStr>::from(CString::new(as_str()).into_boxed_c_str())`
+    /// agreement. Structural mirror of
+    /// `test_per_attempt_region_try_from_rc_cstr_agrees_with_from_str`
+    /// (commit 75227ec) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_try_from_rc_cstr_agrees_with_from_str() {
+        for tier in AdmissionTier::ALL {
+            let boxed: Box<std::ffi::CStr> = std::ffi::CString::new(tier.as_str())
+                .expect("canonical label must contain no interior NUL")
+                .into_boxed_c_str();
+            let shared: std::rc::Rc<std::ffi::CStr> = std::rc::Rc::<std::ffi::CStr>::from(boxed);
+            let parsed =
+                <AdmissionTier as std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>>::try_from(
+                    shared,
+                )
+                .expect("canonical label Rc<CStr> must parse through TryFrom<Rc<CStr>>");
+            assert_eq!(
+                parsed, tier,
+                "TryFrom<Rc<CStr>> must round-trip through Rc::<CStr>::from(CString::new(as_str()).into_boxed_c_str()) at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Rc<std::ffi::CStr>> for AdmissionTier`] identity
+    /// carries through a generic
+    /// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(c: Rc<CStr>) -> T where T:
+    /// TryFrom<Rc<CStr>>, T::Error: std::fmt::Debug` — the shape of
+    /// an actual downstream consumer (a
+    /// [`std::rc::Rc::<std::ffi::CStr>::from`]`(Box<CStr>)` receiver
+    /// that shares the shrunk NUL-terminated buffer within a single
+    /// thread through a single-threaded refcount header, a
+    /// [`std::ffi::CStr::from_ptr`] + [`std::ffi::CStr::to_owned`] +
+    /// [`std::ffi::CString::into_boxed_c_str`] +
+    /// [`std::rc::Rc::<std::ffi::CStr>::from`] compose that shares a
+    /// freshly-allocated NUL-terminated buffer over a `*const c_char`
+    /// FFI return within a single thread, a serde
+    /// `#[serde(try_from = "Rc<CStr>")]` container, a generic
+    /// try-conversion helper) — recovers the canonical variant from
+    /// the canonical snake_case label thread-local shared-owned
+    /// NUL-terminated C-string at every variant. The structural
+    /// witness that an [`AdmissionTier`] is genuinely usable at
+    /// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>` call sites — a
+    /// regression that drifted the [`TryFrom`] impl signature
+    /// (requiring a borrowed [`&std::ffi::CStr`] input, requiring an
+    /// owned [`std::ffi::CString`] input, requiring a shrunk-owned
+    /// [`Box<std::ffi::CStr>`] input, requiring an atomic-shared-
+    /// owned [`std::sync::Arc<std::ffi::CStr>`] input, dropping the
+    /// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] borrow step and
+    /// misparsing non-UTF-8 input, returning a different variant than
+    /// [`FromStr`] would) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_admission_tier_try_from_rc_cstr_carries_through_generic_consumer() {
+        fn parse<T>(c: std::rc::Rc<std::ffi::CStr>) -> T
+        where
+            T: std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>,
+            <T as std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>>::try_from(c)
+                .expect("canonical label Rc<CStr> must parse through generic TryFrom<Rc<CStr>>")
+        }
+
+        for tier in AdmissionTier::ALL {
+            let boxed: Box<std::ffi::CStr> = std::ffi::CString::new(tier.as_str())
+                .expect("canonical label must contain no interior NUL")
+                .into_boxed_c_str();
+            let shared: std::rc::Rc<std::ffi::CStr> = std::rc::Rc::<std::ffi::CStr>::from(boxed);
+            assert_eq!(
+                parse::<AdmissionTier>(shared),
+                tier,
+                "generic TryFrom<Rc<CStr>> consumer must recover canonical variant at {tier:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<std::ffi::CStr>> for AdmissionTier`] rejects
+    /// non-UTF-8 thread-local shared-owned NUL-terminated byte
+    /// sequences at the [`std::ffi::CStr::to_str`] decode frontier
+    /// inherited through the
+    /// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] +
+    /// [`TryFrom<&std::ffi::CStr>`] delegation. An
+    /// [`std::rc::Rc<std::ffi::CStr>`] may hold any byte sequence
+    /// excluding interior NUL — a thread-local shared-owned
+    /// counterpart of the borrowed [`&std::ffi::CStr`] non-UTF-8
+    /// fixtures returned by legacy C libraries under foreign locales,
+    /// and of the atomic-shared-owned
+    /// [`std::sync::Arc<std::ffi::CStr>`] non-UTF-8 fixtures the
+    /// sibling
+    /// [`test_admission_tier_try_from_arc_cstr_rejects_non_utf8_input`]
+    /// pin exercises. Pins the encoding-strictness contract at the
+    /// thread-local shared-owned NUL-terminated C-string frontier's
+    /// first strictness gate, matching the by-reference peer
+    /// [`test_admission_tier_try_from_cstr_rejects_non_utf8_input`]
+    /// discipline at the thread-local shared-owned axis — the
+    /// thread-local shared-owned buffer pays the same
+    /// UTF-8-strictness at the same decode frontier a direct
+    /// [`std::ffi::CStr::to_str`] + [`str::parse`] composition would
+    /// offer, at ONE typed-primitive site rather than a per-consumer
+    /// two-step restatement.
+    #[test]
+    fn test_admission_tier_try_from_rc_cstr_rejects_non_utf8_input() {
+        for bad in [
+            &[0xffu8, 0u8][..],
+            &[0xffu8, 0xfe, 0u8][..],
+            &[0x80u8, 0u8][..],
+            &[b's', b't', 0xff, b'r', b'i', b'c', b't', 0u8][..],
+            &[b'r', b'e', b'f', b'u', b's', b'e', b'd', 0xff, 0u8][..],
+        ] {
+            let bad_c = std::ffi::CStr::from_bytes_with_nul(bad)
+                .expect("test fixture must be a valid NUL-terminated byte sequence");
+            let boxed: Box<std::ffi::CStr> = Box::from(bad_c);
+            let shared: std::rc::Rc<std::ffi::CStr> = std::rc::Rc::<std::ffi::CStr>::from(boxed);
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>>::try_from(
+                    shared
+                )
+                .is_err(),
+                "TryFrom<Rc<CStr>> must reject non-UTF-8 input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<std::ffi::CStr>> for AdmissionTier`] rejects
+    /// valid-UTF-8 non-canonical thread-local shared-owned
+    /// NUL-terminated C-string sequences at the underlying
+    /// [`FromStr`] strictness gate inherited through the
+    /// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] +
+    /// [`TryFrom<&std::ffi::CStr>`] + [`TryFrom<&str>`] delegation —
+    /// empty NUL-terminated C-string, UpperCamel rendering,
+    /// uppercase, whitespace padding, and snake_case labels with a
+    /// dropped underscore all reject. Pins the canonical-label
+    /// strictness contract at the thread-local shared-owned
+    /// NUL-terminated C-string frontier's second strictness gate so
+    /// a downstream consumer bound by
+    /// [`TryFrom<std::rc::Rc<std::ffi::CStr>>`] inherits the same
+    /// canonical-only grammar the direct `.parse::<AdmissionTier>()`
+    /// call sites and the sibling [`TryFrom<Rc<str>>`],
+    /// [`TryFrom<Rc<[u8]>>`], [`TryFrom<Rc<std::ffi::OsStr>>`],
+    /// [`TryFrom<Rc<std::path::Path>>`],
+    /// [`TryFrom<&std::ffi::CStr>`],
+    /// [`TryFrom<std::ffi::CString>`],
+    /// [`TryFrom<Box<std::ffi::CStr>>`], and
+    /// [`TryFrom<std::sync::Arc<std::ffi::CStr>>`] impls already
+    /// read, and a future permissive-parse regression at the
+    /// underlying [`FromStr`] impl lights up here rather than
+    /// drifting silently through the thread-local shared-owned
+    /// NUL-terminated C-string try-conversion surface. Sibling of
+    /// the by-reference peer
+    /// [`test_admission_tier_try_from_cstr_rejects_non_canonical_input`],
+    /// the owned-buffer peer
+    /// [`test_admission_tier_try_from_cstring_rejects_non_canonical_input`],
+    /// the shrunk-owned peer
+    /// [`test_admission_tier_try_from_box_cstr_rejects_non_canonical_input`],
+    /// and the atomic-shared-owned peer
+    /// [`test_admission_tier_try_from_arc_cstr_rejects_non_canonical_input`]
+    /// at the NUL-terminated C-string frontier — the five pins
+    /// together close the canonical-only strictness contract across
+    /// the borrowed-view, owned-buffer, shrunk-owned, atomic-
+    /// shared-owned, and thread-local shared-owned axes of the
+    /// NUL-terminated C-string frontier at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_try_from_rc_cstr_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            " refused",
+            "refused ",
+            "stagingonly",
+        ] {
+            let bad_c =
+                std::ffi::CString::new(bad).expect("test fixture must not contain interior NUL");
+            let boxed: Box<std::ffi::CStr> = bad_c.into_boxed_c_str();
+            let shared: std::rc::Rc<std::ffi::CStr> = std::rc::Rc::<std::ffi::CStr>::from(boxed);
+            assert!(
+                <AdmissionTier as std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>>::try_from(
+                    shared
+                )
+                .is_err(),
+                "TryFrom<Rc<CStr>> must reject valid-UTF-8 non-canonical input {bad:?}",
             );
         }
     }
