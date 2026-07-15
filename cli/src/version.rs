@@ -3903,6 +3903,158 @@ impl TryFrom<std::sync::Arc<std::ffi::CStr>> for BumpLevel {
     }
 }
 
+/// [`TryFrom<Rc<std::ffi::CStr>> for BumpLevel`] routes through
+/// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] on the caller-supplied
+/// thread-local shared-owned NUL-terminated C-string and the
+/// by-reference NUL-terminated C-string parse peer
+/// [`TryFrom<&std::ffi::CStr>`] (which itself composes
+/// [`std::ffi::CStr::to_str`] with [`TryFrom<&str>`] which itself
+/// delegates through
+/// [`<BumpLevel as std::str::FromStr>::from_str`]), so a downstream
+/// consumer bound by `impl TryFrom<std::rc::Rc<std::ffi::CStr>>`
+/// (a thread-local shared-owned NUL-terminated C-string wrapper
+/// handed to sibling per-thread consumers through a single-threaded
+/// refcount header, a [`Box<std::ffi::CStr>::into`] shared-buffer
+/// input that trades exclusive shrunk-owned single-owner semantics
+/// for a per-thread reader-count of the same immutable
+/// NUL-terminated C-string, a [`std::ffi::CStr::from_ptr`] +
+/// [`std::ffi::CStr::to_owned`] +
+/// [`std::ffi::CString::into_boxed_c_str`] +
+/// [`std::rc::Rc::<std::ffi::CStr>::from`] compose that shares the
+/// FFI-returned NUL-terminated buffer across per-thread consumers
+/// without a per-reader clone of the label bytes and without paying
+/// the atomic-refcount header cost the
+/// [`std::sync::Arc<std::ffi::CStr>`] sibling pays, a generic
+/// try-conversion helper
+/// `fn parse<T: TryFrom<std::rc::Rc<std::ffi::CStr>>>` that composes
+/// with thread-local shared-owned NUL-terminated C-string inputs)
+/// recovers a [`BumpLevel`] value from a thread-local shared-owned
+/// canonical NUL-terminated C-string label through the same
+/// one-oracle grammar the sibling [`TryFrom<&std::ffi::CStr>`],
+/// [`TryFrom<std::ffi::CString>`], [`TryFrom<Box<std::ffi::CStr>>`],
+/// [`TryFrom<std::sync::Arc<std::ffi::CStr>>`],
+/// [`TryFrom<std::rc::Rc<std::ffi::OsStr>>`],
+/// [`TryFrom<std::rc::Rc<std::path::Path>>`], and (one frontier
+/// below) [`TryFrom<std::rc::Rc<str>>`],
+/// [`TryFrom<std::rc::Rc<[u8]>>`] thread-local shared-owned parse
+/// peers already read at neighboring NUL-terminated-C-string,
+/// OS-string, filesystem-path, UTF-8, and byte-slice frontiers.
+///
+/// The by-value thread-local shared-owned NUL-terminated C-string
+/// parse peer of [`TryFrom<std::sync::Arc<std::ffi::CStr>>`] above
+/// — both are shared immutable-heap NUL-terminated C-string parse
+/// surfaces of the label-axis conversion set, differing on refcount
+/// discipline:
+/// [`TryFrom<std::sync::Arc<std::ffi::CStr>>`] consumes an atomic-
+/// refcount NUL-terminated buffer safe to hand across threads
+/// (`Send` + `Sync`), this [`TryFrom<std::rc::Rc<std::ffi::CStr>>`]
+/// consumes a single-threaded refcount NUL-terminated buffer that
+/// stays within one thread (`!Send`, `!Sync`) and pays no atomic
+/// synchronization on clone/drop. Both route through the shared
+/// [`<BumpLevel as std::str::FromStr>::from_str`] canonical-label
+/// parse oracle: the atomic-shared-owned peer through
+/// [`std::sync::Arc::<std::ffi::CStr>::as_ref`] composed with
+/// [`TryFrom<&std::ffi::CStr>`], this thread-local shared-owned
+/// peer through [`std::rc::Rc::<std::ffi::CStr>::as_ref`] composed
+/// with [`TryFrom<&std::ffi::CStr>`] — the same canonical grammar
+/// lifted to the thread-local shared-owned NUL-terminated C-string
+/// layer.
+///
+/// The two-stage strictness discipline (UTF-8 validity at the
+/// NUL-terminated C-string decode frontier gated by
+/// [`std::ffi::CStr::to_str`], canonical-label grammar at the parse
+/// frontier gated by [`std::str::FromStr`]) is inherited unchanged
+/// from the by-reference [`TryFrom<&std::ffi::CStr>`] peer via
+/// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] which yields a
+/// `&std::ffi::CStr` view of the shared inner payload without
+/// cloning the single-threaded refcount or reallocating the label
+/// buffer.
+///
+/// The impl body picks [`std::rc::Rc::<std::ffi::CStr>::as_ref`]
+/// rather than an intermediate clone-into-`CString` +
+/// `TryFrom<CString>` restatement: the [`AsRef`] view yields a
+/// borrowed `&std::ffi::CStr` window over the shared heap
+/// allocation without a clone of the label bytes into a resizable
+/// [`std::ffi::CString`] first, so the receiver pays no clone and
+/// no capacity-vs-length metadata rebuild on the fast path — the
+/// borrow-then-drop discipline the sibling
+/// [`TryFrom<std::ffi::CString>`], [`TryFrom<Box<std::ffi::CStr>>`],
+/// and [`TryFrom<std::sync::Arc<std::ffi::CStr>>`] peers apply at
+/// the resizable-buffer, shrunk-owned, and atomic-shared-owned
+/// axes, lifted to the thread-local shared-owned axis via
+/// [`std::rc::Rc::<std::ffi::CStr>::as_ref`].
+///
+/// Trio-closing peer of the thread-local shared-owned NUL-terminated
+/// C-string parse trio at the version-bump-magnitude ladder:
+/// [`TryFrom<std::rc::Rc<std::ffi::CStr>>`] for
+/// [`crate::retry::PerAttemptRegion`] (commit 75227ec) opened the
+/// trio at the first ordered typed sum;
+/// [`TryFrom<std::rc::Rc<std::ffi::CStr>>`] for
+/// [`crate::probe_outcome::AdmissionTier`] (commit a8e882a)
+/// mid-slotted the trio at the second ordered typed sum; this impl
+/// closes the trio at the third and last ordered typed sum,
+/// matching the [`TryFrom<&std::ffi::CStr>`] borrowed-view NUL-
+/// terminated C-string parse closing order (8777e9f → 95ddf71 →
+/// 5073623) at the borrowed-view counterpart, the
+/// [`TryFrom<std::ffi::CString>`] owned-buffer NUL-terminated
+/// C-string parse closing order (e73daa7 → 77c0cdd → 20357c7) at
+/// the owned-buffer counterpart, the [`TryFrom<Box<std::ffi::CStr>>`]
+/// shrunk-owned NUL-terminated C-string parse closing order
+/// (1076700 → 16320c3 → 3a2edcd) at the shrunk-owned counterpart,
+/// the [`TryFrom<std::sync::Arc<std::ffi::CStr>>`] shared-owned
+/// NUL-terminated C-string parse closing order (d0e9b09 → 57e7b7b
+/// → 5969966) at the atomic-shared-owned counterpart one refcount
+/// discipline above, the [`TryFrom<std::rc::Rc<std::ffi::OsStr>>`]
+/// OS-string thread-local shared-owned parse closing order
+/// (63f6f55 → 2adee36 → b27263d) at the OS-string sibling one
+/// frontier above, and the [`TryFrom<std::rc::Rc<std::path::Path>>`]
+/// filesystem-path thread-local shared-owned parse closing order
+/// (4497115 → c973b49 → 445f8a1) at the filesystem-path sibling.
+/// After this commit the thread-local shared-owned NUL-terminated
+/// C-string parse axis spans all three ordered typed sums on the
+/// ladder set through ONE
+/// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] +
+/// [`TryFrom<&std::ffi::CStr>`] composition each.
+///
+/// The identity `BumpLevel::try_from(
+/// std::rc::Rc::<std::ffi::CStr>::from(std::ffi::CString::new(
+/// level.as_str()).unwrap().into_boxed_c_str())).unwrap() == level`
+/// at every [`BumpLevel::ALL`] variant is pinned by
+/// [`tests::test_bump_level_try_from_rc_cstr_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>` consumer at every
+/// variant is pinned by
+/// [`tests::test_bump_level_try_from_rc_cstr_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-UTF-8 thread-local shared-
+/// owned NUL-terminated C-string input is pinned by
+/// [`tests::test_bump_level_try_from_rc_cstr_rejects_non_utf8_input`];
+/// the strict-rejection contract on valid-UTF-8 non-canonical
+/// thread-local shared-owned NUL-terminated C-string input is
+/// pinned by
+/// [`tests::test_bump_level_try_from_rc_cstr_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// NUL-terminated C-string try-conversion parse surface is a
+/// typed-primitive site on [`BumpLevel`] itself (one
+/// `TryFrom<std::rc::Rc<std::ffi::CStr>>` impl routing through
+/// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] and the by-reference
+/// [`TryFrom<&std::ffi::CStr>`] peer), not a per-consumer
+/// `BumpLevel::try_from(shared.as_ref())` bridge at every
+/// downstream site that types its parse contract as
+/// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label grammar is
+/// named at one site ([`BumpLevel::as_str`]), inverted at one site
+/// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every
+/// parse surface — including this thread-local shared-owned
+/// NUL-terminated C-string peer — reads through it.
+impl TryFrom<std::rc::Rc<std::ffi::CStr>> for BumpLevel {
+    type Error = anyhow::Error;
+
+    fn try_from(c: std::rc::Rc<std::ffi::CStr>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::ffi::CStr>>::try_from(c.as_ref())
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for BumpLevel`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -13194,6 +13346,201 @@ mod tests {
                 )
                 .is_err(),
                 "TryFrom<Arc<CStr>> must reject valid-UTF-8 non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<std::ffi::CStr>> for BumpLevel`] agrees with
+    /// [`FromStr`] at every [`BumpLevel::ALL`] variant. Owning the
+    /// [`std::rc::Rc<std::ffi::CStr>`] input round-trips through
+    /// [`std::rc::Rc::<std::ffi::CStr>::from`] of the shrunk-owned
+    /// [`Box<std::ffi::CStr>`] view of
+    /// [`std::ffi::CString::new(level.as_str()).into_boxed_c_str()`]
+    /// and the by-value thread-local shared-owned NUL-terminated
+    /// C-string try-conversion recovers the canonical variant — the
+    /// thread-local shared-owned NUL-terminated C-string parse peer
+    /// of the by-reference [`TryFrom<&std::ffi::CStr>`] surface
+    /// reads the same one-oracle grammar the thread-local shared-
+    /// owned UTF-8-string parse peer [`TryFrom<Rc<str>>`], the
+    /// thread-local shared-owned byte-slice parse peer
+    /// [`TryFrom<Rc<[u8]>>`], the thread-local shared-owned
+    /// OS-string parse peer [`TryFrom<Rc<std::ffi::OsStr>>`], and
+    /// the thread-local shared-owned filesystem-path parse peer
+    /// [`TryFrom<Rc<std::path::Path>>`] read — one round-trip pin
+    /// per variant, refuses a future variant insertion that drops
+    /// the `TryFrom<Rc<CStr>>`/`Rc::<CStr>::from(CString::new(as_str()).into_boxed_c_str())`
+    /// agreement. Structural mirror of
+    /// `test_per_attempt_region_try_from_rc_cstr_agrees_with_from_str`
+    /// (commit 75227ec) at the per-attempt-region ladder and
+    /// `test_admission_tier_try_from_rc_cstr_agrees_with_from_str`
+    /// (commit a8e882a) at the admission-tier ladder.
+    #[test]
+    fn test_bump_level_try_from_rc_cstr_agrees_with_from_str() {
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::ffi::CStr> = std::ffi::CString::new(level.as_str())
+                .expect("canonical label must contain no interior NUL")
+                .into_boxed_c_str();
+            let shared: std::rc::Rc<std::ffi::CStr> = std::rc::Rc::<std::ffi::CStr>::from(boxed);
+            let parsed =
+                <BumpLevel as std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>>::try_from(shared)
+                    .expect("canonical label Rc<CStr> must parse through TryFrom<Rc<CStr>>");
+            assert_eq!(
+                parsed, level,
+                "TryFrom<Rc<CStr>> must round-trip through Rc::<CStr>::from(CString::new(as_str()).into_boxed_c_str()) at {level:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Rc<std::ffi::CStr>> for BumpLevel`] identity
+    /// carries through a generic
+    /// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>` consumer at
+    /// every [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(c: Rc<CStr>) -> T where T:
+    /// TryFrom<Rc<CStr>>, T::Error: std::fmt::Debug` — the shape of
+    /// an actual downstream consumer (a
+    /// [`std::rc::Rc::<std::ffi::CStr>::from`]`(Box<CStr>)` receiver
+    /// that shares the shrunk NUL-terminated buffer within a single
+    /// thread through a single-threaded refcount header, a
+    /// [`std::ffi::CStr::from_ptr`] + [`std::ffi::CStr::to_owned`] +
+    /// [`std::ffi::CString::into_boxed_c_str`] +
+    /// [`std::rc::Rc::<std::ffi::CStr>::from`] compose that shares
+    /// a freshly-allocated NUL-terminated buffer over a
+    /// `*const c_char` FFI return within a single thread, a serde
+    /// `#[serde(try_from = "Rc<CStr>")]` container, a generic
+    /// try-conversion helper) — recovers the canonical variant from
+    /// the canonical lowercase label thread-local shared-owned
+    /// NUL-terminated C-string at every variant. The structural
+    /// witness that a [`BumpLevel`] is genuinely usable at
+    /// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>` call sites — a
+    /// regression that drifted the [`TryFrom`] impl signature
+    /// (requiring a borrowed [`&std::ffi::CStr`] input, requiring
+    /// an owned [`std::ffi::CString`] input, requiring a shrunk-
+    /// owned [`Box<std::ffi::CStr>`] input, requiring an atomic-
+    /// shared-owned [`std::sync::Arc<std::ffi::CStr>`] input,
+    /// dropping the [`std::rc::Rc::<std::ffi::CStr>::as_ref`]
+    /// borrow step and misparsing non-UTF-8 input, returning a
+    /// different variant than [`FromStr`] would) fails here at
+    /// compile time or at the assertion instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_bump_level_try_from_rc_cstr_carries_through_generic_consumer() {
+        fn parse<T>(c: std::rc::Rc<std::ffi::CStr>) -> T
+        where
+            T: std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>,
+            <T as std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>>::try_from(c)
+                .expect("canonical label Rc<CStr> must parse through generic TryFrom<Rc<CStr>>")
+        }
+
+        for level in BumpLevel::ALL {
+            let boxed: Box<std::ffi::CStr> = std::ffi::CString::new(level.as_str())
+                .expect("canonical label must contain no interior NUL")
+                .into_boxed_c_str();
+            let shared: std::rc::Rc<std::ffi::CStr> = std::rc::Rc::<std::ffi::CStr>::from(boxed);
+            assert_eq!(
+                parse::<BumpLevel>(shared),
+                level,
+                "generic TryFrom<Rc<CStr>> consumer must recover canonical variant at {level:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<std::ffi::CStr>> for BumpLevel`] rejects
+    /// non-UTF-8 thread-local shared-owned NUL-terminated byte
+    /// sequences at the [`std::ffi::CStr::to_str`] decode frontier
+    /// inherited through the
+    /// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] +
+    /// [`TryFrom<&std::ffi::CStr>`] delegation. An
+    /// [`std::rc::Rc<std::ffi::CStr>`] may hold any byte sequence
+    /// excluding interior NUL — a thread-local shared-owned
+    /// counterpart of the borrowed [`&std::ffi::CStr`] non-UTF-8
+    /// fixtures returned by legacy C libraries under foreign
+    /// locales, and of the atomic-shared-owned
+    /// [`std::sync::Arc<std::ffi::CStr>`] non-UTF-8 fixtures the
+    /// sibling
+    /// [`test_bump_level_try_from_arc_cstr_rejects_non_utf8_input`]
+    /// pin exercises. Pins the encoding-strictness contract at the
+    /// thread-local shared-owned NUL-terminated C-string frontier's
+    /// first strictness gate, matching the by-reference peer
+    /// [`test_bump_level_try_from_cstr_rejects_non_utf8_input`]
+    /// discipline at the thread-local shared-owned axis — the
+    /// thread-local shared-owned buffer pays the same
+    /// UTF-8-strictness at the same decode frontier a direct
+    /// [`std::ffi::CStr::to_str`] + [`str::parse`] composition
+    /// would offer, at ONE typed-primitive site rather than a
+    /// per-consumer two-step restatement.
+    #[test]
+    fn test_bump_level_try_from_rc_cstr_rejects_non_utf8_input() {
+        for bad in [
+            &[0xffu8, 0u8][..],
+            &[0xffu8, 0xfe, 0u8][..],
+            &[0x80u8, 0u8][..],
+            &[b'p', b'a', 0xff, b't', b'c', b'h', 0u8][..],
+            &[b'm', b'i', b'n', b'o', b'r', 0xff, 0u8][..],
+        ] {
+            let bad_c = std::ffi::CStr::from_bytes_with_nul(bad)
+                .expect("test fixture must be a valid NUL-terminated byte sequence");
+            let boxed: Box<std::ffi::CStr> = Box::from(bad_c);
+            let shared: std::rc::Rc<std::ffi::CStr> = std::rc::Rc::<std::ffi::CStr>::from(boxed);
+            assert!(
+                <BumpLevel as std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>>::try_from(shared)
+                    .is_err(),
+                "TryFrom<Rc<CStr>> must reject non-UTF-8 input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<std::ffi::CStr>> for BumpLevel`] rejects
+    /// valid-UTF-8 non-canonical thread-local shared-owned
+    /// NUL-terminated C-string sequences at the underlying
+    /// [`FromStr`] strictness gate inherited through the
+    /// [`std::rc::Rc::<std::ffi::CStr>::as_ref`] +
+    /// [`TryFrom<&std::ffi::CStr>`] + [`TryFrom<&str>`] delegation —
+    /// empty NUL-terminated C-string, UpperCamel rendering,
+    /// uppercase, whitespace padding, and truncated labels all
+    /// reject. Pins the canonical-label strictness contract at the
+    /// thread-local shared-owned NUL-terminated C-string frontier's
+    /// second strictness gate so a downstream consumer bound by
+    /// [`TryFrom<std::rc::Rc<std::ffi::CStr>>`] inherits the same
+    /// canonical-only grammar the direct `.parse::<BumpLevel>()`
+    /// call sites and the sibling [`TryFrom<Rc<str>>`],
+    /// [`TryFrom<Rc<[u8]>>`], [`TryFrom<Rc<std::ffi::OsStr>>`],
+    /// [`TryFrom<Rc<std::path::Path>>`],
+    /// [`TryFrom<&std::ffi::CStr>`], [`TryFrom<std::ffi::CString>`],
+    /// [`TryFrom<Box<std::ffi::CStr>>`], and
+    /// [`TryFrom<std::sync::Arc<std::ffi::CStr>>`] impls already
+    /// read, and a future permissive-parse regression at the
+    /// underlying [`FromStr`] impl lights up here rather than
+    /// drifting silently through the thread-local shared-owned
+    /// NUL-terminated C-string try-conversion surface. Sibling of
+    /// the by-reference peer
+    /// [`test_bump_level_try_from_cstr_rejects_non_canonical_input`],
+    /// the owned-buffer peer
+    /// [`test_bump_level_try_from_cstring_rejects_non_canonical_input`],
+    /// the shrunk-owned peer
+    /// [`test_bump_level_try_from_box_cstr_rejects_non_canonical_input`],
+    /// and the atomic-shared-owned peer
+    /// [`test_bump_level_try_from_arc_cstr_rejects_non_canonical_input`]
+    /// at the NUL-terminated C-string frontier — the five pins
+    /// together close the canonical-only strictness contract
+    /// across the borrowed-view, owned-buffer, shrunk-owned,
+    /// atomic-shared-owned, and thread-local shared-owned axes of
+    /// the NUL-terminated C-string frontier at the version-bump-
+    /// magnitude ladder.
+    #[test]
+    fn test_bump_level_try_from_rc_cstr_rejects_non_canonical_input() {
+        for bad in [
+            "", "Patch", "Minor", "Major", "PATCH", " patch", "patch ", "pat",
+        ] {
+            let bad_c =
+                std::ffi::CString::new(bad).expect("test fixture must not contain interior NUL");
+            let boxed: Box<std::ffi::CStr> = bad_c.into_boxed_c_str();
+            let shared: std::rc::Rc<std::ffi::CStr> = std::rc::Rc::<std::ffi::CStr>::from(boxed);
+            assert!(
+                <BumpLevel as std::convert::TryFrom<std::rc::Rc<std::ffi::CStr>>>::try_from(shared)
+                    .is_err(),
+                "TryFrom<Rc<CStr>> must reject valid-UTF-8 non-canonical input {bad:?}",
             );
         }
     }
