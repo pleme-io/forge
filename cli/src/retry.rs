@@ -6891,6 +6891,130 @@ impl TryFrom<std::rc::Rc<std::ffi::CStr>> for PerAttemptRegion {
     }
 }
 
+/// [`TryFrom<std::borrow::Cow<'_, std::ffi::CStr>> for PerAttemptRegion`]
+/// routes through [`std::borrow::Cow::as_ref`] on the caller-supplied
+/// borrowed/owned-frontier NUL-terminated C-string and the by-reference
+/// NUL-terminated C-string parse peer [`TryFrom<&std::ffi::CStr>`]
+/// (which itself composes [`std::ffi::CStr::to_str`] with
+/// [`TryFrom<&str>`] which delegates through
+/// [`<PerAttemptRegion as std::str::FromStr>::from_str`]), so a
+/// downstream consumer bound by `impl for<'a> TryFrom<Cow<'a,
+/// std::ffi::CStr>>` (a `serde` container that opts into
+/// `#[serde(try_from = "Cow<'_, CStr>")]` on a wrapper field, a
+/// [`libc`]/POSIX FFI receiver that materializes some canonical labels
+/// as `'static`-lived `&CStr` constants from a table and others as
+/// owned [`std::ffi::CString`] payloads decoded from a C-ABI callback
+/// before wrapping in a [`std::borrow::Cow`], a generic try-conversion
+/// helper `fn parse<T: for<'a> TryFrom<Cow<'a, std::ffi::CStr>>>` that
+/// composes with borrowed/owned-frontier NUL-terminated C-string inputs
+/// uniformly, a validated-input newtype builder whose canonical parse
+/// contract is stated as `TryFrom<Cow<'_, CStr>>` to compose over
+/// caller-supplied NUL-terminated C-string buffers of either ownership
+/// shape) recovers a [`PerAttemptRegion`] value from a borrowed-or-owned
+/// canonical NUL-terminated C-string label through the same one-oracle
+/// grammar the sibling [`TryFrom<&std::ffi::CStr>`],
+/// [`TryFrom<std::ffi::CString>`], [`TryFrom<Box<std::ffi::CStr>>`],
+/// [`TryFrom<std::sync::Arc<std::ffi::CStr>>`], and
+/// [`TryFrom<std::rc::Rc<std::ffi::CStr>>`] parse peers already read.
+///
+/// The parse-side dual of [`From<PerAttemptRegion> for
+/// std::borrow::Cow<'static, std::ffi::CStr>`] (commit a6ea43e) — the
+/// by-value borrowed/owned-frontier emit surface at the NUL-terminated
+/// C-string frontier — at the parse axis: the emit surface yields a
+/// canonical [`Cow<'static, CStr>`] view out of a [`PerAttemptRegion`]
+/// value pointing at a `'static`-lived embedded label, this parse
+/// surface reads a canonical [`Cow<'_, CStr>`] view IN to a
+/// [`PerAttemptRegion`] value at the same NUL-terminated C-string
+/// frontier. Together the two impls close both directions of the
+/// borrowed/owned-frontier NUL-terminated C-string conversion at the
+/// per-attempt-region ladder, giving a downstream site that types its
+/// label NUL-terminated buffer sink or source as [`Cow<'a,
+/// std::ffi::CStr>`] (rather than one of the four owned/borrowed cross
+/// products [`&CStr`] / [`std::ffi::CString`] on the emit or parse
+/// side) a first-class typed-primitive surface at both ends, not a
+/// per-consumer `Cow::Borrowed(...)` / `Cow::Owned(...)` restatement.
+///
+/// Opens the by-value borrowed/owned-frontier NUL-terminated C-string
+/// parse trio at the per-attempt-region ladder; two subsequent commits
+/// close it at the [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the [`TryFrom<Cow<'_,
+/// [u8]>>`] opening order at the byte-slice sibling, the
+/// [`TryFrom<Cow<'_, str>>`] opening order at the UTF-8 sibling, the
+/// [`TryFrom<Cow<'_, std::ffi::OsStr>>`] opening order at the OS-string
+/// sibling, and the [`TryFrom<Cow<'_, std::path::Path>>`] opening
+/// order at the filesystem-path sibling.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at the same TWO frontiers the sibling
+/// [`TryFrom<&std::ffi::CStr>`], [`TryFrom<std::ffi::CString>`],
+/// [`TryFrom<Box<std::ffi::CStr>>`], [`TryFrom<std::sync::Arc<std::ffi::CStr>>`],
+/// and [`TryFrom<std::rc::Rc<std::ffi::CStr>>`] parse peers are strict
+/// at, inherited through the delegation: non-UTF-8 NUL-terminated byte
+/// sequences reject at [`std::ffi::CStr::to_str`] with the standard
+/// [`std::str::Utf8Error`] diagnostic surfaced through
+/// [`anyhow::Error`], and valid-UTF-8 NUL-terminated byte sequences
+/// that decode to a non-canonical label (`c"BeforeFirst"`,
+/// `c"OverBudget"`, `c"FIRST"`, `c" first"`, `c"first "`,
+/// `c"beforefirst"`, `c"overbudget"`, and the empty NUL-terminated
+/// C-string) reject at the underlying [`std::str::FromStr`] impl —
+/// the same canonical-only strictness the NUL-terminated C-string
+/// frontier already carries at the by-reference and by-value
+/// owned-buffer peers, now lifted to the borrowed/owned-frontier input
+/// layer at ONE composition through the borrowed
+/// [`TryFrom<&std::ffi::CStr>`] peer.
+///
+/// The impl body picks [`std::borrow::Cow::as_ref`] rather than
+/// [`Cow::into_owned`] or a per-branch [`match`]: [`Cow::as_ref`]
+/// yields a borrowed `&CStr` view against both branches without
+/// allocation ([`Cow::Borrowed`] yields the underlying borrow directly,
+/// [`Cow::Owned`] yields the [`std::ffi::CString::as_c_str`] view of
+/// the caller-owned buffer without a redundant clone), so the
+/// parse-side receiver pays the by-reference [`TryFrom<&std::ffi::CStr>`]
+/// cost, not the [`std::ffi::CString`]-allocation cost of a
+/// [`Cow::into_owned`] round trip — the same discipline the sibling
+/// [`TryFrom<Cow<'_, [u8]>>`] parse peer applies at the byte-slice
+/// frontier's [`Cow::as_ref`] boundary and the emit-side [`From<T> for
+/// Cow<'static, std::ffi::CStr>`] peer applies at the [`Cow::Borrowed`]
+/// branch.
+///
+/// The identity
+/// `PerAttemptRegion::try_from(Cow::Borrowed(CString::new(region.as_str()).unwrap().as_c_str())).unwrap()
+/// == region` and its [`Cow::Owned`] sibling at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_cow_cstr_agrees_with_from_str`];
+/// the identity carried through a generic `impl for<'a> TryFrom<Cow<'a,
+/// std::ffi::CStr>>` consumer at every variant is pinned by
+/// [`tests::test_per_attempt_region_try_from_cow_cstr_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-UTF-8 input across both
+/// [`Cow`] branches is pinned by
+/// [`tests::test_per_attempt_region_try_from_cow_cstr_rejects_non_utf8_input`];
+/// the strict-rejection contract on valid-UTF-8 non-canonical input
+/// across both [`Cow`] branches is pinned by
+/// [`tests::test_per_attempt_region_try_from_cow_cstr_rejects_non_canonical_input`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value [`Cow<'_,
+/// std::ffi::CStr>`] try-conversion parse surface is a typed-primitive
+/// site on [`PerAttemptRegion`] itself (one `TryFrom<Cow<'_,
+/// std::ffi::CStr>>` impl routing through the borrowed
+/// [`TryFrom<&std::ffi::CStr>`] parse peer on [`Cow::as_ref`]), not a
+/// per-consumer `PerAttemptRegion::try_from(buf.as_ref())` bridge at
+/// every downstream site that types its parse contract as `impl
+/// for<'a> TryFrom<Cow<'a, std::ffi::CStr>>` rather than
+/// [`TryFrom<&std::ffi::CStr>`] or [`TryFrom<std::ffi::CString>`].
+/// THEORY.md §VI.1 one-oracle: the canonical-label grammar is named at
+/// one site ([`PerAttemptRegion::as_str`]), inverted at one site
+/// ([`PerAttemptRegion::from_str`]), and every parse surface —
+/// including this borrowed/owned-frontier NUL-terminated C-string peer
+/// — reads through it.
+impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::CStr>> for PerAttemptRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(c: std::borrow::Cow<'a, std::ffi::CStr>) -> Result<Self, Self::Error> {
+        <Self as std::convert::TryFrom<&std::ffi::CStr>>::try_from(c.as_ref())
+    }
+}
+
 /// [`TryFrom<&std::ffi::OsStr> for PerAttemptRegion`] routes through
 /// [`std::ffi::OsStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for PerAttemptRegion`] so a downstream consumer bound
@@ -24675,6 +24799,180 @@ mod tests {
                 )
                 .is_err(),
                 "TryFrom<Rc<CStr>> must reject valid-UTF-8 non-canonical input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::borrow::Cow<'_, std::ffi::CStr>> for
+    /// PerAttemptRegion`] recovers the original variant at every
+    /// [`PerAttemptRegion::ALL`] variant across BOTH [`Cow`] branches
+    /// ([`Cow::Borrowed`] holding a `'static`-lived canonical
+    /// NUL-terminated C-string, [`Cow::Owned`] holding an owned
+    /// [`std::ffi::CString`] canonical label) when the canonical label
+    /// emitted through [`std::ffi::CString::new`]`(region.as_str())`
+    /// wrapped in each [`Cow`] shape is fed back through it. Pins the
+    /// round-trip identity
+    /// `PerAttemptRegion::try_from(Cow::Borrowed(cstring.as_c_str())).unwrap()
+    /// == region` and its [`Cow::Owned`] sibling at every variant
+    /// against the shared [`PerAttemptRegion::as_str`] +
+    /// [`std::ffi::CString::new`] canonical-label NUL-terminated
+    /// C-string oracle.
+    #[test]
+    fn test_per_attempt_region_try_from_cow_cstr_agrees_with_from_str() {
+        for region in PerAttemptRegion::ALL {
+            let owned: std::ffi::CString = std::ffi::CString::new(region.as_str())
+                .expect("canonical label must contain no interior NUL");
+
+            let borrowed_parsed = <PerAttemptRegion as std::convert::TryFrom<
+                std::borrow::Cow<'_, std::ffi::CStr>,
+            >>::try_from(std::borrow::Cow::Borrowed(
+                owned.as_c_str(),
+            ))
+            .expect("canonical Cow::Borrowed<CStr> must parse through TryFrom<Cow<CStr>>");
+            assert_eq!(
+                borrowed_parsed, region,
+                "TryFrom<Cow<CStr>> Borrowed branch must round-trip at {region:?}",
+            );
+
+            let owned_parsed = <PerAttemptRegion as std::convert::TryFrom<
+                std::borrow::Cow<'_, std::ffi::CStr>,
+            >>::try_from(std::borrow::Cow::Owned(owned.clone()))
+            .expect("canonical Cow::Owned<CString> must parse through TryFrom<Cow<CStr>>");
+            assert_eq!(
+                owned_parsed, region,
+                "TryFrom<Cow<CStr>> Owned branch must round-trip at {region:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<std::borrow::Cow<'_, std::ffi::CStr>> for
+    /// PerAttemptRegion`] identity carries through a generic
+    /// `impl for<'a> TryFrom<Cow<'a, std::ffi::CStr>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant across BOTH [`Cow`] branches.
+    /// Structural witness that a [`PerAttemptRegion`] is genuinely
+    /// usable at `impl for<'a> TryFrom<Cow<'a, std::ffi::CStr>>` call
+    /// sites — a regression that drifted the [`TryFrom`] impl signature
+    /// (requiring a plain [`&std::ffi::CStr`] input, requiring an owned
+    /// [`std::ffi::CString`] input, dropping the [`Cow::as_ref`] borrow
+    /// step and misparsing non-UTF-8 input, returning a different
+    /// variant than [`std::str::FromStr`] would) fails here at compile
+    /// time or at the assertion instead of at every downstream generic
+    /// call site.
+    #[test]
+    fn test_per_attempt_region_try_from_cow_cstr_carries_through_generic_consumer() {
+        fn parse<T>(c: std::borrow::Cow<'_, std::ffi::CStr>) -> T
+        where
+            T: for<'a> std::convert::TryFrom<std::borrow::Cow<'a, std::ffi::CStr>>,
+            for<'a> <T as std::convert::TryFrom<std::borrow::Cow<'a, std::ffi::CStr>>>::Error:
+                std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::borrow::Cow<'_, std::ffi::CStr>>>::try_from(c)
+                .expect("canonical Cow<CStr> must parse through generic TryFrom<Cow<CStr>>")
+        }
+
+        for region in PerAttemptRegion::ALL {
+            let owned: std::ffi::CString = std::ffi::CString::new(region.as_str())
+                .expect("canonical label must contain no interior NUL");
+
+            assert_eq!(
+                parse::<PerAttemptRegion>(std::borrow::Cow::Borrowed(owned.as_c_str())),
+                region,
+                "generic TryFrom<Cow<CStr>> Borrowed branch must recover canonical variant at {region:?}",
+            );
+            assert_eq!(
+                parse::<PerAttemptRegion>(std::borrow::Cow::Owned(owned.clone())),
+                region,
+                "generic TryFrom<Cow<CStr>> Owned branch must recover canonical variant at {region:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::borrow::Cow<'_, std::ffi::CStr>> for
+    /// PerAttemptRegion`] rejects non-UTF-8 borrowed/owned-frontier
+    /// NUL-terminated byte sequences at the [`std::ffi::CStr::to_str`]
+    /// decode frontier inherited through the [`Cow::as_ref`] +
+    /// [`TryFrom<&std::ffi::CStr>`] delegation, across BOTH [`Cow`]
+    /// branches. Pins the encoding-strictness contract at the
+    /// borrowed/owned-frontier NUL-terminated C-string frontier's first
+    /// strictness gate, matching the discipline
+    /// [`test_per_attempt_region_try_from_cstr_rejects_non_utf8_input`]
+    /// pins at the borrowed reference peer.
+    #[test]
+    fn test_per_attempt_region_try_from_cow_cstr_rejects_non_utf8_input() {
+        for bad in [
+            &[0xffu8, 0u8][..],
+            &[0xffu8, 0xfe, 0u8][..],
+            &[0x80u8, 0u8][..],
+            &[b'f', b'i', 0xff, b'r', b's', b't', 0u8][..],
+            &[b'f', b'i', b'n', b'a', b'l', 0xff, 0u8][..],
+        ] {
+            let bad_c = std::ffi::CStr::from_bytes_with_nul(bad)
+                .expect("test fixture must be a valid NUL-terminated byte sequence");
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<
+                    std::borrow::Cow<'_, std::ffi::CStr>,
+                >>::try_from(std::borrow::Cow::Borrowed(bad_c))
+                .is_err(),
+                "TryFrom<Cow<CStr>> Borrowed branch must reject non-UTF-8 input {bad:?}",
+            );
+
+            let bad_owned: std::ffi::CString = std::ffi::CString::from(bad_c);
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<
+                    std::borrow::Cow<'_, std::ffi::CStr>,
+                >>::try_from(std::borrow::Cow::Owned(bad_owned))
+                .is_err(),
+                "TryFrom<Cow<CStr>> Owned branch must reject non-UTF-8 input {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<std::borrow::Cow<'_, std::ffi::CStr>> for
+    /// PerAttemptRegion`] rejects valid-UTF-8 non-canonical
+    /// borrowed/owned-frontier NUL-terminated C-string sequences at the
+    /// underlying [`std::str::FromStr`] strictness gate inherited
+    /// through the [`Cow::as_ref`] + [`TryFrom<&std::ffi::CStr>`] +
+    /// [`TryFrom<&str>`] delegation, across BOTH [`Cow`] branches —
+    /// empty NUL-terminated C-string, UpperCamel rendering, uppercase,
+    /// whitespace padding, and snake_case labels with a dropped
+    /// underscore all reject. Pins the canonical-label strictness
+    /// contract at the borrowed/owned-frontier NUL-terminated C-string
+    /// frontier's second strictness gate so a downstream consumer bound
+    /// by [`TryFrom<Cow<'_, std::ffi::CStr>>`] inherits the same
+    /// canonical-only grammar the direct `.parse::<PerAttemptRegion>()`
+    /// call sites and the sibling [`TryFrom<&std::ffi::CStr>`],
+    /// [`TryFrom<std::ffi::CString>`], [`TryFrom<Box<std::ffi::CStr>>`],
+    /// [`TryFrom<std::sync::Arc<std::ffi::CStr>>`], and
+    /// [`TryFrom<std::rc::Rc<std::ffi::CStr>>`] impls already read.
+    #[test]
+    fn test_per_attempt_region_try_from_cow_cstr_rejects_non_canonical_input() {
+        for bad in [
+            "",
+            "BeforeFirst",
+            "OverBudget",
+            "FIRST",
+            " first",
+            "first ",
+            "beforefirst",
+            "overbudget",
+        ] {
+            let bad_c: std::ffi::CString =
+                std::ffi::CString::new(bad).expect("test fixture must not contain interior NUL");
+
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<
+                    std::borrow::Cow<'_, std::ffi::CStr>,
+                >>::try_from(std::borrow::Cow::Borrowed(bad_c.as_c_str()))
+                .is_err(),
+                "TryFrom<Cow<CStr>> Borrowed branch must reject valid-UTF-8 non-canonical input {bad:?}",
+            );
+
+            assert!(
+                <PerAttemptRegion as std::convert::TryFrom<
+                    std::borrow::Cow<'_, std::ffi::CStr>,
+                >>::try_from(std::borrow::Cow::Owned(bad_c))
+                .is_err(),
+                "TryFrom<Cow<CStr>> Owned branch must reject valid-UTF-8 non-canonical input {bad:?}",
             );
         }
     }
