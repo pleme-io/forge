@@ -65,6 +65,105 @@ fn run_helm_timed(args: &[&str], timeout: Duration) -> Result<bool> {
     run_program_timed("helm", args, timeout)
 }
 
+/// Print a captured [`std::process::Command::output`] result to this
+/// process's own stdout/stderr, matching what `.status()` (inherited stdio)
+/// would have streamed live. Callers that switch to `.output()` to capture a
+/// failure reason must not silently swallow the CI log the operator would
+/// otherwise have seen.
+fn print_captured_output(stdout: &[u8], stderr: &[u8]) {
+    if !stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(stdout));
+    }
+    if !stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(stderr));
+    }
+}
+
+/// The last non-empty line of a failed command's captured output — stderr
+/// first (where helm/OCI errors land, e.g. `403: denied: permission_denied:
+/// write_package`), falling back to stdout. Gives a typed error a short,
+/// SPECIFIC reason instead of a bare "helm X failed for Y", so a multi-chart
+/// batch's final summary can name *why* a chart failed without forcing a
+/// reader back into tens of thousands of interleaved CI log lines to find
+/// the one relevant to that chart.
+fn last_reason_line(stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stdout = String::from_utf8_lossy(stdout);
+    stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .or_else(|| stdout.lines().rev().find(|l| !l.trim().is_empty()))
+        .unwrap_or("(no output captured)")
+        .trim()
+        .to_string()
+}
+
+/// Render a batch's per-chart failures as one bullet each —
+/// `  - <chart>: <stage>: <reason>` — so a multi-chart lint/release run's
+/// final summary answers "which chart, and why" directly instead of just
+/// listing names (the gap that made a real 24/28-chart GHCR-permission
+/// failure look like one opaque batch error rather than a clear report).
+fn format_failure_summary(failed: &[(String, String)]) -> String {
+    failed
+        .iter()
+        .map(|(name, reason)| format!("  - {name}: {reason}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::{format_failure_summary, last_reason_line};
+
+    #[test]
+    fn last_reason_line_prefers_final_nonblank_stderr_line() {
+        let stderr = b"Pushing chart...\nError: failed to perform \"Push\" on destination: 403: denied: permission_denied: write_package\n";
+        assert_eq!(
+            last_reason_line(b"", stderr),
+            "Error: failed to perform \"Push\" on destination: 403: denied: permission_denied: write_package"
+        );
+    }
+
+    #[test]
+    fn last_reason_line_falls_back_to_stdout_when_stderr_empty() {
+        assert_eq!(
+            last_reason_line(b"final stdout line\n", b""),
+            "final stdout line"
+        );
+    }
+
+    #[test]
+    fn last_reason_line_handles_no_output() {
+        assert_eq!(last_reason_line(b"", b""), "(no output captured)");
+    }
+
+    #[test]
+    fn last_reason_line_skips_trailing_blank_lines() {
+        let stderr = b"Error: real reason\n\n\n";
+        assert_eq!(last_reason_line(b"", stderr), "Error: real reason");
+    }
+
+    #[test]
+    fn format_failure_summary_renders_one_bullet_per_chart() {
+        let failed = vec![
+            (
+                "pitr-forge".to_string(),
+                "push: 403 permission_denied: write_package".to_string(),
+            ),
+            (
+                "lareira-camelot".to_string(),
+                "lint: pleme-lib:0.36.0 not found".to_string(),
+            ),
+        ];
+        let out = format_failure_summary(&failed);
+        assert_eq!(
+            out,
+            "  - pitr-forge: push: 403 permission_denied: write_package\n  - lareira-camelot: lint: pleme-lib:0.36.0 not found"
+        );
+    }
+}
+
 /// `helm dependency update` for a chart, bounded by [`DEP_TIMEOUT_SECS`] and
 /// retried [`DEP_RETRIES`] times with linear backoff. A genuinely unreachable
 /// dependency surfaces as a typed error (so the chart is marked failed rather
@@ -145,13 +244,18 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     // helm lint
     let mut lint_args: Vec<String> = vec!["lint".into(), chart_dir.into()];
     lint_args.extend(value_args.iter().cloned());
-    let lint_status = Command::new("helm")
+    let lint_output = Command::new("helm")
         .args(&lint_args)
-        .status()
+        .output()
         .context("Failed to run helm lint")?;
+    print_captured_output(&lint_output.stdout, &lint_output.stderr);
 
-    if !lint_status.success() {
-        bail!("helm lint failed for {}", chart_dir);
+    if !lint_output.status.success() {
+        bail!(
+            "{}: {}",
+            chart_dir,
+            last_reason_line(&lint_output.stdout, &lint_output.stderr)
+        );
     }
 
     // helm template (validation) — skip for library charts. Discard rendered
@@ -166,14 +270,24 @@ pub fn lint(chart_dir: &str) -> Result<()> {
         let mut tmpl_args: Vec<String> =
             vec!["template".into(), "test".into(), chart_dir.into()];
         tmpl_args.extend(value_args.iter().cloned());
-        let template_status = Command::new("helm")
+        // stdout stays null'd (never captured, never printed) — a wrapper
+        // chart like lareira-vm-stack renders MEGABYTES of manifests that
+        // would otherwise sit in memory for no reason. stderr is piped so a
+        // failure still gets a real, specific reason attached to the typed
+        // error instead of forcing a reader back into the full CI log.
+        let template_output = Command::new("helm")
             .args(&tmpl_args)
             .stdout(std::process::Stdio::null())
-            .status()
+            .output()
             .context("Failed to run helm template")?;
+        print_captured_output(&[], &template_output.stderr);
 
-        if !template_status.success() {
-            bail!("helm template validation failed for {}", chart_dir);
+        if !template_output.status.success() {
+            bail!(
+                "{} (helm template): {}",
+                chart_dir,
+                last_reason_line(&template_output.stdout, &template_output.stderr)
+            );
         }
     }
 
@@ -269,13 +383,18 @@ pub fn package(chart_dir: &str, output: &str, version: Option<&str>) -> Result<S
         args.push(&version_str);
     }
 
-    let status = Command::new("helm")
+    let pkg_output = Command::new("helm")
         .args(&args)
-        .status()
+        .output()
         .context("Failed to run helm package")?;
+    print_captured_output(&pkg_output.stdout, &pkg_output.stderr);
 
-    if !status.success() {
-        bail!("helm package failed for {}", chart_dir);
+    if !pkg_output.status.success() {
+        bail!(
+            "{}: {}",
+            chart_dir,
+            last_reason_line(&pkg_output.stdout, &pkg_output.stderr)
+        );
     }
 
     // Find the generated tarball — use name from Chart.yaml, not the directory
@@ -305,13 +424,18 @@ pub fn push(chart: &str, registry: &str) -> Result<()> {
 
     info!("Pushing {} → {}", chart, registry);
 
-    let status = Command::new("helm")
+    let output = Command::new("helm")
         .args(["push", chart, registry])
-        .status()
+        .output()
         .context("Failed to run helm push")?;
+    print_captured_output(&output.stdout, &output.stderr);
 
-    if !status.success() {
-        bail!("helm push failed for {}", chart);
+    if !output.status.success() {
+        bail!(
+            "{}: {}",
+            chart,
+            last_reason_line(&output.stdout, &output.stderr)
+        );
     }
 
     info!("Push succeeded");
@@ -1166,7 +1290,7 @@ pub fn lint_all(charts_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &
 
     info!("Discovered {} charts: {}", charts.len(), charts.join(", "));
 
-    let mut failed = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
 
     for chart_name in &charts {
         println!();
@@ -1174,14 +1298,28 @@ pub fn lint_all(charts_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &
         println!("  Linting {}", chart_name);
         println!("==========================================");
 
-        let (_tmpdir, chart_path) =
-            prepare_chart_workspace(chart_name, charts_dir, lib_chart_dir, lib_chart_name)?;
+        // Workspace prep is isolated too — a single chart's copy/stage/
+        // redirect failure must not `?`-abort the remaining charts, same as
+        // the lint step below.
+        let (_tmpdir, chart_path) = match prepare_chart_workspace(
+            chart_name,
+            charts_dir,
+            lib_chart_dir,
+            lib_chart_name,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("FAIL: {} workspace prep — {}", chart_name, e);
+                failed.push((chart_name.clone(), format!("workspace prep: {e}")));
+                continue;
+            }
+        };
 
         match lint(&chart_path) {
             Ok(()) => println!("PASS: {}", chart_name),
             Err(e) => {
                 println!("FAIL: {} — {}", chart_name, e);
-                failed.push(chart_name.clone());
+                failed.push((chart_name.clone(), format!("lint: {e}")));
             }
         }
     }
@@ -1192,10 +1330,10 @@ pub fn lint_all(charts_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &
         Ok(())
     } else {
         bail!(
-            "{}/{} charts failed lint: {}",
+            "{}/{} chart(s) failed lint — every chart was still linted independently:\n{}",
             failed.len(),
             charts.len(),
-            failed.join(", ")
+            format_failure_summary(&failed)
         )
     }
 }
@@ -1220,7 +1358,7 @@ pub fn release_all(
     let output_dir = "dist";
     std::fs::create_dir_all(output_dir)?;
 
-    let mut failed = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
     let mut released = Vec::new();
 
     for chart_name in &charts {
@@ -1229,14 +1367,32 @@ pub fn release_all(
         println!("  Releasing {}", chart_name);
         println!("==========================================");
 
-        let (_tmpdir, chart_path) =
-            prepare_chart_workspace(chart_name, charts_dir, lib_chart_dir, lib_chart_name)?;
+        // Every chart is independent from here down: a failure at ANY stage
+        // (workspace prep / lint / package / push) records the chart + a
+        // specific reason and `continue`s to the next chart. Nothing in this
+        // loop is allowed to `?`-propagate and abort the batch — one chart's
+        // GHCR permission gap or bad dependency version must never prevent
+        // an unrelated, already-clean chart later in the list from
+        // publishing (task pleme-io/helmworks-akeyless#143).
+        let (_tmpdir, chart_path) = match prepare_chart_workspace(
+            chart_name,
+            charts_dir,
+            lib_chart_dir,
+            lib_chart_name,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("FAIL: {} workspace prep — {}", chart_name, e);
+                failed.push((chart_name.clone(), format!("workspace prep: {e}")));
+                continue;
+            }
+        };
 
         // Lint
         println!("--- Lint ---");
         if let Err(e) = lint(&chart_path) {
             println!("FAIL: {} lint — {}", chart_name, e);
-            failed.push(chart_name.clone());
+            failed.push((chart_name.clone(), format!("lint: {e}")));
             continue;
         }
 
@@ -1246,7 +1402,7 @@ pub fn release_all(
             Ok(t) => t,
             Err(e) => {
                 println!("FAIL: {} package — {}", chart_name, e);
-                failed.push(chart_name.clone());
+                failed.push((chart_name.clone(), format!("package: {e}")));
                 continue;
             }
         };
@@ -1255,7 +1411,7 @@ pub fn release_all(
         println!("--- Push ---");
         if let Err(e) = push(&tgz, registry) {
             println!("FAIL: {} push — {}", chart_name, e);
-            failed.push(chart_name.clone());
+            failed.push((chart_name.clone(), format!("push: {e}")));
             continue;
         }
 
@@ -1268,9 +1424,12 @@ pub fn release_all(
 
     if !failed.is_empty() {
         bail!(
-            "{} chart(s) failed: {}",
+            "{}/{} chart(s) failed — every chart was attempted independently ({} \
+             succeeded and published above; one chart's failure never blocks another):\n{}",
             failed.len(),
-            failed.join(", ")
+            charts.len(),
+            released.len(),
+            format_failure_summary(&failed)
         )
     }
 
