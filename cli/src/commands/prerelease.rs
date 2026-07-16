@@ -1457,8 +1457,10 @@ mod tests {
 
     #[test]
     fn test_prerelease_config_with_gates() {
-        let mut gates = PreReleaseGatesConfig::default();
-        gates.fail_on_error = false;
+        let mut gates = PreReleaseGatesConfig {
+            fail_on_error: false,
+            ..PreReleaseGatesConfig::default()
+        };
         gates.migrations.check_after = Some("20240101".to_string());
 
         let config = PreReleaseConfig::from_working_dir_with_gates(Path::new("/tmp/testapp"), gates);
@@ -1471,10 +1473,12 @@ mod tests {
 
     #[test]
     fn test_prerelease_config_with_integration_disabled() {
-        let mut gates = PreReleaseGatesConfig::default();
-        gates.integration = IntegrationGatesConfig {
-            enabled: false,
-            timeout_secs: 120,
+        let gates = PreReleaseGatesConfig {
+            integration: IntegrationGatesConfig {
+                enabled: false,
+                timeout_secs: 120,
+            },
+            ..PreReleaseGatesConfig::default()
         };
 
         let config = PreReleaseConfig::from_working_dir_with_gates(Path::new("/tmp/testapp"), gates);
@@ -1486,11 +1490,13 @@ mod tests {
 
     #[test]
     fn test_prerelease_config_with_e2e_custom() {
-        let mut gates = PreReleaseGatesConfig::default();
-        gates.e2e = E2eGatesConfig {
-            enabled: true,
-            timeout_secs: 1200,
-            headless: false,
+        let gates = PreReleaseGatesConfig {
+            e2e: E2eGatesConfig {
+                enabled: true,
+                timeout_secs: 1200,
+                headless: false,
+            },
+            ..PreReleaseGatesConfig::default()
         };
 
         let config = PreReleaseConfig::from_working_dir_with_gates(Path::new("/tmp/testapp"), gates);

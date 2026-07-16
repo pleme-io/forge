@@ -249,8 +249,10 @@ mod tests {
 
     #[test]
     fn test_kustomization_for_env_fallback_to_flat() {
-        let mut config = ManifestPathsConfig::default();
-        config.kustomization = Some("flat/kustomization.yaml".to_string());
+        let config = ManifestPathsConfig {
+            kustomization: Some("flat/kustomization.yaml".to_string()),
+            ..ManifestPathsConfig::default()
+        };
         assert_eq!(
             config.kustomization_for_env("production").unwrap(),
             "flat/kustomization.yaml"
@@ -259,8 +261,10 @@ mod tests {
 
     #[test]
     fn test_kustomization_for_env_env_takes_precedence() {
-        let mut config = ManifestPathsConfig::default();
-        config.kustomization = Some("flat/kustomization.yaml".to_string());
+        let mut config = ManifestPathsConfig {
+            kustomization: Some("flat/kustomization.yaml".to_string()),
+            ..ManifestPathsConfig::default()
+        };
         config.environments.insert(
             "staging".to_string(),
             ManifestPaths {
