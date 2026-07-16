@@ -5945,6 +5945,132 @@ impl From<PerAttemptRegion> for std::rc::Rc<std::ffi::CStr> {
     }
 }
 
+/// [`From<PerAttemptRegion> for &'static std::ffi::CStr`] emits the
+/// per-attempt-region label as a static-lifetime borrowed
+/// NUL-terminated C-string view — the by-value static-lifetime emit
+/// surface at the NUL-terminated C-string frontier. Downstream
+/// consumers bound by `impl Into<&'static std::ffi::CStr>` (a `const`-
+/// adjacent NUL-terminated-C-string sink that stashes the region label
+/// in a `&'static std::ffi::CStr` field for a C-ABI callee to receive
+/// through [`std::ffi::CStr::as_ptr`], a
+/// [`std::borrow::Cow<'static, std::ffi::CStr>`] sink taking
+/// `Into<Cow<'static, CStr>>`, a `libc::syslog`-style FFI wrapper that
+/// keeps a static `*const c_char` per canonical label, a `phf`-style
+/// static lookup table keyed by canonical label NUL-terminated
+/// C-strings) read the canonical snake_case label as an owned
+/// `&'static std::ffi::CStr` view of the compile-time literal
+/// (`c"before_first"`, `c"first"`, `c"interim"`, `c"final"`,
+/// `c"over_budget"`) with `'static` lifetime preserved end-to-end and
+/// zero runtime allocation at the emit boundary.
+///
+/// The by-value static-lifetime peer of the by-value owned
+/// [`From<PerAttemptRegion> for std::ffi::CString`] surface (line
+/// 5532), the shrunk-owned
+/// [`From<PerAttemptRegion> for Box<std::ffi::CStr>`] surface (line
+/// 5676), the atomic-shared-owned
+/// [`From<PerAttemptRegion> for std::sync::Arc<std::ffi::CStr>`]
+/// surface (line 5807), and the thread-local shared-owned
+/// [`From<PerAttemptRegion> for std::rc::Rc<std::ffi::CStr>`] surface
+/// (line 5942) directly above — all five are NUL-terminated C-string
+/// emit surfaces at the same canonical-label oracle, differing only on
+/// receiver-side ownership shape: the four heap-owned peers allocate a
+/// per-emit NUL-terminated buffer at differing ownership tiers
+/// (growth-header, shrunk, atomic-refcount-header, non-atomic-refcount-
+/// header), this [`From<T> for &'static std::ffi::CStr`] returns a
+/// borrowed view of a compile-time immortal read-only-data-section
+/// literal for consumers that want the borrow at `'static` lifetime and
+/// pay zero runtime cost.
+///
+/// Structural mirror of [`From<PerAttemptRegion> for &'static str`]
+/// (line 1352), [`From<PerAttemptRegion> for &'static [u8]`] (line
+/// 2666), [`From<PerAttemptRegion> for &'static std::ffi::OsStr`] (line
+/// 4349), and [`From<PerAttemptRegion> for &'static std::path::Path`]
+/// (line 4436) at the UTF-8, byte-slice, OS-string, and filesystem-path
+/// frontiers respectively — the same by-value static-lifetime emit
+/// surface at the same one-oracle discipline, projected onto the
+/// NUL-terminated C-string frontier this time. All five siblings
+/// return a compile-time immortal borrow of the canonical label at
+/// their respective frontier: the UTF-8 sibling returns
+/// `&'static str` directly from [`PerAttemptRegion::as_str`], the byte-
+/// slice sibling returns `&'static [u8]` via [`str::as_bytes`], the
+/// OS-string sibling routes through [`std::ffi::OsStr::new`], the
+/// filesystem-path sibling routes through [`std::path::Path::new`], and
+/// this NUL-terminated C-string sibling routes through per-variant
+/// compile-time C-string literals (`c"..."`, stable since Rust 1.77) —
+/// the only frontier that cannot compose through
+/// [`PerAttemptRegion::as_str`] alone because `&'static str` carries no
+/// trailing NUL byte the C-ABI needs and a runtime
+/// [`std::ffi::CString::new`] step would allocate.
+///
+/// Opens the by-value static-lifetime NUL-terminated C-string emit
+/// trio at the per-attempt-region ladder; two subsequent commits close
+/// the trio at the [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// [`From<T> for &'static std::ffi::OsStr`] opening order at the
+/// static-lifetime OS-string emit sibling one frontier above, the
+/// [`From<T> for &'static std::path::Path`] opening order at the
+/// static-lifetime filesystem-path emit sibling, and the
+/// [`From<T> for std::ffi::CString`] opening order
+/// (020317a → 1e8ed3c → 6cff423) at the by-value owned
+/// NUL-terminated C-string emit sibling one ownership tier above.
+///
+/// Zero-cost, zero-allocation by construction: `c"..."` literals are
+/// compile-time [`&'static std::ffi::CStr`] values baked into the
+/// binary's read-only data section — no runtime buffer allocation, no
+/// per-emission NUL-byte scan, no [`std::ffi::CString::new`] validity
+/// check. The variant discriminant matches once at the [`From::from`]
+/// body and the per-variant static reference falls through with
+/// `'static` lifetime preserved. The trailing NUL byte the C-ABI needs
+/// is baked into the literal at compile time by the `c"..."` syntax —
+/// the compiler proves the canonical label contains no interior NUL
+/// byte at build time, eliminating the runtime
+/// [`std::ffi::CString::new`] check the owned and shrunk-owned emit
+/// peers pay per emission.
+///
+/// The identity `<&'static std::ffi::CStr>::from(region).to_bytes() ==
+/// region.as_str().as_bytes()` at every [`PerAttemptRegion::ALL`]
+/// variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_static_cstr_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<&'static std::ffi::CStr>` consumer at every variant is
+/// pinned by
+/// [`tests::test_per_attempt_region_into_static_cstr_carries_through_generic_consumer`];
+/// the round-trip through [`std::ffi::CStr::to_str`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_static_cstr_round_trips_through_to_str`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// NUL-terminated C-string emit surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
+/// &'static std::ffi::CStr` impl matching over the variants at per-
+/// variant `c"..."` literals), not a per-consumer
+/// `CStr::from_bytes_with_nul(&{ let mut b = region.as_str().as_bytes()
+/// .to_vec(); b.push(0); b }).unwrap()` restatement at every downstream
+/// site that accepts `impl Into<&'static std::ffi::CStr>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`PerAttemptRegion::as_str`]) and every by-value static-
+/// lifetime emit surface — [`From<T> for &'static str`],
+/// [`From<T> for &'static [u8]`],
+/// [`From<T> for &'static std::ffi::OsStr`],
+/// [`From<T> for &'static std::path::Path`], this
+/// [`From<T> for &'static std::ffi::CStr`] — reads through it; the per-
+/// variant `c"..."` literals at the match body agree byte-for-byte with
+/// [`PerAttemptRegion::as_str`], pinned by
+/// [`tests::test_per_attempt_region_from_into_static_cstr_agrees_with_as_str`],
+/// keeping the one-oracle discipline intact across the static-lifetime
+/// NUL-terminated C-string projection.
+impl From<PerAttemptRegion> for &'static std::ffi::CStr {
+    fn from(region: PerAttemptRegion) -> &'static std::ffi::CStr {
+        match region {
+            PerAttemptRegion::BeforeFirst => c"before_first",
+            PerAttemptRegion::First => c"first",
+            PerAttemptRegion::Interim => c"interim",
+            PerAttemptRegion::Final => c"final",
+            PerAttemptRegion::OverBudget => c"over_budget",
+        }
+    }
+}
+
 /// [`TryFrom<&std::ffi::CStr> for PerAttemptRegion`] routes through
 /// [`std::ffi::CStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for PerAttemptRegion`] so a downstream consumer bound
@@ -23299,6 +23425,113 @@ mod tests {
             assert!(
                 std::rc::Rc::strong_count(&shared) >= 2,
                 "Rc<CStr> strong count must be at least 2 after clone at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for &'static std::ffi::CStr`]
+    /// identity agrees with [`PerAttemptRegion::as_str`] byte-for-byte at
+    /// every [`PerAttemptRegion::ALL`] variant. Pins the byte-view
+    /// identity across the canonical-label + trailing-NUL C-string
+    /// oracle — the impl body's match arms return per-variant `c"..."`
+    /// literals whose non-NUL bytes must equal
+    /// [`PerAttemptRegion::as_str`]'s bytes at every variant. A
+    /// regression that drifted a match arm (`c"before-first"` instead of
+    /// `c"before_first"`, `c"BEFORE_FIRST"` instead of the lowercase
+    /// canonical spelling, dropping the `over_budget` variant off the
+    /// match with a fresh `_ =>` catch-all fallthrough that mis-labels
+    /// the trailing region as `c"final"`) would fail here rather than at
+    /// a distant FFI callee's log parser. Structural mirror of the
+    /// [`&'static str`] agreement pin, the [`&'static [u8]`] agreement
+    /// pin, the [`&'static std::ffi::OsStr`] agreement pin, and the
+    /// [`&'static std::path::Path`] agreement pin at the four prior
+    /// static-lifetime emit siblings; the five static-lifetime agreement
+    /// pins together close the by-value static-lifetime emit surface at
+    /// the same one-oracle discipline across UTF-8, byte-slice,
+    /// OS-string, filesystem-path, and NUL-terminated C-string
+    /// frontiers.
+    #[test]
+    fn test_per_attempt_region_from_into_static_cstr_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &'static std::ffi::CStr = <&'static std::ffi::CStr>::from(region);
+            assert_eq!(
+                borrowed.to_bytes(),
+                region.as_str().as_bytes(),
+                "From<PerAttemptRegion> for &'static CStr must agree with as_str() bytes at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for &'static std::ffi::CStr`]
+    /// identity carries through a generic
+    /// `impl Into<&'static std::ffi::CStr>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<&'static std::ffi::CStr>>(t: T) ->
+    /// &'static std::ffi::CStr { t.into() }` — the shape of an actual
+    /// downstream consumer (a `const`-adjacent NUL-terminated-C-string
+    /// sink that stashes the region label in a `&'static
+    /// std::ffi::CStr` field for a C-ABI callee to receive through
+    /// [`std::ffi::CStr::as_ptr`], a `libc::syslog`-style FFI wrapper
+    /// that keeps a static `*const c_char` per canonical label, a
+    /// `phf`-style static lookup table keyed by canonical label
+    /// NUL-terminated C-strings) reads the canonical snake_case label
+    /// from a [`PerAttemptRegion`] value as a static-lifetime borrowed
+    /// NUL-terminated C-string. The structural witness that a
+    /// [`PerAttemptRegion`] is genuinely usable at
+    /// `impl Into<&'static std::ffi::CStr>` call sites; a regression
+    /// that drifted the impl signature (returning [`std::ffi::CString`]
+    /// or [`Box<std::ffi::CStr>`] instead of `&'static std::ffi::CStr`,
+    /// returning a shorter-lived borrow rather than `'static`, requiring
+    /// `&PerAttemptRegion` and losing the by-value semantics) fails here
+    /// at compile time or at the assertion instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_static_cstr_carries_through_generic_consumer() {
+        fn read<T: Into<&'static std::ffi::CStr>>(t: T) -> &'static std::ffi::CStr {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region).to_bytes(),
+                region.as_str().as_bytes(),
+                "generic Into<&'static CStr> consumer must read canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for &'static std::ffi::CStr`]
+    /// round-trips through [`std::ffi::CStr::to_str`] recovering the
+    /// canonical snake_case label at every [`PerAttemptRegion::ALL`]
+    /// variant. Pins the parse-side dual: the [`&'static std::ffi::CStr`]
+    /// borrowed view emitted by [`From<T> for &'static std::ffi::CStr`]
+    /// decodes to valid UTF-8 (no interior non-UTF-8 bytes leak in via a
+    /// mistranscribed literal) and the decoded [`&str`] view equals the
+    /// [`PerAttemptRegion::as_str`] canonical label byte-for-byte. A
+    /// regression that let a non-UTF-8 escape sneak into a `c"..."`
+    /// literal (a stray `\xFF` in the byte string, a mis-copied
+    /// `c"in\xE9rim"` instead of `c"interim"` under a Latin-1 paste) or
+    /// that drifted a match arm to a spelling
+    /// [`PerAttemptRegion::as_str`] does not emit would fail here at the
+    /// [`str`] equality assertion rather than at a distant FFI callee's
+    /// log parser. Structural mirror of the [`&'static std::ffi::OsStr`]
+    /// round-trip pin
+    /// [`test_per_attempt_region_from_into_static_os_str_round_trips_through_to_str`]
+    /// and the [`&'static std::path::Path`] round-trip pin
+    /// [`test_per_attempt_region_from_into_static_path_round_trips_through_to_str`]
+    /// at the OS-string and filesystem-path frontiers respectively,
+    /// projected onto the NUL-terminated C-string frontier this time.
+    #[test]
+    fn test_per_attempt_region_from_into_static_cstr_round_trips_through_to_str() {
+        for region in PerAttemptRegion::ALL {
+            let borrowed: &'static std::ffi::CStr = <&'static std::ffi::CStr>::from(region);
+            let decoded = borrowed
+                .to_str()
+                .expect("static C-string literal must be valid UTF-8");
+            assert_eq!(
+                decoded,
+                region.as_str(),
+                "&'static CStr round-trip through to_str() must recover as_str() at {region:?}",
             );
         }
     }
