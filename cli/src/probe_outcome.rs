@@ -10537,6 +10537,112 @@ impl From<AdmissionTier> for std::rc::Rc<std::ffi::CStr> {
     }
 }
 
+/// [`From<AdmissionTier> for &'static std::ffi::CStr`] emits the
+/// admission-tier label as a static-lifetime borrowed NUL-terminated
+/// C-string view — the by-value static-lifetime emit surface at the
+/// NUL-terminated C-string frontier. Downstream consumers bound by
+/// `impl Into<&'static std::ffi::CStr>` (a `const`-adjacent
+/// NUL-terminated-C-string sink that stashes the tier label in a
+/// `&'static std::ffi::CStr` field for a C-ABI callee to receive
+/// through [`std::ffi::CStr::as_ptr`], a
+/// [`std::borrow::Cow<'static, std::ffi::CStr>`] sink taking
+/// `Into<Cow<'static, CStr>>`, a `libc::syslog`-style FFI wrapper that
+/// keeps a static `*const c_char` per canonical label, a `phf`-style
+/// static lookup table keyed by canonical label NUL-terminated
+/// C-strings) read the canonical lowercase label as an owned
+/// `&'static std::ffi::CStr` view of the compile-time literal
+/// (`c"refused"`, `c"staging_only"`, `c"strict"`) with `'static`
+/// lifetime preserved end-to-end and zero runtime allocation at the
+/// emit boundary.
+///
+/// The by-value static-lifetime peer of the by-value owned
+/// [`From<AdmissionTier> for std::ffi::CString`] surface (commit
+/// 1e8ed3c), the shrunk-owned
+/// [`From<AdmissionTier> for Box<std::ffi::CStr>`] surface (commit
+/// daaae30), the atomic-shared-owned
+/// [`From<AdmissionTier> for std::sync::Arc<std::ffi::CStr>`] surface
+/// (commit ed95d37), and the thread-local shared-owned
+/// [`From<AdmissionTier> for std::rc::Rc<std::ffi::CStr>`] surface
+/// (commit 61d51ad) directly above — all five are NUL-terminated
+/// C-string emit surfaces at the same canonical-label oracle,
+/// differing only on receiver-side ownership shape: the four heap-
+/// owned peers allocate a per-emit NUL-terminated buffer at differing
+/// ownership tiers (growth-header, shrunk, atomic-refcount-header,
+/// non-atomic-refcount-header), whereas this by-value static-lifetime
+/// peer returns a borrowed view of an immortal compile-time C-string
+/// literal — zero allocation, zero NUL-byte scan, zero
+/// [`std::ffi::CString::new`] validity check at the emit boundary.
+///
+/// Structural mirror of [`From<AdmissionTier> for &'static str`]
+/// (commit 6006f26), [`From<AdmissionTier> for &'static [u8]`]
+/// (commit 6083f26), [`From<AdmissionTier> for &'static
+/// std::ffi::OsStr`] (commit b69f733), and
+/// [`From<AdmissionTier> for &'static std::path::Path`] at the UTF-8,
+/// byte-slice, OS-string, and filesystem-path frontiers respectively
+/// — the same by-value static-lifetime emit surface at the same one-
+/// oracle discipline, projected onto the NUL-terminated C-string
+/// frontier this time. The compile-time `c"..."` literals (stable
+/// since Rust 1.77) supply the NUL-terminated view directly, so no
+/// runtime step composes over the [`AdmissionTier::as_str`] UTF-8
+/// oracle at this emit boundary — but the per-variant `c"..."` bytes
+/// agree with [`AdmissionTier::as_str`] byte-for-byte, pinned by
+/// [`tests::test_admission_tier_from_into_static_cstr_agrees_with_as_str`],
+/// so the one-oracle discipline is preserved structurally.
+///
+/// Mid-trio peer at the second ordered typed sum of the by-value
+/// static-lifetime NUL-terminated C-string emit trio:
+/// [`From<PerAttemptRegion> for &'static std::ffi::CStr`] (commit
+/// 9247efe) opened the trio at the per-attempt-region ladder; the
+/// closing peer at the third typed sum is
+/// [`From<BumpLevel> for &'static std::ffi::CStr`] in a follow-up
+/// commit, matching the [`From<T> for &'static std::ffi::OsStr`]
+/// opening order (be57ac3 → b69f733 → 3cbc7bc) at the OS-string
+/// sibling one frontier above and the [`From<T> for &'static
+/// std::path::Path`] opening order at the filesystem-path sibling one
+/// frontier above.
+///
+/// The identity `<&'static std::ffi::CStr>::from(tier).to_bytes()
+/// == tier.as_str().as_bytes()` at every [`AdmissionTier::ALL`]
+/// variant is pinned by
+/// [`tests::test_admission_tier_from_into_static_cstr_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<&'static std::ffi::CStr>` consumer at every variant is
+/// pinned by
+/// [`tests::test_admission_tier_into_static_cstr_carries_through_generic_consumer`];
+/// the round-trip through [`std::ffi::CStr::to_str`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_admission_tier_from_into_static_cstr_round_trips_through_to_str`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// NUL-terminated C-string emit surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one `From<AdmissionTier> for
+/// &'static std::ffi::CStr` impl matching over the variants at per-
+/// variant `c"..."` literals), not a per-consumer
+/// `CStr::from_bytes_with_nul(&{ let mut b = tier.as_str().as_bytes()
+/// .to_vec(); b.push(0); b }).unwrap()` restatement at every
+/// downstream site that accepts `impl Into<&'static std::ffi::CStr>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`AdmissionTier::as_str`]) and every by-value static-
+/// lifetime emit surface — [`From<T> for &'static str`],
+/// [`From<T> for &'static [u8]`],
+/// [`From<T> for &'static std::ffi::OsStr`],
+/// [`From<T> for &'static std::path::Path`], this
+/// [`From<T> for &'static std::ffi::CStr`] — reads through it; the
+/// per-variant `c"..."` literals at the match body agree byte-for-
+/// byte with [`AdmissionTier::as_str`], pinned by
+/// [`tests::test_admission_tier_from_into_static_cstr_agrees_with_as_str`],
+/// keeping the one-oracle discipline intact across the static-
+/// lifetime NUL-terminated C-string projection.
+impl From<AdmissionTier> for &'static std::ffi::CStr {
+    fn from(tier: AdmissionTier) -> &'static std::ffi::CStr {
+        match tier {
+            AdmissionTier::Refused => c"refused",
+            AdmissionTier::StagingOnly => c"staging_only",
+            AdmissionTier::Strict => c"strict",
+        }
+    }
+}
+
 /// [`TryFrom<&std::ffi::CStr> for AdmissionTier`] routes through
 /// [`std::ffi::CStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for AdmissionTier`] so a downstream consumer bound by
@@ -28072,6 +28178,110 @@ mod tests {
             assert!(
                 std::rc::Rc::strong_count(&shared) >= 2,
                 "Rc<CStr> strong count must be at least 2 after clone at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for &'static std::ffi::CStr`] identity
+    /// agrees with [`AdmissionTier::as_str`] byte-for-byte at every
+    /// [`AdmissionTier::ALL`] variant. Pins the byte-view identity
+    /// across the canonical-label + trailing-NUL C-string oracle — the
+    /// impl body's match arms return per-variant `c"..."` literals
+    /// whose non-NUL bytes must equal [`AdmissionTier::as_str`]'s bytes
+    /// at every variant. A regression that drifted a match arm
+    /// (`c"staging-only"` instead of `c"staging_only"`, `c"STRICT"`
+    /// instead of the lowercase canonical spelling, dropping the
+    /// `Refused` variant off the match with a fresh `_ =>` catch-all
+    /// fallthrough that mis-labels the tier as `c"strict"`) would fail
+    /// here rather than at a distant FFI callee's log parser.
+    /// Structural mirror of the [`&'static str`] agreement pin, the
+    /// [`&'static [u8]`] agreement pin, the [`&'static std::ffi::OsStr`]
+    /// agreement pin, and the [`&'static std::path::Path`] agreement
+    /// pin at the four prior static-lifetime emit siblings at the
+    /// admission-tier ladder; the five static-lifetime agreement pins
+    /// together close the by-value static-lifetime emit surface at the
+    /// same one-oracle discipline across UTF-8, byte-slice, OS-string,
+    /// filesystem-path, and NUL-terminated C-string frontiers.
+    #[test]
+    fn test_admission_tier_from_into_static_cstr_agrees_with_as_str() {
+        for tier in AdmissionTier::ALL {
+            let borrowed: &'static std::ffi::CStr = <&'static std::ffi::CStr>::from(tier);
+            assert_eq!(
+                borrowed.to_bytes(),
+                tier.as_str().as_bytes(),
+                "From<AdmissionTier> for &'static CStr must agree with as_str() bytes at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for &'static std::ffi::CStr`] identity
+    /// carries through a generic `impl Into<&'static std::ffi::CStr>`
+    /// consumer at every [`AdmissionTier::ALL`] variant. A tiny generic
+    /// function `fn read<T: Into<&'static std::ffi::CStr>>(t: T) ->
+    /// &'static std::ffi::CStr { t.into() }` — the shape of an actual
+    /// downstream consumer (a `const`-adjacent NUL-terminated-C-string
+    /// sink that stashes the tier label in a `&'static
+    /// std::ffi::CStr` field for a C-ABI callee to receive through
+    /// [`std::ffi::CStr::as_ptr`], a `libc::syslog`-style FFI wrapper
+    /// that keeps a static `*const c_char` per canonical label, a
+    /// `phf`-style static lookup table keyed by canonical label
+    /// NUL-terminated C-strings) reads the canonical lowercase label
+    /// from an [`AdmissionTier`] value as a static-lifetime borrowed
+    /// NUL-terminated C-string. The structural witness that an
+    /// [`AdmissionTier`] is genuinely usable at
+    /// `impl Into<&'static std::ffi::CStr>` call sites; a regression
+    /// that drifted the impl signature (returning [`std::ffi::CString`]
+    /// or [`Box<std::ffi::CStr>`] instead of `&'static std::ffi::CStr`,
+    /// returning a shorter-lived borrow rather than `'static`,
+    /// requiring `&AdmissionTier` and losing the by-value semantics)
+    /// fails here at compile time or at the assertion instead of at
+    /// every downstream generic call site.
+    #[test]
+    fn test_admission_tier_into_static_cstr_carries_through_generic_consumer() {
+        fn read<T: Into<&'static std::ffi::CStr>>(t: T) -> &'static std::ffi::CStr {
+            t.into()
+        }
+
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(tier).to_bytes(),
+                tier.as_str().as_bytes(),
+                "generic Into<&'static CStr> consumer must read canonical label bytes at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`From<AdmissionTier> for &'static std::ffi::CStr`] round-
+    /// trips through [`std::ffi::CStr::to_str`] recovering the
+    /// canonical lowercase label at every [`AdmissionTier::ALL`]
+    /// variant. Pins the parse-side dual: the [`&'static
+    /// std::ffi::CStr`] borrowed view emitted by [`From<T> for
+    /// &'static std::ffi::CStr`] decodes to valid UTF-8 (no interior
+    /// non-UTF-8 bytes leak in via a mistranscribed literal) and the
+    /// decoded [`&str`] view equals the [`AdmissionTier::as_str`]
+    /// canonical label byte-for-byte. A regression that let a non-UTF-8
+    /// escape sneak into a `c"..."` literal (a stray `\xFF` in the byte
+    /// string, a mis-copied `c"str\xE9ct"` instead of `c"strict"` under
+    /// a Latin-1 paste) or that drifted a match arm to a spelling
+    /// [`AdmissionTier::as_str`] does not emit would fail here at the
+    /// [`str`] equality assertion rather than at a distant FFI callee's
+    /// log parser. Structural mirror of
+    /// [`test_admission_tier_from_into_static_os_str_round_trips_through_to_str`]
+    /// and
+    /// [`test_admission_tier_from_into_static_path_round_trips_through_to_str`]
+    /// at the OS-string and filesystem-path frontiers respectively,
+    /// projected onto the NUL-terminated C-string frontier this time.
+    #[test]
+    fn test_admission_tier_from_into_static_cstr_round_trips_through_to_str() {
+        for tier in AdmissionTier::ALL {
+            let borrowed: &'static std::ffi::CStr = <&'static std::ffi::CStr>::from(tier);
+            let decoded: &str = borrowed
+                .to_str()
+                .expect("c\"...\" literal must decode to valid UTF-8");
+            assert_eq!(
+                decoded,
+                tier.as_str(),
+                "From<AdmissionTier> for &'static CStr must round-trip through CStr::to_str at {tier:?}",
             );
         }
     }
