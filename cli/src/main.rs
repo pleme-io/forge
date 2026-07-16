@@ -1,3 +1,11 @@
+// Pin the struct-update-syntax invariant that commits 9d1e0f3 and a2f68a2
+// reached fleet-wide: 0 occurrences of `let mut x = X::default(); x.f = v;`
+// across the tree. Denying the lint at the crate root turns that achievement
+// from a soft warning into a hard `cargo clippy` failure — a future
+// test-builder that regresses to the pre/post-mutation shape can't slip past
+// the routine's clippy gate one file at a time.
+#![deny(clippy::field_reassign_with_default)]
+
 use anyhow::Result;
 use clap::Parser;
 
