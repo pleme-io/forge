@@ -403,54 +403,99 @@ pub fn mirror(charts_dir: &str, registry: &str) -> Result<()> {
     let reg = registry.trim_end_matches('/');
     let mut mirrored = 0u32;
     let mut skipped = 0u32;
+    let mut failed: Vec<String> = Vec::new();
+
+    // Per-dependency resilience (matching lint_all/release_all): a single
+    // upstream mirror failure — e.g. a brand-new GHCR package name hitting a
+    // one-time `403 write_package` permission gap that only closes once a
+    // human grants package-creation once — must NOT stop the remaining
+    // dependencies from mirroring, and must NOT abort the caller's release
+    // pass that runs after this one. Collect failures and continue; bail
+    // only once, at the end, with the full list.
     for ((name, version), upstream) in &wanted {
-        let oci_ref = format!("{reg}/{name}");
-
-        // Already mirrored? `helm show chart` succeeds iff the ref exists.
-        if run_program_timed("helm", &["show", "chart", &oci_ref, "--version", version], timeout)
-            .unwrap_or(false)
-        {
-            info!("Mirror: {name}:{version} already in {reg} — skip");
-            skipped += 1;
-            continue;
+        match mirror_one(name, version, upstream, reg, registry, timeout) {
+            Ok(true) => mirrored += 1,
+            Ok(false) => skipped += 1,
+            Err(e) => {
+                warn!("Mirror: {name}:{version} from {upstream} FAILED — {e}; continuing with remaining deps");
+                failed.push(format!("{name}:{version} ({e})"));
+            }
         }
-
-        let tmp = tempfile::tempdir().context("mirror tempdir")?;
-        let tmps = tmp.path().to_string_lossy().to_string();
-
-        // Pull from upstream — OCI repos take the chart name in the path, HTTP
-        // repos take it via --repo.
-        let pulled = if upstream.starts_with("oci://") {
-            let r = format!("{}/{}", upstream.trim_end_matches('/'), name);
-            run_program_timed("helm", &["pull", &r, "--version", version, "-d", &tmps], timeout)?
-        } else {
-            run_program_timed(
-                "helm",
-                &["pull", name, "--repo", upstream, "--version", version, "-d", &tmps],
-                timeout,
-            )?
-        };
-        if !pulled {
-            bail!("helm pull failed for {name} {version} from {upstream}");
-        }
-
-        // The pulled tarball name may carry a `v` prefix or differ from
-        // {name}-{version}; find the .tgz rather than assume.
-        let tgz = std::fs::read_dir(tmp.path())?
-            .filter_map(std::result::Result::ok)
-            .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|x| x == "tgz"))
-            .with_context(|| format!("no .tgz pulled for {name} {version}"))?;
-
-        if !run_program_timed("helm", &["push", &tgz.to_string_lossy(), registry], timeout)? {
-            bail!("helm push failed for {name} {version} → {registry}");
-        }
-        info!("Mirrored {name}:{version} ({upstream}) → {registry}");
-        mirrored += 1;
     }
 
-    info!("Mirror complete: {mirrored} pushed, {skipped} already present ({} total)", wanted.len());
+    info!(
+        "Mirror complete: {mirrored} pushed, {skipped} already present, {} failed ({} total)",
+        failed.len(),
+        wanted.len()
+    );
+
+    if !failed.is_empty() {
+        bail!(
+            "{} upstream subchart(s) failed to mirror (all others above were pushed; if this is a \
+             brand-new package name, the GHCR package-creation permission is a one-time manual grant, \
+             not a code fix): {}",
+            failed.len(),
+            failed.join(", ")
+        );
+    }
+
     Ok(())
+}
+
+/// Mirror a single third-party subchart dependency into `registry`. Returns
+/// `Ok(true)` if newly pushed, `Ok(false)` if it was already present (skip).
+/// Isolated into its own `Result`-returning function so [`mirror`]'s loop can
+/// catch one dependency's failure without aborting the rest.
+fn mirror_one(
+    name: &str,
+    version: &str,
+    upstream: &str,
+    reg: &str,
+    registry: &str,
+    timeout: Duration,
+) -> Result<bool> {
+    let oci_ref = format!("{reg}/{name}");
+
+    // Already mirrored? `helm show chart` succeeds iff the ref exists.
+    if run_program_timed("helm", &["show", "chart", &oci_ref, "--version", version], timeout)
+        .unwrap_or(false)
+    {
+        info!("Mirror: {name}:{version} already in {reg} — skip");
+        return Ok(false);
+    }
+
+    let tmp = tempfile::tempdir().context("mirror tempdir")?;
+    let tmps = tmp.path().to_string_lossy().to_string();
+
+    // Pull from upstream — OCI repos take the chart name in the path, HTTP
+    // repos take it via --repo.
+    let pulled = if upstream.starts_with("oci://") {
+        let r = format!("{}/{}", upstream.trim_end_matches('/'), name);
+        run_program_timed("helm", &["pull", &r, "--version", version, "-d", &tmps], timeout)?
+    } else {
+        run_program_timed(
+            "helm",
+            &["pull", name, "--repo", upstream, "--version", version, "-d", &tmps],
+            timeout,
+        )?
+    };
+    if !pulled {
+        bail!("helm pull failed for {name} {version} from {upstream}");
+    }
+
+    // The pulled tarball name may carry a `v` prefix or differ from
+    // {name}-{version}; find the .tgz rather than assume.
+    let tgz = std::fs::read_dir(tmp.path())?
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "tgz"))
+        .with_context(|| format!("no .tgz pulled for {name} {version}"))?;
+
+    if !run_program_timed("helm", &["push", &tgz.to_string_lossy(), registry], timeout)? {
+        bail!("helm push failed for {name} {version} → {registry}");
+    }
+    info!("Mirrored {name}:{version} ({upstream}) → {registry}");
+    Ok(true)
 }
 
 /// Rewrite a chart's third-party Helm subchart dependency repositories to the
