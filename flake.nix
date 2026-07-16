@@ -23,16 +23,9 @@
       url = "github:pleme-io/substrate";
       inputs.fenix.follows = "fenix";
     };
-
-    # Kept as a flake (not flake=false) for the crate2nix binary used by regen apps.
-    # Substrate captures its own crate2nix source internally for builders.
-    crate2nix = {
-      url = "github:nix-community/crate2nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = inputs @ { self, nixpkgs, flake-parts, fenix, substrate, crate2nix, devenv, ... }:
+  outputs = inputs @ { self, nixpkgs, flake-parts, fenix, substrate, devenv, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [ inputs.devenv.flakeModule ];
       systems = [ "aarch64-darwin" "x86_64-linux" "aarch64-linux" ];
@@ -54,15 +47,12 @@
         isLinux = pkgs.lib.hasSuffix "-linux" system;
 
         # ── forge CLI ────────────────────────────────────────────────
+        # gen-cargo DELTA-ONLY: cli/Cargo.gen.lock is the committed sidecar;
+        # substrate's lockfile-builder reconstructs Cargo.build-spec.json in
+        # pure Nix at eval (useLockfileBuilder defaults to true).
         forgeCli = substrateLib.mkCrate2nixTool {
           toolName = "forge";
           src = ./cli;
-          # Use the legacy crate2nix-generated Cargo.nix path — this
-          # repo ships cli/Cargo.nix but not Cargo.build-spec.json.
-          # The newer lockfile-builder path (default substrate@9556488)
-          # demands the build-spec; flipping to false keeps forge
-          # building until the build-spec is generated via `gen build .`.
-          useLockfileBuilder = false;
           crateOverrides = {
             forge = oldAttrs: {
               nativeBuildInputs = (oldAttrs.nativeBuildInputs or [])
@@ -104,8 +94,6 @@
           }
         else null;
 
-        crate2nixBin = crate2nix.packages.${system}.default;
-
       in {
         # ── devenv shell ─────────────────────────────────────────
         devenv.shells.default = {
@@ -113,7 +101,6 @@
 
           packages = with pkgs; [
             cmake perl git
-            crate2nixBin
           ];
 
           env = {
@@ -132,25 +119,10 @@
         };
 
         # ── apps ───────────────────────────────────────────────────
-        apps = {
-          "regen:cli" = {
-            type = "app";
-            program = toString (pkgs.writeShellScript "regen-forge-cli" ''
-              set -euo pipefail
-              cd "$(${pkgs.git}/bin/git rev-parse --show-toplevel)/cli"
-              ${crate2nixBin}/bin/crate2nix generate
-            '');
-          };
-
-          "regen:provision" = {
-            type = "app";
-            program = toString (pkgs.writeShellScript "regen-forge-provision" ''
-              set -euo pipefail
-              cd "$(${pkgs.git}/bin/git rev-parse --show-toplevel)/provision/forge-provision"
-              ${crate2nixBin}/bin/crate2nix generate
-            '');
-          };
-        } // pkgs.lib.optionalAttrs (forgeProvisionImage != null) {
+        # Regen apps retired with the crate2nix → gen-cargo migration.
+        # Regenerate a build sidecar with `gen build .` in cli/ or
+        # provision/forge-provision/ whenever Cargo.lock changes.
+        apps = {} // pkgs.lib.optionalAttrs (forgeProvisionImage != null) {
           "release:provision" = {
             type = "app";
             program = toString (pkgs.writeShellScript "release-forge-provision" ''

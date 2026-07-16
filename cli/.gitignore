@@ -19,3 +19,11 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# gen-cargo DELTA-ONLY doctrine: Cargo.gen.lock is the sole committed
+# build sidecar; substrate's lockfile-delta.nix reconstructs this in
+# pure Nix at eval. Do not commit it.
+Cargo.build-spec.json
+
+# crate2nix legacy artifact — retired in favor of gen-cargo above.
+Cargo.nix
