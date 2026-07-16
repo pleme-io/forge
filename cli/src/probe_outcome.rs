@@ -9990,6 +9990,94 @@ impl From<AdmissionTier> for std::rc::Rc<std::path::Path> {
     }
 }
 
+/// Zero-copy borrowed NUL-terminated C-string view of the canonical
+/// snake_case label (`"refused"`, `"staging_only"`, `"strict"`) at the
+/// [`std::ffi::CStr`] frontier — a downstream consumer bound by
+/// `impl AsRef<std::ffi::CStr>` (a `libc::syslog`-style FFI wrapper
+/// that hands the borrowed NUL-terminated view straight to a
+/// `*const c_char` argument through [`std::ffi::CStr::as_ptr`]
+/// without a per-call [`std::ffi::CString`] allocation, a
+/// `libloading::Symbol` lookup keyed by a canonical label C-string
+/// name, a `nix::sys::*` bridge that reads a canonical label off a
+/// NUL-terminated buffer, a `phf`-style static lookup table keyed by
+/// canonical label NUL-terminated C-strings) reads the canonical
+/// snake_case label as a borrowed `&std::ffi::CStr` view of the
+/// compile-time `c"..."` literal without a [`std::ffi::CString`]
+/// allocation, a [`Box<std::ffi::CStr>`] copy, or an intermediate
+/// [`std::ffi::CString::new`] NUL-terminator staple step.
+///
+/// Sibling of [`AsRef<str>`] (yields `&str`), [`AsRef<[u8]>`] (yields
+/// `&[u8]`), [`AsRef<std::ffi::OsStr>`] (yields `&OsStr`), and
+/// [`AsRef<std::path::Path>`] (yields `&Path`) above — the same
+/// borrowed-view surface at the same canonical-label oracle,
+/// projected onto the NUL-terminated C-string frontier instead of the
+/// UTF-8 string, byte-slice, OS-string, or filesystem-path frontier.
+/// Unlike the four sibling `AsRef<_>` peers this frontier cannot
+/// compose through [`AdmissionTier::as_str`] directly at zero cost —
+/// `&'static str` carries no trailing NUL byte the [`std::ffi::CStr`]
+/// shape requires — so the composition threads through the by-value
+/// static-lifetime [`From<AdmissionTier> for &'static std::ffi::CStr`]
+/// emit oracle (which reads the per-variant `c"refused"` /
+/// `c"staging_only"` / `c"strict"` compile-time C-string literals),
+/// preserving both the zero-allocation contract at the borrow-view
+/// boundary and the one-oracle discipline against the same canonical-
+/// label + trailing-NUL grammar the sibling by-value static-lifetime,
+/// owned, boxed, [`std::sync::Arc`]-shared, [`std::rc::Rc`]-shared,
+/// and [`std::borrow::Cow`] C-string emit peers read.
+///
+/// Mid-trio peer at the second ordered typed sum of the NUL-terminated
+/// C-string borrowed-view trio: `impl AsRef<std::ffi::CStr> for`
+/// [`crate::retry::PerAttemptRegion`] (commit 307bce0) opened the trio
+/// at the per-attempt-region ladder; the closing peer at the third
+/// typed sum is `impl AsRef<std::ffi::CStr> for`
+/// [`crate::version::BumpLevel`] in a follow-up commit, matching the
+/// [`AsRef<std::path::Path>`] opening order (17718d2 → f6c4c75 →
+/// dfd887a), the [`AsRef<std::ffi::OsStr>`] opening order (70e1ab5 →
+/// 1d708f4 → 242ed89), the [`AsRef<[u8]>`] opening order (af44439 →
+/// 13abcc4 → 833d706), and the [`AsRef<str>`] opening order (8c8cffe
+/// → 7acca19 → f1ca293).
+///
+/// Zero-cost by construction: the underlying
+/// [`From<AdmissionTier> for &'static std::ffi::CStr`] emit oracle
+/// already returns a borrowed view of an immortal read-only-data-
+/// section C-string literal at zero allocation, zero NUL-byte scan,
+/// and zero [`std::ffi::CString::new`] validity check per emission;
+/// returning that view under the shorter `AsRef` receiver lifetime is
+/// a plain lifetime-shortening coercion carrying the reference
+/// verbatim, so this surface adds no runtime cost over the underlying
+/// static-lifetime borrow.
+///
+/// The identity `<AdmissionTier as AsRef<std::ffi::CStr>>::as_ref(&tier)
+/// == <&'static std::ffi::CStr>::from(tier)` at every
+/// [`AdmissionTier::ALL`] variant is pinned by
+/// [`tests::test_admission_tier_as_ref_cstr_agrees_with_static_cstr_from`];
+/// the identity carried through a generic `impl AsRef<std::ffi::CStr>`
+/// consumer at every variant is pinned by
+/// [`tests::test_admission_tier_as_ref_cstr_carries_through_generic_consumer`];
+/// the round-trip through [`std::ffi::CStr::to_str`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_admission_tier_as_ref_cstr_round_trips_through_to_str`].
+///
+/// THEORY.md §V.4 typed primitives: the NUL-terminated C-string
+/// borrowed-view surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one `AsRef<std::ffi::CStr>` impl routing
+/// through the by-value static-lifetime C-string emit oracle), not a
+/// per-consumer `<&'static CStr>::from(tier)` restatement at every
+/// downstream site that accepts `impl AsRef<std::ffi::CStr>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label + trailing-NUL is
+/// named at the [`&'static std::ffi::CStr`] emit oracle (which itself
+/// reads the per-variant `c"..."` literals agreeing with
+/// [`AdmissionTier::as_str`] byte-for-byte), and every borrowed-view
+/// surface — [`AsRef<str>`], [`AsRef<[u8]>`],
+/// [`AsRef<std::ffi::OsStr>`], [`AsRef<std::path::Path>`], this
+/// [`AsRef<std::ffi::CStr>`] — reads through the same one-oracle
+/// discipline projected onto its own frontier.
+impl AsRef<std::ffi::CStr> for AdmissionTier {
+    fn as_ref(&self) -> &std::ffi::CStr {
+        <&'static std::ffi::CStr>::from(*self)
+    }
+}
+
 /// [`From<AdmissionTier> for std::ffi::CString`] routes through
 /// [`AdmissionTier::as_str`] composed with
 /// [`std::ffi::CString::new`] so a downstream consumer that takes a
@@ -26479,6 +26567,98 @@ mod tests {
                 decoded,
                 tier.as_str(),
                 "Path::to_str round-trip must recover canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant enumerated by
+    /// [`AdmissionTier::ALL`],
+    /// `<Self as AsRef<std::ffi::CStr>>::as_ref(&tier)` equals
+    /// `<&'static std::ffi::CStr>::from(tier)`. Pins the agreement
+    /// identity that the NUL-terminated C-string borrowed-view
+    /// surface reads the same canonical label + trailing-NUL grammar
+    /// the by-value static-lifetime C-string emit oracle reads,
+    /// projected through the shorter [`AsRef`] receiver lifetime. A
+    /// regression that swapped the [`AsRef<std::ffi::CStr>`] impl to
+    /// route through an intermediate [`std::ffi::CString::new`]
+    /// allocation or a [`Box<std::ffi::CStr>`] copy would break this
+    /// composition equality at at least one variant and fail here at
+    /// the canonical-label pin, not at every downstream
+    /// `impl AsRef<std::ffi::CStr>` call site. Structural mirror of
+    /// `test_per_attempt_region_as_ref_cstr_agrees_with_static_cstr_from`
+    /// (commit 307bce0) at the admission-tier ladder.
+    #[test]
+    fn test_admission_tier_as_ref_cstr_agrees_with_static_cstr_from() {
+        for tier in AdmissionTier::ALL {
+            let borrowed: &std::ffi::CStr = <AdmissionTier as AsRef<std::ffi::CStr>>::as_ref(&tier);
+            assert_eq!(
+                borrowed,
+                <&'static std::ffi::CStr>::from(tier),
+                "AsRef<CStr> and <&'static CStr>::from must agree at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<std::ffi::CStr>`] identity carries through a
+    /// generic `impl AsRef<std::ffi::CStr>` consumer at every
+    /// [`AdmissionTier::ALL`] variant. A tiny generic function
+    /// `fn read<T: AsRef<std::ffi::CStr>>(t: &T) -> &std::ffi::CStr
+    /// { t.as_ref() }` — the shape of an actual downstream consumer
+    /// (a `libc::syslog`-style FFI wrapper that reads a `*const
+    /// c_char` through [`std::ffi::CStr::as_ptr`], a
+    /// `libloading::Symbol` lookup keyed by a NUL-terminated
+    /// C-string name, a `nix::sys::*` bridge over a canonical
+    /// NUL-terminated buffer, a `phf`-style static lookup table
+    /// keyed by canonical label C-strings) reads the canonical
+    /// snake_case label directly from an [`AdmissionTier`] value
+    /// without going through the [`std::fmt::Display`] formatter
+    /// buffer or an intermediate [`std::ffi::CString`] allocation.
+    /// The structural witness that an [`AdmissionTier`] is genuinely
+    /// usable at `impl AsRef<std::ffi::CStr>` call sites — a
+    /// regression that drifted the [`AsRef<std::ffi::CStr>`] impl
+    /// signature (e.g., returning an owned [`std::ffi::CString`]
+    /// instead of a `&std::ffi::CStr`, or requiring a `&mut self`)
+    /// fails here at compile time instead of at every downstream
+    /// generic call site.
+    #[test]
+    fn test_admission_tier_as_ref_cstr_carries_through_generic_consumer() {
+        fn read<T: AsRef<std::ffi::CStr>>(t: &T) -> &std::ffi::CStr {
+            t.as_ref()
+        }
+        for tier in AdmissionTier::ALL {
+            assert_eq!(
+                read(&tier),
+                <&'static std::ffi::CStr>::from(tier),
+                "generic AsRef<CStr> consumer must recover canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<std::ffi::CStr>`] output round-trips through
+    /// [`std::ffi::CStr::to_str`] recovering the canonical
+    /// snake_case label at every [`AdmissionTier::ALL`] variant.
+    /// Pins the UTF-8 validity contract on the NUL-terminated
+    /// C-string borrowed-view surface: the returned
+    /// `&std::ffi::CStr` decodes to valid UTF-8 (the canonical
+    /// labels are pure printable-ASCII lowercase snake_case), and
+    /// [`std::ffi::CStr::to_str`] recovers exactly the
+    /// [`AdmissionTier::as_str`] emission. Together with
+    /// [`test_admission_tier_as_ref_cstr_agrees_with_static_cstr_from`]
+    /// this closes the NUL-terminated C-string borrowed-view surface
+    /// against both the composition oracle (`<&'static CStr>::from`)
+    /// and the UTF-8 validity oracle (`CStr::to_str`) at every
+    /// [`AdmissionTier::ALL`] variant.
+    #[test]
+    fn test_admission_tier_as_ref_cstr_round_trips_through_to_str() {
+        for tier in AdmissionTier::ALL {
+            let borrowed: &std::ffi::CStr = <AdmissionTier as AsRef<std::ffi::CStr>>::as_ref(&tier);
+            let decoded = borrowed
+                .to_str()
+                .unwrap_or_else(|_| panic!("AsRef<CStr> bytes for {tier:?} must be valid UTF-8"));
+            assert_eq!(
+                decoded,
+                tier.as_str(),
+                "CStr::to_str round-trip must recover canonical label at {tier:?}",
             );
         }
     }
