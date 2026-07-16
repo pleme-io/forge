@@ -3490,6 +3490,169 @@ impl From<BumpLevel> for Box<std::ffi::CStr> {
     }
 }
 
+/// [`From<BumpLevel> for std::sync::Arc<std::ffi::CStr>`] routes
+/// through the by-value owned NUL-terminated C-string emit peer
+/// [`From<BumpLevel> for std::ffi::CString`] composed with the
+/// standard-library [`std::sync::Arc::<std::ffi::CStr>::from`]
+/// in-place refcount-header repurposing so a downstream consumer
+/// bound by `impl Into<std::sync::Arc<std::ffi::CStr>>` (a
+/// cross-thread cached-NUL-terminated-C-string slot typed as
+/// [`std::sync::Arc<std::ffi::CStr>`] to share a canonical
+/// [`BumpLevel`] label across worker threads at a single atomic-
+/// refcount-header allocation, a validated-input newtype whose
+/// NUL-terminated-C-string payload field is typed
+/// [`std::sync::Arc<std::ffi::CStr>`] to hand cheap
+/// [`std::sync::Arc::clone`]s to sibling structures across worker
+/// threads without a per-clone allocation, an FFI-boundary broadcast
+/// wrapper that shares one `*const c_char` handle across many
+/// consumers via atomic refcount rather than one [`std::ffi::CString`]
+/// per consumer, a `dashmap`-style keyed-table NUL-terminated-C-string
+/// value slot whose readers want an [`std::sync::Arc`] clone rather
+/// than a per-lookup [`std::ffi::CString`] allocation, a serde
+/// container that opts into
+/// `#[serde(from = "std::sync::Arc<std::ffi::CStr>")]` at the shared-
+/// owned NUL-terminated C-string frontier) reads the canonical
+/// lowercase label (`"patch"`, `"minor"`, `"major"`) as a shared-owned
+/// NUL-terminated C-string through ONE composition rather than a
+/// per-consumer
+/// `std::sync::Arc::<std::ffi::CStr>::from(std::ffi::CString::new(
+/// level.as_str()).unwrap())` restatement.
+///
+/// The by-value shared-owned peer of the by-value owned
+/// [`From<BumpLevel> for std::ffi::CString`] surface above and the
+/// by-value shrunk-owned [`From<BumpLevel> for Box<std::ffi::CStr>`]
+/// surface directly above — all three are NUL-terminated C-string
+/// emit surfaces at the same canonical-label oracle, differing only
+/// on receiver-side ownership shape: [`From<T> for std::ffi::CString`]
+/// returns a growth-header-carrying resizable owned buffer,
+/// [`From<T> for Box<std::ffi::CStr>`] returns a shrunk immutable
+/// heap allocation with no refcount header, this
+/// [`From<T> for std::sync::Arc<std::ffi::CStr>`] returns a shared-
+/// owned immutable heap allocation with an atomic-refcount header
+/// preceding the label bytes plus the trailing NUL byte for consumers
+/// that will hand cheap [`std::sync::Arc::clone`]s across worker
+/// threads. All three route through the same [`BumpLevel::as_str`]
+/// canonical-label oracle via the same [`std::ffi::CString::new`]
+/// NUL-terminator step.
+///
+/// Structural mirror of [`From<BumpLevel> for std::sync::Arc<str>`],
+/// [`From<BumpLevel> for std::sync::Arc<[u8]>`],
+/// [`From<BumpLevel> for std::sync::Arc<std::ffi::OsStr>`], and
+/// [`From<BumpLevel> for std::sync::Arc<std::path::Path>`] at the
+/// UTF-8, byte-slice, OS-string, and filesystem-path frontiers
+/// respectively — the same by-value shared-owned emit surface at the
+/// same one-oracle discipline, projected onto the NUL-terminated
+/// C-string frontier this time. All five siblings route through the
+/// standard library `From<&T> for std::sync::Arc<T>` /
+/// `From<CString> for Arc<CStr>` impls at their respective frontier
+/// constructor ([`std::sync::Arc::<str>::from`] for the UTF-8 sibling
+/// routing through the `&str` view, [`std::sync::Arc::<[u8]>::from`]
+/// for the byte-slice sibling routing through the `.as_bytes()` view,
+/// [`std::sync::Arc::<std::ffi::OsStr>::from`] for the OS-string
+/// sibling routing through [`std::ffi::OsStr::new`] over the same
+/// `&str` view, [`std::sync::Arc::<std::path::Path>::from`] for the
+/// filesystem-path sibling routing through [`std::path::Path::new`]
+/// over the same `&str` view,
+/// [`std::sync::Arc::<std::ffi::CStr>::from`] here routing through
+/// the owned [`std::ffi::CString`] emit peer to reuse its single
+/// canonical-label + trailing-NUL allocation as the atomic-refcount-
+/// header-prefixed allocation the [`std::sync::Arc<std::ffi::CStr>`]
+/// slot backs onto). Single allocation: the standard library
+/// `From<CString> for Arc<CStr>` impl repurposes the owned
+/// [`std::ffi::CString`] heap allocation in place with an atomic-
+/// refcount-header prefix rather than allocating a fresh shared-
+/// owned buffer and copying, matching the shared-owned discipline
+/// the [`Arc<str>`], [`Arc<[u8]>`], [`Arc<std::ffi::OsStr>`], and
+/// [`Arc<std::path::Path>`] emit peers already carry at their
+/// respective frontiers, whereas the [`Box<std::ffi::CStr>`] emit
+/// peer carries no refcount header and the [`std::ffi::CString`] emit
+/// peer carries a growth-header for future extension.
+///
+/// Closing peer of the by-value shared-owned NUL-terminated C-string
+/// emit trio at the version-bump-magnitude ladder:
+/// [`From<crate::retry::PerAttemptRegion> for
+/// std::sync::Arc<std::ffi::CStr>`] (commit 151a7f2 at `retry.rs`)
+/// opened the trio at the first ordered typed sum;
+/// [`From<crate::probe_outcome::AdmissionTier> for
+/// std::sync::Arc<std::ffi::CStr>`] (commit ed95d37 at
+/// `probe_outcome.rs`) mid-slotted the trio at the second ordered
+/// typed sum; this impl closes the trio at the third and last ordered
+/// typed sum, matching the [`From<T> for
+/// std::sync::Arc<std::ffi::OsStr>`] closing order at the shared-
+/// owned OS-string emit sibling one frontier above (aa7a860 → 99f9460
+/// → 6fc3e70), the [`From<T> for std::sync::Arc<std::path::Path>`]
+/// closing order at the shared-owned filesystem-path emit sibling
+/// (97a2228 → 0b378c1 → 54c3104), and the [`From<T> for
+/// Box<std::ffi::CStr>`] closing order at the shrunk-owned
+/// NUL-terminated C-string emit sibling one ownership shape below
+/// (7eda876 → daaae30 → 53877f3). After this commit the shared-owned
+/// NUL-terminated C-string emit axis spans all three ordered typed
+/// sums on the ladder set through ONE
+/// [`std::ffi::CString::from`] + `From<CString> for Arc<CStr>`
+/// composition each, and the ladder set carries a fifth by-value
+/// shared-owned emit axis alongside the four existing ones (UTF-8,
+/// byte-slice, OS-string, filesystem-path) at a strictly one-oracle
+/// discipline.
+///
+/// # Infallibility
+///
+/// The infallibility contract is inherited unchanged from the upstream
+/// [`From<BumpLevel> for std::ffi::CString`] peer:
+/// [`std::ffi::CString::new`] is fallible in the general case
+/// (rejecting interior-NUL byte sequences at the
+/// [`std::ffi::NulError`] frontier), but the canonical
+/// [`BumpLevel::as_str`] label alphabet (`"patch"`, `"minor"`,
+/// `"major"`) is a subset of the printable-ASCII lowercase alphabetic
+/// grammar and carries no interior NUL byte at any variant, so the
+/// [`std::ffi::CString::new`] call inside the upstream peer is
+/// guaranteed to succeed at every [`BumpLevel::ALL`] value, and the
+/// standard-library `From<CString> for Arc<CStr>` impl is total on
+/// any well-formed [`std::ffi::CString`] receiver. A future variant
+/// insertion that landed a label with an interior NUL byte would
+/// break the upstream peer's `.expect(...)` at the same test-suite
+/// gate the [`std::str::FromStr`] canonicity discipline refuses non-
+/// canonical label admission at, before ever reaching this shared-
+/// owned emit surface.
+///
+/// The identity
+/// `std::sync::Arc::<std::ffi::CStr>::from(level).to_bytes() ==
+/// level.as_str().as_bytes()` at every [`BumpLevel::ALL`] variant is
+/// pinned by
+/// [`tests::test_bump_level_into_arc_cstr_agrees_with_as_str`]; the
+/// identity carried through a generic
+/// `impl Into<std::sync::Arc<std::ffi::CStr>>` consumer at every
+/// variant is pinned by
+/// [`tests::test_bump_level_into_arc_cstr_carries_through_generic_consumer`];
+/// the shared-owned receiver contract — [`std::sync::Arc::clone`]
+/// reads the same canonical label bytes plus trailing NUL,
+/// [`std::sync::Arc::ptr_eq`] holds after the clone, and
+/// [`std::sync::Arc::strong_count`] lifts to at least two after the
+/// clone — at every variant is pinned by
+/// [`tests::test_bump_level_into_arc_cstr_shares_label_across_clones`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// NUL-terminated C-string emit surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one
+/// `From<BumpLevel> for std::sync::Arc<std::ffi::CStr>` impl routing
+/// through the owned [`std::ffi::CString`] emit peer and
+/// [`std::sync::Arc::<std::ffi::CStr>::from`]), not a per-consumer
+/// `std::sync::Arc::<std::ffi::CStr>::from(std::ffi::CString::new(
+/// level.as_str()).unwrap())` restatement at every downstream site
+/// that accepts `impl Into<std::sync::Arc<std::ffi::CStr>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`BumpLevel::as_str`]) and every NUL-terminated C-string
+/// emit surface — [`From<T> for std::ffi::CString`],
+/// [`From<T> for Box<std::ffi::CStr>`], this
+/// [`From<T> for std::sync::Arc<std::ffi::CStr>`] — reads through it,
+/// so the shared-owned allocation shape sits ON TOP of the same
+/// canonical-label oracle the owned resizable-buffer and shrunk-
+/// owned immutable-buffer emit peers already read.
+impl From<BumpLevel> for std::sync::Arc<std::ffi::CStr> {
+    fn from(level: BumpLevel) -> std::sync::Arc<std::ffi::CStr> {
+        std::sync::Arc::<std::ffi::CStr>::from(std::ffi::CString::from(level))
+    }
+}
+
 /// [`TryFrom<&std::ffi::CStr> for BumpLevel`] routes through
 /// [`std::ffi::CStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -12924,6 +13087,145 @@ mod tests {
                 bytes_with_nul.len(),
                 bytes.len() + 1,
                 "Box<CStr> label bytes_with_nul must be exactly one byte longer than to_bytes at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant enumerated by [`BumpLevel::ALL`],
+    /// `std::sync::Arc::<std::ffi::CStr>::from(level)` (the
+    /// [`From<BumpLevel> for std::sync::Arc<std::ffi::CStr>`] impl
+    /// body) yields the same NUL-terminated C-string label bytes (via
+    /// [`std::ffi::CStr::to_bytes`]) as `level.as_str().as_bytes()` —
+    /// the composition through the canonical-label oracle, the
+    /// [`std::ffi::CString`] emit peer, and the standard-library
+    /// `From<CString> for Arc<CStr>` reuse. Pins the agreement
+    /// identity that the by-value shared-owned NUL-terminated C-string
+    /// emit surface reads the same canonical label the by-value owned
+    /// [`From<BumpLevel> for std::ffi::CString`] and the by-value
+    /// shrunk-owned [`From<BumpLevel> for Box<std::ffi::CStr>`]
+    /// surfaces already read at the NUL-terminated C-string frontier.
+    /// Structural mirror of the [`Arc<str>`] agreement pin, the
+    /// [`Arc<[u8]>`] agreement pin, the [`Arc<std::ffi::OsStr>`]
+    /// agreement pin
+    /// [`test_bump_level_into_arc_os_str_agrees_with_os_str_new_as_str`],
+    /// and the [`Arc<std::path::Path>`] agreement pin
+    /// [`test_bump_level_into_arc_path_agrees_with_path_new_as_str`]
+    /// at the UTF-8, byte-slice, OS-string, and filesystem-path
+    /// frontiers respectively, projected onto the NUL-terminated
+    /// C-string frontier this time. Structural mirror of
+    /// `test_per_attempt_region_into_arc_cstr_agrees_with_as_str`
+    /// (commit 151a7f2) at the trio-opener per-attempt-region ladder
+    /// and `test_admission_tier_into_arc_cstr_agrees_with_as_str`
+    /// (commit ed95d37) at the mid-trio admission-tier ladder.
+    #[test]
+    fn test_bump_level_into_arc_cstr_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let shared: std::sync::Arc<std::ffi::CStr> =
+                std::sync::Arc::<std::ffi::CStr>::from(level);
+            assert_eq!(
+                shared.to_bytes(),
+                level.as_str().as_bytes(),
+                "From<BumpLevel> for Arc<CStr> must agree with as_str() bytes at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for std::sync::Arc<std::ffi::CStr>`]
+    /// identity carries through a generic
+    /// `impl Into<std::sync::Arc<std::ffi::CStr>>` consumer at every
+    /// [`BumpLevel::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<std::sync::Arc<std::ffi::CStr>>>(t: T) ->
+    /// std::sync::Arc<std::ffi::CStr> { t.into() }` — the shape of an
+    /// actual downstream consumer (a cross-thread cached-NUL-
+    /// terminated-C-string slot typed as
+    /// [`std::sync::Arc<std::ffi::CStr>`] to share a canonical
+    /// [`BumpLevel`] label across worker threads via atomic refcount,
+    /// a validated-input newtype whose NUL-terminated-C-string
+    /// payload field is typed [`std::sync::Arc<std::ffi::CStr>`] to
+    /// hand cheap [`std::sync::Arc::clone`]s to sibling structures
+    /// across worker threads, a `dashmap`-style keyed-table NUL-
+    /// terminated-C-string-value slot builder whose readers want an
+    /// [`std::sync::Arc`] clone rather than a per-lookup
+    /// [`std::ffi::CString`] allocation, a serde
+    /// `#[serde(from = "std::sync::Arc<std::ffi::CStr>")]` container)
+    /// reads the canonical lowercase label from a [`BumpLevel`] value
+    /// as a shared-owned NUL-terminated C-string. The structural
+    /// witness that a [`BumpLevel`] is genuinely usable at
+    /// `impl Into<std::sync::Arc<std::ffi::CStr>>` call sites; a
+    /// regression that drifted the impl signature (returning
+    /// [`std::ffi::CString`] instead of
+    /// [`std::sync::Arc<std::ffi::CStr>`], returning a
+    /// [`Box<std::ffi::CStr>`] instead of the shared-owned handle,
+    /// requiring `&BumpLevel` and losing the by-value semantics) fails
+    /// here at compile time or at the assertion instead of at every
+    /// downstream generic call site. Structural mirror of
+    /// `test_per_attempt_region_into_arc_cstr_carries_through_generic_consumer`
+    /// (commit 151a7f2) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_arc_cstr_carries_through_generic_consumer`
+    /// (commit ed95d37) at the mid-trio admission-tier ladder.
+    #[test]
+    fn test_bump_level_into_arc_cstr_carries_through_generic_consumer() {
+        fn read<T: Into<std::sync::Arc<std::ffi::CStr>>>(t: T) -> std::sync::Arc<std::ffi::CStr> {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).to_bytes(),
+                level.as_str().as_bytes(),
+                "generic Into<Arc<CStr>> consumer must read canonical label bytes at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for std::sync::Arc<std::ffi::CStr>`]
+    /// shared-owned semantics hold across [`std::sync::Arc::clone`]
+    /// at every [`BumpLevel::ALL`] variant: the clone reads exactly
+    /// the same canonical lowercase label bytes the original reads
+    /// (via [`std::ffi::CStr::to_bytes`]), points at the same
+    /// allocation (identity of the underlying NUL-terminated-C-string
+    /// pointer via [`std::sync::Arc::ptr_eq`]), and the atomic
+    /// refcount lifts to at least two after the clone (via
+    /// [`std::sync::Arc::strong_count`]). Pins the shared-owned
+    /// receiver contract at the NUL-terminated C-string emit
+    /// surface — a regression that drifted the impl body to a non-
+    /// `Arc` composition ([`Box::<std::ffi::CStr>::from`]-then-ad-hoc-
+    /// rewrap that would allocate twice, an [`std::ffi::CString`]
+    /// intermediate followed by a fresh [`std::sync::Arc::new`] rather
+    /// than the standard-library `From<CString> for Arc<CStr>` in-
+    /// place refcount-header repurposing) would break the pointer-
+    /// identity assertion (each clone would land at a distinct
+    /// allocation) even if the canonical-label bytes still agreed.
+    /// Structural mirror of
+    /// `test_per_attempt_region_into_arc_cstr_shares_label_across_clones`
+    /// (commit 151a7f2) at the trio-opener per-attempt-region ladder,
+    /// `test_admission_tier_into_arc_cstr_shares_label_across_clones`
+    /// (commit ed95d37) at the mid-trio admission-tier ladder, and of
+    /// the [`Arc<std::path::Path>`] clone-identity pin
+    /// [`test_bump_level_into_arc_path_shares_label_across_clones`]
+    /// and the [`Arc<std::ffi::OsStr>`] clone-identity pin
+    /// [`test_bump_level_into_arc_os_str_shares_label_across_clones`]
+    /// at the sibling frontiers, projected onto the NUL-terminated
+    /// C-string frontier this time.
+    #[test]
+    fn test_bump_level_into_arc_cstr_shares_label_across_clones() {
+        for level in BumpLevel::ALL {
+            let shared: std::sync::Arc<std::ffi::CStr> =
+                std::sync::Arc::<std::ffi::CStr>::from(level);
+            let cloned = std::sync::Arc::clone(&shared);
+            assert_eq!(
+                cloned.to_bytes(),
+                level.as_str().as_bytes(),
+                "Arc<CStr> clone must read canonical label bytes at {level:?}",
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(&shared, &cloned),
+                "Arc<CStr> clone must share the same underlying allocation at {level:?}",
+            );
+            assert!(
+                std::sync::Arc::strong_count(&shared) >= 2,
+                "Arc<CStr> strong count must be at least 2 after clone at {level:?}",
             );
         }
     }
