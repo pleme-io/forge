@@ -3830,6 +3830,117 @@ impl From<BumpLevel> for std::rc::Rc<std::ffi::CStr> {
     }
 }
 
+/// [`From<BumpLevel> for &'static std::ffi::CStr`] emits the bump-
+/// magnitude label as a static-lifetime borrowed NUL-terminated
+/// C-string view — the by-value static-lifetime emit surface at
+/// the NUL-terminated C-string frontier. Downstream consumers
+/// bound by `impl Into<&'static std::ffi::CStr>` (a `const`-
+/// adjacent NUL-terminated-C-string sink that stashes the bump
+/// label in a `&'static std::ffi::CStr` field for a C-ABI callee
+/// to receive through [`std::ffi::CStr::as_ptr`], a
+/// [`std::borrow::Cow<'static, std::ffi::CStr>`] sink taking
+/// `Into<Cow<'static, CStr>>`, a `libc::syslog`-style FFI wrapper
+/// that keeps a static `*const c_char` per canonical label, a
+/// `phf`-style static lookup table keyed by canonical label
+/// NUL-terminated C-strings) read the canonical lowercase label
+/// as an owned `&'static std::ffi::CStr` view of the compile-time
+/// literal (`c"patch"`, `c"minor"`, `c"major"`) with `'static`
+/// lifetime preserved end-to-end and zero runtime allocation at
+/// the emit boundary.
+///
+/// The by-value static-lifetime peer of the by-value owned
+/// [`From<BumpLevel> for std::ffi::CString`] surface (line 3344),
+/// the shrunk-owned [`From<BumpLevel> for Box<std::ffi::CStr>`]
+/// surface (line 3487), the atomic-shared-owned
+/// [`From<BumpLevel> for std::sync::Arc<std::ffi::CStr>`] surface
+/// (line 3650), and the thread-local shared-owned
+/// [`From<BumpLevel> for std::rc::Rc<std::ffi::CStr>`] surface
+/// (line 3827) directly above — all five are NUL-terminated
+/// C-string emit surfaces at the same canonical-label oracle,
+/// differing only on receiver-side ownership shape: the four
+/// heap-owned peers allocate a per-emit NUL-terminated buffer at
+/// differing ownership tiers (growth-header, shrunk, atomic-
+/// refcount-header, non-atomic-refcount-header), whereas this
+/// by-value static-lifetime peer returns a borrowed view of an
+/// immortal compile-time C-string literal — zero allocation, zero
+/// NUL-byte scan, zero [`std::ffi::CString::new`] validity check
+/// at the emit boundary.
+///
+/// Structural mirror of [`From<BumpLevel> for &'static str`]
+/// (line 6153), [`From<BumpLevel> for &'static [u8]`] (line
+/// 6233), [`From<BumpLevel> for &'static std::ffi::OsStr`] (line
+/// 2040), and [`From<BumpLevel> for &'static std::path::Path`]
+/// (line 2141) at the UTF-8, byte-slice, OS-string, and
+/// filesystem-path frontiers respectively — the same by-value
+/// static-lifetime emit surface at the same one-oracle
+/// discipline, projected onto the NUL-terminated C-string
+/// frontier this time. The compile-time `c"..."` literals (stable
+/// since Rust 1.77) supply the NUL-terminated view directly, so
+/// no runtime step composes over the [`BumpLevel::as_str`] UTF-8
+/// oracle at this emit boundary — but the per-variant `c"..."`
+/// bytes agree with [`BumpLevel::as_str`] byte-for-byte, pinned
+/// by
+/// [`tests::test_bump_level_from_into_static_cstr_agrees_with_as_str`],
+/// so the one-oracle discipline is preserved structurally.
+///
+/// Closes the by-value static-lifetime NUL-terminated C-string
+/// emit trio at the third and last ordered typed sum:
+/// [`From<crate::retry::PerAttemptRegion> for &'static std::ffi::CStr`]
+/// (commit 9247efe) opened the trio at the per-attempt-region
+/// ladder in [`crate::retry`];
+/// [`From<crate::probe_outcome::AdmissionTier> for &'static std::ffi::CStr`]
+/// (commit fe4fbbf) carried the mid-trio slot at the admission-
+/// tier ladder in [`crate::probe_outcome`]; this impl closes the
+/// trio at the version-bump-magnitude ladder, matching the
+/// [`From<T> for &'static std::ffi::OsStr`] closing order
+/// (be57ac3 → b69f733 → 3cbc7bc) at the OS-string sibling one
+/// frontier above and the [`From<T> for &'static
+/// std::path::Path`] closing order at the filesystem-path sibling
+/// one frontier above.
+///
+/// The identity `<&'static std::ffi::CStr>::from(level).to_bytes()
+/// == level.as_str().as_bytes()` at every [`BumpLevel::ALL`]
+/// variant is pinned by
+/// [`tests::test_bump_level_from_into_static_cstr_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<&'static std::ffi::CStr>` consumer at every variant
+/// is pinned by
+/// [`tests::test_bump_level_into_static_cstr_carries_through_generic_consumer`];
+/// the round-trip through [`std::ffi::CStr::to_str`] recovering
+/// the canonical label at every variant is pinned by
+/// [`tests::test_bump_level_from_into_static_cstr_round_trips_through_to_str`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// NUL-terminated C-string emit surface is a typed-primitive site
+/// on [`BumpLevel`] itself (one `From<BumpLevel> for
+/// &'static std::ffi::CStr` impl matching over the variants at
+/// per-variant `c"..."` literals), not a per-consumer
+/// `CStr::from_bytes_with_nul(&{ let mut b = level.as_str().as_bytes()
+/// .to_vec(); b.push(0); b }).unwrap()` restatement at every
+/// downstream site that accepts
+/// `impl Into<&'static std::ffi::CStr>`. THEORY.md §VI.1 one-
+/// oracle: the canonical label is named at one site
+/// ([`BumpLevel::as_str`]) and every by-value static-lifetime
+/// emit surface — [`From<T> for &'static str`],
+/// [`From<T> for &'static [u8]`],
+/// [`From<T> for &'static std::ffi::OsStr`],
+/// [`From<T> for &'static std::path::Path`], this
+/// [`From<T> for &'static std::ffi::CStr`] — reads through it;
+/// the per-variant `c"..."` literals at the match body agree
+/// byte-for-byte with [`BumpLevel::as_str`], pinned by
+/// [`tests::test_bump_level_from_into_static_cstr_agrees_with_as_str`],
+/// keeping the one-oracle discipline intact across the static-
+/// lifetime NUL-terminated C-string projection.
+impl From<BumpLevel> for &'static std::ffi::CStr {
+    fn from(level: BumpLevel) -> &'static std::ffi::CStr {
+        match level {
+            BumpLevel::Patch => c"patch",
+            BumpLevel::Minor => c"minor",
+            BumpLevel::Major => c"major",
+        }
+    }
+}
+
 /// [`TryFrom<&std::ffi::CStr> for BumpLevel`] routes through
 /// [`std::ffi::CStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for BumpLevel`] so a downstream consumer bound by
@@ -13543,6 +13654,125 @@ mod tests {
             assert!(
                 std::rc::Rc::strong_count(&shared) >= 2,
                 "Rc<CStr> strong count must be at least 2 after clone at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for &'static std::ffi::CStr`] identity
+    /// agrees with [`BumpLevel::as_str`] byte-for-byte at every
+    /// [`BumpLevel::ALL`] variant. Pins the byte-view identity
+    /// across the canonical-label + trailing-NUL C-string oracle —
+    /// the impl body's match arms return per-variant `c"..."`
+    /// literals whose non-NUL bytes must equal [`BumpLevel::as_str`]'s
+    /// bytes at every variant. A regression that drifted a match arm
+    /// (`c"PATCH"` under UpperCamel drift, `c"minor "` with trailing
+    /// whitespace, dropping the `Patch` variant with a fresh `_ =>`
+    /// catch-all that mis-labels the level) would fail here rather
+    /// than at a distant FFI callee's log parser. Structural mirror
+    /// of the [`&'static str`] agreement pin, the [`&'static [u8]`]
+    /// agreement pin, the [`&'static std::ffi::OsStr`] agreement
+    /// pin, and the [`&'static std::path::Path`] agreement pin at
+    /// the four prior static-lifetime emit siblings at the version-
+    /// bump-magnitude ladder; the five static-lifetime agreement
+    /// pins together close the by-value static-lifetime emit surface
+    /// at the same one-oracle discipline across UTF-8, byte-slice,
+    /// OS-string, filesystem-path, and NUL-terminated C-string
+    /// frontiers. Structural mirror of
+    /// `test_per_attempt_region_from_into_static_cstr_agrees_with_as_str`
+    /// (commit 9247efe) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_from_into_static_cstr_agrees_with_as_str`
+    /// (commit fe4fbbf) at the mid-trio admission-tier ladder —
+    /// closing the by-value static-lifetime NUL-terminated C-string
+    /// emit agreement pin at the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_from_into_static_cstr_agrees_with_as_str() {
+        for level in BumpLevel::ALL {
+            let borrowed: &'static std::ffi::CStr = <&'static std::ffi::CStr>::from(level);
+            assert_eq!(
+                borrowed.to_bytes(),
+                level.as_str().as_bytes(),
+                "From<BumpLevel> for &'static CStr must agree with as_str() bytes at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for &'static std::ffi::CStr`] identity
+    /// carries through a generic `impl Into<&'static std::ffi::CStr>`
+    /// consumer at every [`BumpLevel::ALL`] variant. A tiny generic
+    /// function `fn read<T: Into<&'static std::ffi::CStr>>(t: T) ->
+    /// &'static std::ffi::CStr { t.into() }` — the shape of an actual
+    /// downstream consumer (a `const`-adjacent NUL-terminated-C-string
+    /// sink that stashes the bump label in a `&'static
+    /// std::ffi::CStr` field for a C-ABI callee to receive through
+    /// [`std::ffi::CStr::as_ptr`], a `libc::syslog`-style FFI wrapper
+    /// that keeps a static `*const c_char` per canonical label, a
+    /// `phf`-style static lookup table keyed by canonical label
+    /// NUL-terminated C-strings) reads the canonical lowercase label
+    /// from a [`BumpLevel`] value as a static-lifetime borrowed
+    /// NUL-terminated C-string. The structural witness that a
+    /// [`BumpLevel`] is genuinely usable at
+    /// `impl Into<&'static std::ffi::CStr>` call sites; a regression
+    /// that drifted the impl signature (returning
+    /// [`std::ffi::CString`] or [`Box<std::ffi::CStr>`] instead of
+    /// `&'static std::ffi::CStr`, returning a shorter-lived borrow
+    /// rather than `'static`, requiring `&BumpLevel` and losing the
+    /// by-value semantics) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    /// Structural mirror of
+    /// `test_per_attempt_region_into_static_cstr_carries_through_generic_consumer`
+    /// (commit 9247efe) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_into_static_cstr_carries_through_generic_consumer`
+    /// (commit fe4fbbf) at the mid-trio admission-tier ladder.
+    #[test]
+    fn test_bump_level_into_static_cstr_carries_through_generic_consumer() {
+        fn read<T: Into<&'static std::ffi::CStr>>(t: T) -> &'static std::ffi::CStr {
+            t.into()
+        }
+
+        for level in BumpLevel::ALL {
+            assert_eq!(
+                read(level).to_bytes(),
+                level.as_str().as_bytes(),
+                "generic Into<&'static CStr> consumer must read canonical label bytes at {level:?}",
+            );
+        }
+    }
+
+    /// The [`From<BumpLevel> for &'static std::ffi::CStr`] round-
+    /// trips through [`std::ffi::CStr::to_str`] recovering the
+    /// canonical lowercase label at every [`BumpLevel::ALL`]
+    /// variant. Pins the parse-side dual: the [`&'static
+    /// std::ffi::CStr`] borrowed view emitted by [`From<T> for
+    /// &'static std::ffi::CStr`] decodes to valid UTF-8 (no interior
+    /// non-UTF-8 bytes leak in via a mistranscribed literal) and the
+    /// decoded [`&str`] view equals the [`BumpLevel::as_str`]
+    /// canonical label byte-for-byte. A regression that let a
+    /// non-UTF-8 escape sneak into a `c"..."` literal (a stray
+    /// `\xFF` in the byte string, a mis-copied `c"m\xE9nor"` instead
+    /// of `c"minor"` under a Latin-1 paste) or that drifted a match
+    /// arm to a spelling [`BumpLevel::as_str`] does not emit would
+    /// fail here at the [`str`] equality assertion rather than at a
+    /// distant FFI callee's log parser. Structural mirror of
+    /// `test_per_attempt_region_from_into_static_cstr_round_trips_through_to_str`
+    /// (commit 9247efe) at the trio-opener per-attempt-region ladder
+    /// and
+    /// `test_admission_tier_from_into_static_cstr_round_trips_through_to_str`
+    /// (commit fe4fbbf) at the mid-trio admission-tier ladder —
+    /// closing the by-value static-lifetime NUL-terminated C-string
+    /// emit round-trip pin at the third and last ordered typed sum.
+    #[test]
+    fn test_bump_level_from_into_static_cstr_round_trips_through_to_str() {
+        for level in BumpLevel::ALL {
+            let borrowed: &'static std::ffi::CStr = <&'static std::ffi::CStr>::from(level);
+            let decoded: &str = borrowed
+                .to_str()
+                .expect("c\"...\" literal must decode to valid UTF-8");
+            assert_eq!(
+                decoded,
+                level.as_str(),
+                "From<BumpLevel> for &'static CStr must round-trip through CStr::to_str at {level:?}",
             );
         }
     }
