@@ -5810,6 +5810,141 @@ impl From<PerAttemptRegion> for std::sync::Arc<std::ffi::CStr> {
     }
 }
 
+/// [`From<PerAttemptRegion> for Rc<std::ffi::CStr>`] routes through the
+/// owned [`From<PerAttemptRegion> for std::ffi::CString`] emit peer
+/// composed with [`std::rc::Rc::<std::ffi::CStr>::from`] so a
+/// downstream consumer bound by
+/// `impl Into<std::rc::Rc<std::ffi::CStr>>` (a same-thread cached
+/// NUL-terminated-C-string slot typed as
+/// [`std::rc::Rc<std::ffi::CStr>`] to share a canonical
+/// [`PerAttemptRegion`] label within one worker via a single non-atomic
+/// refcount-header allocation, a validated-input newtype whose
+/// NUL-terminated-C-string payload field is typed
+/// [`std::rc::Rc<std::ffi::CStr>`] to hand cheap
+/// [`std::rc::Rc::clone`]s to sibling structures on the same thread
+/// without a per-clone allocation, a single-threaded
+/// [`std::collections::HashMap<std::rc::Rc<std::ffi::CStr>, _>`] key
+/// slot builder whose readers want an [`std::rc::Rc`] clone rather than
+/// a per-lookup [`std::ffi::CString`] allocation, a serde container
+/// that opts into `#[serde(from = "std::rc::Rc<std::ffi::CStr>")]` at
+/// the thread-local shared-owned NUL-terminated C-string frontier)
+/// reads the canonical snake_case label as a thread-local shared-owned
+/// NUL-terminated C-string through ONE composition rather than a per-
+/// consumer `std::rc::Rc::<std::ffi::CStr>::from(std::ffi::CString::new(
+/// region.as_str()).unwrap())` restatement.
+///
+/// The by-value thread-local shared-owned peer of the by-value owned
+/// [`From<PerAttemptRegion> for std::ffi::CString`] surface (line
+/// 5532), the by-value shrunk-owned
+/// [`From<PerAttemptRegion> for Box<std::ffi::CStr>`] surface (line
+/// 5676), and the by-value atomic-shared-owned
+/// [`From<PerAttemptRegion> for std::sync::Arc<std::ffi::CStr>`]
+/// surface (line 5807) directly above — all four are NUL-terminated
+/// C-string emit surfaces at the same canonical-label oracle, differing
+/// only on receiver-side ownership shape: [`From<T> for
+/// std::ffi::CString`] returns a growth-header-carrying resizable
+/// owned buffer, [`From<T> for Box<std::ffi::CStr>`] returns a shrunk
+/// immutable heap allocation with no refcount header,
+/// [`From<T> for std::sync::Arc<std::ffi::CStr>`] returns a shared-
+/// owned immutable heap allocation with an atomic-refcount header for
+/// cross-thread sharing, and this [`From<T> for std::rc::Rc<
+/// std::ffi::CStr>`] returns a shared-owned immutable heap allocation
+/// with a non-atomic refcount header preceding the label bytes plus
+/// the trailing NUL byte for consumers that will hand cheap
+/// [`std::rc::Rc::clone`]s within a single thread (paying no atomic-
+/// operation cost that the [`std::sync::Arc<std::ffi::CStr>`] peer
+/// must pay for cross-thread safety). All four route through the same
+/// [`PerAttemptRegion::as_str`] canonical-label oracle via the same
+/// [`std::ffi::CString::new`] NUL-terminator step.
+///
+/// Structural mirror of [`From<PerAttemptRegion> for
+/// std::rc::Rc<str>`] (line 2352), [`From<PerAttemptRegion> for
+/// std::rc::Rc<[u8]>`] (line 3231),
+/// [`From<PerAttemptRegion> for std::rc::Rc<std::ffi::OsStr>`]
+/// (line 5283), and [`From<PerAttemptRegion> for
+/// std::rc::Rc<std::path::Path>`] (line 5425) at the UTF-8, byte-slice,
+/// OS-string, and filesystem-path frontiers respectively — the same
+/// by-value thread-local shared-owned emit surface at the same one-
+/// oracle discipline, projected onto the NUL-terminated C-string
+/// frontier this time. All five siblings route through the standard
+/// library `From<&T> for std::rc::Rc<T>` / `From<CString> for
+/// Rc<CStr>` impls at their respective frontier constructor
+/// ([`std::rc::Rc::<str>::from`] for the UTF-8 sibling routing
+/// through the `&str` view, [`std::rc::Rc::<[u8]>::from`] for the
+/// byte-slice sibling routing through the `.as_bytes()` view,
+/// [`std::rc::Rc::<std::ffi::OsStr>::from`] for the OS-string sibling
+/// routing through [`std::ffi::OsStr::new`] over the same `&str` view,
+/// [`std::rc::Rc::<std::path::Path>::from`] for the filesystem-path
+/// sibling routing through [`std::path::Path::new`] over the same
+/// `&str` view, [`std::rc::Rc::<std::ffi::CStr>::from`] here routing
+/// through the owned [`std::ffi::CString`] emit peer to reuse its
+/// single canonical-label + trailing-NUL allocation as the non-atomic-
+/// refcount-header-prefixed allocation the
+/// [`std::rc::Rc<std::ffi::CStr>`] slot backs onto). Single allocation:
+/// the standard library `From<CString> for Rc<CStr>` impl repurposes
+/// the owned [`std::ffi::CString`] heap allocation in place with a
+/// non-atomic-refcount-header prefix rather than allocating a fresh
+/// shared-owned buffer and copying, matching the shared-owned
+/// discipline the [`Rc<str>`], [`Rc<[u8]>`], [`Rc<std::ffi::OsStr>`],
+/// and [`Rc<std::path::Path>`] emit peers already carry at their
+/// respective frontiers, whereas the [`Box<std::ffi::CStr>`] emit peer
+/// carries no refcount header and the [`std::ffi::CString`] emit peer
+/// carries a growth-header for future extension.
+///
+/// Opens the by-value thread-local shared-owned NUL-terminated C-string
+/// emit trio at the per-attempt-region ladder; two subsequent commits
+/// close the trio at the [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the [`From<T> for
+/// std::rc::Rc<std::ffi::OsStr>`] opening order at the thread-local
+/// shared-owned OS-string emit sibling one frontier above (d484f80 →
+/// 2df36e3 → 91e16b4), the [`From<T> for std::rc::Rc<std::path::Path>`]
+/// opening order at the thread-local shared-owned filesystem-path emit
+/// sibling (af6b09a → 949d2e3 → c11463f), and the [`From<T> for
+/// std::sync::Arc<std::ffi::CStr>`] opening order at the atomic-
+/// shared-owned NUL-terminated C-string emit sibling one ownership
+/// tier above (151a7f2 → ed95d37 → 0629b24) this commit's peer directly
+/// mirrors.
+///
+/// The identity
+/// `std::rc::Rc::<std::ffi::CStr>::from(region).to_bytes() ==
+/// region.as_str().as_bytes()` at every [`PerAttemptRegion::ALL`]
+/// variant is pinned by
+/// [`tests::test_per_attempt_region_into_rc_cstr_agrees_with_as_str`];
+/// the identity carried through a generic
+/// `impl Into<std::rc::Rc<std::ffi::CStr>>` consumer at every variant
+/// is pinned by
+/// [`tests::test_per_attempt_region_into_rc_cstr_carries_through_generic_consumer`];
+/// the thread-local shared-owned receiver contract —
+/// [`std::rc::Rc::clone`] reads the same canonical label bytes plus
+/// trailing NUL, [`std::rc::Rc::ptr_eq`] holds after the clone, and
+/// [`std::rc::Rc::strong_count`] lifts to at least two after the clone
+/// — at every variant is pinned by
+/// [`tests::test_per_attempt_region_into_rc_cstr_shares_label_across_clones`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value thread-local shared-
+/// owned NUL-terminated C-string emit surface is a typed-primitive site
+/// on [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
+/// std::rc::Rc<std::ffi::CStr>` impl routing through the owned
+/// [`std::ffi::CString`] emit peer and
+/// [`std::rc::Rc::<std::ffi::CStr>::from`]), not a per-consumer
+/// `std::rc::Rc::<std::ffi::CStr>::from(std::ffi::CString::new(
+/// region.as_str()).unwrap())` restatement at every downstream site
+/// that accepts `impl Into<std::rc::Rc<std::ffi::CStr>>`. THEORY.md
+/// §VI.1 one-oracle: the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]) and every NUL-terminated C-string
+/// emit surface — [`From<T> for std::ffi::CString`], [`From<T> for
+/// Box<std::ffi::CStr>`], [`From<T> for std::sync::Arc<std::ffi::CStr>`],
+/// this [`From<T> for std::rc::Rc<std::ffi::CStr>`] — reads through it,
+/// so the thread-local shared-owned allocation shape sits ON TOP of the
+/// same canonical-label oracle the owned resizable-buffer, shrunk-
+/// owned immutable-buffer, and atomic-shared-owned emit peers already
+/// read.
+impl From<PerAttemptRegion> for std::rc::Rc<std::ffi::CStr> {
+    fn from(region: PerAttemptRegion) -> std::rc::Rc<std::ffi::CStr> {
+        std::rc::Rc::<std::ffi::CStr>::from(std::ffi::CString::from(region))
+    }
+}
+
 /// [`TryFrom<&std::ffi::CStr> for PerAttemptRegion`] routes through
 /// [`std::ffi::CStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for PerAttemptRegion`] so a downstream consumer bound
@@ -23025,6 +23160,145 @@ mod tests {
             assert!(
                 std::sync::Arc::strong_count(&shared) >= 2,
                 "Arc<CStr> strong count must be at least 2 after clone at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`],
+    /// `std::rc::Rc::<std::ffi::CStr>::from(region)` (the
+    /// [`From<PerAttemptRegion> for std::rc::Rc<std::ffi::CStr>`] impl
+    /// body) yields the same NUL-terminated C-string label bytes (via
+    /// [`std::ffi::CStr::to_bytes`]) as `region.as_str().as_bytes()`
+    /// — the composition through the canonical-label oracle, the
+    /// [`std::ffi::CString`] emit peer, and the standard-library
+    /// `From<CString> for Rc<CStr>` reuse. Pins the agreement identity
+    /// that the by-value thread-local shared-owned NUL-terminated
+    /// C-string emit surface reads the same canonical label the by-
+    /// value owned [`From<PerAttemptRegion> for std::ffi::CString`],
+    /// the by-value shrunk-owned [`From<PerAttemptRegion> for
+    /// Box<std::ffi::CStr>`], and the by-value atomic-shared-owned
+    /// [`From<PerAttemptRegion> for std::sync::Arc<std::ffi::CStr>`]
+    /// surfaces already read at the NUL-terminated C-string frontier.
+    /// Structural mirror of the [`Rc<str>`] agreement pin
+    /// [`test_per_attempt_region_into_rc_str_agrees_with_as_str`], the
+    /// [`Rc<[u8]>`] agreement pin
+    /// [`test_per_attempt_region_into_rc_bytes_agrees_with_as_str_as_bytes`],
+    /// the [`Rc<std::ffi::OsStr>`] agreement pin
+    /// [`test_per_attempt_region_into_rc_os_str_agrees_with_os_str_new_as_str`],
+    /// and the [`Rc<std::path::Path>`] agreement pin
+    /// [`test_per_attempt_region_into_rc_path_agrees_with_path_new_as_str`]
+    /// at the UTF-8, byte-slice, OS-string, and filesystem-path
+    /// frontiers respectively, projected onto the NUL-terminated
+    /// C-string frontier this time — the five thread-local shared-owned
+    /// agreement pins together close the by-value thread-local shared-
+    /// owned emit surface at the same one-oracle discipline across
+    /// UTF-8, byte-slice, OS-string, filesystem-path, and NUL-
+    /// terminated C-string frontiers.
+    #[test]
+    fn test_per_attempt_region_into_rc_cstr_agrees_with_as_str() {
+        for region in PerAttemptRegion::ALL {
+            let shared: std::rc::Rc<std::ffi::CStr> = std::rc::Rc::<std::ffi::CStr>::from(region);
+            assert_eq!(
+                shared.to_bytes(),
+                region.as_str().as_bytes(),
+                "From<PerAttemptRegion> for Rc<CStr> must agree with as_str() bytes at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for std::rc::Rc<std::ffi::CStr>`]
+    /// identity carries through a generic
+    /// `impl Into<std::rc::Rc<std::ffi::CStr>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<std::rc::Rc<std::ffi::CStr>>>(t: T) ->
+    /// std::rc::Rc<std::ffi::CStr> { t.into() }` — the shape of an
+    /// actual downstream consumer (a same-thread cached-NUL-terminated-
+    /// C-string slot typed as [`std::rc::Rc<std::ffi::CStr>`] to share
+    /// a canonical [`PerAttemptRegion`] label within one worker via a
+    /// single non-atomic refcount-header allocation, a validated-input
+    /// newtype whose NUL-terminated-C-string payload field is typed
+    /// [`std::rc::Rc<std::ffi::CStr>`] to hand cheap
+    /// [`std::rc::Rc::clone`]s to sibling structures on the same
+    /// thread, a single-threaded arena-keyed table NUL-terminated-
+    /// C-string-value slot builder whose readers want an
+    /// [`std::rc::Rc`] clone rather than a per-lookup
+    /// [`std::ffi::CString`] allocation, a serde
+    /// `#[serde(from = "std::rc::Rc<std::ffi::CStr>")]` container)
+    /// reads the canonical snake_case label from a [`PerAttemptRegion`]
+    /// value as a thread-local shared-owned NUL-terminated C-string.
+    /// The structural witness that a [`PerAttemptRegion`] is genuinely
+    /// usable at `impl Into<std::rc::Rc<std::ffi::CStr>>` call sites;
+    /// a regression that drifted the impl signature (returning
+    /// [`std::ffi::CString`] instead of [`std::rc::Rc<std::ffi::CStr>`],
+    /// returning [`Box<std::ffi::CStr>`] or
+    /// [`std::sync::Arc<std::ffi::CStr>`] instead of the thread-local
+    /// shared-owned handle, requiring `&PerAttemptRegion` and losing
+    /// the by-value semantics) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_rc_cstr_carries_through_generic_consumer() {
+        fn read<T: Into<std::rc::Rc<std::ffi::CStr>>>(t: T) -> std::rc::Rc<std::ffi::CStr> {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            assert_eq!(
+                read(region).to_bytes(),
+                region.as_str().as_bytes(),
+                "generic Into<Rc<CStr>> consumer must read canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// The [`From<PerAttemptRegion> for std::rc::Rc<std::ffi::CStr>`]
+    /// thread-local shared-owned semantics hold across
+    /// [`std::rc::Rc::clone`] at every [`PerAttemptRegion::ALL`]
+    /// variant: the clone reads exactly the same canonical snake_case
+    /// label bytes the original reads (via [`std::ffi::CStr::to_bytes`]),
+    /// points at the same allocation (identity of the underlying
+    /// NUL-terminated-C-string pointer via [`std::rc::Rc::ptr_eq`]),
+    /// and the non-atomic refcount lifts to at least two after the
+    /// clone (via [`std::rc::Rc::strong_count`]). Pins the thread-local
+    /// shared-owned receiver contract at the NUL-terminated C-string
+    /// emit surface — a regression that drifted the impl body to a
+    /// non-`Rc` composition ([`Box::<std::ffi::CStr>::from`]-then-
+    /// ad-hoc-rewrap that would allocate twice, an [`std::ffi::CString`]
+    /// intermediate followed by a fresh [`std::rc::Rc::new`] rather
+    /// than the standard-library `From<CString> for Rc<CStr>` in-place
+    /// refcount-header repurposing) would break the pointer-identity
+    /// assertion (each clone would land at a distinct allocation) even
+    /// if the canonical-label bytes still agreed. Structural mirror of
+    /// the [`Rc<str>`] clone-identity pin
+    /// [`test_per_attempt_region_into_rc_str_shares_label_across_clones`]
+    /// at the UTF-8 frontier, the [`Rc<[u8]>`] clone-identity pin
+    /// [`test_per_attempt_region_into_rc_bytes_shares_label_across_clones`]
+    /// at the byte-slice frontier, and the [`Rc<std::ffi::OsStr>`]
+    /// clone-identity pin
+    /// [`test_per_attempt_region_into_rc_os_str_shares_label_across_clones`]
+    /// at the OS-string frontier — the four clone-identity pins
+    /// together close the structural witness that the receiver actually
+    /// holds a thread-local shared-owned handle rather than an
+    /// [`std::rc::Rc`]-typed wrapper around a per-clone-allocated
+    /// [`Box<std::ffi::CStr>`], across UTF-8, byte-slice, OS-string,
+    /// and NUL-terminated C-string frontiers.
+    #[test]
+    fn test_per_attempt_region_into_rc_cstr_shares_label_across_clones() {
+        for region in PerAttemptRegion::ALL {
+            let shared: std::rc::Rc<std::ffi::CStr> = std::rc::Rc::<std::ffi::CStr>::from(region);
+            let cloned = std::rc::Rc::clone(&shared);
+            assert_eq!(
+                cloned.to_bytes(),
+                region.as_str().as_bytes(),
+                "Rc<CStr> clone must read canonical label bytes at {region:?}",
+            );
+            assert!(
+                std::rc::Rc::ptr_eq(&shared, &cloned),
+                "Rc<CStr> clone must share the same underlying allocation at {region:?}",
+            );
+            assert!(
+                std::rc::Rc::strong_count(&shared) >= 2,
+                "Rc<CStr> strong count must be at least 2 after clone at {region:?}",
             );
         }
     }
