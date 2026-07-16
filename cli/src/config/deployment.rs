@@ -552,29 +552,37 @@ mod tests {
 
     #[test]
     fn test_deployment_config_validate_disabled_passes() {
-        let mut config = DeploymentConfig::default();
-        config.enabled = false;
+        let config = DeploymentConfig {
+            enabled: false,
+            ..DeploymentConfig::default()
+        };
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_deployment_config_validate_empty_flux_commands() {
-        let mut config = DeploymentConfig::default();
-        config.flux_commands = vec![];
+        let config = DeploymentConfig {
+            flux_commands: vec![],
+            ..DeploymentConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_deployment_config_validate_whitespace_flux_command() {
-        let mut config = DeploymentConfig::default();
-        config.flux_commands = vec!["  ".to_string()];
+        let config = DeploymentConfig {
+            flux_commands: vec!["  ".to_string()],
+            ..DeploymentConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_deployment_config_validate_zero_timeout() {
-        let mut config = DeploymentConfig::default();
-        config.deployment_wait_timeout_secs = 0;
+        let config = DeploymentConfig {
+            deployment_wait_timeout_secs: 0,
+            ..DeploymentConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
@@ -583,8 +591,10 @@ mod tests {
         // Before the magnitude oracle wired this field, a zero
         // nix_connect_timeout_secs validated clean and reached the `nix`
         // invocation; now it is rejected at config-load like every peer.
-        let mut config = DeploymentConfig::default();
-        config.nix_connect_timeout_secs = 0;
+        let config = DeploymentConfig {
+            nix_connect_timeout_secs: 0,
+            ..DeploymentConfig::default()
+        };
         let err = config.validate().unwrap_err().to_string();
         assert!(
             err.contains("nix_connect_timeout_secs"),
@@ -594,35 +604,57 @@ mod tests {
 
     #[test]
     fn test_deployment_config_validate_ab_split_needs_2_slices() {
-        let mut config = DeploymentConfig::default();
-        config.production_strategy = ProductionStrategy::AbSplit;
-        config.ab_slices = vec![AbSliceConfig {
-            name: "a".to_string(),
-            kustomization: "k".to_string(),
-            delay_secs: 0,
-        }];
+        let config = DeploymentConfig {
+            production_strategy: ProductionStrategy::AbSplit,
+            ab_slices: vec![AbSliceConfig {
+                name: "a".to_string(),
+                kustomization: "k".to_string(),
+                delay_secs: 0,
+            }],
+            ..DeploymentConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_deployment_config_validate_ab_split_duplicate_names() {
-        let mut config = DeploymentConfig::default();
-        config.production_strategy = ProductionStrategy::AbSplit;
-        config.ab_slices = vec![
-            AbSliceConfig { name: "a".to_string(), kustomization: "k1".to_string(), delay_secs: 0 },
-            AbSliceConfig { name: "a".to_string(), kustomization: "k2".to_string(), delay_secs: 300 },
-        ];
+        let config = DeploymentConfig {
+            production_strategy: ProductionStrategy::AbSplit,
+            ab_slices: vec![
+                AbSliceConfig {
+                    name: "a".to_string(),
+                    kustomization: "k1".to_string(),
+                    delay_secs: 0,
+                },
+                AbSliceConfig {
+                    name: "a".to_string(),
+                    kustomization: "k2".to_string(),
+                    delay_secs: 300,
+                },
+            ],
+            ..DeploymentConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_deployment_config_validate_ab_split_valid() {
-        let mut config = DeploymentConfig::default();
-        config.production_strategy = ProductionStrategy::AbSplit;
-        config.ab_slices = vec![
-            AbSliceConfig { name: "a".to_string(), kustomization: "k1".to_string(), delay_secs: 0 },
-            AbSliceConfig { name: "b".to_string(), kustomization: "k2".to_string(), delay_secs: 300 },
-        ];
+        let config = DeploymentConfig {
+            production_strategy: ProductionStrategy::AbSplit,
+            ab_slices: vec![
+                AbSliceConfig {
+                    name: "a".to_string(),
+                    kustomization: "k1".to_string(),
+                    delay_secs: 0,
+                },
+                AbSliceConfig {
+                    name: "b".to_string(),
+                    kustomization: "k2".to_string(),
+                    delay_secs: 300,
+                },
+            ],
+            ..DeploymentConfig::default()
+        };
         assert!(config.validate().is_ok());
     }
 
