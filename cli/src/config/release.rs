@@ -309,15 +309,19 @@ mod tests {
 
     #[test]
     fn test_validate_invalid_default_mode() {
-        let mut config = ReleaseConfig::default();
-        config.default_mode = "invalid".to_string();
+        let config = ReleaseConfig {
+            default_mode: "invalid".to_string(),
+            ..ReleaseConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_validate_empty_environment_order() {
-        let mut config = ReleaseConfig::default();
-        config.environment_order = vec![];
+        let config = ReleaseConfig {
+            environment_order: vec![],
+            ..ReleaseConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 

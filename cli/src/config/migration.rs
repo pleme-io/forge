@@ -401,57 +401,71 @@ mod tests {
 
     #[test]
     fn test_service_migration_config_validate_memory_request_exceeds_limit() {
-        let mut config = ServiceMigrationConfig::default();
-        config.memory_request = "512Mi".to_string();
-        config.memory_limit = "256Mi".to_string();
+        let config = ServiceMigrationConfig {
+            memory_request: "512Mi".to_string(),
+            memory_limit: "256Mi".to_string(),
+            ..ServiceMigrationConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_service_migration_config_validate_cpu_request_exceeds_limit() {
-        let mut config = ServiceMigrationConfig::default();
-        config.cpu_request = "1000m".to_string();
-        config.cpu_limit = "500m".to_string();
+        let config = ServiceMigrationConfig {
+            cpu_request: "1000m".to_string(),
+            cpu_limit: "500m".to_string(),
+            ..ServiceMigrationConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_service_migration_config_validate_invalid_database_type() {
-        let mut config = ServiceMigrationConfig::default();
-        config.database_type = "redis".to_string();
+        let config = ServiceMigrationConfig {
+            database_type: "redis".to_string(),
+            ..ServiceMigrationConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_service_migration_config_validate_all_valid_db_types() {
         for db_type in ["postgres", "postgresql", "databend", "clickhouse", "elasticsearch", "meilisearch", "none"] {
-            let mut config = ServiceMigrationConfig::default();
-            config.database_type = db_type.to_string();
+            let config = ServiceMigrationConfig {
+                database_type: db_type.to_string(),
+                ..ServiceMigrationConfig::default()
+            };
             assert!(config.validate().is_ok(), "Expected '{}' to be valid", db_type);
         }
     }
 
     #[test]
     fn test_service_migration_config_validate_empty_schema_path() {
-        let mut config = ServiceMigrationConfig::default();
-        config.schema_migrations = true;
-        config.schema_migrations_path = "".to_string();
+        let config = ServiceMigrationConfig {
+            schema_migrations: true,
+            schema_migrations_path: "".to_string(),
+            ..ServiceMigrationConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_service_migration_config_validate_empty_data_path() {
-        let mut config = ServiceMigrationConfig::default();
-        config.data_migrations = true;
-        config.data_migrations_path = "".to_string();
+        let config = ServiceMigrationConfig {
+            data_migrations: true,
+            data_migrations_path: "".to_string(),
+            ..ServiceMigrationConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_service_migration_config_validate_shinka_timeout_bounds() {
-        let mut config = ServiceMigrationConfig::default();
-        config.shinka_gating = true;
-        config.shinka_timeout_secs = 10;
+        let mut config = ServiceMigrationConfig {
+            shinka_gating: true,
+            shinka_timeout_secs: 10,
+            ..ServiceMigrationConfig::default()
+        };
         assert!(config.validate().is_err());
 
         config.shinka_timeout_secs = 2000;
@@ -463,15 +477,19 @@ mod tests {
 
     #[test]
     fn test_service_migration_config_validate_invalid_memory_format() {
-        let mut config = ServiceMigrationConfig::default();
-        config.memory_request = "invalid".to_string();
+        let config = ServiceMigrationConfig {
+            memory_request: "invalid".to_string(),
+            ..ServiceMigrationConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_service_migration_config_validate_invalid_cpu_format() {
-        let mut config = ServiceMigrationConfig::default();
-        config.cpu_request = "invalid".to_string();
+        let config = ServiceMigrationConfig {
+            cpu_request: "invalid".to_string(),
+            ..ServiceMigrationConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 }
