@@ -92,6 +92,9 @@ tempfile = "3.14"
 # UUID for release IDs
 uuid = { version = "1.11", features = ["serde"] }
 
+# docker-archive tarball + layer-tar walking (image-release ELF verification)
+tar = "0.4"
+
 [features]
 default = []
 attestation = ["tameshi"]
