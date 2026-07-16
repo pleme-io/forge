@@ -6071,6 +6071,154 @@ impl From<PerAttemptRegion> for &'static std::ffi::CStr {
     }
 }
 
+/// [`From<PerAttemptRegion> for std::borrow::Cow<'static,
+/// std::ffi::CStr>`] routes through the by-value static-lifetime
+/// NUL-terminated C-string emit peer [`From<PerAttemptRegion> for
+/// &'static std::ffi::CStr`] directly above (which reads the per-
+/// variant `c"before_first"` / `c"first"` / `c"interim"` / `c"final"`
+/// / `c"over_budget"` compile-time C-string literals, stable since
+/// Rust 1.77) wrapped in [`std::borrow::Cow::Borrowed`] so a
+/// downstream consumer bound by
+/// `impl Into<Cow<'static, std::ffi::CStr>>` (a config-schema builder
+/// that accepts either a static NUL-terminated C-string label or a
+/// caller-supplied [`std::ffi::CString`] uniformly at the borrowed/
+/// owned frontier, a `libc::syslog`-style FFI wrapper that stashes
+/// canonical labels behind [`std::borrow::Cow<'static, std::ffi::CStr>`]
+/// slots to hand `*const c_char` pointers to a C-ABI callee through
+/// [`std::ffi::CStr::as_ptr`] without a per-emit
+/// [`std::ffi::CString`] allocation, a `phf`-style static lookup table
+/// keyed by canonical label NUL-terminated C-strings, a SLSA
+/// attestation-emitter or Dagger pipeline-step wrapper typed as
+/// [`std::borrow::Cow<'static, std::ffi::CStr>`] at its label sink)
+/// reads the canonical snake_case label as a borrowed
+/// [`Cow<'static, std::ffi::CStr>`] view of the compile-time
+/// `c"..."` literal with `'static` lifetime preserved end-to-end and
+/// zero allocation at the emit boundary.
+///
+/// The by-value borrowed/owned-frontier peer of the by-value static-
+/// lifetime [`From<PerAttemptRegion> for &'static std::ffi::CStr`]
+/// (commit 9247efe) and by-value owned [`From<PerAttemptRegion> for
+/// std::ffi::CString`] (commit 020317a) surfaces above — all three
+/// are NUL-terminated C-string emit surfaces at the same canonical-
+/// label + trailing-NUL oracle, differing only on receiver-side
+/// shape: [`From<T> for &'static std::ffi::CStr`] returns a borrowed
+/// `'static`-lived view for consumers that want the borrow,
+/// [`From<T> for std::ffi::CString`] returns an owned buffer for
+/// consumers that own the label, this
+/// [`From<T> for Cow<'static, std::ffi::CStr>`] returns either
+/// uniformly at the borrowed/owned-frontier receiver shape. All
+/// three route through the same canonical-label + trailing-NUL
+/// oracle: the [`&'static std::ffi::CStr`] peer through per-variant
+/// `c"..."` literals directly, the [`std::ffi::CString`] peer
+/// through [`std::ffi::CString::new`] over
+/// [`PerAttemptRegion::as_str`], this
+/// [`Cow<'static, std::ffi::CStr>`] peer through the
+/// [`&'static std::ffi::CStr`] emit oracle composed with
+/// [`std::borrow::Cow::Borrowed`] — the same one-oracle discipline
+/// lifted to the borrowed/owned-frontier emit layer, with the
+/// [`std::borrow::Cow::Borrowed`] branch taken uniformly because the
+/// compile-time C-string literal already has `'static` lifetime.
+///
+/// Structural mirror of
+/// [`From<PerAttemptRegion> for std::borrow::Cow<'static, str>`],
+/// [`From<PerAttemptRegion> for std::borrow::Cow<'static, [u8]>`],
+/// [`From<PerAttemptRegion> for std::borrow::Cow<'static, std::ffi::OsStr>`]
+/// (commit 24f6110), and
+/// [`From<PerAttemptRegion> for std::borrow::Cow<'static, std::path::Path>`]
+/// at the UTF-8, byte-slice, OS-string, and filesystem-path frontiers
+/// respectively — the same by-value borrowed/owned-frontier emit
+/// surface at the same one-oracle discipline, projected onto the
+/// NUL-terminated C-string frontier this time; every sibling similarly
+/// wraps [`std::borrow::Cow::Borrowed`] around the `'static`-lived
+/// borrowed view produced by its frontier constructor (`&'static str`
+/// directly for the UTF-8 sibling, `str::as_bytes` for the byte-slice
+/// sibling, [`std::ffi::OsStr::new`] for the OS-string sibling,
+/// [`std::path::Path::new`] for the filesystem-path sibling, and the
+/// [`&'static std::ffi::CStr`] emit oracle here for the
+/// NUL-terminated C-string frontier). Unlike the four sibling
+/// frontiers, this frontier cannot compose through
+/// [`PerAttemptRegion::as_str`] directly at zero cost — `&'static str`
+/// carries no trailing NUL byte the [`std::ffi::CStr`] shape requires
+/// — so the composition threads through the per-variant `c"..."`
+/// literals that the by-value static-lifetime C-string emit peer
+/// already reads, preserving both the `'static` lifetime and the
+/// zero-allocation contract at the emit boundary.
+///
+/// Opens the by-value borrowed/owned-frontier NUL-terminated
+/// C-string emit trio at the per-attempt-region ladder; two
+/// subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// [`From<T> for &'static std::ffi::CStr`] opening order
+/// (9247efe → fe4fbbf → 8dd0277), the
+/// [`From<T> for std::ffi::CString`] opening order
+/// (020317a → 1e8ed3c → 6cff423), the [`From<T> for Box<std::ffi::CStr>`]
+/// opening order (7eda876 → daaae30 → 53877f3), the
+/// [`From<T> for std::sync::Arc<std::ffi::CStr>`] opening order
+/// (151a7f2 → ed95d37 → 0629b24), the
+/// [`From<T> for std::rc::Rc<std::ffi::CStr>`] opening order
+/// (71e7707 → 61d51ad → dbaf0a3), and the
+/// [`From<T> for std::borrow::Cow<'static, std::ffi::OsStr>`]
+/// opening order at the OS-string sibling one frontier above.
+///
+/// Zero-cost by construction: the underlying
+/// [`&'static std::ffi::CStr`] emit peer already returns a borrowed
+/// view of an immortal read-only-data-section C-string literal at
+/// zero allocation, zero NUL-byte scan, and zero
+/// [`std::ffi::CString::new`] validity check per emission; wrapping
+/// that view in [`std::borrow::Cow::Borrowed`] is a plain enum-
+/// variant construction carrying the reference verbatim, so this
+/// surface adds no runtime cost over the underlying static-lifetime
+/// borrow. The `'static` lifetime is preserved through the
+/// composition because per-variant `c"..."` literals live in the
+/// read-only data section, [`&'static std::ffi::CStr`] preserves
+/// that lifetime, and [`std::borrow::Cow::Borrowed`] preserves the
+/// inner reference's lifetime.
+///
+/// The identity `<Cow<'static, std::ffi::CStr>>::from(region) ==
+/// Cow::Borrowed(<&'static CStr>::from(region))` at every
+/// [`PerAttemptRegion::ALL`] variant is pinned by
+/// [`tests::test_per_attempt_region_from_into_cow_static_cstr_agrees_with_cow_borrowed_static_cstr`];
+/// the identity carried through a generic
+/// `impl Into<Cow<'static, std::ffi::CStr>>` consumer at every variant
+/// is pinned by
+/// [`tests::test_per_attempt_region_into_cow_static_cstr_carries_through_generic_consumer`];
+/// the zero-allocation contract (impl returns the
+/// [`std::borrow::Cow::Borrowed`] branch rather than
+/// [`std::borrow::Cow::Owned`]) at every variant is pinned by
+/// [`tests::test_per_attempt_region_into_cow_static_cstr_is_borrowed`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// frontier NUL-terminated C-string emit surface is a typed-
+/// primitive site on [`PerAttemptRegion`] itself (one
+/// `From<PerAttemptRegion> for Cow<'static, std::ffi::CStr>` impl
+/// routing through the [`&'static std::ffi::CStr`] emit oracle and
+/// [`std::borrow::Cow::Borrowed`]), not a per-consumer
+/// `Cow::Borrowed(<&'static CStr>::from(region))` restatement at
+/// every downstream site that accepts
+/// `impl Into<Cow<'static, std::ffi::CStr>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label + trailing-NUL
+/// is named at the [`&'static std::ffi::CStr`] emit oracle (which
+/// itself reads the per-variant `c"..."` literals agreeing with
+/// [`PerAttemptRegion::as_str`] byte-for-byte), and every by-value
+/// borrowed/owned-frontier emit surface —
+/// [`From<T> for std::borrow::Cow<'static, str>`] (yields
+/// `Cow<'static, str>`),
+/// [`From<T> for std::borrow::Cow<'static, [u8]>`] (yields
+/// `Cow<'static, [u8]>`),
+/// [`From<T> for std::borrow::Cow<'static, std::ffi::OsStr>`] (yields
+/// `Cow<'static, std::ffi::OsStr>`),
+/// [`From<T> for std::borrow::Cow<'static, std::path::Path>`] (yields
+/// `Cow<'static, std::path::Path>`), this
+/// [`From<T> for std::borrow::Cow<'static, std::ffi::CStr>`] (yields
+/// `Cow<'static, std::ffi::CStr>`) — reads through the same one-
+/// oracle discipline projected onto its own frontier.
+impl From<PerAttemptRegion> for std::borrow::Cow<'static, std::ffi::CStr> {
+    fn from(region: PerAttemptRegion) -> std::borrow::Cow<'static, std::ffi::CStr> {
+        std::borrow::Cow::Borrowed(<&'static std::ffi::CStr>::from(region))
+    }
+}
+
 /// [`TryFrom<&std::ffi::CStr> for PerAttemptRegion`] routes through
 /// [`std::ffi::CStr::to_str`] and the by-reference UTF-8 parse peer
 /// [`TryFrom<&str> for PerAttemptRegion`] so a downstream consumer bound
@@ -23532,6 +23680,136 @@ mod tests {
                 decoded,
                 region.as_str(),
                 "&'static CStr round-trip through to_str() must recover as_str() at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant enumerated by
+    /// [`PerAttemptRegion::ALL`],
+    /// `<std::borrow::Cow<'static, std::ffi::CStr>>::from(region)` (the
+    /// [`From<PerAttemptRegion> for Cow<'static, std::ffi::CStr>`] impl
+    /// body) equals `Cow::Borrowed(<&'static CStr>::from(region))` (the
+    /// composition through the by-value static-lifetime C-string emit
+    /// oracle and [`std::borrow::Cow::Borrowed`]). Pins the agreement
+    /// identity that the by-value borrowed/owned-frontier
+    /// NUL-terminated C-string emit surface reads the same canonical
+    /// label + trailing-NUL the by-value owned
+    /// [`From<PerAttemptRegion> for std::ffi::CString`] surface, the
+    /// shrunk-owned [`From<PerAttemptRegion> for Box<std::ffi::CStr>`]
+    /// surface, the atomic-shared-owned
+    /// [`From<PerAttemptRegion> for std::sync::Arc<std::ffi::CStr>`]
+    /// surface, the thread-local shared-owned
+    /// [`From<PerAttemptRegion> for std::rc::Rc<std::ffi::CStr>`]
+    /// surface, and the by-value static-lifetime
+    /// [`From<PerAttemptRegion> for &'static std::ffi::CStr`] surface
+    /// already read at the NUL-terminated C-string frontier: a
+    /// regression that swapped the [`From`] impl body to route through
+    /// [`std::ffi::CString::new`]-then-into-[`std::borrow::Cow::Owned`]
+    /// (dropping the zero-allocation branch), or through an
+    /// intermediate [`String`] buffer, or through a
+    /// [`std::borrow::Cow::Borrowed`] wrap of a
+    /// [`std::ffi::CStr::from_bytes_with_nul`] over
+    /// [`PerAttemptRegion::as_str`] plus a runtime-appended NUL byte
+    /// (allocating a scratch [`Vec<u8>`] per emission), would break
+    /// this composition equality at at least one variant and fail
+    /// here at the canonical-label pin, not at every downstream
+    /// `impl Into<Cow<'static, std::ffi::CStr>>` call site.
+    #[test]
+    fn test_per_attempt_region_from_into_cow_static_cstr_agrees_with_cow_borrowed_static_cstr() {
+        for region in PerAttemptRegion::ALL {
+            let cow: std::borrow::Cow<'static, std::ffi::CStr> = std::borrow::Cow::from(region);
+            let borrowed: &std::ffi::CStr = &cow;
+            assert_eq!(
+                borrowed,
+                <&'static std::ffi::CStr>::from(region),
+                "From<PerAttemptRegion> for Cow<'static, CStr> and \
+                 Cow::Borrowed(<&'static CStr>::from(region)) must agree at {region:?}",
+            );
+        }
+    }
+
+    /// The
+    /// [`From<PerAttemptRegion> for std::borrow::Cow<'static, std::ffi::CStr>`]
+    /// identity carries through a generic
+    /// `impl Into<Cow<'static, std::ffi::CStr>>` consumer at every
+    /// [`PerAttemptRegion::ALL`] variant. A tiny generic function
+    /// `fn read<T: Into<Cow<'static, CStr>>>(t: T) -> Cow<'static, CStr>
+    /// { t.into() }` — the shape of an actual downstream consumer
+    /// (config-schema builder that accepts either a static
+    /// NUL-terminated C-string label or a caller-supplied
+    /// [`std::ffi::CString`] uniformly at the borrowed/owned frontier,
+    /// `libc::syslog`-style FFI wrapper that stashes canonical labels
+    /// behind [`std::borrow::Cow<'static, std::ffi::CStr>`] slots to
+    /// hand `*const c_char` pointers to a C-ABI callee through
+    /// [`std::ffi::CStr::as_ptr`], a SLSA attestation-emitter typed
+    /// as [`std::borrow::Cow<'static, std::ffi::CStr>`] at its label
+    /// sink) reads the canonical snake_case label directly from a
+    /// [`PerAttemptRegion`] value with the `'static` lifetime
+    /// preserved through the [`std::borrow::Cow<'static, std::ffi::CStr>`]
+    /// wrapper. The structural witness that a [`PerAttemptRegion`] is
+    /// genuinely usable at `impl Into<Cow<'static, std::ffi::CStr>>`
+    /// call sites — a regression that drifted the [`From`] impl
+    /// signature (returning [`std::borrow::Cow<'_, std::ffi::CStr>`]
+    /// with a non-`'static` lifetime, requiring [`&PerAttemptRegion`]
+    /// and losing the by-value semantics, or dropping the
+    /// [`std::borrow::Cow`] wrapper entirely) fails here at compile
+    /// time instead of at every downstream generic call site.
+    #[test]
+    fn test_per_attempt_region_into_cow_static_cstr_carries_through_generic_consumer() {
+        fn read<T: Into<std::borrow::Cow<'static, std::ffi::CStr>>>(
+            t: T,
+        ) -> std::borrow::Cow<'static, std::ffi::CStr> {
+            t.into()
+        }
+
+        for region in PerAttemptRegion::ALL {
+            let cow = read(region);
+            let borrowed: &std::ffi::CStr = &cow;
+            assert_eq!(
+                borrowed,
+                <&'static std::ffi::CStr>::from(region),
+                "generic Into<Cow<'static, CStr>> consumer must read canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// [`From<PerAttemptRegion> for std::borrow::Cow<'static, std::ffi::CStr>`]
+    /// returns the [`std::borrow::Cow::Borrowed`] branch, not
+    /// [`std::borrow::Cow::Owned`], at every [`PerAttemptRegion::ALL`]
+    /// variant. Pins the zero-allocation contract at the emit
+    /// boundary: because the per-variant `c"..."` literals that the
+    /// [`&'static std::ffi::CStr`] emit oracle reads live in the
+    /// read-only data section with `'static` lifetime, and
+    /// [`std::borrow::Cow::Borrowed`] preserves the inner reference's
+    /// lifetime, this impl composes with an
+    /// [`Into<std::borrow::Cow<'static, std::ffi::CStr>>`] receiver at
+    /// the [`std::borrow::Cow::Borrowed`] branch — the receiver pays
+    /// the `'static`-borrow cost of
+    /// [`From<PerAttemptRegion> for &'static std::ffi::CStr`], not
+    /// the [`std::ffi::CString`]-allocation cost of
+    /// [`From<PerAttemptRegion> for std::ffi::CString`]. The
+    /// structural witness that the impl body picks the load-bearing
+    /// [`std::borrow::Cow::Borrowed`] branch — a regression that
+    /// drifted the impl body toward
+    /// `Cow::Owned(std::ffi::CString::from(region))` would silently
+    /// allocate at every emit site and defeat the borrowed/owned-
+    /// frontier discipline this impl closes; the [`matches!`] pin
+    /// lights up here at ONE named site instead of leaking to every
+    /// downstream `impl Into<Cow<'static, std::ffi::CStr>>` consumer
+    /// as a hidden per-call allocation. Sibling of the agreement pin
+    /// [`test_per_attempt_region_from_into_cow_static_cstr_agrees_with_cow_borrowed_static_cstr`]
+    /// at the label-oracle surface — the two pins together close both
+    /// the value-agreement contract and the branch-choice / zero-
+    /// allocation contract at the by-value
+    /// [`std::borrow::Cow<'static, std::ffi::CStr>`] emit surface.
+    #[test]
+    fn test_per_attempt_region_into_cow_static_cstr_is_borrowed() {
+        for region in PerAttemptRegion::ALL {
+            let cow: std::borrow::Cow<'static, std::ffi::CStr> = std::borrow::Cow::from(region);
+            assert!(
+                matches!(cow, std::borrow::Cow::Borrowed(_)),
+                "From<PerAttemptRegion> for Cow<'static, CStr> must return Cow::Borrowed \
+                 (zero-allocation branch) at {region:?}, not Cow::Owned",
             );
         }
     }
