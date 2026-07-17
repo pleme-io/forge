@@ -164,14 +164,15 @@ pub async fn get_pod_statuses(
             .clone();
 
         // Extract tag from image via the typed primitive at
-        // `crate::oci_manifest::image_tag` — the "unknown" fallback covers
-        // bare references, digest-form references, and malformed inputs
-        // that the naïve `.split(':').last()` predecessor confused with a
-        // legitimate tag (returning the image name, digest hex, or an
-        // empty string instead of falling through to the sentinel).
-        let image_tag = crate::oci_manifest::image_tag(&image)
-            .unwrap_or("unknown")
-            .to_string();
+        // `crate::oci_manifest::image_tag_display` — the display sibling
+        // of `image_tag` that returns the shared `IMAGE_TAG_UNKNOWN`
+        // sentinel on a bare reference, a digest-form reference, or any
+        // input the naïve `.split(':').last()` predecessor confused with
+        // a legitimate tag. Centralising the "unknown" literal at the
+        // OCI-adjacent parse module prevents the five k8s / flux
+        // display sites from drifting to five different fallback
+        // strings.
+        let image_tag = crate::oci_manifest::image_tag_display(&image).to_string();
 
         // Extract detailed container state
         let container_state = container_statuses.and_then(|cs| cs.first()).map(|c| {

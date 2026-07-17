@@ -281,6 +281,39 @@ pub fn image_tag(image: &str) -> Option<&str> {
     })
 }
 
+/// Display fallback for image references without a parseable tag — the
+/// one canonical string surfaced to logs and user-facing output when
+/// [`image_tag`] returns [`None`] (a digest-form reference, a bare
+/// reference, a port-only registry, a degenerate parse).
+///
+/// Centralising the sentinel here means the whole crate agrees on
+/// which literal a rollout log or a pod-status line writes when the
+/// tag can't be read: one `IMAGE_TAG_UNKNOWN` symbol beats five
+/// hand-rolled `"unknown"` literals that could drift to `"?"`,
+/// `"n/a"`, `""` at any of them. Consumers that log or compare
+/// against the sentinel spot it by name (`== oci_manifest::
+/// IMAGE_TAG_UNKNOWN`) rather than by magic-string equality.
+pub const IMAGE_TAG_UNKNOWN: &str = "unknown";
+
+/// Display-friendly image tag: [`image_tag`] when the reference has a
+/// parseable `:<tag>`, [`IMAGE_TAG_UNKNOWN`] otherwise.
+///
+/// This is the sibling of [`image_tag`] scoped to the log / user-
+/// output frontier — a total function that always returns a non-empty
+/// [`&str`] safe to interpolate into a status line. Prior call sites
+/// hand-rolled `image_tag(image).unwrap_or("unknown")` at five spots
+/// (theory §VI.1 three-times rule tripped by more than a factor of
+/// one — a `k8s::get_pod_statuses` `PodStatus.image_tag` build and
+/// four `flux::wait_for_deployment` / `wait_for_pod` status lines),
+/// all baking the literal fallback string into their own scope. Every
+/// consumer that reads a tag off a `&str` for display now routes
+/// through this one primitive at zero per-site cost, and the sentinel
+/// is defined once at the same OCI-adjacent parse frontier the tag
+/// itself is read from.
+pub fn image_tag_display(image: &str) -> &str {
+    image_tag(image).unwrap_or(IMAGE_TAG_UNKNOWN)
+}
+
 /// Extract the image reference from a single line of `docker load`
 /// output. `docker load` reports each loaded image on its own line under
 /// one of two shapes:
@@ -742,6 +775,82 @@ mod tests {
         assert_eq!(image_tag(":latest"), None);
         assert_eq!(image_tag("nginx/"), None);
         assert_eq!(image_tag("/nginx"), None);
+    }
+
+    /// [`image_tag_display`] returns the parsed tag for every input
+    /// [`image_tag`] does; the display sibling is a pure widening from
+    /// [`Option<&str>`] to `&str` on the `Some` branch.
+    #[test]
+    fn test_image_tag_display_returns_parsed_tag_when_present() {
+        assert_eq!(image_tag_display("nginx:latest"), "latest");
+        assert_eq!(
+            image_tag_display("ghcr.io/pleme-io/forge:v0.42.0"),
+            "v0.42.0"
+        );
+        assert_eq!(
+            image_tag_display("registry.example.com:5000/library/nginx:1.25"),
+            "1.25"
+        );
+    }
+
+    /// Every input that makes [`image_tag`] return [`None`] — bare,
+    /// port-only, digest-form, degenerate — routes to the shared
+    /// [`IMAGE_TAG_UNKNOWN`] sentinel via [`image_tag_display`].
+    #[test]
+    fn test_image_tag_display_falls_back_to_sentinel() {
+        assert_eq!(image_tag_display(""), IMAGE_TAG_UNKNOWN);
+        assert_eq!(image_tag_display("nginx"), IMAGE_TAG_UNKNOWN);
+        assert_eq!(
+            image_tag_display("registry.example.com:5000/library/nginx"),
+            IMAGE_TAG_UNKNOWN
+        );
+        assert_eq!(
+            image_tag_display(&format!("nginx@sha256:{D1}")),
+            IMAGE_TAG_UNKNOWN
+        );
+        assert_eq!(image_tag_display("nginx:"), IMAGE_TAG_UNKNOWN);
+        assert_eq!(image_tag_display(":latest"), IMAGE_TAG_UNKNOWN);
+    }
+
+    /// The sentinel is a non-empty display string safe to interpolate
+    /// into any user-facing log line — a rollout status line that
+    /// substituted an empty string here would produce
+    /// "Current tag: , waiting for SHA …" and lose the reader.
+    #[test]
+    fn test_image_tag_unknown_is_a_non_empty_display_string() {
+        assert!(!IMAGE_TAG_UNKNOWN.is_empty());
+        assert_eq!(IMAGE_TAG_UNKNOWN, "unknown");
+    }
+
+    /// Regression pin for the five call sites this primitive replaces:
+    /// [`image_tag_display`] must be observationally identical to the
+    /// prior hand-rolled `image_tag(input).unwrap_or("unknown")` on
+    /// every input the crate had in production. Reverting the impl to
+    /// something that changed the sentinel spelling (e.g. `""`, `"?"`,
+    /// `"n/a"`) would fail this test, catching the drift the
+    /// centralised primitive is here to prevent.
+    #[test]
+    fn test_image_tag_display_matches_prior_unwrap_or_unknown_pattern() {
+        let inputs = [
+            "nginx:latest",
+            "ghcr.io/pleme-io/forge:v0.42.0",
+            "registry.example.com:5000/library/nginx:1.25",
+            "",
+            "nginx",
+            "registry.example.com:5000/library/nginx",
+            "nginx:",
+            ":latest",
+            "nginx/",
+        ];
+        for input in inputs {
+            let predecessor = image_tag(input).unwrap_or("unknown");
+            assert_eq!(
+                image_tag_display(input),
+                predecessor,
+                "image_tag_display drifted from the pre-extraction \
+                 `image_tag(image).unwrap_or(\"unknown\")` shape on input {input:?}"
+            );
+        }
     }
 
     /// The canonical `Loaded image: <ref>` shape (tagged load) reports

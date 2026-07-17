@@ -460,7 +460,7 @@ pub async fn verify_deployment_image(
         match get_pod_status_full(namespace, deployment_name).await {
             Ok(pod) => {
                 if pod.image.contains(expected_tag_suffix) {
-                    let tag = crate::oci_manifest::image_tag(&pod.image).unwrap_or("unknown");
+                    let tag = crate::oci_manifest::image_tag_display(&pod.image);
                     println!("   ✅ Deployment has correct image tag: {}", tag);
                     return Ok(());
                 }
@@ -480,7 +480,7 @@ pub async fn verify_deployment_image(
                     }
                 }
 
-                let tag = crate::oci_manifest::image_tag(&pod.image).unwrap_or("unknown");
+                let tag = crate::oci_manifest::image_tag_display(&pod.image);
                 println!(
                     "   ⏳ Current tag: {}, waiting for SHA {} ({}s elapsed)",
                     tag, expected_tag_suffix, elapsed
@@ -545,8 +545,7 @@ pub async fn wait_for_deployment(
                 let has_correct_image = pod.image.contains(&expected_sha);
 
                 if has_correct_image && pod.ready {
-                    let current_tag =
-                        crate::oci_manifest::image_tag(&pod.image).unwrap_or("unknown");
+                    let current_tag = crate::oci_manifest::image_tag_display(&pod.image);
                     println!("   ✅ Pod has correct image ({}) and is ready", current_tag);
                     println!(
                         "✅ {}",
@@ -570,7 +569,7 @@ pub async fn wait_for_deployment(
                     }
                 }
 
-                let current_tag = crate::oci_manifest::image_tag(&pod.image).unwrap_or("unknown");
+                let current_tag = crate::oci_manifest::image_tag_display(&pod.image);
                 if has_correct_image {
                     println!(
                         "   ⏳ Pod has correct image but not ready yet (status: {}, {}s elapsed)",
