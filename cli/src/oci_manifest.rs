@@ -232,6 +232,72 @@ impl std::str::FromStr for ContentDigest {
     }
 }
 
+/// [`TryFrom<&str>`] for [`ContentDigest`] routes through
+/// [`<ContentDigest as std::str::FromStr>::from_str`] so a downstream
+/// consumer bound by `impl TryFrom<&str>` (a serde container that opts
+/// into `#[serde(try_from = "&str")]` on a wrapper field, a generic
+/// try-conversion helper `fn parse_digest<T: for<'a> TryFrom<&'a str,
+/// Error = ContentDigestError>>`, a validated-input newtype builder
+/// whose canonical parse contract is stated as [`TryFrom<&str>`] rather
+/// than [`std::str::FromStr`]) recovers a [`ContentDigest`] value from
+/// its canonical `<algorithm>:<hex>` string through the same one-oracle
+/// grammar the direct `.parse::<ContentDigest>()` call sites already
+/// read.
+///
+/// The by-reference parse peer of [`std::str::FromStr for ContentDigest`]
+/// on the reference-grammar family — same discipline the sibling typed
+/// primitives [`crate::retry::PerAttemptRegion`],
+/// [`crate::probe_outcome::AdmissionTier`], and
+/// [`crate::version::BumpLevel`] already carry (each of them exposes
+/// [`std::str::FromStr`] AND [`TryFrom<&str>`], both routing through the
+/// shared canonical-label parse oracle) — now extended to the digest
+/// reference-grammar family so every canonical-string typed primitive in
+/// forge's typed-primitive algebra exposes the SAME two-surface pair
+/// (inherent `parse` + [`FromStr`] + [`TryFrom<&str>`], all reading
+/// through the ONE [`ContentDigest::parse`] grammar oracle) without
+/// exception.
+///
+/// The [`Err`](std::convert::TryFrom::Error) type is
+/// [`ContentDigestError`] — the same typed error [`ContentDigest::parse`]
+/// and [`<ContentDigest as std::str::FromStr>::from_str`] emit, carrying
+/// the same per-failure-mode discriminator (missing separator,
+/// unsupported algorithm, invalid hex) so a consumer that pins a
+/// per-variant handling policy at its own frontier can distinguish arms
+/// directly off the [`Result<ContentDigest, ContentDigestError>`] the
+/// impl returns, matching the discipline every other reference-grammar
+/// consumer already observes.
+///
+/// The natural bridge to the serde `try_from` container attribute
+/// (`#[serde(try_from = "&str")]` — which keys off [`TryFrom<&str>`],
+/// not [`std::str::FromStr`]) so a downstream config-schema field that
+/// wraps a [`ContentDigest`] and wants serde's `try_from` grammar reads
+/// through the same one-oracle predicate at zero per-consumer bridge
+/// cost. The [`FromStr`](std::str::FromStr) impl carries the load-
+/// bearing delegation to [`ContentDigest::parse`]; this [`TryFrom<&str>`]
+/// impl delegates through it, so the parse-oracle discipline is
+/// preserved end-to-end and a future grammar refinement (widening to
+/// `sha384`, tightening the trim behaviour) remains a one-site edit at
+/// the inherent [`ContentDigest::parse`] oracle without a per-derived-
+/// surface cascade.
+///
+/// THEORY.md §III.1 typescape: the by-reference try-conversion surface
+/// is a typed-primitive site on [`ContentDigest`] itself (one
+/// [`TryFrom<&str>`] impl routing through the [`FromStr`] parse oracle),
+/// not a per-consumer `.parse::<ContentDigest>()` bridge at every
+/// downstream site that types its parse contract as
+/// `impl TryFrom<&str>` rather than [`std::str::FromStr`]. THEORY.md
+/// §VI.1 one-oracle: the canonical `<algorithm>:<hex>` grammar is named
+/// at one site ([`ContentDigest::parse`]), and every parse surface —
+/// [`std::str::FromStr`], this [`TryFrom<&str>`], a future
+/// [`serde::Deserialize`] impl — reads through it.
+impl TryFrom<&str> for ContentDigest {
+    type Error = ContentDigestError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s)
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -876,6 +942,133 @@ mod tests {
         let d1: ContentDigest = format!("sha256:{D1}").parse().unwrap();
         let d2: ContentDigest = d1.to_string().parse().unwrap();
         assert_eq!(d1, d2);
+    }
+
+    /// [`TryFrom<&str>`] succeeds on a well-formed sha256 digest and
+    /// yields the same validated value as the inherent
+    /// [`ContentDigest::parse`] oracle and the [`std::str::FromStr`]
+    /// derived surface. Pins the by-reference try-conversion surface for
+    /// the primary registry algorithm.
+    #[test]
+    fn test_try_from_str_parses_sha256_digest() {
+        let raw = format!("sha256:{D1}");
+        let via_try_from = ContentDigest::try_from(raw.as_str()).unwrap();
+        let via_inherent = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(via_try_from, via_inherent);
+        assert_eq!(via_try_from.as_str(), raw);
+    }
+
+    /// [`TryFrom<&str>`] succeeds on a well-formed sha512 digest. Pins
+    /// the derived surface for the second supported algorithm so a
+    /// downstream consumer bound by `impl TryFrom<&str>` that receives a
+    /// sha512-signed receipt reads the same grammar the inherent oracle
+    /// enforces.
+    #[test]
+    fn test_try_from_str_parses_sha512_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let via_try_from = ContentDigest::try_from(raw.as_str()).unwrap();
+        assert_eq!(via_try_from.algorithm(), "sha512");
+        assert_eq!(via_try_from.hex(), hex);
+    }
+
+    /// The [`TryFrom<&str>`] impl inherits the inherent oracle's
+    /// edge-whitespace trim: a captured registry response with leading /
+    /// trailing whitespace still parses via `ContentDigest::try_from`.
+    /// Pins the by-reference try-conversion surface's trim behaviour to
+    /// the inherent oracle's so a downstream consumer switching from
+    /// `ContentDigest::parse(s.trim()).ok()` to
+    /// `ContentDigest::try_from(s).ok()` reads byte-identical results.
+    #[test]
+    fn test_try_from_str_trims_edge_whitespace() {
+        let raw = format!("  sha256:{D1}\n");
+        let via_try_from = ContentDigest::try_from(raw.as_str()).unwrap();
+        assert_eq!(via_try_from.as_str(), format!("sha256:{D1}"));
+    }
+
+    /// The [`TryFrom<&str>`] impl emits the SAME [`ContentDigestError`]
+    /// variant as the inherent oracle at each canonical failure mode
+    /// (missing separator, unsupported algorithm, invalid hex — length
+    /// wrong, uppercase, non-hex byte). Pins the "one grammar oracle
+    /// serves every idiomatic Rust parse entry point" invariant so a
+    /// future refactor that inlined a divergent grammar into
+    /// [`TryFrom<&str>`] is caught by the test suite.
+    #[test]
+    fn test_try_from_str_matches_inherent_parse_on_every_error_mode() {
+        let cases = [
+            "sha256abc",                              // missing separator
+            &format!("md5:{D1}"),                     // unsupported algorithm
+            &format!("sha256:{}", &D1[..60]),         // wrong hex length
+            &format!("sha256:{}", D1.to_uppercase()), // uppercase hex
+            &format!("sha256:{}g", &D1[..63]),        // non-hex byte
+        ];
+        for raw in cases {
+            let via_try_from = ContentDigest::try_from(raw).unwrap_err();
+            let via_inherent = ContentDigest::parse(raw).unwrap_err();
+            assert_eq!(
+                via_try_from, via_inherent,
+                "try_from and inherent parse must emit the same error variant \
+                 for '{raw}'; got try_from={via_try_from:?} vs inherent={via_inherent:?}"
+            );
+        }
+    }
+
+    /// The [`TryFrom<&str>`] impl and the [`std::str::FromStr`] impl
+    /// resolve to the SAME [`Result<ContentDigest, ContentDigestError>`]
+    /// on every well-formed digest and every canonical failure mode.
+    /// Pins the "both by-reference parse surfaces route through the
+    /// single [`ContentDigest::parse`] oracle" invariant so a future
+    /// divergence between the two derived surfaces (one accepting inputs
+    /// the other rejects, or emitting a different error variant) is
+    /// caught by the test suite.
+    #[test]
+    fn test_try_from_str_agrees_with_from_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let ok_cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha512:{hex512}"),
+            format!("  sha256:{D3}\n"),
+        ];
+        for raw in ok_cases {
+            let via_try_from = ContentDigest::try_from(raw.as_str());
+            let via_from_str: Result<ContentDigest, _> = raw.parse();
+            assert_eq!(via_try_from, via_from_str);
+        }
+        let err_cases = [
+            "sha256abc",                              // missing separator
+            &format!("md5:{D1}"),                     // unsupported algorithm
+            &format!("sha256:{}", &D1[..60]),         // wrong hex length
+            &format!("sha256:{}", D1.to_uppercase()), // uppercase hex
+            &format!("sha256:{}g", &D1[..63]),        // non-hex byte
+        ];
+        for raw in err_cases {
+            let via_try_from = ContentDigest::try_from(raw);
+            let via_from_str: Result<ContentDigest, _> = raw.parse();
+            assert_eq!(via_try_from, via_from_str);
+        }
+    }
+
+    /// The [`TryFrom<&str>`] impl composes with a generic
+    /// try-conversion helper bounded by `for<'a> TryFrom<&'a str, Error
+    /// = ContentDigestError>` — the compositional motivation for
+    /// landing the trait separately from [`std::str::FromStr`]. Pins the
+    /// generic-consumer surface so a downstream site that types its
+    /// parse contract as [`TryFrom<&str>`] (a serde `try_from` wrapper,
+    /// a validated-input builder helper) recovers the same typed value
+    /// the inherent oracle produces.
+    #[test]
+    fn test_try_from_str_carries_through_generic_consumer() {
+        fn parse_via_try_from<T: for<'a> TryFrom<&'a str, Error = ContentDigestError>>(
+            s: &str,
+        ) -> Result<T, ContentDigestError> {
+            T::try_from(s)
+        }
+        let raw = format!("sha256:{D1}");
+        let d: ContentDigest = parse_via_try_from(&raw).unwrap();
+        assert_eq!(d.as_str(), raw);
+        let err = parse_via_try_from::<ContentDigest>("sha256abc").unwrap_err();
+        assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
     }
 
     /// An OCI image manifest (the standard single-image shape skopeo
