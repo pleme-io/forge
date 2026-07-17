@@ -97,7 +97,8 @@ pub async fn execute(
                 println!(
                     "   {} {} ({})",
                     "OK".green(),
-                    format!("{}:{}", entry.registry_url, rollback_tag).dimmed(),
+                    crate::oci_manifest::image_reference(&entry.registry_url, &rollback_tag)
+                        .dimmed(),
                     &digest[..std::cmp::min(19, digest.len())]
                 );
             }

@@ -317,7 +317,7 @@ impl RegistryClient {
         for tag in tags {
             info!("Pushing {}:{}", registry, tag);
             self.push(image_path, registry, tag).await?;
-            pushed.push(format!("{}:{}", registry, tag));
+            pushed.push(crate::oci_manifest::image_reference(registry, tag));
         }
 
         Ok(pushed)
@@ -370,11 +370,14 @@ impl RegistryClient {
             for tag in &tags {
                 info!("Pushing {}:{}", registry, tag);
                 self.push(&image.path, registry, tag).await?;
-                arch_tags.push(format!("{}:{}", registry, tag));
+                arch_tags.push(crate::oci_manifest::image_reference(registry, tag));
             }
 
             // Track the immutable arch-sha tag as source for manifest index
-            source_refs.push(format!("{}:{}-{}", registry, image.arch, tag_suffix));
+            source_refs.push(crate::oci_manifest::image_reference(
+                registry,
+                &format!("{}-{}", image.arch, tag_suffix),
+            ));
         }
 
         // Step 2: Create manifest index if multiple architectures
@@ -385,7 +388,9 @@ impl RegistryClient {
             self.create_manifest_index(registry, &tags, &source_refs)
                 .await?;
 
-            tags.iter().map(|t| format!("{}:{}", registry, t)).collect()
+            tags.iter()
+                .map(|t| crate::oci_manifest::image_reference(registry, t))
+                .collect()
         } else {
             Vec::new()
         };
@@ -410,7 +415,7 @@ impl RegistryClient {
         let regctl = get_tool_path("REGCTL_BIN", "regctl");
 
         for tag in tags {
-            let target = format!("{}:{}", registry, tag);
+            let target = crate::oci_manifest::image_reference(registry, tag);
             let mut cmd = Command::new(&regctl);
             cmd.args(["index", "create", &target]);
 

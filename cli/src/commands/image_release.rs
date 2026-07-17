@@ -133,8 +133,8 @@ pub async fn execute(
     if arm64_path.is_some() {
         tags_pushed.push(format!("{}:arm64-{}", registry, sha));
         tags_pushed.push(format!("{}:arm64-latest", registry));
-        tags_pushed.push(format!("{}:{}", registry, sha));
-        tags_pushed.push(format!("{}:latest", registry));
+        tags_pushed.push(crate::oci_manifest::image_reference(registry, &sha));
+        tags_pushed.push(crate::oci_manifest::image_reference(registry, "latest"));
     }
     info!(
         "Image release complete — {} tags pushed for {}:",
@@ -426,8 +426,8 @@ fn verify_binary_contents_arch(image_path: &str, expected_arch: &str) -> Result<
 
     let expected_em = expected_em_machine(expected_arch);
 
-    let manifest = read_docker_archive_manifest(image_path)
-        .map_err(|_| LoaderError::MissingArchitecture)?;
+    let manifest =
+        read_docker_archive_manifest(image_path).map_err(|_| LoaderError::MissingArchitecture)?;
 
     for layer_name in &manifest.layers {
         let mut outer = tar::Archive::new(

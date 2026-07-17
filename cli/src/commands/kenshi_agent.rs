@@ -128,7 +128,7 @@ async fn update_kustomization_image(
         .await
         .context("Failed to read kustomization.yaml")?;
 
-    let new_image = format!("{}:{}", registry, new_tag);
+    let new_image = crate::oci_manifest::image_reference(registry, new_tag);
     let mut updated_images = false;
     let mut updated_env = false;
     let mut new_content = String::new();
@@ -216,7 +216,7 @@ async fn update_builder_pool_agent_image(
         .await
         .context("Failed to read builder-pool.yaml")?;
 
-    let new_image = format!("{}:{}", registry, new_tag);
+    let new_image = crate::oci_manifest::image_reference(registry, new_tag);
     let mut updated = false;
     let mut new_content = String::new();
 

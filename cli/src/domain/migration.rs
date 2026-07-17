@@ -135,12 +135,19 @@ impl MigrationConfig {
         format!("{}-migration", self.service)
     }
 
-    /// Get the full image reference
+    /// Get the full image reference. When a non-empty tag is set, composes
+    /// through `crate::oci_manifest::image_reference` — the typed
+    /// compositional inverse of `image_repository_and_tag` — so the
+    /// `<repository>:<tag>` shape agrees with every other build / push /
+    /// cosign / status call site in the crate by construction. The
+    /// empty-tag branch preserves the prior behaviour (a bare repository
+    /// reference is returned verbatim for callers that carry the tag
+    /// elsewhere in the k8s job spec).
     pub fn image_ref(&self) -> String {
         if self.tag.is_empty() {
             self.image.clone()
         } else {
-            format!("{}:{}", self.image, self.tag)
+            crate::oci_manifest::image_reference(&self.image, &self.tag)
         }
     }
 

@@ -1315,7 +1315,7 @@ mod tests {
         }
     }
 
-    /// Regression pin for the six call sites this primitive replaces:
+    /// Regression pin for the call sites this primitive replaces:
     /// [`image_reference`] must be observationally identical to the
     /// prior hand-rolled `format!("{}:{}", repository, tag)` shape on
     /// every `(repository, tag)` input the crate had in production.
@@ -1323,6 +1323,22 @@ mod tests {
     /// (e.g. `"/"`, `"::"`) or the order (`format!("{}:{}", tag,
     /// repository)`) would fail this test, catching the drift the
     /// centralised primitive is here to prevent.
+    ///
+    /// The fixture set spans the full crate-wide call-site surface,
+    /// not the six initial migrations alone: the central
+    /// `infrastructure/registry.rs` push/manifest helpers, the
+    /// `commands/image_release.rs` regctl orchestrator, the
+    /// `commands/nix_builder.rs` / `commands/kenshi_agent.rs` YAML
+    /// rewriters, the `commands/crossplane.rs` xpkg push, the
+    /// `commands/rollback.rs` display line, the `domain/migration.rs`
+    /// `MigrationConfig::image_ref` accessor, and the initial
+    /// `commands/attestation.rs` / `commands/migrations.rs` /
+    /// `commands/product_release.rs` / `commands/rust_service.rs`
+    /// sites. Reverting any of them to `format!("{}:{}", …)` would
+    /// still parse-and-produce the same string, but the drift-risk
+    /// this primitive closes (separator, order, double-tag) applies
+    /// per site; the fixture spans them all so a schema-level
+    /// regression on `image_reference` is caught at one place.
     #[test]
     fn test_image_reference_matches_prior_format_shape() {
         let inputs = [
@@ -1337,6 +1353,37 @@ mod tests {
             ("ghcr.io/pleme-io/forge/api", "arm64-latest"),
             ("ghcr.io/pleme-io/forge/api", "linux-latest"),
             ("registry.example.com:5000/library/nginx", "v1.2.3"),
+            // `infrastructure/registry.rs::push_tags`,
+            // `push_multiarch` (arch tag / arch-latest),
+            // `create_manifest_index`: registry + tag both bound at
+            // the call site.
+            ("ghcr.io/pleme-io/forge/api", "amd64-abc1234"),
+            ("ghcr.io/pleme-io/forge/api", "arm64-abc1234"),
+            ("ghcr.io/pleme-io/forge/api", "amd64-latest"),
+            ("ghcr.io/pleme-io/forge/api", "arm64-latest"),
+            ("ghcr.io/pleme-io/forge/api", "latest"),
+            // `infrastructure/registry.rs::push_multiarch`: the arch-
+            // suffix composed tag routes through the primitive as
+            // `image_reference(registry, &format!("{arch}-{suffix}"))`.
+            ("ghcr.io/pleme-io/forge/api", "amd64-abc1234"),
+            // `commands/image_release.rs::tags_pushed` and its regctl
+            // `index create` targets.
+            ("ghcr.io/pleme-io/forge/api", "abc1234"),
+            ("ghcr.io/pleme-io/forge/api", "latest"),
+            // `commands/nix_builder.rs`,
+            // `commands/kenshi_agent.rs`: registry+new_tag on YAML
+            // rewrite.
+            ("ghcr.io/pleme-io/forge/nix-builder", "amd64-abc1234"),
+            ("ghcr.io/pleme-io/forge/kenshi-agent", "amd64-abc1234"),
+            // `commands/crossplane.rs::function_release` /
+            // `configuration_release`: package_ref (trimmed of any
+            // trailing `/`) + tag.
+            ("ghcr.io/pleme-io/forge/xpkg-fn-foo", "v0.1.0"),
+            // `commands/rollback.rs::verify_rollback_candidates`:
+            // registry_url + `amd64-{previous_tag}`.
+            ("ghcr.io/pleme-io/forge/api", "amd64-prevsha"),
+            // `domain/migration.rs::MigrationConfig::image_ref`.
+            ("ghcr.io/org/project/myproduct-api", "amd64-abc1234"),
         ];
         for (repo, tag) in inputs {
             let predecessor = format!("{}:{}", repo, tag);

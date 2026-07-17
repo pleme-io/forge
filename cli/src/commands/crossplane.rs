@@ -71,7 +71,7 @@ pub fn function_release(
         bail!("crossplane xpkg build failed");
     }
 
-    let dest = format!("{}:{}", package_ref.trim_end_matches('/'), tag);
+    let dest = crate::oci_manifest::image_reference(package_ref.trim_end_matches('/'), tag);
     info!("crossplane xpkg push → {}", dest);
     // `xpkg push <package> -f <files>`: the tag is the positional <package>; the
     // file flag's long form is `--package-files` (plural — verified against the
@@ -111,7 +111,7 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
     if !build.success() {
         bail!("crossplane xpkg build failed");
     }
-    let dest = format!("{}:{}", package_ref.trim_end_matches('/'), tag);
+    let dest = crate::oci_manifest::image_reference(package_ref.trim_end_matches('/'), tag);
     info!("crossplane xpkg push → {}", dest);
     let push = Command::new("crossplane")
         .args(["xpkg", "push", "--package-files"])
