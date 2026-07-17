@@ -362,6 +362,72 @@ pub fn docker_load_image_reference(line: &str) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Split an OCI / Docker image reference into its repository component
+/// and its optional `:<tag>`. Returns `(repository, Some(tag))` when the
+/// reference carries a parseable tag (per [`image_tag`]'s invariants —
+/// registry-port not a tag, `@digest` not a tag, bare reference has no
+/// tag), and `(image, None)` otherwise. The returned repository slice is
+/// the reference verbatim up to but not including the `:` that separates
+/// the last-path-component name from its tag.
+///
+/// This is the compound sibling of [`image_tag`] at the same OCI-
+/// adjacent parse frontier: any consumer that needs both halves of the
+/// `<repo>:<tag>` split for display or downstream use now routes through
+/// one primitive rather than a per-site `image.rsplit_once(':')` scan
+/// that reproduces the same three parse bugs [`image_tag`] closed at
+/// its own frontier. Prior call sites hand-rolled
+/// `image_str.rsplit_once(':')` at two spots in
+/// `commands/status.rs::extract_main_image` and its container-detail
+/// peer, both baking the naïve split's three failure modes into the
+/// per-site scan:
+///
+/// 1. **Digest form.** `nginx@sha256:hex` under the naïve split
+///    returned `("nginx@sha256", "hex")`, surfacing the digest hex to
+///    a `tag` column in the status output as if it were a legitimate
+///    tag; the primitive strips `@digest` before the tag scan and
+///    reports the whole reference as the repository with `None` as
+///    the tag.
+/// 2. **Registry port.** `registry.example.com:5000/nginx` under the
+///    naïve split returned `("registry.example.com", "5000/nginx")`,
+///    surfacing the path segment to the `tag` column; the primitive
+///    scopes the tag scan to the final path component and reports
+///    the whole reference with `None` as the tag.
+/// 3. **Bare reference.** `nginx` under the naïve split returned
+///    `None` from the split itself (no `:`), which the callers handled
+///    correctly at the `None` arm; the primitive preserves this
+///    behavior verbatim.
+///
+/// Complexity is `O(n)` on a fixed number of scans over the reference
+/// string, matching the direct sibling [`image_tag`] it composes with.
+pub fn image_repository_and_tag(image: &str) -> (&str, Option<&str>) {
+    // The `@digest` suffix is content-addressed identity, not a tag;
+    // strip it so its inner `:` (between `sha256` / `sha512` and the
+    // hex body) cannot bleed into the tag scan.
+    let before_digest = image.split_once('@').map_or(image, |(head, _)| head);
+    // Scope the tag scan to the final path component. Anything before
+    // the last `/` is `registry[:port]/path/…` prefix whose `:` (a
+    // registry port separator) must not be misread as a tag colon.
+    let path_prefix_end = before_digest.rfind('/').map_or(0, |i| i + 1);
+    let last_segment = &before_digest[path_prefix_end..];
+    // Empty last segment (`foo/`) has no name and therefore no tag by
+    // construction.
+    if last_segment.is_empty() {
+        return (image, None);
+    }
+    match last_segment.rsplit_once(':') {
+        Some((name, tag)) if !name.is_empty() && !tag.is_empty() => {
+            // `tag` is a subslice of `image` (it is a tail of
+            // `last_segment`, itself a suffix of `before_digest`, itself
+            // a prefix of `image`). The repository slice is `image` up
+            // to the `:` that starts the tag — offset
+            // `path_prefix_end + name.len()`.
+            let repo_end = path_prefix_end + name.len();
+            (&image[..repo_end], Some(tag))
+        }
+        _ => (image, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -981,5 +1047,175 @@ mod tests {
                       Loaded image: myservice-worker:abc1234\n";
         let first = stdout.lines().find_map(docker_load_image_reference);
         assert_eq!(first, Some("myservice:abc1234"));
+    }
+
+    /// The canonical `<repo>:<tag>` shape reports the repository up to
+    /// but not including the tag colon and the tag after it. Registry
+    /// prefix and path prefix are carried into the repository slice
+    /// verbatim.
+    #[test]
+    fn test_image_repository_and_tag_extracts_canonical_split() {
+        assert_eq!(
+            image_repository_and_tag("nginx:latest"),
+            ("nginx", Some("latest"))
+        );
+        assert_eq!(
+            image_repository_and_tag("library/nginx:1.25"),
+            ("library/nginx", Some("1.25"))
+        );
+        assert_eq!(
+            image_repository_and_tag("docker.io/library/nginx:1.25"),
+            ("docker.io/library/nginx", Some("1.25"))
+        );
+        assert_eq!(
+            image_repository_and_tag("ghcr.io/pleme-io/forge:v0.42.0"),
+            ("ghcr.io/pleme-io/forge", Some("v0.42.0"))
+        );
+    }
+
+    /// A bare reference (no `:` after the final path separator) reports
+    /// the whole input as the repository and `None` as the tag; the
+    /// naïve `image.rsplit_once(':')` predecessor also returned `None`
+    /// on the split for a bare reference, so this axis is unchanged.
+    #[test]
+    fn test_image_repository_and_tag_bare_reference_has_no_tag() {
+        assert_eq!(image_repository_and_tag("nginx"), ("nginx", None));
+        assert_eq!(
+            image_repository_and_tag("library/nginx"),
+            ("library/nginx", None)
+        );
+        assert_eq!(
+            image_repository_and_tag("docker.io/library/nginx"),
+            ("docker.io/library/nginx", None)
+        );
+    }
+
+    /// A `registry:port/name` reference embeds a `:` in the registry
+    /// segment; the primitive scopes the tag scan to the final path
+    /// component and reports the whole reference as the repository with
+    /// `None` as the tag. The naïve `rsplit_once(':')` predecessor
+    /// returned `("registry.example.com", "5000/nginx")` on this input,
+    /// surfacing a path segment as if it were a tag — the primitive
+    /// closes that bug at one site.
+    #[test]
+    fn test_image_repository_and_tag_registry_port_is_not_a_tag() {
+        assert_eq!(
+            image_repository_and_tag("registry.example.com:5000/nginx"),
+            ("registry.example.com:5000/nginx", None)
+        );
+        assert_eq!(
+            image_repository_and_tag("registry.example.com:5000/library/nginx"),
+            ("registry.example.com:5000/library/nginx", None)
+        );
+        assert_eq!(
+            image_repository_and_tag("registry.example.com:5000/nginx:v1"),
+            ("registry.example.com:5000/nginx", Some("v1"))
+        );
+        assert_eq!(
+            image_repository_and_tag("registry.example.com:5000/library/nginx:v1"),
+            ("registry.example.com:5000/library/nginx", Some("v1"))
+        );
+    }
+
+    /// A digest-form reference (`name@sha256:hex`) is content-
+    /// addressed identity, not a tag; the primitive reports the whole
+    /// reference as the repository with `None` as the tag. The naïve
+    /// `rsplit_once(':')` predecessor returned `("nginx@sha256", "hex")`
+    /// on this input, surfacing the digest hex as if it were a tag —
+    /// the primitive closes that bug at one site.
+    #[test]
+    fn test_image_repository_and_tag_digest_form_has_no_tag() {
+        assert_eq!(
+            image_repository_and_tag(&format!("nginx@sha256:{D1}")),
+            (format!("nginx@sha256:{D1}").as_str(), None)
+        );
+        assert_eq!(
+            image_repository_and_tag(&format!("library/nginx@sha256:{D1}")),
+            (format!("library/nginx@sha256:{D1}").as_str(), None)
+        );
+        assert_eq!(
+            image_repository_and_tag(&format!(
+                "registry.example.com:5000/library/nginx@sha256:{D1}"
+            )),
+            (
+                format!("registry.example.com:5000/library/nginx@sha256:{D1}").as_str(),
+                None,
+            )
+        );
+    }
+
+    /// Degenerate and malformed inputs — empty string, trailing
+    /// separators, empty tag after a `:`, empty name before a `:` —
+    /// all report the whole input as the repository with `None` as the
+    /// tag; the primitive never surfaces an empty tag slice.
+    #[test]
+    fn test_image_repository_and_tag_degenerate_inputs_have_no_tag() {
+        assert_eq!(image_repository_and_tag(""), ("", None));
+        assert_eq!(image_repository_and_tag("nginx:"), ("nginx:", None));
+        assert_eq!(image_repository_and_tag(":latest"), (":latest", None));
+        assert_eq!(image_repository_and_tag("nginx/"), ("nginx/", None));
+        assert_eq!(image_repository_and_tag("/nginx"), ("/nginx", None));
+    }
+
+    /// The repository half agrees with the tag half — on every input
+    /// where the primitive reports `Some(tag)`, the reported repository
+    /// slice concatenated with `":"` and the tag reconstructs the
+    /// original reference (modulo any `@digest` suffix, which the
+    /// primitive does not carry into the repository slice when a tag
+    /// is present — the tag/digest split is not roundtrippable through
+    /// the two-tuple return by design, matching the semantic of the
+    /// sibling [`image_tag`] which strips `@digest` before its scan).
+    #[test]
+    fn test_image_repository_and_tag_roundtrip_when_no_digest() {
+        let cases = [
+            "nginx:latest",
+            "library/nginx:1.25",
+            "docker.io/library/nginx:1.25",
+            "ghcr.io/pleme-io/forge:v0.42.0",
+            "registry.example.com:5000/nginx:v1",
+            "registry.example.com:5000/library/nginx:v1",
+        ];
+        for input in cases {
+            let (repo, tag) = image_repository_and_tag(input);
+            let tag = tag.expect("case must have a parseable tag");
+            assert_eq!(
+                format!("{repo}:{tag}"),
+                input,
+                "repository+':'+tag must reconstruct the original reference"
+            );
+        }
+    }
+
+    /// Regression pin for the two `commands/status.rs` call sites this
+    /// primitive replaces: on the three input shapes the naïve
+    /// `image_str.rsplit_once(':')` predecessor got wrong, the primitive
+    /// must report a repository/tag pair that agrees with [`image_tag`]
+    /// (never surfaces the digest hex or a path segment as a tag).
+    /// Reverting the impl to plain `image.rsplit_once(':')` would fail
+    /// every assertion here.
+    #[test]
+    fn test_image_repository_and_tag_regression_pins() {
+        // Registry port: naïve predecessor returned
+        // ("registry.example.com", "5000/nginx"); primitive returns
+        // (whole ref, None).
+        let (repo, tag) = image_repository_and_tag("registry.example.com:5000/nginx");
+        assert_eq!(repo, "registry.example.com:5000/nginx");
+        assert_eq!(tag, None);
+        assert_eq!(tag, image_tag("registry.example.com:5000/nginx"));
+
+        // Digest form: naïve predecessor returned ("nginx@sha256", "hex");
+        // primitive returns (whole ref, None).
+        let input = format!("nginx@sha256:{D1}");
+        let (repo, tag) = image_repository_and_tag(&input);
+        assert_eq!(repo, input.as_str());
+        assert_eq!(tag, None);
+        assert_eq!(tag, image_tag(&input));
+
+        // Canonical tagged shape (baseline): both predecessor and
+        // primitive agree.
+        let (repo, tag) = image_repository_and_tag("nginx:latest");
+        assert_eq!(repo, "nginx");
+        assert_eq!(tag, Some("latest"));
+        assert_eq!(tag, image_tag("nginx:latest"));
     }
 }
