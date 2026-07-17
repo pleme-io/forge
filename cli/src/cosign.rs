@@ -130,11 +130,22 @@ crate::impl_verified_outcome!(CosignVerifyOutcome);
 /// cosign emits a JSON array of `SimpleContainerImage` envelopes; each
 /// envelope's `critical.image.docker-manifest-digest` is the cosigned
 /// blob identity, and `optional.{Subject,Issuer}` are the keyless OIDC
-/// signer identity (for Fulcio-issued certificates). A payload without a
-/// `docker-manifest-digest` is structurally invalid as a signature
-/// receipt and is dropped from the valid-payload set (mirroring the
-/// `oci_manifest::canonical_manifest_fingerprint` skip-malformed
-/// discipline). An empty valid-payload set collapses to
+/// signer identity (for Fulcio-issued certificates). A payload whose
+/// `docker-manifest-digest` does not parse as a well-formed
+/// [`crate::oci_manifest::ContentDigest`] — missing, whitespace-only,
+/// bare `sha256:garbage`, uppercase-hex, wrong-length hex,
+/// unsupported-algorithm (`md5:...`, `sha1:...`), or internal
+/// whitespace at the algo/hex boundary — is structurally invalid as a
+/// signature receipt and is dropped from the valid-payload set. This
+/// mirrors the `oci_manifest::canonical_manifest_fingerprint` skip-
+/// malformed discipline (the image-side peer), the
+/// `oci_architecture::EmbeddedInConfig` gate (arm 3 of the manifest
+/// detection ladder), and the `helm_provenance::find_tarball_sha256`
+/// route (chart-side `.prov` peer): every Phase 1 attestation surface
+/// that consumes a `<algorithm>:<hex>` digest string validates via
+/// [`crate::oci_manifest::ContentDigest::parse`] at the extraction
+/// frontier, not via a per-consumer restatement of "well-formed
+/// digest". An empty valid-payload set collapses to
 /// [`CosignVerifyOutcome::Unverified`] — the probe ran, found nothing.
 ///
 /// The signer identity is taken from the first valid payload that
@@ -146,28 +157,21 @@ pub fn parse_verify_output(stdout: &str) -> CosignVerifyOutcome {
     let Ok(payloads) = serde_json::from_str::<Vec<SimpleContainerImage>>(stdout.trim()) else {
         return CosignVerifyOutcome::Unverified;
     };
-    let valid: Vec<&SimpleContainerImage> = payloads
+    let valid: Vec<(&SimpleContainerImage, crate::oci_manifest::ContentDigest)> = payloads
         .iter()
-        .filter(|p| {
-            p.critical
-                .image
-                .docker_manifest_digest
-                .as_deref()
-                .is_some_and(|d| !d.trim().is_empty())
+        .filter_map(|p| {
+            let raw = p.critical.image.docker_manifest_digest.as_deref()?;
+            let digest = crate::oci_manifest::ContentDigest::parse(raw).ok()?;
+            Some((p, digest))
         })
         .collect();
-    let Some(first) = valid.first() else {
+    let Some((_, first_digest)) = valid.first() else {
         return CosignVerifyOutcome::Unverified;
     };
-    let manifest_digest = first
-        .critical
-        .image
-        .docker_manifest_digest
-        .as_deref()
-        .map(|s| s.trim().to_string());
+    let manifest_digest = Some(first_digest.as_str().to_string());
     let signer_identity = valid
         .iter()
-        .find_map(|p| p.optional.as_ref().and_then(pick_identity));
+        .find_map(|(p, _)| p.optional.as_ref().and_then(pick_identity));
     CosignVerifyOutcome::Verified {
         signer_identity,
         manifest_digest,
@@ -455,5 +459,160 @@ mod tests {
         .is_probe_absent());
         assert!(!CosignVerifyOutcome::Unverified.is_probe_absent());
         assert!(!CosignVerifyOutcome::VerifyFailed.is_probe_absent());
+    }
+
+    /// **Load-bearing fail-before / pass-after pin.** A cosign receipt
+    /// whose `docker-manifest-digest` names an unsupported algorithm
+    /// (`md5:...`, `sha1:...`) is structurally invalid as an OCI /
+    /// Docker content digest: the registry cannot be asked to fetch a
+    /// blob under that name via the standard blob API. The prior
+    /// `!s.trim().is_empty()` gate admitted the payload and inflated
+    /// the Phase 1 `manifest_digest` claim with a digest no verifier
+    /// can substantiate. Routing the filter through
+    /// [`crate::oci_manifest::ContentDigest::parse`] collapses this
+    /// receipt to [`CosignVerifyOutcome::Unverified`] — the probe ran,
+    /// no well-formed digest witnessed.
+    #[test]
+    fn test_parse_unsupported_algorithm_digest_is_unverified() {
+        let stdout = r#"[
+            {
+                "critical": {
+                    "image": {"docker-manifest-digest": "md5:0123456789abcdef0123456789abcdef"}
+                },
+                "optional": {"Subject": "u@e"}
+            }
+        ]"#;
+        assert_eq!(parse_verify_output(stdout), CosignVerifyOutcome::Unverified);
+    }
+
+    /// A `sha256:` prefix with a body that is not lowercase-hex of the
+    /// algorithm's canonical length — here 32 chars, half the sha256
+    /// hex length — is malformed. The old gate admitted it; the
+    /// `ContentDigest::parse` route rejects it and the outcome
+    /// collapses to `Unverified`. Same drift class as the last
+    /// commit's chart-side peer (`helm_provenance` `find_tarball_sha256`).
+    #[test]
+    fn test_parse_wrong_length_sha256_hex_is_unverified() {
+        let stdout = r#"[
+            {
+                "critical": {
+                    "image": {"docker-manifest-digest": "sha256:0123456789abcdef0123456789abcdef"}
+                }
+            }
+        ]"#;
+        assert_eq!(parse_verify_output(stdout), CosignVerifyOutcome::Unverified);
+    }
+
+    /// An uppercase-hex body under a valid algorithm is malformed per
+    /// the OCI Distribution Spec: content-addressed digests are
+    /// lowercase-hex. The prior gate admitted it (it was non-empty
+    /// after trim); the typed parse rejects it.
+    #[test]
+    fn test_parse_uppercase_hex_digest_is_unverified() {
+        let stdout = r#"[
+            {
+                "critical": {
+                    "image": {"docker-manifest-digest": "sha256:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"}
+                }
+            }
+        ]"#;
+        assert_eq!(parse_verify_output(stdout), CosignVerifyOutcome::Unverified);
+    }
+
+    /// A non-hex byte inside an otherwise correctly-shaped 64-char body
+    /// (here `g` at position 4) fails the lowercase-hex predicate. The
+    /// prior string-non-empty gate admitted it.
+    #[test]
+    fn test_parse_non_hex_byte_in_digest_is_unverified() {
+        let stdout = r#"[
+            {
+                "critical": {
+                    "image": {"docker-manifest-digest": "sha256:0123g56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+                }
+            }
+        ]"#;
+        assert_eq!(parse_verify_output(stdout), CosignVerifyOutcome::Unverified);
+    }
+
+    /// A bare `garbage` string with no `<algorithm>:<hex>` separator
+    /// is not a digest by any grammar. The prior gate admitted it and
+    /// wrote `manifest_digest: Some("garbage")` into the Phase 1
+    /// receipt. The typed parse rejects it.
+    #[test]
+    fn test_parse_missing_algorithm_separator_is_unverified() {
+        let stdout = r#"[
+            {
+                "critical": {
+                    "image": {"docker-manifest-digest": "garbage"}
+                }
+            }
+        ]"#;
+        assert_eq!(parse_verify_output(stdout), CosignVerifyOutcome::Unverified);
+    }
+
+    /// Per-payload filter: when the first payload's digest is
+    /// malformed and a later payload carries a well-formed one, the
+    /// receipt is still verified — the malformed payload is dropped
+    /// from the valid set and the second one becomes the "first
+    /// valid". The manifest digest and signer identity come from
+    /// that payload. This pins that the invalid-digest filter is
+    /// per-payload, not receipt-wide, so a partially-corrupted
+    /// receipt still recovers what it structurally can.
+    #[test]
+    fn test_parse_skips_invalid_first_payload_uses_next_valid() {
+        let stdout = r#"[
+            {
+                "critical": {
+                    "image": {"docker-manifest-digest": "sha256:short"}
+                },
+                "optional": {"Subject": "dropped@example.com"}
+            },
+            {
+                "critical": {
+                    "image": {"docker-manifest-digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}
+                },
+                "optional": {"Subject": "kept@example.com"}
+            }
+        ]"#;
+        let CosignVerifyOutcome::Verified {
+            signer_identity,
+            manifest_digest,
+        } = parse_verify_output(stdout)
+        else {
+            panic!("expected Verified");
+        };
+        assert_eq!(
+            manifest_digest.as_deref(),
+            Some("sha256:2222222222222222222222222222222222222222222222222222222222222222"),
+            "malformed first payload is dropped; second payload's digest is the receipt's"
+        );
+        assert_eq!(signer_identity.as_deref(), Some("kept@example.com"));
+    }
+
+    /// The `manifest_digest` field on the verified arm round-trips
+    /// through `ContentDigest::parse` — i.e. any value that appears
+    /// there could be re-parsed by a downstream cross-checker without
+    /// error. Pins the invariant explicitly so a future refactor that
+    /// reverts the filter to a string-non-empty check fails this test.
+    #[test]
+    fn test_verified_manifest_digest_round_trips_through_content_digest_parse() {
+        let stdout = r#"[
+            {
+                "critical": {
+                    "image": {"docker-manifest-digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+                }
+            }
+        ]"#;
+        let CosignVerifyOutcome::Verified {
+            manifest_digest, ..
+        } = parse_verify_output(stdout)
+        else {
+            panic!("expected Verified");
+        };
+        let raw = manifest_digest.expect("verified arm must carry a digest");
+        let round_tripped = crate::oci_manifest::ContentDigest::parse(&raw)
+            .expect("verified manifest_digest must re-parse via ContentDigest::parse");
+        assert_eq!(round_tripped.algorithm(), "sha256");
+        assert_eq!(round_tripped.as_str(), raw);
     }
 }
