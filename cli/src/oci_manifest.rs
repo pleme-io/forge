@@ -359,6 +359,65 @@ impl TryFrom<String> for ContentDigest {
     }
 }
 
+/// [`TryFrom<Cow<'_, str>>`] for [`ContentDigest`] routes through
+/// [`<ContentDigest as TryFrom<&str>>::try_from`] on the underlying
+/// [`str`] view (borrowed from the `Cow::Borrowed` arm, dereferenced
+/// off the `String` in the `Cow::Owned` arm) so a downstream consumer
+/// bound by `impl TryFrom<Cow<'_, str>>` (a serde-compatible
+/// deserializer that hands its container an owned-or-borrowed
+/// [`Cow<'_, str>`] to preserve zero-copy where the input allows it, a
+/// generic try-conversion helper `fn parse_digest<'a, T: TryFrom<Cow<'a,
+/// str>, Error = ContentDigestError>>`, a validated-builder frontier
+/// that pins its input type as [`Cow`] to bridge caller-owned and
+/// caller-borrowed inputs at zero extra allocation) recovers a
+/// [`ContentDigest`] value from its canonical `<algorithm>:<hex>`
+/// borrowed-or-owned string through the same one-oracle grammar the
+/// direct `.parse::<ContentDigest>()` call sites already read.
+///
+/// The borrowed/owned-frontier peer of [`TryFrom<&str> for
+/// ContentDigest`] and [`TryFrom<String> for ContentDigest`] on the
+/// reference-grammar family — a canonical-string typed primitive is
+/// parseable from a borrowed [`&str`] (idiomatic borrow-frontier
+/// consumer), from an owned [`String`] (idiomatic serde-frontier
+/// consumer keyed on `#[serde(try_from = "String")]`), AND from a
+/// [`Cow<'_, str>`] (idiomatic borrowed-or-owned frontier consumer
+/// keyed on `#[serde(try_from = "Cow<'_, str>")]` or a serde
+/// deserializer that emits [`Cow`] to preserve zero-copy for
+/// borrowable inputs while still handling owned inputs). Prior to
+/// this impl a downstream site that received a [`Cow<'_, str>`] (a
+/// serde-derived container whose canonical field type is [`Cow`] to
+/// preserve zero-copy, an owned-or-borrowed pipeline that consumes
+/// [`Cow`] to defer the ownership decision to its caller) and wanted
+/// the typed [`ContentDigest`] had to bridge through [`str`]
+/// (`ContentDigest::try_from(cow.as_ref())`) at every consumer.
+///
+/// The [`Err`](std::convert::TryFrom::Error) type is
+/// [`ContentDigestError`] — the same typed error every by-reference
+/// and by-value parse surface emits, carrying the same per-failure-
+/// mode discriminator (missing separator, unsupported algorithm,
+/// invalid hex) so a consumer that pins a per-variant handling policy
+/// at its own frontier can distinguish arms directly off the
+/// [`Result<ContentDigest, ContentDigestError>`] the impl returns.
+///
+/// THEORY.md §III.1 typescape: the borrowed/owned-frontier try-
+/// conversion surface is a typed-primitive site on [`ContentDigest`]
+/// itself (one [`TryFrom<Cow<'_, str>>`] impl routing through the
+/// [`TryFrom<&str>`] parse oracle), not a per-consumer
+/// `cow.as_ref()` bridge at every downstream site that types its
+/// parse contract as `impl TryFrom<Cow<'_, str>>` rather than
+/// [`TryFrom<&str>`]. THEORY.md §VI.1 one-oracle: the canonical
+/// `<algorithm>:<hex>` grammar is named at one site
+/// ([`ContentDigest::parse`]), and every parse surface —
+/// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+/// this [`TryFrom<Cow<'_, str>>`] — reads through it.
+impl TryFrom<std::borrow::Cow<'_, str>> for ContentDigest {
+    type Error = ContentDigestError;
+
+    fn try_from(s: std::borrow::Cow<'_, str>) -> Result<Self, Self::Error> {
+        <Self as TryFrom<&str>>::try_from(s.as_ref())
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -1259,6 +1318,157 @@ mod tests {
         let d: ContentDigest = parse_via_try_from(raw.clone()).unwrap();
         assert_eq!(d.as_str(), raw);
         let err = parse_via_try_from::<ContentDigest>("sha256abc".to_string()).unwrap_err();
+        assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
+    }
+
+    /// [`TryFrom<Cow<'_, str>>`] succeeds on a well-formed sha256
+    /// digest handed in via the borrowed arm — the zero-copy path a
+    /// serde deserializer takes when the input allows it. Pins the
+    /// primary algorithm on the borrowed arm of the derived surface.
+    #[test]
+    fn test_try_from_cow_str_borrowed_parses_sha256_digest() {
+        let raw = format!("sha256:{D1}");
+        let cow: std::borrow::Cow<'_, str> = std::borrow::Cow::Borrowed(raw.as_str());
+        let d = ContentDigest::try_from(cow).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha256");
+        assert_eq!(d.hex(), D1);
+        let inherent = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(d, inherent);
+    }
+
+    /// [`TryFrom<Cow<'_, str>>`] succeeds on a well-formed sha256
+    /// digest handed in via the owned arm — the fallback path a
+    /// serde deserializer takes when zero-copy is unavailable
+    /// (escaped strings, differing lifetimes). Pins the primary
+    /// algorithm on the owned arm of the derived surface.
+    #[test]
+    fn test_try_from_cow_str_owned_parses_sha256_digest() {
+        let raw = format!("sha256:{D1}");
+        let cow: std::borrow::Cow<'_, str> = std::borrow::Cow::Owned(raw.clone());
+        let d = ContentDigest::try_from(cow).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha256");
+        assert_eq!(d.hex(), D1);
+    }
+
+    /// [`TryFrom<Cow<'_, str>>`] succeeds on a well-formed sha512
+    /// digest across both `Cow` arms. Pins the second supported
+    /// algorithm so a widening at the inherent oracle is caught by
+    /// an existing test on this derived surface.
+    #[test]
+    fn test_try_from_cow_str_parses_sha512_digest_both_arms() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let via_borrowed =
+            ContentDigest::try_from(std::borrow::Cow::Borrowed(raw.as_str())).unwrap();
+        let via_owned =
+            ContentDigest::try_from(std::borrow::Cow::<'_, str>::Owned(raw.clone())).unwrap();
+        assert_eq!(via_borrowed, via_owned);
+        assert_eq!(via_borrowed.algorithm(), "sha512");
+        assert_eq!(via_borrowed.hex(), hex);
+    }
+
+    /// [`TryFrom<Cow<'_, str>>`] inherits the inherent oracle's
+    /// edge-whitespace trim on both arms so a serde-deserialized
+    /// YAML string carrying a stray newline still parses whether
+    /// the deserializer emits it borrowed or owned.
+    #[test]
+    fn test_try_from_cow_str_trims_edge_whitespace_both_arms() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let via_borrowed =
+            ContentDigest::try_from(std::borrow::Cow::Borrowed(raw.as_str())).unwrap();
+        let via_owned = ContentDigest::try_from(std::borrow::Cow::<'_, str>::Owned(raw)).unwrap();
+        assert_eq!(via_borrowed.as_str(), expected);
+        assert_eq!(via_owned.as_str(), expected);
+    }
+
+    /// [`TryFrom<Cow<'_, str>>`] agrees with the inherent oracle on
+    /// every canonical failure mode across both arms. Pins the
+    /// "one grammar oracle serves every borrowed-or-owned parse entry
+    /// point" invariant. A future refactor that inlined a divergent
+    /// grammar into [`TryFrom<Cow<'_, str>>`] fails this test.
+    #[test]
+    fn test_try_from_cow_str_matches_inherent_parse_on_every_error_mode() {
+        let err_cases = [
+            "sha256abc123".to_string(),
+            format!("md5:{D1}"),
+            format!("sha1:0123456789abcdef0123456789abcdef01234567"),
+            format!("sha256:{}", &D1[..60]),
+            format!("sha256:{}", D1.to_uppercase()),
+            format!("sha256:{}g", &D1[..63]),
+        ];
+        for raw in err_cases {
+            let via_borrowed = ContentDigest::try_from(std::borrow::Cow::Borrowed(raw.as_str()));
+            let via_owned =
+                ContentDigest::try_from(std::borrow::Cow::<'_, str>::Owned(raw.clone()));
+            let via_inherent = ContentDigest::parse(&raw);
+            assert_eq!(
+                via_borrowed, via_inherent,
+                "TryFrom<Cow::Borrowed> and inherent parse must agree on '{raw}'",
+            );
+            assert_eq!(
+                via_owned, via_inherent,
+                "TryFrom<Cow::Owned> and inherent parse must agree on '{raw}'",
+            );
+            assert!(via_borrowed.is_err());
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, str>>`] and [`TryFrom<&str>`] resolve to the
+    /// SAME [`Result<ContentDigest, ContentDigestError>`] across every
+    /// well-formed digest AND every canonical failure mode on both
+    /// `Cow` arms. Pins the "borrowed, owned, and cow parse surfaces
+    /// all read through the same canonical grammar oracle" invariant
+    /// so a future divergence between the derived surfaces fails this
+    /// test.
+    #[test]
+    fn test_try_from_cow_str_agrees_with_try_from_str_both_arms() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let ok_cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha512:{hex512}"),
+            format!("  sha256:{D3}\n"),
+        ];
+        for raw in ok_cases {
+            let via_borrowed = ContentDigest::try_from(std::borrow::Cow::Borrowed(raw.as_str()));
+            let via_owned =
+                ContentDigest::try_from(std::borrow::Cow::<'_, str>::Owned(raw.clone()));
+            let via_ref = ContentDigest::try_from(raw.as_str());
+            assert_eq!(via_borrowed, via_ref);
+            assert_eq!(via_owned, via_ref);
+        }
+    }
+
+    /// The [`TryFrom<Cow<'_, str>>`] impl composes with a generic
+    /// try-conversion helper bounded by `for<'a> TryFrom<Cow<'a, str>,
+    /// Error = ContentDigestError>` — the compositional motivation
+    /// for landing the trait separately from [`TryFrom<&str>`] /
+    /// [`TryFrom<String>`]. Pins the borrowed/owned-frontier
+    /// generic-consumer surface so a downstream site that types its
+    /// parse contract as [`TryFrom<Cow<'_, str>>`] (a serde
+    /// `try_from = "Cow<'_, str>"` wrapper, a caller-agnostic
+    /// validated builder) recovers the same typed value the inherent
+    /// oracle produces on both arms.
+    #[test]
+    fn test_try_from_cow_str_carries_through_generic_consumer() {
+        fn parse_via_try_from<'a, T>(s: std::borrow::Cow<'a, str>) -> Result<T, ContentDigestError>
+        where
+            T: TryFrom<std::borrow::Cow<'a, str>, Error = ContentDigestError>,
+        {
+            T::try_from(s)
+        }
+        let raw = format!("sha256:{D1}");
+        let borrowed: std::borrow::Cow<'_, str> = std::borrow::Cow::Borrowed(raw.as_str());
+        let d: ContentDigest = parse_via_try_from(borrowed).unwrap();
+        assert_eq!(d.as_str(), raw);
+        let owned: std::borrow::Cow<'_, str> = std::borrow::Cow::Owned(raw.clone());
+        let d2: ContentDigest = parse_via_try_from(owned).unwrap();
+        assert_eq!(d2, d);
+        let err = parse_via_try_from::<ContentDigest>(std::borrow::Cow::Borrowed("sha256abc"))
+            .unwrap_err();
         assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
     }
 
