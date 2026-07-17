@@ -13098,6 +13098,98 @@ impl PartialEq<str> for AdmissionTier {
     }
 }
 
+/// Ergonomic canonical-label equality query at the borrowed UTF-8
+/// frontier through a `&str` receiver — a downstream consumer bound
+/// by [`PartialEq<&str>`] (a `matches!` predicate that reads a
+/// canonical label off a `&str` handle without a per-arm
+/// [`AdmissionTier::from_str`] parse-and-discard round trip, a
+/// config-audit assertion that names a specific canonical
+/// [`AdmissionTier`] variant against an already-borrowed `&str`
+/// slot without a downstream `.as_str()` restatement or an explicit
+/// `*label_ref` deref, an integration-test oracle that compares a
+/// captured stdout / journal / telemetry-breadcrumb line against a
+/// specific canonical label as `tier == captured_line_ref` where
+/// `captured_line_ref: &str`) answers the boolean equality query
+/// `tier == label_ref` at ONE composition rather than a per-site
+/// `tier.as_str() == label_ref` restatement that repeats the
+/// canonical-label oracle name at every downstream comparison site.
+///
+/// Sibling of [`PartialEq<str>`] (line 13095) — the same canonical-
+/// label oracle at the same borrowed UTF-8 frontier, split by
+/// receiver shape: [`PartialEq<str>`] answers the boolean equality
+/// query against a dereffed `str` value (`tier == *label_ref`),
+/// this [`PartialEq<&str>`] answers the same boolean equality query
+/// against a `&str` reference (`tier == label_ref`) without the
+/// caller's explicit `*` deref at every comparison site. The two
+/// receiver-shape peers together give the borrowed UTF-8 comparison
+/// surface the same ergonomic reach the standard library gives
+/// [`String`] through its own [`PartialEq<str>`] + [`PartialEq<&str>`]
+/// receiver-shape pair.
+///
+/// Route: the impl body composes [`AdmissionTier::as_str`] with the
+/// standard library [`<str as PartialEq<str>>::eq`] (byte-for-byte
+/// UTF-8 equality against the borrowed right-hand-side view), so
+/// the comparison reads the same canonical-label bytes at zero
+/// allocation, zero temporary [`String`] construction, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call — the
+/// same zero-cost discipline the [`PartialEq<str>`] receiver-shape
+/// sibling carries.
+///
+/// Mid-trio peer of the borrowed UTF-8 `&str`-receiver comparison
+/// trio opened at [`crate::retry::PerAttemptRegion`] (commit
+/// 3ba5b60 — the structural mirror at the sibling per-attempt-region
+/// ladder, routing through [`crate::retry::PerAttemptRegion::as_str`])
+/// and closed by the follow-up [`crate::version::BumpLevel`] peer,
+/// matching the [`PartialEq<str>`] mid-trio order at the sibling
+/// borrowed UTF-8 dereffed-str-receiver surface (ac5f0af → 8f0a8cc
+/// → f891f6e), the [`AsRef<std::ffi::CStr>`] mid-trio order at the
+/// sibling borrowed-view NUL-terminated C-string surface (307bce0
+/// → e8cbfaf → f6d4f39), and every prior borrowed-view AsRef trio's
+/// mid-trio order at the sibling string-owner-shape frontiers. After
+/// the trio closes, the borrowed UTF-8 `&str`-receiver comparison
+/// axis spans all three ordered typed sums on the ladder set
+/// against ONE canonical-label oracle each, and future trios extend
+/// the same pattern to [`PartialEq<String>`] and
+/// [`PartialEq<std::borrow::Cow<'_, str>>`] (the remaining
+/// receiver-shape cross-product at the UTF-8 comparison frontier);
+/// the follow-up trios are not in this commit.
+///
+/// The identity `(tier == label_ref) == (tier.as_str() == label_ref)`
+/// at every [`AdmissionTier::ALL`] variant × every string in the
+/// union of {canonical labels, common non-canonical labels, empty}
+/// is pinned by
+/// [`tests::test_admission_tier_partial_eq_str_ref_agrees_with_as_str`];
+/// the reflexivity identity `tier == tier.as_str()` (no explicit
+/// deref) at every variant is pinned by
+/// [`tests::test_admission_tier_partial_eq_str_ref_reflexive_at_own_label`];
+/// the canonicity discipline (only exact snake_case
+/// [`AdmissionTier::as_str`] emissions equal an [`AdmissionTier`]
+/// value through this surface — no case-fold, no whitespace
+/// tolerance, no cross-variant collision) at every variant ×
+/// known-bad label pair is pinned by
+/// [`tests::test_admission_tier_partial_eq_str_ref_rejects_non_canonical_labels`].
+///
+/// THEORY.md §V.4 typed primitives: the borrowed UTF-8 `&str`-
+/// receiver comparison surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one [`PartialEq<&str>`] impl routing
+/// through [`AdmissionTier::as_str`]), not a per-consumer
+/// `tier.as_str() == label_ref` restatement at every downstream
+/// site that asks whether an [`AdmissionTier`] value names a
+/// specific canonical label through an already-borrowed `&str`
+/// handle. THEORY.md §VI.1 one-oracle: the canonical label is named
+/// at one site ([`AdmissionTier::as_str`]), and every borrowed
+/// UTF-8 surface — the [`AsRef<str>`] borrowed-view sibling yielding
+/// `&str`, the [`PartialEq<str>`] dereffed-str-receiver sibling
+/// answering `tier == *label_ref`, this [`PartialEq<&str>`]
+/// answering `tier == label_ref` without the explicit deref — reads
+/// through the same one-oracle discipline projected onto its own
+/// intent × receiver shape.
+impl PartialEq<&str> for AdmissionTier {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -38459,6 +38551,151 @@ mod tests {
                 assert!(
                     !<AdmissionTier as PartialEq<str>>::eq(&tier, label),
                     "PartialEq<str> must reject non-canonical label {label:?} at {tier:?}",
+                );
+            }
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant × every string in the
+    /// union of {canonical labels, common non-canonical labels,
+    /// empty}, the [`PartialEq<&str>`] comparison
+    /// `<Self as PartialEq<&str>>::eq(&tier, &label_ref)` equals
+    /// the direct `tier.as_str() == label_ref` composition. Pins
+    /// the agreement identity that the borrowed UTF-8 `&str`-
+    /// receiver comparison surface reads the same canonical-label
+    /// oracle the [`AsRef<str>`] borrowed-view sibling reads,
+    /// projected through the boolean equality query at a `&str`
+    /// handle rather than at a dereffed `str` value or a borrow. A
+    /// regression that swapped the [`PartialEq<&str>`] impl body
+    /// onto a stale label table, drifted it off the
+    /// [`AdmissionTier::as_str`] oracle (a hand-rolled `matches!`
+    /// on the variant tag with hard-coded per-arm labels that a
+    /// future variant insertion could silently leave out), or
+    /// introduced case-folding / whitespace-tolerance leniency would
+    /// break this composition equality at at least one (variant,
+    /// label) pair and fail here at the canonical-label pin, not at
+    /// every downstream `tier == label_ref` call site. Structural
+    /// mirror of
+    /// [`crate::retry::tests::test_per_attempt_region_partial_eq_str_ref_agrees_with_as_str`]
+    /// (commit 3ba5b60) at the sibling per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_partial_eq_str_ref_agrees_with_as_str() {
+        let labels = [
+            "refused",
+            "staging_only",
+            "strict",
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            "STRICT",
+            "stagingonly",
+            "refused ",
+            " refused",
+            "staging only",
+            "\trefused",
+            "refused\n",
+            "nonsense",
+            "patch",
+            "minor",
+            "major",
+            "before_first",
+            "over_budget",
+        ];
+        for tier in AdmissionTier::ALL {
+            for label in labels {
+                assert_eq!(
+                    <AdmissionTier as PartialEq<&str>>::eq(&tier, &label),
+                    tier.as_str() == label,
+                    "PartialEq<&str> and as_str() equality must agree at ({tier:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant,
+    /// `<Self as PartialEq<&str>>::eq(&tier, &tier.as_str())`
+    /// returns true — equivalently, the caller may write
+    /// `tier == tier.as_str()` without an explicit `*` deref
+    /// against the borrowed label. Pins the reflexivity identity
+    /// that a variant compared against its own canonical-label
+    /// emission through a `&str` handle always answers true — the
+    /// load-bearing "self-recognition" property the borrowed UTF-8
+    /// `&str`-receiver comparison surface promises. A future variant
+    /// insertion that landed a label the [`AdmissionTier::as_str`]
+    /// oracle emits but the [`PartialEq<&str>`] impl silently misses
+    /// (a divergent hand-rolled label table drifting past the one-
+    /// oracle discipline) would break this pin at the new variant,
+    /// not at a downstream consumer's aggregate. Structural mirror
+    /// of
+    /// [`crate::retry::tests::test_per_attempt_region_partial_eq_str_ref_reflexive_at_own_label`]
+    /// (commit 3ba5b60) at the sibling per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_partial_eq_str_ref_reflexive_at_own_label() {
+        for tier in AdmissionTier::ALL {
+            let label: &str = tier.as_str();
+            assert!(
+                <AdmissionTier as PartialEq<&str>>::eq(&tier, &label),
+                "PartialEq<&str> must recognise self canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant × every entry in a
+    /// known-bad label set (empty, UpperCamel forms of every variant
+    /// including the target variant's own UpperCamel name, ALLCAPS
+    /// forms, no-underscore form of [`AdmissionTier::StagingOnly`],
+    /// whitespace-fringed forms, space-instead-of-underscore forms,
+    /// unrelated labels from sibling ladders like
+    /// [`crate::version::BumpLevel`] and
+    /// [`crate::retry::PerAttemptRegion`]), the [`PartialEq<&str>`]
+    /// impl returns false. Pins the canonicity discipline at the
+    /// borrowed UTF-8 `&str`-receiver comparison surface: only the
+    /// exact snake_case labels [`AdmissionTier::as_str`] emits
+    /// (`"refused"`, `"staging_only"`, `"strict"`) equal an
+    /// [`AdmissionTier`] value through this surface — drift toward
+    /// accepting a case-folded, ALLCAPS, no-underscore,
+    /// whitespace-tolerant, or space-substituted grammar is refused
+    /// at ONE pin covering the full variant × known-bad grid,
+    /// matching the canonicity discipline the sibling
+    /// [`PartialEq<str>`] receiver-shape peer enforces at
+    /// [`test_admission_tier_partial_eq_str_rejects_non_canonical_labels`].
+    /// Structural mirror of
+    /// [`crate::retry::tests::test_per_attempt_region_partial_eq_str_ref_rejects_non_canonical_labels`]
+    /// (commit 3ba5b60) at the sibling per-attempt-region ladder.
+    #[test]
+    fn test_admission_tier_partial_eq_str_ref_rejects_non_canonical_labels() {
+        let bad = [
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            "STAGINGONLY",
+            "STRICT",
+            "stagingonly",
+            "staging only",
+            " refused",
+            "refused ",
+            "\tstrict",
+            "strict\n",
+            "nonsense",
+            "patch",
+            "minor",
+            "major",
+            "before_first",
+            "over_budget",
+            "final",
+        ];
+        for tier in AdmissionTier::ALL {
+            for label in bad {
+                if label == tier.as_str() {
+                    continue;
+                }
+                assert!(
+                    !<AdmissionTier as PartialEq<&str>>::eq(&tier, &label),
+                    "PartialEq<&str> must reject non-canonical label {label:?} at {tier:?}",
                 );
             }
         }
