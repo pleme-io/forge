@@ -418,6 +418,91 @@ impl TryFrom<std::borrow::Cow<'_, str>> for ContentDigest {
     }
 }
 
+/// [`AsRef<str>`] for [`ContentDigest`] routes through
+/// [`ContentDigest::as_str`] so a downstream consumer bound by
+/// `impl AsRef<str>` (a [`std::path::Path::new`] / [`std::fs::write`]
+/// path-segment builder that opens an on-disk cache slot keyed by the
+/// full `<algorithm>:<hex>` reference, a [`std::collections::HashSet<&str>`]
+/// membership check against a set of expected registry digests, a
+/// generic log / tracing attribute setter that keys by
+/// [`Into<Cow<'static, str>>`] via the borrowed-view [`AsRef<str>`]
+/// coercion, a [`std::process::Command::arg`] slot that pins its input
+/// as `impl AsRef<std::ffi::OsStr>` and reads the digest through the
+/// blanket [`AsRef<std::ffi::OsStr>`] impl for every `T: AsRef<str>`,
+/// a URL-path assembler that appends a validated digest to a registry
+/// blob reference under `/v2/<name>/blobs/<digest>`) reads the
+/// validated `<algorithm>:<hex>` full string directly off a
+/// [`ContentDigest`] value without a per-consumer
+/// `digest.as_str()` bridge, without a [`std::fmt::Display`] format-
+/// buffer step, and without an intermediate [`String`] allocation.
+///
+/// The by-reference borrowed-view read peer of the emit surfaces
+/// already on the reference-grammar family — [`ContentDigest::as_str`]
+/// (inherent) and [`std::fmt::Display for ContentDigest`] both read
+/// the same underlying full-digest slice through
+/// [`ContentDigest::as_str`]; this [`AsRef<str>`] impl exposes the
+/// same slice through the standard-library trait-generic borrowed-
+/// view surface the entire std ecosystem already uses
+/// (`Path::new`, `Command::arg`, `HashSet::contains`,
+/// `HashMap<K: Borrow<str>, _>::get`, `str::eq_ignore_ascii_case`,
+/// hasher `update`, formatter `write_str`) so a downstream site that
+/// pins its input type as `impl AsRef<str>` recovers the borrowed
+/// full-digest slice through the same one-oracle read discipline
+/// [`ContentDigest::as_str`] already carries. Structural mirror of
+/// [`impl AsRef<std::ffi::CStr> for crate::retry::PerAttemptRegion`],
+/// [`impl AsRef<std::ffi::CStr> for crate::probe_outcome::AdmissionTier`],
+/// and [`impl AsRef<std::ffi::CStr> for crate::version::BumpLevel`]
+/// (commits 307bce0 / e8cbfaf / f6d4f39 — the same borrowed-view lift
+/// at the NUL-terminated C-string frontier on the label-axis ordered
+/// typed sums, each routing through the shared canonical-label
+/// oracle) — now extended to the digest reference-grammar family at
+/// the UTF-8 borrowed-view frontier so the parse-oracle-bounded typed
+/// primitive [`ContentDigest`] exposes the same trait-generic
+/// borrowed-view surface every sibling typed primitive already
+/// carries, without exception.
+///
+/// Zero-cost by construction: the returned `&str` is a borrow off
+/// [`ContentDigest::full`] (the trimmed, validated full-digest
+/// backing string) via [`ContentDigest::as_str`], so a consumer that
+/// borrows the slice reads directly into the value's own storage
+/// without a copy, an allocation, or a formatter round-trip through
+/// [`std::fmt::Display`]. The identity
+/// `digest.as_ref() == digest.as_str()` at every validated
+/// [`ContentDigest`] value is pinned by
+/// [`tests::test_as_ref_str_matches_as_str`]; the identity carrying
+/// through a generic `impl AsRef<str>` consumer is pinned by
+/// [`tests::test_as_ref_str_carries_through_generic_consumer`]; the
+/// parse-round-trip identity through the borrowed-view surface is
+/// pinned by [`tests::test_as_ref_str_parse_round_trip`].
+///
+/// A future refinement to the inherent [`ContentDigest::parse`]
+/// grammar (widening to `sha384`, tightening the trim behaviour) or
+/// to the [`ContentDigest::as_str`] read accessor (a canonicalising
+/// projection, a case-normalising view) updates the one-oracle site
+/// alone and every consumer — cache-slot path builder, registry
+/// blob-URL assembler, hasher `update` sink, HashSet membership check
+/// — that accepts `impl AsRef<str>` inherits the refined slice
+/// automatically with no downstream retyping.
+///
+/// THEORY.md §III.1 typescape: the borrowed-view UTF-8 read surface
+/// is a typed-primitive site on [`ContentDigest`] itself (one
+/// [`AsRef<str>`] impl routing through the
+/// [`ContentDigest::as_str`] read oracle), not a per-consumer
+/// `digest.as_str()` restatement at every downstream site that
+/// accepts `impl AsRef<str>`. THEORY.md §VI.1 one-oracle: the
+/// validated full-digest slice is named at one site
+/// ([`ContentDigest::as_str`], reading through the
+/// [`ContentDigest::parse`]-guarded backing string), and every
+/// borrowed-view read surface — the inherent
+/// [`ContentDigest::as_str`] accessor, the format machinery
+/// [`std::fmt::Display`], this [`AsRef<str>`] trait-generic peer —
+/// reads through it.
+impl AsRef<str> for ContentDigest {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -1470,6 +1555,159 @@ mod tests {
         let err = parse_via_try_from::<ContentDigest>(std::borrow::Cow::Borrowed("sha256abc"))
             .unwrap_err();
         assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
+    }
+
+    /// [`AsRef::as_ref`] yields the same borrowed slice the inherent
+    /// [`ContentDigest::as_str`] accessor yields on every validated
+    /// digest. Pins the "borrowed-view read surface routes through
+    /// [`ContentDigest::as_str`]" invariant: a future refactor that
+    /// inlined a divergent read into the [`AsRef<str>`] impl fails
+    /// this test.
+    #[test]
+    fn test_as_ref_str_matches_as_str() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let via_as_ref: &str = <ContentDigest as AsRef<str>>::as_ref(&d);
+        assert_eq!(via_as_ref, d.as_str());
+        assert_eq!(via_as_ref, raw);
+    }
+
+    /// [`AsRef<str>::as_ref`] yields the full `<algorithm>:<hex>` slice
+    /// for a sha256 digest — the same string the inherent read
+    /// accessor and the [`std::fmt::Display`] formatter emit. Pins the
+    /// primary registry algorithm on the borrowed-view surface.
+    #[test]
+    fn test_as_ref_str_sha256_full_digest() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let borrowed: &str = d.as_ref();
+        assert_eq!(borrowed, raw);
+        assert!(borrowed.starts_with("sha256:"));
+        assert_eq!(&borrowed[7..], D1);
+    }
+
+    /// [`AsRef<str>::as_ref`] yields the full `<algorithm>:<hex>` slice
+    /// for a sha512 digest. Pins the second supported algorithm on the
+    /// borrowed-view surface so a widening at the inherent oracle is
+    /// caught by an existing test on this derived surface.
+    #[test]
+    fn test_as_ref_str_sha512_full_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let borrowed: &str = d.as_ref();
+        assert_eq!(borrowed, raw);
+        assert!(borrowed.starts_with("sha512:"));
+        assert_eq!(&borrowed[7..], hex);
+    }
+
+    /// [`AsRef<str>::as_ref`] reads the trimmed backing slice on an
+    /// input the inherent oracle whitespace-trimmed at parse time —
+    /// the borrowed-view surface exposes the canonical trimmed value,
+    /// not the caller's stray-whitespace raw input. Pins the trim
+    /// discipline carrying through the derived read surface.
+    #[test]
+    fn test_as_ref_str_after_whitespace_trim() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let borrowed: &str = d.as_ref();
+        assert_eq!(borrowed, expected);
+        // The borrowed slice does NOT retain the caller's leading /
+        // trailing whitespace — the canonical trimmed form is what the
+        // derived surface exposes.
+        assert!(!borrowed.starts_with(' '));
+        assert!(!borrowed.ends_with('\n'));
+    }
+
+    /// [`AsRef<str>::as_ref`] and [`std::fmt::Display`]'s formatter
+    /// output read the same underlying slice — the borrowed-view
+    /// trait-generic peer and the format-machinery emission surface
+    /// both route through [`ContentDigest::as_str`]. Pins the "one
+    /// read oracle serves both the trait-generic borrowed-view and
+    /// the format-machinery emission" invariant so a future
+    /// divergence between the two surfaces fails this test.
+    #[test]
+    fn test_as_ref_str_matches_display() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let via_as_ref: &str = d.as_ref();
+            let via_display = d.to_string();
+            assert_eq!(
+                via_as_ref, via_display,
+                "AsRef<str> and Display must read the same underlying \
+                 slice on '{raw}'",
+            );
+        }
+    }
+
+    /// The [`AsRef<str>`] impl composes with a generic borrowed-view
+    /// helper bounded by `impl AsRef<str>` — the compositional
+    /// motivation for landing the trait separately from the inherent
+    /// [`ContentDigest::as_str`] accessor. Pins the trait-generic
+    /// consumer surface: a downstream site that types its input
+    /// contract as `impl AsRef<str>` (a path-segment assembler, a
+    /// HashSet membership check, a hasher `update` sink, a URL-path
+    /// builder) recovers the same borrowed full-digest slice a
+    /// direct `.as_str()` call would.
+    #[test]
+    fn test_as_ref_str_carries_through_generic_consumer() {
+        fn first_char_of<T: AsRef<str>>(t: T) -> char {
+            t.as_ref().chars().next().unwrap()
+        }
+        fn full_length_of<T: AsRef<str>>(t: T) -> usize {
+            t.as_ref().len()
+        }
+        fn equals<T: AsRef<str>>(t: T, expected: &str) -> bool {
+            t.as_ref() == expected
+        }
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(first_char_of(&d), 's');
+        assert_eq!(full_length_of(&d), raw.len());
+        assert!(equals(&d, &raw));
+        // The generic bound must accept ContentDigest by value AND by
+        // borrow — both routes must yield the same slice.
+        assert_eq!(full_length_of(d.clone()), raw.len());
+        assert!(equals(d, &raw));
+    }
+
+    /// A validated digest's [`AsRef<str>`] slice round-trips through
+    /// the inherent [`ContentDigest::parse`] oracle back to the same
+    /// validated [`ContentDigest`] value. Pins the "borrowed-view
+    /// read surface exposes exactly the canonical form the inherent
+    /// oracle accepts" invariant so a future canonicalising
+    /// refinement to [`ContentDigest::as_str`] that broke round-trip
+    /// via [`AsRef<str>`] fails this test.
+    #[test]
+    fn test_as_ref_str_parse_round_trip() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let borrowed: &str = d.as_ref();
+            let round_tripped = ContentDigest::parse(borrowed).unwrap();
+            assert_eq!(round_tripped, d);
+            // Composed with the trait-generic parse peer: parsing the
+            // AsRef<str> slice through TryFrom<&str> and FromStr must
+            // yield the same value.
+            let via_try_from = ContentDigest::try_from(borrowed).unwrap();
+            let via_from_str: ContentDigest = borrowed.parse().unwrap();
+            assert_eq!(via_try_from, d);
+            assert_eq!(via_from_str, d);
+        }
     }
 
     /// An OCI image manifest (the standard single-image shape skopeo
