@@ -9258,6 +9258,102 @@ impl PartialEq<str> for BumpLevel {
     }
 }
 
+/// Ergonomic canonical-label equality query at the borrowed UTF-8
+/// frontier through a `&str` receiver — a downstream consumer bound
+/// by [`PartialEq<&str>`] (a `matches!` predicate that reads a
+/// canonical label off a `&str` handle without a per-arm
+/// [`BumpLevel::from_str`] parse-and-discard round trip, a
+/// release-manifest audit assertion that names a specific canonical
+/// [`BumpLevel`] variant against an already-borrowed `&str` slot
+/// without a downstream `.as_str()` restatement or an explicit
+/// `*label_ref` deref, an integration-test oracle that compares a
+/// captured stdout / journal / telemetry-breadcrumb line against a
+/// specific canonical label as `level == captured_line_ref` where
+/// `captured_line_ref: &str`) answers the boolean equality query
+/// `level == label_ref` at ONE composition rather than a per-site
+/// `level.as_str() == label_ref` restatement that repeats the
+/// canonical-label oracle name at every downstream comparison site.
+///
+/// Sibling of [`PartialEq<str>`] (line 9255) — the same canonical-
+/// label oracle at the same borrowed UTF-8 frontier, split by
+/// receiver shape: [`PartialEq<str>`] answers the boolean equality
+/// query against a dereffed `str` value (`level == *label_ref`),
+/// this [`PartialEq<&str>`] answers the same boolean equality query
+/// against a `&str` reference (`level == label_ref`) without the
+/// caller's explicit `*` deref at every comparison site. The two
+/// receiver-shape peers together give the borrowed UTF-8 comparison
+/// surface the same ergonomic reach the standard library gives
+/// [`String`] through its own [`PartialEq<str>`] + [`PartialEq<&str>`]
+/// receiver-shape pair.
+///
+/// Route: the impl body composes [`BumpLevel::as_str`] with the
+/// standard library [`<str as PartialEq<str>>::eq`] (byte-for-byte
+/// UTF-8 equality against the borrowed right-hand-side view), so
+/// the comparison reads the same canonical-label bytes at zero
+/// allocation, zero temporary [`String`] construction, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call — the
+/// same zero-cost discipline the [`PartialEq<str>`] receiver-shape
+/// sibling carries.
+///
+/// Closes the borrowed UTF-8 `&str`-receiver comparison trio at the
+/// version-bump-magnitude ladder — opened at
+/// [`crate::retry::PerAttemptRegion`] (commit 3ba5b60 — the
+/// structural mirror at the sibling per-attempt-region ladder,
+/// routing through [`crate::retry::PerAttemptRegion::as_str`]) and
+/// mid-slotted at [`crate::probe_outcome::AdmissionTier`] (commit
+/// a94265d — the structural mirror at the sibling admission-tier
+/// ladder, routing through
+/// [`crate::probe_outcome::AdmissionTier::as_str`]), matching the
+/// [`PartialEq<str>`] closing order at the sibling borrowed UTF-8
+/// dereffed-str-receiver surface (ac5f0af → 8f0a8cc → f891f6e), the
+/// [`AsRef<std::ffi::CStr>`] closing order at the sibling borrowed-
+/// view NUL-terminated C-string surface (307bce0 → e8cbfaf →
+/// f6d4f39), and every prior borrowed-view AsRef trio's closing
+/// order at the sibling string-owner-shape frontiers. With this
+/// commit the borrowed UTF-8 `&str`-receiver comparison axis spans
+/// all three ordered typed sums on the ladder set against ONE
+/// canonical-label oracle each, and future trios extend the same
+/// pattern to [`PartialEq<String>`] and
+/// [`PartialEq<std::borrow::Cow<'_, str>>`] (the remaining
+/// receiver-shape cross-product at the UTF-8 comparison frontier);
+/// the follow-up trios are not in this commit.
+///
+/// The identity `(level == label_ref) == (level.as_str() == label_ref)`
+/// at every [`BumpLevel::ALL`] variant × every string in the union
+/// of {canonical labels, common non-canonical labels, empty} is
+/// pinned by
+/// [`tests::test_bump_level_partial_eq_str_ref_agrees_with_as_str`];
+/// the reflexivity identity `level == level.as_str()` (no explicit
+/// deref) at every variant is pinned by
+/// [`tests::test_bump_level_partial_eq_str_ref_reflexive_at_own_label`];
+/// the canonicity discipline (only exact lowercase
+/// [`BumpLevel::as_str`] emissions equal a [`BumpLevel`] value
+/// through this surface — no case-fold, no whitespace tolerance,
+/// no cross-variant collision) at every variant × known-bad label
+/// pair is pinned by
+/// [`tests::test_bump_level_partial_eq_str_ref_rejects_non_canonical_labels`].
+///
+/// THEORY.md §V.4 typed primitives: the borrowed UTF-8 `&str`-
+/// receiver comparison surface is a typed-primitive site on
+/// [`BumpLevel`] itself (one [`PartialEq<&str>`] impl routing
+/// through [`BumpLevel::as_str`]), not a per-consumer
+/// `level.as_str() == label_ref` restatement at every downstream
+/// site that asks whether a [`BumpLevel`] value names a specific
+/// canonical label through an already-borrowed `&str` handle.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`BumpLevel::as_str`]), and every borrowed UTF-8 surface —
+/// the [`AsRef<str>`] borrowed-view sibling yielding `&str`, the
+/// [`PartialEq<str>`] dereffed-str-receiver sibling answering
+/// `level == *label_ref`, this [`PartialEq<&str>`] answering
+/// `level == label_ref` without the explicit deref — reads through
+/// the same one-oracle discipline projected onto its own intent ×
+/// receiver shape.
+impl PartialEq<&str> for BumpLevel {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -20326,6 +20422,161 @@ mod tests {
                 assert!(
                     !<BumpLevel as PartialEq<str>>::eq(&level, label),
                     "PartialEq<str> must reject non-canonical label {label:?} at {level:?}",
+                );
+            }
+        }
+    }
+
+    /// At every [`BumpLevel`] variant × every string in the union of
+    /// {canonical labels, common non-canonical labels, empty}, the
+    /// [`PartialEq<&str>`] comparison
+    /// `<Self as PartialEq<&str>>::eq(&level, &label_ref)` equals
+    /// the direct `level.as_str() == label_ref` composition. Pins
+    /// the agreement identity that the borrowed UTF-8 `&str`-
+    /// receiver comparison surface reads the same canonical-label
+    /// oracle the [`AsRef<str>`] borrowed-view sibling reads,
+    /// projected through the boolean equality query at a `&str`
+    /// handle rather than at a dereffed `str` value or a borrow. A
+    /// regression that swapped the [`PartialEq<&str>`] impl body
+    /// onto a stale label table, drifted it off the
+    /// [`BumpLevel::as_str`] oracle (a hand-rolled `matches!` on
+    /// the variant tag with hard-coded per-arm labels that a future
+    /// variant insertion could silently leave out), or introduced
+    /// case-folding / whitespace-tolerance leniency would break
+    /// this composition equality at at least one (variant, label)
+    /// pair and fail here at the canonical-label pin, not at every
+    /// downstream `level == label_ref` call site. Structural mirror
+    /// of
+    /// [`crate::retry::tests::test_per_attempt_region_partial_eq_str_ref_agrees_with_as_str`]
+    /// (commit 3ba5b60) at the sibling per-attempt-region ladder
+    /// and
+    /// [`crate::probe_outcome::tests::test_admission_tier_partial_eq_str_ref_agrees_with_as_str`]
+    /// (commit a94265d) at the sibling admission-tier ladder.
+    #[test]
+    fn test_bump_level_partial_eq_str_ref_agrees_with_as_str() {
+        let labels = [
+            "patch",
+            "minor",
+            "major",
+            "",
+            "Patch",
+            "Minor",
+            "Major",
+            "PATCH",
+            "MINOR",
+            "MAJOR",
+            "patch ",
+            " patch",
+            "\tminor",
+            "major\n",
+            "pat",
+            "nonsense",
+            "refused",
+            "staging_only",
+            "strict",
+            "first",
+            "before_first",
+            "over_budget",
+        ];
+        for level in BumpLevel::ALL {
+            for label in labels {
+                assert_eq!(
+                    <BumpLevel as PartialEq<&str>>::eq(&level, &label),
+                    level.as_str() == label,
+                    "PartialEq<&str> and as_str() equality must agree at ({level:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`BumpLevel`] variant,
+    /// `<Self as PartialEq<&str>>::eq(&level, &level.as_str())`
+    /// returns true — equivalently, the caller may write
+    /// `level == level.as_str()` without an explicit `*` deref
+    /// against the borrowed label. Pins the reflexivity identity
+    /// that a variant compared against its own canonical-label
+    /// emission through a `&str` handle always answers true — the
+    /// load-bearing "self-recognition" property the borrowed UTF-8
+    /// `&str`-receiver comparison surface promises. A future variant
+    /// insertion that landed a label the [`BumpLevel::as_str`]
+    /// oracle emits but the [`PartialEq<&str>`] impl silently missed
+    /// (a divergent hand-rolled label table drifting past the one-
+    /// oracle discipline) would break this pin at the new variant,
+    /// not at a downstream consumer's aggregate. Structural mirror
+    /// of
+    /// [`crate::retry::tests::test_per_attempt_region_partial_eq_str_ref_reflexive_at_own_label`]
+    /// (commit 3ba5b60) at the sibling per-attempt-region ladder
+    /// and
+    /// [`crate::probe_outcome::tests::test_admission_tier_partial_eq_str_ref_reflexive_at_own_label`]
+    /// (commit a94265d) at the sibling admission-tier ladder.
+    #[test]
+    fn test_bump_level_partial_eq_str_ref_reflexive_at_own_label() {
+        for level in BumpLevel::ALL {
+            let label: &str = level.as_str();
+            assert!(
+                <BumpLevel as PartialEq<&str>>::eq(&level, &label),
+                "PartialEq<&str> must recognise self canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// At every [`BumpLevel`] variant × every entry in a known-bad
+    /// label set (empty, UpperCamel forms of every variant including
+    /// the target variant's own UpperCamel name, ALLCAPS forms,
+    /// truncated forms, whitespace-fringed forms, unrelated labels
+    /// from sibling ladders like
+    /// [`crate::retry::PerAttemptRegion`] and
+    /// [`crate::probe_outcome::AdmissionTier`]), the
+    /// [`PartialEq<&str>`] impl returns false. Pins the canonicity
+    /// discipline at the borrowed UTF-8 `&str`-receiver comparison
+    /// surface: only the exact lowercase labels [`BumpLevel::as_str`]
+    /// emits (`"patch"`, `"minor"`, `"major"`) equal a [`BumpLevel`]
+    /// value through this surface — drift toward accepting a
+    /// case-folded, ALLCAPS, truncated, or whitespace-tolerant
+    /// grammar is refused at ONE pin covering the full variant ×
+    /// known-bad grid, matching the canonicity discipline the
+    /// sibling [`PartialEq<str>`] receiver-shape peer enforces at
+    /// [`test_bump_level_partial_eq_str_rejects_non_canonical_labels`].
+    /// Structural mirror of
+    /// [`crate::retry::tests::test_per_attempt_region_partial_eq_str_ref_rejects_non_canonical_labels`]
+    /// (commit 3ba5b60) at the sibling per-attempt-region ladder
+    /// and
+    /// [`crate::probe_outcome::tests::test_admission_tier_partial_eq_str_ref_rejects_non_canonical_labels`]
+    /// (commit a94265d) at the sibling admission-tier ladder.
+    #[test]
+    fn test_bump_level_partial_eq_str_ref_rejects_non_canonical_labels() {
+        let bad = [
+            "",
+            "Patch",
+            "Minor",
+            "Major",
+            "PATCH",
+            "MINOR",
+            "MAJOR",
+            "pat",
+            "min",
+            "maj",
+            " patch",
+            "patch ",
+            "\tminor",
+            "major\n",
+            "nonsense",
+            "refused",
+            "staging_only",
+            "strict",
+            "first",
+            "before_first",
+            "over_budget",
+            "final",
+        ];
+        for level in BumpLevel::ALL {
+            for label in bad {
+                if label == level.as_str() {
+                    continue;
+                }
+                assert!(
+                    !<BumpLevel as PartialEq<&str>>::eq(&level, &label),
+                    "PartialEq<&str> must reject non-canonical label {label:?} at {level:?}",
                 );
             }
         }
