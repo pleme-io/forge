@@ -234,13 +234,20 @@ pub async fn execute(
                     anyhow::bail!("Failed to load Docker image");
                 }
 
-                // Extract image name from docker load output
+                // Extract image name from docker load output. The typed
+                // primitive `crate::oci_manifest::docker_load_image_reference`
+                // strips the `Loaded image[ ID]:` prefix in one step,
+                // preserving the tag colon inside the reference and the
+                // `sha256:` algorithm prefix inside an image-ID identity;
+                // the prior `line.split(':').last()` scan lost both
+                // (dropping the image name from `nginx:latest` → `latest`
+                // and the algorithm prefix from `sha256:hex` → bare hex),
+                // silently breaking the downstream `docker tag` step for
+                // every real docker-load output.
                 let load_output = String::from_utf8_lossy(&load_result.stdout);
                 let image_name = load_output
                     .lines()
-                    .find(|line| line.contains("Loaded image"))
-                    .and_then(|line| line.split(':').last())
-                    .map(|s| s.trim())
+                    .find_map(crate::oci_manifest::docker_load_image_reference)
                     .ok_or_else(|| anyhow::anyhow!("Could not determine loaded image name"))?;
 
                 info!("   Loaded: {}", image_name);

@@ -281,6 +281,54 @@ pub fn image_tag(image: &str) -> Option<&str> {
     })
 }
 
+/// Extract the image reference from a single line of `docker load`
+/// output. `docker load` reports each loaded image on its own line under
+/// one of two shapes:
+///
+/// - `Loaded image: <name>:<tag>` — tagged load (tar carried a named
+///   image reference).
+/// - `Loaded image ID: sha256:<hex>` — untagged load (tar carried only
+///   an image ID; the daemon reports the content-addressed identity).
+///
+/// This primitive returns the trimmed `<ref>` (respectively `<name>:<tag>`
+/// or `sha256:<hex>`) for either shape and [`None`] for any other line
+/// or for either shape with an empty tail. The tag colon inside the
+/// image reference or the digest colon inside the sha256 identity cannot
+/// bleed into the parse — the shape's fixed prefix is stripped in one
+/// step, so the tail is whatever follows it verbatim.
+///
+/// The naïve predecessor at `commands/comprehensive_release.rs` was
+/// `line.split(':').last().map(str::trim)` on a line that matched
+/// `line.contains("Loaded image")`. That parse was semantically wrong
+/// on the two real docker-load outputs it had to handle:
+///
+/// 1. `Loaded image: nginx:latest` — `split(':').last()` returned
+///    `"latest"`, dropping the image name entirely. The downstream
+///    `docker tag latest <target>` had no local image called
+///    `latest:latest` and failed the release step with a misleading
+///    "Failed to tag Docker image" error rather than the actual parse
+///    bug. Every tagged image (the common case: a Nix-built OCI tar
+///    carrying `<service>:<git-sha>`) hit this failure mode.
+/// 2. `Loaded image ID: sha256:abcdef…` — `split(':').last()` returned
+///    the bare hex `abcdef…`, dropping the `sha256:` algorithm prefix.
+///    `docker tag abcdef…` may or may not resolve depending on how
+///    docker interprets bare hex; the prefixed form always resolves.
+///
+/// `docker_load_image_reference` extracts the correct tail in one
+/// pattern-scoped step, and the caller composes it as
+/// `.lines().find_map(docker_load_image_reference)` — the honesty-
+/// preserving replacement for the naïve substring scan.
+pub fn docker_load_image_reference(line: &str) -> Option<&str> {
+    // `Loaded image ID:` must be checked first: `Loaded image:` is a
+    // proper prefix of it up through the space, but not through the `:`
+    // (the `ID` word intervenes), so either ordering is correct — this
+    // ordering makes the more-specific match explicit.
+    line.strip_prefix("Loaded image ID:")
+        .or_else(|| line.strip_prefix("Loaded image:"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +742,135 @@ mod tests {
         assert_eq!(image_tag(":latest"), None);
         assert_eq!(image_tag("nginx/"), None);
         assert_eq!(image_tag("/nginx"), None);
+    }
+
+    /// The canonical `Loaded image: <ref>` shape (tagged load) reports
+    /// the full `<name>:<tag>` reference verbatim — the tag colon
+    /// inside the reference is preserved, not eaten by a naïve
+    /// `split(':').last()` scan.
+    #[test]
+    fn test_docker_load_image_reference_tagged_load() {
+        assert_eq!(
+            docker_load_image_reference("Loaded image: nginx:latest"),
+            Some("nginx:latest")
+        );
+        assert_eq!(
+            docker_load_image_reference("Loaded image: myservice:abc1234"),
+            Some("myservice:abc1234")
+        );
+        assert_eq!(
+            docker_load_image_reference("Loaded image: ghcr.io/pleme-io/forge:v0.42.0"),
+            Some("ghcr.io/pleme-io/forge:v0.42.0")
+        );
+        // Registry with port + tag: two colons inside the reference,
+        // both preserved.
+        assert_eq!(
+            docker_load_image_reference(
+                "Loaded image: registry.example.com:5000/library/nginx:1.25"
+            ),
+            Some("registry.example.com:5000/library/nginx:1.25")
+        );
+    }
+
+    /// The `Loaded image ID: <id>` shape (untagged load) reports the
+    /// full content-addressed identity verbatim, with the `sha256:`
+    /// algorithm prefix intact.
+    #[test]
+    fn test_docker_load_image_reference_untagged_load() {
+        let id = format!("sha256:{D1}");
+        assert_eq!(
+            docker_load_image_reference(&format!("Loaded image ID: {id}")),
+            Some(id.as_str())
+        );
+    }
+
+    /// Whitespace around the reference is trimmed; the tail is always
+    /// the reference alone with no stray leading space (which the
+    /// downstream `docker tag` would otherwise reject).
+    #[test]
+    fn test_docker_load_image_reference_trims_surrounding_whitespace() {
+        assert_eq!(
+            docker_load_image_reference("Loaded image:   nginx:latest   "),
+            Some("nginx:latest")
+        );
+        assert_eq!(
+            docker_load_image_reference("Loaded image ID:\tsha256:abc\n"),
+            Some("sha256:abc")
+        );
+    }
+
+    /// Lines that do not carry a `Loaded image[:| ID:]` prefix — status
+    /// lines, warnings, unrelated stdout, empty lines — report [`None`]
+    /// so `.lines().find_map(...)` skips them without confusing an
+    /// arbitrary substring for an image reference.
+    #[test]
+    fn test_docker_load_image_reference_rejects_non_load_lines() {
+        assert_eq!(docker_load_image_reference(""), None);
+        assert_eq!(docker_load_image_reference("Loading layer"), None);
+        assert_eq!(
+            docker_load_image_reference("The image loaded was: nginx:latest"),
+            None
+        );
+        // The `Loaded image` phrase in the middle of a line (not as a
+        // prefix) is not a load record; skip it.
+        assert_eq!(
+            docker_load_image_reference("Note: Loaded image: nginx:latest"),
+            None
+        );
+    }
+
+    /// An empty tail after either prefix reports [`None`] rather than
+    /// an empty reference; the downstream `docker tag ""` would
+    /// otherwise fail with an opaque error.
+    #[test]
+    fn test_docker_load_image_reference_empty_tail_is_none() {
+        assert_eq!(docker_load_image_reference("Loaded image:"), None);
+        assert_eq!(docker_load_image_reference("Loaded image:   "), None);
+        assert_eq!(docker_load_image_reference("Loaded image ID:"), None);
+        assert_eq!(docker_load_image_reference("Loaded image ID:  \t "), None);
+    }
+
+    /// The naïve `line.split(':').last().map(str::trim)` predecessor
+    /// returned the wrong tail on both real docker-load shapes; this
+    /// test pins the exact strings the primitive rescues from that
+    /// bug. Reverting `docker_load_image_reference` to the predecessor
+    /// (`line.split(':').last().map(str::trim)` applied to a
+    /// prefix-matched line) would fail every assertion here.
+    #[test]
+    fn test_docker_load_image_reference_regression_pins() {
+        // Tagged load — predecessor returned "latest", losing "nginx:".
+        assert_eq!(
+            docker_load_image_reference("Loaded image: nginx:latest"),
+            Some("nginx:latest")
+        );
+        // Registry+port+tag — predecessor returned "1.25", losing the
+        // registry, port, and image name.
+        assert_eq!(
+            docker_load_image_reference(
+                "Loaded image: registry.example.com:5000/library/nginx:1.25"
+            ),
+            Some("registry.example.com:5000/library/nginx:1.25")
+        );
+        // Untagged load — predecessor returned bare hex, losing the
+        // "sha256:" algorithm prefix docker requires as an image ID.
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            docker_load_image_reference(&format!("Loaded image ID: sha256:{hex}")),
+            Some(format!("sha256:{hex}").as_str())
+        );
+    }
+
+    /// End-to-end shape: a multi-line `docker load` stdout stream
+    /// scanned with `.lines().find_map(docker_load_image_reference)`
+    /// yields the first loaded image reference and skips unrelated
+    /// status lines, mirroring the caller's composition at
+    /// `commands/comprehensive_release.rs`.
+    #[test]
+    fn test_docker_load_image_reference_scans_multiline_stdout() {
+        let stdout = "Loading layer [==================================================>]\n\
+                      Loaded image: myservice:abc1234\n\
+                      Loaded image: myservice-worker:abc1234\n";
+        let first = stdout.lines().find_map(docker_load_image_reference);
+        assert_eq!(first, Some("myservice:abc1234"));
     }
 }
