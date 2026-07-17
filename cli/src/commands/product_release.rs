@@ -182,7 +182,14 @@ async fn push_prebuilt_image(local_name: &str, registry: &str, deploy_tag: &str)
         .await
         .ok_or_else(|| anyhow::anyhow!("No local Docker image found for '{}'", local_name))?;
 
-    let full_tag = format!("{}:{}", registry, deploy_tag);
+    // Compose `<repository>:<tag>` via
+    // `crate::oci_manifest::image_reference` — the typed
+    // compositional inverse of `image_repository_and_tag` — so this
+    // build path and every other `<repository>:<tag>` composition in
+    // the crate route through one canonical site (theory §VI.1
+    // generation over composition: the three-times rule tripped
+    // across 20+ sites, extract the primitive).
+    let full_tag = crate::oci_manifest::image_reference(registry, deploy_tag);
 
     // Tag with registry URL and SHA
     let status = Command::new("docker")

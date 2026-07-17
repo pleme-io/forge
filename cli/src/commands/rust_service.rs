@@ -629,7 +629,10 @@ pub async fn build_rust_service(
 /// Verify image exists in registry and return its digest
 /// This provides a cryptographic guarantee that we're deploying exactly what we pushed
 async fn verify_image_in_registry(registry: &str, full_tag_suffix: &str) -> Result<String> {
-    let full_tag = format!("{}:{}", registry, full_tag_suffix);
+    // Compose `<repository>:<tag>` via
+    // `crate::oci_manifest::image_reference` — the typed
+    // compositional inverse of `image_repository_and_tag`.
+    let full_tag = crate::oci_manifest::image_reference(registry, full_tag_suffix);
 
     // Get token for authenticated registry access
     let github_token = RegistryCredentials::discover_token(None)
@@ -1794,7 +1797,10 @@ pub async fn deploy_rust_service_with_tag(
     k8s_workdir: Option<std::path::PathBuf>,
     k8s_branch: Option<String>,
 ) -> Result<String> {
-    let image_tag = format!("{}:{}", registry, tag_suffix);
+    // Compose `<repository>:<tag>` via
+    // `crate::oci_manifest::image_reference` — the typed
+    // compositional inverse of `image_repository_and_tag`.
+    let image_tag = crate::oci_manifest::image_reference(&registry, &tag_suffix);
 
     println!(
         "🎯 {} {} {}",
@@ -2001,7 +2007,11 @@ async fn print_deployment_report(
             println!("    • Current pod status: {}", phase);
             println!("    • Current image: {}", image.dimmed());
 
-            let expected_image = format!("{}:{}", deploy_config.registry_url(), tag_suffix);
+            // Compose `<repository>:<tag>` via
+            // `crate::oci_manifest::image_reference` — the typed
+            // compositional inverse of `image_repository_and_tag`.
+            let expected_image =
+                crate::oci_manifest::image_reference(&deploy_config.registry_url(), tag_suffix);
             if image.contains(tag_suffix) {
                 println!("    • {} New image is already deployed!", "✓".green());
             } else {
