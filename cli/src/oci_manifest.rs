@@ -699,6 +699,104 @@ impl From<ContentDigest> for String {
     }
 }
 
+/// [`From<ContentDigest>`] for [`Vec<u8>`] moves the validated
+/// `<algorithm>:<hex>` backing bytes out of the consumed
+/// [`ContentDigest`] value at zero-copy — the impl routes through
+/// [`<ContentDigest as From<ContentDigest>>::from`] into [`String`]
+/// (which moves [`ContentDigest::full`] out at zero-copy) and then
+/// [`String::into_bytes`] (which moves the backing [`Vec<u8>`] out
+/// of the [`String`] at zero-copy), so no allocation, no
+/// re-formatting through [`std::fmt::Display`], no
+/// `digest.as_ref().to_vec()` bridge, no `digest.as_str().as_bytes().
+/// to_owned()` chain. A downstream consumer that owns a
+/// [`ContentDigest`] and needs to hand it off as an owned
+/// [`Vec<u8>`] to a byte-oriented sink (a
+/// [`std::collections::HashMap<Vec<u8>, _>`] key insertion, a
+/// [`bytes::Bytes::from`] intake, an `http::HeaderValue::from_bytes`
+/// / [`http::HeaderValue::from_maybe_shared`] `Vec<u8>` frontier, a
+/// `blake3::Hasher` / `sha2::Digest` streaming hasher that consumes
+/// its input as an owned byte buffer at a construction boundary, a
+/// generic sink bounded by `impl Into<Vec<u8>>`) is a one-line
+/// `Vec::<u8>::from(digest)` / `digest.into()` call, not a per-site
+/// `digest.as_ref().to_vec()` or `digest.as_str().as_bytes().
+/// to_owned()` bridge that pays a redundant allocation.
+///
+/// The by-value owned-byte-slice emit peer of the by-reference
+/// borrowed-view byte-slice read peer [`AsRef<[u8]> for
+/// ContentDigest`] (commit fbfb838): both surfaces read the same
+/// underlying validated full-digest bytes, one exposing them
+/// borrowed at the byte-slice frontier (`&[u8]`) and this one
+/// emitting them owned at the [`Vec<u8>`] frontier that
+/// owned-byte-buffer consumers pin their contract on. The
+/// byte-slice frontier sibling of the by-value owned-UTF-8 emit
+/// peer [`From<ContentDigest> for String`] (commit 83313fd): the
+/// two together close the by-value owned emit surface across the
+/// UTF-8 (`String`) and byte-slice (`Vec<u8>`) frontiers — the
+/// UTF-8 peer routes through the moved [`ContentDigest::full`]
+/// backing directly, this byte-slice peer chains through the same
+/// UTF-8 emit oracle via [`String::into_bytes`] so the two agree
+/// byte-for-byte on the canonical form by construction, and a
+/// future canonicalising refinement to the [`String`] emit surface
+/// propagates to the byte-slice emit surface at zero per-consumer
+/// cost.
+///
+/// Zero-copy by construction: [`String::from(digest)`] moves
+/// [`ContentDigest::full`] out at zero-copy, and
+/// [`String::into_bytes`] moves the backing [`Vec<u8>`] out of the
+/// [`String`] at zero-copy — no allocation, no clone, no
+/// per-consumer buffer growth. The identity
+/// `Vec::<u8>::from(digest.clone()) ==
+/// <ContentDigest as AsRef<[u8]>>::as_ref(&digest)` at every
+/// validated [`ContentDigest`] value is pinned by
+/// [`tests::test_from_content_digest_vec_u8_matches_as_ref_bytes`];
+/// the identity carrying through a generic `impl Into<Vec<u8>>`
+/// consumer is pinned by
+/// [`tests::test_from_content_digest_vec_u8_carries_through_generic_consumer`];
+/// the parse-round-trip identity through the byte-slice emit
+/// surface (decoding the emitted [`Vec<u8>`] via
+/// [`String::from_utf8`] and parsing back through every canonical
+/// parse surface) is pinned by
+/// [`tests::test_from_content_digest_vec_u8_parse_round_trip`].
+///
+/// The emitted bytes are pure lowercase-hex plus
+/// `sha256`/`sha512`/`:` — every byte is ASCII by parse invariant,
+/// so an owned-byte-buffer consumer that treats the input as ASCII
+/// (a `HashMap<Vec<u8>, _>` key whose ordering is byte-lex, a MAC
+/// accumulator that reads its owned input as bytes, a
+/// content-addressed cache key that hashes the owned byte buffer)
+/// stores the same canonical form the byte-slice borrowed-view
+/// surface exposes with no multibyte-boundary hazard.
+///
+/// A future refinement to the inherent [`ContentDigest::parse`]
+/// grammar (widening to `sha384`, tightening the trim behaviour) or
+/// to the [`From<ContentDigest> for String`] emit oracle (a
+/// canonicalising projection at the owned-UTF-8 frontier) is a
+/// one-site edit at the inherent / owned-UTF-8 oracle; every
+/// consumer bound by `impl Into<Vec<u8>>` inherits the refined
+/// canonical byte buffer off the moved backing storage
+/// automatically with no downstream retyping.
+///
+/// THEORY.md §III.1 typescape: the by-value owned-byte-slice emit
+/// surface is a typed-primitive site on [`ContentDigest`] itself
+/// (one [`From<ContentDigest>`] impl moving the
+/// [`ContentDigest::parse`]-validated backing bytes out at
+/// zero-copy through the [`From<ContentDigest> for String`] emit
+/// oracle), not a per-consumer `digest.as_ref().to_vec()` or
+/// `digest.as_str().as_bytes().to_owned()` restatement at every
+/// downstream site that accepts `impl Into<Vec<u8>>`.
+/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are
+/// named at one site ([`From<ContentDigest> for String`], reading
+/// through the moved [`ContentDigest::full`] backing), and every
+/// emit surface — the by-value owned-UTF-8 peer
+/// [`From<ContentDigest> for String`], this by-value
+/// owned-byte-slice peer [`From<ContentDigest> for Vec<u8>`] —
+/// reads through it.
+impl From<ContentDigest> for Vec<u8> {
+    fn from(digest: ContentDigest) -> Vec<u8> {
+        String::from(digest).into_bytes()
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -2200,6 +2298,165 @@ mod tests {
             let via_try_from_string = ContentDigest::try_from(emitted.clone()).unwrap();
             let via_try_from_cow =
                 ContentDigest::try_from(std::borrow::Cow::Owned(emitted.clone())).unwrap();
+            assert_eq!(via_parse, original);
+            assert_eq!(via_try_from_str, original);
+            assert_eq!(via_from_str, original);
+            assert_eq!(via_try_from_string, original);
+            assert_eq!(via_try_from_cow, original);
+        }
+    }
+
+    /// The by-value owned-byte-slice emit surface
+    /// [`From<ContentDigest> for Vec<u8>`] moves the same validated
+    /// full-digest bytes that the borrowed-view surface
+    /// [`AsRef<[u8]> for ContentDigest`] reads and that the
+    /// by-value owned-UTF-8 emit peer [`From<ContentDigest> for
+    /// String`] emits (as UTF-8 bytes). Pins the "byte-slice emit
+    /// peer routes through the same one-oracle backing bytes the
+    /// borrowed-view byte-slice peer projects, chained through the
+    /// UTF-8 emit oracle via [`String::into_bytes`]" invariant
+    /// across the sha256 / sha512 algorithm grid — a future
+    /// divergence between the moved-out [`Vec<u8>`] and the
+    /// borrowed `&[u8]` view fails this test.
+    #[test]
+    fn test_from_content_digest_vec_u8_matches_as_ref_bytes() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let borrowed_as_ref: Vec<u8> = <ContentDigest as AsRef<[u8]>>::as_ref(&d).to_vec();
+            let via_str_bytes: Vec<u8> = d.as_str().as_bytes().to_vec();
+            let via_string_emit: Vec<u8> = String::from(d.clone()).into_bytes();
+            let emitted: Vec<u8> = Vec::<u8>::from(d);
+            assert_eq!(emitted, borrowed_as_ref);
+            assert_eq!(emitted, via_str_bytes);
+            assert_eq!(emitted, via_string_emit);
+            assert_eq!(emitted, raw.as_bytes());
+        }
+    }
+
+    /// [`From<ContentDigest> for Vec<u8>`] emits the full
+    /// `<algorithm>:<hex>` byte slice for a sha256 digest. Pins the
+    /// primary registry algorithm on the by-value owned-byte-slice
+    /// emit surface — the emitted [`Vec<u8>`] is byte-identical to
+    /// the input the inherent oracle accepted, and every emitted
+    /// byte is ASCII by parse invariant.
+    #[test]
+    fn test_from_content_digest_vec_u8_sha256_full_digest() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: Vec<u8> = d.into();
+        assert_eq!(emitted, raw.as_bytes());
+        assert!(emitted.starts_with(b"sha256:"));
+        assert_eq!(&emitted[7..], D1.as_bytes());
+        assert!(emitted.iter().all(|b| b.is_ascii()));
+    }
+
+    /// [`From<ContentDigest> for Vec<u8>`] emits the full
+    /// `<algorithm>:<hex>` byte slice for a sha512 digest. Pins the
+    /// second supported algorithm on the by-value owned-byte-slice
+    /// emit surface so a widening at the inherent oracle is caught
+    /// by an existing test on this derived surface.
+    #[test]
+    fn test_from_content_digest_vec_u8_sha512_full_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: Vec<u8> = d.into();
+        assert_eq!(emitted, raw.as_bytes());
+        assert!(emitted.starts_with(b"sha512:"));
+        assert_eq!(&emitted[7..], hex.as_bytes());
+        assert!(emitted.iter().all(|b| b.is_ascii()));
+    }
+
+    /// [`From<ContentDigest> for Vec<u8>`] emits the trimmed
+    /// canonical bytes on an input the inherent oracle
+    /// whitespace-trimmed at parse time — the emit surface projects
+    /// the canonical trimmed byte buffer, not the caller's
+    /// stray-whitespace raw input. Pins the trim discipline
+    /// carrying through the by-value owned-byte-slice emit surface.
+    #[test]
+    fn test_from_content_digest_vec_u8_after_whitespace_trim() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: Vec<u8> = d.into();
+        assert_eq!(emitted, expected.as_bytes());
+        assert!(!emitted.starts_with(b" "));
+        assert!(!emitted.ends_with(b"\n"));
+    }
+
+    /// The [`From<ContentDigest> for Vec<u8>`] impl composes with a
+    /// generic owned-byte-buffer helper bounded by `impl
+    /// Into<Vec<u8>>` — the compositional motivation for landing
+    /// the trait separately from the borrowed-view [`AsRef<[u8]>`]
+    /// read peer. Pins the trait-generic consumer surface: a
+    /// downstream site that types its input contract as
+    /// `impl Into<Vec<u8>>` (a `HashMap<Vec<u8>, _>::insert` key, a
+    /// [`bytes::Bytes::from`] intake, an
+    /// `http::HeaderValue::from_bytes` `Vec<u8>` frontier, a
+    /// streaming-hasher owned-buffer construction sink) recovers
+    /// the same validated full-digest bytes a direct
+    /// `digest.as_ref().to_vec()` chain would, at zero-copy off the
+    /// moved backing storage.
+    #[test]
+    fn test_from_content_digest_vec_u8_carries_through_generic_consumer() {
+        fn first_byte_of<T: Into<Vec<u8>>>(t: T) -> u8 {
+            let v: Vec<u8> = t.into();
+            *v.first().unwrap()
+        }
+        fn byte_length_of<T: Into<Vec<u8>>>(t: T) -> usize {
+            let v: Vec<u8> = t.into();
+            v.len()
+        }
+        fn owned_bytes_eq<T: Into<Vec<u8>>>(t: T, expected: &[u8]) -> bool {
+            let v: Vec<u8> = t.into();
+            v == expected
+        }
+        let raw = format!("sha256:{D1}");
+        let d1 = ContentDigest::parse(&raw).unwrap();
+        let d2 = d1.clone();
+        let d3 = d1.clone();
+        assert_eq!(first_byte_of(d1), b's');
+        assert_eq!(byte_length_of(d2), raw.len());
+        assert!(owned_bytes_eq(d3, raw.as_bytes()));
+    }
+
+    /// A validated digest's [`From<ContentDigest> for Vec<u8>`]
+    /// output round-trips through [`String::from_utf8`] and then
+    /// the full parse-surface set — inherent
+    /// [`ContentDigest::parse`], [`TryFrom<&str>`],
+    /// [`FromStr`](std::str::FromStr), [`TryFrom<String>`],
+    /// [`TryFrom<Cow<'_, str>>`] — back to the same validated
+    /// [`ContentDigest`] value. Pins the "byte-slice emit surface
+    /// projects exactly the canonical UTF-8 form every parse
+    /// surface accepts" invariant so a future canonicalising
+    /// refinement to the backing bytes that broke round-trip via
+    /// the owned-byte-slice emit peer fails this test.
+    #[test]
+    fn test_from_content_digest_vec_u8_parse_round_trip() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let original = ContentDigest::parse(&raw).unwrap();
+            let emitted: Vec<u8> = Vec::<u8>::from(original.clone());
+            let decoded = String::from_utf8(emitted).unwrap();
+            let via_parse = ContentDigest::parse(&decoded).unwrap();
+            let via_try_from_str = ContentDigest::try_from(decoded.as_str()).unwrap();
+            let via_from_str: ContentDigest = decoded.parse().unwrap();
+            let via_try_from_string = ContentDigest::try_from(decoded.clone()).unwrap();
+            let via_try_from_cow =
+                ContentDigest::try_from(std::borrow::Cow::Owned(decoded.clone())).unwrap();
             assert_eq!(via_parse, original);
             assert_eq!(via_try_from_str, original);
             assert_eq!(via_from_str, original);
