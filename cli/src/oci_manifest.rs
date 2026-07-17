@@ -238,7 +238,9 @@ fn insert_array_digests(
 ///    returned `abcdef…` (the digest hex) as the "tag". `image_tag`
 ///    strips the `@digest` suffix first, so a digest-only reference
 ///    correctly reports no tag rather than a hex string masquerading
-///    as one.
+///    as one. The dropped digest is recoverable via the peer parser
+///    [`image_digest`] — the one canonical site to extract and
+///    validate the `@<algo>:<hex>` suffix.
 /// 2. **Registry port.** `registry.example.com:5000/name` under the
 ///    naïve parse returned `5000/name` as the "tag". `image_tag`
 ///    splits on the last `/` first, so the port colon in the registry
@@ -386,7 +388,9 @@ pub fn docker_load_image_reference(line: &str) -> Option<&str> {
 ///    a `tag` column in the status output as if it were a legitimate
 ///    tag; the primitive strips `@digest` before the tag scan and
 ///    reports the whole reference as the repository with `None` as
-///    the tag.
+///    the tag. The dropped digest is recoverable via the peer
+///    parser [`image_digest`] — the one canonical site to extract
+///    and validate the `@<algo>:<hex>` suffix.
 /// 2. **Registry port.** `registry.example.com:5000/nginx` under the
 ///    naïve split returned `("registry.example.com", "5000/nginx")`,
 ///    surfacing the path segment to the `tag` column; the primitive
@@ -426,6 +430,53 @@ pub fn image_repository_and_tag(image: &str) -> (&str, Option<&str>) {
         }
         _ => (image, None),
     }
+}
+
+/// Extract the content-addressed digest of an OCI / Docker image
+/// reference — the `@<algo>:<hex>` suffix in
+/// `[registry[:port]/][path/]name[:<tag>]@<algo>:<hex>`. Returns
+/// [`Some`] with a validated [`ContentDigest`] when the reference
+/// carries a well-formed `@<algo>:<hex>` suffix; returns [`None`] when
+/// the reference is bare (`nginx`), tagged-only (`nginx:v1`), carries
+/// no repository component before the `@` (`@sha256:hex`), or carries
+/// an `@` suffix that does not parse as a canonical registry digest
+/// (unsupported algorithm, wrong hex length, non-lowercase-hex byte).
+///
+/// This is the third peer of the reference-grammar parser family
+/// (theory §III.1 typescape: the reference grammar is a typed primitive
+/// on the platform, not a per-call-site restatement), alongside
+/// [`image_tag`] (extract the `<tag>` fragment) and
+/// [`image_repository_and_tag`] (split the `<repository>` and `<tag>`
+/// fragments). The full canonical reference grammar is
+/// `[registry[:port]/][path/]name[:<tag>][@<algo>:<hex>]`; the two tag
+/// parsers strip the `@digest` suffix (a digest is content-addressed
+/// identity, not a tag) and this primitive is the one canonical site
+/// to recover it. Together the three parsers cover every fragment of
+/// the reference grammar without loss, so a consumer that needs any
+/// combination of repository / tag / digest routes through the
+/// primitives rather than hand-rolling a `split_once('@')` scan that
+/// forgets to validate the tail.
+///
+/// The returned digest is validated by [`ContentDigest::parse`] — the
+/// same algorithm / length / lowercase-hex checks that gate every
+/// digest entering the [`canonical_manifest_fingerprint`] — so a caller
+/// receives a value it can trust as a real content-addressed identity
+/// without re-parsing. A malformed `@<garbage>` suffix is discarded at
+/// the extraction frontier rather than allowed to escape into a caller
+/// that would compare, log, or pin against a bad digest.
+///
+/// Complexity is `O(n)` on a single [`str::split_once`] scan plus the
+/// fixed [`ContentDigest::parse`] validation.
+pub fn image_digest(image: &str) -> Option<ContentDigest> {
+    let (head, digest_str) = image.split_once('@')?;
+    // A `@digest` suffix with no repository component before it
+    // (`@sha256:hex`) is malformed as an image reference; report no
+    // digest so the frontier does not admit a headless reference into
+    // the typed algebra.
+    if head.is_empty() {
+        return None;
+    }
+    ContentDigest::parse(digest_str).ok()
 }
 
 /// Compose an OCI / Docker image reference from a repository slice and a
@@ -1427,5 +1478,209 @@ mod tests {
         assert_eq!(repo, "nginx");
         assert_eq!(tag, Some("latest"));
         assert_eq!(tag, image_tag("nginx:latest"));
+    }
+
+    /// The canonical `name@sha256:hex` shape reports the parsed
+    /// [`ContentDigest`] for every input the naïve tag parsers
+    /// silently discard. Registry prefix and path prefix do not
+    /// affect the digest scan — the `split_once('@')` reaches the
+    /// digest suffix regardless of what came before it.
+    #[test]
+    fn test_image_digest_extracts_canonical_digest() {
+        let expected = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        assert_eq!(
+            image_digest(&format!("nginx@sha256:{D1}")),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            image_digest(&format!("library/nginx@sha256:{D1}")),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            image_digest(&format!("docker.io/library/nginx@sha256:{D1}")),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            image_digest(&format!(
+                "registry.example.com:5000/library/nginx@sha256:{D1}"
+            )),
+            Some(expected)
+        );
+    }
+
+    /// A `name:tag@digest` reference carries both a tag and a digest;
+    /// [`image_digest`] reports the digest, sibling [`image_tag`]
+    /// reports the tag, and they never confuse the two halves.
+    #[test]
+    fn test_image_digest_with_tag_and_digest_reports_digest() {
+        let expected = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        assert_eq!(
+            image_digest(&format!("nginx:latest@sha256:{D1}")),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            image_digest(&format!(
+                "registry.example.com:5000/library/nginx:1.25@sha256:{D1}"
+            )),
+            Some(expected)
+        );
+        // The tag parser sibling still reports the tag verbatim on
+        // the same input — the two halves are independent extractors.
+        assert_eq!(
+            image_tag(&format!("nginx:latest@sha256:{D1}")),
+            Some("latest")
+        );
+    }
+
+    /// [`image_digest`] validates the digest tail via
+    /// [`ContentDigest::parse`], so `sha512` references also parse.
+    #[test]
+    fn test_image_digest_supports_sha512() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let expected = ContentDigest::parse(&format!("sha512:{hex}")).unwrap();
+        assert_eq!(image_digest(&format!("nginx@sha512:{hex}")), Some(expected));
+    }
+
+    /// A bare reference or tagged-only reference carries no `@`; the
+    /// primitive reports [`None`] without consulting
+    /// [`ContentDigest::parse`].
+    #[test]
+    fn test_image_digest_reports_none_when_no_at_suffix() {
+        assert_eq!(image_digest(""), None);
+        assert_eq!(image_digest("nginx"), None);
+        assert_eq!(image_digest("library/nginx"), None);
+        assert_eq!(image_digest("nginx:latest"), None);
+        assert_eq!(image_digest("ghcr.io/pleme-io/forge:v0.42.0"), None);
+        assert_eq!(image_digest("registry.example.com:5000/nginx"), None);
+        assert_eq!(image_digest("registry.example.com:5000/nginx:v1"), None);
+    }
+
+    /// A malformed `@<garbage>` suffix — unsupported algorithm, wrong
+    /// hex length, non-lowercase-hex byte, or empty tail — is
+    /// discarded at the extraction frontier. The primitive does not
+    /// admit an unvalidated digest string into the typed algebra
+    /// (theory §III.1 typescape: the digest is a proof-carrying value,
+    /// not a slice; theory §V.1 knowable platform: a malformed digest
+    /// entering `verify_image_digest_matches` at a distant call site
+    /// would silently succeed a string compare on garbage — the
+    /// validated `ContentDigest` return type closes that class of
+    /// failure at the frontier).
+    #[test]
+    fn test_image_digest_rejects_malformed_digest_suffix() {
+        // Empty tail after `@`: `ContentDigest::parse("")` reports
+        // MissingSeparator.
+        assert_eq!(image_digest("nginx@"), None);
+        // Unsupported algorithm.
+        assert_eq!(image_digest(&format!("nginx@md5:{D1}")), None);
+        assert_eq!(
+            image_digest("nginx@sha1:0123456789abcdef0123456789abcdef01234567"),
+            None
+        );
+        // Wrong hex length for sha256.
+        assert_eq!(image_digest(&format!("nginx@sha256:{}", &D1[..60])), None);
+        // Uppercase hex — registries emit lowercase.
+        assert_eq!(
+            image_digest(&format!("nginx@sha256:{}", D1.to_uppercase())),
+            None
+        );
+        // Non-hex byte in the body.
+        assert_eq!(image_digest(&format!("nginx@sha256:{}g", &D1[..63])), None);
+        // No colon separator inside the tail.
+        assert_eq!(image_digest("nginx@sha256abc"), None);
+    }
+
+    /// A `@<algo>:<hex>` suffix with no repository component before
+    /// the `@` is malformed as an image reference; the primitive
+    /// reports [`None`] rather than admitting a headless reference
+    /// into the algebra.
+    #[test]
+    fn test_image_digest_requires_repository_before_at() {
+        assert_eq!(image_digest(&format!("@sha256:{D1}")), None);
+    }
+
+    /// The load-bearing three-parser coverage law: the reference
+    /// grammar `[registry[:port]/][path/]name[:<tag>][@<algo>:<hex>]`
+    /// has three fragments after the repository — tag, digest, and
+    /// the repository itself — and the parser family covers all of
+    /// them without loss. On every non-degenerate input carrying a
+    /// tag AND a digest, feeding the input through
+    /// [`image_repository_and_tag`] and [`image_digest`] recovers
+    /// the (repository, tag, digest) triple; the tag parsers strip
+    /// the digest, and the digest parser is agnostic to whether a
+    /// tag is present. Future changes to any of the three parsers
+    /// that break the independent-extractor invariant are caught by
+    /// this test rather than at a distant call site.
+    #[test]
+    fn test_reference_grammar_parsers_cover_all_fragments() {
+        let cases = [
+            // (input, expected_repo, expected_tag, expected_digest_body)
+            (format!("nginx:latest@sha256:{D1}"), "nginx", "latest", D1),
+            (
+                format!("library/nginx:1.25@sha256:{D2}"),
+                "library/nginx",
+                "1.25",
+                D2,
+            ),
+            (
+                format!("ghcr.io/pleme-io/forge:v0.42.0@sha256:{D3}"),
+                "ghcr.io/pleme-io/forge",
+                "v0.42.0",
+                D3,
+            ),
+            (
+                format!("registry.example.com:5000/library/nginx:v1@sha256:{D1}"),
+                "registry.example.com:5000/library/nginx",
+                "v1",
+                D1,
+            ),
+        ];
+        for (input, expected_repo, expected_tag, expected_digest_body) in cases {
+            let (repo, tag) = image_repository_and_tag(&input);
+            let digest = image_digest(&input);
+            let expected_digest = ContentDigest::parse(&format!("sha256:{expected_digest_body}"))
+                .expect("digest fixture must parse");
+            assert_eq!(
+                repo, expected_repo,
+                "image_repository_and_tag repo mismatch on {input:?}"
+            );
+            assert_eq!(
+                tag,
+                Some(expected_tag),
+                "image_repository_and_tag tag mismatch on {input:?}"
+            );
+            assert_eq!(
+                digest,
+                Some(expected_digest),
+                "image_digest mismatch on {input:?}"
+            );
+        }
+    }
+
+    /// The three-parser family agrees on the "no-digest" case: every
+    /// input `image_repository_and_tag` handles without a digest
+    /// suffix ([`image_repository_and_tag`] returns `(_, _)` and
+    /// [`image_digest`] returns [`None`]) — the tag parser is unaware
+    /// the digest parser exists, and vice versa. Reverting
+    /// [`image_digest`] to also handle tags (or leaking the tag
+    /// scan into the digest parser) would fail this test.
+    #[test]
+    fn test_image_digest_none_when_reference_carries_no_digest() {
+        let cases = [
+            "nginx",
+            "library/nginx",
+            "docker.io/library/nginx",
+            "nginx:latest",
+            "library/nginx:1.25",
+            "ghcr.io/pleme-io/forge:v0.42.0",
+            "registry.example.com:5000/library/nginx",
+            "registry.example.com:5000/library/nginx:v1",
+        ];
+        for input in cases {
+            assert_eq!(
+                image_digest(input),
+                None,
+                "image_digest must report None on tag-only / bare reference {input:?}"
+            );
+        }
     }
 }
