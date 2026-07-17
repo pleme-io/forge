@@ -440,10 +440,21 @@ fn extract_main_image(deployment: &serde_json::Value) -> (Option<String>, Option
 
         if let Some(container) = main_container {
             if let Some(image_str) = container.get("image").and_then(|i| i.as_str()) {
-                if let Some((image, tag)) = image_str.rsplit_once(':') {
-                    return (Some(image.to_string()), Some(tag.to_string()));
-                }
-                return (Some(image_str.to_string()), None);
+                // Route through the typed primitive at
+                // `crate::oci_manifest::image_repository_and_tag`. The
+                // naïve `image_str.rsplit_once(':')` predecessor read
+                // the last `:` regardless of context, so a
+                // `registry.example.com:5000/nginx` reference reported
+                // `("registry.example.com", Some("5000/nginx"))` — a
+                // path segment surfaced as if it were a tag — and a
+                // `nginx@sha256:hex` reference reported
+                // `("nginx@sha256", Some("hex"))` — a digest hex
+                // surfaced as if it were a tag. The primitive scopes
+                // the tag scan to the final path component and strips
+                // the `@digest` suffix, so both bad shapes route to
+                // (whole reference, None) at one site.
+                let (image, tag) = crate::oci_manifest::image_repository_and_tag(image_str);
+                return (Some(image.to_string()), tag.map(str::to_string));
             }
         }
     }
@@ -559,10 +570,24 @@ fn extract_pod_and_container_info(
                 for cs in statuses {
                     let name = cs.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
                     let image_full = cs.get("image").and_then(|i| i.as_str()).unwrap_or("");
-                    let (image, tag) = image_full
-                        .rsplit_once(':')
-                        .map(|(i, t)| (i.to_string(), t.to_string()))
-                        .unwrap_or((image_full.to_string(), "latest".to_string()));
+                    // Route through the typed primitive at
+                    // `crate::oci_manifest::image_repository_and_tag`.
+                    // The naïve `image_full.rsplit_once(':')`
+                    // predecessor surfaced the digest hex of a
+                    // `nginx@sha256:hex` reference and the port-bearing
+                    // path suffix of a `registry.example.com:5000/nginx`
+                    // reference as if either were a legitimate tag; the
+                    // primitive scopes the tag scan to the final path
+                    // component (per `image_tag`'s invariants) and
+                    // reports the whole reference with `None` on either
+                    // shape. The Docker default `"latest"` tag is
+                    // preserved as the fallback when no tag is
+                    // parseable, matching the display convention this
+                    // container-row uses.
+                    let (image_slice, tag_opt) =
+                        crate::oci_manifest::image_repository_and_tag(image_full);
+                    let image = image_slice.to_string();
+                    let tag = tag_opt.unwrap_or("latest").to_string();
 
                     let is_sidecar = name.contains("envoy")
                         || name.contains("istio")
