@@ -375,21 +375,12 @@ async fn reconcile_product_chain(namespace: &str) -> Result<()> {
                 println!("      ⏳ Reconciling {}...", phase_label);
 
                 let status = Command::new("flux")
-                    .args([
-                        "reconcile",
-                        "kustomization",
-                        &ks_name,
-                        "-n",
-                        "flux-system",
-                    ])
+                    .args(["reconcile", "kustomization", &ks_name, "-n", "flux-system"])
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .status()
                     .await
-                    .context(format!(
-                        "Failed to reconcile kustomization {}",
-                        ks_name
-                    ))?;
+                    .context(format!("Failed to reconcile kustomization {}", ks_name))?;
 
                 if status.success() {
                     println!("      ✓ {}", phase_label.green());
@@ -469,7 +460,7 @@ pub async fn verify_deployment_image(
         match get_pod_status_full(namespace, deployment_name).await {
             Ok(pod) => {
                 if pod.image.contains(expected_tag_suffix) {
-                    let tag = pod.image.split(':').last().unwrap_or("unknown");
+                    let tag = crate::oci_manifest::image_tag(&pod.image).unwrap_or("unknown");
                     println!("   ✅ Deployment has correct image tag: {}", tag);
                     return Ok(());
                 }
@@ -489,17 +480,14 @@ pub async fn verify_deployment_image(
                     }
                 }
 
-                let tag = pod.image.split(':').last().unwrap_or("unknown");
+                let tag = crate::oci_manifest::image_tag(&pod.image).unwrap_or("unknown");
                 println!(
                     "   ⏳ Current tag: {}, waiting for SHA {} ({}s elapsed)",
                     tag, expected_tag_suffix, elapsed
                 );
             }
             Err(e) => {
-                println!(
-                    "   ⏳ Waiting for deployment ({}, {}s elapsed)",
-                    e, elapsed
-                );
+                println!("   ⏳ Waiting for deployment ({}, {}s elapsed)", e, elapsed);
             }
         }
 
@@ -557,7 +545,8 @@ pub async fn wait_for_deployment(
                 let has_correct_image = pod.image.contains(&expected_sha);
 
                 if has_correct_image && pod.ready {
-                    let current_tag = pod.image.split(':').last().unwrap_or("unknown");
+                    let current_tag =
+                        crate::oci_manifest::image_tag(&pod.image).unwrap_or("unknown");
                     println!("   ✅ Pod has correct image ({}) and is ready", current_tag);
                     println!(
                         "✅ {}",
@@ -581,7 +570,7 @@ pub async fn wait_for_deployment(
                     }
                 }
 
-                let current_tag = pod.image.split(':').last().unwrap_or("unknown");
+                let current_tag = crate::oci_manifest::image_tag(&pod.image).unwrap_or("unknown");
                 if has_correct_image {
                     println!(
                         "   ⏳ Pod has correct image but not ready yet (status: {}, {}s elapsed)",
@@ -595,10 +584,7 @@ pub async fn wait_for_deployment(
                 }
             }
             Err(e) => {
-                println!(
-                    "   ⏳ Waiting for pod ({}, {}s elapsed)",
-                    e, elapsed
-                );
+                println!("   ⏳ Waiting for pod ({}, {}s elapsed)", e, elapsed);
             }
         }
 
@@ -653,10 +639,7 @@ struct PodStatus {
 }
 
 /// Get comprehensive pod status for a deployment (image, phase, readiness, waiting reasons).
-async fn get_pod_status_full(
-    namespace: &str,
-    deployment_name: &str,
-) -> Result<PodStatus> {
+async fn get_pod_status_full(namespace: &str, deployment_name: &str) -> Result<PodStatus> {
     // Single kubectl call using JSON for all fields
     let output = Command::new("kubectl")
         .args([
@@ -681,9 +664,7 @@ async fn get_pod_status_full(
     let json: serde_json::Value =
         serde_json::from_str(&stdout).context("Failed to parse pod JSON")?;
 
-    let items = json["items"]
-        .as_array()
-        .context("No items in pod list")?;
+    let items = json["items"].as_array().context("No items in pod list")?;
 
     if items.is_empty() {
         bail!("No pods found");
@@ -707,16 +688,13 @@ async fn get_pod_status_full(
 
     let ready = pod["status"]["conditions"]
         .as_array()
-        .and_then(|conditions| {
-            conditions.iter().find(|c| c["type"] == "Ready")
-        })
+        .and_then(|conditions| conditions.iter().find(|c| c["type"] == "Ready"))
         .and_then(|c| c["status"].as_str())
         .unwrap_or("False")
         == "True";
 
     // Extract waiting reason from container statuses
-    let container_statuses = pod["status"]["containerStatuses"]
-        .as_array();
+    let container_statuses = pod["status"]["containerStatuses"].as_array();
 
     let (waiting_reason, waiting_message) = container_statuses
         .and_then(|statuses| {
@@ -747,10 +725,7 @@ async fn get_pod_status_full(
 ///
 /// Collects pod statuses, container states, events, deployment conditions,
 /// and flux kustomization status. Returns a formatted diagnostic string.
-pub async fn gather_deployment_diagnostics(
-    namespace: &str,
-    deployment_name: &str,
-) -> String {
+pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &str) -> String {
     let mut diag = String::new();
     diag.push_str(&format!("\n{}\n", "━".repeat(72)));
     diag.push_str(&format!(
