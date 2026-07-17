@@ -206,12 +206,24 @@ pub fn parse_manifest_architectures(manifest_json: &str) -> OciArchitectureOutco
     }
 
     // (3) OCI / Docker v2 image manifest: architecture is in the
-    // referenced config blob the manifest probe did not fetch.
+    // referenced config blob the manifest probe did not fetch. Only
+    // admit this arm when `config.digest` parses as a well-formed
+    // [`crate::oci_manifest::ContentDigest`] (`<algorithm>:<hex>`
+    // with `sha256`/`sha512` and the correct lowercase-hex length) —
+    // a bare `"garbage"`, an uppercase-hex body, an unsupported
+    // algorithm, or a wrong-length body is not a real content-
+    // addressed reference and cannot substantiate an "image
+    // manifest whose config we did not fetch" claim. Reporting
+    // `EmbeddedInConfig` on a malformed digest would inflate the
+    // attestation with a claim the probe never substantiated, and
+    // would diverge from the discipline the peer manifest-identity
+    // oracle [`crate::oci_manifest::canonical_manifest_fingerprint`]
+    // already imposes on the same field.
     if obj
         .get("config")
         .and_then(|c| c.get("digest"))
         .and_then(|d| d.as_str())
-        .is_some_and(|s| !s.trim().is_empty())
+        .is_some_and(|s| crate::oci_manifest::ContentDigest::parse(s).is_ok())
     {
         return OciArchitectureOutcome::EmbeddedInConfig;
     }
@@ -340,6 +352,127 @@ mod tests {
                 "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
                 "config": {{"digest": "sha256:{D1}", "size": 999}},
                 "layers": [{{"digest": "sha256:{D2}", "size": 500}}]
+            }}"#
+        );
+        assert_eq!(
+            parse_manifest_architectures(&json),
+            OciArchitectureOutcome::EmbeddedInConfig
+        );
+    }
+
+    /// Fail-before / pass-after pin: an image manifest whose
+    /// `config.digest` is structurally malformed as an OCI /
+    /// Docker content-addressed reference must NOT be admitted to
+    /// the `EmbeddedInConfig` arm — a value that cannot resolve to
+    /// a real config blob is not evidence of an image manifest,
+    /// and reporting `embedded-in-config` on it would fabricate a
+    /// claim the probe never substantiated. The prior body admitted
+    /// any non-whitespace `config.digest` string; the typed
+    /// [`crate::oci_manifest::ContentDigest::parse`] guard closes
+    /// six malformed shapes at one site: no separator, unsupported
+    /// algorithm (`md5`, `sha1`), sha256 hex too short, sha256 hex
+    /// too long, uppercase-hex body, and a non-hex byte in the hex
+    /// body. Every shape collapses to `Absent` — the honest record
+    /// that no valid image manifest was recovered.
+    #[test]
+    fn test_parse_image_manifest_with_malformed_config_digest_is_absent() {
+        // No `:` separator — cannot even be split into algorithm/hex.
+        assert_eq!(
+            parse_manifest_architectures(r#"{"config": {"digest": "garbage"}}"#),
+            OciArchitectureOutcome::Absent
+        );
+        // Unsupported algorithm (`md5`) — not a registry-side digest
+        // algorithm; the primitive rejects it, so the arm rejects it.
+        assert_eq!(
+            parse_manifest_architectures(
+                r#"{"config": {"digest": "md5:0123456789abcdef0123456789abcdef"}}"#
+            ),
+            OciArchitectureOutcome::Absent
+        );
+        // Unsupported algorithm (`sha1`) — likewise.
+        assert_eq!(
+            parse_manifest_architectures(
+                r#"{"config": {"digest": "sha1:0123456789abcdef0123456789abcdef01234567"}}"#
+            ),
+            OciArchitectureOutcome::Absent
+        );
+        // sha256 hex too short (63 chars) — a truncated body cannot
+        // name a real blob.
+        assert_eq!(
+            parse_manifest_architectures(
+                r#"{"config": {"digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde"}}"#
+            ),
+            OciArchitectureOutcome::Absent
+        );
+        // sha256 hex too long (65 chars) — a padded body cannot
+        // name a real blob either.
+        assert_eq!(
+            parse_manifest_architectures(
+                r#"{"config": {"digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0"}}"#
+            ),
+            OciArchitectureOutcome::Absent
+        );
+        // Uppercase hex — OCI/Docker digests are canonically
+        // lowercase; a case-inflated body would silently mismatch
+        // any downstream comparator that respects the canonical
+        // form, so the frontier rejects it.
+        assert_eq!(
+            parse_manifest_architectures(&format!(
+                r#"{{"config": {{"digest": "sha256:{}"}}}}"#,
+                "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+            )),
+            OciArchitectureOutcome::Absent
+        );
+        // Non-hex byte inside an otherwise correctly-shaped body.
+        assert_eq!(
+            parse_manifest_architectures(&format!(
+                r#"{{"config": {{"digest": "sha256:{}"}}}}"#,
+                "z123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            )),
+            OciArchitectureOutcome::Absent
+        );
+    }
+
+    /// The sha512 digest form is also admitted — the primitive
+    /// accepts it, so the arm accepts it, and a Phase 1 attestation
+    /// on a sha512-config image manifest correctly reports
+    /// `EmbeddedInConfig` rather than falling through to
+    /// `Absent`. The three parsers that already route through
+    /// [`crate::oci_manifest::ContentDigest`] compose without
+    /// splitting the algorithm-support surface across sites.
+    #[test]
+    fn test_parse_image_manifest_with_sha512_config_digest_is_embedded() {
+        let sha512_hex = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+             47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
+        let json = format!(
+            r#"{{
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {{"digest": "sha512:{sha512_hex}", "size": 1234}},
+                "layers": []
+            }}"#
+        );
+        assert_eq!(
+            parse_manifest_architectures(&json),
+            OciArchitectureOutcome::EmbeddedInConfig
+        );
+    }
+
+    /// Whitespace around a well-formed digest is trimmed by the
+    /// primitive, so a `config.digest` string of `"  sha256:...  "`
+    /// is admitted to the `EmbeddedInConfig` arm — matching the
+    /// registry-response robustness discipline
+    /// [`crate::oci_manifest::ContentDigest::parse`] already
+    /// applies to the canonical fingerprint field.
+    #[test]
+    fn test_parse_image_manifest_with_padded_config_digest_is_embedded() {
+        let padded = format!("  sha256:{D1}  ");
+        let json = format!(
+            r#"{{
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {{"digest": "{padded}"}},
+                "layers": []
             }}"#
         );
         assert_eq!(
