@@ -387,7 +387,7 @@ async fn update_kenshi_builder_image(
     // Find and replace BUILDER_IMAGE reference
     // Pattern: - BUILDER_IMAGE={registry}:amd64-xxx
     // Or: {registry}:amd64-xxx (anywhere in literals)
-    let new_image = format!("{}:{}", registry, new_tag);
+    let new_image = crate::oci_manifest::image_reference(registry, new_tag);
 
     let mut updated = false;
     let mut new_content = String::new();
@@ -455,7 +455,7 @@ async fn update_builder_pool_builder_image(
         .await
         .context("Failed to read builder-pool.yaml")?;
 
-    let new_image = format!("{}:{}", registry, new_tag);
+    let new_image = crate::oci_manifest::image_reference(registry, new_tag);
     let mut updated = false;
     let mut new_content = String::new();
 
