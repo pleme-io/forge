@@ -175,6 +175,63 @@ impl std::fmt::Display for ContentDigest {
     }
 }
 
+/// Parse a [`&str`] into a validated [`ContentDigest`] via the canonical
+/// `<algorithm>:<hex>` grammar. Delegates to the inherent
+/// [`ContentDigest::parse`] oracle so the grammar is defined at one
+/// site and every read surface — `parse`, this `FromStr` impl, the
+/// derived `str::parse::<ContentDigest>()` and `T: FromStr` generic
+/// bounds — reads through it.
+///
+/// This is the derived idiom-frontier surface for the
+/// [`crate::oci_manifest`] reference-grammar parser family: every other
+/// typed primitive in forge's typed-primitive algebra that carries a
+/// canonical-label parser (`crate::retry::PerAttemptRegion`,
+/// `crate::probe_outcome::AdmissionTier`, `crate::version::BumpLevel`)
+/// exposes its parser through both the inherent method AND the
+/// [`std::str::FromStr`] trait, so consumers who parse via the
+/// `.parse::<T>()` turbofish, thread the type through a
+/// `T: FromStr` generic bound, or rehydrate a value through a serde
+/// `#[serde(with = "...")]` bridge, all read through the SAME canonical
+/// grammar oracle without a per-consumer bridge. Prior to this impl
+/// [`ContentDigest`] was the only reference-grammar-family primitive
+/// missing the trait surface — its inherent [`ContentDigest::parse`]
+/// oracle existed but consumers who wanted to compose it with
+/// [`str::parse`] (`"sha256:{hex}".parse::<ContentDigest>()`) or with
+/// a [`T: FromStr`] iterator adapter
+/// (`strs.iter().filter_map(|s| s.parse::<ContentDigest>().ok())`)
+/// could not, and had to fall back to the inherent-method call
+/// (`ContentDigest::parse(s).ok()`) at every consumer.
+///
+/// The [`Err`](std::str::FromStr::Err) type is [`ContentDigestError`] —
+/// the same typed error the inherent oracle emits, carrying the same
+/// per-failure-mode discriminator (missing separator, unsupported
+/// algorithm, invalid hex) so a consumer that pins a per-variant
+/// handling policy at its own frontier can distinguish arms directly
+/// off the [`Result<ContentDigest, ContentDigestError>`] the impl
+/// returns, matching the discipline every other reference-grammar
+/// consumer already observes (`crate::helm_provenance::
+/// find_tarball_sha256`, `crate::cosign::parse_verify_output`).
+///
+/// THEORY.md §III.1 typescape: the content-digest reference grammar
+/// is a typed primitive on the platform, and its parse frontier is
+/// one oracle serving every idiomatic Rust read surface (inherent
+/// method, [`FromStr`](std::str::FromStr), `.parse::<T>()`,
+/// `T: FromStr` bounds), not a per-consumer restatement of
+/// "well-formed `<algorithm>:<hex>`". THEORY.md §VI.1
+/// generation over composition: the canonical parse predicate is
+/// named at one site ([`ContentDigest::parse`]), the derived read
+/// surfaces route through it, and a future refinement to the grammar
+/// (widening to `sha384`, tightening the trim behaviour) is a
+/// one-site edit at the inherent oracle without a per-consumer
+/// cascade.
+impl std::str::FromStr for ContentDigest {
+    type Err = ContentDigestError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -704,6 +761,121 @@ mod tests {
     fn test_content_digest_accessors_compose_to_full_string() {
         let d = ContentDigest::parse(&format!("  sha256:{D1}\n")).unwrap();
         assert_eq!(format!("{}:{}", d.algorithm(), d.hex()), d.as_str());
+    }
+
+    /// `str::parse::<ContentDigest>()` succeeds on a well-formed sha256
+    /// digest and yields the same validated value as the inherent
+    /// [`ContentDigest::parse`] oracle. Pins the derived
+    /// [`std::str::FromStr`] surface for the primary registry algorithm.
+    #[test]
+    fn test_from_str_parses_sha256_digest() {
+        let raw = format!("sha256:{D1}");
+        let via_from_str: ContentDigest = raw.parse().unwrap();
+        let via_inherent = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(via_from_str, via_inherent);
+        assert_eq!(via_from_str.as_str(), raw);
+    }
+
+    /// `str::parse::<ContentDigest>()` succeeds on a well-formed sha512
+    /// digest. Pins the derived surface for the second supported
+    /// algorithm so a future consumer that turbofishes a sha512-signed
+    /// receipt through the trait reads the same grammar the inherent
+    /// oracle enforces.
+    #[test]
+    fn test_from_str_parses_sha512_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let via_from_str: ContentDigest = raw.parse().unwrap();
+        assert_eq!(via_from_str.algorithm(), "sha512");
+        assert_eq!(via_from_str.hex(), hex);
+    }
+
+    /// The [`std::str::FromStr`] impl inherits the inherent oracle's
+    /// edge-whitespace trim: a captured registry response with a
+    /// trailing newline still parses via `.parse::<ContentDigest>()`.
+    /// Pins the derived surface's trim behaviour to the inherent
+    /// oracle's so a downstream consumer switching from
+    /// `ContentDigest::parse(s.trim()).ok()` to
+    /// `s.parse::<ContentDigest>().ok()` reads byte-identical results.
+    #[test]
+    fn test_from_str_trims_edge_whitespace() {
+        let raw = format!("  sha256:{D1}\n");
+        let via_from_str: ContentDigest = raw.parse().unwrap();
+        assert_eq!(via_from_str.as_str(), format!("sha256:{D1}"));
+    }
+
+    /// The [`std::str::FromStr`] impl emits the SAME
+    /// [`ContentDigestError`] variant as the inherent oracle at each
+    /// canonical failure mode (missing separator, unsupported
+    /// algorithm, invalid hex — length wrong, uppercase, non-hex byte).
+    /// Pins the "one grammar oracle serves both entry points" invariant
+    /// so a future refactor that inlined a divergent grammar into
+    /// [`std::str::FromStr`] (e.g., trimmed only via `str::trim_start`,
+    /// or accepted uppercase hex) is caught by the test suite.
+    #[test]
+    fn test_from_str_matches_inherent_parse_on_every_error_mode() {
+        let cases = [
+            "sha256abc",                              // missing separator
+            &format!("md5:{D1}"),                     // unsupported algorithm
+            &format!("sha256:{}", &D1[..60]),         // wrong hex length
+            &format!("sha256:{}", D1.to_uppercase()), // uppercase hex
+            &format!("sha256:{}g", &D1[..63]),        // non-hex byte
+        ];
+        for raw in cases {
+            let via_from_str = raw.parse::<ContentDigest>().unwrap_err();
+            let via_inherent = ContentDigest::parse(raw).unwrap_err();
+            assert_eq!(
+                via_from_str, via_inherent,
+                "from_str and inherent parse must emit the same error variant \
+                 for '{raw}'; got from_str={via_from_str:?} vs inherent={via_inherent:?}"
+            );
+        }
+    }
+
+    /// The [`std::str::FromStr`] impl composes with
+    /// [`Iterator::filter_map`] and the `T: FromStr` bound —
+    /// `strs.iter().filter_map(|s| s.parse::<ContentDigest>().ok())`
+    /// yields exactly the well-formed digests, in input order, with
+    /// malformed entries silently dropped. The compositional
+    /// motivation for landing the trait: prior to this impl the
+    /// idiomatic Rust filter-parse over an iterator of digest strings
+    /// had to fall back to the inherent-method call at every consumer;
+    /// after this impl the turbofish composes directly.
+    #[test]
+    fn test_from_str_composes_with_iterator_filter_map() {
+        let good_1 = format!("sha256:{D1}");
+        let good_2 = format!("sha256:{D2}");
+        let mixed = [
+            good_1.as_str(),                        // valid sha256
+            "sha256abc",                            // missing separator — dropped
+            good_2.as_str(),                        // valid sha256
+            "md5:0123456789abcdef0123456789abcdef", // unsupported algorithm — dropped
+        ];
+        let parsed: Vec<ContentDigest> = mixed
+            .iter()
+            .filter_map(|s| s.parse::<ContentDigest>().ok())
+            .collect();
+        assert_eq!(
+            parsed.iter().map(ContentDigest::as_str).collect::<Vec<_>>(),
+            vec![good_1.as_str(), good_2.as_str()],
+            "filter_map through the FromStr surface must drop malformed entries and \
+             preserve input order for well-formed ones"
+        );
+    }
+
+    /// Round-trip: `str::parse::<ContentDigest>()` on a valid digest
+    /// followed by [`ContentDigest::as_str`] recovers the trimmed input
+    /// verbatim. Pins the emit-then-parse identity through the derived
+    /// [`std::str::FromStr`] entry point so a future consumer that
+    /// stamps a digest into an attestation record via `d.to_string()`
+    /// and rehydrates it via `s.parse::<ContentDigest>()` (a
+    /// [`Display`](std::fmt::Display) + [`FromStr`](std::str::FromStr)
+    /// round trip) reads back the same typed value.
+    #[test]
+    fn test_from_str_roundtrips_via_display() {
+        let d1: ContentDigest = format!("sha256:{D1}").parse().unwrap();
+        let d2: ContentDigest = d1.to_string().parse().unwrap();
+        assert_eq!(d1, d2);
     }
 
     /// An OCI image manifest (the standard single-image shape skopeo
