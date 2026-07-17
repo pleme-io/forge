@@ -220,6 +220,67 @@ fn insert_array_digests(
     }
 }
 
+/// Extract the tag component of an OCI / Docker image reference — the
+/// `<tag>` in `[registry[:port]/][path/]name:<tag>[@digest]`. Returns
+/// [`None`] when the reference is bare (`nginx`), digest-only
+/// (`nginx@sha256:…`), or otherwise carries no `:<tag>` after the final
+/// path separator; otherwise returns the borrowed tag slice.
+///
+/// This is the one-oracle site for reading the tag off an image string
+/// in forge (theory §III.1 typescape: the reference grammar is a typed
+/// primitive on the platform, not a per-call-site restatement; theory
+/// §VI.1 generation over composition: `image.split(':').last()`
+/// repeated at every consumer is the three-times rule tripped, extract
+/// the primitive). Prior call sites hand-rolled `.split(':').last()`
+/// which had three failure modes the typed primitive fixes at one site:
+///
+/// 1. **Digest form.** `nginx@sha256:abcdef…` under the naïve parse
+///    returned `abcdef…` (the digest hex) as the "tag". `image_tag`
+///    strips the `@digest` suffix first, so a digest-only reference
+///    correctly reports no tag rather than a hex string masquerading
+///    as one.
+/// 2. **Registry port.** `registry.example.com:5000/name` under the
+///    naïve parse returned `5000/name` as the "tag". `image_tag`
+///    splits on the last `/` first, so the port colon in the registry
+///    prefix cannot be misread as a tag colon.
+/// 3. **Bare reference.** `nginx` under the naïve parse returned
+///    `nginx` itself as the "tag". `image_tag` returns [`None`] when
+///    the name component carries no `:` at all, letting the caller
+///    supply an explicit default (`unknown`, `latest`, an error) at
+///    its own frontier rather than treating the image name as its own
+///    tag.
+///
+/// Complexity is `O(n)` on a fixed number of `rsplit_once` scans over
+/// the reference string; the [`std::iter::Iterator::last`] antipattern
+/// (`clippy::double_ended_iterator_last`) it replaces was `O(n)` for
+/// the same result but iterated the entire split iterator to reach the
+/// tail.
+pub fn image_tag(image: &str) -> Option<&str> {
+    // Strip the `@digest` suffix if present; the digest is content-
+    // addressed identity, not a tag, and its own `:` between algorithm
+    // and hex would otherwise confuse the tag scan below.
+    let name_and_tag = image.split_once('@').map_or(image, |(head, _)| head);
+    // The tag is scoped to the final path component (`image_name[:tag]`);
+    // any earlier `:` belongs to a `registry:port/` prefix and must not
+    // be read as a tag separator.
+    let last_segment = name_and_tag
+        .rsplit_once('/')
+        .map_or(name_and_tag, |(_, tail)| tail);
+    // Empty last segment (`foo/`) has no tag by construction.
+    if last_segment.is_empty() {
+        return None;
+    }
+    last_segment.rsplit_once(':').and_then(|(name, tag)| {
+        // `name:` (empty tag) is a malformed reference, not a valid
+        // empty tag; report no tag rather than surfacing "".
+        if name.is_empty() || tag.is_empty() {
+            None
+        } else {
+            Some(tag)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,5 +611,88 @@ mod tests {
         );
         // A JSON array at top level (not a manifest shape).
         assert_eq!(canonical_manifest_fingerprint(r#"[1, 2, 3]"#), "");
+    }
+
+    /// The canonical `name:tag` shape (with and without a registry
+    /// prefix and with and without a path prefix) reports the tag
+    /// after the final `/` and the final `:`.
+    #[test]
+    fn test_image_tag_extracts_canonical_tag() {
+        assert_eq!(image_tag("nginx:latest"), Some("latest"));
+        assert_eq!(image_tag("library/nginx:1.25"), Some("1.25"));
+        assert_eq!(image_tag("docker.io/library/nginx:1.25"), Some("1.25"));
+        assert_eq!(image_tag("ghcr.io/pleme-io/forge:v0.42.0"), Some("v0.42.0"));
+    }
+
+    /// A bare reference (no `:` after the final path separator) has
+    /// no tag; report [`None`] rather than the image name itself,
+    /// which the naïve `image.split(':').last()` predecessor returned.
+    #[test]
+    fn test_image_tag_bare_reference_has_no_tag() {
+        assert_eq!(image_tag("nginx"), None);
+        assert_eq!(image_tag("library/nginx"), None);
+        assert_eq!(image_tag("docker.io/library/nginx"), None);
+    }
+
+    /// A `registry:port/name` prefix embeds a `:` in the registry
+    /// segment; the tag scan is scoped to the final path component,
+    /// so the port colon is not misread as a tag colon (the failure
+    /// mode of the `.split(':').last()` predecessor for names with
+    /// no tag but with a port-bearing registry).
+    #[test]
+    fn test_image_tag_registry_port_is_not_a_tag() {
+        assert_eq!(image_tag("registry.example.com:5000/nginx"), None);
+        assert_eq!(image_tag("registry.example.com:5000/library/nginx"), None);
+        assert_eq!(image_tag("registry.example.com:5000/nginx:v1"), Some("v1"));
+        assert_eq!(
+            image_tag("registry.example.com:5000/library/nginx:v1"),
+            Some("v1")
+        );
+    }
+
+    /// A digest-form reference (`name@sha256:hex`) is content-
+    /// addressed identity, not a tag; report [`None`] rather than
+    /// the digest hex, which the naïve `image.split(':').last()`
+    /// predecessor returned as if it were a tag.
+    #[test]
+    fn test_image_tag_digest_form_has_no_tag() {
+        assert_eq!(image_tag(&format!("nginx@sha256:{D1}")), None);
+        assert_eq!(image_tag(&format!("library/nginx@sha256:{D1}")), None);
+        assert_eq!(
+            image_tag(&format!(
+                "registry.example.com:5000/library/nginx@sha256:{D1}"
+            )),
+            None
+        );
+    }
+
+    /// A `name:tag@digest` reference carries both a tag and a
+    /// digest; the tag survives the digest strip and is reported.
+    #[test]
+    fn test_image_tag_tag_and_digest_reports_tag() {
+        assert_eq!(
+            image_tag(&format!("nginx:latest@sha256:{D1}")),
+            Some("latest")
+        );
+        assert_eq!(
+            image_tag(&format!(
+                "registry.example.com:5000/library/nginx:1.25@sha256:{D1}"
+            )),
+            Some("1.25")
+        );
+    }
+
+    /// Degenerate and malformed inputs — empty string, trailing
+    /// separators, empty tag after a `:`, empty name before a `:` —
+    /// all report [`None`] rather than an empty tag slice; the
+    /// call-site fallback (`unwrap_or("unknown")`, `ok_or(...)`)
+    /// then decides how the "no tag" case renders.
+    #[test]
+    fn test_image_tag_degenerate_inputs_have_no_tag() {
+        assert_eq!(image_tag(""), None);
+        assert_eq!(image_tag("nginx:"), None);
+        assert_eq!(image_tag(":latest"), None);
+        assert_eq!(image_tag("nginx/"), None);
+        assert_eq!(image_tag("/nginx"), None);
     }
 }

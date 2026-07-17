@@ -77,11 +77,13 @@ pub async fn get_expected_image_tag(
             .and_then(|pod_spec| pod_spec.containers.first().and_then(|c| c.image.clone()))
             .ok_or_else(|| anyhow::anyhow!("Could not find container image in Deployment spec"))?;
 
-        // Extract tag from image (format: registry/image:tag)
-        let tag = image
-            .split(':')
-            .last()
-            .ok_or_else(|| anyhow::anyhow!("Invalid image format: {}", image))?
+        // Extract tag from image (format: [registry[:port]/][path/]name:tag).
+        // The typed primitive `crate::oci_manifest::image_tag` strips the
+        // digest suffix and scopes the tag scan to the final path component,
+        // so a digest-form reference or a port-bearing registry does not
+        // masquerade as a tag.
+        let tag = crate::oci_manifest::image_tag(&image)
+            .ok_or_else(|| anyhow::anyhow!("Image reference has no :tag component: {}", image))?
             .to_string();
 
         return Ok(tag);
@@ -99,11 +101,13 @@ pub async fn get_expected_image_tag(
             .and_then(|pod_spec| pod_spec.containers.first().and_then(|c| c.image.clone()))
             .ok_or_else(|| anyhow::anyhow!("Could not find container image in StatefulSet spec"))?;
 
-        // Extract tag from image (format: registry/image:tag)
-        let tag = image
-            .split(':')
-            .last()
-            .ok_or_else(|| anyhow::anyhow!("Invalid image format: {}", image))?
+        // Extract tag from image (format: [registry[:port]/][path/]name:tag).
+        // The typed primitive `crate::oci_manifest::image_tag` strips the
+        // digest suffix and scopes the tag scan to the final path component,
+        // so a digest-form reference or a port-bearing registry does not
+        // masquerade as a tag.
+        let tag = crate::oci_manifest::image_tag(&image)
+            .ok_or_else(|| anyhow::anyhow!("Image reference has no :tag component: {}", image))?
             .to_string();
 
         return Ok(tag);
@@ -159,8 +163,15 @@ pub async fn get_pod_statuses(
             .unwrap_or(&"unknown".to_string())
             .clone();
 
-        // Extract tag from image
-        let image_tag = image.split(':').last().unwrap_or("unknown").to_string();
+        // Extract tag from image via the typed primitive at
+        // `crate::oci_manifest::image_tag` — the "unknown" fallback covers
+        // bare references, digest-form references, and malformed inputs
+        // that the naïve `.split(':').last()` predecessor confused with a
+        // legitimate tag (returning the image name, digest hex, or an
+        // empty string instead of falling through to the sentinel).
+        let image_tag = crate::oci_manifest::image_tag(&image)
+            .unwrap_or("unknown")
+            .to_string();
 
         // Extract detailed container state
         let container_state = container_statuses.and_then(|cs| cs.first()).map(|c| {
