@@ -696,7 +696,15 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     // hardcoded `None` because the boolean fold had nowhere to recover
     // it from (THEORY §V.4 Phase 1: every claim a typed primitive can
     // populate must be populated honestly, not stubbed).
-    let cosign_image_ref = format!("{}:{}", image_ref, tag);
+    // Compose `<repository>:<tag>` via the typed primitive at
+    // `crate::oci_manifest::image_reference` — the compositional
+    // inverse of `image_repository_and_tag`. Prior hand-rolled
+    // `format!("{}:{}", image_ref, tag)` at this spot and 20+ peers
+    // reproduced the same trivial shape at every consumer and each
+    // independently risked drifting to a subtly wrong separator or
+    // to a double-tagged repository slice; the one-oracle-site route
+    // closes that class by construction (theory §III.1 / §VI.1).
+    let cosign_image_ref = crate::oci_manifest::image_reference(image_ref, tag);
     let cosign_captured = Command::new("cosign")
         .current_dir(Path::new("."))
         .args(["verify", &cosign_image_ref, "--output", "json"])

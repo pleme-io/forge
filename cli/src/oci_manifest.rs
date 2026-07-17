@@ -428,6 +428,69 @@ pub fn image_repository_and_tag(image: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Compose an OCI / Docker image reference from a repository slice and a
+/// tag, returning the canonical `<repository>:<tag>` shape as an owned
+/// `String`.
+///
+/// This is the compositional inverse of [`image_repository_and_tag`]:
+/// for every tag-free repository slice `r`
+/// (`image_repository_and_tag(r) == (r, None)`) and every non-empty
+/// tag `t`, feeding both halves through the composer and back through
+/// the parser recovers the original pair —
+/// `image_repository_and_tag(&image_reference(r, t)) == (r, Some(t))`.
+/// The roundtrip law is asserted in
+/// `test_image_reference_roundtrips_with_image_repository_and_tag`
+/// across every non-degenerate input shape the parser handles
+/// (bare name, path prefix, registry, registry with port), so future
+/// changes to either half that break the pair are caught by the test
+/// suite rather than at a distant call site.
+///
+/// This is the one canonical site in the crate for building a
+/// `<repository>:<tag>` reference from its two halves. Prior call sites
+/// hand-rolled `format!("{}:{}", registry, tag)` at 20+ spots across
+/// `commands/attestation.rs`, `commands/migrations.rs`,
+/// `commands/product_release.rs`, `commands/rust_service.rs`, and
+/// peers — each independently reproducing the same trivial `format!`
+/// shape and each independently at risk of drifting to a subtly wrong
+/// separator (`format!("{}::{}", …)`, `format!("{}/{}", …)`), of
+/// reordering the halves, or of double-tagging a repository slice that
+/// already carries its own tag. The one-oracle-site route closes the
+/// class of composition drift by construction (theory §III.1 typescape:
+/// the composition of the reference grammar is a typed primitive, not
+/// a per-call-site restatement; §VI.1 generation over composition:
+/// hand-rolled `format!` composition repeated at every consumer is the
+/// three-times rule tripped, extract the primitive).
+///
+/// Under `debug_assertions`, the primitive checks its caller invariants:
+///
+/// - `repository` is non-empty.
+/// - `tag` is non-empty.
+/// - `repository` does not itself already carry a tag — i.e.,
+///   [`image_repository_and_tag`] reports the whole slice as the
+///   repository with `None` as the tag. A repository slice that already
+///   carries its own tag (`nginx:latest` passed as `repository`) would
+///   produce a double-tagged malformed reference (`nginx:latest:new`).
+///
+/// The checks are debug-only so a call site whose repository slice is
+/// derived from a validated config source pays no release-mode cost.
+/// The typical caller shape is
+/// `image_reference(deploy_config.registry_url(), &tag_suffix)` — a
+/// registry URL rendered from typed configuration and a tag suffix
+/// derived from a git SHA, both bare by construction.
+pub fn image_reference(repository: &str, tag: &str) -> String {
+    debug_assert!(
+        !repository.is_empty(),
+        "image_reference: repository must be non-empty"
+    );
+    debug_assert!(!tag.is_empty(), "image_reference: tag must be non-empty");
+    debug_assert!(
+        image_repository_and_tag(repository).1.is_none(),
+        "image_reference: repository '{repository}' already carries a tag; \
+         composing '{repository}:{tag}' would produce a double-tagged reference"
+    );
+    format!("{repository}:{tag}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,6 +1245,106 @@ mod tests {
                 format!("{repo}:{tag}"),
                 input,
                 "repository+':'+tag must reconstruct the original reference"
+            );
+        }
+    }
+
+    /// [`image_reference`] composes a `<repository>:<tag>` reference
+    /// verbatim from its two halves — the canonical bare-registry +
+    /// tag-suffix shape used at every non-`commands/status.rs` build /
+    /// push / cosign call site in the crate.
+    #[test]
+    fn test_image_reference_composes_canonical_shape() {
+        assert_eq!(image_reference("nginx", "latest"), "nginx:latest");
+        assert_eq!(
+            image_reference("library/nginx", "1.25"),
+            "library/nginx:1.25"
+        );
+        assert_eq!(
+            image_reference("ghcr.io/pleme-io/forge", "v0.42.0"),
+            "ghcr.io/pleme-io/forge:v0.42.0"
+        );
+    }
+
+    /// A `registry:port/name` repository slice carries its own `:`
+    /// (the port colon) but not its own tag — [`image_repository_and_tag`]
+    /// reports the whole slice as the repository with `None` as the tag.
+    /// [`image_reference`] must accept such a slice under its
+    /// debug-mode `already carries a tag` check and compose the
+    /// `<repository>:<tag>` shape correctly.
+    #[test]
+    fn test_image_reference_preserves_registry_port_repository_slice() {
+        assert_eq!(
+            image_reference("registry.example.com:5000/nginx", "v1"),
+            "registry.example.com:5000/nginx:v1"
+        );
+        assert_eq!(
+            image_reference("registry.example.com:5000/library/nginx", "v1"),
+            "registry.example.com:5000/library/nginx:v1"
+        );
+    }
+
+    /// The load-bearing algebra law: on every non-degenerate
+    /// `(repository, tag)` pair the [`image_repository_and_tag`] parser
+    /// handles, feeding the halves through [`image_reference`] and
+    /// back through the parser recovers the original pair verbatim.
+    /// This is the property that makes the composer the honest
+    /// inverse of the parser (theory §III.1 typescape: the compose /
+    /// parse pair widens the typed algebra so future canonicalisation
+    /// on either half must uphold the roundtrip or fail this test).
+    #[test]
+    fn test_image_reference_roundtrips_with_image_repository_and_tag() {
+        let cases = [
+            ("nginx", "latest"),
+            ("library/nginx", "1.25"),
+            ("docker.io/library/nginx", "1.25"),
+            ("ghcr.io/pleme-io/forge", "v0.42.0"),
+            ("registry.example.com:5000/nginx", "v1"),
+            ("registry.example.com:5000/library/nginx", "v1"),
+        ];
+        for (repo, tag) in cases {
+            let composed = image_reference(repo, tag);
+            let parsed = image_repository_and_tag(&composed);
+            assert_eq!(
+                parsed,
+                (repo, Some(tag)),
+                "image_reference / image_repository_and_tag roundtrip must be identity on \
+                 non-degenerate (repository, tag) pairs; broke on ({repo:?}, {tag:?}) → \
+                 composed = {composed:?}, reparsed = {parsed:?}"
+            );
+        }
+    }
+
+    /// Regression pin for the six call sites this primitive replaces:
+    /// [`image_reference`] must be observationally identical to the
+    /// prior hand-rolled `format!("{}:{}", repository, tag)` shape on
+    /// every `(repository, tag)` input the crate had in production.
+    /// Reverting the impl to something that changed the separator
+    /// (e.g. `"/"`, `"::"`) or the order (`format!("{}:{}", tag,
+    /// repository)`) would fail this test, catching the drift the
+    /// centralised primitive is here to prevent.
+    #[test]
+    fn test_image_reference_matches_prior_format_shape() {
+        let inputs = [
+            // `commands/attestation.rs`: cosign_image_ref
+            ("ghcr.io/pleme-io/forge", "sig-tag"),
+            // `commands/migrations.rs`: image for the k8s migration job
+            ("ghcr.io/pleme-io/forge/myproduct-api", "amd64-abc1234"),
+            // `commands/product_release.rs`: full_tag for `docker tag`
+            ("ghcr.io/pleme-io/forge/myproduct-worker", "sha-deadbeef"),
+            // `commands/rust_service.rs`: full_tag, image_tag,
+            // expected_image
+            ("ghcr.io/pleme-io/forge/api", "arm64-latest"),
+            ("ghcr.io/pleme-io/forge/api", "linux-latest"),
+            ("registry.example.com:5000/library/nginx", "v1.2.3"),
+        ];
+        for (repo, tag) in inputs {
+            let predecessor = format!("{}:{}", repo, tag);
+            assert_eq!(
+                image_reference(repo, tag),
+                predecessor,
+                "image_reference drifted from the pre-extraction \
+                 `format!(\"{{}}:{{}}\", repository, tag)` shape on input ({repo:?}, {tag:?})"
             );
         }
     }

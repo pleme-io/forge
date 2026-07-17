@@ -240,8 +240,12 @@ async fn run_migration_job(
     );
     let tracker = MigrationTracker::new(metadata, db_label, &job_name, &image_tag);
 
-    // image_tag already includes architecture prefix (e.g., "amd64-abc1234" or "arm64-abc1234")
-    let image = format!("{}:{}", deploy_config.registry_url(), image_tag);
+    // image_tag already includes architecture prefix (e.g., "amd64-abc1234" or "arm64-abc1234").
+    // Compose `<repository>:<tag>` via `crate::oci_manifest::image_reference`
+    // (the typed compositional inverse of `image_repository_and_tag`),
+    // not a bare `format!("{}:{}", ...)` that would drift out of step
+    // with the parser under any future canonicalisation.
+    let image = crate::oci_manifest::image_reference(&deploy_config.registry_url(), &image_tag);
 
     // Use deployment_name from config for the app label (e.g., "myapp-backend")
     // This is required for network policies which expect the full deployment name
