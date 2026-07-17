@@ -125,6 +125,48 @@ impl ContentDigest {
     pub fn as_str(&self) -> &str {
         &self.full
     }
+
+    /// The algorithm prefix of the validated digest: `"sha256"` or
+    /// `"sha512"`. Read-back accessor so a consumer that pins a policy
+    /// on the algorithm at its own attestation boundary (e.g.
+    /// [`crate::helm_provenance`]'s sha256-only chart-hash cross-check)
+    /// can distinguish arms directly rather than re-splitting the full
+    /// string.
+    ///
+    /// The parse invariant guarantees exactly one `:` separates the
+    /// algorithm from the hex body and the algorithm is one of the
+    /// values matched in [`Self::parse`], so this returns the unchecked
+    /// head slice; the trailing `.unwrap_or_default()` is unreachable
+    /// under a valid `ContentDigest`.
+    ///
+    /// `allow(dead_code)`: part of the primitive read-back surface,
+    /// same discipline as [`Self::as_str`].
+    #[allow(dead_code)]
+    pub fn algorithm(&self) -> &str {
+        self.full
+            .split_once(':')
+            .map(|(algo, _)| algo)
+            .unwrap_or_default()
+    }
+
+    /// The lowercase-hex body of the validated digest — the payload
+    /// after the `<algorithm>:` prefix. Read-back accessor so a
+    /// consumer that stores the hex without the algorithm prefix (e.g.
+    /// [`crate::helm_provenance::HelmProvenanceOutcome::Verified::signed_chart_hash`],
+    /// documented as "no algorithm prefix, lowercase hex") extracts it
+    /// off the typed primitive rather than re-parsing.
+    ///
+    /// Same parse-invariant unreachability as [`Self::algorithm`].
+    ///
+    /// `allow(dead_code)`: part of the primitive read-back surface,
+    /// same discipline as [`Self::as_str`].
+    #[allow(dead_code)]
+    pub fn hex(&self) -> &str {
+        self.full
+            .split_once(':')
+            .map(|(_, hex)| hex)
+            .unwrap_or_default()
+    }
 }
 
 impl std::fmt::Display for ContentDigest {
@@ -623,6 +665,45 @@ mod tests {
             err.to_string().contains("not-a-digest"),
             "error must name the offending input; got: {err}"
         );
+    }
+
+    /// The `algorithm()` accessor recovers the algorithm prefix off a
+    /// validated digest for both supported algorithms. A consumer that
+    /// pins a per-algorithm policy at its own attestation boundary can
+    /// distinguish arms without re-splitting the full string.
+    #[test]
+    fn test_content_digest_algorithm_accessor() {
+        let sha256 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        assert_eq!(sha256.algorithm(), "sha256");
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let sha512 = ContentDigest::parse(&format!("sha512:{hex512}")).unwrap();
+        assert_eq!(sha512.algorithm(), "sha512");
+    }
+
+    /// The `hex()` accessor recovers the lowercase-hex body off a
+    /// validated digest for both supported algorithms. Round-trips
+    /// with the input hex on the two canonical algorithms, so a
+    /// consumer that persists the hex without the algorithm prefix
+    /// (e.g. `helm_provenance::HelmProvenanceOutcome::Verified::
+    /// signed_chart_hash`) extracts it off the typed primitive.
+    #[test]
+    fn test_content_digest_hex_accessor() {
+        let sha256 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        assert_eq!(sha256.hex(), D1);
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let sha512 = ContentDigest::parse(&format!("sha512:{hex512}")).unwrap();
+        assert_eq!(sha512.hex(), hex512);
+    }
+
+    /// `algorithm()` + `hex()` compose back to the full digest string,
+    /// so the two accessors are the exact inverse of the internal
+    /// `<algorithm>:<hex>` shape. Pinning the round-trip closes the
+    /// class of drift where a future consumer joins accessor outputs
+    /// and finds them disagreeing with `as_str()`.
+    #[test]
+    fn test_content_digest_accessors_compose_to_full_string() {
+        let d = ContentDigest::parse(&format!("  sha256:{D1}\n")).unwrap();
+        assert_eq!(format!("{}:{}", d.algorithm(), d.hex()), d.as_str());
     }
 
     /// An OCI image manifest (the standard single-image shape skopeo

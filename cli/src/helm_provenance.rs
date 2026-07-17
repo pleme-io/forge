@@ -262,12 +262,19 @@ fn dash_unescape(body: &str) -> String {
 /// recover the `sha256:<hex>` digest. Returns the lowercase-hex digest
 /// (no algorithm prefix) on a positive match, or `None` if no `files:`
 /// block is present, the expected entry is absent, the algorithm is
-/// not `sha256`, the hex payload is empty, or the hex payload is not
-/// well-formed lowercase hex.
+/// not `sha256`, or the digest fails
+/// [`crate::oci_manifest::ContentDigest::parse`].
 ///
-/// The parser deliberately rejects non-`sha256` algorithms and
-/// malformed hex so a future cross-check against the tarball bytes
-/// cannot be fed garbage from a corrupt `.prov`.
+/// The digest-validation predicate routes through the typed OCI /
+/// Docker content-digest primitive
+/// [`crate::oci_manifest::ContentDigest`] so this attestation site
+/// shares its "valid `<algorithm>:<hex>`" discipline with
+/// [`crate::oci_manifest::canonical_manifest_fingerprint`] rather
+/// than hand-rolling a second lowercase-hex predicate that could
+/// drift. The sha256-only policy at THIS attestation site (Helm
+/// `.prov` currently emits sha256; a future commit can widen) is a
+/// per-consumer filter on top of the primitive, not a duplicated
+/// validator.
 fn find_tarball_sha256(body: &str, expected_tarball_name: &str) -> Option<String> {
     let mut in_files = false;
     let mut files_indent: Option<usize> = None;
@@ -304,29 +311,15 @@ fn find_tarball_sha256(body: &str, expected_tarball_name: &str) -> Option<String
         if name.trim() != expected_tarball_name {
             continue;
         }
-        let value = value.trim();
-        let Some(hex) = value.strip_prefix("sha256:") else {
+        let digest = crate::oci_manifest::ContentDigest::parse(value).ok()?;
+        if digest.algorithm() != "sha256" {
             // A non-sha256 algorithm is not the digest we cross-check;
             // skip rather than misreport. Future commit can widen.
             return None;
-        };
-        let hex = hex.trim();
-        if hex.is_empty() || !is_lowercase_hex(hex) {
-            return None;
         }
-        return Some(hex.to_string());
+        return Some(digest.hex().to_string());
     }
     None
-}
-
-/// A sha256 digest's hex payload is exactly 64 lowercase-hex chars.
-/// The parser pins the length AND the lowercase discipline so a
-/// truncated, uppercase, or non-hex string cannot enter the
-/// attestation as if it were a valid digest.
-fn is_lowercase_hex(s: &str) -> bool {
-    s.len() == 64
-        && s.chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 #[cfg(test)]
@@ -603,6 +596,72 @@ mod tests {
             parse_provenance(nonhex, "example-0.1.0.tgz"),
             HelmProvenanceOutcome::Unverified
         );
+    }
+
+    /// **Load-bearing fail-before / pass-after pin.** A `.prov` entry
+    /// whose value carries internal whitespace between the `sha256:`
+    /// algorithm prefix and the hex payload (`sha256:  <64-hex>`) is a
+    /// shape Helm never emits — a hand-edited or registry-corrupted
+    /// `.prov` at best, garbage at worst. The prior hand-rolled parser
+    /// stripped the prefix and then re-trimmed the hex, silently
+    /// admitting the malformed shape as [`HelmProvenanceOutcome::
+    /// Verified`]. This commit routes the digest through
+    /// [`crate::oci_manifest::ContentDigest::parse`], whose strict
+    /// `<algorithm>:<hex>` grammar rejects internal whitespace at the
+    /// algo/hex boundary — the tightening matches the OCI distribution
+    /// spec's digest shape and closes the class of drift where a
+    /// downstream cross-check gets fed a hex payload that never named
+    /// a fetchable blob.
+    #[test]
+    fn test_parse_internal_whitespace_between_algo_and_hex_is_unverified() {
+        let prov = format!(
+            "-----BEGIN PGP SIGNED MESSAGE-----\n\
+             Hash: SHA512\n\
+             \n\
+             files:\n  example-0.1.0.tgz: sha256:  {}\n\
+             -----BEGIN PGP SIGNATURE-----\n\
+             \n\
+             wsBcBAAB\n\
+             -----END PGP SIGNATURE-----\n",
+            CHART_DIGEST
+        );
+        assert_eq!(
+            parse_provenance(&prov, "example-0.1.0.tgz"),
+            HelmProvenanceOutcome::Unverified,
+            "internal whitespace between 'sha256:' and hex is malformed under the OCI \
+             digest grammar; the ContentDigest::parse route rejects it, closing the \
+             drift the prior hand-rolled predicate silently admitted",
+        );
+    }
+
+    /// The digest-validation predicate is exactly
+    /// [`crate::oci_manifest::ContentDigest::parse`] with a
+    /// sha256-only algorithm filter — the same primitive
+    /// [`crate::oci_manifest::canonical_manifest_fingerprint`] uses to
+    /// admit `config.digest` / `layers[].digest` /
+    /// `manifests[].digest` / `fsLayers[].blobSum` into the OCI image
+    /// fingerprint. Pinning the predicate at both consumer sites
+    /// closes the class of drift where the chart-side
+    /// `signed_chart_hash` names a hex the image-side fingerprint
+    /// would reject (or vice versa). The prior hand-rolled
+    /// `is_lowercase_hex` predicate lived at one site; this test
+    /// pins that the recovered hex must round-trip through
+    /// `ContentDigest::parse("sha256:<hex>")`.
+    #[test]
+    fn test_recovered_hex_round_trips_through_content_digest_parse() {
+        use crate::oci_manifest::ContentDigest;
+        let prov = realistic_prov("example-0.1.0.tgz", CHART_DIGEST);
+        let HelmProvenanceOutcome::Verified {
+            signed_chart_hash, ..
+        } = parse_provenance(&prov, "example-0.1.0.tgz")
+        else {
+            panic!("expected Verified for realistic .prov");
+        };
+        let hex = signed_chart_hash.expect("realistic .prov must recover a hex");
+        let digest = ContentDigest::parse(&format!("sha256:{hex}"))
+            .expect("recovered hex must round-trip through ContentDigest::parse");
+        assert_eq!(digest.algorithm(), "sha256");
+        assert_eq!(digest.hex(), hex);
     }
 
     /// Dash-escaped body lines (RFC 4880 §7.1) are un-escaped before
