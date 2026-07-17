@@ -596,6 +596,109 @@ impl AsRef<[u8]> for ContentDigest {
     }
 }
 
+/// [`From<ContentDigest>`] for [`String`] moves the validated
+/// `<algorithm>:<hex>` backing string out of the consumed
+/// [`ContentDigest`] value at zero-copy — no allocation, no
+/// re-formatting through [`std::fmt::Display`], no
+/// `digest.as_str().to_owned()` bridge. A downstream consumer that
+/// owns a [`ContentDigest`] and needs to hand it off as an owned
+/// [`String`] to a [`std::collections::HashMap<String, _>`] key, a
+/// [`Vec<String>`] entry, a [`serde_json::Value::String`] payload,
+/// an HTTP header value that pins its input contract as
+/// `impl Into<String>` (a `reqwest::header::HeaderValue::from_str`
+/// bridge that keys off `String`, an
+/// [`http::HeaderValue::from_maybe_shared`] sink), or a config-schema
+/// field that owns its digest text (a
+/// [`crate::deployment_manifest`] structural field that stores the
+/// canonical `<algorithm>:<hex>` form as `String` for downstream
+/// serialization) is a one-line `String::from(digest)` /
+/// `digest.into()` call, not a per-site `digest.as_str().to_owned()`
+/// or `digest.to_string()` bridge that pays a redundant allocation
+/// AND a redundant [`std::fmt::Display`] format-buffer round-trip.
+///
+/// The by-value owned-UTF-8 emit peer of the by-reference
+/// borrowed-view read peer [`AsRef<str> for ContentDigest`] (commit
+/// 6a321e3): both surfaces read the same underlying validated
+/// full-digest slice, one exposing it borrowed at the UTF-8 frontier
+/// (`&str`) and this one emitting it owned at the [`String`]
+/// frontier that owned-input consumers pin their contract on. The
+/// symmetric emit-side sibling of [`TryFrom<String> for
+/// ContentDigest`] (commit f175833): the two together close the
+/// by-value owned-UTF-8 input+output symmetry on the reference-
+/// grammar family — [`TryFrom<String>`] parses a canonical
+/// `<algorithm>:<hex>` from an owned [`String`] through the
+/// [`ContentDigest::parse`] oracle, this [`From<ContentDigest>`]
+/// emits the canonical `<algorithm>:<hex>` as an owned [`String`]
+/// through the moved backing string — so a consumer that receives
+/// an owned digest string, parses it into a [`ContentDigest`],
+/// validates it, and hands it back out as an owned [`String`] at
+/// its own downstream boundary reads through the same one-oracle
+/// discipline the parse peer already carries with zero per-consumer
+/// bridge cost. Structural mirror of [`impl From<crate::retry::
+/// PerAttemptRegion> for String`], [`impl
+/// From<crate::probe_outcome::AdmissionTier> for String`], and
+/// [`impl From<crate::version::BumpLevel> for String`] — the same
+/// by-value owned-UTF-8 emit lift the sibling label-axis ordered
+/// typed sums already carry, each routing through its shared
+/// canonical-label oracle via
+/// [`crate::retry::PerAttemptRegion::as_str`] +
+/// [`str::to_owned`] — now extended to the digest reference-grammar
+/// family through a strictly cheaper move-out projection off the
+/// [`ContentDigest`] value's own backing storage.
+///
+/// Zero-copy by construction: the returned [`String`] is the
+/// consumed [`ContentDigest`] value's [`ContentDigest::full`]
+/// backing string moved out — no allocation, no clone, no
+/// per-consumer buffer growth. Sibling label-axis emit peers
+/// (`From<PerAttemptRegion> for String` etc.) allocate a fresh
+/// [`String`] because their canonical labels live in a static
+/// `'static` slice and the emit peer must copy; the digest family's
+/// backing string is a per-value owned [`String`] the impl can move
+/// directly, so this peer is strictly cheaper than the sibling
+/// analog it structurally mirrors while carrying the same
+/// one-oracle read discipline. The identity
+/// `String::from(digest.clone()) == digest.as_str()` at every
+/// validated [`ContentDigest`] value is pinned by
+/// [`tests::test_from_content_digest_string_matches_as_str`]; the
+/// identity carrying through a generic `impl Into<String>` consumer
+/// is pinned by
+/// [`tests::test_from_content_digest_string_carries_through_generic_consumer`];
+/// the parse-round-trip identity through the owned-UTF-8 emit
+/// surface (parsing the emitted [`String`] back through every
+/// canonical parse surface) is pinned by
+/// [`tests::test_from_content_digest_string_parse_round_trip`].
+///
+/// A future refinement to the inherent [`ContentDigest::parse`]
+/// grammar (widening to `sha384`, tightening the trim behaviour) or
+/// to the [`ContentDigest::as_str`] read accessor (a canonicalising
+/// projection) is a one-site edit at the inherent oracle; every
+/// consumer bound by `impl Into<String>` inherits the refined
+/// canonical form off the moved backing string automatically with
+/// no downstream retyping.
+///
+/// THEORY.md §III.1 typescape: the by-value owned-UTF-8 emit
+/// surface is a typed-primitive site on [`ContentDigest`] itself
+/// (one [`From<ContentDigest>`] impl moving the
+/// [`ContentDigest::parse`]-validated backing string out at
+/// zero-copy), not a per-consumer `digest.as_str().to_owned()` or
+/// `digest.to_string()` restatement at every downstream site that
+/// accepts `impl Into<String>`. THEORY.md §VI.1 one-oracle: the
+/// validated full-digest string is named at one site
+/// ([`ContentDigest::parse`]-guarded [`ContentDigest::full`]
+/// backing), and every emit surface — the borrowed-view read peers
+/// [`ContentDigest::as_str`], [`std::fmt::Display`],
+/// [`AsRef<str>`], [`AsRef<[u8]>`], this by-value owned-UTF-8 peer
+/// [`From<ContentDigest> for String`] — reads through the same
+/// backing storage. A future divergence between the moved-out
+/// [`String`] and the borrowed `&str` view would fail the new
+/// `test_from_content_digest_string_matches_as_str` invariance
+/// test.
+impl From<ContentDigest> for String {
+    fn from(digest: ContentDigest) -> String {
+        digest.full
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -1953,6 +2056,155 @@ mod tests {
             let via_from_str: ContentDigest = decoded.parse().unwrap();
             assert_eq!(via_try_from, d);
             assert_eq!(via_from_str, d);
+        }
+    }
+
+    /// The by-value owned-UTF-8 emit surface
+    /// [`From<ContentDigest> for String`] moves the same validated
+    /// full-digest bytes that the borrowed-view surfaces
+    /// [`ContentDigest::as_str`] and [`AsRef<str>`] read. Pins the
+    /// "emit peer routes through the same one-oracle backing string
+    /// the read peers project" invariant across the sha256 / sha512
+    /// algorithm grid — a future divergence between the moved-out
+    /// [`String`] and the borrowed `&str` view fails this test.
+    #[test]
+    fn test_from_content_digest_string_matches_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let borrowed_as_str = d.as_str().to_owned();
+            let borrowed_as_ref: String = <ContentDigest as AsRef<str>>::as_ref(&d).to_owned();
+            let via_display = format!("{d}");
+            let emitted: String = String::from(d);
+            assert_eq!(emitted, borrowed_as_str);
+            assert_eq!(emitted, borrowed_as_ref);
+            assert_eq!(emitted, via_display);
+            assert_eq!(emitted, raw);
+        }
+    }
+
+    /// [`From<ContentDigest> for String`] emits the full
+    /// `<algorithm>:<hex>` slice for a sha256 digest. Pins the
+    /// primary registry algorithm on the by-value owned-UTF-8 emit
+    /// surface — the emitted [`String`] is byte-identical to the
+    /// input the inherent oracle accepted.
+    #[test]
+    fn test_from_content_digest_string_sha256_full_digest() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: String = d.into();
+        assert_eq!(emitted, raw);
+        assert!(emitted.starts_with("sha256:"));
+        assert_eq!(&emitted[7..], D1);
+    }
+
+    /// [`From<ContentDigest> for String`] emits the full
+    /// `<algorithm>:<hex>` slice for a sha512 digest. Pins the
+    /// second supported algorithm on the by-value owned-UTF-8 emit
+    /// surface so a widening at the inherent oracle is caught by an
+    /// existing test on this derived surface.
+    #[test]
+    fn test_from_content_digest_string_sha512_full_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: String = d.into();
+        assert_eq!(emitted, raw);
+        assert!(emitted.starts_with("sha512:"));
+        assert_eq!(&emitted[7..], hex);
+    }
+
+    /// [`From<ContentDigest> for String`] emits the trimmed canonical
+    /// form on an input the inherent oracle whitespace-trimmed at
+    /// parse time — the emit surface projects the canonical trimmed
+    /// value, not the caller's stray-whitespace raw input. Pins the
+    /// trim discipline carrying through the by-value owned-UTF-8
+    /// emit surface.
+    #[test]
+    fn test_from_content_digest_string_after_whitespace_trim() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: String = d.into();
+        assert_eq!(emitted, expected);
+        assert!(!emitted.starts_with(' '));
+        assert!(!emitted.ends_with('\n'));
+    }
+
+    /// The [`From<ContentDigest> for String`] impl composes with a
+    /// generic owned-string helper bounded by `impl Into<String>` —
+    /// the compositional motivation for landing the trait separately
+    /// from the borrowed-view [`AsRef<str>`] read peer. Pins the
+    /// trait-generic consumer surface: a downstream site that types
+    /// its input contract as `impl Into<String>`
+    /// (a `HashMap<String, _>::insert` key, a
+    /// [`http::HeaderValue::from_maybe_shared`] intake, a
+    /// [`serde_json::Value::String`] constructor sink, a config-schema
+    /// setter that owns its digest text) recovers the same validated
+    /// full-digest [`String`] a direct `digest.as_str().to_owned()`
+    /// chain would, at zero-copy off the moved backing storage.
+    #[test]
+    fn test_from_content_digest_string_carries_through_generic_consumer() {
+        fn first_char_of<T: Into<String>>(t: T) -> char {
+            let s: String = t.into();
+            s.chars().next().unwrap()
+        }
+        fn length_of<T: Into<String>>(t: T) -> usize {
+            let s: String = t.into();
+            s.len()
+        }
+        fn owned_eq<T: Into<String>>(t: T, expected: &str) -> bool {
+            let s: String = t.into();
+            s == expected
+        }
+        let raw = format!("sha256:{D1}");
+        let d1 = ContentDigest::parse(&raw).unwrap();
+        let d2 = d1.clone();
+        let d3 = d1.clone();
+        assert_eq!(first_char_of(d1), 's');
+        assert_eq!(length_of(d2), raw.len());
+        assert!(owned_eq(d3, &raw));
+    }
+
+    /// A validated digest's [`From<ContentDigest> for String`]
+    /// output round-trips through the full parse-surface set —
+    /// inherent [`ContentDigest::parse`], [`TryFrom<&str>`],
+    /// [`FromStr`](std::str::FromStr), [`TryFrom<String>`],
+    /// [`TryFrom<Cow<'_, str>>`] — back to the same validated
+    /// [`ContentDigest`] value. Pins the "emit surface projects
+    /// exactly the canonical form every parse surface accepts"
+    /// invariant so a future canonicalising refinement to the
+    /// backing string that broke round-trip via the owned-UTF-8
+    /// emit peer fails this test.
+    #[test]
+    fn test_from_content_digest_string_parse_round_trip() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let original = ContentDigest::parse(&raw).unwrap();
+            let emitted: String = String::from(original.clone());
+            let via_parse = ContentDigest::parse(&emitted).unwrap();
+            let via_try_from_str = ContentDigest::try_from(emitted.as_str()).unwrap();
+            let via_from_str: ContentDigest = emitted.parse().unwrap();
+            let via_try_from_string = ContentDigest::try_from(emitted.clone()).unwrap();
+            let via_try_from_cow =
+                ContentDigest::try_from(std::borrow::Cow::Owned(emitted.clone())).unwrap();
+            assert_eq!(via_parse, original);
+            assert_eq!(via_try_from_str, original);
+            assert_eq!(via_from_str, original);
+            assert_eq!(via_try_from_string, original);
+            assert_eq!(via_try_from_cow, original);
         }
     }
 
