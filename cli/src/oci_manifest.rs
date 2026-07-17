@@ -503,6 +503,99 @@ impl AsRef<str> for ContentDigest {
     }
 }
 
+/// [`AsRef<[u8]>`] for [`ContentDigest`] routes through
+/// [`<ContentDigest as AsRef<str>>::as_ref`] (in turn
+/// [`ContentDigest::as_str`]) via [`str::as_bytes`] so a downstream
+/// consumer bound by `impl AsRef<[u8]>` (a `blake3::Hasher::update` /
+/// `sha2::Digest::update` / `crate::tameshi::Blake3Hash::digest`
+/// streaming hasher sink that feeds the validated
+/// `<algorithm>:<hex>` bytes into a downstream attestation-chain
+/// fingerprint, a [`std::collections::HashSet<&[u8]>`] membership
+/// check against a set of expected registry digests keyed on their
+/// byte-slice identity, a raw-write output sink
+/// (`out.write_all(&digest)`), a `nom` / `winnow` byte-slice parser
+/// that treats the digest as a bounded byte token, an
+/// `hmac::Mac::update` MAC accumulator that reads its input as
+/// bytes) reads the validated `<algorithm>:<hex>` full string
+/// directly off a [`ContentDigest`] value as UTF-8 bytes without a
+/// per-consumer `digest.as_str().as_bytes()` bridge, without a
+/// [`std::fmt::Display`] format-buffer step, and without an
+/// intermediate [`String`] / [`Vec<u8>`] allocation.
+///
+/// The byte-slice borrowed-view read peer of the UTF-8 borrowed-view
+/// read surface [`AsRef<str> for ContentDigest`] already on the
+/// reference-grammar family — both read the same underlying
+/// full-digest slice through [`ContentDigest::as_str`], one exposing
+/// it at the UTF-8 frontier (`&str`) and this one at the byte-slice
+/// frontier (`&[u8]`) that streaming hashers, MAC accumulators, and
+/// raw-write sinks pin their input contract on. Structural mirror
+/// of [`impl AsRef<[u8]> for crate::retry::PerAttemptRegion`],
+/// [`impl AsRef<[u8]> for crate::probe_outcome::AdmissionTier`],
+/// and [`impl AsRef<[u8]> for crate::version::BumpLevel`] — the
+/// same borrowed-view lift at the byte-slice frontier the sibling
+/// label-axis ordered typed sums already carry, each routing
+/// through the shared canonical-label oracle — now extended to the
+/// digest reference-grammar family so the parse-oracle-bounded
+/// typed primitive [`ContentDigest`] exposes the same trait-generic
+/// byte-slice borrowed-view surface every sibling typed primitive
+/// already carries, without exception.
+///
+/// Zero-cost by construction: the returned `&[u8]` is a borrow off
+/// the UTF-8 backing string via [`str::as_bytes`], which itself
+/// borrows off [`ContentDigest::full`] (the trimmed, validated
+/// full-digest backing string) through [`ContentDigest::as_str`],
+/// so a consumer that borrows the byte slice reads directly into
+/// the value's own storage without a copy, an allocation, or a
+/// formatter round-trip. The identity
+/// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) ==
+/// <ContentDigest as AsRef<str>>::as_ref(&d).as_bytes()` at every
+/// validated [`ContentDigest`] value is pinned by
+/// [`tests::test_as_ref_bytes_matches_as_ref_str_bytes`]; the
+/// identity carrying through a generic `impl AsRef<[u8]>`
+/// consumer is pinned by
+/// [`tests::test_as_ref_bytes_carries_through_generic_consumer`];
+/// the parse-round-trip identity through the byte-slice surface
+/// (parsing back via [`std::str::from_utf8`]) is pinned by
+/// [`tests::test_as_ref_bytes_parse_round_trip`].
+///
+/// The validated full-digest bytes are pure lowercase-hex plus
+/// `sha256`/`sha512`/`:` — every byte is ASCII by parse invariant,
+/// so a byte-slice consumer that treats the input as ASCII (a
+/// case-insensitive comparator on the `sha256` prefix, an ASCII
+/// hex-digit walker on the `<hex>` body) reads the same
+/// canonicalised form the UTF-8 surface exposes with no
+/// multibyte-boundary hazard.
+///
+/// A future refinement to the inherent [`ContentDigest::parse`]
+/// grammar (widening to `sha384`, tightening the trim behaviour)
+/// or to the [`ContentDigest::as_str`] read accessor (a
+/// canonicalising projection, a case-normalising view) updates the
+/// one-oracle site alone and every consumer — streaming hasher
+/// sink, HashSet-of-bytes membership check, raw-write output sink,
+/// MAC accumulator — that accepts `impl AsRef<[u8]>` inherits the
+/// refined byte slice automatically with no downstream retyping.
+///
+/// THEORY.md §III.1 typescape: the borrowed-view byte-slice read
+/// surface is a typed-primitive site on [`ContentDigest`] itself
+/// (one [`AsRef<[u8]>`] impl routing through the [`AsRef<str>`]
+/// and [`ContentDigest::as_str`] read oracle via
+/// [`str::as_bytes`]), not a per-consumer
+/// `digest.as_str().as_bytes()` restatement at every downstream
+/// site that accepts `impl AsRef<[u8]>`. THEORY.md §VI.1
+/// one-oracle: the validated full-digest slice is named at one
+/// site ([`ContentDigest::as_str`], reading through the
+/// [`ContentDigest::parse`]-guarded backing string), and every
+/// borrowed-view read surface — the inherent
+/// [`ContentDigest::as_str`] accessor, the format machinery
+/// [`std::fmt::Display`], the trait-generic UTF-8 peer
+/// [`AsRef<str>`], this byte-slice peer [`AsRef<[u8]>`] — reads
+/// through it.
+impl AsRef<[u8]> for ContentDigest {
+    fn as_ref(&self) -> &[u8] {
+        <Self as AsRef<str>>::as_ref(self).as_bytes()
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -1705,6 +1798,159 @@ mod tests {
             // yield the same value.
             let via_try_from = ContentDigest::try_from(borrowed).unwrap();
             let via_from_str: ContentDigest = borrowed.parse().unwrap();
+            assert_eq!(via_try_from, d);
+            assert_eq!(via_from_str, d);
+        }
+    }
+
+    /// [`AsRef<[u8]>::as_ref`] yields exactly the same bytes as
+    /// `<ContentDigest as AsRef<str>>::as_ref(&d).as_bytes()` at
+    /// every validated digest — the byte-slice borrowed-view peer
+    /// routes through the same one-oracle read discipline the UTF-8
+    /// borrowed-view peer already carries, just projected onto its
+    /// own frontier. Pins the "byte-slice surface routes through
+    /// AsRef<str> ⇒ as_str ⇒ full backing string" invariant: a
+    /// future refactor that inlined a divergent read into the
+    /// [`AsRef<[u8]>`] impl fails this test.
+    #[test]
+    fn test_as_ref_bytes_matches_as_ref_str_bytes() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let via_bytes: &[u8] = <ContentDigest as AsRef<[u8]>>::as_ref(&d);
+            let via_str: &str = <ContentDigest as AsRef<str>>::as_ref(&d);
+            assert_eq!(via_bytes, via_str.as_bytes());
+            assert_eq!(via_bytes, d.as_str().as_bytes());
+            assert_eq!(via_bytes, raw.as_bytes());
+        }
+    }
+
+    /// [`AsRef<[u8]>::as_ref`] yields the full `<algorithm>:<hex>`
+    /// byte slice for a sha256 digest, and every byte is ASCII
+    /// (lowercase-hex / `sha256` / `:`) so a downstream ASCII
+    /// consumer reads the canonical byte stream directly. Pins the
+    /// primary registry algorithm on the byte-slice surface.
+    #[test]
+    fn test_as_ref_bytes_sha256_full_digest() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let borrowed: &[u8] = d.as_ref();
+        assert_eq!(borrowed, raw.as_bytes());
+        assert!(borrowed.starts_with(b"sha256:"));
+        assert_eq!(&borrowed[7..], D1.as_bytes());
+        assert!(borrowed.iter().all(|b| b.is_ascii()));
+    }
+
+    /// [`AsRef<[u8]>::as_ref`] yields the full `<algorithm>:<hex>`
+    /// byte slice for a sha512 digest. Pins the second supported
+    /// algorithm on the byte-slice surface so a widening at the
+    /// inherent oracle is caught by an existing test on this
+    /// derived surface.
+    #[test]
+    fn test_as_ref_bytes_sha512_full_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let borrowed: &[u8] = d.as_ref();
+        assert_eq!(borrowed, raw.as_bytes());
+        assert!(borrowed.starts_with(b"sha512:"));
+        assert_eq!(&borrowed[7..], hex.as_bytes());
+        assert!(borrowed.iter().all(|b| b.is_ascii()));
+    }
+
+    /// [`AsRef<[u8]>::as_ref`] reads the trimmed backing bytes on
+    /// an input the inherent oracle whitespace-trimmed at parse
+    /// time — the byte-slice surface exposes the canonical trimmed
+    /// value, not the caller's stray-whitespace raw input. Pins
+    /// the trim discipline carrying through the byte-slice
+    /// borrowed-view surface.
+    #[test]
+    fn test_as_ref_bytes_after_whitespace_trim() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let borrowed: &[u8] = d.as_ref();
+        assert_eq!(borrowed, expected.as_bytes());
+        assert!(!borrowed.starts_with(b" "));
+        assert!(!borrowed.ends_with(b"\n"));
+    }
+
+    /// The [`AsRef<[u8]>`] impl composes with a generic byte-slice
+    /// helper bounded by `impl AsRef<[u8]>` — the compositional
+    /// motivation for landing the trait separately from the
+    /// inherent [`ContentDigest::as_str`] accessor. Pins the
+    /// trait-generic consumer surface: a downstream site that
+    /// types its input contract as `impl AsRef<[u8]>` (a streaming
+    /// hasher `update` sink, a raw-write output sink, an
+    /// hmac-mac accumulator, a byte-slice HashSet membership
+    /// check) recovers the same borrowed full-digest byte slice a
+    /// direct `.as_str().as_bytes()` chain would. Both by-value and
+    /// by-borrow entry to the generic helper resolve to the same
+    /// slice.
+    #[test]
+    fn test_as_ref_bytes_carries_through_generic_consumer() {
+        fn first_byte_of<T: AsRef<[u8]>>(t: T) -> u8 {
+            *t.as_ref().first().unwrap()
+        }
+        fn byte_length_of<T: AsRef<[u8]>>(t: T) -> usize {
+            t.as_ref().len()
+        }
+        fn byte_eq<T: AsRef<[u8]>>(t: T, expected: &[u8]) -> bool {
+            t.as_ref() == expected
+        }
+        // Simulate the load-bearing sink shape (streaming hasher):
+        // fold `T: AsRef<[u8]>` bytes into an accumulator.
+        fn sum_of_bytes<T: AsRef<[u8]>>(t: T) -> u64 {
+            t.as_ref().iter().map(|b| u64::from(*b)).sum()
+        }
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(first_byte_of(&d), b's');
+        assert_eq!(byte_length_of(&d), raw.len());
+        assert!(byte_eq(&d, raw.as_bytes()));
+        assert_eq!(sum_of_bytes(&d), sum_of_bytes(raw.as_bytes()));
+        // The generic bound must accept ContentDigest by value AND
+        // by borrow — both routes must yield the same slice.
+        assert_eq!(byte_length_of(d.clone()), raw.len());
+        assert!(byte_eq(d, raw.as_bytes()));
+    }
+
+    /// A validated digest's [`AsRef<[u8]>`] slice round-trips
+    /// through [`std::str::from_utf8`] and then the inherent
+    /// [`ContentDigest::parse`] oracle back to the same validated
+    /// [`ContentDigest`] value. Pins the "byte-slice surface
+    /// exposes exactly the canonical UTF-8 form the inherent
+    /// oracle accepts" invariant so a future canonicalising
+    /// refinement to [`ContentDigest::as_str`] that broke
+    /// round-trip via [`AsRef<[u8]>`] fails this test. Composed
+    /// with the trait-generic parse peer chain
+    /// ([`TryFrom<&str>`], [`FromStr`](std::str::FromStr)) so a
+    /// consumer that receives the byte slice, decodes UTF-8, and
+    /// parses back through any read surface recovers the same
+    /// value.
+    #[test]
+    fn test_as_ref_bytes_parse_round_trip() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let borrowed: &[u8] = d.as_ref();
+            let decoded = std::str::from_utf8(borrowed).unwrap();
+            let round_tripped = ContentDigest::parse(decoded).unwrap();
+            assert_eq!(round_tripped, d);
+            let via_try_from = ContentDigest::try_from(decoded).unwrap();
+            let via_from_str: ContentDigest = decoded.parse().unwrap();
             assert_eq!(via_try_from, d);
             assert_eq!(via_from_str, d);
         }
