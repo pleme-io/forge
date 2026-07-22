@@ -1521,6 +1521,150 @@ impl From<ContentDigest> for std::borrow::Cow<'static, [u8]> {
     }
 }
 
+/// [`From<ContentDigest>`] for [`std::sync::Arc<[u8]>`] moves the validated
+/// `<algorithm>:<hex>` backing string out of the consumed [`ContentDigest`]
+/// value into an immutable, thread-safe, shared-owned [`Arc<[u8]>`] at
+/// exactly the label's byte length — the impl routes through
+/// [`<Vec<u8> as From<ContentDigest>>::from`] (which itself chains through
+/// the [`From<ContentDigest> for String`] emit oracle via
+/// [`String::into_bytes`], moving [`ContentDigest::full`] out at zero-copy)
+/// and then [`std::sync::Arc::<[u8]>::from`] on the moved [`Vec<u8>`]
+/// (which repackages the backing buffer as an immutable shared-owned
+/// [`Arc<[u8]>`] with a single atomic-refcount header preceding the label
+/// bytes). No re-formatting through [`std::fmt::Display`], no
+/// `Arc::<[u8]>::from(digest.as_ref())` bridge that would copy the backing
+/// bytes into a fresh allocation while leaking the consumed
+/// [`ContentDigest`]'s owned [`String`], no
+/// `digest.as_ref().to_vec().into()` chain that would restate the
+/// shared-owned discipline at every consumer.
+///
+/// A downstream consumer that owns a [`ContentDigest`] and needs to hand
+/// it off as a cross-thread shared-owned raw-byte handle to an atomic-
+/// refcounted byte-slice sink (a `dashmap::DashMap<Arc<[u8]>, _>` cache
+/// key inserted once and cloned across worker threads at `O(1)`
+/// [`Arc::clone`] cost with no atomic-op per-clone allocation, an
+/// `Arc<Manifest>` field whose digest slot is stored as [`Arc<[u8]>`] to
+/// share a single label byte-buffer across concurrent readers without
+/// paying the [`String`]/`Arc<str>` UTF-8 typing on the ASCII-only-by-
+/// parse-invariant digest bytes, a `bytes::Bytes::from(Arc<[u8]>)` intake
+/// that pins its input contract on the raw-byte shared-owned frontier, a
+/// `tokio::sync::broadcast` sender carrying an [`Arc<[u8]>`] payload
+/// receivers clone atomically without a per-receiver allocation, a
+/// long-lived registry-cache entry keyed on a shared-owned raw-byte digest
+/// for zero-copy fanout to `tokio::spawn`ed inspection tasks, a `serde`
+/// container that opts into `#[serde(into = "Arc<[u8]>")]` at the
+/// shared-owned byte-slice frontier) is a one-line
+/// `Arc::<[u8]>::from(digest)` / `digest.into()` call, not a per-site
+/// `Arc::<[u8]>::from(digest.as_ref())` bridge that leaks the consumed
+/// [`ContentDigest`]'s owned [`String`] nor a
+/// `Arc::<[u8]>::from(digest.to_string().into_bytes())` chain that pays a
+/// redundant [`Display`]-format allocation on top of the shared-owned
+/// repackaging.
+///
+/// The by-value cross-thread shared-owned byte-slice emit peer of the
+/// by-value cross-thread shared-owned UTF-8 emit peer
+/// [`From<ContentDigest> for Arc<str>`] (commit 5f85247) at the raw-byte
+/// frontier, of the by-value resizable owned-byte-slice peer
+/// [`From<ContentDigest> for Vec<u8>`] (commit e1ea855) with a shared-
+/// owned alternative shape, of the by-value shrunk-owned byte-slice peer
+/// [`From<ContentDigest> for Box<[u8]>`] (commit fce9fee) with a shared-
+/// owned refcounted alternative shape, and of the by-value borrowed/
+/// owned-frontier byte-slice peer
+/// [`From<ContentDigest> for Cow<'static, [u8]>`] (commit c2a5acf) with a
+/// cross-thread refcounted alternative shape: all five surfaces move the
+/// same validated full-digest bytes out of the consumed [`ContentDigest`],
+/// differing only on the owner-shape of the emitted receiver —
+/// [`Arc<str>`] for cross-thread shared-owned UTF-8 label slots,
+/// [`Vec<u8>`] for resizable growth-header byte-buffer owners,
+/// [`Box<[u8]>`] for immutable shrunk-owned raw-byte slots that trade the
+/// [`Vec<u8>`] growth-header word for a two-word slice pointer,
+/// [`Cow<'static, [u8]>`] for borrowed/owned-frontier raw-byte sinks, this
+/// [`Arc<[u8]>`] for immutable cross-thread shared-owned raw-byte slots
+/// that carry a single atomic-refcount header so consumers `Arc::clone`
+/// the label byte-buffer across worker threads at atomic-op cost with no
+/// per-clone allocation, while dropping the UTF-8 typing [`Arc<str>`]
+/// imposes on the ASCII-only-by-parse-invariant digest bytes for consumers
+/// that pin their contract on the raw-byte shared-owned frontier
+/// (`bytes::Bytes`, `http::HeaderValue::from_bytes`, streaming hashers
+/// seeded off an [`Arc<[u8]>`] label input). All five route through the
+/// [`From<ContentDigest> for String`] emit oracle: the [`Arc<str>`] peer
+/// chains through [`std::sync::Arc::<str>::from`], the [`Vec<u8>`] peer
+/// chains through [`String::into_bytes`], the [`Box<[u8]>`] peer chains
+/// through [`String::into_bytes`] then [`Vec::into_boxed_slice`], the
+/// [`Cow<'static, [u8]>`] peer chains through [`String::into_bytes`] then
+/// wraps the moved [`Vec<u8>`] in [`Cow::Owned`], this [`Arc<[u8]>`] peer
+/// chains through [`String::into_bytes`] then
+/// [`std::sync::Arc::<[u8]>::from`] applied to the moved [`Vec<u8>`] —
+/// the five agree byte-for-byte on the canonical form by construction,
+/// and a future canonicalising refinement to the [`String`] emit surface
+/// propagates to the cross-thread shared-owned raw-byte frontier at zero
+/// per-consumer cost.
+///
+/// Zero-copy on the digest bytes by construction: [`Vec::<u8>::from`]
+/// moves [`ContentDigest::full`]'s backing buffer out through
+/// [`String::into_bytes`] (which repackages the [`String`] as a
+/// [`Vec<u8>`] at the same capacity), and
+/// [`std::sync::Arc::<[u8]>::from`] on the moved [`Vec<u8>`] performs a
+/// single atomic-refcount allocation of exactly `label.len() + refcount
+/// header` bytes and copies the label bytes into that allocation once
+/// (the [`Vec<u8>`]'s heap buffer cannot itself be repurposed because the
+/// [`Arc<[u8]>`] layout requires the atomic-refcount header to precede
+/// the slice body, and [`Vec<u8>`]'s backing has no such header). This is
+/// strictly the minimum cost of shifting from the resizable-growth-header
+/// [`Vec<u8>`] shape to the immutable-shared-refcount [`Arc<[u8]>`] shape;
+/// no [`std::fmt::Display`] round-trip, no intermediate [`Box<[u8]>`]
+/// allocation, no per-consumer bridge cost.
+///
+/// The identity `<std::sync::Arc<[u8]> as
+/// std::ops::Deref>::deref(&std::sync::Arc::<[u8]>::from(digest.clone()))
+/// == digest.as_str().as_bytes()` at every validated [`ContentDigest`]
+/// value is pinned by
+/// [`tests::test_from_content_digest_arc_bytes_matches_as_ref`]; the
+/// identity carrying through a generic `impl Into<std::sync::Arc<[u8]>>`
+/// consumer is pinned by
+/// [`tests::test_from_content_digest_arc_bytes_carries_through_generic_consumer`];
+/// the parse-round-trip identity through the cross-thread shared-owned
+/// byte-slice emit surface (decoding the emitted [`Arc<[u8]>`]'s deref
+/// view as UTF-8 and parsing through every canonical parse surface) is
+/// pinned by
+/// [`tests::test_from_content_digest_arc_bytes_parse_round_trip`]; the
+/// cross-thread `Arc::clone` shared-allocation semantic is pinned by
+/// [`tests::test_from_content_digest_arc_bytes_clones_cheaply_across_threads`].
+///
+/// A future refinement to the inherent [`ContentDigest::parse`] grammar
+/// (widening to `sha384`, tightening the trim behaviour) or to the
+/// [`From<ContentDigest> for String`] emit oracle (a canonicalising
+/// projection at the owned-UTF-8 frontier) is a one-site edit at the
+/// inherent / owned-UTF-8 oracle; every consumer bound by
+/// `impl Into<std::sync::Arc<[u8]>>` inherits the refined canonical
+/// cross-thread shared-owned byte slice off the moved backing storage
+/// automatically with no downstream retyping.
+///
+/// THEORY.md §III.1 typescape: the by-value cross-thread shared-owned
+/// byte-slice emit surface is a typed-primitive site on [`ContentDigest`]
+/// itself (one [`From<ContentDigest>`] impl chaining through the
+/// [`From<ContentDigest> for String`] emit oracle via
+/// [`String::into_bytes`] and [`std::sync::Arc::<[u8]>::from`]), not a
+/// per-consumer `Arc::<[u8]>::from(digest.as_ref())` restatement at every
+/// downstream site that accepts `impl Into<std::sync::Arc<[u8]>>`.
+/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are named
+/// at one site ([`From<ContentDigest> for String`], reading through the
+/// moved [`ContentDigest::full`] backing), and every by-value owned emit
+/// surface — the UTF-8 peers [`From<ContentDigest> for String`],
+/// [`From<ContentDigest> for Box<str>`],
+/// [`From<ContentDigest> for Cow<'static, str>`],
+/// [`From<ContentDigest> for Arc<str>`],
+/// [`From<ContentDigest> for Rc<str>`], the byte-slice peers
+/// [`From<ContentDigest> for Vec<u8>`],
+/// [`From<ContentDigest> for Box<[u8]>`],
+/// [`From<ContentDigest> for Cow<'static, [u8]>`], this
+/// [`From<ContentDigest> for Arc<[u8]>`] — reads through it.
+impl From<ContentDigest> for std::sync::Arc<[u8]> {
+    fn from(digest: ContentDigest) -> std::sync::Arc<[u8]> {
+        std::sync::Arc::<[u8]>::from(Vec::<u8>::from(digest))
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -4282,6 +4426,208 @@ mod tests {
                  wrap the moved backing in Cow::Owned, not Cow::Borrowed"
             );
         }
+    }
+
+    /// The by-value cross-thread shared-owned byte-slice emit surface
+    /// [`From<ContentDigest> for Arc<[u8]>`] emits the same canonical
+    /// `<algorithm>:<hex>` bytes every borrowed-view read surface and
+    /// every peer emit surface on the byte-slice frontier project.
+    /// Round-trips the emit peer against
+    /// [`<ContentDigest as AsRef<[u8]>>::as_ref`] (the trait-generic
+    /// borrowed-view byte-slice read surface), against
+    /// [`ContentDigest::as_str`]`.as_bytes()` (the borrowed-view UTF-8
+    /// read surface reinterpreted as raw bytes), against
+    /// [`<Vec<u8> as From<ContentDigest>>::from`] (the by-value
+    /// resizable-owned-byte-slice emit peer), against
+    /// [`<Box<[u8]> as From<ContentDigest>>::from`] (the by-value
+    /// shrunk-owned byte-slice emit peer), and against the raw input the
+    /// inherent oracle accepted. Pins that after the [`Vec<u8>`] moves
+    /// out and is repackaged as [`Arc<[u8]>`] — the by-value
+    /// cross-thread shared-owned byte-slice emit surface names the same
+    /// canonical full-digest byte buffer as every peer surface on the
+    /// byte-slice frontier.
+    #[test]
+    fn test_from_content_digest_arc_bytes_matches_as_ref() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let borrowed_as_ref: Vec<u8> = <ContentDigest as AsRef<[u8]>>::as_ref(&d).to_vec();
+            let via_str_bytes: Vec<u8> = d.as_str().as_bytes().to_vec();
+            let via_vec_emit: Vec<u8> = Vec::<u8>::from(d.clone());
+            let via_box_emit: Box<[u8]> = Box::<[u8]>::from(d.clone());
+            let emitted: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(d);
+            assert_eq!(&*emitted, borrowed_as_ref.as_slice());
+            assert_eq!(&*emitted, via_str_bytes.as_slice());
+            assert_eq!(&*emitted, via_vec_emit.as_slice());
+            assert_eq!(&*emitted, &*via_box_emit);
+            assert_eq!(&*emitted, raw.as_bytes());
+        }
+    }
+
+    /// [`From<ContentDigest> for Arc<[u8]>`] emits the full
+    /// `<algorithm>:<hex>` byte slice for a sha256 digest. Pins the
+    /// primary registry algorithm on the by-value cross-thread shared-
+    /// owned byte-slice emit surface — the emitted [`Arc<[u8]>`] is
+    /// byte-identical to the input the inherent oracle accepted, and
+    /// every emitted byte is ASCII by parse invariant.
+    #[test]
+    fn test_from_content_digest_arc_bytes_sha256_full_digest() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::sync::Arc<[u8]> = d.into();
+        assert_eq!(&*emitted, raw.as_bytes());
+        assert!(emitted.starts_with(b"sha256:"));
+        assert_eq!(&emitted[7..], D1.as_bytes());
+        assert!(emitted.iter().all(|b| b.is_ascii()));
+    }
+
+    /// [`From<ContentDigest> for Arc<[u8]>`] emits the full
+    /// `<algorithm>:<hex>` byte slice for a sha512 digest. Pins the
+    /// second supported algorithm on the by-value cross-thread shared-
+    /// owned byte-slice emit surface so a widening at the inherent
+    /// oracle is caught by an existing test on this derived surface.
+    #[test]
+    fn test_from_content_digest_arc_bytes_sha512_full_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::sync::Arc<[u8]> = d.into();
+        assert_eq!(&*emitted, raw.as_bytes());
+        assert!(emitted.starts_with(b"sha512:"));
+        assert_eq!(&emitted[7..], hex.as_bytes());
+        assert!(emitted.iter().all(|b| b.is_ascii()));
+    }
+
+    /// [`From<ContentDigest> for Arc<[u8]>`] emits the trimmed canonical
+    /// bytes on an input the inherent oracle whitespace-trimmed at parse
+    /// time — the emit surface projects the canonical trimmed byte
+    /// buffer, not the caller's stray-whitespace raw input. Pins the
+    /// trim discipline carrying through the by-value cross-thread
+    /// shared-owned byte-slice emit surface.
+    #[test]
+    fn test_from_content_digest_arc_bytes_after_whitespace_trim() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::sync::Arc<[u8]> = d.into();
+        assert_eq!(&*emitted, expected.as_bytes());
+        assert!(!emitted.starts_with(b" "));
+        assert!(!emitted.ends_with(b"\n"));
+    }
+
+    /// The [`From<ContentDigest> for Arc<[u8]>`] impl composes with a
+    /// generic cross-thread shared-owned byte-slice helper bounded by
+    /// `impl Into<std::sync::Arc<[u8]>>` — the compositional motivation
+    /// for landing the trait separately from the UTF-8 shared-owned
+    /// [`From<ContentDigest> for Arc<str>`] emit peer and the borrowed/
+    /// owned-frontier byte-slice [`From<ContentDigest> for
+    /// Cow<'static, [u8]>`] emit peer. Pins the trait-generic consumer
+    /// surface: a downstream site that types its input contract as
+    /// `impl Into<Arc<[u8]>>` (a `dashmap::DashMap<Arc<[u8]>, _>` cache
+    /// key inserter, a `tokio::sync::broadcast` sender that carries an
+    /// `Arc<[u8]>` payload across worker threads at `O(1)` `Arc::clone`
+    /// cost, a `bytes::Bytes::from(Arc<[u8]>)` intake at the shared-
+    /// owned raw-byte frontier, a `serde` container opting into
+    /// `#[serde(into = "Arc<[u8]>")]` at the shared-owned byte-slice
+    /// frontier) recovers the same validated full-digest bytes a direct
+    /// `Arc::<[u8]>::from(digest.as_ref())` call would, at exactly the
+    /// shared-owned repackaging cost off the moved backing storage.
+    #[test]
+    fn test_from_content_digest_arc_bytes_carries_through_generic_consumer() {
+        fn first_byte_of<T: Into<std::sync::Arc<[u8]>>>(t: T) -> u8 {
+            let a: std::sync::Arc<[u8]> = t.into();
+            *a.first().unwrap()
+        }
+        fn byte_length_of<T: Into<std::sync::Arc<[u8]>>>(t: T) -> usize {
+            let a: std::sync::Arc<[u8]> = t.into();
+            a.len()
+        }
+        fn arc_bytes_eq<T: Into<std::sync::Arc<[u8]>>>(t: T, expected: &[u8]) -> bool {
+            let a: std::sync::Arc<[u8]> = t.into();
+            &*a == expected
+        }
+        let raw = format!("sha256:{D1}");
+        let d1 = ContentDigest::parse(&raw).unwrap();
+        let d2 = d1.clone();
+        let d3 = d1.clone();
+        assert_eq!(first_byte_of(d1), b's');
+        assert_eq!(byte_length_of(d2), raw.len());
+        assert!(arc_bytes_eq(d3, raw.as_bytes()));
+    }
+
+    /// A validated digest's [`From<ContentDigest> for Arc<[u8]>`] output
+    /// round-trips through [`std::str::from_utf8`] and then the full
+    /// parse-surface set — inherent [`ContentDigest::parse`],
+    /// [`TryFrom<&str>`], [`FromStr`](std::str::FromStr),
+    /// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`] — back to the same
+    /// validated [`ContentDigest`] value. Pins the "cross-thread shared-
+    /// owned byte-slice emit surface projects exactly the canonical
+    /// UTF-8 form every parse surface accepts" invariant so a future
+    /// canonicalising refinement to the backing bytes that broke round-
+    /// trip via the cross-thread shared-owned byte-slice emit peer fails
+    /// this test.
+    #[test]
+    fn test_from_content_digest_arc_bytes_parse_round_trip() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let original = ContentDigest::parse(&raw).unwrap();
+            let emitted: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(original.clone());
+            let decoded = std::str::from_utf8(&emitted).unwrap();
+            let via_parse = ContentDigest::parse(decoded).unwrap();
+            let via_try_from_str = ContentDigest::try_from(decoded).unwrap();
+            let via_from_str: ContentDigest = decoded.parse().unwrap();
+            let via_try_from_string = ContentDigest::try_from(decoded.to_owned()).unwrap();
+            let via_try_from_cow =
+                ContentDigest::try_from(std::borrow::Cow::Borrowed(decoded)).unwrap();
+            assert_eq!(via_parse, original);
+            assert_eq!(via_try_from_str, original);
+            assert_eq!(via_from_str, original);
+            assert_eq!(via_try_from_string, original);
+            assert_eq!(via_try_from_cow, original);
+        }
+    }
+
+    /// [`From<ContentDigest> for Arc<[u8]>`] emits an [`Arc<[u8]>`]
+    /// whose [`Arc::clone`] returns a second handle onto the same shared
+    /// allocation — the load-bearing property of the cross-thread
+    /// shared-owned raw-byte frontier that a downstream cache slot
+    /// (`dashmap::DashMap<Arc<[u8]>, _>`, `tokio::sync::broadcast`
+    /// payload, `bytes::Bytes::from(Arc<[u8]>)` sink) relies on to fan a
+    /// single label byte-buffer allocation across worker threads at
+    /// atomic-refcount cost. Pins the shared-allocation identity so a
+    /// future refactor that accidentally re-allocated on
+    /// [`Arc::clone`] (a rebox through `to_string().into_bytes().into()`
+    /// in the emit path, a per-clone `Arc::<[u8]>::from(&*self)` chain,
+    /// a spurious [`Box<[u8]>`] intermediate that broke the
+    /// [`Vec<u8>`]→[`Arc<[u8]>`] one-shot repackaging) fails this test.
+    #[test]
+    fn test_from_content_digest_arc_bytes_clones_cheaply_across_threads() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::sync::Arc<[u8]> = d.into();
+        let cloned = std::sync::Arc::clone(&emitted);
+        assert!(
+            std::sync::Arc::ptr_eq(&emitted, &cloned),
+            "Arc::clone on the emitted Arc<[u8]> must return a handle onto the same shared \
+             allocation, not a fresh allocation of the label bytes"
+        );
+        assert_eq!(&*cloned, raw.as_bytes());
+        assert_eq!(std::sync::Arc::strong_count(&emitted), 2);
+        let handoff = std::sync::Arc::clone(&emitted);
+        let joined = std::thread::spawn(move || handoff.to_vec()).join().unwrap();
+        assert_eq!(joined.as_slice(), raw.as_bytes());
     }
 
     /// An OCI image manifest (the standard single-image shape skopeo
