@@ -89,7 +89,33 @@ impl std::error::Error for ContentDigestError {}
 /// Constructing a `ContentDigest` proves the string names a real blob the
 /// registry could be asked to fetch — a malformed digest cannot enter the
 /// canonical fingerprint and inflate the image identity with junk.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// `Hash` closes the identity-sink surface the type's whole raison
+/// d'être asks for. Content-addressed identity is a hash key by
+/// definition: two [`ContentDigest`] values are [`Eq`] iff their
+/// validated `<algorithm>:<hex>` bytes agree, so the same values must
+/// hash the same and a [`std::collections::HashSet<ContentDigest>`] /
+/// [`std::collections::HashMap<ContentDigest, _>`] read-back is the
+/// canonical dedup / lookup shape. Deriving `Hash` off the same
+/// `full` field the derived [`PartialEq`] / [`Eq`] read (the only
+/// field on the struct) discharges the [`Eq`] → [`Hash`] coherence
+/// requirement by construction: `a == b ⇒ hash(a) == hash(b)` holds
+/// at every `(a, b)` pair because both traits project through the
+/// same one-oracle validated backing string. Prior to this derive,
+/// the ~30 sibling trait impls in this file that documented
+/// `HashSet<ContentDigest>` / `HashMap<ContentDigest, _>` as their
+/// downstream consumer sink (see the [`AsRef<str>`] / [`AsRef<[u8]>`]
+/// borrowed-view read peers, the [`PartialEq<str>`] / [`PartialEq<&str>`]
+/// comparison peers, the [`From<ContentDigest>`] emit peers, the
+/// [`TryFrom<&str>`] / [`TryFrom<String>`] parse peers) all pointed
+/// at a shape the primitive itself could not participate in — a
+/// [`ContentDigest`] value could not be inserted into either
+/// container without a per-consumer `digest.as_str().to_owned()`
+/// bridge that paid an allocation AND lost the type-level identity
+/// guarantee at the key slot. Closing the [`Hash`] derive routes
+/// every downstream identity-container sink through the primitive
+/// itself.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentDigest {
     full: String,
 }
@@ -9225,5 +9251,81 @@ mod tests {
             assert!(!eq_via_bound::<str>(other_ref, &d));
             assert!(!eq_via_bound::<&str>(&other_ref, &d));
         }
+    }
+
+    /// Two [`ContentDigest`] values that parse to the same canonical
+    /// `<algorithm>:<hex>` bytes hash the same. Pins the [`Eq`] → [`Hash`]
+    /// coherence axiom `a == b ⇒ hash(a) == hash(b)` at a concrete
+    /// `(a, b)` pair whose inputs differ only in the pre-trim whitespace
+    /// the [`ContentDigest::parse`] oracle strips — the same "canonical
+    /// backing string is the identity" discipline the derived
+    /// [`PartialEq`] / [`Eq`] impls carry, now projected onto the
+    /// [`Hash`] surface a [`std::collections::HashSet<ContentDigest>`]
+    /// / [`std::collections::HashMap<ContentDigest, _>`] consumer sink
+    /// reads through.
+    #[test]
+    fn test_hash_agrees_on_equal_digests_after_whitespace_normalization() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of(d: &ContentDigest) -> u64 {
+            let mut h = DefaultHasher::new();
+            d.hash(&mut h);
+            h.finish()
+        }
+
+        let raw = format!("sha256:{D1}");
+        let padded = format!("  sha256:{D1}\n");
+        let a = ContentDigest::parse(&raw).unwrap();
+        let b = ContentDigest::parse(&padded).unwrap();
+        assert_eq!(a, b, "parse oracle collapses pre-trim whitespace");
+        assert_eq!(
+            hash_of(&a),
+            hash_of(&b),
+            "Eq → Hash coherence: equal digests must hash the same"
+        );
+    }
+
+    /// [`ContentDigest`] participates in a
+    /// [`std::collections::HashSet`] as its own key. Pins the
+    /// identity-container consumer sink the ~30 sibling trait impls
+    /// in this file document (`HashSet<ContentDigest>` /
+    /// `HashMap<ContentDigest, _>` as the canonical dedup / lookup
+    /// shape) at the primitive itself — pre-Hash the primitive could
+    /// not be inserted into either container without a per-consumer
+    /// `digest.as_str().to_owned()` bridge, and this test would fail
+    /// to compile against a `ContentDigest` that lacked the derived
+    /// [`Hash`] impl. Composes the insert + contains + dedup arms so
+    /// a regression on any of them (a hand-written `Hash` impl that
+    /// hashes a different projection than the derived [`Eq`] reads,
+    /// a future refactor that adds a non-identity field to the
+    /// struct without teaching [`Hash`] to ignore it) fails here
+    /// rather than degrading a downstream dedup pass into a
+    /// silent-double-insert bug.
+    #[test]
+    fn test_hash_set_dedup_and_membership() {
+        use std::collections::HashSet;
+
+        let a = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        let a2 = ContentDigest::parse(&format!("  sha256:{D1}\n")).unwrap();
+        let b = ContentDigest::parse(&format!("sha256:{D2}")).unwrap();
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let c = ContentDigest::parse(&format!("sha512:{hex512}")).unwrap();
+
+        let mut set: HashSet<ContentDigest> = HashSet::new();
+        assert!(set.insert(a.clone()), "first insert of a returns true");
+        assert!(
+            !set.insert(a2),
+            "reinsert of whitespace-variant of a is a dedup no-op"
+        );
+        assert!(set.insert(b.clone()), "insert of distinct sha256 b");
+        assert!(set.insert(c.clone()), "insert of distinct sha512 c");
+        assert_eq!(set.len(), 3, "three distinct canonical digests in set");
+        assert!(set.contains(&a), "membership by owned value");
+        assert!(set.contains(&b));
+        assert!(set.contains(&c));
+
+        let d_unseen = ContentDigest::parse(&format!("sha256:{D3}")).unwrap();
+        assert!(!set.contains(&d_unseen), "unseen digest is not a member");
     }
 }
