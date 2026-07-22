@@ -900,6 +900,139 @@ impl From<ContentDigest> for Box<str> {
     }
 }
 
+/// [`From<ContentDigest>`] for [`std::borrow::Cow<'static, str>`] moves
+/// the validated `<algorithm>:<hex>` backing string out of the consumed
+/// [`ContentDigest`] value into the [`Cow::Owned`] branch of a
+/// `'static`-lifetime [`Cow<'static, str>`] at zero-copy — the impl
+/// routes through [`<ContentDigest as From<ContentDigest>>::from`] into
+/// [`String`] (which moves [`ContentDigest::full`] out at zero-copy) and
+/// wraps the moved [`String`] in [`Cow::Owned`], so no allocation, no
+/// re-formatting through [`std::fmt::Display`], no
+/// `Cow::Owned(digest.as_str().to_owned())` bridge that would clone the
+/// backing bytes while leaking the consumed [`ContentDigest`]'s owned
+/// [`String`], no `Cow::Owned(digest.to_string())` chain that would
+/// re-run [`std::fmt::Display`] over the already-canonical backing.
+///
+/// A downstream consumer that owns a [`ContentDigest`] and needs to
+/// hand it off to a borrowed/owned-frontier label sink (a
+/// `http::HeaderValue::from_str` bridge whose caller types the input
+/// contract as `impl Into<Cow<'static, str>>` to interleave `'static`
+/// labels with computed [`String`]s, a `tracing::field` recorder that
+/// takes `impl Into<Cow<'static, str>>` to hold the label as either a
+/// borrowed static or an owned digest, a serde container that opts
+/// into `#[serde(from = "Cow<'static, str>")]` at the
+/// borrowed/owned-frontier emit surface, a generic sink bounded by
+/// `impl Into<Cow<'static, str>>` that accepts either the zero-alloc
+/// borrowed branch from a static label or the owned branch from a
+/// runtime-parsed digest) is a one-line
+/// `Cow::<'static, str>::from(digest)` / `digest.into()` call, not a
+/// per-site `Cow::Owned(digest.to_string())` bridge that pays a
+/// redundant `Display`-format allocation nor a
+/// `Cow::Owned(digest.as_str().to_owned())` chain that clones the
+/// already-owned backing.
+///
+/// The by-value borrowed/owned-frontier emit peer of the by-value
+/// owned-UTF-8 emit peer [`From<ContentDigest> for String`] (commit
+/// 83313fd), the by-value owned-byte-slice emit peer
+/// [`From<ContentDigest> for Vec<u8>`] (commit e1ea855), and the
+/// by-value shrunk-owned UTF-8 emit peer
+/// [`From<ContentDigest> for Box<str>`] (commit 0e86524): all four
+/// surfaces move the same validated full-digest bytes out of the
+/// consumed [`ContentDigest`], differing only on the owner-shape of the
+/// emitted receiver — [`String`] for resizable growth-header owners,
+/// [`Vec<u8>`] for byte-oriented sinks, [`Box<str>`] for immutable
+/// heap-owned label slots that trade the [`String`] growth-header word
+/// for a two-word slice pointer, this [`Cow<'static, str>`] for
+/// borrowed/owned-frontier sinks that accept either the zero-alloc
+/// borrowed branch from a `'static` label or the owned branch from a
+/// runtime-parsed value. All four route through the
+/// [`From<ContentDigest> for String`] emit oracle: the [`String`] peer
+/// moves [`ContentDigest::full`] directly, the [`Vec<u8>`] peer chains
+/// through [`String::into_bytes`], the [`Box<str>`] peer chains through
+/// [`String::into_boxed_str`], this [`Cow<'static, str>`] peer wraps the
+/// moved [`String`] in [`Cow::Owned`] — the four agree byte-for-byte on
+/// the canonical form by construction, and a future canonicalising
+/// refinement to the [`String`] emit surface propagates to the
+/// borrowed/owned-frontier emit surface at zero per-consumer cost.
+///
+/// The borrowed/owned-frontier emit peer of the borrowed/owned-frontier
+/// parse peer [`TryFrom<Cow<'_, str>> for ContentDigest`] (commit
+/// 3a28035): the parse peer accepts a caller-supplied
+/// [`Cow<'_, str>`] and routes it through the one-oracle parser; this
+/// emit peer projects a validated [`ContentDigest`] back into a
+/// [`Cow<'static, str>`] at the same frontier. Together they close the
+/// [`Cow`] frontier at [`ContentDigest`] on both the parse and emit
+/// sides so a downstream site that types both its input and its
+/// re-emit contract as [`Cow`] (a serde container that opts into
+/// `#[serde(try_from = "Cow<'a, str>", into = "Cow<'static, str>")]`,
+/// a validated-input newtype builder whose canonical parse AND re-emit
+/// contracts are both stated as [`Cow`]) is a one-line bridge through
+/// the shared frontier, not a per-consumer restatement of the
+/// borrowed/owned discipline at either side.
+///
+/// The sibling [`Cow<'static, str>`] emit peer at the enum-shaped
+/// ordered typed sums [`From<crate::version::BumpLevel> for
+/// Cow<'static, str>`], [`From<crate::probe_outcome::AdmissionTier> for
+/// Cow<'static, str>`], and [`From<crate::retry::PerAttemptRegion> for
+/// Cow<'static, str>`] takes the [`Cow::Borrowed`] branch because their
+/// `as_str` oracle returns a `'static` slice off a static label table;
+/// this [`ContentDigest`] emit peer takes the [`Cow::Owned`] branch
+/// because [`ContentDigest`] owns a runtime-parsed [`String`] with no
+/// `'static` backing to borrow — the two branches of [`Cow<'static,
+/// str>`] are the load-bearing shapes of the borrowed/owned frontier,
+/// and every typed primitive on the platform lands on the branch its
+/// oracle backing shape mandates without paying an allocation or a
+/// re-parse to shoehorn onto the other.
+///
+/// Zero-copy by construction: [`String::from(digest)`] moves
+/// [`ContentDigest::full`] out at zero-copy, and [`Cow::Owned`] wraps
+/// the moved [`String`] without touching its backing buffer — no
+/// allocation, no clone, no per-consumer buffer growth. The identity
+/// `Cow::<'static, str>::from(digest.clone()) == digest.as_str()` at
+/// every validated [`ContentDigest`] value is pinned by
+/// [`tests::test_from_content_digest_cow_static_str_matches_as_str`];
+/// the identity carrying through a generic
+/// `impl Into<Cow<'static, str>>` consumer is pinned by
+/// [`tests::test_from_content_digest_cow_static_str_carries_through_generic_consumer`];
+/// the parse-round-trip identity through the borrowed/owned-frontier
+/// emit surface (parsing back through every canonical parse surface)
+/// is pinned by
+/// [`tests::test_from_content_digest_cow_static_str_parse_round_trip`];
+/// the [`Cow::Owned`]-not-[`Cow::Borrowed`] variant discriminator at
+/// the emit boundary (contrasting the enum-shaped siblings that emit
+/// [`Cow::Borrowed`]) is pinned by
+/// [`tests::test_from_content_digest_cow_static_str_is_owned`].
+///
+/// A future refinement to the inherent [`ContentDigest::parse`]
+/// grammar (widening to `sha384`, tightening the trim behaviour) or
+/// to the [`From<ContentDigest> for String`] emit oracle (a
+/// canonicalising projection at the owned-UTF-8 frontier) is a
+/// one-site edit at the inherent / owned-UTF-8 oracle; every consumer
+/// bound by `impl Into<Cow<'static, str>>` inherits the refined
+/// canonical borrowed/owned-frontier label off the moved backing
+/// storage automatically with no downstream retyping.
+///
+/// THEORY.md §III.1 typescape: the by-value borrowed/owned-frontier
+/// emit surface is a typed-primitive site on [`ContentDigest`] itself
+/// (one [`From<ContentDigest>`] impl chaining through the
+/// [`From<ContentDigest> for String`] emit oracle via [`Cow::Owned`]),
+/// not a per-consumer `Cow::Owned(digest.to_string())` restatement at
+/// every downstream site that accepts `impl Into<Cow<'static, str>>`.
+/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are
+/// named at one site ([`From<ContentDigest> for String`], reading
+/// through the moved [`ContentDigest::full`] backing), and every
+/// by-value owned emit surface — the by-value owned-UTF-8 peer
+/// [`From<ContentDigest> for String`], the by-value owned-byte-slice
+/// peer [`From<ContentDigest> for Vec<u8>`], the by-value shrunk-owned
+/// UTF-8 peer [`From<ContentDigest> for Box<str>`], this by-value
+/// borrowed/owned-frontier peer
+/// [`From<ContentDigest> for Cow<'static, str>`] — reads through it.
+impl From<ContentDigest> for std::borrow::Cow<'static, str> {
+    fn from(digest: ContentDigest) -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Owned(String::from(digest))
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -2721,6 +2854,190 @@ mod tests {
             assert_eq!(via_from_str, original);
             assert_eq!(via_try_from_string, original);
             assert_eq!(via_try_from_cow, original);
+        }
+    }
+
+    /// [`From<ContentDigest> for Cow<'static, str>`] emits the same
+    /// canonical `<algorithm>:<hex>` slice every borrowed-view read
+    /// surface exposes. Pins the borrowed/owned-frontier emit peer to
+    /// the [`ContentDigest::as_str`] one-oracle read surface at every
+    /// supported algorithm, so a widening at the inherent oracle is
+    /// caught by an existing test on this derived surface.
+    #[test]
+    fn test_from_content_digest_cow_static_str_matches_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let borrowed_as_str = d.as_str().to_owned();
+            let via_display = format!("{d}");
+            let emitted: std::borrow::Cow<'static, str> = std::borrow::Cow::<'static, str>::from(d);
+            assert_eq!(emitted.as_ref(), borrowed_as_str.as_str());
+            assert_eq!(emitted.as_ref(), via_display.as_str());
+            assert_eq!(&*emitted, raw.as_str());
+        }
+    }
+
+    /// [`From<ContentDigest> for Cow<'static, str>`] emits the full
+    /// `<algorithm>:<hex>` slice for a sha256 digest. Pins the primary
+    /// registry algorithm on the by-value borrowed/owned-frontier emit
+    /// surface — the emitted [`Cow<'static, str>`] is byte-identical to
+    /// the input the inherent oracle accepted.
+    #[test]
+    fn test_from_content_digest_cow_static_str_sha256_full_digest() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::borrow::Cow<'static, str> = d.into();
+        assert_eq!(&*emitted, raw.as_str());
+        assert!(emitted.starts_with("sha256:"));
+        assert_eq!(&emitted[7..], D1);
+    }
+
+    /// [`From<ContentDigest> for Cow<'static, str>`] emits the full
+    /// `<algorithm>:<hex>` slice for a sha512 digest. Pins the second
+    /// supported algorithm on the by-value borrowed/owned-frontier emit
+    /// surface so a widening at the inherent oracle is caught by an
+    /// existing test on this derived surface.
+    #[test]
+    fn test_from_content_digest_cow_static_str_sha512_full_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::borrow::Cow<'static, str> = d.into();
+        assert_eq!(&*emitted, raw.as_str());
+        assert!(emitted.starts_with("sha512:"));
+        assert_eq!(&emitted[7..], hex.as_str());
+    }
+
+    /// [`From<ContentDigest> for Cow<'static, str>`] emits the trimmed
+    /// canonical form on an input the inherent oracle whitespace-trimmed
+    /// at parse time — the emit surface projects the canonical trimmed
+    /// value, not the caller's stray-whitespace raw input. Pins the trim
+    /// discipline carrying through the by-value borrowed/owned-frontier
+    /// emit surface.
+    #[test]
+    fn test_from_content_digest_cow_static_str_after_whitespace_trim() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::borrow::Cow<'static, str> = d.into();
+        assert_eq!(&*emitted, expected.as_str());
+        assert!(!emitted.starts_with(' '));
+        assert!(!emitted.ends_with('\n'));
+    }
+
+    /// The [`From<ContentDigest> for Cow<'static, str>`] impl composes
+    /// with a generic borrowed/owned-frontier label helper bounded by
+    /// `impl Into<Cow<'static, str>>` — the compositional motivation for
+    /// landing the trait separately from the owned-string
+    /// [`From<ContentDigest> for String`] and shrunk-owned
+    /// [`From<ContentDigest> for Box<str>`] emit peers. Pins the
+    /// trait-generic consumer surface: a downstream site that types its
+    /// input contract as `impl Into<Cow<'static, str>>` (a
+    /// `tracing::field` recorder that interleaves `'static` labels with
+    /// runtime-parsed digests in the same sink, a serde container that
+    /// opts into `#[serde(from = "Cow<'static, str>")]` at the
+    /// borrowed/owned-frontier emit surface, an
+    /// `http::HeaderValue`-adjacent bridge that types its label input
+    /// as [`Cow<'static, str>`] to elide the allocation on the borrowed
+    /// branch) recovers the same validated full-digest [`Cow<'static,
+    /// str>`] a direct `Cow::Owned(digest.as_str().to_owned())` chain
+    /// would, at no allocation beyond the parse-time backing off the
+    /// moved storage.
+    #[test]
+    fn test_from_content_digest_cow_static_str_carries_through_generic_consumer() {
+        fn first_char_of<T: Into<std::borrow::Cow<'static, str>>>(t: T) -> char {
+            let c: std::borrow::Cow<'static, str> = t.into();
+            c.chars().next().unwrap()
+        }
+        fn length_of<T: Into<std::borrow::Cow<'static, str>>>(t: T) -> usize {
+            let c: std::borrow::Cow<'static, str> = t.into();
+            c.len()
+        }
+        fn cow_eq<T: Into<std::borrow::Cow<'static, str>>>(t: T, expected: &str) -> bool {
+            let c: std::borrow::Cow<'static, str> = t.into();
+            &*c == expected
+        }
+        let raw = format!("sha256:{D1}");
+        let d1 = ContentDigest::parse(&raw).unwrap();
+        let d2 = d1.clone();
+        let d3 = d1.clone();
+        assert_eq!(first_char_of(d1), 's');
+        assert_eq!(length_of(d2), raw.len());
+        assert!(cow_eq(d3, &raw));
+    }
+
+    /// A validated digest's [`From<ContentDigest> for Cow<'static, str>`]
+    /// output round-trips through the full parse-surface set —
+    /// inherent [`ContentDigest::parse`], [`TryFrom<&str>`],
+    /// [`FromStr`](std::str::FromStr), [`TryFrom<String>`],
+    /// [`TryFrom<Cow<'_, str>>`] — back to the same validated
+    /// [`ContentDigest`] value. Pins the "borrowed/owned-frontier emit
+    /// surface projects exactly the canonical form every parse surface
+    /// accepts" invariant so a future canonicalising refinement to the
+    /// backing string that broke round-trip via the
+    /// borrowed/owned-frontier emit peer fails this test.
+    #[test]
+    fn test_from_content_digest_cow_static_str_parse_round_trip() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let original = ContentDigest::parse(&raw).unwrap();
+            let emitted: std::borrow::Cow<'static, str> =
+                std::borrow::Cow::<'static, str>::from(original.clone());
+            let via_parse = ContentDigest::parse(emitted.as_ref()).unwrap();
+            let via_try_from_str = ContentDigest::try_from(emitted.as_ref()).unwrap();
+            let via_from_str: ContentDigest = emitted.parse().unwrap();
+            let via_try_from_string = ContentDigest::try_from(emitted.to_string()).unwrap();
+            let via_try_from_cow = ContentDigest::try_from(emitted).unwrap();
+            assert_eq!(via_parse, original);
+            assert_eq!(via_try_from_str, original);
+            assert_eq!(via_from_str, original);
+            assert_eq!(via_try_from_string, original);
+            assert_eq!(via_try_from_cow, original);
+        }
+    }
+
+    /// [`From<ContentDigest> for Cow<'static, str>`] takes the
+    /// [`Cow::Owned`] branch — the load-bearing choice given
+    /// [`ContentDigest`] holds a runtime-parsed [`String`] with no
+    /// `'static` backing to borrow. Contrasts the enum-shaped sibling
+    /// [`Cow<'static, str>`] emit peers on [`crate::version::BumpLevel`],
+    /// [`crate::probe_outcome::AdmissionTier`], and
+    /// [`crate::retry::PerAttemptRegion`] — each of which lands on
+    /// [`Cow::Borrowed`] because their `as_str` oracle returns a
+    /// `'static` slice off a static label table — and pins the branch
+    /// discriminator so a future refactor that accidentally boxed the
+    /// digest through [`Cow::Borrowed`] on a leaked buffer (or that
+    /// re-formatted through [`std::fmt::Display`] into an owned string
+    /// to shoehorn onto the borrowed branch) fails this test.
+    #[test]
+    fn test_from_content_digest_cow_static_str_is_owned() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let emitted: std::borrow::Cow<'static, str> = d.into();
+            assert!(
+                matches!(emitted, std::borrow::Cow::Owned(_)),
+                "ContentDigest owns its backing String; Cow<'static, str> emit peer must \
+                 wrap the moved backing in Cow::Owned, not Cow::Borrowed"
+            );
         }
     }
 
