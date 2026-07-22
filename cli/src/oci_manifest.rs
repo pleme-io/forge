@@ -1295,6 +1295,116 @@ impl From<ContentDigest> for std::rc::Rc<str> {
     }
 }
 
+/// [`From<ContentDigest>`] for [`Box<[u8]>`] moves the validated
+/// `<algorithm>:<hex>` backing bytes out of the consumed [`ContentDigest`]
+/// value into an immutable, heap-owned [`Box<[u8]>`] at exactly the
+/// label's length — the impl routes through
+/// [`<Vec<u8> as From<ContentDigest>>::from`] (which chains through the
+/// [`From<ContentDigest> for String`] emit oracle via
+/// [`String::into_bytes`], moving [`ContentDigest::full`] out at
+/// zero-copy) and then [`Vec::into_boxed_slice`] (which repackages the
+/// backing buffer as an immutable [`Box<[u8]>`], shrinking to exact
+/// length only when the backing [`Vec<u8>`]'s capacity exceeded its
+/// length — for [`ContentDigest`] values the parse-time
+/// [`str::to_string`](str::to_string) allocation sizes the backing
+/// [`String`] to exact length, and [`String::into_bytes`] preserves
+/// the buffer's capacity, so the shrink is a no-op in the common
+/// case). No re-formatting through [`std::fmt::Display`], no
+/// `Box::<[u8]>::from(digest.as_ref())` bridge that would copy the
+/// backing bytes into a fresh allocation while leaking the consumed
+/// [`ContentDigest`]'s owned [`String`], no
+/// `digest.as_ref().to_vec().into_boxed_slice()` chain that would
+/// re-state the shrunk-owned discipline at every consumer.
+///
+/// A downstream consumer that owns a [`ContentDigest`] and needs to
+/// hand it off as an immutable heap-owned byte slice to an owned-byte
+/// sink (a [`std::collections::HashMap<Box<[u8]>, _>`] key insertion,
+/// a validated-input newtype whose digest field is stored as
+/// [`Box<[u8]>`] to shed the [`Vec<u8>`] growth-header word for a
+/// long-lived per-value slot, a `bytes::Bytes::from(Box<[u8]>)` intake
+/// at the shrunk-owned frontier, an `Arc<Manifest>` field whose
+/// digest slot is a [`Box<[u8]>`] chosen for its two-machine-word
+/// footprint over the three-word [`Vec<u8>`]) is a one-line
+/// `Box::<[u8]>::from(digest)` / `digest.into()` call, not a per-site
+/// `Box::<[u8]>::from(digest.as_ref())` bridge that pays a redundant
+/// allocation nor a `digest.as_ref().to_vec().into_boxed_slice()`
+/// chain that pays the [`Vec`]-alloc-plus-shrink round trip while
+/// re-stating the shrunk-owned discipline.
+///
+/// The by-value shrunk-owned byte-slice emit peer of the by-value
+/// owned-byte-slice emit peer [`From<ContentDigest> for Vec<u8>`]
+/// (commit e1ea855) and the sibling by-value shrunk-owned UTF-8 emit
+/// peer [`From<ContentDigest> for Box<str>`] (commit 0e86524): all
+/// three surfaces move the same validated full-digest bytes out of
+/// the consumed [`ContentDigest`], differing only on the owner-shape
+/// of the emitted receiver — [`Vec<u8>`] for resizable growth-header
+/// byte-buffer owners, [`Box<str>`] for immutable heap-owned UTF-8
+/// label slots, this [`Box<[u8]>`] for immutable heap-owned raw-byte
+/// slots that trade the [`Vec<u8>`] growth-header word for a two-word
+/// slice pointer while dropping the UTF-8 typing that [`Box<str>`]
+/// imposes on the ASCII-only-by-parse-invariant digest bytes for
+/// consumers that pin their contract on the raw byte-slice frontier
+/// (`bytes::Bytes`, `http::HeaderValue::from_bytes`, streaming
+/// hashers). All three route through the [`From<ContentDigest> for
+/// String`] emit oracle: the [`Vec<u8>`] peer chains through
+/// [`String::into_bytes`], the [`Box<str>`] peer chains through
+/// [`String::into_boxed_str`], this [`Box<[u8]>`] peer chains through
+/// [`String::into_bytes`] then [`Vec::into_boxed_slice`] — the three
+/// agree byte-for-byte on the canonical form by construction, and a
+/// future canonicalising refinement to the [`String`] emit surface
+/// propagates to the shrunk-owned byte-slice frontier at zero
+/// per-consumer cost.
+///
+/// Zero-copy in the common case by construction: the parse-time
+/// [`str::to_string`] allocation that produces [`ContentDigest::full`]
+/// sizes the backing [`String`] to exact length,
+/// [`String::into_bytes`] repackages that buffer as a [`Vec<u8>`] at
+/// the same capacity, and [`Vec::into_boxed_slice`] repackages the
+/// [`Vec<u8>`] as [`Box<[u8]>`] without reallocation when capacity
+/// equals length. The identity
+/// `<Box<[u8]> as std::ops::Deref>::deref(&Box::<[u8]>::from(
+/// digest.clone())) == digest.as_str().as_bytes()` at every validated
+/// [`ContentDigest`] value is pinned by
+/// [`tests::test_from_content_digest_box_bytes_matches_as_ref`]; the
+/// identity carrying through a generic `impl Into<Box<[u8]>>`
+/// consumer is pinned by
+/// [`tests::test_from_content_digest_box_bytes_carries_through_generic_consumer`];
+/// the parse-round-trip identity through the shrunk-owned byte-slice
+/// emit surface (decoding the emitted [`Box<[u8]>`] as UTF-8 and
+/// parsing through every canonical parse surface) is pinned by
+/// [`tests::test_from_content_digest_box_bytes_parse_round_trip`];
+/// the shrunk-owned length identity is pinned by
+/// [`tests::test_from_content_digest_box_bytes_length_equals_label_bytes`].
+///
+/// A future refinement to the inherent [`ContentDigest::parse`]
+/// grammar (widening to `sha384`, tightening the trim behaviour) or
+/// to the [`From<ContentDigest> for String`] emit oracle (a
+/// canonicalising projection at the owned-UTF-8 frontier) is a
+/// one-site edit at the inherent / owned-UTF-8 oracle; every consumer
+/// bound by `impl Into<Box<[u8]>>` inherits the refined canonical
+/// shrunk-owned byte slice off the moved backing storage
+/// automatically with no downstream retyping.
+///
+/// THEORY.md §III.1 typescape: the by-value shrunk-owned byte-slice
+/// emit surface is a typed-primitive site on [`ContentDigest`] itself
+/// (one [`From<ContentDigest>`] impl chaining through the
+/// [`From<ContentDigest> for String`] emit oracle via
+/// [`String::into_bytes`] and [`Vec::into_boxed_slice`]), not a
+/// per-consumer `Box::<[u8]>::from(digest.as_ref())` restatement at
+/// every downstream site that accepts `impl Into<Box<[u8]>>`.
+/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are
+/// named at one site ([`From<ContentDigest> for String`], reading
+/// through the moved [`ContentDigest::full`] backing), and every
+/// by-value owned emit surface — the by-value owned-byte-slice peer
+/// [`From<ContentDigest> for Vec<u8>`], this by-value shrunk-owned
+/// byte-slice peer [`From<ContentDigest> for Box<[u8]>`] — reads
+/// through it.
+impl From<ContentDigest> for Box<[u8]> {
+    fn from(digest: ContentDigest) -> Box<[u8]> {
+        Vec::<u8>::from(digest).into_boxed_slice()
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -3662,6 +3772,188 @@ mod tests {
         assert!(std::rc::Rc::ptr_eq(&emitted, &third));
         drop(third);
         assert_eq!(std::rc::Rc::strong_count(&emitted), 2);
+    }
+
+    /// [`From<ContentDigest> for Box<[u8]>`] emits the same bytes as
+    /// the borrowed-view read peer [`AsRef<[u8]>`] sees off the
+    /// backing string, and as the by-value owned-byte-slice emit peer
+    /// [`Vec<u8>`] moves out — the by-value shrunk-owned byte-slice
+    /// emit surface names the same canonical full-digest byte buffer
+    /// as every peer surface on the byte-slice frontier.
+    #[test]
+    fn test_from_content_digest_box_bytes_matches_as_ref() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let borrowed_as_ref: Vec<u8> = <ContentDigest as AsRef<[u8]>>::as_ref(&d).to_vec();
+            let via_str_bytes: Vec<u8> = d.as_str().as_bytes().to_vec();
+            let via_vec_emit: Vec<u8> = Vec::<u8>::from(d.clone());
+            let emitted: Box<[u8]> = Box::<[u8]>::from(d);
+            assert_eq!(&*emitted, borrowed_as_ref.as_slice());
+            assert_eq!(&*emitted, via_str_bytes.as_slice());
+            assert_eq!(&*emitted, via_vec_emit.as_slice());
+            assert_eq!(&*emitted, raw.as_bytes());
+        }
+    }
+
+    /// [`From<ContentDigest> for Box<[u8]>`] emits the full
+    /// `<algorithm>:<hex>` byte slice for a sha256 digest. Pins the
+    /// primary registry algorithm on the by-value shrunk-owned
+    /// byte-slice emit surface — the emitted [`Box<[u8]>`] is
+    /// byte-identical to the input the inherent oracle accepted, and
+    /// every emitted byte is ASCII by parse invariant.
+    #[test]
+    fn test_from_content_digest_box_bytes_sha256_full_digest() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: Box<[u8]> = d.into();
+        assert_eq!(&*emitted, raw.as_bytes());
+        assert!(emitted.starts_with(b"sha256:"));
+        assert_eq!(&emitted[7..], D1.as_bytes());
+        assert!(emitted.iter().all(|b| b.is_ascii()));
+    }
+
+    /// [`From<ContentDigest> for Box<[u8]>`] emits the full
+    /// `<algorithm>:<hex>` byte slice for a sha512 digest. Pins the
+    /// second supported algorithm on the by-value shrunk-owned
+    /// byte-slice emit surface so a widening at the inherent oracle
+    /// is caught by an existing test on this derived surface.
+    #[test]
+    fn test_from_content_digest_box_bytes_sha512_full_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: Box<[u8]> = d.into();
+        assert_eq!(&*emitted, raw.as_bytes());
+        assert!(emitted.starts_with(b"sha512:"));
+        assert_eq!(&emitted[7..], hex.as_bytes());
+        assert!(emitted.iter().all(|b| b.is_ascii()));
+    }
+
+    /// [`From<ContentDigest> for Box<[u8]>`] emits the trimmed
+    /// canonical bytes on an input the inherent oracle
+    /// whitespace-trimmed at parse time — the emit surface projects
+    /// the canonical trimmed byte buffer, not the caller's
+    /// stray-whitespace raw input. Pins the trim discipline carrying
+    /// through the by-value shrunk-owned byte-slice emit surface.
+    #[test]
+    fn test_from_content_digest_box_bytes_after_whitespace_trim() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: Box<[u8]> = d.into();
+        assert_eq!(&*emitted, expected.as_bytes());
+        assert!(!emitted.starts_with(b" "));
+        assert!(!emitted.ends_with(b"\n"));
+    }
+
+    /// The [`From<ContentDigest> for Box<[u8]>`] impl composes with a
+    /// generic shrunk-owned-byte-slice helper bounded by
+    /// `impl Into<Box<[u8]>>` — the compositional motivation for
+    /// landing the trait separately from the resizable-growth-header
+    /// [`From<ContentDigest> for Vec<u8>`] emit peer. Pins the
+    /// trait-generic consumer surface: a downstream site that types
+    /// its input contract as `impl Into<Box<[u8]>>` (a per-value
+    /// digest slot on a long-lived manifest struct that stores its
+    /// byte-slice frontier as [`Box<[u8]>`] to shed the [`Vec<u8>`]
+    /// growth-header word, a [`bytes::Bytes::from`] intake at the
+    /// shrunk-owned byte-slice frontier, a
+    /// [`std::collections::HashMap<Box<[u8]>, _>`] byte-keyed
+    /// registry) recovers the same validated full-digest bytes a
+    /// direct `Box::<[u8]>::from(digest.as_ref())` bridge would, at
+    /// zero-copy off the moved backing storage.
+    #[test]
+    fn test_from_content_digest_box_bytes_carries_through_generic_consumer() {
+        fn first_byte_of<T: Into<Box<[u8]>>>(t: T) -> u8 {
+            let b: Box<[u8]> = t.into();
+            *b.first().unwrap()
+        }
+        fn byte_length_of<T: Into<Box<[u8]>>>(t: T) -> usize {
+            let b: Box<[u8]> = t.into();
+            b.len()
+        }
+        fn boxed_bytes_eq<T: Into<Box<[u8]>>>(t: T, expected: &[u8]) -> bool {
+            let b: Box<[u8]> = t.into();
+            &*b == expected
+        }
+        let raw = format!("sha256:{D1}");
+        let d1 = ContentDigest::parse(&raw).unwrap();
+        let d2 = d1.clone();
+        let d3 = d1.clone();
+        assert_eq!(first_byte_of(d1), b's');
+        assert_eq!(byte_length_of(d2), raw.len());
+        assert!(boxed_bytes_eq(d3, raw.as_bytes()));
+    }
+
+    /// A validated digest's [`From<ContentDigest> for Box<[u8]>`]
+    /// output round-trips through [`std::str::from_utf8`] and then
+    /// the full parse-surface set — inherent [`ContentDigest::parse`],
+    /// [`TryFrom<&str>`], [`FromStr`](std::str::FromStr),
+    /// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`] — back to the
+    /// same validated [`ContentDigest`] value. Pins the "shrunk-owned
+    /// byte-slice emit surface projects exactly the canonical UTF-8
+    /// form every parse surface accepts" invariant so a future
+    /// canonicalising refinement to the backing bytes that broke
+    /// round-trip via the shrunk-owned byte-slice emit peer fails
+    /// this test.
+    #[test]
+    fn test_from_content_digest_box_bytes_parse_round_trip() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let original = ContentDigest::parse(&raw).unwrap();
+            let emitted: Box<[u8]> = Box::<[u8]>::from(original.clone());
+            let decoded = std::str::from_utf8(&emitted).unwrap();
+            let via_parse = ContentDigest::parse(decoded).unwrap();
+            let via_try_from_str = ContentDigest::try_from(decoded).unwrap();
+            let via_from_str: ContentDigest = decoded.parse().unwrap();
+            let via_try_from_string = ContentDigest::try_from(decoded.to_owned()).unwrap();
+            let via_try_from_cow =
+                ContentDigest::try_from(std::borrow::Cow::Borrowed(decoded)).unwrap();
+            assert_eq!(via_parse, original);
+            assert_eq!(via_try_from_str, original);
+            assert_eq!(via_from_str, original);
+            assert_eq!(via_try_from_string, original);
+            assert_eq!(via_try_from_cow, original);
+        }
+    }
+
+    /// [`From<ContentDigest> for Box<[u8]>`] emits a [`Box<[u8]>`]
+    /// whose length equals the canonical `<algorithm>:<hex>` label's
+    /// byte length exactly — the shrunk-owned invariant that
+    /// separates this frontier from the resizable growth-header
+    /// [`Vec<u8>`] emit peer. Pins the expected length for both
+    /// supported algorithms (`sha256` → 7 + 64 = 71 bytes, `sha512`
+    /// → 7 + 128 = 135 bytes) so a future refactor that accidentally
+    /// routed the impl through a [`Vec::with_capacity`]
+    /// overallocation before boxing (which would break the
+    /// shrunk-owned discipline any consumer bound by
+    /// `impl Into<Box<[u8]>>` pins its per-value slot size on) fails
+    /// this test.
+    #[test]
+    fn test_from_content_digest_box_bytes_length_equals_label_bytes() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            (format!("sha256:{D1}"), "sha256:".len() + SHA256_HEX_LEN),
+            (format!("sha512:{hex512}"), "sha512:".len() + SHA512_HEX_LEN),
+        ];
+        for (raw, expected_len) in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let emitted: Box<[u8]> = d.into();
+            assert_eq!(emitted.len(), expected_len);
+            assert_eq!(emitted.len(), raw.len());
+        }
     }
 
     /// An OCI image manifest (the standard single-image shape skopeo
