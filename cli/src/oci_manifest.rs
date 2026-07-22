@@ -826,6 +826,148 @@ impl TryFrom<std::sync::Arc<str>> for ContentDigest {
     }
 }
 
+/// [`TryFrom<Rc<str>>`] for [`ContentDigest`] routes through
+/// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`] (a zero-copy borrow of the
+/// shared allocation's UTF-8 backing bytes that does NOT touch the
+/// non-atomic-refcount header) then delegates to
+/// [`<ContentDigest as TryFrom<&str>>::try_from`] so a downstream consumer
+/// holding a single-thread shared-owned UTF-8 buffer at a refcount-headered
+/// frontier (a serde container that opts into
+/// `#[serde(try_from = "Rc<str>")]` on a wrapper field to consume a
+/// thread-local shared-owned label without a per-consumer allocation, a
+/// validated-input newtype builder whose parse contract accepts a
+/// caller-supplied [`Rc<str>`] label slot at the shared-owned frontier
+/// for single-thread cheap-clone semantics on the input, a single-thread
+/// `HashMap<Rc<str>, _>` registry cache whose key slot arrives as a
+/// shared-owned label from an upstream table build refcounted across peer
+/// inspectors within one thread, a `!Send` per-task lookaside built during
+/// a synchronous scan phase whose `Vec<Rc<str>>` digest list is handed
+/// cheaply through [`Rc::clone`] to each parse worker) recovers a
+/// [`ContentDigest`] value from its canonical `<algorithm>:<hex>`
+/// shared-owned UTF-8 serialization through the same one-oracle grammar
+/// the `.parse::<ContentDigest>()` string call sites already read —
+/// WITHOUT a per-consumer `shared.parse::<ContentDigest>()` restatement at
+/// every downstream site, WITHOUT an
+/// [`std::rc::Rc::try_unwrap`]-fallback-clone-then-parse cascade that
+/// would negotiate the refcount at every intake, and WITHOUT an
+/// `Rc::to_string()`-then-parse round trip that would allocate a fresh
+/// owned [`String`] off the shared borrow for each parse pass.
+///
+/// Zero-touch on the non-atomic refcount during the parse: the
+/// receiver-side [`<std::rc::Rc<str> as AsRef<str>>::as_ref`] call yields
+/// a borrowed `&str` view of the shared allocation's UTF-8 payload
+/// without allocating and without incrementing or decrementing the
+/// non-atomic-refcount header preceding the label bytes, so the
+/// parse-side receiver pays the by-reference [`ContentDigest::parse`]
+/// cost only, not the integer-op cost of a
+/// [`std::rc::Rc::try_unwrap`]-fallback-clone-then-parse composition nor
+/// the allocation cost of an `Rc::to_string()`-then-parse round trip. The
+/// [`std::rc::Rc<str>`] input is dropped at end of scope, releasing the
+/// shared allocation exactly when the last outstanding [`Rc::clone`]
+/// refcount hits zero — the standard single-thread shared-owned drop
+/// semantics carry through unchanged.
+///
+/// A single-thread caller that would otherwise widen its parse frontier
+/// to [`Arc<str>`] purely to satisfy the parse peer's type signature —
+/// paying [`Arc`]'s atomic-refcount header on every clone of a label
+/// that never crosses a thread boundary — routes through this [`Rc<str>`]
+/// peer instead and keeps the non-atomic-refcount cost on the input side
+/// by construction. The single-thread parse-side cost of a `Vec<Rc<str>>`
+/// digest list drained one-by-one through this impl collapses to
+/// `n * (Rc::deref + ContentDigest::parse)`, matching the [`Arc<str>`]
+/// peer's parse cost minus the atomic-fence overhead the [`Rc<str>`]
+/// frontier avoids by construction.
+///
+/// The by-value thread-local shared-owned UTF-8 parse peer of
+/// [`TryFrom<&str> for ContentDigest`] (commit ebd8d0d),
+/// [`TryFrom<String> for ContentDigest`] (commit f175833),
+/// [`TryFrom<Cow<'_, str>> for ContentDigest`] (commit 3a28035),
+/// [`TryFrom<&[u8]> for ContentDigest`] (commit 08e1285),
+/// [`TryFrom<Vec<u8>> for ContentDigest`] (commit 67c5485),
+/// [`TryFrom<Box<str>> for ContentDigest`] (commit 2d5eb7e), and
+/// [`TryFrom<Arc<str>> for ContentDigest`] (commit 414b22c) on the
+/// reference-grammar family — the parse surface widens across the
+/// borrowed-string, owned-string, borrowed-or-owned-string,
+/// borrowed-byte-slice, owned-byte-slice, shrunk-owned-string,
+/// cross-thread shared-owned-string, AND thread-local shared-owned-string
+/// input frontiers so a downstream site that receives its input at any of
+/// those frontiers routes through the same [`ContentDigest::parse`]
+/// oracle without a per-consumer bridge — the pattern this impl absorbs
+/// at one site so no downstream site restates it. The parse mirror of the
+/// emit peer [`From<ContentDigest> for Rc<str>`] (commit a7bcfd2): the
+/// emit peer projects a validated [`ContentDigest`] into a thread-local
+/// shared-owned UTF-8 buffer through [`std::rc::Rc::<str>::from`]; this
+/// parse peer recovers a [`ContentDigest`] value from a thread-local
+/// shared-owned UTF-8 buffer through the [`AsRef::as_ref`] borrow of its
+/// backing bytes. Together they close the [`Rc<str>`] frontier at
+/// [`ContentDigest`] on both the parse and emit sides so a downstream
+/// site that types both its input and its re-emit contract as
+/// [`Rc<str>`] (a serde container that opts into
+/// `#[serde(try_from = "Rc<str>", into = "Rc<str>")]`, a
+/// validated-input newtype builder whose canonical parse AND re-emit
+/// contracts are both stated as thread-local shared-owned UTF-8) is a
+/// one-line bridge through the shared frontier, not a per-consumer
+/// restatement of the shared-owned discipline at either side.
+///
+/// Closes the shrunk / cross-thread-shared / thread-local-shared UTF-8
+/// parse trio at [`ContentDigest`]: [`TryFrom<Box<str>>`] (commit 2d5eb7e,
+/// shrunk-owned), [`TryFrom<Arc<str>>`] (commit 414b22c, cross-thread
+/// shared-owned), this [`TryFrom<Rc<str>>`] (thread-local shared-owned)
+/// — every owned-shape UTF-8 receiver frontier the sibling label-axis
+/// ordered typed sums already carry now has a matching parse surface on
+/// the digest reference-grammar family.
+///
+/// Structural mirror of
+/// [`impl TryFrom<Rc<str>> for crate::retry::PerAttemptRegion`], the
+/// by-value thread-local shared-owned UTF-8 parse peer on the sibling
+/// label-axis ordered typed sum that already carries the complete
+/// owned-shape parse-peer set ([`TryFrom<Box<str>>`],
+/// [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`])
+/// — the digest reference-grammar family closes the thread-local
+/// shared-owned string leg of that same owned-shape parse-peer surface,
+/// mirroring the emit-side [`From<ContentDigest> for Rc<str>`] that
+/// already exists. Next natural step in the same family: the
+/// borrowed/owned-frontier byte-slice parse peer
+/// [`TryFrom<Cow<'_, [u8]>>`] opening the shrunk / cross-thread-shared
+/// / thread-local-shared byte-slice parse trio at the byte-slice
+/// frontier.
+///
+/// The [`Err`](std::convert::TryFrom::Error) type is
+/// [`ContentDigestError`] — the same typed error every by-reference and
+/// by-value parse surface emits. The three grammar-failure variants
+/// ([`ContentDigestError::MissingSeparator`],
+/// [`ContentDigestError::UnsupportedAlgorithm`],
+/// [`ContentDigestError::InvalidHex`]) route unchanged through the
+/// string oracle so a caller that pins a per-variant handling policy at
+/// its own frontier can distinguish arms directly off the
+/// [`Result<ContentDigest, ContentDigestError>`] the impl returns. The
+/// UTF-8-invalid failure mode ([`ContentDigestError::InvalidUtf8`])
+/// cannot be reached from this peer by construction: an
+/// [`std::rc::Rc<str>`] carries a UTF-8-validated backing slice at the
+/// type level, so the UTF-8 gate the byte-frontier peers
+/// ([`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`]) run is unreachable here.
+///
+/// THEORY.md §III.1 typescape: the by-value thread-local shared-owned
+/// UTF-8 try-conversion surface is a typed-primitive site on
+/// [`ContentDigest`] itself (one [`TryFrom<Rc<str>>`] impl routing
+/// through [`AsRef::as_ref`] then [`TryFrom<&str>`]), not a per-consumer
+/// `shared.parse::<ContentDigest>()` restatement at every downstream
+/// site that owns a thread-local shared UTF-8 buffer. THEORY.md §VI.1
+/// one-oracle: the canonical `<algorithm>:<hex>` grammar is named at
+/// one site ([`ContentDigest::parse`]), and every parse surface —
+/// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], this [`TryFrom<Rc<str>>`]
+/// — reads through it.
+impl TryFrom<std::rc::Rc<str>> for ContentDigest {
+    type Error = ContentDigestError;
+
+    fn try_from(shared: std::rc::Rc<str>) -> Result<Self, Self::Error> {
+        <Self as TryFrom<&str>>::try_from(shared.as_ref())
+    }
+}
+
 /// [`AsRef<str>`] for [`ContentDigest`] routes through
 /// [`ContentDigest::as_str`] so a downstream consumer bound by
 /// `impl AsRef<str>` (a [`std::path::Path::new`] / [`std::fs::write`]
@@ -4225,6 +4367,182 @@ mod tests {
         let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
         let d1 = ContentDigest::try_from(shared).unwrap();
         let emitted: std::sync::Arc<str> = d1.clone().into();
+        let d2 = ContentDigest::try_from(emitted).unwrap();
+        assert_eq!(d1, d2);
+        assert_eq!(d2.as_str(), raw);
+    }
+
+    /// [`TryFrom<Rc<str>>`] succeeds on the thread-local shared-owned
+    /// UTF-8 serialization of a well-formed sha256 digest — the by-value
+    /// parse peer of [`TryFrom<&str>`], accepting the receiver-side
+    /// shared-owned buffer through [`AsRef::as_ref`] then delegating to
+    /// the string oracle. Pins the "shared-owned UTF-8 parse surface
+    /// reads through the string parse oracle" invariant so a future
+    /// refactor that inlined a divergent grammar into the shared-owned
+    /// peer fails this test.
+    #[test]
+    fn test_try_from_rc_str_parses_sha256_digest() {
+        let raw = format!("sha256:{D1}");
+        let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(raw.as_str());
+        let d = ContentDigest::try_from(shared).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha256");
+        assert_eq!(d.hex(), D1);
+        let inherent = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(d, inherent);
+    }
+
+    /// [`TryFrom<Rc<str>>`] succeeds on the shared-owned UTF-8
+    /// serialization of a well-formed sha512 digest — the second
+    /// supported algorithm at the digest reference-grammar family.
+    /// Pins the impl across both algorithms so a widening at the
+    /// inherent oracle (e.g. `sha384`) is caught by an existing test
+    /// on this derived surface.
+    #[test]
+    fn test_try_from_rc_str_parses_sha512_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(raw.as_str());
+        let d = ContentDigest::try_from(shared).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha512");
+        assert_eq!(d.hex(), hex);
+    }
+
+    /// [`TryFrom<Rc<str>>`] trims leading / trailing ASCII whitespace
+    /// on the delegated string oracle — a thread-local shared-owned
+    /// UTF-8 buffer whose trailing newline rides in the shared
+    /// allocation parses successfully because the string oracle
+    /// whitespace-trims before checking the grammar. Pins the trim
+    /// discipline carrying through the thread-local shared-owned UTF-8
+    /// frontier.
+    #[test]
+    fn test_try_from_rc_str_trims_edge_whitespace() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(raw.as_str());
+        let d = ContentDigest::try_from(shared).unwrap();
+        assert_eq!(d.as_str(), expected);
+    }
+
+    /// [`TryFrom<Rc<str>>`] emits the SAME error
+    /// [`ContentDigest::parse`] emits on every grammar-failure input —
+    /// the missing-separator, unsupported-algorithm, and invalid-hex
+    /// variants route through the string oracle unchanged because the
+    /// thread-local shared-owned-string peer delegates via
+    /// [`AsRef::as_ref`] then [`TryFrom<&str>`]. Pins the "thread-local
+    /// shared-owned UTF-8 parse surface reads through the string parse
+    /// oracle on grammar-failure inputs" invariant so a future refactor
+    /// that inlined a divergent grammar into the thread-local
+    /// shared-owned peer fails this test.
+    #[test]
+    fn test_try_from_rc_str_matches_inherent_parse_on_every_error_mode() {
+        let err_cases: [String; 5] = [
+            "sha256abc".to_string(),                 // missing separator
+            format!("md5:{D1}"),                     // unsupported algorithm
+            format!("sha256:{}", &D1[..60]),         // wrong hex length
+            format!("sha256:{}", D1.to_uppercase()), // uppercase hex
+            format!("sha256:{}g", &D1[..63]),        // non-hex byte
+        ];
+        for raw in err_cases {
+            let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(raw.as_str());
+            let via_rc = ContentDigest::try_from(shared);
+            let via_inherent = ContentDigest::parse(&raw);
+            assert_eq!(
+                via_rc, via_inherent,
+                "TryFrom<Rc<str>> and inherent parse must agree on '{raw}'",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<str>>`] agrees with [`TryFrom<Arc<str>>`] on every
+    /// well-formed AND grammar-failure input — the by-value thread-local
+    /// shared-owned UTF-8 parse peer and the by-value cross-thread
+    /// shared-owned UTF-8 parse peer resolve to the SAME
+    /// [`Result<ContentDigest, ContentDigestError>`] across every input
+    /// the two share, so a downstream site that migrates a consumer from
+    /// [`Arc<str>`] to [`Rc<str>`] (a scan-phase pass that narrows a
+    /// cross-thread refcounted label slot to a single-thread refcounted
+    /// one to shed the atomic-fence overhead on labels never accessed
+    /// across threads) yields identical values and identical errors at
+    /// every input. Pins the "thread-local shared-owned and cross-thread
+    /// shared-owned string parse peers read through the same canonical
+    /// oracle" invariant, closing the sibling-peer agreement between the
+    /// two shared-owned owned-shape parse peers.
+    #[test]
+    fn test_try_from_rc_str_agrees_with_try_from_arc_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let ok_cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha512:{hex512}"),
+            format!("  sha256:{D3}\n"),
+        ];
+        for raw in ok_cases {
+            let rc: std::rc::Rc<str> = std::rc::Rc::<str>::from(raw.as_str());
+            let arc: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+            let via_rc = ContentDigest::try_from(rc);
+            let via_arc = ContentDigest::try_from(arc);
+            assert_eq!(via_rc, via_arc);
+        }
+        let err_cases: [String; 5] = [
+            "sha256abc".to_string(),
+            format!("md5:{D1}"),
+            format!("sha256:{}", &D1[..60]),
+            format!("sha256:{}", D1.to_uppercase()),
+            format!("sha256:{}g", &D1[..63]),
+        ];
+        for raw in err_cases {
+            let rc: std::rc::Rc<str> = std::rc::Rc::<str>::from(raw.as_str());
+            let arc: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+            let via_rc = ContentDigest::try_from(rc);
+            let via_arc = ContentDigest::try_from(arc);
+            assert_eq!(via_rc, via_arc);
+        }
+    }
+
+    /// The [`TryFrom<Rc<str>>`] impl composes with a generic
+    /// try-conversion helper bounded by `TryFrom<Rc<str>, Error =
+    /// ContentDigestError>` — the compositional motivation for landing
+    /// the trait separately from the [`String`], [`Box<str>`], and
+    /// [`Arc<str>`] parse surfaces. Pins the by-value thread-local
+    /// shared-owned generic-consumer surface so a downstream site that
+    /// types its parse contract as [`TryFrom<Rc<str>>`] (a serde
+    /// container that opts into `#[serde(try_from = "Rc<str>")]`, a
+    /// single-thread-cached-label validated-builder helper) recovers
+    /// the same typed value the inherent oracle produces.
+    #[test]
+    fn test_try_from_rc_str_carries_through_generic_consumer() {
+        fn parse_via_try_from<T: TryFrom<std::rc::Rc<str>, Error = ContentDigestError>>(
+            shared: std::rc::Rc<str>,
+        ) -> Result<T, ContentDigestError> {
+            T::try_from(shared)
+        }
+        let raw = format!("sha256:{D1}");
+        let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(raw.as_str());
+        let d: ContentDigest = parse_via_try_from(shared).unwrap();
+        assert_eq!(d.as_str(), raw);
+        let bad: std::rc::Rc<str> = std::rc::Rc::<str>::from("sha256abc");
+        let err = parse_via_try_from::<ContentDigest>(bad).unwrap_err();
+        assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
+    }
+
+    /// [`TryFrom<Rc<str>>`] round-trips through the emit peer
+    /// [`From<ContentDigest> for Rc<str>`] — parsing a thread-local
+    /// shared-owned UTF-8 buffer, emitting the shared-owned buffer off
+    /// the resulting value, then re-parsing that emitted buffer yields
+    /// the SAME validated [`ContentDigest`]. Pins the "the by-value
+    /// thread-local shared-owned UTF-8 parse peer and the by-value
+    /// thread-local shared-owned UTF-8 emit peer are mutual inverses on
+    /// the validated subset" invariant, closing the round-trip
+    /// discipline on the [`Rc<str>`] axis and matching the closed
+    /// [`Arc<str>`] round-trip pinned above.
+    #[test]
+    fn test_try_from_rc_str_round_trips_through_rc_str_emit_peer() {
+        let raw = format!("sha256:{D1}");
+        let shared: std::rc::Rc<str> = std::rc::Rc::<str>::from(raw.as_str());
+        let d1 = ContentDigest::try_from(shared).unwrap();
+        let emitted: std::rc::Rc<str> = d1.clone().into();
         let d2 = ContentDigest::try_from(emitted).unwrap();
         assert_eq!(d1, d2);
         assert_eq!(d2.as_str(), raw);
