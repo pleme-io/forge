@@ -70,9 +70,17 @@ pub enum CosignVerifyOutcome {
     /// `manifest_digest` carries the cosigned manifest digest from the
     /// first valid payload — the cross-check a downstream verifier
     /// reconciles against the `manifest_hash` field on the same record.
+    /// Typed as [`Option<ContentDigest>`](crate::oci_manifest::ContentDigest)
+    /// (not `Option<String>`) so the parse invariant established at
+    /// `parse_verify_output`'s per-payload filter is preserved across
+    /// the outcome envelope: any value that lands in this field
+    /// structurally names a real blob the registry could be asked to
+    /// fetch, and a downstream cross-checker (`ImageAttestation`'s
+    /// `manifest_hash` reconcile site) receives a value it cannot
+    /// doubt rather than a raw string it would have to re-parse.
     Verified {
         signer_identity: Option<String>,
-        manifest_digest: Option<String>,
+        manifest_digest: Option<crate::oci_manifest::ContentDigest>,
     },
     /// cosign ran (spawn succeeded, exit 0) but the parsed output carried
     /// no structurally-valid signature payload — empty array, missing
@@ -116,6 +124,26 @@ impl CosignVerifyOutcome {
             Self::Verified {
                 signer_identity, ..
             } => signer_identity.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The parsed cosigned manifest digest for the verified arm, or
+    /// `None` otherwise (probe absent, verify failed, empty payload).
+    /// Sibling accessor to [`Self::signer_identity`] — the two
+    /// discriminators the `Verified` arm carries are read through
+    /// parallel typed accessors so a downstream cross-checker
+    /// (`ImageAttestation`'s `manifest_hash` reconcile site) reaches
+    /// the digest without pattern-matching the enum inline. Returns
+    /// a borrowed [`&ContentDigest`](crate::oci_manifest::ContentDigest)
+    /// — the typed handle carries the parse invariant the raw string
+    /// surface would have to re-establish per consumer.
+    #[allow(dead_code)]
+    pub fn manifest_digest(&self) -> Option<&crate::oci_manifest::ContentDigest> {
+        match self {
+            Self::Verified {
+                manifest_digest, ..
+            } => manifest_digest.as_ref(),
             _ => None,
         }
     }
@@ -168,7 +196,7 @@ pub fn parse_verify_output(stdout: &str) -> CosignVerifyOutcome {
     let Some((_, first_digest)) = valid.first() else {
         return CosignVerifyOutcome::Unverified;
     };
-    let manifest_digest = Some(first_digest.as_str().to_string());
+    let manifest_digest = Some(first_digest.clone());
     let signer_identity = valid
         .iter()
         .find_map(|(p, _)| p.optional.as_ref().and_then(pick_identity));
@@ -259,7 +287,9 @@ mod tests {
             "Subject is preferred over Issuer as the signer identity"
         );
         assert_eq!(
-            manifest_digest.as_deref(),
+            manifest_digest
+                .as_ref()
+                .map(crate::oci_manifest::ContentDigest::as_str),
             Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
         );
     }
@@ -400,7 +430,9 @@ mod tests {
             panic!("expected Verified");
         };
         assert_eq!(
-            manifest_digest.as_deref(),
+            manifest_digest
+                .as_ref()
+                .map(crate::oci_manifest::ContentDigest::as_str),
             Some("sha256:1111111111111111111111111111111111111111111111111111111111111111"),
             "manifest digest pinned to first payload"
         );
@@ -582,20 +614,33 @@ mod tests {
             panic!("expected Verified");
         };
         assert_eq!(
-            manifest_digest.as_deref(),
+            manifest_digest
+                .as_ref()
+                .map(crate::oci_manifest::ContentDigest::as_str),
             Some("sha256:2222222222222222222222222222222222222222222222222222222222222222"),
             "malformed first payload is dropped; second payload's digest is the receipt's"
         );
         assert_eq!(signer_identity.as_deref(), Some("kept@example.com"));
     }
 
-    /// The `manifest_digest` field on the verified arm round-trips
-    /// through `ContentDigest::parse` — i.e. any value that appears
-    /// there could be re-parsed by a downstream cross-checker without
-    /// error. Pins the invariant explicitly so a future refactor that
-    /// reverts the filter to a string-non-empty check fails this test.
+    /// The `manifest_digest` field on the verified arm is
+    /// [`ContentDigest`](crate::oci_manifest::ContentDigest)-typed —
+    /// the parse invariant established at
+    /// [`parse_verify_output`]'s per-payload filter is preserved
+    /// across the outcome envelope, so a downstream cross-checker
+    /// receives a value that structurally carries its
+    /// `<algorithm>:<hex>` shape without re-parsing. Prior to this
+    /// pin the field was `Option<String>` and a downstream consumer
+    /// had to re-invoke `ContentDigest::parse` at every site — this
+    /// test pinned the round-trip; the typed field pins the
+    /// invariant at the field itself.
+    ///
+    /// The load-bearing structural claim: the `Verified` payload
+    /// this test constructs (`ContentDigest::parse` on the input
+    /// digest) is `PartialEq` to the field the parser stored; the
+    /// parse oracle is one site for both.
     #[test]
-    fn test_verified_manifest_digest_round_trips_through_content_digest_parse() {
+    fn test_verified_manifest_digest_is_content_digest_typed() {
         let stdout = r#"[
             {
                 "critical": {
@@ -609,10 +654,55 @@ mod tests {
         else {
             panic!("expected Verified");
         };
-        let raw = manifest_digest.expect("verified arm must carry a digest");
-        let round_tripped = crate::oci_manifest::ContentDigest::parse(&raw)
-            .expect("verified manifest_digest must re-parse via ContentDigest::parse");
-        assert_eq!(round_tripped.algorithm(), "sha256");
-        assert_eq!(round_tripped.as_str(), raw);
+        let expected = crate::oci_manifest::ContentDigest::parse(
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("test input must parse");
+        assert_eq!(manifest_digest, Some(expected));
+    }
+
+    /// `manifest_digest` accessor returns `None` for every
+    /// non-`Verified` arm — the mirror of
+    /// [`test_signer_identity_none_for_non_verified_arms`]. Pins the
+    /// three absent-payload arms so a future refactor that flips one
+    /// of them to leak a stale digest fails loudly rather than
+    /// silently promoting an arm that carried no receipt to one that
+    /// reports a manifest identity.
+    #[test]
+    fn test_manifest_digest_none_for_non_verified_arms() {
+        assert_eq!(CosignVerifyOutcome::Unverified.manifest_digest(), None);
+        assert_eq!(CosignVerifyOutcome::VerifyFailed.manifest_digest(), None);
+        assert_eq!(CosignVerifyOutcome::ProbeAbsent.manifest_digest(), None);
+        assert_eq!(
+            CosignVerifyOutcome::Verified {
+                signer_identity: None,
+                manifest_digest: None,
+            }
+            .manifest_digest(),
+            None,
+            "Verified with no digest returns None — the arm can honestly \
+             carry an absent digest without collapsing to Unverified"
+        );
+    }
+
+    /// `manifest_digest` accessor returns the same
+    /// [`ContentDigest`](crate::oci_manifest::ContentDigest) the
+    /// `Verified` arm was constructed with — a borrowed handle to
+    /// the field, no allocation. Sibling shape to
+    /// [`test_signer_identity_none_for_non_verified_arms`]'s
+    /// `Some("u@e")` construction: the accessor is the frontier the
+    /// downstream `ImageAttestation` cross-check reads through, not
+    /// the field name.
+    #[test]
+    fn test_manifest_digest_returns_the_carried_digest() {
+        let digest = crate::oci_manifest::ContentDigest::parse(
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("test input must parse");
+        let out = CosignVerifyOutcome::Verified {
+            signer_identity: None,
+            manifest_digest: Some(digest.clone()),
+        };
+        assert_eq!(out.manifest_digest(), Some(&digest));
     }
 }
