@@ -901,6 +901,104 @@ impl PartialEq<&str> for ContentDigest {
     }
 }
 
+/// Symmetric borrowed UTF-8 comparison peer: `<str as
+/// PartialEq<ContentDigest>>::eq` — the reverse-direction sibling of
+/// [`PartialEq<str> for ContentDigest`] (directly above). The pair
+/// together closes the borrowed UTF-8 comparison surface across BOTH
+/// receiver directions, so a caller who holds a
+/// [`str`] value (a `matches!` arm on a `str` binding, a dereffed
+/// `&Cow::Borrowed(s)`) writes `*label_ref == digest` (or the
+/// standard-library-derived `if a == b || b == a`-style symmetric
+/// composition a generic `PartialEq`-bounded consumer performs
+/// internally) and answers a boolean equality query against a
+/// [`ContentDigest`] value at the same borrowed UTF-8 frontier the
+/// forward-direction peer covers, at zero allocation, zero temporary
+/// [`String`] construction, and zero [`std::fmt::Display`]
+/// formatter-buffer round trip per call.
+///
+/// Route: the impl body composes [`ContentDigest::as_str`] with the
+/// standard library [`<str as PartialEq<str>>::eq`], so the comparison
+/// reads the same canonical-digest bytes as the forward-direction
+/// [`PartialEq<str> for ContentDigest`] peer, and the symmetry axiom
+/// `<str as PartialEq<ContentDigest>>::eq(label, &digest)
+/// == <ContentDigest as PartialEq<str>>::eq(&digest, label)` holds by
+/// construction at every `(label, digest)` pair.
+///
+/// Mirrors the standard-library idiom [`String`] carries through its
+/// own [`PartialEq<String> for str`] +
+/// [`PartialEq<String> for &str`] symmetric receiver-shape pair: a
+/// borrowed UTF-8 handle compares against an owned canonical-string
+/// primitive in either direction with the same zero-cost projection
+/// through the primitive's read-back accessor. Prior to this impl the
+/// digest reference-grammar family carried only the forward direction
+/// (`digest == label` compiled but `label == digest` did not), so a
+/// generic `PartialEq`-bounded consumer that composed the two through
+/// its own symmetric-check protocol could not thread a
+/// [`ContentDigest`] through the [`str`] side of the bound without a
+/// per-consumer `label == digest.as_str()` bridge.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction borrowed UTF-8
+/// comparison surface is a typed-primitive site on [`ContentDigest`]
+/// itself (one [`PartialEq<ContentDigest>`] impl on [`str`] routing
+/// through [`ContentDigest::as_str`]), not a per-consumer
+/// `label == digest.as_str()` restatement at every downstream site
+/// that asks whether a borrowed UTF-8 handle names the same canonical
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value. THEORY.md §VI.1
+/// one-oracle: the validated full-digest slice is named at one site
+/// ([`ContentDigest::as_str`]), and every borrowed UTF-8 comparison
+/// surface — the forward-direction [`PartialEq<str> for
+/// ContentDigest`] + [`PartialEq<&str> for ContentDigest`] pair, this
+/// reverse-direction [`PartialEq<ContentDigest> for str`] +
+/// [`PartialEq<ContentDigest> for &str`] pair — reads through the
+/// same one-oracle discipline projected onto its own direction ×
+/// receiver shape.
+impl PartialEq<ContentDigest> for str {
+    fn eq(&self, other: &ContentDigest) -> bool {
+        self == other.as_str()
+    }
+}
+
+/// Symmetric borrowed UTF-8 comparison peer through a `&str`
+/// receiver — the reverse-direction sibling of [`PartialEq<&str> for
+/// ContentDigest`] and the receiver-shape peer of
+/// [`PartialEq<ContentDigest> for str`] (directly above), split by
+/// receiver shape so the caller writes `label_ref == digest` without
+/// the explicit `*` deref at every comparison site. The four
+/// [`PartialEq`] impls together — forward × receiver-shape and
+/// reverse × receiver-shape — close the borrowed UTF-8 comparison
+/// surface across the full 2×2 cross-product on the reference-grammar
+/// family, matching the standard-library idiom [`String`] carries
+/// through its own four-impl closure ([`PartialEq<str> for String`] +
+/// [`PartialEq<&str> for String`] + [`PartialEq<String> for str`] +
+/// [`PartialEq<String> for &str`]).
+///
+/// Route: the impl body composes [`ContentDigest::as_str`] with
+/// [`<str as PartialEq<str>>::eq`] on the dereffed `&str` self
+/// receiver, so the comparison reads the same canonical-digest bytes
+/// as the sibling receiver-shape peer at zero allocation and zero
+/// intermediate buffer, and the symmetry axiom
+/// `<&str as PartialEq<ContentDigest>>::eq(&label_ref, &digest)
+/// == <ContentDigest as PartialEq<&str>>::eq(&digest, &label_ref)`
+/// holds by construction at every `(label_ref, digest)` pair.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction borrowed UTF-8
+/// `&str`-receiver comparison surface is a typed-primitive site on
+/// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl on
+/// [`&str`] routing through [`ContentDigest::as_str`]), not a
+/// per-consumer `label_ref == digest.as_str()` restatement at every
+/// downstream site that asks whether a borrowed `&str` handle names
+/// the same canonical `<algorithm>:<hex>` as a [`ContentDigest`]
+/// value. THEORY.md §VI.1 one-oracle: the validated full-digest slice
+/// is named at one site ([`ContentDigest::as_str`]), and this reverse-
+/// direction `&str`-receiver surface reads through the same
+/// one-oracle discipline the three sibling comparison surfaces
+/// (forward-str, forward-&str, reverse-str) already carry.
+impl PartialEq<ContentDigest> for &str {
+    fn eq(&self, other: &ContentDigest) -> bool {
+        *self == other.as_str()
+    }
+}
+
 /// [`From<ContentDigest>`] for [`String`] moves the validated
 /// `<algorithm>:<hex>` backing string out of the consumed
 /// [`ContentDigest`] value at zero-copy — no allocation, no
@@ -7003,6 +7101,230 @@ mod tests {
                 format!("sha256:{D1}")
             };
             assert!(!eq_via_bound(&d, &other));
+        }
+    }
+
+    /// `PartialEq<ContentDigest> for str` agrees byte-for-byte with
+    /// the borrowed-view [`ContentDigest::as_str`] oracle across the
+    /// same grid, threaded through a [`str`] self receiver so the
+    /// caller writes `*label_ref == digest` and answers the same
+    /// boolean equality query as the forward-direction
+    /// [`PartialEq<str> for ContentDigest`] peer. Pins the
+    /// reverse-direction agreement so a future refactor that inlined
+    /// a divergent read into the reverse-direction impl breaks this
+    /// pin at at least one (digest, label) pair rather than at every
+    /// downstream `*label_ref == digest` call site.
+    #[test]
+    fn test_str_partial_eq_content_digest_agrees_with_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let cross = digests.iter().map(String::as_str).chain([
+            "",
+            "sha256:",
+            "SHA256:0123",
+            "not-a-digest",
+        ]);
+        let owned: Vec<String> = digests
+            .iter()
+            .flat_map(|d| {
+                [
+                    format!("SHA256:{}", &d[7..]),
+                    format!(" {d}"),
+                    format!("{d}\n"),
+                ]
+            })
+            .collect();
+        let labels: Vec<&str> = cross.chain(owned.iter().map(String::as_str)).collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &labels {
+                assert_eq!(
+                    <str as PartialEq<ContentDigest>>::eq(label, &d),
+                    *label == d.as_str(),
+                    "PartialEq<ContentDigest> for str and as_str() equality must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// At every validated [`ContentDigest`] value,
+    /// `<str as PartialEq<ContentDigest>>::eq(digest.as_str(), &digest)`
+    /// returns true — the digest's own emitted canonical form
+    /// recognises itself as a match through the reverse-direction
+    /// [`str`]-receiver peer.
+    #[test]
+    fn test_str_partial_eq_content_digest_reflexive_at_own_digest() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let canonical: &str = d.as_str();
+            assert!(
+                <str as PartialEq<ContentDigest>>::eq(canonical, &d),
+                "PartialEq<ContentDigest> for str must recognise self canonical form at {raw:?}",
+            );
+        }
+    }
+
+    /// `PartialEq<ContentDigest> for &str` agrees byte-for-byte with
+    /// the borrowed-view [`ContentDigest::as_str`] oracle across the
+    /// same grid, threaded through a `&str` self receiver so the
+    /// caller writes `label_ref == digest` without the explicit `*`
+    /// deref. Pins the reverse-direction `&str`-receiver agreement.
+    #[test]
+    fn test_str_ref_partial_eq_content_digest_agrees_with_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let labels = [
+            "",
+            "sha256:",
+            "not-a-digest",
+            &format!("sha256:{D1}") as &str,
+            &format!("sha256:{D2}") as &str,
+            &format!("SHA256:{D1}") as &str,
+            &format!(" sha256:{D1}") as &str,
+        ];
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in labels {
+                let label_ref: &str = label;
+                assert_eq!(
+                    <&str as PartialEq<ContentDigest>>::eq(&label_ref, &d),
+                    label_ref == d.as_str(),
+                    "PartialEq<ContentDigest> for &str and as_str() equality must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// At every validated [`ContentDigest`] value,
+    /// `<&str as PartialEq<ContentDigest>>::eq(&digest.as_str(), &digest)`
+    /// returns true — the digest's own emitted canonical form
+    /// recognises itself as a match through the reverse-direction
+    /// `&str`-receiver peer without the caller's explicit `*` deref.
+    #[test]
+    fn test_str_ref_partial_eq_content_digest_reflexive_at_own_digest() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let canonical: &str = d.as_str();
+            assert!(
+                <&str as PartialEq<ContentDigest>>::eq(&canonical, &d),
+                "PartialEq<ContentDigest> for &str must recognise self canonical form at {raw:?}",
+            );
+        }
+    }
+
+    /// The reverse-direction and forward-direction borrowed UTF-8
+    /// comparison surfaces agree byte-for-byte at every `(label,
+    /// digest)` pair — the symmetry axiom
+    /// `<str as PartialEq<ContentDigest>>::eq(label, &digest) ==
+    /// <ContentDigest as PartialEq<str>>::eq(&digest, label)` (and
+    /// its `&str`-receiver peer) holds across a canonical × broken
+    /// grid. Pins the full 2×2 receiver × direction cross-product
+    /// closure so a future refactor that diverged one impl from its
+    /// symmetric peer breaks this pin at at least one pair rather
+    /// than propagating unnoticed through downstream generic
+    /// `PartialEq`-bounded consumers that thread a [`ContentDigest`]
+    /// through either side of a `==` operator.
+    #[test]
+    fn test_partial_eq_content_digest_symmetric_with_forward_direction() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let owned_labels: Vec<String> = digests
+            .iter()
+            .cloned()
+            .chain([
+                "".to_string(),
+                "sha256:".to_string(),
+                "not-a-digest".to_string(),
+                format!("SHA256:{D1}"),
+                format!(" sha256:{D1}"),
+                format!("sha256:{D1}\n"),
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &owned_labels {
+                let label_ref: &str = label;
+                // str receiver <-> ContentDigest receiver on str.
+                assert_eq!(
+                    <str as PartialEq<ContentDigest>>::eq(label_ref, &d),
+                    <ContentDigest as PartialEq<str>>::eq(&d, label_ref),
+                    "reverse str vs forward str direction must agree at ({label:?}, {raw:?})",
+                );
+                // &str receiver <-> ContentDigest receiver on &str.
+                assert_eq!(
+                    <&str as PartialEq<ContentDigest>>::eq(&label_ref, &d),
+                    <ContentDigest as PartialEq<&str>>::eq(&d, &label_ref),
+                    "reverse &str vs forward &str direction must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// The reverse-direction impls compose with a generic
+    /// `PartialEq<ContentDigest>`-bounded consumer — a downstream
+    /// site that types its comparison contract as `impl
+    /// PartialEq<ContentDigest>` (a `matches!` predicate on a
+    /// borrowed-str arm, an integration-test oracle that
+    /// generic-bounds its reverse-direction equality check) recovers
+    /// the same answer as a direct
+    /// `<str as PartialEq<ContentDigest>>::eq` call. Pins the
+    /// trait-generic consumer surface parallel to
+    /// [`test_partial_eq_str_carries_through_generic_consumer`] on
+    /// the forward direction.
+    #[test]
+    fn test_partial_eq_content_digest_carries_through_generic_consumer() {
+        fn eq_via_bound<T: PartialEq<ContentDigest> + ?Sized>(
+            t: &T,
+            expected: &ContentDigest,
+        ) -> bool {
+            <T as PartialEq<ContentDigest>>::eq(t, expected)
+        }
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let raw_ref: &str = &raw;
+            assert!(eq_via_bound::<str>(raw_ref, &d));
+            assert!(eq_via_bound::<&str>(&raw_ref, &d));
+            let other = if raw.starts_with("sha256:") {
+                format!("sha512:{}", "0".repeat(SHA512_HEX_LEN))
+            } else {
+                format!("sha256:{D1}")
+            };
+            let other_ref: &str = &other;
+            assert!(!eq_via_bound::<str>(other_ref, &d));
+            assert!(!eq_via_bound::<&str>(&other_ref, &d));
         }
     }
 }
