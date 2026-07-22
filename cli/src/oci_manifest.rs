@@ -49,6 +49,14 @@ pub enum ContentDigestError {
     UnsupportedAlgorithm { input: String },
     /// The hex body was not lowercase-hex of the algorithm's expected length.
     InvalidHex { input: String },
+    /// The byte-slice input was not valid UTF-8, so the string-oracle
+    /// grammar cannot be reached. Carries a lossy-decoded rendering of
+    /// the input so a failure record can still name the offending bytes.
+    /// Only the byte-slice parse peer
+    /// ([`TryFrom<&[u8]> for ContentDigest`]) can emit this variant —
+    /// the string-frontier parse peers cannot receive UTF-8-invalid
+    /// input by construction.
+    InvalidUtf8 { input: String },
 }
 
 impl std::fmt::Display for ContentDigestError {
@@ -65,6 +73,10 @@ impl std::fmt::Display for ContentDigestError {
             ContentDigestError::InvalidHex { input } => write!(
                 f,
                 "content digest '{input}' hex body is not lowercase-hex of the algorithm's expected length"
+            ),
+            ContentDigestError::InvalidUtf8 { input } => write!(
+                f,
+                "content digest byte input '{input}' (lossy-decoded) is not valid UTF-8"
             ),
         }
     }
@@ -415,6 +427,74 @@ impl TryFrom<std::borrow::Cow<'_, str>> for ContentDigest {
 
     fn try_from(s: std::borrow::Cow<'_, str>) -> Result<Self, Self::Error> {
         <Self as TryFrom<&str>>::try_from(s.as_ref())
+    }
+}
+
+/// [`TryFrom<&[u8]>`] for [`ContentDigest`] routes through
+/// [`std::str::from_utf8`] then delegates to
+/// [`<ContentDigest as TryFrom<&str>>::try_from`] so a downstream
+/// consumer holding a byte slice at a raw-byte frontier (a captured
+/// `skopeo inspect --raw` stdout still on the [`Vec<u8>`] register, a
+/// manifest byte body from a `reqwest::Response::bytes()` /
+/// `hyper::body::to_bytes` future not yet UTF-8-validated, a slice off
+/// a `std::fs::read` of a cached digest file, a `nom` / `winnow`
+/// byte-slice parser that pins its input contract as `&[u8]` and
+/// yields a bounded `<algorithm>:<hex>` digest token) recovers a
+/// [`ContentDigest`] value from its canonical `<algorithm>:<hex>`
+/// byte serialization through the same one-oracle grammar the
+/// `.parse::<ContentDigest>()` string call sites already read.
+///
+/// The borrowed-byte-slice peer of [`TryFrom<&str> for ContentDigest`],
+/// [`TryFrom<String> for ContentDigest`], and
+/// [`TryFrom<Cow<'_, str>> for ContentDigest`] on the
+/// reference-grammar family — the parse surface is now closed across
+/// the borrowed-string, owned-string, borrowed-or-owned-string, and
+/// borrowed-byte-slice input frontiers so a downstream site that
+/// receives its input at any of those frontiers routes through the
+/// same [`ContentDigest::parse`] oracle without an
+/// `std::str::from_utf8(bytes)?.parse()` bridge per consumer. Prior
+/// to this impl a downstream site holding a `&[u8]` (a captured
+/// registry stdout not yet UTF-8-validated, a network response body
+/// still on the byte-slice register, a `serde_bytes`-decoded field)
+/// had to restate that bridge at every call site before it could
+/// reach the string parse oracle.
+///
+/// The [`Err`](std::convert::TryFrom::Error) type is
+/// [`ContentDigestError`] — the same typed error every by-reference
+/// and by-value parse surface emits. The three
+/// grammar-failure variants ([`ContentDigestError::MissingSeparator`],
+/// [`ContentDigestError::UnsupportedAlgorithm`],
+/// [`ContentDigestError::InvalidHex`]) route unchanged through the
+/// string oracle once UTF-8 validation clears; a UTF-8-invalid input
+/// (a stray non-UTF-8 sequence in a raw wire capture, a
+/// partial-write byte tail that clips a UTF-8 continuation) surfaces
+/// as [`ContentDigestError::InvalidUtf8`] carrying the lossy-decoded
+/// rendering of the offending bytes so a caller that pins a
+/// per-variant handling policy at its own frontier can distinguish
+/// arms directly off the
+/// [`Result<ContentDigest, ContentDigestError>`] the impl returns.
+///
+/// THEORY.md §III.1 typescape: the byte-slice try-conversion surface
+/// is a typed-primitive site on [`ContentDigest`] itself (one
+/// [`TryFrom<&[u8]>`] impl routing through [`std::str::from_utf8`]
+/// then [`TryFrom<&str>`]), not a per-consumer
+/// `std::str::from_utf8(bytes)?.parse()` bridge at every downstream
+/// site that owns a byte slice. THEORY.md §VI.1 one-oracle: the
+/// canonical `<algorithm>:<hex>` grammar is named at one site
+/// ([`ContentDigest::parse`]), and every parse surface —
+/// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], this [`TryFrom<&[u8]>`] — reads
+/// through it.
+impl TryFrom<&[u8]> for ContentDigest {
+    type Error = ContentDigestError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        match std::str::from_utf8(bytes) {
+            Ok(s) => <Self as TryFrom<&str>>::try_from(s),
+            Err(_) => Err(ContentDigestError::InvalidUtf8 {
+                input: String::from_utf8_lossy(bytes).into_owned(),
+            }),
+        }
     }
 }
 
@@ -2866,6 +2946,191 @@ mod tests {
         let err = parse_via_try_from::<ContentDigest>(std::borrow::Cow::Borrowed("sha256abc"))
             .unwrap_err();
         assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
+    }
+
+    /// [`TryFrom<&[u8]>`] succeeds on the byte serialization of a
+    /// well-formed sha256 digest and yields the same validated value
+    /// as the inherent oracle. The byte-slice parse surface is the
+    /// idiomatic wire-frontier peer of the string parse surfaces: a
+    /// captured registry stdout or a network response body arrives on
+    /// the byte register, and this impl routes through
+    /// [`std::str::from_utf8`] before delegating to the string
+    /// oracle.
+    #[test]
+    fn test_try_from_bytes_parses_sha256_digest() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::try_from(raw.as_bytes()).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha256");
+        assert_eq!(d.hex(), D1);
+        let inherent = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(d, inherent);
+    }
+
+    /// [`TryFrom<&[u8]>`] succeeds on the byte serialization of a
+    /// well-formed sha512 digest — the second supported algorithm at
+    /// the digest reference-grammar family. Pins the impl across both
+    /// algorithms so a widening at the inherent oracle (e.g. `sha384`)
+    /// is caught by an existing test on this derived surface.
+    #[test]
+    fn test_try_from_bytes_parses_sha512_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let d = ContentDigest::try_from(raw.as_bytes()).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha512");
+        assert_eq!(d.hex(), hex);
+    }
+
+    /// [`TryFrom<&[u8]>`] trims leading / trailing ASCII whitespace on
+    /// the delegated string oracle — a captured wire response whose
+    /// trailing newline rides in the byte buffer parses successfully
+    /// because the string oracle whitespace-trims before checking the
+    /// grammar. Pins the trim discipline carrying through the
+    /// byte-slice frontier.
+    #[test]
+    fn test_try_from_bytes_trims_edge_whitespace() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let d = ContentDigest::try_from(raw.as_bytes()).unwrap();
+        assert_eq!(d.as_str(), expected);
+    }
+
+    /// [`TryFrom<&[u8]>`] on a UTF-8-valid input emits the SAME error
+    /// [`ContentDigest::parse`] emits on every grammar-failure input
+    /// — the missing-separator, unsupported-algorithm, and
+    /// invalid-hex variants route through the string oracle unchanged
+    /// once UTF-8 validation clears. Pins the "byte-slice parse
+    /// surface reads through the string parse oracle on
+    /// grammar-failure inputs" invariant so a future refactor that
+    /// inlined a divergent grammar into the byte-slice peer fails
+    /// this test.
+    #[test]
+    fn test_try_from_bytes_matches_inherent_parse_on_every_grammar_error_mode() {
+        let err_cases = [
+            "sha256abc",                              // missing separator
+            &format!("md5:{D1}"),                     // unsupported algorithm
+            &format!("sha256:{}", &D1[..60]),         // wrong hex length
+            &format!("sha256:{}", D1.to_uppercase()), // uppercase hex
+            &format!("sha256:{}g", &D1[..63]),        // non-hex byte
+        ];
+        for raw in err_cases {
+            let via_bytes = ContentDigest::try_from(raw.as_bytes());
+            let via_inherent = ContentDigest::parse(raw);
+            assert_eq!(via_bytes, via_inherent);
+        }
+    }
+
+    /// [`TryFrom<&[u8]>`] agrees with [`TryFrom<&str>`] on every
+    /// valid and invalid UTF-8-valid input — the byte-slice parse
+    /// surface and the string parse surface resolve to the SAME
+    /// [`Result<ContentDigest, ContentDigestError>`] across every
+    /// input the two share, so a downstream site that migrates a
+    /// consumer from `bytes.as_ref().parse()` (string-typed) to a
+    /// direct byte-slice consumer keyed on `TryFrom<&[u8]>` yields
+    /// identical values and identical errors at every input.
+    #[test]
+    fn test_try_from_bytes_agrees_with_try_from_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let ok_cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha512:{hex512}"),
+            format!("  sha256:{D3}\n"),
+        ];
+        for raw in ok_cases {
+            let via_bytes = ContentDigest::try_from(raw.as_bytes());
+            let via_str = ContentDigest::try_from(raw.as_str());
+            assert_eq!(via_bytes, via_str);
+        }
+        let err_cases = [
+            "sha256abc",
+            &format!("md5:{D1}"),
+            &format!("sha256:{}", &D1[..60]),
+            &format!("sha256:{}", D1.to_uppercase()),
+            &format!("sha256:{}g", &D1[..63]),
+        ];
+        for raw in err_cases {
+            let via_bytes = ContentDigest::try_from(raw.as_bytes());
+            let via_str = ContentDigest::try_from(raw);
+            assert_eq!(via_bytes, via_str);
+        }
+    }
+
+    /// [`TryFrom<&[u8]>`] on a UTF-8-invalid input surfaces the
+    /// [`ContentDigestError::InvalidUtf8`] variant carrying the
+    /// lossy-decoded rendering of the offending bytes. Pins the
+    /// byte-frontier-specific failure mode — the string parse peers
+    /// cannot receive this input by construction, so this variant
+    /// is only emitted by the byte-slice peer. A stray continuation
+    /// byte (`0xff`) trailing an otherwise-valid digest still fails
+    /// UTF-8 validation before the string oracle is reached.
+    #[test]
+    fn test_try_from_bytes_rejects_invalid_utf8() {
+        let mut bytes = format!("sha256:{D1}").into_bytes();
+        bytes.push(0xff);
+        let err = ContentDigest::try_from(bytes.as_slice()).unwrap_err();
+        assert!(matches!(err, ContentDigestError::InvalidUtf8 { .. }));
+        // The lossy-decoded rendering names the offending input at the
+        // failure record so a caller can attach it downstream.
+        assert!(
+            err.to_string().contains("sha256:"),
+            "InvalidUtf8 display must name the lossy-decoded input; got: {err}"
+        );
+    }
+
+    /// [`TryFrom<&[u8]>`] on a purely-invalid-UTF-8 input (no
+    /// well-formed prefix) also surfaces
+    /// [`ContentDigestError::InvalidUtf8`] — the byte-slice peer
+    /// fails at the UTF-8 gate before any grammar predicate runs, so
+    /// a consumer that receives arbitrary bytes off a
+    /// `serde_bytes`-decoded field or a raw file read cannot leak
+    /// through as a MissingSeparator / UnsupportedAlgorithm /
+    /// InvalidHex misdiagnosis.
+    #[test]
+    fn test_try_from_bytes_rejects_pure_invalid_utf8() {
+        let bytes: &[u8] = &[0xff, 0xfe, 0xfd, 0xfc];
+        let err = ContentDigest::try_from(bytes).unwrap_err();
+        assert!(matches!(err, ContentDigestError::InvalidUtf8 { .. }));
+    }
+
+    /// The [`TryFrom<&[u8]>`] impl composes with a generic
+    /// try-conversion helper bounded by `for<'a> TryFrom<&'a [u8],
+    /// Error = ContentDigestError>` — the compositional motivation
+    /// for landing the trait separately from the string parse
+    /// surfaces. Pins the generic-consumer surface so a downstream
+    /// site that types its parse contract as `TryFrom<&[u8]>` (a
+    /// `nom` / `winnow` byte-slice parser, a raw-wire validated-input
+    /// builder helper) recovers the same typed value the inherent
+    /// oracle produces.
+    #[test]
+    fn test_try_from_bytes_carries_through_generic_consumer() {
+        fn parse_via_try_from<T: for<'a> TryFrom<&'a [u8], Error = ContentDigestError>>(
+            bytes: &[u8],
+        ) -> Result<T, ContentDigestError> {
+            T::try_from(bytes)
+        }
+        let raw = format!("sha256:{D1}");
+        let d: ContentDigest = parse_via_try_from(raw.as_bytes()).unwrap();
+        assert_eq!(d.as_str(), raw);
+        let err = parse_via_try_from::<ContentDigest>(b"sha256abc").unwrap_err();
+        assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
+    }
+
+    /// The [`ContentDigestError::InvalidUtf8`] variant's
+    /// [`std::fmt::Display`] arm names the offending lossy-decoded
+    /// input so a failure record built from the error string carries
+    /// the input a caller supplied. Pins the display shape so a
+    /// future rewording that dropped the input field fails this
+    /// test.
+    #[test]
+    fn test_invalid_utf8_error_display_names_offending_input() {
+        let err = ContentDigestError::InvalidUtf8 {
+            input: "sha256:garbled\u{FFFD}".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("sha256:garbled"), "got: {msg}");
+        assert!(msg.contains("UTF-8"), "got: {msg}");
     }
 
     /// [`AsRef::as_ref`] yields the same borrowed slice the inherent
