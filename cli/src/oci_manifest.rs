@@ -968,6 +968,137 @@ impl TryFrom<std::rc::Rc<str>> for ContentDigest {
     }
 }
 
+/// [`TryFrom<Cow<'_, [u8]>>`] for [`ContentDigest`] routes each arm through
+/// its shape-matched byte-slice parse peer — the [`Cow::Borrowed`] arm to
+/// [`<ContentDigest as TryFrom<&[u8]>>::try_from`] (a zero-copy borrow of
+/// the shared byte view that runs the by-reference UTF-8 gate and then the
+/// string oracle without touching the owned allocation), the [`Cow::Owned`]
+/// arm to [`<ContentDigest as TryFrom<Vec<u8>>>::try_from`] (a consumed
+/// move of the owned [`Vec<u8>`] into the by-value UTF-8 gate whose
+/// [`String::from_utf8`] happy path reuses the same allocation as the
+/// intermediate [`String`] backing storage that then moves into the
+/// validated [`ContentDigest`]) so a downstream consumer holding a
+/// borrowed-or-owned byte buffer at a raw-byte frontier (a serde-compatible
+/// byte deserializer that hands its container an owned-or-borrowed
+/// [`Cow<'_, [u8]>`] to preserve zero-copy where the input allows it, a
+/// generic try-conversion helper `fn parse_digest<'a, T: TryFrom<Cow<'a,
+/// [u8]>, Error = ContentDigestError>>`, a validated-builder frontier that
+/// pins its input contract as [`Cow<'_, [u8]>`] to bridge caller-owned and
+/// caller-borrowed raw-byte inputs at zero extra allocation on the
+/// borrowed arm and zero extra allocation on the owned arm, an owned-or-
+/// borrowed pipeline that consumes [`Cow`] to defer the ownership decision
+/// to its caller while still handing the wire bytes through the parse
+/// oracle) recovers a [`ContentDigest`] value from its canonical
+/// `<algorithm>:<hex>` borrowed-or-owned byte serialization through the
+/// same one-oracle grammar the `.parse::<ContentDigest>()` string call
+/// sites already read — WITHOUT the by-reference bridge
+/// (`ContentDigest::try_from(cow.as_ref())`) that would collapse the
+/// owned arm through the borrowed peer and force the string oracle to
+/// re-allocate its own owned backing string off the borrowed view even
+/// when the caller already handed over an owned [`Vec<u8>`] the parse
+/// pipeline could have moved through end to end.
+///
+/// Ownership-preserving on both arms: the [`Cow::Borrowed`] arm keeps
+/// the caller's borrow structurally by routing through the borrowed-byte
+/// peer (no allocation on the parse-side receiver), and the [`Cow::Owned`]
+/// arm keeps the caller's owned allocation structurally by routing
+/// through the owned-byte peer whose [`String::from_utf8`] happy path
+/// converts the [`Vec<u8>`] backing to a [`String`] backing without
+/// re-allocating (the standard library documents this as an in-place
+/// UTF-8 check) and then into the validated value's backing on
+/// [`TryFrom<String>`]'s move. A downstream site that types its parse
+/// contract as [`Cow<'_, [u8]>`] to preserve zero-copy on borrowable
+/// inputs while still handling owned inputs — a serde
+/// `try_from = "Cow<'_, [u8]>"` wrapper on a byte-frontier
+/// deserializer, a caller-agnostic validated builder whose input type
+/// crosses the borrowed/owned frontier — pays the byte-slice UTF-8 gate
+/// cost only, not the additional allocation the by-reference bridge
+/// would force on the owned arm.
+///
+/// The borrowed/owned-frontier byte-slice parse peer of [`TryFrom<&[u8]>
+/// for ContentDigest`] (commit 08e1285), [`TryFrom<Vec<u8>> for
+/// ContentDigest`] (commit 67c5485), and [`TryFrom<Cow<'_, str>> for
+/// ContentDigest`] (commit 3a28035) on the reference-grammar family —
+/// the parse surface widens across the borrowed-byte-slice, owned-byte-
+/// slice, AND borrowed-or-owned-byte-slice input frontiers so a
+/// downstream site that receives its input at any of those frontiers
+/// routes through the same [`ContentDigest::parse`] oracle without a
+/// per-consumer bridge. Structural analog on the byte-slice axis of
+/// [`TryFrom<Cow<'_, str>> for ContentDigest`] on the UTF-8-string
+/// axis: the borrowed/owned-frontier string peer opened the borrowed-
+/// or-owned frontier at the [`str`] receiver shape; this
+/// borrowed/owned-frontier byte-slice peer opens the analogous frontier
+/// at the `[u8]` receiver shape so the parse surface is now closed at
+/// the [`Cow`] frontier on both the UTF-8-string axis and the byte-
+/// slice axis. The parse mirror of the emit peer
+/// [`From<ContentDigest> for Cow<'static, [u8]>`] (commit c2a5acf): the
+/// emit peer projects a validated [`ContentDigest`] into a
+/// borrowed-or-owned byte buffer through `Cow::Owned(bytes)`; this parse
+/// peer recovers a [`ContentDigest`] value from a borrowed-or-owned byte
+/// buffer through the arm-matched byte-slice peer delegation. Together
+/// they close the [`Cow<'_, [u8]>`] / [`Cow<'static, [u8]>`] frontier
+/// at [`ContentDigest`] on both the parse and emit sides so a
+/// downstream site that types both its input and its re-emit contract
+/// as a byte-slice [`Cow`] (a serde container that opts into
+/// `#[serde(try_from = "Cow<'_, [u8]>", into = "Cow<'static, [u8]>")]`,
+/// a validated-input newtype builder whose canonical parse AND re-emit
+/// contracts are both stated as borrowed-or-owned byte slices) is a
+/// one-line bridge through the shared frontier, not a per-consumer
+/// restatement of the borrowed/owned byte-slice discipline at either
+/// side.
+///
+/// Opens the shrunk / cross-thread-shared / thread-local-shared
+/// byte-slice parse trio at [`ContentDigest`] — the analog on the
+/// byte-slice axis of the UTF-8-string trio [`TryFrom<Box<str>>`]
+/// (commit 2d5eb7e), [`TryFrom<Arc<str>>`] (commit 414b22c),
+/// [`TryFrom<Rc<str>>`] (commit 4d0783e) closed on the sibling axis.
+/// Next natural steps in the same family: [`TryFrom<Box<[u8]>>`]
+/// (shrunk-owned byte-slice), [`TryFrom<Arc<[u8]>>`] (cross-thread
+/// shared-owned byte-slice), [`TryFrom<Rc<[u8]>>`] (thread-local
+/// shared-owned byte-slice) closing the owned-shape byte-slice
+/// parse-peer surface on the digest reference-grammar family.
+///
+/// The [`Err`](std::convert::TryFrom::Error) type is
+/// [`ContentDigestError`] — the same typed error every by-reference and
+/// by-value parse surface emits. The three grammar-failure variants
+/// ([`ContentDigestError::MissingSeparator`],
+/// [`ContentDigestError::UnsupportedAlgorithm`],
+/// [`ContentDigestError::InvalidHex`]) route unchanged through the
+/// string oracle once UTF-8 validation clears on either arm; a
+/// UTF-8-invalid input on either arm (a stray non-UTF-8 byte in a
+/// borrowed wire capture, an owned partial-write byte tail that clips
+/// a UTF-8 continuation) surfaces as
+/// [`ContentDigestError::InvalidUtf8`] carrying the lossy-decoded
+/// rendering of the offending bytes — the same failure record the
+/// arm-matched byte-slice peer emits — so a caller that pins a
+/// per-variant handling policy at its own frontier can distinguish
+/// arms directly off the [`Result<ContentDigest, ContentDigestError>`]
+/// the impl returns.
+///
+/// THEORY.md §III.1 typescape: the borrowed/owned-frontier byte-slice
+/// try-conversion surface is a typed-primitive site on [`ContentDigest`]
+/// itself (one [`TryFrom<Cow<'_, [u8]>>`] impl arm-matching to the
+/// borrowed-byte and owned-byte parse peers), not a per-consumer
+/// arm-matching bridge at every downstream site that types its parse
+/// contract as `impl TryFrom<Cow<'_, [u8]>>` rather than a shape-
+/// specific byte-slice peer. THEORY.md §VI.1 one-oracle: the canonical
+/// `<algorithm>:<hex>` grammar is named at one site
+/// ([`ContentDigest::parse`]), and every parse surface —
+/// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// this [`TryFrom<Cow<'_, [u8]>>`] — reads through it.
+impl TryFrom<std::borrow::Cow<'_, [u8]>> for ContentDigest {
+    type Error = ContentDigestError;
+
+    fn try_from(bytes: std::borrow::Cow<'_, [u8]>) -> Result<Self, Self::Error> {
+        match bytes {
+            std::borrow::Cow::Borrowed(slice) => <Self as TryFrom<&[u8]>>::try_from(slice),
+            std::borrow::Cow::Owned(owned) => <Self as TryFrom<Vec<u8>>>::try_from(owned),
+        }
+    }
+}
+
 /// [`AsRef<str>`] for [`ContentDigest`] routes through
 /// [`ContentDigest::as_str`] so a downstream consumer bound by
 /// `impl AsRef<str>` (a [`std::path::Path::new`] / [`std::fs::write`]
@@ -4548,6 +4679,237 @@ mod tests {
         assert_eq!(d2.as_str(), raw);
     }
 
+    /// [`TryFrom<Cow<'_, [u8]>>`] succeeds on a well-formed sha256 digest
+    /// handed in via the borrowed arm — the zero-copy path a serde byte
+    /// deserializer takes when the input slice can be reused directly.
+    /// Pins the primary algorithm on the borrowed arm of the derived
+    /// byte-slice frontier surface.
+    #[test]
+    fn test_try_from_cow_bytes_borrowed_parses_sha256_digest() {
+        let raw = format!("sha256:{D1}");
+        let cow: std::borrow::Cow<'_, [u8]> = std::borrow::Cow::Borrowed(raw.as_bytes());
+        let d = ContentDigest::try_from(cow).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha256");
+        assert_eq!(d.hex(), D1);
+        let inherent = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(d, inherent);
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>>`] succeeds on a well-formed sha256 digest
+    /// handed in via the owned arm — the fallback path a serde byte
+    /// deserializer takes when zero-copy is unavailable (an escaped or
+    /// re-materialised byte buffer, a network response body already
+    /// consumed into `Vec<u8>`). Pins the primary algorithm on the owned
+    /// arm.
+    #[test]
+    fn test_try_from_cow_bytes_owned_parses_sha256_digest() {
+        let raw = format!("sha256:{D1}");
+        let cow: std::borrow::Cow<'_, [u8]> = std::borrow::Cow::Owned(raw.as_bytes().to_vec());
+        let d = ContentDigest::try_from(cow).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha256");
+        assert_eq!(d.hex(), D1);
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>>`] succeeds on a well-formed sha512 digest
+    /// across both `Cow` arms. Pins the second supported algorithm on
+    /// the borrowed/owned-frontier byte-slice surface so a widening at
+    /// the inherent oracle is caught by an existing test on this
+    /// derived surface.
+    #[test]
+    fn test_try_from_cow_bytes_parses_sha512_digest_both_arms() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let via_borrowed =
+            ContentDigest::try_from(std::borrow::Cow::Borrowed(raw.as_bytes())).unwrap();
+        let via_owned =
+            ContentDigest::try_from(std::borrow::Cow::<'_, [u8]>::Owned(raw.as_bytes().to_vec()))
+                .unwrap();
+        assert_eq!(via_borrowed, via_owned);
+        assert_eq!(via_borrowed.algorithm(), "sha512");
+        assert_eq!(via_borrowed.hex(), hex);
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>>`] inherits the inherent oracle's
+    /// edge-whitespace trim on both arms so a captured registry stdout
+    /// whose trailing newline rides in the byte buffer still parses on
+    /// either the borrowed or the owned arm.
+    #[test]
+    fn test_try_from_cow_bytes_trims_edge_whitespace_both_arms() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let via_borrowed =
+            ContentDigest::try_from(std::borrow::Cow::Borrowed(raw.as_bytes())).unwrap();
+        let via_owned =
+            ContentDigest::try_from(std::borrow::Cow::<'_, [u8]>::Owned(raw.as_bytes().to_vec()))
+                .unwrap();
+        assert_eq!(via_borrowed.as_str(), expected);
+        assert_eq!(via_owned.as_str(), expected);
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>>`] agrees with the inherent oracle on every
+    /// canonical grammar-failure mode across both arms. Pins the
+    /// "one grammar oracle serves every borrowed-or-owned byte-slice
+    /// parse entry point" invariant. A future refactor that inlined a
+    /// divergent grammar into either arm fails this test.
+    #[test]
+    fn test_try_from_cow_bytes_matches_inherent_parse_on_every_grammar_error_mode() {
+        let err_cases = [
+            "sha256abc123".to_string(),
+            format!("md5:{D1}"),
+            format!("sha1:0123456789abcdef0123456789abcdef01234567"),
+            format!("sha256:{}", &D1[..60]),
+            format!("sha256:{}", D1.to_uppercase()),
+            format!("sha256:{}g", &D1[..63]),
+        ];
+        for raw in err_cases {
+            let via_borrowed = ContentDigest::try_from(std::borrow::Cow::Borrowed(raw.as_bytes()));
+            let via_owned = ContentDigest::try_from(std::borrow::Cow::<'_, [u8]>::Owned(
+                raw.as_bytes().to_vec(),
+            ));
+            let via_inherent = ContentDigest::parse(&raw);
+            assert_eq!(
+                via_borrowed, via_inherent,
+                "TryFrom<Cow::Borrowed<[u8]>> and inherent parse must agree on '{raw}'",
+            );
+            assert_eq!(
+                via_owned, via_inherent,
+                "TryFrom<Cow::Owned<[u8]>> and inherent parse must agree on '{raw}'",
+            );
+            assert!(via_borrowed.is_err());
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>>`] agrees arm-for-arm with the shape-
+    /// matched byte-slice peers: the borrowed arm resolves to the same
+    /// [`Result`] as [`TryFrom<&[u8]>`] on the same byte view, and the
+    /// owned arm resolves to the same [`Result`] as [`TryFrom<Vec<u8>>`]
+    /// on the same owned bytes. Pins the arm-matched delegation
+    /// discipline so a future refactor that collapsed the owned arm
+    /// through the borrowed peer (forcing a re-allocation in the string
+    /// oracle) or the borrowed arm through the owned peer (forcing a
+    /// spurious `to_vec()`) fails this test.
+    #[test]
+    fn test_try_from_cow_bytes_agrees_with_shape_matched_byte_peers() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let ok_cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha512:{hex512}"),
+            format!("  sha256:{D3}\n"),
+        ];
+        for raw in ok_cases {
+            let via_cow_borrowed =
+                ContentDigest::try_from(std::borrow::Cow::Borrowed(raw.as_bytes()));
+            let via_slice = ContentDigest::try_from(raw.as_bytes());
+            assert_eq!(via_cow_borrowed, via_slice);
+
+            let via_cow_owned = ContentDigest::try_from(std::borrow::Cow::<'_, [u8]>::Owned(
+                raw.as_bytes().to_vec(),
+            ));
+            let via_vec = ContentDigest::try_from(raw.as_bytes().to_vec());
+            assert_eq!(via_cow_owned, via_vec);
+        }
+        let err_cases = [
+            "sha256abc",
+            &format!("md5:{D1}"),
+            &format!("sha256:{}", &D1[..60]),
+            &format!("sha256:{}", D1.to_uppercase()),
+            &format!("sha256:{}g", &D1[..63]),
+        ];
+        for raw in err_cases {
+            let via_cow_borrowed =
+                ContentDigest::try_from(std::borrow::Cow::Borrowed(raw.as_bytes()));
+            let via_slice = ContentDigest::try_from(raw.as_bytes());
+            assert_eq!(via_cow_borrowed, via_slice);
+
+            let via_cow_owned = ContentDigest::try_from(std::borrow::Cow::<'_, [u8]>::Owned(
+                raw.as_bytes().to_vec(),
+            ));
+            let via_vec = ContentDigest::try_from(raw.as_bytes().to_vec());
+            assert_eq!(via_cow_owned, via_vec);
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>>`] on a UTF-8-invalid input surfaces
+    /// [`ContentDigestError::InvalidUtf8`] on BOTH arms — the borrowed
+    /// arm through [`std::str::from_utf8`] inside the by-reference
+    /// byte-slice peer, the owned arm through [`String::from_utf8`]
+    /// inside the by-value byte-slice peer. Pins the byte-frontier
+    /// UTF-8 gate on both arms so a downstream consumer receiving a
+    /// raw wire buffer as [`Cow<'_, [u8]>`] cannot leak a non-UTF-8
+    /// sequence past the byte frontier as a MissingSeparator /
+    /// UnsupportedAlgorithm / InvalidHex misdiagnosis.
+    #[test]
+    fn test_try_from_cow_bytes_rejects_invalid_utf8_both_arms() {
+        let mut bytes = format!("sha256:{D1}").into_bytes();
+        bytes.push(0xff);
+        let borrowed_err =
+            ContentDigest::try_from(std::borrow::Cow::Borrowed(bytes.as_slice())).unwrap_err();
+        assert!(matches!(
+            borrowed_err,
+            ContentDigestError::InvalidUtf8 { .. }
+        ));
+        let owned_err = ContentDigest::try_from(std::borrow::Cow::<'_, [u8]>::Owned(bytes.clone()))
+            .unwrap_err();
+        assert!(matches!(owned_err, ContentDigestError::InvalidUtf8 { .. }));
+        assert_eq!(borrowed_err.to_string(), owned_err.to_string());
+    }
+
+    /// The [`TryFrom<Cow<'_, [u8]>>`] impl composes with a generic
+    /// try-conversion helper bounded by `for<'a> TryFrom<Cow<'a, [u8]>,
+    /// Error = ContentDigestError>` — the compositional motivation for
+    /// landing the trait separately from the shape-specific byte-slice
+    /// peers. Pins the borrowed/owned-frontier byte-slice generic-
+    /// consumer surface so a downstream site that types its parse
+    /// contract as [`TryFrom<Cow<'_, [u8]>>`] (a serde
+    /// `try_from = "Cow<'_, [u8]>"` wrapper on a byte-frontier
+    /// deserializer, a caller-agnostic validated builder) recovers the
+    /// same typed value the inherent oracle produces on both arms.
+    #[test]
+    fn test_try_from_cow_bytes_carries_through_generic_consumer() {
+        fn parse_via_try_from<'a, T>(
+            bytes: std::borrow::Cow<'a, [u8]>,
+        ) -> Result<T, ContentDigestError>
+        where
+            T: TryFrom<std::borrow::Cow<'a, [u8]>, Error = ContentDigestError>,
+        {
+            T::try_from(bytes)
+        }
+        let raw = format!("sha256:{D1}");
+        let borrowed: std::borrow::Cow<'_, [u8]> = std::borrow::Cow::Borrowed(raw.as_bytes());
+        let d: ContentDigest = parse_via_try_from(borrowed).unwrap();
+        assert_eq!(d.as_str(), raw);
+        let owned: std::borrow::Cow<'_, [u8]> = std::borrow::Cow::Owned(raw.as_bytes().to_vec());
+        let d2: ContentDigest = parse_via_try_from(owned).unwrap();
+        assert_eq!(d2, d);
+        let err = parse_via_try_from::<ContentDigest>(std::borrow::Cow::Borrowed(b"sha256abc"))
+            .unwrap_err();
+        assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>>`] round-trips through the emit peer
+    /// [`From<ContentDigest> for Cow<'static, [u8]>`] (commit c2a5acf):
+    /// parsing a borrowed-or-owned byte buffer, emitting the owned-arm
+    /// buffer off the resulting value, then re-parsing that emitted
+    /// buffer yields the SAME validated [`ContentDigest`]. Pins the
+    /// "the byte-slice `Cow` parse peer and the byte-slice `Cow` emit
+    /// peer are mutual inverses on the validated subset" invariant,
+    /// closing the round-trip discipline on the [`Cow<'_, [u8]>`] /
+    /// [`Cow<'static, [u8]>`] axis and matching the closed
+    /// [`Cow<'_, str>`] round-trip on the sibling UTF-8-string axis.
+    #[test]
+    fn test_try_from_cow_bytes_round_trips_through_cow_bytes_emit_peer() {
+        let raw = format!("sha256:{D1}");
+        let via_borrowed: std::borrow::Cow<'_, [u8]> = std::borrow::Cow::Borrowed(raw.as_bytes());
+        let d1 = ContentDigest::try_from(via_borrowed).unwrap();
+        let emitted: std::borrow::Cow<'static, [u8]> = d1.clone().into();
+        let d2 = ContentDigest::try_from(emitted).unwrap();
+        assert_eq!(d1, d2);
+        assert_eq!(d2.as_str(), raw);
+    }
+
     /// The [`ContentDigestError::InvalidUtf8`] variant's
     /// [`std::fmt::Display`] arm names the offending lossy-decoded
     /// input so a failure record built from the error string carries
@@ -5010,7 +5372,8 @@ mod tests {
             let via_from_str: ContentDigest = emitted.parse().unwrap();
             let via_try_from_string = ContentDigest::try_from(emitted.clone()).unwrap();
             let via_try_from_cow =
-                ContentDigest::try_from(std::borrow::Cow::Owned(emitted.clone())).unwrap();
+                ContentDigest::try_from(std::borrow::Cow::<'_, str>::Owned(emitted.clone()))
+                    .unwrap();
             assert_eq!(via_parse, original);
             assert_eq!(via_try_from_str, original);
             assert_eq!(via_from_str, original);
@@ -5169,7 +5532,8 @@ mod tests {
             let via_from_str: ContentDigest = decoded.parse().unwrap();
             let via_try_from_string = ContentDigest::try_from(decoded.clone()).unwrap();
             let via_try_from_cow =
-                ContentDigest::try_from(std::borrow::Cow::Owned(decoded.clone())).unwrap();
+                ContentDigest::try_from(std::borrow::Cow::<'_, str>::Owned(decoded.clone()))
+                    .unwrap();
             assert_eq!(via_parse, original);
             assert_eq!(via_try_from_str, original);
             assert_eq!(via_from_str, original);
@@ -5325,7 +5689,8 @@ mod tests {
             let via_try_from_string =
                 ContentDigest::try_from(String::from(emitted.clone())).unwrap();
             let via_try_from_cow =
-                ContentDigest::try_from(std::borrow::Cow::Owned(String::from(emitted))).unwrap();
+                ContentDigest::try_from(std::borrow::Cow::<'_, str>::Owned(String::from(emitted)))
+                    .unwrap();
             assert_eq!(via_parse, original);
             assert_eq!(via_try_from_str, original);
             assert_eq!(via_from_str, original);
