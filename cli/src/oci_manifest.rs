@@ -498,6 +498,106 @@ impl TryFrom<&[u8]> for ContentDigest {
     }
 }
 
+/// [`TryFrom<Vec<u8>>`] for [`ContentDigest`] routes through
+/// [`String::from_utf8`] then delegates to
+/// [`<ContentDigest as TryFrom<String>>::try_from`] so a downstream
+/// consumer holding an owned byte buffer at a raw-byte frontier (a
+/// consumed `reqwest::Response::bytes()` future materialised into
+/// `Vec<u8>`, a moved `std::fs::read` of a cached digest file, a
+/// `serde_bytes`-decoded field on an owned schema value, a
+/// tokio-mpsc-received `Vec<u8>` frame that carries the digest token
+/// as its payload) recovers a [`ContentDigest`] value from its
+/// canonical `<algorithm>:<hex>` owned-byte serialization through the
+/// same one-oracle grammar the `.parse::<ContentDigest>()` string
+/// call sites already read — WITHOUT the by-reference bridge
+/// (`ContentDigest::try_from(bytes.as_slice())`) that leaks the owned
+/// [`Vec<u8>`] allocation and forces the string oracle to re-allocate
+/// its own owned backing string off the borrowed view.
+///
+/// Zero-copy on the happy path: [`String::from_utf8`] consumes the
+/// owned [`Vec<u8>`] and — on successful UTF-8 validation — reuses
+/// the same allocation as the returned [`String`]'s backing storage
+/// (the standard library documents this as an in-place check, no
+/// re-allocation). The resulting owned [`String`] then flows into
+/// the by-value string parse peer [`TryFrom<String> for ContentDigest`]
+/// which itself moves the string into the validated
+/// [`ContentDigest`]'s backing storage on success — one allocation,
+/// consumed at intake, carried through parse, landed on the typed
+/// value. The prior route through the borrowed-byte peer
+/// (`ContentDigest::try_from(bytes.as_slice())`) instead forced a
+/// second allocation inside the string oracle (`trimmed.to_string()`
+/// at [`ContentDigest::parse`]) because the borrowed input could
+/// not be moved.
+///
+/// The by-value owned-byte-slice parse peer of [`TryFrom<&[u8]> for
+/// ContentDigest`] on the reference-grammar family — the parse
+/// surface is now closed across the borrowed-string
+/// ([`TryFrom<&str>`]), owned-string ([`TryFrom<String>`]),
+/// borrowed-or-owned-string ([`TryFrom<Cow<'_, str>>`]),
+/// borrowed-byte-slice ([`TryFrom<&[u8]>`]), AND owned-byte-slice
+/// (this [`TryFrom<Vec<u8>>`]) input frontiers — mirroring the emit
+/// surface which is already closed across the by-value owned targets
+/// on both axes ([`From<ContentDigest> for String`],
+/// [`From<ContentDigest> for Vec<u8>`]). A downstream site that
+/// received its input at any of those frontiers routes through the
+/// same [`ContentDigest::parse`] oracle without a per-consumer
+/// `String::from_utf8(bytes)?.try_into()` bridge — the pattern this
+/// impl absorbs at one site so no downstream site restates it.
+/// Structural mirror of [`impl TryFrom<Vec<u8>> for
+/// crate::retry::PerAttemptRegion`], the by-value owned-byte-slice
+/// parse peer on the sibling label-axis ordered typed sum that
+/// already carries the complete owned-shape parse-peer set
+/// ([`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`],
+/// [`TryFrom<Rc<str>>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`],
+/// [`TryFrom<Rc<[u8]>>`]) — the digest reference-grammar family
+/// begins closing that same owned-shape parse-peer surface here,
+/// starting with the by-value owned-byte-slice peer whose emit
+/// counterpart [`From<ContentDigest> for Vec<u8>`] already exists.
+///
+/// The [`Err`](std::convert::TryFrom::Error) type is
+/// [`ContentDigestError`] — the same typed error every by-reference
+/// and by-value parse surface emits. The three grammar-failure
+/// variants ([`ContentDigestError::MissingSeparator`],
+/// [`ContentDigestError::UnsupportedAlgorithm`],
+/// [`ContentDigestError::InvalidHex`]) route unchanged through the
+/// string oracle once UTF-8 validation clears; a UTF-8-invalid input
+/// (a stray non-UTF-8 byte in an owned wire buffer, a
+/// partial-write byte tail materialised as owned bytes) surfaces as
+/// [`ContentDigestError::InvalidUtf8`] carrying the lossy-decoded
+/// rendering of the offending bytes so a caller that pins a
+/// per-variant handling policy at its own frontier can distinguish
+/// arms directly off the
+/// [`Result<ContentDigest, ContentDigestError>`] the impl returns.
+/// On the UTF-8-invalid path the owned [`Vec<u8>`] is recovered
+/// through [`std::string::FromUtf8Error::into_bytes`] so the lossy
+/// rendering names the exact bytes the caller supplied — no data
+/// loss between the intake buffer and the failure record.
+///
+/// THEORY.md §III.1 typescape: the by-value owned-byte-slice
+/// try-conversion surface is a typed-primitive site on
+/// [`ContentDigest`] itself (one [`TryFrom<Vec<u8>>`] impl routing
+/// through [`String::from_utf8`] then [`TryFrom<String>`]), not a
+/// per-consumer `String::from_utf8(bytes)?.try_into()` bridge at
+/// every downstream site that owns a byte buffer. THEORY.md §VI.1
+/// one-oracle: the canonical `<algorithm>:<hex>` grammar is named
+/// at one site ([`ContentDigest::parse`]), and every parse surface —
+/// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], this
+/// [`TryFrom<Vec<u8>>`] — reads through it.
+impl TryFrom<Vec<u8>> for ContentDigest {
+    type Error = ContentDigestError;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        match String::from_utf8(bytes) {
+            Ok(s) => <Self as TryFrom<String>>::try_from(s),
+            Err(err) => Err(ContentDigestError::InvalidUtf8 {
+                input: String::from_utf8_lossy(&err.into_bytes()).into_owned(),
+            }),
+        }
+    }
+}
+
 /// [`AsRef<str>`] for [`ContentDigest`] routes through
 /// [`ContentDigest::as_str`] so a downstream consumer bound by
 /// `impl AsRef<str>` (a [`std::path::Path::new`] / [`std::fs::write`]
@@ -3115,6 +3215,229 @@ mod tests {
         assert_eq!(d.as_str(), raw);
         let err = parse_via_try_from::<ContentDigest>(b"sha256abc").unwrap_err();
         assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
+    }
+
+    /// [`TryFrom<Vec<u8>>`] succeeds on the owned-byte serialization
+    /// of a well-formed sha256 digest and yields the same validated
+    /// value as the inherent oracle. The by-value owned-byte-slice
+    /// parse surface — the natural intake for a consumer that owns a
+    /// [`Vec<u8>`] materialised off a completed
+    /// `reqwest::Response::bytes()` future, a moved [`std::fs::read`],
+    /// or a `serde_bytes`-decoded owned field — routes through the
+    /// same one-oracle grammar as every other parse peer.
+    #[test]
+    fn test_try_from_vec_bytes_parses_sha256_digest() {
+        let raw = format!("sha256:{D1}");
+        let bytes = raw.clone().into_bytes();
+        let d = ContentDigest::try_from(bytes).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha256");
+        assert_eq!(d.hex(), D1);
+        let inherent = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(d, inherent);
+    }
+
+    /// [`TryFrom<Vec<u8>>`] succeeds on the owned-byte serialization
+    /// of a well-formed sha512 digest — the second supported algorithm
+    /// at the digest reference-grammar family. Pins the impl across
+    /// both algorithms so a widening at the inherent oracle (e.g.
+    /// `sha384`) is caught by an existing test on this derived
+    /// surface.
+    #[test]
+    fn test_try_from_vec_bytes_parses_sha512_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let d = ContentDigest::try_from(raw.clone().into_bytes()).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha512");
+        assert_eq!(d.hex(), hex);
+    }
+
+    /// [`TryFrom<Vec<u8>>`] trims leading / trailing ASCII whitespace
+    /// on the delegated string oracle — an owned wire buffer whose
+    /// trailing newline rides in the moved [`Vec<u8>`] parses
+    /// successfully because the string oracle whitespace-trims before
+    /// checking the grammar. Pins the trim discipline carrying
+    /// through the owned-byte frontier.
+    #[test]
+    fn test_try_from_vec_bytes_trims_edge_whitespace() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let d = ContentDigest::try_from(raw.into_bytes()).unwrap();
+        assert_eq!(d.as_str(), expected);
+    }
+
+    /// [`TryFrom<Vec<u8>>`] on a UTF-8-valid input emits the SAME
+    /// error [`ContentDigest::parse`] emits on every grammar-failure
+    /// input — the missing-separator, unsupported-algorithm, and
+    /// invalid-hex variants route through the string oracle unchanged
+    /// once UTF-8 validation clears. Pins the "owned-byte parse
+    /// surface reads through the string parse oracle on
+    /// grammar-failure inputs" invariant so a future refactor that
+    /// inlined a divergent grammar into the owned-byte peer fails
+    /// this test.
+    #[test]
+    fn test_try_from_vec_bytes_matches_inherent_parse_on_every_grammar_error_mode() {
+        let err_cases: [String; 5] = [
+            "sha256abc".to_string(),                 // missing separator
+            format!("md5:{D1}"),                     // unsupported algorithm
+            format!("sha256:{}", &D1[..60]),         // wrong hex length
+            format!("sha256:{}", D1.to_uppercase()), // uppercase hex
+            format!("sha256:{}g", &D1[..63]),        // non-hex byte
+        ];
+        for raw in err_cases {
+            let via_vec = ContentDigest::try_from(raw.clone().into_bytes());
+            let via_inherent = ContentDigest::parse(&raw);
+            assert_eq!(
+                via_vec, via_inherent,
+                "TryFrom<Vec<u8>> and inherent parse must agree on '{raw}'",
+            );
+        }
+    }
+
+    /// [`TryFrom<Vec<u8>>`] agrees with [`TryFrom<&[u8]>`] on every
+    /// well-formed AND UTF-8-valid grammar-failure input — the
+    /// owned-byte parse surface and the borrowed-byte parse surface
+    /// resolve to the SAME [`Result<ContentDigest, ContentDigestError>`]
+    /// across every input the two share, so a downstream site that
+    /// migrates a consumer from `bytes.as_slice().try_into()`
+    /// (borrowed) to a direct owned-byte consumer keyed on
+    /// [`TryFrom<Vec<u8>>`] yields identical values and identical
+    /// errors at every input. Pins the "owned and borrowed byte
+    /// parse peers read through the same canonical oracle" invariant.
+    #[test]
+    fn test_try_from_vec_bytes_agrees_with_try_from_byte_slice() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let ok_cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha512:{hex512}"),
+            format!("  sha256:{D3}\n"),
+        ];
+        for raw in ok_cases {
+            let via_vec = ContentDigest::try_from(raw.clone().into_bytes());
+            let via_slice = ContentDigest::try_from(raw.as_bytes());
+            assert_eq!(via_vec, via_slice);
+        }
+        let err_cases: [String; 5] = [
+            "sha256abc".to_string(),
+            format!("md5:{D1}"),
+            format!("sha256:{}", &D1[..60]),
+            format!("sha256:{}", D1.to_uppercase()),
+            format!("sha256:{}g", &D1[..63]),
+        ];
+        for raw in err_cases {
+            let via_vec = ContentDigest::try_from(raw.clone().into_bytes());
+            let via_slice = ContentDigest::try_from(raw.as_bytes());
+            assert_eq!(via_vec, via_slice);
+        }
+    }
+
+    /// [`TryFrom<Vec<u8>>`] agrees with [`TryFrom<String>`] on every
+    /// well-formed input — the by-value owned-byte parse peer and the
+    /// by-value owned-UTF-8 parse peer resolve to the SAME validated
+    /// [`ContentDigest`] value across every input both accept. Pins
+    /// the "the two by-value owned parse peers route through the same
+    /// canonical oracle" cross-axis invariant so a divergence between
+    /// the owned-UTF-8 and owned-byte parse paths (one accepting
+    /// inputs the other rejects) fails this test.
+    #[test]
+    fn test_try_from_vec_bytes_agrees_with_try_from_string() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let ok_cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha512:{hex512}"),
+            format!("  sha256:{D3}\n"),
+        ];
+        for raw in ok_cases {
+            let via_vec = ContentDigest::try_from(raw.clone().into_bytes());
+            let via_string = ContentDigest::try_from(raw.clone());
+            assert_eq!(via_vec, via_string);
+        }
+    }
+
+    /// [`TryFrom<Vec<u8>>`] on a UTF-8-invalid owned buffer surfaces
+    /// the [`ContentDigestError::InvalidUtf8`] variant carrying the
+    /// lossy-decoded rendering of the offending bytes — the same
+    /// byte-frontier-specific failure mode the borrowed-byte peer
+    /// emits, so a downstream site whose failure branch pattern-
+    /// matches on [`ContentDigestError::InvalidUtf8`] handles owned
+    /// and borrowed byte inputs uniformly. Pins the load-bearing
+    /// "the by-value owned-byte peer recovers the input through
+    /// [`FromUtf8Error::into_bytes`] and renders it lossy" invariant:
+    /// a future refactor that dropped the input from the error would
+    /// fail this test.
+    #[test]
+    fn test_try_from_vec_bytes_rejects_invalid_utf8() {
+        let mut bytes = format!("sha256:{D1}").into_bytes();
+        bytes.push(0xff);
+        let err = ContentDigest::try_from(bytes).unwrap_err();
+        assert!(matches!(err, ContentDigestError::InvalidUtf8 { .. }));
+        assert!(
+            err.to_string().contains("sha256:"),
+            "InvalidUtf8 display must name the lossy-decoded input; got: {err}"
+        );
+    }
+
+    /// [`TryFrom<Vec<u8>>`] on a purely-invalid-UTF-8 owned buffer
+    /// (no well-formed prefix) surfaces
+    /// [`ContentDigestError::InvalidUtf8`] — the owned-byte peer fails
+    /// at the UTF-8 gate before any grammar predicate runs, so a
+    /// consumer that receives arbitrary owned bytes off a
+    /// `serde_bytes`-decoded owned field, a tokio-mpsc `Vec<u8>`
+    /// frame, or a moved raw file read cannot leak through as a
+    /// MissingSeparator / UnsupportedAlgorithm / InvalidHex
+    /// misdiagnosis.
+    #[test]
+    fn test_try_from_vec_bytes_rejects_pure_invalid_utf8() {
+        let bytes: Vec<u8> = vec![0xff, 0xfe, 0xfd, 0xfc];
+        let err = ContentDigest::try_from(bytes).unwrap_err();
+        assert!(matches!(err, ContentDigestError::InvalidUtf8 { .. }));
+    }
+
+    /// The [`TryFrom<Vec<u8>>`] impl composes with a generic
+    /// try-conversion helper bounded by `TryFrom<Vec<u8>, Error =
+    /// ContentDigestError>` — the compositional motivation for
+    /// landing the trait separately from the borrowed-byte parse
+    /// surface. Pins the by-value generic-consumer surface so a
+    /// downstream site that types its parse contract as
+    /// [`TryFrom<Vec<u8>>`] (an owned-input validated-builder helper,
+    /// a `serde_bytes`-frontier wrapper that hands its container an
+    /// owned [`Vec<u8>`]) recovers the same typed value the inherent
+    /// oracle produces.
+    #[test]
+    fn test_try_from_vec_bytes_carries_through_generic_consumer() {
+        fn parse_via_try_from<T: TryFrom<Vec<u8>, Error = ContentDigestError>>(
+            bytes: Vec<u8>,
+        ) -> Result<T, ContentDigestError> {
+            T::try_from(bytes)
+        }
+        let raw = format!("sha256:{D1}");
+        let d: ContentDigest = parse_via_try_from(raw.clone().into_bytes()).unwrap();
+        assert_eq!(d.as_str(), raw);
+        let err = parse_via_try_from::<ContentDigest>(b"sha256abc".to_vec()).unwrap_err();
+        assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
+    }
+
+    /// [`TryFrom<Vec<u8>>`] round-trips through the emit peer
+    /// [`From<ContentDigest> for Vec<u8>`] — parsing an owned buffer,
+    /// emitting the owned buffer off the resulting value, then
+    /// re-parsing that emitted buffer yields the SAME validated
+    /// [`ContentDigest`]. Pins the "the by-value owned-byte parse peer
+    /// and the by-value owned-byte emit peer are mutual inverses on
+    /// the validated subset" invariant, closing the round-trip
+    /// discipline on the owned-byte axis (the string-axis round-trip
+    /// through [`TryFrom<String>`] / [`From<ContentDigest> for
+    /// String`] is already pinned by prior tests).
+    #[test]
+    fn test_try_from_vec_bytes_round_trips_through_vec_emit_peer() {
+        let raw = format!("sha256:{D1}");
+        let d1 = ContentDigest::try_from(raw.clone().into_bytes()).unwrap();
+        let emitted: Vec<u8> = d1.clone().into();
+        let d2 = ContentDigest::try_from(emitted).unwrap();
+        assert_eq!(d1, d2);
+        assert_eq!(d2.as_str(), raw);
     }
 
     /// The [`ContentDigestError::InvalidUtf8`] variant's
