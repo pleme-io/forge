@@ -1158,6 +1158,143 @@ impl From<ContentDigest> for std::sync::Arc<str> {
     }
 }
 
+/// [`From<ContentDigest>`] for [`std::rc::Rc<str>`] moves the validated
+/// `<algorithm>:<hex>` backing string out of the consumed [`ContentDigest`]
+/// value into an immutable, single-thread, shared-owned [`Rc<str>`] at
+/// exactly the label's length — the impl routes through
+/// [`<ContentDigest as From<ContentDigest>>::from`] into [`String`] (which
+/// moves [`ContentDigest::full`] out at zero-copy) and then
+/// [`std::rc::Rc::<str>::from`] on the moved [`String`] (which repackages
+/// the backing buffer as an immutable shared-owned [`Rc<str>`] with a
+/// single non-atomic-refcount header preceding the label bytes). No
+/// re-formatting through [`std::fmt::Display`], no
+/// `Rc::<str>::from(digest.as_str())` bridge that would copy the backing
+/// bytes into a fresh allocation while leaking the consumed
+/// [`ContentDigest`]'s owned [`String`], no `digest.to_string().into()`
+/// chain that would re-run [`std::fmt::Display`] over the already-canonical
+/// backing.
+///
+/// A downstream consumer that owns a [`ContentDigest`] and needs to hand
+/// it off as a same-thread shared-owned label to a non-atomic-refcounted
+/// sink (a single-thread `HashMap<Rc<str>, _>` registry cache built once
+/// per pipeline pass and cloned across peer inspectors at `O(1)`
+/// [`Rc::clone`] cost with no atomic-op fence, an `Rc<Manifest>`
+/// structural field whose digest slot is stored as [`Rc<str>`] to share a
+/// single label allocation across per-worker readers of the manifest
+/// within one thread, a `!Send` per-task lookaside built during a
+/// synchronous scan phase that keys entries on the digest without
+/// paying [`Arc`]'s atomic refcount, a `LocalKey` / `thread_local!`
+/// per-thread digest interner that fans out `Rc<str>` handles to
+/// inline inspection helpers) is a one-line `Rc::<str>::from(digest)` /
+/// `digest.into()` call, not a per-site
+/// `Rc::<str>::from(digest.as_str())` bridge that leaks the consumed
+/// [`ContentDigest`]'s owned [`String`] nor a
+/// `Rc::<str>::from(digest.to_string())` chain that pays a redundant
+/// [`Display`]-format allocation on top of the shared-owned repackaging.
+///
+/// The by-value single-thread shared-owned UTF-8 emit peer of the
+/// by-value owned-UTF-8 emit peer [`From<ContentDigest> for String`]
+/// (commit 83313fd), the by-value owned-byte-slice emit peer
+/// [`From<ContentDigest> for Vec<u8>`] (commit e1ea855), the by-value
+/// shrunk-owned UTF-8 emit peer [`From<ContentDigest> for Box<str>`]
+/// (commit 0e86524), the by-value borrowed/owned-frontier emit peer
+/// [`From<ContentDigest> for Cow<'static, str>`] (commit 15b7a05), and
+/// the by-value cross-thread shared-owned UTF-8 emit peer
+/// [`From<ContentDigest> for Arc<str>`] (commit 5f85247): all six
+/// surfaces move the same validated full-digest bytes out of the
+/// consumed [`ContentDigest`], differing only on the owner-shape of the
+/// emitted receiver — [`String`] for resizable growth-header owners,
+/// [`Vec<u8>`] for byte-oriented sinks, [`Box<str>`] for immutable
+/// heap-owned label slots that trade the growth-header word for a
+/// two-word slice pointer, [`Cow<'static, str>`] for borrowed/owned-
+/// frontier sinks, [`Arc<str>`] for cross-thread shared-owned label
+/// slots that carry an atomic-refcount header, this [`Rc<str>`] for
+/// single-thread shared-owned label slots that carry a non-atomic-
+/// refcount header so consumers `Rc::clone` the label within one
+/// thread at pointer-copy + integer-increment cost with no atomic fence
+/// and no per-clone allocation. All six route through the
+/// [`From<ContentDigest> for String`] emit oracle: the [`String`] peer
+/// moves [`ContentDigest::full`] directly, the [`Vec<u8>`] peer chains
+/// through [`String::into_bytes`], the [`Box<str>`] peer chains through
+/// [`String::into_boxed_str`], the [`Cow<'static, str>`] peer wraps the
+/// moved [`String`] in [`Cow::Owned`], the [`Arc<str>`] peer chains
+/// through [`std::sync::Arc::<str>::from`], this [`Rc<str>`] peer
+/// chains through [`std::rc::Rc::<str>::from`] applied to the moved
+/// [`String`] — the six agree byte-for-byte on the canonical form by
+/// construction, and a future canonicalising refinement to the
+/// [`String`] emit surface propagates to the single-thread shared-owned
+/// frontier at zero per-consumer cost.
+///
+/// Structural mirror of the sibling label-axis
+/// `From<T> for std::rc::Rc<std::ffi::CStr>` closer trio on
+/// [`crate::retry::PerAttemptRegion`], [`crate::probe_outcome::AdmissionTier`],
+/// and [`crate::version::BumpLevel`] — the trio already carries the
+/// by-value thread-local shared-owned emit surface at its
+/// NUL-terminated C-string frontier (commits 71e7707, 61d51ad,
+/// dbaf0a3), and this impl extends the same discipline to the digest
+/// reference-grammar family at its UTF-8 frontier. The parse-oracle-
+/// bounded typed primitive [`ContentDigest`] now exposes the same
+/// thread-local shared-owned emit surface every sibling typed primitive
+/// on the string-owner axis already carries.
+///
+/// Zero-copy on the digest bytes by construction: [`String::from(digest)`]
+/// moves [`ContentDigest::full`] out at zero-copy, and
+/// [`std::rc::Rc::<str>::from`] on the moved [`String`] performs a
+/// single non-atomic-refcount allocation of exactly `label.len() +
+/// refcount header` bytes and copies the label bytes into that
+/// allocation once (the [`String`]'s heap buffer cannot itself be
+/// repurposed because the [`Rc<str>`] layout requires the non-atomic-
+/// refcount header to precede the str body, and [`String`]'s backing
+/// has no such header). This is strictly the minimum cost of shifting
+/// from the resizable-growth-header [`String`] shape to the
+/// immutable-shared-refcount [`Rc<str>`] shape; no [`std::fmt::Display`]
+/// round-trip, no intermediate [`Box<str>`] allocation, no per-consumer
+/// bridge cost. A single-thread caller that would otherwise pay
+/// [`Arc<str>`]'s atomic-refcount header for a cache slot never
+/// accessed from another thread saves the atomic-op cost on every
+/// clone by construction.
+///
+/// The identity `<std::rc::Rc<str> as std::ops::Deref>::deref(
+/// &std::rc::Rc::<str>::from(digest.clone())) == digest.as_str()` at
+/// every validated [`ContentDigest`] value is pinned by
+/// [`tests::test_from_content_digest_rc_str_matches_as_str`]; the
+/// identity carrying through a generic `impl Into<std::rc::Rc<str>>`
+/// consumer is pinned by
+/// [`tests::test_from_content_digest_rc_str_carries_through_generic_consumer`];
+/// the parse-round-trip identity through the shared-owned UTF-8 emit
+/// surface (parsing the emitted [`Rc<str>`]'s deref view back through
+/// every canonical parse surface) is pinned by
+/// [`tests::test_from_content_digest_rc_str_parse_round_trip`]; the
+/// same-thread `Rc::clone` shared-allocation semantic is pinned by
+/// [`tests::test_from_content_digest_rc_str_clones_share_allocation`].
+///
+/// A future refinement to the inherent [`ContentDigest::parse`] grammar
+/// (widening to `sha384`, tightening the trim behaviour) or to the
+/// [`From<ContentDigest> for String`] emit oracle (a canonicalising
+/// projection at the owned-UTF-8 frontier) is a one-site edit at the
+/// inherent / owned-UTF-8 oracle; every consumer bound by
+/// `impl Into<std::rc::Rc<str>>` inherits the refined canonical
+/// shared-owned label off the moved backing storage automatically with
+/// no downstream retyping.
+///
+/// THEORY.md §III.1 typescape: the by-value single-thread shared-owned
+/// UTF-8 emit surface is a typed-primitive site on [`ContentDigest`]
+/// itself (one [`From<ContentDigest>`] impl chaining through the
+/// [`From<ContentDigest> for String`] emit oracle via
+/// [`std::rc::Rc::<str>::from`]), not a per-consumer
+/// `Rc::<str>::from(digest.as_str())` restatement at every downstream
+/// site that accepts `impl Into<std::rc::Rc<str>>`. THEORY.md §VI.1
+/// one-oracle: the validated full-digest bytes are named at one site
+/// ([`From<ContentDigest> for String`], reading through the moved
+/// [`ContentDigest::full`] backing), and every by-value owned emit
+/// surface — [`String`], [`Vec<u8>`], [`Box<str>`], [`Cow<'static, str>`],
+/// [`Arc<str>`], this [`Rc<str>`] — reads through it.
+impl From<ContentDigest> for std::rc::Rc<str> {
+    fn from(digest: ContentDigest) -> std::rc::Rc<str> {
+        std::rc::Rc::<str>::from(String::from(digest))
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -3344,6 +3481,187 @@ mod tests {
             .join()
             .unwrap();
         assert_eq!(joined, raw);
+    }
+
+    /// [`From<ContentDigest> for std::rc::Rc<str>`] emits the same
+    /// canonical `<algorithm>:<hex>` slice every borrowed-view read
+    /// surface exposes. Pins the single-thread shared-owned frontier
+    /// emit peer to the [`ContentDigest::as_str`] one-oracle read
+    /// surface at every supported algorithm, so a widening at the
+    /// inherent oracle is caught by an existing test on this derived
+    /// surface.
+    #[test]
+    fn test_from_content_digest_rc_str_matches_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let borrowed_as_str = d.as_str().to_owned();
+            let via_display = format!("{d}");
+            let emitted: std::rc::Rc<str> = std::rc::Rc::<str>::from(d);
+            assert_eq!(&*emitted, borrowed_as_str.as_str());
+            assert_eq!(&*emitted, via_display.as_str());
+            assert_eq!(&*emitted, raw.as_str());
+        }
+    }
+
+    /// [`From<ContentDigest> for std::rc::Rc<str>`] emits the full
+    /// `<algorithm>:<hex>` slice for a sha256 digest. Pins the primary
+    /// registry algorithm on the by-value single-thread shared-owned
+    /// UTF-8 emit surface — the emitted [`Rc<str>`] is byte-identical
+    /// to the input the inherent oracle accepted.
+    #[test]
+    fn test_from_content_digest_rc_str_sha256_full_digest() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::rc::Rc<str> = d.into();
+        assert_eq!(&*emitted, raw.as_str());
+        assert!(emitted.starts_with("sha256:"));
+        assert_eq!(&emitted[7..], D1);
+    }
+
+    /// [`From<ContentDigest> for std::rc::Rc<str>`] emits the full
+    /// `<algorithm>:<hex>` slice for a sha512 digest. Pins the second
+    /// supported algorithm on the by-value single-thread shared-owned
+    /// UTF-8 emit surface so a widening at the inherent oracle is
+    /// caught by an existing test on this derived surface.
+    #[test]
+    fn test_from_content_digest_rc_str_sha512_full_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::rc::Rc<str> = d.into();
+        assert_eq!(&*emitted, raw.as_str());
+        assert!(emitted.starts_with("sha512:"));
+        assert_eq!(&emitted[7..], hex.as_str());
+    }
+
+    /// [`From<ContentDigest> for std::rc::Rc<str>`] emits the trimmed
+    /// canonical form on an input the inherent oracle whitespace-
+    /// trimmed at parse time — the emit surface projects the canonical
+    /// trimmed value, not the caller's stray-whitespace raw input.
+    /// Pins the trim discipline carrying through the by-value
+    /// single-thread shared-owned UTF-8 emit surface.
+    #[test]
+    fn test_from_content_digest_rc_str_after_whitespace_trim() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::rc::Rc<str> = d.into();
+        assert_eq!(&*emitted, expected.as_str());
+        assert!(!emitted.starts_with(' '));
+        assert!(!emitted.ends_with('\n'));
+    }
+
+    /// The [`From<ContentDigest> for std::rc::Rc<str>`] impl composes
+    /// with a generic single-thread shared-owned-label helper bounded
+    /// by `impl Into<std::rc::Rc<str>>` — the compositional motivation
+    /// for landing the trait separately from the atomic-shared-owned
+    /// [`From<ContentDigest> for Arc<str>`] emit peer. Pins the
+    /// trait-generic consumer surface: a downstream site that types
+    /// its input contract as `impl Into<Rc<str>>` (a same-thread
+    /// `HashMap<Rc<str>, _>` registry cache built once per pipeline
+    /// pass, a `thread_local!` per-thread digest interner that fans
+    /// out `Rc<str>` handles to inline inspection helpers, a `!Send`
+    /// per-task lookaside that keys entries on the digest without
+    /// paying `Arc`'s atomic refcount) recovers the same validated
+    /// full-digest [`Rc<str>`] a direct `Rc::<str>::from(digest.as_str())`
+    /// call would, at exactly the shared-owned repackaging cost off
+    /// the moved backing storage.
+    #[test]
+    fn test_from_content_digest_rc_str_carries_through_generic_consumer() {
+        fn first_char_of<T: Into<std::rc::Rc<str>>>(t: T) -> char {
+            let a: std::rc::Rc<str> = t.into();
+            a.chars().next().unwrap()
+        }
+        fn length_of<T: Into<std::rc::Rc<str>>>(t: T) -> usize {
+            let a: std::rc::Rc<str> = t.into();
+            a.len()
+        }
+        fn rc_eq<T: Into<std::rc::Rc<str>>>(t: T, expected: &str) -> bool {
+            let a: std::rc::Rc<str> = t.into();
+            &*a == expected
+        }
+        let raw = format!("sha256:{D1}");
+        let d1 = ContentDigest::parse(&raw).unwrap();
+        let d2 = d1.clone();
+        let d3 = d1.clone();
+        assert_eq!(first_char_of(d1), 's');
+        assert_eq!(length_of(d2), raw.len());
+        assert!(rc_eq(d3, &raw));
+    }
+
+    /// A validated digest's [`From<ContentDigest> for std::rc::Rc<str>`]
+    /// output round-trips through the full parse-surface set — inherent
+    /// [`ContentDigest::parse`], [`TryFrom<&str>`],
+    /// [`FromStr`](std::str::FromStr), [`TryFrom<String>`],
+    /// [`TryFrom<Cow<'_, str>>`] — back to the same validated
+    /// [`ContentDigest`] value. Pins the "single-thread shared-owned
+    /// emit surface projects exactly the canonical form every parse
+    /// surface accepts" invariant so a future canonicalising refinement
+    /// to the backing string that broke round-trip via the single-
+    /// thread shared-owned UTF-8 emit peer fails this test.
+    #[test]
+    fn test_from_content_digest_rc_str_parse_round_trip() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let original = ContentDigest::parse(&raw).unwrap();
+            let emitted: std::rc::Rc<str> = std::rc::Rc::<str>::from(original.clone());
+            let via_parse = ContentDigest::parse(&emitted).unwrap();
+            let via_try_from_str = ContentDigest::try_from(&*emitted).unwrap();
+            let via_from_str: ContentDigest = emitted.parse().unwrap();
+            let via_try_from_string = ContentDigest::try_from(emitted.to_string()).unwrap();
+            let via_try_from_cow =
+                ContentDigest::try_from(std::borrow::Cow::Borrowed(&*emitted)).unwrap();
+            assert_eq!(via_parse, original);
+            assert_eq!(via_try_from_str, original);
+            assert_eq!(via_from_str, original);
+            assert_eq!(via_try_from_string, original);
+            assert_eq!(via_try_from_cow, original);
+        }
+    }
+
+    /// [`From<ContentDigest> for std::rc::Rc<str>`] emits an
+    /// [`Rc<str>`] whose [`Rc::clone`] returns a second handle onto
+    /// the same shared allocation — the load-bearing property of the
+    /// single-thread shared-owned frontier that a downstream
+    /// same-thread cache slot (a `HashMap<Rc<str>, _>` per-pipeline
+    /// registry, a `thread_local!` digest interner) relies on to fan
+    /// a single label allocation across per-worker readers at
+    /// pointer-copy + integer-increment cost with no atomic-op fence.
+    /// Pins the shared-allocation identity so a future refactor that
+    /// accidentally re-allocated on [`Rc::clone`] (a rebox through
+    /// `to_string().into()` in the emit path, a per-clone
+    /// `Rc::<str>::from(&*self)` chain) fails this test.
+    #[test]
+    fn test_from_content_digest_rc_str_clones_share_allocation() {
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let emitted: std::rc::Rc<str> = d.into();
+        let cloned = std::rc::Rc::clone(&emitted);
+        assert!(
+            std::rc::Rc::ptr_eq(&emitted, &cloned),
+            "Rc::clone on the emitted Rc<str> must return a handle onto the same shared \
+             allocation, not a fresh allocation of the label bytes"
+        );
+        assert_eq!(&*cloned, raw.as_str());
+        assert_eq!(std::rc::Rc::strong_count(&emitted), 2);
+        let third = std::rc::Rc::clone(&emitted);
+        assert_eq!(std::rc::Rc::strong_count(&emitted), 3);
+        assert!(std::rc::Rc::ptr_eq(&emitted, &third));
+        drop(third);
+        assert_eq!(std::rc::Rc::strong_count(&emitted), 2);
     }
 
     /// An OCI image manifest (the standard single-image shape skopeo
