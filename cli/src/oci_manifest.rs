@@ -707,6 +707,125 @@ impl TryFrom<Box<str>> for ContentDigest {
     }
 }
 
+/// [`TryFrom<Arc<str>>`] for [`ContentDigest`] routes through
+/// [`<std::sync::Arc<str> as AsRef<str>>::as_ref`] (a zero-copy borrow of
+/// the shared allocation's UTF-8 backing bytes that does NOT touch the
+/// atomic-refcount header) then delegates to
+/// [`<ContentDigest as TryFrom<&str>>::try_from`] so a downstream
+/// consumer holding a shared-owned UTF-8 buffer at a refcount-headered
+/// frontier (a serde container that opts into
+/// `#[serde(try_from = "Arc<str>")]` on a wrapper field to consume a
+/// cross-thread shared-owned label without a per-consumer allocation, a
+/// validated-input newtype builder whose parse contract accepts a
+/// caller-supplied [`Arc<str>`] label slot at the shared-owned frontier
+/// for cross-thread cheap-clone semantics on the input, a
+/// `dashmap`-style keyed-table consumer whose key slot arrives as a
+/// shared-owned label from an upstream table build refcounted across
+/// worker threads, a `Vec<Arc<str>>` per-attempt digest list handed
+/// cheaply through [`Arc::clone`] to each parse worker) recovers a
+/// [`ContentDigest`] value from its canonical `<algorithm>:<hex>`
+/// shared-owned UTF-8 serialization through the same one-oracle grammar
+/// the `.parse::<ContentDigest>()` string call sites already read —
+/// WITHOUT a per-consumer `shared.parse::<ContentDigest>()` restatement
+/// at every downstream site, WITHOUT an
+/// [`std::sync::Arc::try_unwrap`]-fallback-clone-then-parse cascade
+/// that would negotiate the refcount at every intake, and WITHOUT an
+/// `Arc::to_string()`-then-parse round trip that would allocate a fresh
+/// owned [`String`] off the shared borrow for each parse pass.
+///
+/// Zero-touch on the atomic refcount during the parse: the receiver-side
+/// [`<std::sync::Arc<str> as AsRef<str>>::as_ref`] call yields a
+/// borrowed `&str` view of the shared allocation's UTF-8 payload without
+/// allocating and without incrementing or decrementing the atomic
+/// refcount header preceding the label bytes, so the parse-side receiver
+/// pays the by-reference [`ContentDigest::parse`] cost only, not the
+/// atomic-op cost of a
+/// [`std::sync::Arc::try_unwrap`]-fallback-clone-then-parse composition
+/// nor the allocation cost of an `Arc::to_string()`-then-parse round
+/// trip. The [`std::sync::Arc<str>`] input is dropped at end of scope,
+/// releasing the shared allocation exactly when the last outstanding
+/// [`Arc::clone`] refcount hits zero — the standard shared-owned drop
+/// semantics carry through unchanged.
+///
+/// The by-value shared-owned UTF-8 parse peer of
+/// [`TryFrom<&str> for ContentDigest`] (commit ebd8d0d),
+/// [`TryFrom<String> for ContentDigest`] (commit f175833),
+/// [`TryFrom<Cow<'_, str>> for ContentDigest`] (commit 3a28035),
+/// [`TryFrom<&[u8]> for ContentDigest`] (commit 08e1285),
+/// [`TryFrom<Vec<u8>> for ContentDigest`] (commit 67c5485), and
+/// [`TryFrom<Box<str>> for ContentDigest`] (commit 2d5eb7e) on the
+/// reference-grammar family — the parse surface widens across the
+/// borrowed-string, owned-string, borrowed-or-owned-string,
+/// borrowed-byte-slice, owned-byte-slice, shrunk-owned-string, AND
+/// shared-owned-string input frontiers so a downstream site that
+/// receives its input at any of those frontiers routes through the same
+/// [`ContentDigest::parse`] oracle without a per-consumer bridge — the
+/// pattern this impl absorbs at one site so no downstream site restates
+/// it. The parse mirror of the emit peer
+/// [`From<ContentDigest> for Arc<str>`] (commit 5f85247): the emit peer
+/// projects a validated [`ContentDigest`] into a cross-thread
+/// shared-owned UTF-8 buffer through
+/// [`std::sync::Arc::<str>::from`]; this parse peer recovers a
+/// [`ContentDigest`] value from a cross-thread shared-owned UTF-8 buffer
+/// through the [`AsRef::as_ref`] borrow of its backing bytes. Together
+/// they close the [`Arc<str>`] frontier at [`ContentDigest`] on both the
+/// parse and emit sides so a downstream site that types both its input
+/// and its re-emit contract as [`Arc<str>`] (a serde container that
+/// opts into `#[serde(try_from = "Arc<str>", into = "Arc<str>")]`, a
+/// validated-input newtype builder whose canonical parse AND re-emit
+/// contracts are both stated as cross-thread shared-owned UTF-8) is a
+/// one-line bridge through the shared frontier, not a per-consumer
+/// restatement of the shared-owned discipline at either side.
+///
+/// Structural mirror of
+/// [`impl TryFrom<Arc<str>> for crate::retry::PerAttemptRegion`], the
+/// by-value shared-owned UTF-8 parse peer on the sibling label-axis
+/// ordered typed sum that already carries the complete owned-shape
+/// parse-peer set ([`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`],
+/// [`TryFrom<Rc<str>>`], [`TryFrom<Vec<u8>>`], [`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`]) — the digest
+/// reference-grammar family continues closing the shared-owned string
+/// leg of that same owned-shape parse-peer surface, mirroring the
+/// emit-side [`From<ContentDigest> for Arc<str>`] that already exists.
+/// Next natural step in the same family: the thread-local shared-owned
+/// UTF-8 parse peer [`TryFrom<Rc<str>>`] closing the shrunk / shared
+/// UTF-8 parse trio.
+///
+/// The [`Err`](std::convert::TryFrom::Error) type is
+/// [`ContentDigestError`] — the same typed error every by-reference
+/// and by-value parse surface emits. The three grammar-failure
+/// variants ([`ContentDigestError::MissingSeparator`],
+/// [`ContentDigestError::UnsupportedAlgorithm`],
+/// [`ContentDigestError::InvalidHex`]) route unchanged through the
+/// string oracle so a caller that pins a per-variant handling policy
+/// at its own frontier can distinguish arms directly off the
+/// [`Result<ContentDigest, ContentDigestError>`] the impl returns. The
+/// UTF-8-invalid failure mode ([`ContentDigestError::InvalidUtf8`])
+/// cannot be reached from this peer by construction: an
+/// [`std::sync::Arc<str>`] carries a UTF-8-validated backing slice at
+/// the type level, so the UTF-8 gate the byte-frontier peers
+/// ([`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`]) run is unreachable here.
+///
+/// THEORY.md §III.1 typescape: the by-value shared-owned UTF-8
+/// try-conversion surface is a typed-primitive site on
+/// [`ContentDigest`] itself (one [`TryFrom<Arc<str>>`] impl routing
+/// through [`AsRef::as_ref`] then [`TryFrom<&str>`]), not a
+/// per-consumer `shared.parse::<ContentDigest>()` restatement at every
+/// downstream site that owns a shared UTF-8 buffer. THEORY.md §VI.1
+/// one-oracle: the canonical `<algorithm>:<hex>` grammar is named at
+/// one site ([`ContentDigest::parse`]), and every parse surface —
+/// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Box<str>>`], this [`TryFrom<Arc<str>>`] — reads through
+/// it.
+impl TryFrom<std::sync::Arc<str>> for ContentDigest {
+    type Error = ContentDigestError;
+
+    fn try_from(shared: std::sync::Arc<str>) -> Result<Self, Self::Error> {
+        <Self as TryFrom<&str>>::try_from(shared.as_ref())
+    }
+}
+
 /// [`AsRef<str>`] for [`ContentDigest`] routes through
 /// [`ContentDigest::as_str`] so a downstream consumer bound by
 /// `impl AsRef<str>` (a [`std::path::Path::new`] / [`std::fs::write`]
@@ -3934,6 +4053,178 @@ mod tests {
         let boxed: Box<str> = raw.clone().into_boxed_str();
         let d1 = ContentDigest::try_from(boxed).unwrap();
         let emitted: Box<str> = d1.clone().into();
+        let d2 = ContentDigest::try_from(emitted).unwrap();
+        assert_eq!(d1, d2);
+        assert_eq!(d2.as_str(), raw);
+    }
+
+    /// [`TryFrom<Arc<str>>`] succeeds on the shared-owned UTF-8
+    /// serialization of a well-formed sha256 digest — the primary
+    /// registry algorithm. Pins the happy path: a downstream site that
+    /// hands the shrunk-owned buffer through an `Arc::clone` before
+    /// parse (a cross-thread cached-label slot, a serde container that
+    /// opts into `#[serde(try_from = "Arc<str>")]` on a wrapper field,
+    /// a `Vec<Arc<str>>` per-attempt digest list) routes through the
+    /// same one-oracle grammar as every other parse peer.
+    #[test]
+    fn test_try_from_arc_str_parses_sha256_digest() {
+        let raw = format!("sha256:{D1}");
+        let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+        let d = ContentDigest::try_from(shared).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha256");
+        assert_eq!(d.hex(), D1);
+        let inherent = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(d, inherent);
+    }
+
+    /// [`TryFrom<Arc<str>>`] succeeds on the shared-owned UTF-8
+    /// serialization of a well-formed sha512 digest — the second
+    /// supported algorithm at the digest reference-grammar family.
+    /// Pins the impl across both algorithms so a widening at the
+    /// inherent oracle (e.g. `sha384`) is caught by an existing test
+    /// on this derived surface.
+    #[test]
+    fn test_try_from_arc_str_parses_sha512_digest() {
+        let hex = "f".repeat(SHA512_HEX_LEN);
+        let raw = format!("sha512:{hex}");
+        let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+        let d = ContentDigest::try_from(shared).unwrap();
+        assert_eq!(d.as_str(), raw);
+        assert_eq!(d.algorithm(), "sha512");
+        assert_eq!(d.hex(), hex);
+    }
+
+    /// [`TryFrom<Arc<str>>`] trims leading / trailing ASCII whitespace
+    /// on the delegated string oracle — a shared-owned UTF-8 buffer
+    /// whose trailing newline rides in the shared allocation parses
+    /// successfully because the string oracle whitespace-trims before
+    /// checking the grammar. Pins the trim discipline carrying through
+    /// the shared-owned UTF-8 frontier.
+    #[test]
+    fn test_try_from_arc_str_trims_edge_whitespace() {
+        let raw = format!("  sha256:{D1}\n");
+        let expected = format!("sha256:{D1}");
+        let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+        let d = ContentDigest::try_from(shared).unwrap();
+        assert_eq!(d.as_str(), expected);
+    }
+
+    /// [`TryFrom<Arc<str>>`] emits the SAME error
+    /// [`ContentDigest::parse`] emits on every grammar-failure input —
+    /// the missing-separator, unsupported-algorithm, and invalid-hex
+    /// variants route through the string oracle unchanged because the
+    /// shared-owned-string peer delegates via [`AsRef::as_ref`] then
+    /// [`TryFrom<&str>`]. Pins the "shared-owned UTF-8 parse surface
+    /// reads through the string parse oracle on grammar-failure inputs"
+    /// invariant so a future refactor that inlined a divergent grammar
+    /// into the shared-owned peer fails this test.
+    #[test]
+    fn test_try_from_arc_str_matches_inherent_parse_on_every_error_mode() {
+        let err_cases: [String; 5] = [
+            "sha256abc".to_string(),                 // missing separator
+            format!("md5:{D1}"),                     // unsupported algorithm
+            format!("sha256:{}", &D1[..60]),         // wrong hex length
+            format!("sha256:{}", D1.to_uppercase()), // uppercase hex
+            format!("sha256:{}g", &D1[..63]),        // non-hex byte
+        ];
+        for raw in err_cases {
+            let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+            let via_arc = ContentDigest::try_from(shared);
+            let via_inherent = ContentDigest::parse(&raw);
+            assert_eq!(
+                via_arc, via_inherent,
+                "TryFrom<Arc<str>> and inherent parse must agree on '{raw}'",
+            );
+        }
+    }
+
+    /// [`TryFrom<Arc<str>>`] agrees with [`TryFrom<Box<str>>`] on every
+    /// well-formed AND grammar-failure input — the by-value
+    /// shared-owned UTF-8 parse peer and the by-value shrunk-owned UTF-8
+    /// parse peer resolve to the SAME
+    /// [`Result<ContentDigest, ContentDigestError>`] across every input
+    /// the two share, so a downstream site that migrates a consumer from
+    /// [`Box<str>`] to [`Arc<str>`] (a memory-optimisation pass that
+    /// widens a heap-owned label slot to a cross-thread refcounted one
+    /// to shed per-worker allocations) yields identical values and
+    /// identical errors at every input. Pins the "shrunk-owned and
+    /// shared-owned string parse peers read through the same canonical
+    /// oracle" invariant, closing the sibling-peer agreement between
+    /// the two newest owned-shape parse peers.
+    #[test]
+    fn test_try_from_arc_str_agrees_with_try_from_box_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let ok_cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha512:{hex512}"),
+            format!("  sha256:{D3}\n"),
+        ];
+        for raw in ok_cases {
+            let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+            let boxed: Box<str> = raw.clone().into_boxed_str();
+            let via_arc = ContentDigest::try_from(shared);
+            let via_box = ContentDigest::try_from(boxed);
+            assert_eq!(via_arc, via_box);
+        }
+        let err_cases: [String; 5] = [
+            "sha256abc".to_string(),
+            format!("md5:{D1}"),
+            format!("sha256:{}", &D1[..60]),
+            format!("sha256:{}", D1.to_uppercase()),
+            format!("sha256:{}g", &D1[..63]),
+        ];
+        for raw in err_cases {
+            let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+            let boxed: Box<str> = raw.clone().into_boxed_str();
+            let via_arc = ContentDigest::try_from(shared);
+            let via_box = ContentDigest::try_from(boxed);
+            assert_eq!(via_arc, via_box);
+        }
+    }
+
+    /// The [`TryFrom<Arc<str>>`] impl composes with a generic
+    /// try-conversion helper bounded by `TryFrom<Arc<str>, Error =
+    /// ContentDigestError>` — the compositional motivation for landing
+    /// the trait separately from the [`String`] and [`Box<str>`] parse
+    /// surfaces. Pins the by-value shared-owned generic-consumer surface
+    /// so a downstream site that types its parse contract as
+    /// [`TryFrom<Arc<str>>`] (a serde container that opts into
+    /// `#[serde(try_from = "Arc<str>")]`, a cross-thread-cached-label
+    /// validated-builder helper) recovers the same typed value the
+    /// inherent oracle produces.
+    #[test]
+    fn test_try_from_arc_str_carries_through_generic_consumer() {
+        fn parse_via_try_from<T: TryFrom<std::sync::Arc<str>, Error = ContentDigestError>>(
+            shared: std::sync::Arc<str>,
+        ) -> Result<T, ContentDigestError> {
+            T::try_from(shared)
+        }
+        let raw = format!("sha256:{D1}");
+        let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+        let d: ContentDigest = parse_via_try_from(shared).unwrap();
+        assert_eq!(d.as_str(), raw);
+        let bad: std::sync::Arc<str> = std::sync::Arc::<str>::from("sha256abc");
+        let err = parse_via_try_from::<ContentDigest>(bad).unwrap_err();
+        assert!(matches!(err, ContentDigestError::MissingSeparator { .. }));
+    }
+
+    /// [`TryFrom<Arc<str>>`] round-trips through the emit peer
+    /// [`From<ContentDigest> for Arc<str>`] — parsing a shared-owned
+    /// UTF-8 buffer, emitting the shared-owned buffer off the resulting
+    /// value, then re-parsing that emitted buffer yields the SAME
+    /// validated [`ContentDigest`]. Pins the "the by-value shared-owned
+    /// UTF-8 parse peer and the by-value shared-owned UTF-8 emit peer
+    /// are mutual inverses on the validated subset" invariant, closing
+    /// the round-trip discipline on the [`Arc<str>`] axis and matching
+    /// the closed [`Box<str>`] round-trip pinned above.
+    #[test]
+    fn test_try_from_arc_str_round_trips_through_arc_str_emit_peer() {
+        let raw = format!("sha256:{D1}");
+        let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+        let d1 = ContentDigest::try_from(shared).unwrap();
+        let emitted: std::sync::Arc<str> = d1.clone().into();
         let d2 = ContentDigest::try_from(emitted).unwrap();
         assert_eq!(d1, d2);
         assert_eq!(d2.as_str(), raw);
