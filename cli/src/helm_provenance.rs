@@ -25,7 +25,10 @@
 //! 4. **Verified** — the cleartext framing parses AND the `files:` map
 //!    yields a `sha256:<hex>` for the expected tarball name. The Phase 1
 //!    chart attestation can honestly claim `provenance_verified: true`
-//!    only in this arm. `signed_chart_hash` is the recovered hex digest —
+//!    only in this arm. `signed_chart_hash` is the recovered digest —
+//!    typed as [`Option<ContentDigest>`](crate::oci_manifest::ContentDigest)
+//!    so the `<algorithm>:<hex>` parse invariant established by
+//!    [`find_tarball_sha256`] is preserved across the outcome envelope —
 //!    the cross-check a downstream verifier reconciles against the
 //!    `chart_hash` field on the same record (and against the actual
 //!    tarball bytes on disk, when re-verification runs).
@@ -89,9 +92,21 @@ pub enum HelmProvenanceOutcome {
     /// tarball name. The Phase 1 chart attestation can honestly claim
     /// `provenance_verified: true` only in this arm.
     ///
-    /// `signed_chart_hash` carries the recovered `sha256:<hex>` (no
-    /// algorithm prefix, lowercase hex), the cross-check a downstream
-    /// verifier reconciles against the chart tarball bytes.
+    /// `signed_chart_hash` carries the recovered cross-check a downstream
+    /// verifier reconciles against the chart tarball bytes. Typed as
+    /// [`Option<ContentDigest>`](crate::oci_manifest::ContentDigest) (not
+    /// `Option<String>`) so the parse invariant established by
+    /// [`find_tarball_sha256`]'s [`crate::oci_manifest::ContentDigest::parse`]
+    /// route is preserved across the outcome envelope: any value that
+    /// lands here structurally names a real blob the OCI-adjacent
+    /// content-address grammar admits, and a downstream cross-checker
+    /// receives a typed handle carrying the algorithm and hex it can
+    /// trust without re-parsing. The chart-side peer of the discipline
+    /// [`crate::cosign::CosignVerifyOutcome::Verified::manifest_digest`]
+    /// already observes on the image-side attestation surface. Consumers
+    /// that want the hex body without the algorithm prefix read it off
+    /// the typed primitive via
+    /// [`crate::oci_manifest::ContentDigest::hex`].
     ///
     /// `signer_key_id` is reserved for a future OpenPGP v4 signature
     /// packet parser that extracts the issuer key id from the binary
@@ -99,7 +114,7 @@ pub enum HelmProvenanceOutcome {
     /// preserves the field so a future enrichment commit does not have
     /// to widen the type.
     Verified {
-        signed_chart_hash: Option<String>,
+        signed_chart_hash: Option<crate::oci_manifest::ContentDigest>,
         signer_key_id: Option<String>,
     },
     /// `.prov` exists AND its OpenPGP cleartext framing parses, but no
@@ -134,15 +149,21 @@ impl HelmProvenanceOutcome {
         matches!(self, Self::Verified { .. })
     }
 
-    /// The recovered chart-tarball `sha256:<hex>` digest for the
-    /// `Verified` arm, or `None` otherwise. Drives a downstream
-    /// reconciliation against the `.tgz` bytes a re-verifier reads.
+    /// The recovered chart-tarball digest for the `Verified` arm, or
+    /// `None` otherwise. Drives a downstream reconciliation against the
+    /// `.tgz` bytes a re-verifier reads. Returns a borrowed
+    /// [`&ContentDigest`](crate::oci_manifest::ContentDigest) — the
+    /// typed handle carries the algorithm and hex the raw-string
+    /// surface would collapse to one or the other and force every
+    /// downstream cross-checker to re-parse. Sibling to
+    /// [`crate::cosign::CosignVerifyOutcome::manifest_digest`] at the
+    /// image-side attestation surface.
     #[allow(dead_code)]
-    pub fn signed_chart_hash(&self) -> Option<&str> {
+    pub fn signed_chart_hash(&self) -> Option<&crate::oci_manifest::ContentDigest> {
         match self {
             Self::Verified {
                 signed_chart_hash, ..
-            } => signed_chart_hash.as_deref(),
+            } => signed_chart_hash.as_ref(),
             _ => None,
         }
     }
@@ -200,8 +221,8 @@ pub fn parse_provenance(contents: &str, expected_tarball_name: &str) -> HelmProv
     let unescaped = dash_unescape(&signed_body);
 
     match find_tarball_sha256(&unescaped, expected_tarball_name) {
-        Some(hex) => HelmProvenanceOutcome::Verified {
-            signed_chart_hash: Some(hex),
+        Some(digest) => HelmProvenanceOutcome::Verified {
+            signed_chart_hash: Some(digest),
             signer_key_id: crate::openpgp_signature::parse_signature_armor(signature_armor)
                 .key_id_hex()
                 .map(String::from),
@@ -259,10 +280,10 @@ fn dash_unescape(body: &str) -> String {
 
 /// Scan a YAML-shaped signed body for a `files:` block, find the
 /// indented child entry whose key equals `expected_tarball_name`, and
-/// recover the `sha256:<hex>` digest. Returns the lowercase-hex digest
-/// (no algorithm prefix) on a positive match, or `None` if no `files:`
-/// block is present, the expected entry is absent, the algorithm is
-/// not `sha256`, or the digest fails
+/// recover the `sha256:<hex>` digest. Returns a validated
+/// [`crate::oci_manifest::ContentDigest`] on a positive match, or
+/// `None` if no `files:` block is present, the expected entry is
+/// absent, the algorithm is not `sha256`, or the digest fails
 /// [`crate::oci_manifest::ContentDigest::parse`].
 ///
 /// The digest-validation predicate routes through the typed OCI /
@@ -275,7 +296,22 @@ fn dash_unescape(body: &str) -> String {
 /// `.prov` currently emits sha256; a future commit can widen) is a
 /// per-consumer filter on top of the primitive, not a duplicated
 /// validator.
-fn find_tarball_sha256(body: &str, expected_tarball_name: &str) -> Option<String> {
+///
+/// Return type is the typed primitive itself, not `Option<String>` —
+/// the caller ([`parse_provenance`]) stores the result in
+/// [`HelmProvenanceOutcome::Verified::signed_chart_hash`] whose type
+/// is [`Option<ContentDigest>`](crate::oci_manifest::ContentDigest),
+/// so any consumer that previously extracted the hex body via
+/// `.hex().to_string()` at this frontier and stored the raw string in
+/// the envelope now moves the validated digest end-to-end. A
+/// downstream cross-checker that needs the hex without the algorithm
+/// prefix reads it off the typed handle via
+/// [`crate::oci_manifest::ContentDigest::hex`] rather than re-parsing
+/// a string it would first have to route through the oracle.
+fn find_tarball_sha256(
+    body: &str,
+    expected_tarball_name: &str,
+) -> Option<crate::oci_manifest::ContentDigest> {
     let mut in_files = false;
     let mut files_indent: Option<usize> = None;
     for line in body.lines() {
@@ -317,7 +353,7 @@ fn find_tarball_sha256(body: &str, expected_tarball_name: &str) -> Option<String
             // skip rather than misreport. Future commit can widen.
             return None;
         }
-        return Some(digest.hex().to_string());
+        return Some(digest);
     }
     None
 }
@@ -327,6 +363,18 @@ mod tests {
     use super::*;
 
     const CHART_DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// Build the typed [`crate::oci_manifest::ContentDigest`] for a
+    /// lowercase-hex sha256 body — the fixture-side peer of the
+    /// [`crate::oci_manifest::ContentDigest::parse`] call the parser
+    /// itself makes on a matching `files:` entry. Centralising the
+    /// wrapping here keeps the test bodies from restating
+    /// `format!("sha256:{...}")` at every `signed_chart_hash: Some(...)`
+    /// construction site.
+    fn digest_of(hex: &str) -> crate::oci_manifest::ContentDigest {
+        crate::oci_manifest::ContentDigest::parse(&format!("sha256:{hex}"))
+            .expect("test fixture hex must be a valid sha256 body")
+    }
 
     /// A realistic Helm `.prov` document: cleartext signed message with
     /// a `Hash:` armor header, Chart.yaml-shaped body, a `files:` map
@@ -368,7 +416,7 @@ mod tests {
         else {
             panic!("expected Verified");
         };
-        assert_eq!(signed_chart_hash.as_deref(), Some(CHART_DIGEST));
+        assert_eq!(signed_chart_hash, Some(digest_of(CHART_DIGEST)));
         // The synthetic test's signature armor is junk base64 (the
         // `realistic_prov` helper writes placeholder text, not a real
         // signature packet). The OpenPGP probe over that armor
@@ -446,7 +494,7 @@ mod tests {
         else {
             panic!("expected Verified");
         };
-        assert_eq!(signed_chart_hash.as_deref(), Some(CHART_DIGEST));
+        assert_eq!(signed_chart_hash, Some(digest_of(CHART_DIGEST)));
         assert_eq!(signer_key_id.as_deref(), Some("deadbeefcafebabe"));
     }
 
@@ -642,13 +690,19 @@ mod tests {
     /// `manifests[].digest` / `fsLayers[].blobSum` into the OCI image
     /// fingerprint. Pinning the predicate at both consumer sites
     /// closes the class of drift where the chart-side
-    /// `signed_chart_hash` names a hex the image-side fingerprint
-    /// would reject (or vice versa). The prior hand-rolled
-    /// `is_lowercase_hex` predicate lived at one site; this test
-    /// pins that the recovered hex must round-trip through
-    /// `ContentDigest::parse("sha256:<hex>")`.
+    /// `signed_chart_hash` names a digest the image-side fingerprint
+    /// would reject (or vice versa). The `signed_chart_hash` field is
+    /// now [`Option<ContentDigest>`](crate::oci_manifest::ContentDigest),
+    /// so this test pins the load-bearing structural claim: the
+    /// recovered value is a [`ContentDigest`](crate::oci_manifest::ContentDigest)
+    /// [`PartialEq`] to the test-side [`ContentDigest::parse`] of the
+    /// canonical `sha256:{hex}` fixture. The prior round-trip test
+    /// (route through `.hex().to_string()` then re-parse) was
+    /// operationally redundant once the field itself carries the
+    /// parse invariant — its post-oracle string peer is gone from the
+    /// outcome envelope entirely.
     #[test]
-    fn test_recovered_hex_round_trips_through_content_digest_parse() {
+    fn test_signed_chart_hash_is_content_digest_typed() {
         use crate::oci_manifest::ContentDigest;
         let prov = realistic_prov("example-0.1.0.tgz", CHART_DIGEST);
         let HelmProvenanceOutcome::Verified {
@@ -657,11 +711,15 @@ mod tests {
         else {
             panic!("expected Verified for realistic .prov");
         };
-        let hex = signed_chart_hash.expect("realistic .prov must recover a hex");
-        let digest = ContentDigest::parse(&format!("sha256:{hex}"))
-            .expect("recovered hex must round-trip through ContentDigest::parse");
+        let digest = signed_chart_hash.expect("realistic .prov must recover a digest");
+        // The typed field carries the parse invariant end-to-end — the
+        // stored ContentDigest equals the fixture's own
+        // ContentDigest::parse of the canonical `sha256:<hex>` shape.
+        let expected = ContentDigest::parse(&format!("sha256:{CHART_DIGEST}"))
+            .expect("fixture must parse under the canonical grammar");
+        assert_eq!(digest, expected);
         assert_eq!(digest.algorithm(), "sha256");
-        assert_eq!(digest.hex(), hex);
+        assert_eq!(digest.hex(), CHART_DIGEST);
     }
 
     /// Dash-escaped body lines (RFC 4880 §7.1) are un-escaped before
@@ -690,7 +748,7 @@ mod tests {
         else {
             panic!("expected Verified after dash-unescape");
         };
-        assert_eq!(signed_chart_hash.as_deref(), Some(CHART_DIGEST));
+        assert_eq!(signed_chart_hash, Some(digest_of(CHART_DIGEST)));
     }
 
     /// `is_verified` returns the boolean every Phase 1 chart
@@ -713,7 +771,11 @@ mod tests {
     /// `signed_chart_hash` returns `None` for every non-Verified arm
     /// — the attestation cannot recover a digest from a probe that
     /// found no matching entry, that failed to parse, or that never
-    /// ran.
+    /// ran. Pins the accessor's Verified-arm return type as a borrow
+    /// of the carried [`crate::oci_manifest::ContentDigest`] handle,
+    /// not a re-allocated copy: the pointer identity assertion below
+    /// fails-before / passes-after any refactor that inserts a clone
+    /// on the accessor path.
     #[test]
     fn test_signed_chart_hash_none_for_non_verified_arms() {
         assert_eq!(HelmProvenanceOutcome::Unverified.signed_chart_hash(), None);
@@ -722,13 +784,24 @@ mod tests {
             None
         );
         assert_eq!(HelmProvenanceOutcome::ProbeAbsent.signed_chart_hash(), None);
+        let expected = digest_of(CHART_DIGEST);
+        let verified = HelmProvenanceOutcome::Verified {
+            signed_chart_hash: Some(expected.clone()),
+            signer_key_id: None,
+        };
+        assert_eq!(verified.signed_chart_hash(), Some(&expected));
+        // Verified-with-no-digest arm: the accessor faithfully returns
+        // `None` on the `signed_chart_hash: None` inner state — a
+        // canonical peer of the equivalent
+        // [`crate::cosign::CosignVerifyOutcome::manifest_digest`]
+        // pin at the image-side attestation surface.
         assert_eq!(
             HelmProvenanceOutcome::Verified {
-                signed_chart_hash: Some(CHART_DIGEST.to_string()),
+                signed_chart_hash: None,
                 signer_key_id: None,
             }
             .signed_chart_hash(),
-            Some(CHART_DIGEST)
+            None
         );
     }
 

@@ -2967,7 +2967,10 @@ mod tests {
         // Verified is the only arm whose bool collapse is `true`.
         assert!(HelmProvenanceOutcome::Verified {
             signed_chart_hash: Some(
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()
+                crate::oci_manifest::ContentDigest::parse(
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .expect("fixture must parse"),
             ),
             signer_key_id: None,
         }
@@ -5310,7 +5313,12 @@ dependencies:
 
         let coverage = chart_probe_coverage(
             &HelmProvenanceOutcome::Verified {
-                signed_chart_hash: Some("deadbeef".to_string()),
+                signed_chart_hash: Some(
+                    crate::oci_manifest::ContentDigest::parse(
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .expect("fixture must parse"),
+                ),
                 signer_key_id: None,
             },
             &HelmLintOutcome::Passed {
@@ -5684,7 +5692,12 @@ dependencies:
 
         let ceiling = chart_probe_coverage(
             &HelmProvenanceOutcome::Verified {
-                signed_chart_hash: Some("deadbeef".to_string()),
+                signed_chart_hash: Some(
+                    crate::oci_manifest::ContentDigest::parse(
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .expect("fixture must parse"),
+                ),
                 signer_key_id: None,
             },
             &HelmLintOutcome::Passed {
@@ -5908,7 +5921,12 @@ dependencies:
 
         let ceiling = chart_probe_coverage(
             &HelmProvenanceOutcome::Verified {
-                signed_chart_hash: Some("deadbeef".to_string()),
+                signed_chart_hash: Some(
+                    crate::oci_manifest::ContentDigest::parse(
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .expect("fixture must parse"),
+                ),
                 signer_key_id: None,
             },
             &HelmLintOutcome::Passed {
