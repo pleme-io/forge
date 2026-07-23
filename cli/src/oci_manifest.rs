@@ -2164,6 +2164,122 @@ impl PartialEq<ContentDigest> for &[u8] {
     }
 }
 
+/// Ergonomic canonical-digest equality query at the owned UTF-8
+/// frontier — the owned-string peer of the borrowed-UTF-8 comparison
+/// pair [`PartialEq<str> for ContentDigest`] +
+/// [`PartialEq<&str> for ContentDigest`] above. A downstream consumer
+/// that owns a [`String`] (a `serde_json::Value::String(String)` arm,
+/// a [`std::collections::HashMap<String, _>`] value read out by clone,
+/// a config-schema field that stores a canonical `<algorithm>:<hex>`
+/// as owned [`String`] for downstream serialization, an integration-
+/// test oracle that captures a `skopeo inspect` / journal / attestation-
+/// breadcrumb line into an owned [`String`] and asks whether it names a
+/// specific [`ContentDigest`] value) answers the boolean equality query
+/// `digest == owned_label` at ONE composition rather than a per-site
+/// `digest.as_str() == owned_label.as_str()` restatement that repeats
+/// the canonical-digest oracle name at every downstream comparison
+/// site.
+///
+/// Route: the impl body composes [`ContentDigest::as_str`] with the
+/// standard library [`<str as PartialEq<str>>::eq`] on the
+/// [`String`]-side deref coercion, so the comparison reads the same
+/// canonical-digest bytes at zero allocation, zero temporary [`String`]
+/// construction, and zero [`std::fmt::Display`] formatter-buffer round
+/// trip per call — the same zero-cost discipline the borrowed-str
+/// sibling peers carry.
+///
+/// Sibling of the by-value owned-UTF-8 emit peer
+/// [`From<ContentDigest> for String`] (directly below): both surfaces
+/// bridge the [`ContentDigest`] value and the [`String`] owned-input
+/// frontier — the emit peer moves the validated backing string out
+/// (`String::from(digest)`), this comparison peer asks whether the
+/// owned [`String`] on the right names the same canonical
+/// `<algorithm>:<hex>` as the [`ContentDigest`] value on the left
+/// (`digest == owned_label`) — so a downstream site that received an
+/// owned [`String`] and needs to answer either query reads through
+/// the ContentDigest primitive at the [`String`] frontier without a
+/// per-site `.as_str()` restatement.
+///
+/// Mirrors the standard-library idiom [`String`] carries through its
+/// own [`PartialEq<String> for str`] + [`PartialEq<String> for &str`]
+/// symmetric owned-string comparison surface: an owned canonical-string
+/// primitive compares against a [`String`] handle at either frontier
+/// with the same zero-cost projection through the primitive's
+/// read-back accessor.
+///
+/// THEORY.md §III.1 typescape: the owned UTF-8 comparison surface is a
+/// typed-primitive site on [`ContentDigest`] itself (one
+/// [`PartialEq<String>`] impl routing through [`ContentDigest::as_str`]),
+/// not a per-consumer `digest.as_str() == owned_label.as_str()`
+/// restatement at every downstream site that asks whether a
+/// [`ContentDigest`] value names a specific canonical
+/// `<algorithm>:<hex>` through an owned [`String`] handle. THEORY.md
+/// §VI.1 one-oracle: the validated full-digest slice is named at one
+/// site ([`ContentDigest::as_str`]), and every comparison surface —
+/// the borrowed-UTF-8 pair, the borrowed-byte-slice pair, this owned-
+/// UTF-8 peer — reads through the same one-oracle discipline projected
+/// onto its own intent × frontier.
+impl PartialEq<String> for ContentDigest {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+/// Symmetric owned UTF-8 comparison peer:
+/// `<String as PartialEq<ContentDigest>>::eq` — the reverse-direction
+/// sibling of [`PartialEq<String> for ContentDigest`] (directly above).
+/// The pair together closes the owned UTF-8 comparison surface across
+/// both receiver directions, so a caller who holds an owned [`String`]
+/// writes `owned_label == digest` (or the standard-library-derived
+/// `if a == b || b == a`-style symmetric composition a generic
+/// `PartialEq`-bounded consumer performs internally) and answers a
+/// boolean equality query against a [`ContentDigest`] value at the
+/// same owned UTF-8 frontier the forward-direction peer covers, at
+/// zero allocation, zero temporary [`String`] construction, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call.
+///
+/// Route: the impl body composes [`ContentDigest::as_str`] with
+/// [`<str as PartialEq<str>>::eq`] on the [`String`]-side deref
+/// coercion, so the comparison reads the same canonical-digest bytes
+/// as the forward-direction [`PartialEq<String> for ContentDigest`]
+/// peer, and the symmetry axiom
+/// `<String as PartialEq<ContentDigest>>::eq(owned, &digest)
+/// == <ContentDigest as PartialEq<String>>::eq(&digest, owned)` holds
+/// by construction at every `(owned, digest)` pair.
+///
+/// Mirrors the standard-library idiom [`String`] carries through its
+/// own [`PartialEq<String> for str`] + [`PartialEq<String> for &str`]
+/// symmetric receiver-shape pair: a borrowed / owned UTF-8 handle
+/// compares against the counter-shape UTF-8 primitive in either
+/// direction with the same zero-cost projection through the
+/// primitive's read-back accessor. Prior to this impl the digest
+/// reference-grammar family carried only the forward direction at the
+/// owned-UTF-8 frontier (`digest == owned_label` compiled but
+/// `owned_label == digest` did not), so a generic `PartialEq`-bounded
+/// consumer that composed the two through its own symmetric-check
+/// protocol could not thread a [`ContentDigest`] through the
+/// [`String`] side of the bound without a per-consumer
+/// `owned_label == digest.as_str()` bridge.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction owned UTF-8
+/// comparison surface is a typed-primitive site on [`ContentDigest`]
+/// itself (one [`PartialEq<ContentDigest>`] impl on [`String`] routing
+/// through [`ContentDigest::as_str`]), not a per-consumer
+/// `owned_label == digest.as_str()` restatement at every downstream
+/// site that asks whether an owned [`String`] handle names the same
+/// canonical `<algorithm>:<hex>` as a [`ContentDigest`] value.
+/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// named at one site ([`ContentDigest::as_str`]), and this reverse-
+/// direction owned-UTF-8 receiver surface reads through the same
+/// one-oracle discipline every sibling comparison surface (borrowed
+/// str × 2 × 2, borrowed bytes × 2 × 2, forward owned-string) already
+/// carries.
+impl PartialEq<ContentDigest> for String {
+    fn eq(&self, other: &ContentDigest) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
 /// [`From<ContentDigest>`] for [`String`] moves the validated
 /// `<algorithm>:<hex>` backing string out of the consumed
 /// [`ContentDigest`] value at zero-copy — no allocation, no
@@ -10393,5 +10509,197 @@ mod tests {
 
         let d_unseen = ContentDigest::parse(&format!("sha256:{D3}")).unwrap();
         assert!(!set.contains(&d_unseen), "unseen digest is not a member");
+    }
+
+    /// `PartialEq<String> for ContentDigest` agrees byte-for-byte with
+    /// the borrowed-view [`ContentDigest::as_str`] oracle across the
+    /// same 4-canonical × ~9-label grid the borrowed-str pair pins,
+    /// threaded through an owned [`String`] label so the caller writes
+    /// `digest == owned_label`. Pins the owned-UTF-8 forward-direction
+    /// agreement so a future refactor that inlined a divergent read
+    /// into the owned-string impl breaks this pin at at least one
+    /// `(digest, owned)` pair rather than at every downstream
+    /// `digest == owned_label` call site.
+    #[test]
+    fn test_partial_eq_string_agrees_with_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let owned: Vec<String> = digests
+            .iter()
+            .flat_map(|d| {
+                [
+                    d.clone(),
+                    format!("SHA256:{}", &d[7..]),
+                    format!(" {d}"),
+                    format!("{d}\n"),
+                ]
+            })
+            .chain([
+                String::new(),
+                "sha256:".to_string(),
+                "SHA256:0123".to_string(),
+                "not-a-digest".to_string(),
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &owned {
+                assert_eq!(
+                    <ContentDigest as PartialEq<String>>::eq(&d, label),
+                    d.as_str() == label.as_str(),
+                    "PartialEq<String> and as_str() equality must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// At every validated [`ContentDigest`] value,
+    /// `<Self as PartialEq<String>>::eq(&digest, &digest.as_str().to_owned())`
+    /// returns true — the digest recognises its own emitted canonical
+    /// form as an owned [`String`] through the owned-UTF-8 peer.
+    #[test]
+    fn test_partial_eq_string_reflexive_at_own_digest() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let canonical: String = d.as_str().to_owned();
+            assert!(
+                <ContentDigest as PartialEq<String>>::eq(&d, &canonical),
+                "PartialEq<String> must recognise self canonical form at {raw:?}",
+            );
+        }
+    }
+
+    /// Every owned [`String`] that is NOT the digest's own emitted
+    /// canonical form fails equality through [`PartialEq<String>`] —
+    /// the same canonicity discipline the borrowed-str sibling peers
+    /// enforce, projected onto the owned [`String`] receiver.
+    #[test]
+    fn test_partial_eq_string_rejects_non_canonical_labels() {
+        let d1 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        let d2 = ContentDigest::parse(&format!("sha256:{D2}")).unwrap();
+        let bad: [String; 7] = [
+            String::new(),
+            "sha256:".to_string(),
+            "not-a-digest".to_string(),
+            format!("SHA256:{D1}"),
+            format!(" sha256:{D1}"),
+            format!("sha256:{D1}\n"),
+            format!("sha256:{D2}"),
+        ];
+        for label in &bad {
+            assert!(
+                !<ContentDigest as PartialEq<String>>::eq(&d1, label),
+                "PartialEq<String> must reject non-canonical label {label:?} at sha256:{D1}",
+            );
+        }
+        // Peer surface is symmetric — d2 rejects d1's canonical form
+        // through the owned-String receiver as well.
+        let d1_canonical = format!("sha256:{D1}");
+        assert!(!<ContentDigest as PartialEq<String>>::eq(
+            &d2,
+            &d1_canonical,
+        ));
+    }
+
+    /// The reverse-direction owned UTF-8 comparison peer
+    /// `<String as PartialEq<ContentDigest>>::eq` agrees byte-for-byte
+    /// with the borrowed-view [`ContentDigest::as_str`] oracle across
+    /// the same grid AND is symmetric with the forward-direction
+    /// `<ContentDigest as PartialEq<String>>::eq` peer at every
+    /// `(owned, digest)` pair. Pins the reverse-direction agreement
+    /// and the symmetry axiom
+    /// `<String as PartialEq<ContentDigest>>::eq(owned, &d)
+    /// == <ContentDigest as PartialEq<String>>::eq(&d, owned)` so a
+    /// future refactor that diverged one impl from its symmetric peer
+    /// breaks this pin at at least one pair rather than propagating
+    /// unnoticed through downstream generic `PartialEq`-bounded
+    /// consumers that thread a [`ContentDigest`] through either side
+    /// of a `==` operator.
+    #[test]
+    fn test_string_partial_eq_content_digest_symmetric_and_agrees_with_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let owned: Vec<String> = digests
+            .iter()
+            .cloned()
+            .chain([
+                String::new(),
+                "sha256:".to_string(),
+                "not-a-digest".to_string(),
+                format!("SHA256:{D1}"),
+                format!(" sha256:{D1}"),
+                format!("sha256:{D1}\n"),
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &owned {
+                assert_eq!(
+                    <String as PartialEq<ContentDigest>>::eq(label, &d),
+                    label.as_str() == d.as_str(),
+                    "reverse String and as_str() equality must agree at ({label:?}, {raw:?})",
+                );
+                assert_eq!(
+                    <String as PartialEq<ContentDigest>>::eq(label, &d),
+                    <ContentDigest as PartialEq<String>>::eq(&d, label),
+                    "reverse-String vs forward-String direction must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// The owned-UTF-8 forward and reverse peers compose with a
+    /// generic `PartialEq<String>`- / `PartialEq<ContentDigest>`-
+    /// bounded consumer — a downstream site that types its comparison
+    /// contract as `impl PartialEq<String>` (a `matches!` predicate on
+    /// an owned-String arm, an integration-test oracle that
+    /// generic-bounds its owned-string equality check) recovers the
+    /// same answer as a direct `<ContentDigest as PartialEq<String>>::
+    /// eq` call, and the reverse-direction bound
+    /// `impl PartialEq<ContentDigest>` recovers the same answer as a
+    /// direct `<String as PartialEq<ContentDigest>>::eq` call.
+    #[test]
+    fn test_partial_eq_content_digest_string_carries_through_generic_consumer() {
+        fn fwd_via_bound<T: PartialEq<String>>(t: &T, expected: &String) -> bool {
+            <T as PartialEq<String>>::eq(t, expected)
+        }
+        fn rev_via_bound<T: PartialEq<ContentDigest>>(t: &T, expected: &ContentDigest) -> bool {
+            <T as PartialEq<ContentDigest>>::eq(t, expected)
+        }
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let owned = raw.clone();
+            assert!(fwd_via_bound(&d, &owned));
+            assert!(rev_via_bound(&owned, &d));
+            let other = if raw.starts_with("sha256:") {
+                format!("sha512:{}", "0".repeat(SHA512_HEX_LEN))
+            } else {
+                format!("sha256:{D1}")
+            };
+            assert!(!fwd_via_bound(&d, &other));
+            assert!(!rev_via_bound(&other, &d));
+        }
     }
 }
