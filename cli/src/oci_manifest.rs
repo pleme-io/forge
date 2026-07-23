@@ -2565,6 +2565,134 @@ impl PartialEq<ContentDigest> for Vec<u8> {
     }
 }
 
+/// Ergonomic canonical-digest equality query at the borrowed-or-
+/// owned-frontier UTF-8 receiver — the [`Cow<'_, str>`] peer of the
+/// borrowed-str comparison pair
+/// [`PartialEq<str> for ContentDigest`] +
+/// [`PartialEq<&str> for ContentDigest`] and the owned-string
+/// comparison peer [`PartialEq<String> for ContentDigest`] above. A
+/// downstream consumer that holds a canonical `<algorithm>:<hex>`
+/// label at the [`Cow<'_, str>`] frontier (a `serde` decoder that
+/// yields `Cow::Borrowed` on the zero-copy fast path and
+/// `Cow::Owned` on an escaped-string arm, a config-schema field
+/// that stores canonical digest text as [`Cow<'_, str>`] so
+/// borrowed static defaults and owned user-supplied overrides
+/// share one contract, a `nom` / `winnow` parser whose output type
+/// is `Cow<'_, str>` because the borrowed slice may reference the
+/// input buffer or an owned normalisation result) answers the
+/// boolean equality query `digest == cow_label` at ONE composition
+/// rather than a per-site `digest.as_str() == &**cow_label` /
+/// `digest.as_str() == cow_label.as_ref()` restatement that
+/// repeats the canonical-digest oracle name at every downstream
+/// comparison site.
+///
+/// Route: the impl body composes [`ContentDigest::as_str`] with
+/// the standard library [`<str as PartialEq<str>>::eq`] on the
+/// [`Cow<'_, str>`] deref coercion (via [`AsRef::as_ref`]), so the
+/// comparison reads the same canonical-digest bytes independently
+/// of which [`Cow`] arm the caller holds — the borrowed and owned
+/// arms alias the same underlying UTF-8 view at zero allocation,
+/// zero temporary [`String`] construction, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call.
+///
+/// Sibling of [`TryFrom<Cow<'_, str>> for ContentDigest`] (commit
+/// 3a28035): both surfaces bridge the [`ContentDigest`] value and
+/// the [`Cow<'_, str>`] borrowed-or-owned-frontier — the parse
+/// peer recovers a [`ContentDigest`] from a canonical
+/// `<algorithm>:<hex>` [`Cow<'_, str>`] payload through the
+/// [`ContentDigest::parse`] oracle, this comparison peer asks
+/// whether an already-held [`Cow<'_, str>`] label names the same
+/// canonical `<algorithm>:<hex>` as the [`ContentDigest`] value on
+/// the left — so a downstream site that received input at the
+/// [`Cow`] frontier and needs to answer either query reads through
+/// the ContentDigest primitive at the [`Cow`] frontier without a
+/// per-site `cow.as_ref()` restatement.
+///
+/// Structural mirror of the sibling borrowed-str
+/// [`PartialEq<str> for ContentDigest`] and owned-string
+/// [`PartialEq<String> for ContentDigest`] peers — the same
+/// canonical-digest comparison lift, now extended to the arm-
+/// collapsing [`Cow`] receiver so the full UTF-8 comparison
+/// receiver set on the reference-grammar family (borrowed str,
+/// borrowed &str, owned String, borrowed-or-owned Cow<'_, str>)
+/// is closed on the forward direction.
+///
+/// THEORY.md §III.1 typescape: the [`Cow<'_, str>`] comparison
+/// surface is a typed-primitive site on [`ContentDigest`] itself
+/// (one [`PartialEq<Cow<'_, str>>`] impl routing through
+/// [`ContentDigest::as_str`]), not a per-consumer
+/// `digest.as_str() == cow.as_ref()` restatement at every
+/// downstream site that receives a [`Cow<'_, str>`] and asks
+/// whether it names a specific canonical `<algorithm>:<hex>`.
+/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// named at one site ([`ContentDigest::as_str`], reading through
+/// the [`ContentDigest::parse`]-guarded backing string), and every
+/// comparison surface — the borrowed-str pair, the borrowed-byte
+/// pair, the owned-String pair, the owned-Vec<u8> pair, this
+/// borrowed-or-owned [`Cow<'_, str>`] peer — reads through the
+/// same one-oracle discipline projected onto its own receiver
+/// shape.
+impl PartialEq<std::borrow::Cow<'_, str>> for ContentDigest {
+    fn eq(&self, other: &std::borrow::Cow<'_, str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+/// Symmetric borrowed-or-owned UTF-8 comparison peer:
+/// `<Cow<'_, str> as PartialEq<ContentDigest>>::eq` — the reverse-
+/// direction sibling of [`PartialEq<Cow<'_, str>> for
+/// ContentDigest`] (directly above). The pair together closes the
+/// [`Cow<'_, str>`] comparison surface across both receiver
+/// directions, so a caller who holds a [`Cow<'_, str>`] label
+/// writes `cow_label == digest` (or the standard-library-derived
+/// `if a == b || b == a`-style symmetric composition a generic
+/// `PartialEq`-bounded consumer performs internally) and answers a
+/// boolean equality query against a [`ContentDigest`] value at the
+/// same arm-collapsing frontier the forward-direction peer covers,
+/// at zero allocation, zero temporary [`String`] construction, and
+/// zero [`std::fmt::Display`] formatter-buffer round trip per call.
+///
+/// Route: the impl body composes [`ContentDigest::as_str`] with
+/// [`<str as PartialEq<str>>::eq`] on the [`Cow<'_, str>`] deref
+/// coercion (via [`AsRef::as_ref`]), so the comparison reads the
+/// same canonical-digest bytes as the forward-direction
+/// [`PartialEq<Cow<'_, str>> for ContentDigest`] peer, and the
+/// symmetry axiom
+/// `<Cow<'_, str> as PartialEq<ContentDigest>>::eq(cow, &d)
+/// == <ContentDigest as PartialEq<Cow<'_, str>>>::eq(&d, cow)`
+/// holds by construction at every `(cow, digest)` pair on either
+/// [`Cow`] arm.
+///
+/// Prior to this impl the digest reference-grammar family carried
+/// only the forward direction at the [`Cow`] frontier
+/// (`digest == cow_label` compiled but `cow_label == digest` did
+/// not), so a generic `PartialEq`-bounded consumer that composed
+/// the two through its own symmetric-check protocol could not
+/// thread a [`ContentDigest`] through the [`Cow`] side of the
+/// bound without a per-consumer `cow_label.as_ref() == digest.as_str()`
+/// bridge.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction [`Cow<'_, str>`]
+/// comparison surface is a typed-primitive site on
+/// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl
+/// on [`Cow<'_, str>`] routing through [`ContentDigest::as_str`]),
+/// not a per-consumer `cow_label.as_ref() == digest.as_str()`
+/// restatement at every downstream site that asks whether a
+/// [`Cow<'_, str>`] handle names the same canonical
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value. THEORY.md
+/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// one site ([`ContentDigest::as_str`]), and this reverse-
+/// direction [`Cow<'_, str>`] receiver reads through the same
+/// one-oracle discipline every sibling comparison surface
+/// (borrowed str × 2 × 2, borrowed bytes × 2 × 2, owned String
+/// × 2, owned Vec<u8> × 2, forward [`Cow<'_, str>`]) already
+/// carries.
+impl PartialEq<ContentDigest> for std::borrow::Cow<'_, str> {
+    fn eq(&self, other: &ContentDigest) -> bool {
+        self.as_ref() == other.as_str()
+    }
+}
+
 /// [`From<ContentDigest>`] for [`String`] moves the validated
 /// `<algorithm>:<hex>` backing string out of the consumed
 /// [`ContentDigest`] value at zero-copy — no allocation, no
@@ -11426,5 +11554,247 @@ mod tests {
             <ContentDigest as Borrow<str>>::borrow(&d),
             <ContentDigest as AsRef<str>>::as_ref(&d),
         );
+    }
+
+    /// `PartialEq<Cow<'_, str>> for ContentDigest` agrees byte-for-
+    /// byte with the borrowed-view [`ContentDigest::as_str`] oracle
+    /// across the same 4-canonical × ~9-label grid the borrowed-str
+    /// and owned-string sibling peers pin, threaded through a
+    /// [`Cow<'_, str>`] label constructed on BOTH `Cow::Borrowed`
+    /// and `Cow::Owned` arms so the arm-collapsing route is
+    /// exercised on both discriminator arms. Pins the borrowed-or-
+    /// owned forward-direction agreement across arms so a future
+    /// refactor that diverged one arm from the
+    /// [`ContentDigest::as_str`] read oracle breaks this pin at at
+    /// least one `(digest, label, arm)` triple rather than at every
+    /// downstream `digest == cow_label` call site.
+    #[test]
+    fn test_partial_eq_cow_str_agrees_with_as_str() {
+        use std::borrow::Cow;
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let owned: Vec<String> = digests
+            .iter()
+            .flat_map(|d| {
+                [
+                    d.clone(),
+                    format!("SHA256:{}", &d[7..]),
+                    format!(" {d}"),
+                    format!("{d}\n"),
+                ]
+            })
+            .chain([
+                String::new(),
+                "sha256:".to_string(),
+                "SHA256:0123".to_string(),
+                "not-a-digest".to_string(),
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &owned {
+                let borrowed: Cow<'_, str> = Cow::Borrowed(label.as_str());
+                let owned_arm: Cow<'_, str> = Cow::Owned(label.clone());
+                for (arm, cow) in [("Borrowed", &borrowed), ("Owned", &owned_arm)] {
+                    assert_eq!(
+                        <ContentDigest as PartialEq<Cow<'_, str>>>::eq(&d, cow),
+                        d.as_str() == label.as_str(),
+                        "PartialEq<Cow<'_, str>> and as_str() equality must agree at ({arm}, {label:?}, {raw:?})",
+                    );
+                }
+            }
+        }
+    }
+
+    /// At every validated [`ContentDigest`] value,
+    /// `<Self as PartialEq<Cow<'_, str>>>::eq(&digest, &Cow::Borrowed(digest.as_str()))`
+    /// and the [`Cow::Owned`] variant both return true — the digest
+    /// recognises its own emitted canonical form as a
+    /// [`Cow<'_, str>`] on either discriminator arm through the
+    /// borrowed-or-owned peer.
+    #[test]
+    fn test_partial_eq_cow_str_reflexive_at_own_digest() {
+        use std::borrow::Cow;
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let canonical: String = d.as_str().to_owned();
+            let borrowed: Cow<'_, str> = Cow::Borrowed(canonical.as_str());
+            let owned_arm: Cow<'_, str> = Cow::Owned(canonical.clone());
+            assert!(
+                <ContentDigest as PartialEq<Cow<'_, str>>>::eq(&d, &borrowed),
+                "PartialEq<Cow<'_, str>> must recognise self canonical form on Borrowed arm at {raw:?}",
+            );
+            assert!(
+                <ContentDigest as PartialEq<Cow<'_, str>>>::eq(&d, &owned_arm),
+                "PartialEq<Cow<'_, str>> must recognise self canonical form on Owned arm at {raw:?}",
+            );
+        }
+    }
+
+    /// Every [`Cow<'_, str>`] that is NOT the digest's own emitted
+    /// canonical form fails equality through
+    /// `PartialEq<Cow<'_, str>>` on BOTH arms — the same canonicity
+    /// discipline the borrowed-str and owned-string sibling peers
+    /// enforce, projected onto the borrowed-or-owned [`Cow`]
+    /// receiver.
+    #[test]
+    fn test_partial_eq_cow_str_rejects_non_canonical_labels() {
+        use std::borrow::Cow;
+        let d1 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        let d2 = ContentDigest::parse(&format!("sha256:{D2}")).unwrap();
+        let bad: [String; 7] = [
+            String::new(),
+            "sha256:".to_string(),
+            "not-a-digest".to_string(),
+            format!("SHA256:{D1}"),
+            format!(" sha256:{D1}"),
+            format!("sha256:{D1}\n"),
+            format!("sha256:{D2}"),
+        ];
+        for label in &bad {
+            for cow in [
+                Cow::<'_, str>::Borrowed(label.as_str()),
+                Cow::<'_, str>::Owned(label.clone()),
+            ] {
+                assert!(
+                    !<ContentDigest as PartialEq<Cow<'_, str>>>::eq(&d1, &cow),
+                    "PartialEq<Cow<'_, str>> must reject non-canonical label {label:?} ({cow:?}) at sha256:{D1}",
+                );
+            }
+        }
+        // Peer surface is symmetric — d2 rejects d1's canonical form
+        // through the Cow receiver on either arm as well.
+        let d1_canonical = format!("sha256:{D1}");
+        for cow in [
+            Cow::<'_, str>::Borrowed(d1_canonical.as_str()),
+            Cow::<'_, str>::Owned(d1_canonical.clone()),
+        ] {
+            assert!(!<ContentDigest as PartialEq<Cow<'_, str>>>::eq(&d2, &cow));
+        }
+    }
+
+    /// The reverse-direction borrowed-or-owned UTF-8 comparison peer
+    /// `<Cow<'_, str> as PartialEq<ContentDigest>>::eq` agrees byte-
+    /// for-byte with the borrowed-view [`ContentDigest::as_str`]
+    /// oracle across the same grid AND is symmetric with the
+    /// forward-direction
+    /// `<ContentDigest as PartialEq<Cow<'_, str>>>::eq` peer at
+    /// every `(cow, digest, arm)` triple. Pins the reverse-direction
+    /// agreement and the symmetry axiom
+    /// `<Cow<'_, str> as PartialEq<ContentDigest>>::eq(cow, &d)
+    /// == <ContentDigest as PartialEq<Cow<'_, str>>>::eq(&d, cow)`
+    /// on both [`Cow`] arms so a future refactor that diverged one
+    /// impl from its symmetric peer breaks this pin at at least one
+    /// triple rather than propagating unnoticed through downstream
+    /// generic `PartialEq`-bounded consumers that thread a
+    /// [`ContentDigest`] through either side of a `==` operator.
+    #[test]
+    fn test_cow_str_partial_eq_content_digest_symmetric_and_agrees_with_as_str() {
+        use std::borrow::Cow;
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let owned: Vec<String> = digests
+            .iter()
+            .cloned()
+            .chain([
+                String::new(),
+                "sha256:".to_string(),
+                "not-a-digest".to_string(),
+                format!("SHA256:{D1}"),
+                format!(" sha256:{D1}"),
+                format!("sha256:{D1}\n"),
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &owned {
+                let borrowed: Cow<'_, str> = Cow::Borrowed(label.as_str());
+                let owned_arm: Cow<'_, str> = Cow::Owned(label.clone());
+                for (arm, cow) in [("Borrowed", &borrowed), ("Owned", &owned_arm)] {
+                    assert_eq!(
+                        <Cow<'_, str> as PartialEq<ContentDigest>>::eq(cow, &d),
+                        label.as_str() == d.as_str(),
+                        "reverse Cow and as_str() equality must agree at ({arm}, {label:?}, {raw:?})",
+                    );
+                    assert_eq!(
+                        <Cow<'_, str> as PartialEq<ContentDigest>>::eq(cow, &d),
+                        <ContentDigest as PartialEq<Cow<'_, str>>>::eq(&d, cow),
+                        "reverse-Cow vs forward-Cow direction must agree at ({arm}, {label:?}, {raw:?})",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The [`Cow<'_, str>`] forward and reverse peers compose with a
+    /// generic `PartialEq<Cow<'_, str>>`- /
+    /// `PartialEq<ContentDigest>`-bounded consumer — a downstream
+    /// site that types its comparison contract as
+    /// `impl PartialEq<Cow<'_, str>>` (a `matches!` predicate on a
+    /// [`Cow`] arm, an integration-test oracle that generic-bounds
+    /// its borrowed-or-owned equality check) recovers the same
+    /// answer as a direct
+    /// `<ContentDigest as PartialEq<Cow<'_, str>>>::eq` call, and
+    /// the reverse-direction bound `impl PartialEq<ContentDigest>`
+    /// recovers the same answer as a direct
+    /// `<Cow<'_, str> as PartialEq<ContentDigest>>::eq` call.
+    #[test]
+    fn test_partial_eq_content_digest_cow_str_carries_through_generic_consumer() {
+        use std::borrow::Cow;
+        // The `&Cow<'_, str>` receiver is load-bearing: this test pins the
+        // exact `PartialEq<Cow<'_, str>>` bound the impl above exposes, so
+        // the sibling clippy suggestion to relax it to `&str` would collapse
+        // the bound this test exists to exercise.
+        #[allow(clippy::ptr_arg)]
+        fn fwd_via_bound<'a, T: PartialEq<Cow<'a, str>>>(t: &T, expected: &Cow<'a, str>) -> bool {
+            <T as PartialEq<Cow<'a, str>>>::eq(t, expected)
+        }
+        fn rev_via_bound<T: PartialEq<ContentDigest>>(t: &T, expected: &ContentDigest) -> bool {
+            <T as PartialEq<ContentDigest>>::eq(t, expected)
+        }
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            for cow in [
+                Cow::<'_, str>::Borrowed(raw.as_str()),
+                Cow::<'_, str>::Owned(raw.clone()),
+            ] {
+                assert!(fwd_via_bound(&d, &cow));
+                assert!(rev_via_bound(&cow, &d));
+            }
+            let other_raw = if raw.starts_with("sha256:") {
+                format!("sha512:{}", "0".repeat(SHA512_HEX_LEN))
+            } else {
+                format!("sha256:{D1}")
+            };
+            for cow in [
+                Cow::<'_, str>::Borrowed(other_raw.as_str()),
+                Cow::<'_, str>::Owned(other_raw.clone()),
+            ] {
+                assert!(!fwd_via_bound(&d, &cow));
+                assert!(!rev_via_bound(&cow, &d));
+            }
+        }
     }
 }
