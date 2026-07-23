@@ -4877,6 +4877,119 @@ impl From<ContentDigest> for std::rc::Rc<[u8]> {
     }
 }
 
+/// [`serde::Serialize`] for [`ContentDigest`] emits the validated
+/// `<algorithm>:<hex>` backing string as a serde string value through
+/// [`serde::Serializer::serialize_str`] on
+/// [`ContentDigest::as_str`], so a downstream attestation-record schema
+/// that carries a [`ContentDigest`] field emits the canonical, trimmed,
+/// lowercase-hex form the [`ContentDigest::parse`] oracle validated —
+/// not the offending pre-trim input, not a re-formatted
+/// [`std::fmt::Display`] rendering, not an
+/// `serde_json::Value::String(digest.as_str().to_owned())` bridge at
+/// every emit site.
+///
+/// The by-reference emit peer of the by-value emit family
+/// [`From<ContentDigest> for String`] / [`From<ContentDigest> for
+/// Vec<u8>`] / [`From<ContentDigest> for Box<str>`] etc.: the by-value
+/// peers move the backing string out at zero-copy for owned-sink
+/// consumers; this by-reference peer streams the same backing bytes
+/// through a serde [`Serializer`](serde::Serializer) so a
+/// [`serde_json`] / [`serde_yaml`] / [`toml`] frontier that pins its
+/// contract as `T: serde::Serialize` reads through the same one-oracle
+/// canonical form without a per-emit-site
+/// `serializer.serialize_str(digest.as_str())` bridge and without
+/// paying the redundant clone the sibling `From<&ContentDigest> for
+/// String` peer would demand.
+///
+/// THEORY.md §III.1 typescape: the serde emit surface is a
+/// typed-primitive site on [`ContentDigest`] itself (one
+/// [`serde::Serialize`] impl streaming the [`ContentDigest::parse`]-
+/// validated backing string through [`serde::Serializer::serialize_str`]),
+/// not a per-consumer `serializer.serialize_str(digest.as_str())`
+/// restatement at every downstream site that owns a [`ContentDigest`]
+/// and hands it to a serde-derived container. THEORY.md §VI.1
+/// one-oracle: the validated full-digest string is named at one site
+/// ([`ContentDigest::parse`]-guarded [`ContentDigest::full`] backing),
+/// and every emit surface — the borrowed-view read peers
+/// [`ContentDigest::as_str`], [`std::fmt::Display`], [`AsRef<str>`],
+/// [`AsRef<[u8]>`], the by-value owned emit peers, this by-reference
+/// serde-frontier peer — reads through the same backing storage.
+impl serde::Serialize for ContentDigest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.full)
+    }
+}
+
+/// [`serde::Deserialize`] for [`ContentDigest`] borrows a
+/// [`Cow<'de, str>`] off the [`Deserializer`](serde::Deserializer)
+/// (borrowed at zero-copy where the deserializer carries a borrowable
+/// string tape — `serde_json::from_slice` off a `&[u8]`, `serde_yaml`'s
+/// borrowing scanner — owned where it does not) and routes through
+/// [`<ContentDigest as TryFrom<Cow<'_, str>>>::try_from`] into the
+/// [`ContentDigest::parse`] oracle so an attestation-record schema
+/// that carries a [`ContentDigest`]-typed field rejects a malformed
+/// `<algorithm>:<hex>` string at serde-read time — the moment the
+/// deserializer visits the string — rather than at a downstream
+/// consumer boundary where the offending input has already been
+/// laundered through a stringly-typed intermediate.
+///
+/// The serde-frontier parse peer of the parse-family
+/// ([`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<Box<str>>`],
+/// [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`], [`TryFrom<&[u8]>`],
+/// [`TryFrom<Vec<u8>>`], [`TryFrom<Cow<'_, [u8]>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`],
+/// [`TryFrom<Rc<[u8]>>`]) — a canonical-string typed primitive is now
+/// parseable from every idiomatic Rust input frontier AND from the
+/// [`serde::Deserializer`] frontier the attestation-record and
+/// deploy-schema readers pin their contract on, all through the same
+/// one-oracle grammar the direct `.parse::<ContentDigest>()` call sites
+/// already read. Prior to this impl a serde-derived container that
+/// wanted to carry a [`ContentDigest`]-typed field had to either
+/// declare `#[serde(try_from = "String")]` at each field (paying a
+/// per-container attribute) or land the field as `String` and validate
+/// downstream — a stringly-typed schema surface the parse-oracle
+/// family this file has been widening exists to close.
+///
+/// The [`Err`](serde::de::Error) type is the deserializer's own
+/// [`serde::de::Error`], surfaced through [`serde::de::Error::custom`]
+/// on the [`ContentDigestError`] the [`TryFrom<Cow<'_, str>>`] oracle
+/// emitted — so a [`serde_json`] failure preserves the JSON pointer /
+/// line-and-column context and a [`serde_yaml`] failure preserves the
+/// YAML span, both wrapping the same typed
+/// [`ContentDigestError::Display`] message. A downstream reader that
+/// wants the typed [`ContentDigestError`] variant (rather than the
+/// string-wrapped serde-frontier form) still routes through
+/// [`ContentDigest::parse`] / [`TryFrom<Cow<'_, str>>`] on its own
+/// borrowed / owned input at its own frontier.
+///
+/// THEORY.md §III.1 typescape: the serde parse surface is a
+/// typed-primitive site on [`ContentDigest`] itself (one
+/// [`serde::Deserialize`] impl routing through the [`TryFrom<Cow<'_,
+/// str>>`] peer into the [`ContentDigest::parse`] oracle), not a
+/// per-consumer `#[serde(try_from = "String")]` container attribute at
+/// every downstream schema that wraps a digest field. THEORY.md §VI.1
+/// one-oracle: the canonical `<algorithm>:<hex>` grammar is named at
+/// one site ([`ContentDigest::parse`]), and every parse surface —
+/// [`std::str::FromStr`], the [`TryFrom<T>`] peer family across
+/// [`&str`] / [`String`] / [`Cow<str>`] / [`Box<str>`] / [`Arc<str>`] /
+/// [`Rc<str>`] and their byte-slice mirrors, this [`serde::Deserialize`]
+/// — reads through it. THEORY.md §V.4 (attestation as cryptographic
+/// evidence): a stringly-typed digest field cannot substantiate a
+/// claim it does not validate; strengthening a serde-derived
+/// attestation-record field from `String` to [`ContentDigest`] (now
+/// unlocked directly, no `#[serde(try_from = "String")]` bridge
+/// needed) moves the substantiation from a downstream boundary check
+/// to a serde-read-time type-level invariant.
+impl<'de> serde::Deserialize<'de> for ContentDigest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let cow: std::borrow::Cow<'de, str> =
+            <std::borrow::Cow<'de, str> as serde::Deserialize<'de>>::deserialize(deserializer)?;
+        <Self as TryFrom<std::borrow::Cow<'_, str>>>::try_from(cow)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Canonical, key-order- and metadata-independent fingerprint of an OCI /
 /// Docker container manifest, derived from its content-addressed digests.
 ///
@@ -14293,5 +14406,164 @@ mod tests {
             assert!(!fwd_via_bound(&d, &other_rced));
             assert!(!rev_via_bound(&other_rced, &d));
         }
+    }
+
+    /// [`serde::Serialize`] emits the validated backing string as a
+    /// JSON string that agrees byte-for-byte with the
+    /// [`ContentDigest::as_str`] read across every algorithm arm the
+    /// [`ContentDigest::parse`] oracle accepts (sha256 / sha512 /
+    /// blake3). Guards the load-bearing serde-frontier emit contract:
+    /// a downstream attestation-record schema that carries a
+    /// [`ContentDigest`] field emits the canonical trimmed
+    /// lowercase-hex form, not a re-formatted or pre-trim rendering.
+    #[test]
+    fn test_serialize_matches_as_str_across_algorithms() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+            format!("blake3:{D1}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let json = serde_json::to_string(&d).unwrap();
+            assert_eq!(
+                json,
+                format!("\"{raw}\""),
+                "serialize must emit the validated backing string verbatim at {raw:?}",
+            );
+        }
+    }
+
+    /// [`serde::Deserialize`] round-trips a well-formed
+    /// `<algorithm>:<hex>` JSON string back to a
+    /// [`ContentDigest`] value that compares equal to the source at
+    /// every algorithm arm, and the read routes through
+    /// [`ContentDigest::parse`] (via [`TryFrom<Cow<'_, str>>`]) so the
+    /// as-str, algorithm, and hex accessors report the same trimmed
+    /// canonical form as the direct parse peer.
+    #[test]
+    fn test_deserialize_valid_digest_round_trip() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha512:{hex512}"),
+            format!("blake3:{D1}"),
+        ] {
+            let json = format!("\"{raw}\"");
+            let d: ContentDigest = serde_json::from_str(&json).unwrap();
+            let direct = ContentDigest::parse(&raw).unwrap();
+            assert_eq!(d, direct);
+            assert_eq!(d.as_str(), direct.as_str());
+            assert_eq!(d.algorithm(), direct.algorithm());
+            assert_eq!(d.hex(), direct.hex());
+            let re_emitted = serde_json::to_string(&d).unwrap();
+            assert_eq!(re_emitted, json);
+        }
+    }
+
+    /// [`serde::Deserialize`] refuses every input the direct
+    /// [`ContentDigest::parse`] oracle refuses: missing separator,
+    /// unsupported algorithm, wrong-length hex, uppercase hex.
+    /// Discipline-mirror of the parse-oracle negative grid projected
+    /// onto the serde frontier so the schema surface cannot admit a
+    /// digest string the direct parse call would refuse.
+    #[test]
+    fn test_deserialize_rejects_malformed_digests() {
+        for raw in [
+            "".to_string(),
+            "sha256".to_string(),
+            "sha256:".to_string(),
+            "not-a-digest".to_string(),
+            format!("md5:{D1}"),
+            format!("SHA256:{D1}"),
+            format!("sha256:{}", &D1[..63]),
+            format!("sha256:{D1}f"),
+            format!("sha256:{}", D1.to_uppercase()),
+            format!("blake3:{}", &D1[..63]),
+            format!("blake3:{}", D1.to_uppercase()),
+            format!("sha512:{}", "0".repeat(SHA512_HEX_LEN - 1)),
+        ] {
+            let json = format!("\"{raw}\"");
+            assert!(
+                serde_json::from_str::<ContentDigest>(&json).is_err(),
+                "deserialize must refuse malformed digest {raw:?}",
+            );
+        }
+    }
+
+    /// [`serde::Deserialize`] refuses a JSON scalar that is not a
+    /// string at all — a JSON number, a JSON boolean, a JSON null, a
+    /// JSON array, a JSON object. The serde-frontier parse peer
+    /// receives its input off the borrowed / owned `Cow<'de, str>`
+    /// intake at the deserializer boundary, so a non-string arm
+    /// surfaces the deserializer's own type-error rather than a
+    /// [`ContentDigestError`] the parse oracle emits.
+    #[test]
+    fn test_deserialize_rejects_wrong_json_types() {
+        for input in ["42", "true", "false", "null", "[]", "{}"] {
+            assert!(
+                serde_json::from_str::<ContentDigest>(input).is_err(),
+                "deserialize must refuse non-string JSON {input:?}",
+            );
+        }
+    }
+
+    /// [`ContentDigest`] embedded as a serde-derived container field
+    /// deserializes off the same one-oracle grammar the standalone
+    /// peer reads through — the schema-surface use case documented in
+    /// the [`serde::Deserialize`] impl doc block, exercised here on a
+    /// minimal wrapper. A malformed digest at the wrapper field
+    /// surfaces as a serde error at read time; a well-formed digest
+    /// round-trips through the wrapper. Guards the load-bearing
+    /// migration path the parse-oracle blake3 widening
+    /// (commit 2e83ff8) called out: attestation-record and
+    /// deploy-schema fields typed as [`ContentDigest`] rather than
+    /// [`String`] reject malformed digests at the serde boundary.
+    #[test]
+    fn test_deserialize_within_serde_derived_struct() {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Wrapper {
+            digest: ContentDigest,
+        }
+        let raw = format!("blake3:{D1}");
+        let json = format!("{{\"digest\":\"{raw}\"}}");
+        let w: Wrapper = serde_json::from_str(&json).unwrap();
+        assert_eq!(w.digest.as_str(), raw);
+        let round_tripped = serde_json::to_string(&w).unwrap();
+        assert_eq!(round_tripped, json);
+        let malformed = format!("{{\"digest\":\"md5:{D1}\"}}");
+        assert!(serde_json::from_str::<Wrapper>(&malformed).is_err());
+    }
+
+    /// The serde emit and parse peers carry through generic serde-
+    /// bounded consumers — a downstream site that types its emit
+    /// contract as `T: serde::Serialize` recovers the same JSON as a
+    /// direct [`serde_json::to_string`] on [`ContentDigest`], and a
+    /// site that types its parse contract as
+    /// `for<'de> T: serde::Deserialize<'de>` recovers the same
+    /// [`ContentDigest`] value as a direct [`serde_json::from_str`].
+    /// Structural mirror of the `carries_through_generic_consumer`
+    /// discipline the sibling parse / emit / equality peers already
+    /// carry, projected onto the serde-frontier surface.
+    #[test]
+    fn test_serde_peers_carry_through_generic_consumer() {
+        fn emit_via_bound<T: serde::Serialize>(t: &T) -> String {
+            serde_json::to_string(t).unwrap()
+        }
+        fn read_via_bound<T: for<'de> serde::Deserialize<'de>>(s: &str) -> T {
+            serde_json::from_str(s).unwrap()
+        }
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        let json_generic = emit_via_bound(&d);
+        let json_direct = serde_json::to_string(&d).unwrap();
+        assert_eq!(json_generic, json_direct);
+        let d_generic: ContentDigest = read_via_bound(&json_generic);
+        let d_direct: ContentDigest = serde_json::from_str(&json_generic).unwrap();
+        assert_eq!(d_generic, d_direct);
+        assert_eq!(d_generic, d);
     }
 }
