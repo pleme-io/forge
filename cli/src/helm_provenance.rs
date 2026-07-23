@@ -348,9 +348,12 @@ fn find_tarball_sha256(
             continue;
         }
         let digest = crate::oci_manifest::ContentDigest::parse(value).ok()?;
-        if digest.algorithm() != "sha256" {
+        if digest.algorithm_kind() != crate::oci_manifest::DigestAlgorithm::Sha256 {
             // A non-sha256 algorithm is not the digest we cross-check;
-            // skip rather than misreport. Future commit can widen.
+            // skip rather than misreport. Typed against the
+            // [`crate::oci_manifest::DigestAlgorithm`] variant sum so a
+            // future widening of the digest grammar lights up at this
+            // policy site rather than silently degrading its cover.
             return None;
         }
         return Some(digest);
