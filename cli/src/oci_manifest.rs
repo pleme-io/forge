@@ -381,6 +381,99 @@ impl std::str::FromStr for DigestAlgorithm {
     }
 }
 
+/// [`TryFrom<&str>`] impl routes through
+/// [`<DigestAlgorithm as std::str::FromStr>::from_str`] so a downstream
+/// consumer bound by `impl TryFrom<&str>` (a serde container that opts into
+/// `#[serde(try_from = "&str")]` on a wrapper field, a generic try-conversion
+/// helper `fn parse_field<T: for<'a> TryFrom<&'a str>>`, a validated-input
+/// newtype builder whose canonical parse contract is stated as
+/// [`TryFrom<&str>`] rather than [`std::str::FromStr`]) recovers a
+/// [`DigestAlgorithm`] variant from its canonical lowercase label through the
+/// same one-oracle grammar the direct `.parse::<DigestAlgorithm>()` call
+/// sites already read.
+///
+/// The by-reference try-conversion parse peer of [`std::str::FromStr`]
+/// directly above — [`std::str::FromStr`] is the stdlib parse frontier of the
+/// canonical-label conversion surface, this [`TryFrom<&str>`] is the by-
+/// reference try-conversion frontier of the same canonical-label conversion
+/// surface. Both route through the shared [`DigestAlgorithm::parse`] inverse
+/// oracle: the stdlib parse frontier through the [`FromStr`] impl body's
+/// `Self::parse` route, this by-reference try-conversion frontier through
+/// the [`FromStr`] impl itself (one further indirection so the load-bearing
+/// match body stays named at one site, not restated at every parse peer).
+///
+/// Sibling of [`std::fmt::Display`], [`AsRef<str>`], and
+/// [`std::str::FromStr`] directly above — the same lift at the by-reference
+/// try-conversion layer instead of the format / borrow / stdlib-parse layers.
+/// Together with those impls this closes the `as_str` ⇢ {`Display`,
+/// `AsRef<str>`} emission pair and the {`FromStr`, `TryFrom<&str>`} parse set
+/// at the digest-algorithm axis against the shared canonical-label oracle.
+/// Structural mirror of `impl TryFrom<&str> for PerAttemptRegion`
+/// (line 1431 of `retry.rs`) and `impl TryFrom<&str> for AdmissionTier`
+/// (line 7293 of `probe_outcome.rs`) — the same lift at the by-reference
+/// try-conversion layer of the parallel canonical-label typed sums, each
+/// delegating through its sum's stdlib [`FromStr`] impl.
+///
+/// The natural bridge to the `serde` `try_from` container attribute
+/// (`#[serde(try_from = "&str")]` — which keys off [`TryFrom<&str>`], not
+/// [`std::str::FromStr`]) so a downstream config-schema field that wraps a
+/// [`DigestAlgorithm`] and wants serde's `try_from` grammar composes with
+/// one blanket impl at the typed-primitive site, not a per-consumer inline
+/// `#[serde(deserialize_with)]` cascade. The [`FromStr`] impl carries the
+/// load-bearing route through [`DigestAlgorithm::parse`]; this
+/// [`TryFrom<&str>`] impl delegates through it, so the parse-oracle
+/// discipline is preserved end-to-end and a future variant insertion
+/// (a `sha384` arm the OCI distribution spec might normatively adopt, a
+/// per-attestation-frontier arm forge might land) remains a one-site edit at
+/// the [`DigestAlgorithm::parse`] match body plus the matching `as_str` /
+/// `hex_len` arm additions.
+///
+/// The error type is [`anyhow::Error`] — the exact shape the [`FromStr`]
+/// impl above and the sibling `TryFrom<&str>` impls at
+/// [`crate::retry::PerAttemptRegion`] and
+/// [`crate::probe_outcome::AdmissionTier`] all carry (all
+/// `type Error = anyhow::Error`). Rejection wording is inherited from
+/// [`FromStr`]: an unknown label surfaces an [`anyhow::Error`] naming the
+/// offending input and the canonical three-label set — no per-peer
+/// rejection-message drift.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is: only
+/// the canonical lowercase labels emitted by [`DigestAlgorithm::as_str`]
+/// parse. Uppercase (`"SHA256"`), hyphenated (`"sha-256"`), unknown labels
+/// (`"md5"`), empty input, and edge-whitespace variants (`"sha256 "`,
+/// `" sha256"`) all reject — the strictness is delegated from the underlying
+/// [`FromStr`] impl (in turn from [`DigestAlgorithm::parse`]).
+///
+/// The identity
+/// `DigestAlgorithm::try_from(algo.as_str()).unwrap() == algo` at every
+/// [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_try_from_str_agrees_with_from_str`]; the
+/// identity carried through a generic `impl for<'a> TryFrom<&'a str>`
+/// consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_try_from_str_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical input is pinned by
+/// [`tests::test_digest_algorithm_try_from_str_rejects_non_canonical_input`].
+///
+/// THEORY.md §III.1 typescape: the by-reference try-conversion surface is
+/// a typed-primitive site on [`DigestAlgorithm`] itself (one
+/// `TryFrom<&str>` impl routing through the [`std::str::FromStr`] parse
+/// oracle), not a per-consumer `.parse::<DigestAlgorithm>()` bridge at every
+/// downstream site that types its parse contract as `impl TryFrom<&str>`
+/// rather than [`std::str::FromStr`]. THEORY.md §VI.1 generation over
+/// composition: the canonical-label grammar is named at one site
+/// ([`DigestAlgorithm::as_str`]), inverted at one site
+/// ([`DigestAlgorithm::parse`]), and every parse surface —
+/// [`std::str::FromStr`], this [`TryFrom<&str>`], the
+/// [`ContentDigest::parse`] grammar oracle's algorithm arm — reads through
+/// it.
+impl TryFrom<&str> for DigestAlgorithm {
+    type Error = anyhow::Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s)
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6224,6 +6317,101 @@ mod tests {
             assert_eq!(
                 via_from_str, via_inherent,
                 "FromStr and inherent parse must agree on non-canonical label '{bad}'",
+            );
+        }
+    }
+
+    /// `<DigestAlgorithm as TryFrom<&str>>::try_from(algo.as_str())` recovers
+    /// `algo` at every [`DigestAlgorithm::ALL`] variant — the [`TryFrom<&str>`]
+    /// impl round-trips against [`DigestAlgorithm::as_str`] across the full
+    /// canonical-label set. Pins the identity
+    /// `DigestAlgorithm::try_from(algo.as_str()).unwrap() == algo` at every
+    /// variant against the shared canonical-label oracle. The structural
+    /// witness that the by-reference try-conversion parse surface (this
+    /// [`TryFrom<&str>`]) reads the same one-oracle grammar the stdlib parse
+    /// frontier ([`std::str::FromStr`], the sibling above) writes — one
+    /// round-trip pin per variant, refuses a future variant insertion that
+    /// drops the `TryFrom<&str>` / `as_str` agreement. Structural mirror of
+    /// [`crate::retry::tests::test_per_attempt_region_try_from_str_agrees_with_from_str`]
+    /// at the per-attempt-region ladder and
+    /// [`crate::probe_outcome::tests::test_admission_tier_try_from_str_agrees_with_from_str`]
+    /// at the admission-tier ladder — the three canonical-label typed sums
+    /// each pin the [`TryFrom<&str>`] round-trip against their shared
+    /// `as_str` oracle.
+    #[test]
+    fn test_digest_algorithm_try_from_str_agrees_with_from_str() {
+        for algo in DigestAlgorithm::ALL {
+            let parsed = <DigestAlgorithm as std::convert::TryFrom<&str>>::try_from(algo.as_str())
+                .expect("canonical label must parse through TryFrom<&str>");
+            assert_eq!(
+                parsed, algo,
+                "TryFrom<&str> must round-trip through as_str at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<&str> for DigestAlgorithm`] identity carries through a
+    /// generic `impl for<'a> TryFrom<&'a str>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(s: &str) -> T where T: for<'a> TryFrom<&'a str>,
+    /// T::Error: Debug` — the shape of an actual downstream consumer
+    /// (validated-input newtype builder, serde `try_from` wrapper, generic
+    /// try-conversion helper that opts into the [`TryFrom<&str>`] contract
+    /// rather than [`std::str::FromStr`]) — recovers the canonical variant
+    /// from the canonical lowercase label at every variant. The structural
+    /// witness that a [`DigestAlgorithm`] is genuinely usable at
+    /// `impl for<'a> TryFrom<&'a str>` call sites — a regression that
+    /// drifted the [`TryFrom`] impl signature (e.g., requiring an owned
+    /// [`String`] input instead of `&str`, or returning a different variant
+    /// than [`FromStr`] would) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_digest_algorithm_try_from_str_carries_through_generic_consumer() {
+        fn parse<T>(s: &str) -> T
+        where
+            T: for<'a> std::convert::TryFrom<&'a str>,
+            for<'a> <T as std::convert::TryFrom<&'a str>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<&str>>::try_from(s)
+                .expect("canonical label must parse through generic TryFrom<&str>")
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(
+                parse::<DigestAlgorithm>(algo.as_str()),
+                algo,
+                "generic TryFrom<&str> consumer must recover canonical variant at {algo:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<&str> for DigestAlgorithm`] rejects non-canonical input with
+    /// the same strictness [`std::str::FromStr`] enforces — empty string,
+    /// uppercase, hyphenated, unknown labels, and edge-whitespace variants
+    /// all reject. Pins the strict-rejection contract at the by-reference
+    /// try-conversion surface so a downstream consumer bound by
+    /// [`TryFrom<&str>`] (a serde `try_from` container, a generic
+    /// try-conversion helper) inherits the same canonical-only grammar the
+    /// direct `.parse::<DigestAlgorithm>()` call sites already read. Also
+    /// pins the delegate-through-[`FromStr`] discipline: rejection at
+    /// [`TryFrom<&str>`] tracks rejection at [`std::str::FromStr`] byte-for-
+    /// byte, so a future permissive-parse regression at the underlying
+    /// [`FromStr`] impl (case-folded acceptance of `"SHA256"`, whitespace-
+    /// tolerant admission of `"sha256 "`, alias admission of `"sha-256"`)
+    /// lights up here rather than drifting silently through the by-reference
+    /// try-conversion surface.
+    #[test]
+    fn test_digest_algorithm_try_from_str_rejects_non_canonical_input() {
+        for bad in ["SHA256", "sha-256", "md5", "", "sha256 ", " sha256"] {
+            let via_try_from = <DigestAlgorithm as std::convert::TryFrom<&str>>::try_from(bad).ok();
+            let via_from_str = bad.parse::<DigestAlgorithm>().ok();
+            assert!(
+                via_try_from.is_none(),
+                "TryFrom<&str> must reject non-canonical input {bad:?}",
+            );
+            assert_eq!(
+                via_try_from, via_from_str,
+                "TryFrom<&str> and FromStr must agree on rejection at {bad:?}",
             );
         }
     }
