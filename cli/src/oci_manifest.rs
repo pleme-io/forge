@@ -3134,6 +3134,112 @@ impl PartialEq<ContentDigest> for Box<[u8]> {
     }
 }
 
+/// Ergonomic canonical-digest equality query at the cross-thread
+/// shared-owned UTF-8 frontier — the [`std::sync::Arc<str>`] peer of
+/// the shrunk-owned [`Box<str>`] pair
+/// [`PartialEq<Box<str>> for ContentDigest`] +
+/// [`PartialEq<ContentDigest> for Box<str>`] (commit f97d311)
+/// directly above. A downstream consumer that holds a canonical
+/// `<algorithm>:<hex>` label as a cross-thread shared-owned
+/// [`Arc<str>`] handle (a long-lived registry cache that stores a
+/// validated digest label under an [`Arc<str>`] to share the string
+/// across worker threads without per-clone allocation, an emitted-
+/// peer consumer that received a digest label through
+/// [`From<ContentDigest> for Arc<str>`] (commit 5f85247) and asks
+/// whether it names the same canonical form as a live
+/// [`ContentDigest`] value) answers the boolean equality query
+/// `digest == arc_label` at ONE composition rather than a per-site
+/// `digest.as_str() == &**arc_label` /
+/// `digest.as_str() == arc_label.as_ref()` restatement that repeats
+/// the canonical-digest oracle name at every downstream comparison
+/// site.
+///
+/// Route: [`ContentDigest::as_str`] composed with
+/// [`<str as PartialEq<str>>::eq`] on the [`Arc<str>`] deref
+/// coercion — zero allocation, zero temporary [`String`]
+/// construction, zero [`std::fmt::Display`] formatter-buffer round
+/// trip.
+///
+/// Sibling of the by-value cross-thread shared-owned UTF-8 emit
+/// peer [`From<ContentDigest> for Arc<str>`] (commit 5f85247) and
+/// the by-value cross-thread shared-owned UTF-8 parse peer
+/// [`TryFrom<Arc<str>> for ContentDigest`] (commit 414b22c): the
+/// three surfaces bridge the [`ContentDigest`] value and the
+/// [`Arc<str>`] cross-thread shared-owned frontier — the parse peer
+/// recovers a [`ContentDigest`] from a canonical `<algorithm>:<hex>`
+/// [`Arc<str>`] payload through the [`ContentDigest::parse`]
+/// oracle, the emit peer hands off the validated canonical form as
+/// an [`Arc<str>`] through a fresh [`Arc::from`] allocation, this
+/// comparison peer asks whether an already-held [`Arc<str>`] label
+/// names the same canonical form as the [`ContentDigest`] value on
+/// the left.
+///
+/// Opens the cross-thread shared-owned / thread-local shared-owned
+/// [`Arc<str>`] + [`Rc<str>`] receiver duo on the equality axis on
+/// the UTF-8 side. The parse axis already carries both receivers
+/// (commits 414b22c, 4d0783e) and the emit axis already carries
+/// both receivers (commits 5f85247, a7bcfd2), so this pair is the
+/// first step in closing the equality-axis analog of the same
+/// shared-owned family on the UTF-8 side.
+///
+/// THEORY.md §III.1 typescape: the [`Arc<str>`] comparison surface
+/// is a typed-primitive site on [`ContentDigest`] itself (one
+/// [`PartialEq<Arc<str>>`] impl routing through
+/// [`ContentDigest::as_str`]), not a per-consumer
+/// `digest.as_str() == &**arc_label` restatement at every
+/// downstream site that receives an [`Arc<str>`] and asks whether
+/// it names a specific canonical `<algorithm>:<hex>`. THEORY.md
+/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// one site ([`ContentDigest::as_str`]), and every comparison
+/// surface reads through the same one-oracle discipline projected
+/// onto its own receiver shape.
+impl PartialEq<std::sync::Arc<str>> for ContentDigest {
+    fn eq(&self, other: &std::sync::Arc<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+/// Symmetric cross-thread shared-owned UTF-8 comparison peer:
+/// `<Arc<str> as PartialEq<ContentDigest>>::eq` — the reverse-
+/// direction sibling of
+/// [`PartialEq<std::sync::Arc<str>> for ContentDigest`] directly
+/// above. The pair together closes the [`Arc<str>`] comparison
+/// surface across both receiver directions, so a caller who holds
+/// an [`Arc<str>`] label writes `arc_label == digest` (or the
+/// standard-library-derived symmetric composition a generic
+/// `PartialEq`-bounded consumer performs internally) and answers a
+/// boolean equality query against a [`ContentDigest`] value at the
+/// same cross-thread shared-owned frontier the forward-direction
+/// peer covers, at zero allocation, zero temporary [`String`]
+/// construction, and zero [`std::fmt::Display`] formatter-buffer
+/// round trip per call.
+///
+/// Route: [`ContentDigest::as_str`] composed with
+/// [`<str as PartialEq<str>>::eq`] on the [`Arc<str>`] deref
+/// coercion, so the comparison reads the same canonical-digest
+/// bytes as the forward-direction peer, and the symmetry axiom
+/// `<Arc<str> as PartialEq<ContentDigest>>::eq(arc, &d)
+/// == <ContentDigest as PartialEq<Arc<str>>>::eq(&d, arc)` holds by
+/// construction at every `(arc, digest)` pair.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction [`Arc<str>`]
+/// comparison surface is a typed-primitive site on
+/// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl
+/// on [`Arc<str>`] routing through [`ContentDigest::as_str`]), not
+/// a per-consumer `&**arc_label == digest.as_str()` restatement at
+/// every downstream site that asks whether an [`Arc<str>`] handle
+/// names the same canonical `<algorithm>:<hex>` as a
+/// [`ContentDigest`] value. THEORY.md §VI.1 one-oracle: the
+/// validated full-digest slice is named at one site
+/// ([`ContentDigest::as_str`]), and this reverse-direction
+/// [`Arc<str>`] receiver reads through the same one-oracle
+/// discipline every sibling comparison surface already carries.
+impl PartialEq<ContentDigest> for std::sync::Arc<str> {
+    fn eq(&self, other: &ContentDigest) -> bool {
+        self.as_ref() == other.as_str()
+    }
+}
+
 /// [`From<ContentDigest>`] for [`String`] moves the validated
 /// `<algorithm>:<hex>` backing string out of the consumed
 /// [`ContentDigest`] value at zero-copy — no allocation, no
@@ -12920,6 +13026,199 @@ mod tests {
             let other_boxed: Box<[u8]> = other.into_bytes().into_boxed_slice();
             assert!(!fwd_via_bound(&d, &other_boxed));
             assert!(!rev_via_bound(&other_boxed, &d));
+        }
+    }
+
+    /// `PartialEq<Arc<str>> for ContentDigest` agrees byte-for-byte
+    /// with the borrowed-view [`ContentDigest::as_str`] oracle across
+    /// the same 4-canonical × ~8-label grid the sibling shrunk-owned
+    /// [`Box<str>`] peer pins, threaded through a cross-thread
+    /// shared-owned [`Arc<str>`] handle so the caller writes
+    /// `digest == arc_label`.
+    #[test]
+    fn test_partial_eq_arc_str_agrees_with_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let arced: Vec<std::sync::Arc<str>> = digests
+            .iter()
+            .flat_map(|d| {
+                [
+                    std::sync::Arc::<str>::from(d.as_str()),
+                    std::sync::Arc::<str>::from(format!("SHA256:{}", &d[7..])),
+                    std::sync::Arc::<str>::from(format!(" {d}")),
+                    std::sync::Arc::<str>::from(format!("{d}\n")),
+                ]
+            })
+            .chain([
+                std::sync::Arc::<str>::from(""),
+                std::sync::Arc::<str>::from("sha256:"),
+                std::sync::Arc::<str>::from("SHA256:0123"),
+                std::sync::Arc::<str>::from("not-a-digest"),
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &arced {
+                assert_eq!(
+                    <ContentDigest as PartialEq<std::sync::Arc<str>>>::eq(&d, label),
+                    d.as_str() == label.as_ref(),
+                    "PartialEq<Arc<str>> and as_str() equality must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// At every validated [`ContentDigest`] value, the peer recognises
+    /// the digest's own emitted canonical form as an [`Arc<str>`] AND
+    /// round-trips through the sibling by-value cross-thread shared-
+    /// owned UTF-8 emit peer [`From<ContentDigest> for Arc<str>`]
+    /// (commit 5f85247) — so the two cross-thread shared-owned
+    /// surfaces agree at their shared canonical form.
+    #[test]
+    fn test_partial_eq_arc_str_reflexive_at_own_digest() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let canonical: std::sync::Arc<str> = std::sync::Arc::<str>::from(d.as_str());
+            assert!(
+                <ContentDigest as PartialEq<std::sync::Arc<str>>>::eq(&d, &canonical),
+                "PartialEq<Arc<str>> must recognise self canonical form at {raw:?}",
+            );
+            let emitted: std::sync::Arc<str> = std::sync::Arc::<str>::from(d.clone());
+            assert!(
+                <ContentDigest as PartialEq<std::sync::Arc<str>>>::eq(&d, &emitted),
+                "PartialEq<Arc<str>> must agree with From<ContentDigest> for Arc<str> at {raw:?}",
+            );
+        }
+    }
+
+    /// Every cross-thread shared-owned [`Arc<str>`] that is NOT the
+    /// digest's own emitted canonical form fails equality through
+    /// [`PartialEq<Arc<str>>`] — the same canonicity discipline the
+    /// sibling receiver peers enforce, projected onto the [`Arc<str>`]
+    /// receiver.
+    #[test]
+    fn test_partial_eq_arc_str_rejects_non_canonical_labels() {
+        let d1 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        let d2 = ContentDigest::parse(&format!("sha256:{D2}")).unwrap();
+        let bad: [std::sync::Arc<str>; 7] = [
+            std::sync::Arc::<str>::from(""),
+            std::sync::Arc::<str>::from("sha256:"),
+            std::sync::Arc::<str>::from("not-a-digest"),
+            std::sync::Arc::<str>::from(format!("SHA256:{D1}").as_str()),
+            std::sync::Arc::<str>::from(format!(" sha256:{D1}").as_str()),
+            std::sync::Arc::<str>::from(format!("sha256:{D1}\n").as_str()),
+            std::sync::Arc::<str>::from(format!("sha256:{D2}").as_str()),
+        ];
+        for label in &bad {
+            assert!(
+                !<ContentDigest as PartialEq<std::sync::Arc<str>>>::eq(&d1, label),
+                "PartialEq<Arc<str>> must reject non-canonical label {label:?} at sha256:{D1}",
+            );
+        }
+        let d1_canonical: std::sync::Arc<str> =
+            std::sync::Arc::<str>::from(format!("sha256:{D1}").as_str());
+        assert!(!<ContentDigest as PartialEq<std::sync::Arc<str>>>::eq(
+            &d2,
+            &d1_canonical,
+        ));
+    }
+
+    /// The reverse-direction cross-thread shared-owned UTF-8
+    /// comparison peer `<Arc<str> as PartialEq<ContentDigest>>::eq`
+    /// agrees byte-for-byte with the borrowed-view
+    /// [`ContentDigest::as_str`] oracle across the same grid AND is
+    /// symmetric with the forward-direction peer at every
+    /// `(arc, digest)` pair.
+    #[test]
+    fn test_arc_str_partial_eq_content_digest_symmetric_and_agrees_with_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let arced: Vec<std::sync::Arc<str>> = digests
+            .iter()
+            .cloned()
+            .chain([
+                String::new(),
+                "sha256:".to_string(),
+                "not-a-digest".to_string(),
+                format!("SHA256:{D1}"),
+                format!(" sha256:{D1}"),
+                format!("sha256:{D1}\n"),
+            ])
+            .map(|s| std::sync::Arc::<str>::from(s.as_str()))
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &arced {
+                assert_eq!(
+                    <std::sync::Arc<str> as PartialEq<ContentDigest>>::eq(label, &d),
+                    label.as_ref() == d.as_str(),
+                    "reverse Arc<str> and as_str() equality must agree at ({label:?}, {raw:?})",
+                );
+                assert_eq!(
+                    <std::sync::Arc<str> as PartialEq<ContentDigest>>::eq(label, &d),
+                    <ContentDigest as PartialEq<std::sync::Arc<str>>>::eq(&d, label),
+                    "reverse-Arc<str> vs forward-Arc<str> direction must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// The cross-thread shared-owned [`Arc<str>`] forward and reverse
+    /// peers compose with a generic
+    /// `PartialEq<Arc<str>>`- / `PartialEq<ContentDigest>`-bounded
+    /// consumer — a downstream site that types its comparison
+    /// contract as `impl PartialEq<Arc<str>>` recovers the same
+    /// answer as a direct
+    /// `<ContentDigest as PartialEq<Arc<str>>>::eq` call, and the
+    /// reverse-direction bound `impl PartialEq<ContentDigest>`
+    /// recovers the same answer as a direct
+    /// `<Arc<str> as PartialEq<ContentDigest>>::eq` call.
+    #[test]
+    fn test_partial_eq_content_digest_arc_str_carries_through_generic_consumer() {
+        fn fwd_via_bound<T: PartialEq<std::sync::Arc<str>>>(
+            t: &T,
+            expected: &std::sync::Arc<str>,
+        ) -> bool {
+            <T as PartialEq<std::sync::Arc<str>>>::eq(t, expected)
+        }
+        fn rev_via_bound<T: PartialEq<ContentDigest>>(t: &T, expected: &ContentDigest) -> bool {
+            <T as PartialEq<ContentDigest>>::eq(t, expected)
+        }
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let arced: std::sync::Arc<str> = std::sync::Arc::<str>::from(raw.as_str());
+            assert!(fwd_via_bound(&d, &arced));
+            assert!(rev_via_bound(&arced, &d));
+            let other = if raw.starts_with("sha256:") {
+                format!("sha512:{}", "0".repeat(SHA512_HEX_LEN))
+            } else {
+                format!("sha256:{D1}")
+            };
+            let other_arced: std::sync::Arc<str> = std::sync::Arc::<str>::from(other.as_str());
+            assert!(!fwd_via_bound(&d, &other_arced));
+            assert!(!rev_via_bound(&other_arced, &d));
         }
     }
 }
