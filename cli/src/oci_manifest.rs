@@ -46,6 +46,177 @@ const SHA256_HEX_LEN: usize = 64;
 const SHA512_HEX_LEN: usize = 128;
 const BLAKE3_HEX_LEN: usize = 64;
 
+/// The canonical set of content-digest algorithms this module admits at
+/// its parse frontier — a typed sum over the `<algorithm>:<hex>`
+/// algorithm axis. The enum has three variants, mirroring the three
+/// algorithms [`ContentDigest::parse`] accepts:
+///
+/// - [`DigestAlgorithm::Sha256`] — the OCI distribution-spec canonical
+///   registry-side digest; 64 lowercase-hex chars (256 bits).
+/// - [`DigestAlgorithm::Sha512`] — the OCI distribution-spec canonical
+///   registry-side long-form digest; 128 lowercase-hex chars (512 bits).
+/// - [`DigestAlgorithm::Blake3`] — forge's attestation-frontier digest
+///   emitted by `tameshi::hash::Blake3Hash::to_prefixed` into the sekiban
+///   `certification_hash` / `signature` / `compliance_hash` slots stamped
+///   through [`crate::commands::attestation::generate_attestation_info`];
+///   64 lowercase-hex chars (256 bits).
+///
+/// This lifts the algorithm axis off the stringly-typed `&str` label
+/// [`ContentDigest::algorithm`] returns onto a typed sum with a bounded,
+/// exhaustive variant set. Prior to this typed sum, a downstream policy
+/// site pinned the algorithm axis through a bare string comparison —
+/// [`crate::helm_provenance::find_tarball_sha256`]'s
+/// `digest.algorithm() != "sha256"` cross-check was the load-bearing
+/// example — which carried two per-site failure modes: (a) a typo in the
+/// literal (`"sha-256"`, `"SHA256"`) was not detectable at compile time
+/// and silently narrowed the policy predicate, and (b) a widening of the
+/// digest grammar to a new algorithm (a future `sha384` arm the
+/// distribution spec might normatively adopt) left every stringly-
+/// typed dispatch site untouched, silently degrading the policy to a
+/// partial cover of the new variant.
+///
+/// Routing every algorithm dispatch through this typed sum makes the
+/// axis single-source: a future variant insertion forces the author to
+/// extend the enum (the compiler refuses to compile a non-exhaustive
+/// `match` against it), and every downstream policy site that
+/// distinguishes arms picks up the new variant at the compile-time
+/// exhaustiveness check without a per-site edit.
+///
+/// The parse frontier ([`ContentDigest::parse`]) and the read-back
+/// accessor ([`ContentDigest::algorithm_kind`]) both route through the
+/// canonical label ↔ variant table on this typed sum
+/// ([`DigestAlgorithm::parse`] / [`DigestAlgorithm::as_str`]), so a
+/// future refinement to the algorithm set (widening to `sha384`,
+/// tightening the attestation-frontier arm) is a one-site edit on this
+/// enum.
+///
+/// Sibling of [`crate::probe_outcome::AdmissionTier`],
+/// [`crate::retry::PerAttemptRegion`], and
+/// [`crate::version::BumpLevel`] — every canonical-label typed sum in
+/// forge's typed-primitive algebra exposes the same shape (a bounded
+/// enum + [`ALL`](Self::ALL) const + [`as_str`](Self::as_str) label
+/// projection + [`Display`](std::fmt::Display) + canonical-label
+/// [`parse`](Self::parse) inverse), and this closes the same shape on
+/// the digest-algorithm axis. Prior to this typed sum the digest-
+/// algorithm axis was the only canonical-label surface in the module
+/// still living as a bare `&str` prefix inside the parse function's
+/// `match` body.
+///
+/// THEORY.md §III.1 typescape: the digest-algorithm axis is a typed
+/// primitive on the platform (one bounded variant set), not a bare
+/// `&str` prefix restated at every consumer that pins a per-algorithm
+/// policy. THEORY.md §VI.1 generation over composition: the
+/// canonical label ↔ variant table is named at one site
+/// ([`DigestAlgorithm::as_str`] and its inverse [`DigestAlgorithm::parse`]),
+/// and every algorithm dispatch surface — the [`ContentDigest::parse`]
+/// grammar oracle, the [`ContentDigest::algorithm_kind`] read-back
+/// accessor, the [`crate::helm_provenance`] sha256-only cross-check —
+/// reads through it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DigestAlgorithm {
+    /// The OCI / Docker distribution-spec canonical registry-side
+    /// digest — 256-bit SHA-2 output rendered as 64 lowercase-hex chars
+    /// (the [`SHA256_HEX_LEN`] body length).
+    Sha256,
+    /// The OCI / Docker distribution-spec canonical registry-side
+    /// long-form digest — 512-bit SHA-2 output rendered as 128
+    /// lowercase-hex chars (the [`SHA512_HEX_LEN`] body length).
+    Sha512,
+    /// Forge's attestation-frontier digest — 256-bit BLAKE3 output
+    /// rendered as 64 lowercase-hex chars (the [`BLAKE3_HEX_LEN`] body
+    /// length) — emitted through `tameshi::hash::Blake3Hash::to_prefixed`
+    /// into the sekiban annotation set stamped by
+    /// [`crate::commands::attestation::generate_attestation_info`].
+    Blake3,
+}
+
+impl DigestAlgorithm {
+    /// Every [`DigestAlgorithm`] variant, listed in the algorithm-family
+    /// order the [`ContentDigest::parse`] grammar admits them
+    /// (`Sha256`, `Sha512`, `Blake3` — the two OCI-distribution
+    /// registry-side algorithms followed by forge's attestation-
+    /// frontier algorithm). Single-source enumeration of the typed sum,
+    /// mirroring the discipline
+    /// [`crate::probe_outcome::AdmissionTier::ALL`] and
+    /// [`crate::version::BumpLevel::ALL`] establish at their sibling
+    /// typed sums. A consumer that needs to iterate every variant —
+    /// exhaustive-cover property tests, per-algorithm cross-check
+    /// tables, telemetry-label enumeration — reads
+    /// [`DigestAlgorithm::ALL`] once instead of restating the variant
+    /// list at the call site, so a future variant insertion forces the
+    /// author to extend this one const rather than every per-site
+    /// restatement.
+    #[allow(dead_code)]
+    pub const ALL: [Self; 3] = [Self::Sha256, Self::Sha512, Self::Blake3];
+
+    /// The canonical `<algorithm>` label the parse grammar
+    /// [`ContentDigest::parse`] admits for this variant. Read-back
+    /// projection from the typed sum onto the borrowed UTF-8
+    /// canonical-label surface. Route: every downstream consumer that
+    /// formats the algorithm prefix (a display frontier stamping
+    /// `"{algo}:{hex}"`, a serde-serialize adapter that emits the
+    /// canonical label, the [`std::fmt::Display`] impl directly below)
+    /// reads through this one-oracle table so a future variant
+    /// insertion adds one arm here rather than one arm at every
+    /// per-consumer restatement.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sha256 => "sha256",
+            Self::Sha512 => "sha512",
+            Self::Blake3 => "blake3",
+        }
+    }
+
+    /// The lowercase-hex body length the [`ContentDigest::parse`]
+    /// grammar pins for this variant. Route: the parse oracle reads
+    /// this at its length-check arm so the expected body length is a
+    /// projection from the algorithm typed sum, not a per-variant
+    /// `match` branch restated at every parse site.
+    #[allow(dead_code)]
+    pub const fn hex_len(self) -> usize {
+        match self {
+            Self::Sha256 => SHA256_HEX_LEN,
+            Self::Sha512 => SHA512_HEX_LEN,
+            Self::Blake3 => BLAKE3_HEX_LEN,
+        }
+    }
+
+    /// Parse a canonical `<algorithm>` label into a
+    /// [`DigestAlgorithm`] variant. Returns [`None`] when the input is
+    /// not one of the canonical labels [`DigestAlgorithm::as_str`]
+    /// admits — the one-oracle inverse of the label projection. The
+    /// [`ContentDigest::parse`] grammar oracle reads through this at
+    /// its algorithm-arm dispatch so the canonical label ↔ variant
+    /// table is named at one site and a future variant insertion adds
+    /// one arm here rather than at every consumer that dispatches on
+    /// the algorithm prefix.
+    pub fn parse(label: &str) -> Option<Self> {
+        match label {
+            "sha256" => Some(Self::Sha256),
+            "sha512" => Some(Self::Sha512),
+            "blake3" => Some(Self::Blake3),
+            _ => None,
+        }
+    }
+}
+
+/// The canonical-label surface of [`DigestAlgorithm`] at the
+/// [`std::fmt::Display`] frontier — routes through
+/// [`DigestAlgorithm::as_str`] so the variant → label mapping is defined
+/// at one site. A downstream consumer that stamps
+/// `format!("{algo}:{hex}")` reads through the same one-oracle table
+/// the [`ContentDigest::parse`] grammar admits at its algorithm arm.
+/// Discipline-mirror of [`crate::probe_outcome::AdmissionTier`]'s
+/// [`Display`](std::fmt::Display) impl and
+/// [`crate::version::BumpLevel`]'s
+/// [`Display`](std::fmt::Display) impl, both routing through their
+/// respective `as_str` label-projection tables.
+impl std::fmt::Display for DigestAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,16 +313,12 @@ impl ContentDigest {
                 .ok_or_else(|| ContentDigestError::MissingSeparator {
                     input: trimmed.to_string(),
                 })?;
-        let expected_len = match algo {
-            "sha256" => SHA256_HEX_LEN,
-            "sha512" => SHA512_HEX_LEN,
-            "blake3" => BLAKE3_HEX_LEN,
-            _ => {
-                return Err(ContentDigestError::UnsupportedAlgorithm {
-                    input: trimmed.to_string(),
-                })
+        let algorithm = DigestAlgorithm::parse(algo).ok_or_else(|| {
+            ContentDigestError::UnsupportedAlgorithm {
+                input: trimmed.to_string(),
             }
-        };
+        })?;
+        let expected_len = algorithm.hex_len();
         let hex_ok = hex.len() == expected_len
             && hex
                 .bytes()
@@ -217,6 +384,47 @@ impl ContentDigest {
             .split_once(':')
             .map(|(_, hex)| hex)
             .unwrap_or_default()
+    }
+
+    /// The [`DigestAlgorithm`] variant of the validated digest — the
+    /// typed peer of [`Self::algorithm`], which returns the same axis
+    /// as a bare `&str` label. Reads through the canonical label ↔
+    /// variant table on the typed sum ([`DigestAlgorithm::parse`]) so
+    /// a downstream consumer that pins a per-algorithm policy — the
+    /// sha256-only cross-check
+    /// [`crate::helm_provenance::find_tarball_sha256`] performs on the
+    /// signed-chart digest, a future per-algorithm ordering key
+    /// keyed on the algorithm axis rather than the full digest bytes,
+    /// a per-algorithm serde-serialize pathway — reads a typed variant
+    /// rather than a string prefix. The compiler refuses to compile a
+    /// non-exhaustive `match` against the typed variant, so a future
+    /// widening of the digest grammar to a new algorithm (a `sha384`
+    /// arm the distribution spec might normatively adopt) lights up at
+    /// every downstream policy site rather than silently degrading it
+    /// to a partial cover.
+    ///
+    /// The parse invariant guarantees the algorithm prefix
+    /// [`Self::algorithm`] returns is one of the canonical labels
+    /// [`DigestAlgorithm::parse`] admits, so the inner
+    /// [`Option::expect`] is unreachable under a valid
+    /// [`ContentDigest`] — the same parse-invariant unreachability
+    /// discipline [`Self::algorithm`] and [`Self::hex`] carry.
+    ///
+    /// `allow(dead_code)`: part of the primitive read-back surface,
+    /// same discipline as [`Self::algorithm`] / [`Self::hex`].
+    ///
+    /// THEORY.md §III.1 typescape: the digest-algorithm axis is a
+    /// typed-primitive projection off [`ContentDigest`] onto the
+    /// [`DigestAlgorithm`] typed sum, not a per-consumer
+    /// `digest.algorithm() == "sha256"` string comparison at every
+    /// downstream policy site. THEORY.md §VI.1 one-oracle: the
+    /// canonical label ↔ variant table is named at one site
+    /// ([`DigestAlgorithm::as_str`] / [`DigestAlgorithm::parse`]), and
+    /// this read-back accessor reads through it.
+    #[allow(dead_code)]
+    pub fn algorithm_kind(&self) -> DigestAlgorithm {
+        DigestAlgorithm::parse(self.algorithm())
+            .expect("ContentDigest carries a validated algorithm by parse invariant")
     }
 }
 
@@ -5579,6 +5787,121 @@ mod tests {
     fn test_content_digest_accessors_compose_to_full_string() {
         let d = ContentDigest::parse(&format!("  sha256:{D1}\n")).unwrap();
         assert_eq!(format!("{}:{}", d.algorithm(), d.hex()), d.as_str());
+    }
+
+    /// [`DigestAlgorithm::as_str`] projects each variant onto the
+    /// canonical `<algorithm>` label the [`ContentDigest::parse`]
+    /// grammar admits. Pins the one-oracle label table so a future
+    /// drift (a variant added without extending the projection, an
+    /// accidental typo in a label) lights up. Guards the load-bearing
+    /// contract that the label projection round-trips through
+    /// [`DigestAlgorithm::parse`] on every variant.
+    #[test]
+    fn test_digest_algorithm_as_str_projects_canonical_label() {
+        assert_eq!(DigestAlgorithm::Sha256.as_str(), "sha256");
+        assert_eq!(DigestAlgorithm::Sha512.as_str(), "sha512");
+        assert_eq!(DigestAlgorithm::Blake3.as_str(), "blake3");
+    }
+
+    /// [`DigestAlgorithm::hex_len`] projects each variant onto the
+    /// lowercase-hex body length the [`ContentDigest::parse`] grammar
+    /// pins for that algorithm. Guards the projection table so a
+    /// future variant insertion or a length-constant drift lights up
+    /// at this one site.
+    #[test]
+    fn test_digest_algorithm_hex_len_projects_body_length() {
+        assert_eq!(DigestAlgorithm::Sha256.hex_len(), SHA256_HEX_LEN);
+        assert_eq!(DigestAlgorithm::Sha512.hex_len(), SHA512_HEX_LEN);
+        assert_eq!(DigestAlgorithm::Blake3.hex_len(), BLAKE3_HEX_LEN);
+    }
+
+    /// [`DigestAlgorithm::parse`] is the one-oracle inverse of
+    /// [`DigestAlgorithm::as_str`] — every variant's canonical label
+    /// round-trips back to the same variant. Guards the label ↔
+    /// variant table isomorphism on the [`DigestAlgorithm::ALL`]
+    /// enumeration so a future variant insertion at either end of the
+    /// pair lights up.
+    #[test]
+    fn test_digest_algorithm_parse_round_trips_every_variant() {
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(DigestAlgorithm::parse(algo.as_str()), Some(algo));
+        }
+    }
+
+    /// [`DigestAlgorithm::parse`] returns [`None`] for a label outside
+    /// the canonical set — the same rejection the
+    /// [`ContentDigest::parse`] grammar oracle observes at its
+    /// [`ContentDigestError::UnsupportedAlgorithm`] arm. Pins the
+    /// rejection cover so a downstream policy site (a per-algorithm
+    /// cross-check) cannot silently admit a stringly-typed drift like
+    /// `"SHA256"` (uppercase) or `"sha-256"` (hyphenated).
+    #[test]
+    fn test_digest_algorithm_parse_rejects_unknown_label() {
+        assert_eq!(DigestAlgorithm::parse("SHA256"), None);
+        assert_eq!(DigestAlgorithm::parse("sha-256"), None);
+        assert_eq!(DigestAlgorithm::parse("md5"), None);
+        assert_eq!(DigestAlgorithm::parse(""), None);
+    }
+
+    /// The [`std::fmt::Display`] impl on [`DigestAlgorithm`] routes
+    /// through [`DigestAlgorithm::as_str`]. A downstream consumer
+    /// stamping `format!("{algo}:{hex}")` reads the same canonical
+    /// label the parse grammar admits, so a `{algo}:{hex}` render
+    /// round-trips back through [`ContentDigest::parse`] without a
+    /// per-variant restatement of the label.
+    #[test]
+    fn test_digest_algorithm_display_matches_as_str() {
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(algo.to_string(), algo.as_str());
+        }
+    }
+
+    /// [`DigestAlgorithm::ALL`] contains every variant exactly once —
+    /// the exhaustive-cover match discipline
+    /// [`crate::probe_outcome::AdmissionTier::ALL`] establishes at the
+    /// sibling typed sum, extended to the digest-algorithm axis. A
+    /// future variant insertion that forgot to extend
+    /// [`DigestAlgorithm::ALL`] lights up at this one site because
+    /// the exhaustive `match` refuses to compile.
+    #[test]
+    fn test_digest_algorithm_all_contains_every_variant() {
+        for algo in DigestAlgorithm::ALL {
+            match algo {
+                DigestAlgorithm::Sha256 => {
+                    assert!(DigestAlgorithm::ALL.contains(&DigestAlgorithm::Sha256))
+                }
+                DigestAlgorithm::Sha512 => {
+                    assert!(DigestAlgorithm::ALL.contains(&DigestAlgorithm::Sha512))
+                }
+                DigestAlgorithm::Blake3 => {
+                    assert!(DigestAlgorithm::ALL.contains(&DigestAlgorithm::Blake3))
+                }
+            }
+        }
+        assert_eq!(DigestAlgorithm::ALL.len(), 3);
+    }
+
+    /// [`ContentDigest::algorithm_kind`] projects the validated digest
+    /// onto the [`DigestAlgorithm`] typed sum, agreeing with the
+    /// stringly-typed [`ContentDigest::algorithm`] on every canonical
+    /// algorithm. The typed peer of the accessor at the algorithm
+    /// axis — a downstream consumer that pins a per-algorithm policy
+    /// reads a variant rather than a bare label, so a stringly-typed
+    /// drift is caught by the compiler's exhaustiveness check.
+    #[test]
+    fn test_content_digest_algorithm_kind_projects_typed_variant() {
+        let sha256 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        assert_eq!(sha256.algorithm_kind(), DigestAlgorithm::Sha256);
+        assert_eq!(sha256.algorithm_kind().as_str(), sha256.algorithm());
+
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let sha512 = ContentDigest::parse(&format!("sha512:{hex512}")).unwrap();
+        assert_eq!(sha512.algorithm_kind(), DigestAlgorithm::Sha512);
+        assert_eq!(sha512.algorithm_kind().as_str(), sha512.algorithm());
+
+        let blake3 = ContentDigest::parse(&format!("blake3:{D2}")).unwrap();
+        assert_eq!(blake3.algorithm_kind(), DigestAlgorithm::Blake3);
+        assert_eq!(blake3.algorithm_kind().as_str(), blake3.algorithm());
     }
 
     /// `str::parse::<ContentDigest>()` succeeds on a well-formed sha256
