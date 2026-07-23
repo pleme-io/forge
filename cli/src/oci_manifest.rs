@@ -1704,6 +1704,139 @@ impl AsRef<[u8]> for ContentDigest {
     }
 }
 
+/// [`std::borrow::Borrow<str>`] for [`ContentDigest`] routes through
+/// [`ContentDigest::as_str`] so a downstream consumer that keys an
+/// identity container on [`ContentDigest`] — a
+/// [`std::collections::HashMap<ContentDigest, V>`] mapping each
+/// canonical digest to its owning image reference / attestation
+/// record / verification breadcrumb, a
+/// [`std::collections::HashSet<ContentDigest>`] of already-seen
+/// content-addressed blobs guarding a deduped push / fetch loop, a
+/// [`std::collections::BTreeMap<ContentDigest, V>`] emitting a
+/// deterministic canonical-digest-ordered dump for a manifest /
+/// audit report — probes the container by an incoming `&str`
+/// (a captured registry-response line, a `serde_json::Value::String`
+/// pulled off a manifest field, a config-file digest token, a CLI
+/// argument slot) WITHOUT allocating a fresh [`ContentDigest`] key
+/// per probe.
+///
+/// The identity-container-lookup peer of the trait-generic
+/// borrowed-view read peer [`AsRef<str> for ContentDigest`] directly
+/// above — both project the same validated full-digest slice through
+/// [`ContentDigest::as_str`], split by intent: [`AsRef<str>`] yields
+/// the slice for a generic `impl AsRef<str>` read consumer (a
+/// formatter frontier, a hasher [`update`](std::hash::Hasher::write)
+/// sink, a [`std::path::Path::new`] path-segment builder), this
+/// [`Borrow<str>`] answers the identity-container's own probe
+/// contract (`HashMap::get<Q>` / `BTreeMap::get<Q>` /
+/// `HashSet::contains<Q>` where `K: Borrow<Q>`) directly at the
+/// [`ContentDigest`] key slot without a per-probe
+/// `ContentDigest::parse(str_key).ok().and_then(|k| map.get(&k))`
+/// restatement that pays a parse-and-discard round trip per lookup
+/// AND wastes the standard-library idiom's zero-allocation probe
+/// discipline the [`String`] → [`str`] key story already carries.
+///
+/// [`Eq`] → [`Hash`] coherence with [`Borrow<str>`] holds by
+/// construction and is the load-bearing safety condition for
+/// [`Borrow<str>`] participating in a [`std::collections::HashMap`]
+/// key slot: the derived [`Hash`] on
+/// [`ContentDigest`]`{ full: String }` produces
+/// `full.hash(hasher)`, [`Hash`] on [`String`] delegates to
+/// [`Hash`] on the underlying [`str`] via
+/// `(**self).hash(hasher)`, and this [`Borrow<str>::borrow`] returns
+/// the same `&self.full` slice through [`ContentDigest::as_str`], so
+/// `hash(&digest)` and `hash(digest.borrow() as &str)` step through
+/// the exact same [`str::hash`] byte-write trace at every validated
+/// [`ContentDigest`] value with any [`std::hash::Hasher`] — the
+/// [`Borrow`] contract's `k.borrow().hash(h) == k.hash(h)` axiom
+/// discharges structurally without a hand-rolled [`Hash`] impl and
+/// without a per-consumer proof obligation. [`Eq`] agreement follows
+/// the same route: the derived [`PartialEq`] on
+/// [`ContentDigest`]`{ full: String }` reads `self.full == other.full`
+/// (byte-for-byte UTF-8 equality on the validated backing string),
+/// and a lookup probe compares `k.borrow() == q` at the borrowed
+/// [`str`] frontier through the same
+/// [`<str as PartialEq<str>>::eq`] the sibling [`PartialEq<str> for
+/// ContentDigest`] peer routes through. Together they close the
+/// [`Borrow`] safety contract at the primitive.
+///
+/// Zero-cost by construction: the returned `&str` is a borrow off
+/// [`ContentDigest::full`] via [`ContentDigest::as_str`], so a
+/// container probe reads directly into the key value's own storage
+/// without a copy, an allocation, or a formatter round-trip — the
+/// same zero-cost discipline the standard-library [`String`] →
+/// [`str`] [`Borrow`] projection carries. The identity
+/// `<ContentDigest as std::borrow::Borrow<str>>::borrow(&d) ==
+/// <ContentDigest as AsRef<str>>::as_ref(&d)` at every validated
+/// [`ContentDigest`] value is pinned by
+/// [`tests::test_borrow_str_matches_as_ref_str`]; the [`Hash`]
+/// coherence axiom at a shared [`std::hash::Hasher`] is pinned by
+/// [`tests::test_borrow_str_hash_agrees_with_borrowed_str_hash`];
+/// the identity-container probe surface — [`HashMap`], [`BTreeMap`],
+/// [`HashSet`] all keying on [`ContentDigest`] and probed by
+/// `&str` — is pinned by
+/// [`tests::test_borrow_str_hash_map_probe_by_str_key`],
+/// [`tests::test_borrow_str_btree_map_probe_by_str_key`], and
+/// [`tests::test_borrow_str_hash_set_contains_by_str_key`]; the
+/// generic-consumer carry-through is pinned by
+/// [`tests::test_borrow_str_carries_through_generic_consumer`].
+///
+/// Prior identity-container work on this primitive closed the key
+/// slot itself (commit 5923d7a — `derive(Hash)` on
+/// [`ContentDigest`], with [`tests::test_hash_set_dedup_and_membership`]
+/// pinning a `HashSet<ContentDigest>` insert / contains / dedup
+/// cycle by owned [`ContentDigest`] key). That closure left every
+/// probe still forced through an owned-key construction
+/// (`set.contains(&ContentDigest::parse(str_key).unwrap())`),
+/// paying the [`ContentDigest::parse`] cost — full grammar check,
+/// [`str::trim`], [`str::split_once`], per-byte hex validation,
+/// [`String`] allocation for the backing store — on every probe
+/// against a wire-received / config-loaded / CLI-argument
+/// canonical-digest string, AND surfacing a parse failure as
+/// probe-inapplicable when the probe intent was strictly
+/// "is this raw string present as a key." This [`Borrow<str>`] impl
+/// closes that gap so the probe reads the raw `&str` through the
+/// container's own zero-allocation lookup path, deferring the
+/// parse-oracle cost to key insertion (once per canonical digest,
+/// where the grammar guarantee is load-bearing) rather than probe
+/// (per lookup, where the string is either present verbatim or
+/// absent).
+///
+/// Frontier inspiration: SLSA / sigstore / BuildKit /
+/// content-addressed cache flows probe `Vec<u8>`-keyed or
+/// `String`-keyed maps of validated digests against wire-received
+/// digest strings by the thousand per manifest walk; the
+/// [`String`] → [`str`] [`Borrow`] projection is the standard-
+/// library idiom that lets those flows read raw strings against
+/// canonical string keys without per-probe validation. This impl
+/// projects that idiom onto the typed [`ContentDigest`] key slot so
+/// the same probe discipline works against a
+/// grammar-oracle-bounded key type — a strictly stronger identity
+/// contract than [`String`] carries (a [`ContentDigest`] key is
+/// provably a valid `<algorithm>:<hex>`; a [`String`] key is not),
+/// at the same zero-allocation probe cost.
+///
+/// THEORY.md §III.1 typescape: the identity-container-lookup
+/// borrowed UTF-8 projection is a typed-primitive site on
+/// [`ContentDigest`] itself (one [`Borrow<str>`] impl routing
+/// through [`ContentDigest::as_str`]), not a per-consumer
+/// `ContentDigest::parse(str_key).ok().and_then(|k| map.get(&k))`
+/// restatement at every downstream identity-container probe site.
+/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// named at one site ([`ContentDigest::as_str`], reading through
+/// the [`ContentDigest::parse`]-guarded backing string), and every
+/// borrowed-view surface — the inherent [`ContentDigest::as_str`]
+/// accessor, the format machinery [`std::fmt::Display`], the
+/// trait-generic UTF-8 read peer [`AsRef<str>`], the trait-generic
+/// byte-slice read peer [`AsRef<[u8]>`], this
+/// identity-container-lookup peer [`Borrow<str>`] — reads through
+/// it.
+impl std::borrow::Borrow<str> for ContentDigest {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// Ergonomic canonical-digest equality query at the borrowed UTF-8
 /// frontier — a downstream consumer bound by [`PartialEq<str>`]
 /// (a `matches!` predicate that reads a canonical `<algorithm>:<hex>`
@@ -11052,5 +11185,246 @@ mod tests {
             assert!(!fwd_via_bound(&d, &other));
             assert!(!rev_via_bound(&other, &d));
         }
+    }
+
+    /// `<ContentDigest as std::borrow::Borrow<str>>::borrow` yields
+    /// exactly the same slice as `<ContentDigest as AsRef<str>>::as_ref`
+    /// and the inherent `ContentDigest::as_str` accessor at every
+    /// validated digest — the identity-container-lookup peer routes
+    /// through the same one-oracle read discipline the trait-generic
+    /// borrowed-view read peer already carries. Pins the "borrow ⇒
+    /// as_ref ⇒ as_str ⇒ full backing string" invariant: a future
+    /// refactor that inlined a divergent projection into the
+    /// [`Borrow<str>`] impl fails this test.
+    #[test]
+    fn test_borrow_str_matches_as_ref_str() {
+        use std::borrow::Borrow;
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let cases = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        for raw in cases {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let via_borrow: &str = <ContentDigest as Borrow<str>>::borrow(&d);
+            let via_as_ref: &str = <ContentDigest as AsRef<str>>::as_ref(&d);
+            assert_eq!(via_borrow, via_as_ref);
+            assert_eq!(via_borrow, d.as_str());
+            assert_eq!(via_borrow, raw);
+        }
+    }
+
+    /// The `Borrow` contract requires `k.borrow().hash(h) == k.hash(h)`
+    /// at every hasher `h` — the load-bearing safety condition without
+    /// which a `HashMap<ContentDigest, _>::get::<str>(str_key)` probe
+    /// silently returns [`None`] for keys that ARE present. Pins the
+    /// axiom at a concrete `(digest, hasher)` pair across every
+    /// canonical algorithm arm: the derived `Hash` on
+    /// `ContentDigest { full: String }` steps through the same
+    /// `str::hash` byte-write trace as `Hash` on the borrowed `&str`.
+    /// A future refactor that added a non-identity field to the
+    /// struct or replaced the derived [`Hash`] with a hand-rolled
+    /// projection that broke coherence fails this test rather than
+    /// degrading a downstream [`HashMap`] probe into a silent-miss
+    /// bug at the map lookup call site.
+    #[test]
+    fn test_borrow_str_hash_agrees_with_borrowed_str_hash() {
+        use std::borrow::Borrow;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of<T: Hash + ?Sized>(t: &T) -> u64 {
+            let mut h = DefaultHasher::new();
+            t.hash(&mut h);
+            h.finish()
+        }
+
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let borrowed: &str = <ContentDigest as Borrow<str>>::borrow(&d);
+            assert_eq!(
+                hash_of(&d),
+                hash_of(borrowed),
+                "Borrow<str> Hash coherence: hash(&digest) must agree with \
+                 hash(digest.borrow() as &str) at {raw:?}",
+            );
+        }
+    }
+
+    /// `HashMap<ContentDigest, V>::get(&str_key)` finds a value keyed
+    /// by a validated [`ContentDigest`] through a raw `&str` probe
+    /// without allocating a fresh [`ContentDigest`] key per lookup —
+    /// the identity-container-lookup surface [`Borrow<str>`] unlocks
+    /// on the parse-oracle-bounded key type. Pins the load-bearing
+    /// motivation for the impl: pre-[`Borrow<str>`] the probe had to
+    /// route through `ContentDigest::parse(str_key).ok().and_then(|k|
+    /// map.get(&k))` at every consumer, paying a full-grammar parse
+    /// per lookup AND surfacing parse failure as probe-inapplicable
+    /// when the probe intent was strictly "is this raw string
+    /// present as a key." Also pins the negative arm: a raw `&str`
+    /// that does NOT match any inserted digest's canonical form
+    /// (canonical mismatch, whitespace-drift variant, unrelated
+    /// canonical digest) returns [`None`].
+    #[test]
+    fn test_borrow_str_hash_map_probe_by_str_key() {
+        use std::collections::HashMap;
+
+        let raw1 = format!("sha256:{D1}");
+        let raw2 = format!("sha256:{D2}");
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let raw3 = format!("sha512:{hex512}");
+
+        let d1 = ContentDigest::parse(&raw1).unwrap();
+        let d2 = ContentDigest::parse(&raw2).unwrap();
+        let d3 = ContentDigest::parse(&raw3).unwrap();
+
+        let mut map: HashMap<ContentDigest, &'static str> = HashMap::new();
+        map.insert(d1.clone(), "layer-1");
+        map.insert(d2.clone(), "layer-2");
+        map.insert(d3.clone(), "config");
+
+        // Positive: probe by raw &str hits the correct value.
+        assert_eq!(map.get(raw1.as_str()), Some(&"layer-1"));
+        assert_eq!(map.get(raw2.as_str()), Some(&"layer-2"));
+        assert_eq!(map.get(raw3.as_str()), Some(&"config"));
+
+        // Positive: probe by owned-key value agrees with probe by
+        // borrowed-str view.
+        assert_eq!(map.get(raw1.as_str()), map.get(&d1));
+        assert_eq!(map.get(raw2.as_str()), map.get(&d2));
+
+        // Negative: an uninserted canonical digest string returns None.
+        let raw_unseen = format!("sha256:{D3}");
+        assert_eq!(map.get(raw_unseen.as_str()), None);
+
+        // Negative: a whitespace-drift variant of an inserted digest
+        // returns None — the map's stored key is the canonical trimmed
+        // form, and the raw-str probe matches byte-for-byte through
+        // Borrow<str>, so a stray-whitespace probe correctly misses.
+        let raw_padded = format!("  sha256:{D1}\n");
+        assert_eq!(map.get(raw_padded.as_str()), None);
+
+        // Negative: a syntactically invalid string returns None (does
+        // NOT panic, does NOT need a fallible parse round-trip at the
+        // probe site).
+        assert_eq!(map.get("not-a-digest"), None);
+    }
+
+    /// `BTreeMap<ContentDigest, V>::get(&str_key)` and
+    /// `BTreeMap::range(str_lo..str_hi)` both work through the same
+    /// [`Borrow<str>`] projection [`HashMap`] uses — the identity-
+    /// container-lookup surface at the ordered-map key slot.
+    /// [`BTreeMap`] additionally exercises the sibling `Ord` derive
+    /// on [`ContentDigest`] (line 118), so a probe by borrowed `&str`
+    /// composes `Borrow<str>` with the derived `Ord` to walk the
+    /// tree — the same walk a probe by owned [`ContentDigest`] key
+    /// walks. Pins the ordered-map identity-container surface as
+    /// well as the hash-map one, so a downstream site that pins its
+    /// container choice on determinism (a canonical-digest-ordered
+    /// audit dump, a deterministic manifest walk) inherits the same
+    /// raw-`&str` probe discipline.
+    #[test]
+    fn test_borrow_str_btree_map_probe_by_str_key() {
+        use std::collections::BTreeMap;
+
+        let raw1 = format!("sha256:{D1}");
+        let raw2 = format!("sha256:{D2}");
+        let d1 = ContentDigest::parse(&raw1).unwrap();
+        let d2 = ContentDigest::parse(&raw2).unwrap();
+
+        let mut map: BTreeMap<ContentDigest, u32> = BTreeMap::new();
+        map.insert(d1, 1);
+        map.insert(d2, 2);
+
+        assert_eq!(map.get(raw1.as_str()), Some(&1));
+        assert_eq!(map.get(raw2.as_str()), Some(&2));
+        assert_eq!(
+            map.get("sha256:0000000000000000000000000000000000000000000000000000000000000000"),
+            None
+        );
+    }
+
+    /// `HashSet<ContentDigest>::contains(&str_key)` returns `true`
+    /// for a raw `&str` that matches any inserted [`ContentDigest`]'s
+    /// canonical form, `false` otherwise — the identity-container
+    /// membership surface [`Borrow<str>`] unlocks on
+    /// [`HashSet`]-keyed dedup sets. A downstream dedup / seen-set
+    /// / expected-registry-digest guard now probes a raw wire /
+    /// config string against the typed key set without allocating a
+    /// fresh [`ContentDigest`] per probe AND without threading
+    /// [`ContentDigest::parse`] failure into the "is this present"
+    /// question.
+    #[test]
+    fn test_borrow_str_hash_set_contains_by_str_key() {
+        use std::collections::HashSet;
+
+        let raw1 = format!("sha256:{D1}");
+        let raw2 = format!("sha256:{D2}");
+        let d1 = ContentDigest::parse(&raw1).unwrap();
+        let d2 = ContentDigest::parse(&raw2).unwrap();
+
+        let mut set: HashSet<ContentDigest> = HashSet::new();
+        set.insert(d1);
+        set.insert(d2);
+
+        assert!(set.contains(raw1.as_str()));
+        assert!(set.contains(raw2.as_str()));
+        assert!(!set
+            .contains("sha256:0000000000000000000000000000000000000000000000000000000000000000"));
+        // Whitespace-drift variant is a byte-level miss through the
+        // canonical trimmed key, matching the HashMap probe surface.
+        let padded = format!(" sha256:{D1}\n");
+        assert!(!set.contains(padded.as_str()));
+        // Syntactically invalid probe is a clean miss, not a panic.
+        assert!(!set.contains("not-a-digest"));
+    }
+
+    /// The [`Borrow<str>`] impl composes with a generic
+    /// identity-container-probe helper bounded by
+    /// `V: Borrow<str>` — the compositional motivation for landing
+    /// the trait separately from the sibling [`AsRef<str>`] and
+    /// inherent [`ContentDigest::as_str`] read peers. Pins the
+    /// trait-generic identity-container consumer surface: a
+    /// downstream site that types its input contract as
+    /// `V: Borrow<str>` (a hash-map-lookup helper, a deterministic
+    /// key-normalisation utility, an audit-record probe) recovers
+    /// the same borrowed full-digest slice a direct
+    /// `.as_str()` / `.as_ref::<str>()` call would.
+    #[test]
+    fn test_borrow_str_carries_through_generic_consumer() {
+        use std::borrow::Borrow;
+
+        fn first_byte_of<V: Borrow<str>>(v: &V) -> u8 {
+            v.borrow().as_bytes()[0]
+        }
+        fn length_of<V: Borrow<str>>(v: &V) -> usize {
+            v.borrow().len()
+        }
+        fn equals<V: Borrow<str>>(v: &V, expected: &str) -> bool {
+            v.borrow() == expected
+        }
+
+        let raw = format!("sha256:{D1}");
+        let d = ContentDigest::parse(&raw).unwrap();
+        assert_eq!(first_byte_of(&d), b's');
+        assert_eq!(length_of(&d), raw.len());
+        assert!(equals(&d, &raw));
+
+        // Composes with the sibling AsRef<str> read peer at the same
+        // borrowed slice: T: Borrow<str> and T: AsRef<str> read the
+        // same underlying full-digest slice through the same
+        // one-oracle discipline.
+        assert_eq!(
+            <ContentDigest as Borrow<str>>::borrow(&d),
+            <ContentDigest as AsRef<str>>::as_ref(&d),
+        );
     }
 }
