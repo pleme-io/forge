@@ -2841,6 +2841,145 @@ impl PartialEq<ContentDigest> for std::borrow::Cow<'_, [u8]> {
     }
 }
 
+/// Ergonomic canonical-digest equality query at the shrunk-owned
+/// UTF-8 frontier — the [`Box<str>`] peer of the owned-string
+/// comparison pair [`PartialEq<String> for ContentDigest`] +
+/// [`PartialEq<ContentDigest> for String`] (commit 06cb6f5) and the
+/// borrowed-or-owned [`Cow<'_, str>`] pair
+/// [`PartialEq<Cow<'_, str>> for ContentDigest`] +
+/// [`PartialEq<ContentDigest> for Cow<'_, str>`] (commit 38b2165)
+/// above. A downstream consumer that holds a canonical
+/// `<algorithm>:<hex>` label as a shrunk-owned [`Box<str>`] handle
+/// (a long-lived registry cache that stores a validated digest label
+/// as [`Box<str>`] after
+/// [`String::into_boxed_str`] to shed the amortised-capacity slack
+/// the [`String`] growth buffer carries, a `Vec<Box<str>>` /
+/// `HashSet<Box<str>>` compact-footprint index, an emitted-peer
+/// consumer that received a digest label through
+/// [`From<ContentDigest> for Box<str>`] (commit 0e86524) and asks
+/// whether it names the same canonical form as a live
+/// [`ContentDigest`] value) answers the boolean equality query
+/// `digest == boxed_label` at ONE composition rather than a per-site
+/// `digest.as_str() == &**boxed_label` / `digest.as_str() ==
+/// boxed_label.as_ref()` restatement that repeats the canonical-
+/// digest oracle name at every downstream comparison site.
+///
+/// Route: the impl body composes [`ContentDigest::as_str`] with
+/// the standard library [`<str as PartialEq<str>>::eq`] on the
+/// [`Box<str>`] deref coercion (`Box<str>: Deref<Target = str>`),
+/// so the comparison reads the same canonical-digest bytes at
+/// zero allocation, zero temporary [`String`] construction, and
+/// zero [`std::fmt::Display`] formatter-buffer round trip per
+/// call — the same zero-cost discipline the sibling owned-string
+/// [`PartialEq<String>`] and borrowed-or-owned [`PartialEq<Cow<'_, str>>`]
+/// peers carry.
+///
+/// Sibling of the by-value shrunk-owned UTF-8 emit peer
+/// [`From<ContentDigest> for Box<str>`] (commit 0e86524) and the
+/// by-value shrunk-owned UTF-8 parse peer
+/// [`TryFrom<Box<str>> for ContentDigest`] (commit 2d5eb7e): the
+/// three surfaces bridge the [`ContentDigest`] value and the
+/// [`Box<str>`] shrunk-owned frontier — the parse peer recovers a
+/// [`ContentDigest`] from a canonical `<algorithm>:<hex>`
+/// [`Box<str>`] payload through the [`ContentDigest::parse`]
+/// oracle, the emit peer hands off the validated canonical form as
+/// a [`Box<str>`] through [`String::into_boxed_str`], this
+/// comparison peer asks whether an already-held [`Box<str>`] label
+/// names the same canonical form as the [`ContentDigest`] value on
+/// the left — so a downstream site that received input at the
+/// [`Box<str>`] frontier and needs to answer any of the three
+/// queries reads through the ContentDigest primitive at that
+/// frontier without a per-site `&**boxed_label` deref restatement.
+///
+/// Opens the shrunk-owned / shared-owned UTF-8 receiver trio
+/// ([`Box<str>`], [`std::sync::Arc<str>`], [`std::rc::Rc<str>`])
+/// on the equality axis. The parse axis already carries all three
+/// receivers (commits 2d5eb7e, 414b22c, 4d0783e) and the emit axis
+/// already carries all three receivers (commits 0e86524, 5f85247,
+/// a7bcfd2), so this pair is the first step in closing the equality-
+/// axis analog of the same three-receiver family on the reference-
+/// grammar primitive — after the [`Arc<str>`] and [`Rc<str>`]
+/// equality peers land, the shrunk-owned / shared-owned UTF-8
+/// receiver family is closed on all three input/output/equality
+/// axes on both directions.
+///
+/// THEORY.md §III.1 typescape: the [`Box<str>`] comparison surface
+/// is a typed-primitive site on [`ContentDigest`] itself (one
+/// [`PartialEq<Box<str>>`] impl routing through
+/// [`ContentDigest::as_str`]), not a per-consumer
+/// `digest.as_str() == &**boxed_label` restatement at every
+/// downstream site that receives a [`Box<str>`] and asks whether
+/// it names a specific canonical `<algorithm>:<hex>`. THEORY.md
+/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// one site ([`ContentDigest::as_str`], reading through the
+/// [`ContentDigest::parse`]-guarded backing string), and every
+/// comparison surface — the borrowed-str pair, the borrowed-byte
+/// pair, the owned-String pair, the owned-Vec<u8> pair, the
+/// borrowed-or-owned [`Cow<'_, str>`] pair, the borrowed-or-owned
+/// [`Cow<'_, [u8]>`] pair, this shrunk-owned [`Box<str>`] peer —
+/// reads through the same one-oracle discipline projected onto its
+/// own receiver shape.
+impl PartialEq<Box<str>> for ContentDigest {
+    fn eq(&self, other: &Box<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+/// Symmetric shrunk-owned UTF-8 comparison peer:
+/// `<Box<str> as PartialEq<ContentDigest>>::eq` — the reverse-
+/// direction sibling of [`PartialEq<Box<str>> for ContentDigest`]
+/// (directly above). The pair together closes the [`Box<str>`]
+/// comparison surface across both receiver directions, so a caller
+/// who holds a [`Box<str>`] label writes `boxed_label == digest`
+/// (or the standard-library-derived `if a == b || b == a`-style
+/// symmetric composition a generic `PartialEq`-bounded consumer
+/// performs internally) and answers a boolean equality query
+/// against a [`ContentDigest`] value at the same shrunk-owned
+/// frontier the forward-direction peer covers, at zero allocation,
+/// zero temporary [`String`] construction, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call.
+///
+/// Route: the impl body composes [`ContentDigest::as_str`] with
+/// [`<str as PartialEq<str>>::eq`] on the [`Box<str>`] deref
+/// coercion, so the comparison reads the same canonical-digest
+/// bytes as the forward-direction
+/// [`PartialEq<Box<str>> for ContentDigest`] peer, and the
+/// symmetry axiom
+/// `<Box<str> as PartialEq<ContentDigest>>::eq(boxed, &d)
+/// == <ContentDigest as PartialEq<Box<str>>>::eq(&d, boxed)` holds
+/// by construction at every `(boxed, digest)` pair.
+///
+/// Prior to this impl the digest reference-grammar family carried
+/// only the forward direction at the [`Box<str>`] frontier
+/// (`digest == boxed_label` compiled but `boxed_label == digest`
+/// did not), so a generic `PartialEq`-bounded consumer that
+/// composed the two through its own symmetric-check protocol could
+/// not thread a [`ContentDigest`] through the [`Box<str>`] side of
+/// the bound without a per-consumer `&**boxed_label ==
+/// digest.as_str()` bridge.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction [`Box<str>`]
+/// comparison surface is a typed-primitive site on
+/// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl
+/// on [`Box<str>`] routing through [`ContentDigest::as_str`]), not
+/// a per-consumer `&**boxed_label == digest.as_str()` restatement
+/// at every downstream site that asks whether a [`Box<str>`]
+/// handle names the same canonical `<algorithm>:<hex>` as a
+/// [`ContentDigest`] value. THEORY.md §VI.1 one-oracle: the
+/// validated full-digest slice is named at one site
+/// ([`ContentDigest::as_str`]), and this reverse-direction
+/// [`Box<str>`] receiver reads through the same one-oracle
+/// discipline every sibling comparison surface (borrowed str
+/// × 2 × 2, borrowed bytes × 2 × 2, owned String × 2, owned
+/// Vec<u8> × 2, borrowed-or-owned [`Cow<'_, str>`] × 2,
+/// borrowed-or-owned [`Cow<'_, [u8]>`] × 2, forward [`Box<str>`])
+/// already carries.
+impl PartialEq<ContentDigest> for Box<str> {
+    fn eq(&self, other: &ContentDigest) -> bool {
+        self.as_ref() == other.as_str()
+    }
+}
+
 /// [`From<ContentDigest>`] for [`String`] moves the validated
 /// `<algorithm>:<hex>` backing string out of the consumed
 /// [`ContentDigest`] value at zero-copy — no allocation, no
@@ -12188,6 +12327,222 @@ mod tests {
                 assert!(!fwd_via_bound(&d, &cow));
                 assert!(!rev_via_bound(&cow, &d));
             }
+        }
+    }
+
+    /// `PartialEq<Box<str>> for ContentDigest` agrees byte-for-byte
+    /// with the borrowed-view [`ContentDigest::as_str`] oracle across
+    /// the same 4-canonical × ~8-label grid the sibling owned-String /
+    /// borrowed-or-owned [`Cow<'_, str>`] peers pin, threaded through
+    /// a shrunk-owned [`Box<str>`] handle so the caller writes
+    /// `digest == boxed_label`. Pins the shrunk-owned forward-direction
+    /// agreement so a future refactor that inlined a divergent read
+    /// into the [`Box<str>`] impl breaks this pin at at least one
+    /// `(digest, boxed)` pair rather than at every downstream
+    /// `digest == boxed_label` call site.
+    #[test]
+    fn test_partial_eq_box_str_agrees_with_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let boxed: Vec<Box<str>> = digests
+            .iter()
+            .flat_map(|d| {
+                [
+                    d.clone().into_boxed_str(),
+                    format!("SHA256:{}", &d[7..]).into_boxed_str(),
+                    format!(" {d}").into_boxed_str(),
+                    format!("{d}\n").into_boxed_str(),
+                ]
+            })
+            .chain([
+                String::new().into_boxed_str(),
+                "sha256:".to_string().into_boxed_str(),
+                "SHA256:0123".to_string().into_boxed_str(),
+                "not-a-digest".to_string().into_boxed_str(),
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &boxed {
+                assert_eq!(
+                    <ContentDigest as PartialEq<Box<str>>>::eq(&d, label),
+                    d.as_str() == label.as_ref(),
+                    "PartialEq<Box<str>> and as_str() equality must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// At every validated [`ContentDigest`] value,
+    /// `<Self as PartialEq<Box<str>>>::eq(&digest,
+    /// &digest.as_str().to_owned().into_boxed_str())` returns true —
+    /// the digest recognises its own emitted canonical form as a
+    /// shrunk-owned [`Box<str>`] through the [`Box<str>`] peer, and
+    /// (crucially) the round-trip through the sibling emit peer
+    /// [`From<ContentDigest> for Box<str>`] round-trips through this
+    /// peer as `true` so the two shrunk-owned surfaces agree at their
+    /// shared canonical form.
+    #[test]
+    fn test_partial_eq_box_str_reflexive_at_own_digest() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let canonical: Box<str> = d.as_str().to_owned().into_boxed_str();
+            assert!(
+                <ContentDigest as PartialEq<Box<str>>>::eq(&d, &canonical),
+                "PartialEq<Box<str>> must recognise self canonical form at {raw:?}",
+            );
+            // Round-trip through the sibling by-value shrunk-owned
+            // UTF-8 emit peer From<ContentDigest> for Box<str>
+            // (commit 0e86524): the emit peer's output equals the
+            // digest itself through this comparison peer at every
+            // validated value.
+            let emitted: Box<str> = Box::<str>::from(d.clone());
+            assert!(
+                <ContentDigest as PartialEq<Box<str>>>::eq(&d, &emitted),
+                "PartialEq<Box<str>> must agree with From<ContentDigest> for Box<str> at {raw:?}",
+            );
+        }
+    }
+
+    /// Every shrunk-owned [`Box<str>`] that is NOT the digest's own
+    /// emitted canonical form fails equality through
+    /// [`PartialEq<Box<str>>`] — the same canonicity discipline the
+    /// borrowed-str and owned-String sibling peers enforce, projected
+    /// onto the shrunk-owned [`Box<str>`] receiver.
+    #[test]
+    fn test_partial_eq_box_str_rejects_non_canonical_labels() {
+        let d1 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        let d2 = ContentDigest::parse(&format!("sha256:{D2}")).unwrap();
+        let bad: [Box<str>; 7] = [
+            String::new().into_boxed_str(),
+            "sha256:".to_string().into_boxed_str(),
+            "not-a-digest".to_string().into_boxed_str(),
+            format!("SHA256:{D1}").into_boxed_str(),
+            format!(" sha256:{D1}").into_boxed_str(),
+            format!("sha256:{D1}\n").into_boxed_str(),
+            format!("sha256:{D2}").into_boxed_str(),
+        ];
+        for label in &bad {
+            assert!(
+                !<ContentDigest as PartialEq<Box<str>>>::eq(&d1, label),
+                "PartialEq<Box<str>> must reject non-canonical label {label:?} at sha256:{D1}",
+            );
+        }
+        // Peer surface is symmetric — d2 rejects d1's canonical form
+        // through the shrunk-owned Box<str> receiver as well.
+        let d1_canonical: Box<str> = format!("sha256:{D1}").into_boxed_str();
+        assert!(!<ContentDigest as PartialEq<Box<str>>>::eq(
+            &d2,
+            &d1_canonical,
+        ));
+    }
+
+    /// The reverse-direction shrunk-owned UTF-8 comparison peer
+    /// `<Box<str> as PartialEq<ContentDigest>>::eq` agrees byte-for-
+    /// byte with the borrowed-view [`ContentDigest::as_str`] oracle
+    /// across the same grid AND is symmetric with the forward-
+    /// direction `<ContentDigest as PartialEq<Box<str>>>::eq` peer at
+    /// every `(boxed, digest)` pair. Pins the reverse-direction
+    /// agreement and the symmetry axiom
+    /// `<Box<str> as PartialEq<ContentDigest>>::eq(boxed, &d)
+    /// == <ContentDigest as PartialEq<Box<str>>>::eq(&d, boxed)` so a
+    /// future refactor that diverged one impl from its symmetric peer
+    /// breaks this pin at at least one pair rather than propagating
+    /// unnoticed through downstream generic `PartialEq`-bounded
+    /// consumers that thread a [`ContentDigest`] through either side
+    /// of a `==` operator.
+    #[test]
+    fn test_box_str_partial_eq_content_digest_symmetric_and_agrees_with_as_str() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let boxed: Vec<Box<str>> = digests
+            .iter()
+            .cloned()
+            .chain([
+                String::new(),
+                "sha256:".to_string(),
+                "not-a-digest".to_string(),
+                format!("SHA256:{D1}"),
+                format!(" sha256:{D1}"),
+                format!("sha256:{D1}\n"),
+            ])
+            .map(String::into_boxed_str)
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &boxed {
+                assert_eq!(
+                    <Box<str> as PartialEq<ContentDigest>>::eq(label, &d),
+                    label.as_ref() == d.as_str(),
+                    "reverse Box<str> and as_str() equality must agree at ({label:?}, {raw:?})",
+                );
+                assert_eq!(
+                    <Box<str> as PartialEq<ContentDigest>>::eq(label, &d),
+                    <ContentDigest as PartialEq<Box<str>>>::eq(&d, label),
+                    "reverse-Box<str> vs forward-Box<str> direction must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// The shrunk-owned [`Box<str>`] forward and reverse peers compose
+    /// with a generic `PartialEq<Box<str>>`- / `PartialEq<ContentDigest>`-
+    /// bounded consumer — a downstream site that types its comparison
+    /// contract as `impl PartialEq<Box<str>>` (a `matches!` predicate
+    /// on a shrunk-owned handle, an integration-test oracle that
+    /// generic-bounds its [`Box<str>`] equality check) recovers the
+    /// same answer as a direct `<ContentDigest as PartialEq<Box<str>>>::eq`
+    /// call, and the reverse-direction bound
+    /// `impl PartialEq<ContentDigest>` recovers the same answer as a
+    /// direct `<Box<str> as PartialEq<ContentDigest>>::eq` call.
+    #[test]
+    fn test_partial_eq_content_digest_box_str_carries_through_generic_consumer() {
+        // The `&Box<str>` receiver is load-bearing: this test pins the
+        // exact `PartialEq<Box<str>>` bound the impl above exposes, so
+        // the sibling clippy suggestion to relax it to `&str` would
+        // collapse the bound this test exists to exercise.
+        #[allow(clippy::borrowed_box)]
+        fn fwd_via_bound<T: PartialEq<Box<str>>>(t: &T, expected: &Box<str>) -> bool {
+            <T as PartialEq<Box<str>>>::eq(t, expected)
+        }
+        fn rev_via_bound<T: PartialEq<ContentDigest>>(t: &T, expected: &ContentDigest) -> bool {
+            <T as PartialEq<ContentDigest>>::eq(t, expected)
+        }
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let boxed: Box<str> = raw.clone().into_boxed_str();
+            assert!(fwd_via_bound(&d, &boxed));
+            assert!(rev_via_bound(&boxed, &d));
+            let other = if raw.starts_with("sha256:") {
+                format!("sha512:{}", "0".repeat(SHA512_HEX_LEN))
+            } else {
+                format!("sha256:{D1}")
+            };
+            let other_boxed: Box<str> = other.into_boxed_str();
+            assert!(!fwd_via_bound(&d, &other_boxed));
+            assert!(!rev_via_bound(&other_boxed, &d));
         }
     }
 }
