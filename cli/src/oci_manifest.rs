@@ -34,9 +34,17 @@
 /// Length of the lowercase-hex digest body for each supported algorithm. The
 /// digest forms the content identity of the blob it names; OCI/Docker accept
 /// `sha256` and `sha512` as the standard registry-side algorithms (the OCI
-/// distribution spec lists both as the canonical set).
+/// distribution spec lists both as the canonical set), and forge's attestation
+/// frontier emits `blake3` (256-bit output, 64 lowercase-hex chars — same body
+/// length as sha256) through [`tameshi::hash::Blake3Hash::to_prefixed`] into
+/// `certification_hash` / `signature` / `compliance_hash` slots documented in
+/// [`crate::config::release`] and stamped into the sekiban annotation set at
+/// [`crate::commands::attestation::generate_attestation_info`], so the
+/// same one-oracle grammar spans registry-supplied digests and attestation-
+/// supplied digests without a per-algorithm-family branch at every consumer.
 const SHA256_HEX_LEN: usize = 64;
 const SHA512_HEX_LEN: usize = 128;
+const BLAKE3_HEX_LEN: usize = 64;
 
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
@@ -44,8 +52,10 @@ const SHA512_HEX_LEN: usize = 128;
 pub enum ContentDigestError {
     /// The string did not contain the `:` separating algorithm from hex.
     MissingSeparator { input: String },
-    /// The algorithm prefix was not one of the supported registry algorithms
-    /// (`sha256` / `sha512`).
+    /// The algorithm prefix was not one of the supported algorithms
+    /// (`sha256` / `sha512` — the OCI distribution registry set — or
+    /// `blake3` — forge's attestation-frontier set stamped through
+    /// [`tameshi::hash::Blake3Hash::to_prefixed`]).
     UnsupportedAlgorithm { input: String },
     /// The hex body was not lowercase-hex of the algorithm's expected length.
     InvalidHex { input: String },
@@ -68,7 +78,7 @@ impl std::fmt::Display for ContentDigestError {
             ),
             ContentDigestError::UnsupportedAlgorithm { input } => write!(
                 f,
-                "content digest '{input}' algorithm is not one of sha256 / sha512"
+                "content digest '{input}' algorithm is not one of sha256 / sha512 / blake3"
             ),
             ContentDigestError::InvalidHex { input } => write!(
                 f,
@@ -135,6 +145,7 @@ impl ContentDigest {
         let expected_len = match algo {
             "sha256" => SHA256_HEX_LEN,
             "sha512" => SHA512_HEX_LEN,
+            "blake3" => BLAKE3_HEX_LEN,
             _ => {
                 return Err(ContentDigestError::UnsupportedAlgorithm {
                     input: trimmed.to_string(),
@@ -164,12 +175,14 @@ impl ContentDigest {
         &self.full
     }
 
-    /// The algorithm prefix of the validated digest: `"sha256"` or
-    /// `"sha512"`. Read-back accessor so a consumer that pins a policy
-    /// on the algorithm at its own attestation boundary (e.g.
-    /// [`crate::helm_provenance`]'s sha256-only chart-hash cross-check)
-    /// can distinguish arms directly rather than re-splitting the full
-    /// string.
+    /// The algorithm prefix of the validated digest: `"sha256"`,
+    /// `"sha512"`, or `"blake3"`. Read-back accessor so a consumer
+    /// that pins a policy on the algorithm at its own attestation
+    /// boundary (e.g. [`crate::helm_provenance`]'s sha256-only chart-
+    /// hash cross-check, a future blake3-only attestation-hash
+    /// cross-check on the sekiban annotation set stamped through
+    /// [`tameshi::hash::Blake3Hash::to_prefixed`]) can distinguish
+    /// arms directly rather than re-splitting the full string.
     ///
     /// The parse invariant guarantees exactly one `:` separates the
     /// algorithm from the hex body and the algorithm is one of the
@@ -5298,6 +5311,57 @@ mod tests {
         assert_eq!(d.as_str(), format!("sha512:{hex}"));
     }
 
+    /// A well-formed `blake3:{64-hex}` string parses. Blake3's
+    /// default 256-bit output renders as 64 lowercase-hex chars —
+    /// the same body length as sha256 — and is the shape
+    /// [`tameshi::hash::Blake3Hash::to_prefixed`] emits into
+    /// `certification_hash` / `signature` / `compliance_hash` slots
+    /// stamped through
+    /// [`crate::commands::attestation::generate_attestation_info`].
+    /// Pins the load-bearing widening of the parse oracle beyond the
+    /// two registry-side algorithms (sha256 / sha512) so the same
+    /// grammar accepts both registry-supplied and attestation-
+    /// supplied digests at one site.
+    #[test]
+    fn test_parse_blake3_digest() {
+        let d = ContentDigest::parse(&format!("blake3:{D1}")).unwrap();
+        assert_eq!(d.as_str(), format!("blake3:{D1}"));
+    }
+
+    /// A `blake3:` prefix with a body of wrong length (63 or 65
+    /// hex chars) fails at the [`ContentDigestError::InvalidHex`]
+    /// arm — the algorithm passes the algorithm gate but its 256-
+    /// bit / 64-hex-char length requirement pins the body against
+    /// [`BLAKE3_HEX_LEN`]. Guards the length-boundary rejection at
+    /// the algorithm arm added by this widening so a future drift
+    /// (accidentally reading a 32-hex-char blake3-of-something-
+    /// truncated body, or a copy-pasted sha512-length body) cannot
+    /// silently enter a validated [`ContentDigest`].
+    #[test]
+    fn test_parse_rejects_wrong_blake3_hex_length() {
+        // 63 chars — one short of the 64-char body.
+        let err = ContentDigest::parse(&format!("blake3:{}", &D1[..63])).unwrap_err();
+        assert!(matches!(err, ContentDigestError::InvalidHex { .. }));
+        // 65 chars — one past the 64-char body.
+        let err = ContentDigest::parse(&format!("blake3:{D1}f")).unwrap_err();
+        assert!(matches!(err, ContentDigestError::InvalidHex { .. }));
+    }
+
+    /// A `blake3:` prefix with uppercase hex fails at the
+    /// [`ContentDigestError::InvalidHex`] arm just as sha256 /
+    /// sha512 do. [`tameshi::hash::Blake3Hash::to_prefixed`] emits
+    /// lowercase; uppercase is non-canonical at the attestation
+    /// frontier the same way it is at the registry frontier.
+    /// Discipline-mirror of
+    /// [`test_parse_rejects_uppercase_hex`] at the sha256 arm,
+    /// extended to blake3 so the canonicity contract holds
+    /// uniformly across the widened algorithm set.
+    #[test]
+    fn test_parse_rejects_uppercase_blake3_hex() {
+        let err = ContentDigest::parse(&format!("blake3:{}", D1.to_uppercase())).unwrap_err();
+        assert!(matches!(err, ContentDigestError::InvalidHex { .. }));
+    }
+
     #[test]
     fn test_parse_trims_whitespace() {
         let d = ContentDigest::parse(&format!("  sha256:{D1}\n")).unwrap();
@@ -5357,9 +5421,12 @@ mod tests {
     }
 
     /// The `algorithm()` accessor recovers the algorithm prefix off a
-    /// validated digest for both supported algorithms. A consumer that
-    /// pins a per-algorithm policy at its own attestation boundary can
-    /// distinguish arms without re-splitting the full string.
+    /// validated digest for every supported algorithm — the two
+    /// registry-side ones (sha256 / sha512) and the attestation-
+    /// frontier one (blake3, added at this widening). A consumer
+    /// that pins a per-algorithm policy at its own attestation
+    /// boundary can distinguish arms directly without re-splitting
+    /// the full string.
     #[test]
     fn test_content_digest_algorithm_accessor() {
         let sha256 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
@@ -5367,14 +5434,18 @@ mod tests {
         let hex512 = "f".repeat(SHA512_HEX_LEN);
         let sha512 = ContentDigest::parse(&format!("sha512:{hex512}")).unwrap();
         assert_eq!(sha512.algorithm(), "sha512");
+        let blake3 = ContentDigest::parse(&format!("blake3:{D1}")).unwrap();
+        assert_eq!(blake3.algorithm(), "blake3");
     }
 
     /// The `hex()` accessor recovers the lowercase-hex body off a
-    /// validated digest for both supported algorithms. Round-trips
-    /// with the input hex on the two canonical algorithms, so a
+    /// validated digest for every supported algorithm. Round-trips
+    /// with the input hex on the three canonical algorithms, so a
     /// consumer that persists the hex without the algorithm prefix
     /// (e.g. `helm_provenance::HelmProvenanceOutcome::Verified::
-    /// signed_chart_hash`) extracts it off the typed primitive.
+    /// signed_chart_hash`, or a future blake3-hex column stored
+    /// alongside the sekiban annotation set) extracts it off the
+    /// typed primitive.
     #[test]
     fn test_content_digest_hex_accessor() {
         let sha256 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
@@ -5382,6 +5453,8 @@ mod tests {
         let hex512 = "f".repeat(SHA512_HEX_LEN);
         let sha512 = ContentDigest::parse(&format!("sha512:{hex512}")).unwrap();
         assert_eq!(sha512.hex(), hex512);
+        let blake3 = ContentDigest::parse(&format!("blake3:{D2}")).unwrap();
+        assert_eq!(blake3.hex(), D2);
     }
 
     /// `algorithm()` + `hex()` compose back to the full digest string,
