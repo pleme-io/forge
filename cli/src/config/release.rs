@@ -8,6 +8,8 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::oci_manifest::ContentDigest;
+
 /// Release workflow configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseConfig {
@@ -65,15 +67,39 @@ pub struct ArtifactInfo {
 }
 
 /// Attestation record persisted in artifact.json.
+///
+/// The three hash slots — [`signature`](Self::signature),
+/// [`certification_hash`](Self::certification_hash),
+/// [`compliance_hash`](Self::compliance_hash) — carry validated
+/// [`ContentDigest`] values so a malformed `<algorithm>:<hex>` payload
+/// on a persisted `artifact.json` is refused by the serde deserializer
+/// (routed through
+/// [`ContentDigest::parse`](crate::oci_manifest::ContentDigest::parse))
+/// at read-time, not deferred to a downstream consumer's boundary. The
+/// emit half round-trips byte-identically: the deserialized digest
+/// re-serializes as the same `<algorithm>:<hex>` string the parse
+/// oracle validated, so a re-emitted `artifact.json` is stable under a
+/// no-op read / write cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttestationInfoRecord {
-    /// Blake3 signature hash (prefixed: "blake3:abc...").
-    pub signature: String,
-    /// Certification hash (prefixed: "blake3:def...").
-    pub certification_hash: String,
-    /// Compliance hash if available.
+    /// Signature digest (typically `blake3:<64hex>`, sourced from
+    /// `tameshi::hash::Blake3Hash::to_prefixed`); one canonical
+    /// `<algorithm>:<hex>` value, validated by
+    /// [`ContentDigest::parse`](crate::oci_manifest::ContentDigest::parse)
+    /// on deserialize.
+    pub signature: ContentDigest,
+    /// Certification hash (typically `blake3:<64hex>`, sourced from
+    /// `tameshi::hash::Blake3Hash::to_prefixed`); one canonical
+    /// `<algorithm>:<hex>` value, validated by
+    /// [`ContentDigest::parse`](crate::oci_manifest::ContentDigest::parse)
+    /// on deserialize.
+    pub certification_hash: ContentDigest,
+    /// Optional compliance hash (typically `blake3:<64hex>`); when
+    /// present, one canonical `<algorithm>:<hex>` value validated by
+    /// [`ContentDigest::parse`](crate::oci_manifest::ContentDigest::parse)
+    /// on deserialize.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub compliance_hash: Option<String>,
+    pub compliance_hash: Option<ContentDigest>,
     /// Whether the product certification passed.
     pub certified: bool,
 }
@@ -450,5 +476,265 @@ mod tests {
         assert!(artifact.built_at.is_empty());
         assert!(artifact.previous_tag.is_empty());
         assert!(artifact.attestation.is_none());
+    }
+
+    /// Canonical `blake3:<64hex>` digest fixture used across the
+    /// [`AttestationInfoRecord`] serde-round-trip pins below. The
+    /// hex body is deliberately non-trivial (mixed hex digits, no
+    /// palindrome) so an accidental case-folding or reflection bug
+    /// on the round-trip path shows up as an inequality rather than
+    /// slipping past a symmetric fixture.
+    const SIGNATURE_HEX: &str =
+        "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809";
+    const CERTIFICATION_HEX: &str =
+        "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0";
+    const COMPLIANCE_HEX: &str =
+        "0011223344556677889900112233445566778899001122334455667788990011";
+
+    fn canonical_signature() -> String {
+        format!("blake3:{SIGNATURE_HEX}")
+    }
+
+    fn canonical_certification() -> String {
+        format!("blake3:{CERTIFICATION_HEX}")
+    }
+
+    fn canonical_compliance() -> String {
+        format!("blake3:{COMPLIANCE_HEX}")
+    }
+
+    /// Every hash slot on the persisted [`AttestationInfoRecord`]
+    /// schema deserializes a canonical `<algorithm>:<hex>` string into
+    /// the [`ContentDigest`] typed primitive whose backing string
+    /// matches the input byte-for-byte, and re-serializes it as the
+    /// same string. The round-trip pin is load-bearing: a downstream
+    /// re-emit of a read-back `artifact.json` (during a rollback that
+    /// preserves the prior attestation record on disk) must be stable
+    /// under a no-op read / write cycle.
+    #[test]
+    fn attestation_info_record_deserializes_canonical_digests_verbatim() {
+        let sig = canonical_signature();
+        let cert = canonical_certification();
+        let comp = canonical_compliance();
+        let json = format!(
+            r#"{{
+                "signature": "{sig}",
+                "certification_hash": "{cert}",
+                "compliance_hash": "{comp}",
+                "certified": true
+            }}"#,
+        );
+        let record: AttestationInfoRecord =
+            serde_json::from_str(&json).expect("canonical record must deserialize");
+        assert_eq!(record.signature.as_ref() as &str, sig);
+        assert_eq!(record.certification_hash.as_ref() as &str, cert);
+        assert_eq!(
+            record.compliance_hash.as_ref().map(|d| d.as_ref() as &str),
+            Some(comp.as_str()),
+        );
+        assert!(record.certified);
+        let reemitted = serde_json::to_string(&record).expect("record must serialize");
+        assert!(
+            reemitted.contains(&sig),
+            "re-emitted JSON must carry the signature byte-identically: {reemitted}",
+        );
+        assert!(
+            reemitted.contains(&cert),
+            "re-emitted JSON must carry the certification_hash byte-identically: {reemitted}",
+        );
+        assert!(
+            reemitted.contains(&comp),
+            "re-emitted JSON must carry the compliance_hash byte-identically: {reemitted}",
+        );
+    }
+
+    /// The `compliance_hash` slot is `Option<ContentDigest>` — the
+    /// absent case (`None`) must deserialize when the field is
+    /// omitted, and must NOT emit a `null` on re-serialize thanks to
+    /// `#[serde(skip_serializing_if = "Option::is_none")]`.
+    #[test]
+    fn attestation_info_record_absent_compliance_round_trips() {
+        let sig = canonical_signature();
+        let cert = canonical_certification();
+        let json = format!(
+            r#"{{
+                "signature": "{sig}",
+                "certification_hash": "{cert}",
+                "certified": false
+            }}"#,
+        );
+        let record: AttestationInfoRecord =
+            serde_json::from_str(&json).expect("record without compliance_hash must deserialize");
+        assert!(record.compliance_hash.is_none());
+        assert!(!record.certified);
+        let reemitted = serde_json::to_string(&record).expect("record must serialize");
+        assert!(
+            !reemitted.contains("compliance_hash"),
+            "absent compliance_hash must be skipped on emit, got: {reemitted}",
+        );
+    }
+
+    /// The load-bearing deserialize-time gate: a malformed
+    /// `certification_hash` payload on `artifact.json` — a truncated
+    /// hex body, an unsupported algorithm, an uppercase hex body, an
+    /// empty string, a JSON `null` where the required field expects
+    /// a canonical `<algorithm>:<hex>` — is refused at the serde
+    /// deserializer frontier, not deferred to a downstream consumer's
+    /// hand-rolled boundary check. The pre-migration
+    /// `certification_hash: String` schema accepted every one of these
+    /// payloads at deserialize-time; the [`ContentDigest`]-typed schema
+    /// closes them at the serde frontier through the same
+    /// [`ContentDigest::parse`](crate::oci_manifest::ContentDigest::parse)
+    /// oracle every other content-digest read surface on the crate
+    /// routes through.
+    #[test]
+    fn attestation_info_record_rejects_malformed_certification_hash() {
+        let sig = canonical_signature();
+        let bad_payloads: &[&str] = &[
+            // Missing algorithm separator.
+            "blake3_no_colon_here",
+            // Unsupported algorithm (md5 is not in the parse-oracle union).
+            "md5:0011223344556677889900112233445566778899001122334455667788990011",
+            // Wrong hex length (63 chars — one short of the blake3 body).
+            "blake3:011223344556677889900112233445566778899001122334455667788990011",
+            // Uppercase hex body — the parse oracle enforces the
+            // registry-side lowercase canonicity.
+            "blake3:AABBCCDDEEFF0011223344556677889900AABBCCDDEEFF0011223344556677889",
+            // Empty body.
+            "blake3:",
+            // Empty string.
+            "",
+        ];
+        for bad in bad_payloads {
+            let json = format!(
+                r#"{{
+                    "signature": "{sig}",
+                    "certification_hash": "{bad}",
+                    "certified": true
+                }}"#,
+            );
+            let outcome = serde_json::from_str::<AttestationInfoRecord>(&json);
+            assert!(
+                outcome.is_err(),
+                "malformed certification_hash {bad:?} must be refused at serde read \
+                 time, but deserialization succeeded",
+            );
+        }
+    }
+
+    /// Symmetric malformed-payload gate on the `signature` slot —
+    /// same rejection surface as `certification_hash` (the two fields
+    /// share the [`ContentDigest`] parse oracle). Pins the two hash
+    /// slots do NOT drift into asymmetric grammar admissions on a
+    /// future refactor.
+    #[test]
+    fn attestation_info_record_rejects_malformed_signature() {
+        let cert = canonical_certification();
+        let bad_payloads: &[&str] = &[
+            "blake3_no_colon",
+            "sha1:0011223344556677889900112233445566778899",
+            "sha256:zzzz",
+            "sha256:AAAA0011223344556677889900112233445566778899001122334455667788990011",
+            "sha256:",
+            "",
+        ];
+        for bad in bad_payloads {
+            let json = format!(
+                r#"{{
+                    "signature": "{bad}",
+                    "certification_hash": "{cert}",
+                    "certified": true
+                }}"#,
+            );
+            let outcome = serde_json::from_str::<AttestationInfoRecord>(&json);
+            assert!(
+                outcome.is_err(),
+                "malformed signature {bad:?} must be refused at serde read time, \
+                 but deserialization succeeded",
+            );
+        }
+    }
+
+    /// The `compliance_hash` slot, when PRESENT, is validated by the
+    /// same parse oracle — a `Some(<malformed>)` payload is refused,
+    /// distinguishing "no compliance evidence emitted" (`None`) from
+    /// "compliance evidence emitted but syntactically invalid"
+    /// (rejected at deserialize time rather than accepted as a
+    /// stringly-typed `Some(<garbage>)`).
+    #[test]
+    fn attestation_info_record_rejects_malformed_present_compliance_hash() {
+        let sig = canonical_signature();
+        let cert = canonical_certification();
+        let bad_payloads: &[&str] = &[
+            "not-a-digest",
+            "blake3:short",
+            "blake3:AABBCCDDEEFF0011223344556677889900AABBCCDDEEFF0011223344556677889",
+        ];
+        for bad in bad_payloads {
+            let json = format!(
+                r#"{{
+                    "signature": "{sig}",
+                    "certification_hash": "{cert}",
+                    "compliance_hash": "{bad}",
+                    "certified": true
+                }}"#,
+            );
+            let outcome = serde_json::from_str::<AttestationInfoRecord>(&json);
+            assert!(
+                outcome.is_err(),
+                "malformed present compliance_hash {bad:?} must be refused at \
+                 serde read time, but deserialization succeeded",
+            );
+        }
+    }
+
+    /// The record composes into [`ArtifactInfo`] — the outer
+    /// container the `artifact.json` file actually serializes at its
+    /// root — and the parse-oracle gate carries through to nested
+    /// deserialization of an [`ArtifactInfo`] value. A malformed
+    /// nested `certification_hash` refuses at the outer read, not at
+    /// a hand-rolled inner validation pass. This is the load-bearing
+    /// pin: production reads always go through [`ArtifactInfo`], not
+    /// through [`AttestationInfoRecord`] directly.
+    #[test]
+    fn artifact_info_nested_attestation_carries_parse_oracle() {
+        let sig = canonical_signature();
+        let cert = canonical_certification();
+        let good_json = format!(
+            r#"{{
+                "tag": "amd64-deadbeef",
+                "built_at": "2026-07-23T00:00:00Z",
+                "attestation": {{
+                    "signature": "{sig}",
+                    "certification_hash": "{cert}",
+                    "certified": true
+                }}
+            }}"#,
+        );
+        let artifact: ArtifactInfo =
+            serde_json::from_str(&good_json).expect("canonical nested record must deserialize");
+        let attestation = artifact
+            .attestation
+            .expect("attestation slot must be populated by the fixture");
+        assert_eq!(attestation.signature.as_ref() as &str, sig);
+        assert_eq!(attestation.certification_hash.as_ref() as &str, cert);
+
+        let bad_json = format!(
+            r#"{{
+                "tag": "amd64-deadbeef",
+                "built_at": "2026-07-23T00:00:00Z",
+                "attestation": {{
+                    "signature": "{sig}",
+                    "certification_hash": "not-a-digest",
+                    "certified": true
+                }}
+            }}"#,
+        );
+        let outcome = serde_json::from_str::<ArtifactInfo>(&bad_json);
+        assert!(
+            outcome.is_err(),
+            "malformed nested certification_hash must be refused at the outer \
+             ArtifactInfo read, but deserialization succeeded",
+        );
     }
 }
