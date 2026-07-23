@@ -20,40 +20,6 @@ use tokio::process::Command;
 use crate::commands::attestation;
 use crate::config::DeployConfig;
 use crate::infrastructure::git::{CommitPushOutcome, GitClient};
-#[cfg(feature = "attestation")]
-use crate::oci_manifest::ContentDigest;
-
-/// Lift a `Blake3Hash::to_prefixed`-sourced `<algorithm>:<hex>` string
-/// onto the [`ContentDigest`] typed primitive at the
-/// [`attestation::AttestationInfo`] →
-/// [`crate::config::AttestationInfoRecord`] boundary.
-///
-/// Every producer of the input string is
-/// `tameshi::hash::Blake3Hash::to_prefixed` (`attestation.rs` /
-/// `generate_attestation_info`), whose output is provably canonical:
-/// `blake3:` followed by 64 lowercase hex characters — the exact
-/// grammar
-/// [`ContentDigest::parse`](crate::oci_manifest::ContentDigest::parse)
-/// admits. The [`Result::expect`] therefore asserts a
-/// producer-established invariant, not a hopeful default, and any
-/// panic here would signal a break in the `Blake3Hash::to_prefixed`
-/// contract itself.
-///
-/// The follow-up commit — one that migrates
-/// [`attestation::AttestationInfo`] fields to [`ContentDigest`] at the
-/// producer end — dissolves this helper: the parse assertion collapses
-/// into the one [`ContentDigest::try_from`] site inside
-/// `generate_attestation_info`, and the boundary here holds already-
-/// typed values on both sides.
-#[cfg(feature = "attestation")]
-fn assert_canonical_digest(input: String) -> ContentDigest {
-    ContentDigest::try_from(input).expect(
-        "AttestationInfo hash slots are populated from \
-         tameshi::hash::Blake3Hash::to_prefixed, whose output is \
-         provably canonical `blake3:<64hex>` — the exact grammar \
-         ContentDigest::parse admits",
-    )
-}
 
 /// Run a forge subcommand by re-invoking the current binary.
 pub(crate) async fn run_forge_subcommand(args: &[&str]) -> Result<()> {
@@ -636,9 +602,9 @@ pub async fn product_release(
                     values.signature.dimmed()
                 );
                 Some(crate::config::AttestationInfoRecord {
-                    signature: assert_canonical_digest(info.signature),
-                    certification_hash: assert_canonical_digest(info.certification_hash),
-                    compliance_hash: info.compliance_hash.map(assert_canonical_digest),
+                    signature: info.signature,
+                    certification_hash: info.certification_hash,
+                    compliance_hash: info.compliance_hash,
                     certified: info.certified,
                 })
             }

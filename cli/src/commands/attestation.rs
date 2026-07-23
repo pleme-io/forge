@@ -31,6 +31,8 @@ use tameshi::compliance::slsa::{determine_slsa_level, SlsaLevel};
 use tameshi::hash::Blake3Hash;
 use tokio::process::Command;
 
+use crate::oci_manifest::ContentDigest;
+
 /// Emit the canonical eleven-field probe-coverage [`tracing::info!`] event
 /// uniformly across the three attestation phases — Phase 1 build, Phase 1
 /// chart, Phase 2 deployment — without retyping the `(ran, absent, total,
@@ -255,12 +257,28 @@ pub struct AttestationValues {
 }
 
 /// Attestation info persisted alongside artifact.json.
+///
+/// The three hash slots — [`signature`](Self::signature),
+/// [`certification_hash`](Self::certification_hash),
+/// [`compliance_hash`](Self::compliance_hash) — carry validated
+/// [`ContentDigest`] values so a malformed `<algorithm>:<hex>` payload
+/// is refused at the field slot itself, not deferred to a downstream
+/// consumer's boundary. The typed slots share one grammar oracle
+/// ([`ContentDigest::parse`](crate::oci_manifest::ContentDigest::parse))
+/// with the mirror [`crate::config::AttestationInfoRecord`] persisted
+/// schema, so a producer-side value on `AttestationInfo` and its
+/// consumer-side counterpart on `AttestationInfoRecord` cannot drift
+/// into asymmetric admissions. `generate_attestation_info` is the
+/// single boundary site that lifts a
+/// `tameshi::hash::Blake3Hash::to_prefixed` string onto the typed
+/// primitive; every consumer past that boundary holds already-typed
+/// values on both sides.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AttestationInfo {
-    pub signature: String,
-    pub certification_hash: String,
+    pub signature: ContentDigest,
+    pub certification_hash: ContentDigest,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub compliance_hash: Option<String>,
+    pub compliance_hash: Option<ContentDigest>,
     pub certified: bool,
 }
 
@@ -1705,10 +1723,31 @@ pub fn generate_attestation_values(cert: &ProductCertification) -> AttestationVa
 }
 
 /// Generate attestation info for persisting alongside artifact.json.
+///
+/// The [`ProductCertification::certification_hash`] is a
+/// [`tameshi::hash::Blake3Hash`]; its
+/// [`Blake3Hash::to_prefixed`](tameshi::hash::Blake3Hash::to_prefixed)
+/// rendering is provably canonical `blake3:<64hex>` — the exact
+/// grammar
+/// [`ContentDigest::parse`](crate::oci_manifest::ContentDigest::parse)
+/// admits after commit `2e83ff8` widened the parse oracle to accept
+/// blake3. The [`Result::expect`] therefore asserts a producer-
+/// established invariant, not a hopeful default: any panic here would
+/// signal a break in the `Blake3Hash::to_prefixed` contract itself.
+/// This is the ONE boundary site that lifts a `to_prefixed` string
+/// onto the [`ContentDigest`] typed primitive on the attestation-info
+/// data path; every downstream consumer holds already-typed values on
+/// both sides, and the `assert_canonical_digest` bridge previously
+/// carried on `product_release.rs` dissolves.
 pub fn generate_attestation_info(cert: &ProductCertification) -> AttestationInfo {
+    let digest = ContentDigest::try_from(cert.certification_hash.to_prefixed()).expect(
+        "ProductCertification::certification_hash is a Blake3Hash; \
+         Blake3Hash::to_prefixed emits canonical `blake3:<64hex>` — \
+         the exact grammar ContentDigest::parse admits",
+    );
     AttestationInfo {
-        signature: cert.certification_hash.to_prefixed(),
-        certification_hash: cert.certification_hash.to_prefixed(),
+        signature: digest.clone(),
+        certification_hash: digest,
         compliance_hash: None,
         certified: cert.certified,
     }
@@ -2121,15 +2160,213 @@ mod tests {
 
     #[test]
     fn attestation_info_serialization() {
+        // Canonical blake3:<64hex> payloads sourced through the
+        // ContentDigest parse oracle — the typed slots refuse any
+        // shorter placeholder at construction time, so the pre-typed
+        // "blake3:abc123" fixture that the pre-migration test used is
+        // no longer admissible input.
+        let sig = ContentDigest::try_from(
+            "blake3:0000000000000000000000000000000000000000000000000000000000000abc",
+        )
+        .expect("canonical blake3 fixture parses");
+        let cert = ContentDigest::try_from(
+            "blake3:0000000000000000000000000000000000000000000000000000000000000def",
+        )
+        .expect("canonical blake3 fixture parses");
         let info = AttestationInfo {
-            signature: "blake3:abc123".to_string(),
-            certification_hash: "blake3:def456".to_string(),
+            signature: sig,
+            certification_hash: cert,
             compliance_hash: None,
             certified: true,
         };
         let json = serde_json::to_string_pretty(&info).unwrap();
-        assert!(json.contains("blake3:abc123"));
+        assert!(json
+            .contains("blake3:0000000000000000000000000000000000000000000000000000000000000abc"));
         assert!(json.contains("certified"));
+    }
+
+    /// A well-formed [`AttestationInfo`] JSON round-trips byte-
+    /// identically: the deserialized typed digests re-serialize as
+    /// the same canonical `<algorithm>:<hex>` strings the parse
+    /// oracle validated. Pins the load-bearing symmetry between
+    /// [`ContentDigest`]'s serde emit peer (streams `as_str`
+    /// verbatim) and its serde parse peer (routes through
+    /// `ContentDigest::parse`) on the [`AttestationInfo`] shape, so
+    /// a persisted-then-reloaded record is stable under a no-op
+    /// read/write cycle.
+    #[test]
+    fn attestation_info_round_trips_canonical_digests_verbatim() {
+        let sig_str = "blake3:1111111111111111111111111111111111111111111111111111111111111111";
+        let cert_str = "blake3:2222222222222222222222222222222222222222222222222222222222222222";
+        let comp_str = "blake3:3333333333333333333333333333333333333333333333333333333333333333";
+        let json = format!(
+            r#"{{"signature":"{sig_str}","certification_hash":"{cert_str}","compliance_hash":"{comp_str}","certified":true}}"#
+        );
+        let info: AttestationInfo = serde_json::from_str(&json).expect("well-formed JSON parses");
+        assert_eq!(info.signature.as_str(), sig_str);
+        assert_eq!(info.certification_hash.as_str(), cert_str);
+        assert_eq!(
+            info.compliance_hash.as_ref().map(ContentDigest::as_str),
+            Some(comp_str)
+        );
+        assert!(info.certified);
+        let reemitted = serde_json::to_string(&info).expect("re-emit succeeds");
+        assert!(reemitted.contains(sig_str));
+        assert!(reemitted.contains(cert_str));
+        assert!(reemitted.contains(comp_str));
+    }
+
+    /// A missing `compliance_hash` field deserializes to `None` and
+    /// the re-serialized JSON omits the field entirely thanks to
+    /// `#[serde(skip_serializing_if = "Option::is_none")]`. Pins
+    /// that "no compliance evidence" (absent) remains distinguishable
+    /// from "invalid compliance evidence" (rejected — see the
+    /// malformed-payload gate below) after the migration to
+    /// `Option<ContentDigest>`.
+    #[test]
+    fn attestation_info_absent_compliance_round_trips() {
+        let sig_str = "blake3:4444444444444444444444444444444444444444444444444444444444444444";
+        let cert_str = "blake3:5555555555555555555555555555555555555555555555555555555555555555";
+        let json = format!(
+            r#"{{"signature":"{sig_str}","certification_hash":"{cert_str}","certified":false}}"#
+        );
+        let info: AttestationInfo = serde_json::from_str(&json).expect("well-formed JSON parses");
+        assert!(info.compliance_hash.is_none());
+        assert!(!info.certified);
+        let reemitted = serde_json::to_string(&info).expect("re-emit succeeds");
+        assert!(!reemitted.contains("compliance_hash"));
+    }
+
+    /// Every malformed `<algorithm>:<hex>` payload at the
+    /// `certification_hash` slot is refused at the serde
+    /// deserializer itself, not deferred to a downstream boundary.
+    /// The negative grid — missing separator, unsupported algorithm,
+    /// wrong hex length, uppercase hex, empty body, empty string —
+    /// pins that the typed slot shares the parse-oracle admission
+    /// with every other `ContentDigest` parse peer, so the read
+    /// frontier of an `AttestationInfo` payload cannot admit a
+    /// value the type itself would refuse.
+    #[test]
+    fn attestation_info_rejects_malformed_certification_hash() {
+        let sig_str = "blake3:6666666666666666666666666666666666666666666666666666666666666666";
+        let malformed = [
+            "no-separator",
+            "md5:abcd",
+            "blake3:tooshort",
+            "blake3:0000000000000000000000000000000000000000000000000000000000000AAA",
+            "blake3:",
+            "",
+        ];
+        for m in malformed {
+            let json = format!(
+                r#"{{"signature":"{sig_str}","certification_hash":"{m}","certified":true}}"#
+            );
+            assert!(
+                serde_json::from_str::<AttestationInfo>(&json).is_err(),
+                "malformed certification_hash {m:?} must be refused at the serde frontier"
+            );
+        }
+    }
+
+    /// Symmetric negative grid on the sibling `signature` slot:
+    /// the two hash slots share ONE grammar oracle and cannot drift
+    /// into asymmetric admissions. Mirrors the discipline commit
+    /// `e0b6deb` pinned on the `AttestationInfoRecord` schema at
+    /// the persistence-frontier gate.
+    #[test]
+    fn attestation_info_rejects_malformed_signature() {
+        let cert_str = "blake3:7777777777777777777777777777777777777777777777777777777777777777";
+        let malformed = [
+            "no-separator",
+            "md5:abcd",
+            "blake3:tooshort",
+            "blake3:0000000000000000000000000000000000000000000000000000000000000AAA",
+            "blake3:",
+            "",
+        ];
+        for m in malformed {
+            let json = format!(
+                r#"{{"signature":"{m}","certification_hash":"{cert_str}","certified":true}}"#
+            );
+            assert!(
+                serde_json::from_str::<AttestationInfo>(&json).is_err(),
+                "malformed signature {m:?} must be refused at the serde frontier"
+            );
+        }
+    }
+
+    /// A present-but-malformed `compliance_hash` payload is refused
+    /// at the serde deserializer — `Some(<malformed>)` is a
+    /// distinct failure world from `None` (absent), and the parse
+    /// oracle gates the inner value at the field slot rather than
+    /// admitting it and deferring validation to a downstream reader.
+    #[test]
+    fn attestation_info_rejects_malformed_present_compliance_hash() {
+        let sig_str = "blake3:8888888888888888888888888888888888888888888888888888888888888888";
+        let cert_str = "blake3:9999999999999999999999999999999999999999999999999999999999999999";
+        let malformed = ["no-separator", "blake3:tooshort", "md5:abcd"];
+        for m in malformed {
+            let json = format!(
+                r#"{{"signature":"{sig_str}","certification_hash":"{cert_str}","compliance_hash":"{m}","certified":true}}"#
+            );
+            assert!(
+                serde_json::from_str::<AttestationInfo>(&json).is_err(),
+                "malformed present compliance_hash {m:?} must be refused"
+            );
+        }
+    }
+
+    /// `generate_attestation_info` populates both hash slots from
+    /// the same `Blake3Hash::to_prefixed` rendering, so the two
+    /// slots hold byte-identical canonical `blake3:<64hex>`
+    /// digests. Pins the boundary contract that the ONE
+    /// `ContentDigest::try_from` site inside the producer emits
+    /// well-typed values on both fields — no dangling `.expect`
+    /// bridge remains at any downstream consumer. The typed
+    /// digest re-serializes verbatim through the ContentDigest
+    /// serde peer, so a persisted `AttestationInfo` JSON emitted
+    /// from a real ProductCertification round-trips byte-identically
+    /// through the parse oracle.
+    #[test]
+    fn generate_attestation_info_emits_typed_canonical_digests() {
+        let source_att = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"flake"),
+            0,
+            false,
+        );
+        let cert = compose_product_certification(
+            "test-product",
+            "staging",
+            "plo",
+            source_att,
+            vec![build_at("backend", SlsaLevel::L2)],
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("certification composes for the minimal typed-slot boundary pin");
+        let info = generate_attestation_info(&cert);
+        assert_eq!(info.signature.algorithm(), "blake3");
+        assert_eq!(info.certification_hash.algorithm(), "blake3");
+        assert_eq!(info.signature.as_str(), info.certification_hash.as_str());
+        assert_eq!(
+            info.signature.as_str(),
+            cert.certification_hash.to_prefixed()
+        );
+        assert!(info.compliance_hash.is_none());
+        let json = serde_json::to_string(&info).expect("serialize succeeds");
+        assert!(json.contains(&cert.certification_hash.to_prefixed()));
+        let round: AttestationInfo =
+            serde_json::from_str(&json).expect("round-trip through serde succeeds");
+        assert_eq!(round.signature.as_str(), info.signature.as_str());
+        assert_eq!(
+            round.certification_hash.as_str(),
+            info.certification_hash.as_str()
+        );
     }
 
     #[test]
