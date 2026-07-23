@@ -295,6 +295,92 @@ impl AsRef<str> for DigestAlgorithm {
     }
 }
 
+/// [`std::str::FromStr`] impl routes through [`DigestAlgorithm::parse`] so
+/// a downstream consumer that reads the canonical-label surface at the
+/// stdlib parse frontier ([`str::parse::<DigestAlgorithm>()`],
+/// [`&str::parse`], a `#[clap(value_parser)]` slot that accepts
+/// `impl FromStr`, an [`iterator::filter_map(|s| s.parse().ok())`] pipeline
+/// over CLI-supplied algorithm labels, a config-file loader that reads
+/// TOML / YAML string values into typed algorithm variants) recovers the
+/// [`DigestAlgorithm`] variant from the same canonical lowercase grammar
+/// [`DigestAlgorithm::as_str`] emits — no per-consumer alias matrix, no
+/// drift between the label a [`Display`](std::fmt::Display) stamp writes
+/// and the variant a downstream [`FromStr`](std::str::FromStr) reader
+/// recovers.
+///
+/// Sibling of [`std::fmt::Display`] and [`AsRef<str>`] directly above —
+/// the parse surface at the same canonical-label oracle the two emission
+/// surfaces already read through. Together with those impls this closes
+/// the `as_str` ⇢ {`Display`, `AsRef<str>`} emission pair and the
+/// {`FromStr`} parse peer at the digest-algorithm axis against the
+/// shared canonical-label oracle. Structural mirror of
+/// `impl FromStr for BumpLevel` (line 1223 of `version.rs`),
+/// `impl FromStr for AdmissionTier` (line 5687 of `probe_outcome.rs`),
+/// and `impl FromStr for PerAttemptRegion` (line 1139 of `retry.rs`) —
+/// the same lift at the version-bump-magnitude, admission-tier, and
+/// per-attempt-region ladders, each routing through its sum's
+/// canonical-label inverse oracle. With this impl, all four repo-internal
+/// canonical-label typed sums that carry
+/// `as_str` + [`Display`](std::fmt::Display) + [`AsRef<str>`] also carry
+/// [`FromStr`](std::str::FromStr) routing through the shared canonical-
+/// label inverse oracle.
+///
+/// The impl body routes through [`DigestAlgorithm::parse`] — the one-
+/// oracle canonical-label inverse table — rather than restating the
+/// label → variant match at the [`FromStr`](std::str::FromStr) call site.
+/// A future variant insertion (a `sha384` arm the distribution spec might
+/// normatively adopt, a per-attestation-frontier arm forge might land)
+/// updates the [`DigestAlgorithm::parse`] match body alone and every
+/// consumer — CLI `clap` value parser, config-file loader, telemetry
+/// label backfill — that reads through [`FromStr`](std::str::FromStr)
+/// inherits the new canonical label automatically with no downstream
+/// retyping. The error path stays the same: an unknown label surfaces
+/// an [`anyhow::Error`] naming the offending input and the canonical
+/// three-label set, matching the byte-identical rejection wording the
+/// sibling FromStr impls emit at their `_ =>` arms.
+///
+/// The error type is [`anyhow::Error`] — the exact shape the three
+/// sibling FromStr impls carry ([`crate::version::BumpLevel`],
+/// [`crate::probe_outcome::AdmissionTier`],
+/// [`crate::retry::PerAttemptRegion`] — all `type Err = anyhow::Error`).
+/// A downstream typed-error surface that wants a structured rejection
+/// (a per-consumer error enum, a `#[derive(thiserror::Error)]` typed
+/// wrap) downcasts through the [`anyhow::Error::downcast`] surface or
+/// reads the rejection at the [`ContentDigest::parse`] level where the
+/// grammar oracle emits a structured [`ContentDigestError::UnsupportedAlgorithm`]
+/// at the same rejection frontier.
+///
+/// The round-trip `algo.as_str().parse::<DigestAlgorithm>() ==
+/// Ok(algo)` at every [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_from_str_round_trips_every_variant`];
+/// the rejection wording on unknown labels is pinned by
+/// [`tests::test_digest_algorithm_from_str_rejects_unknown_label`]; the
+/// route-through-`parse` discipline (the [`FromStr`](std::str::FromStr)
+/// oracle agrees with the [`DigestAlgorithm::parse`] inverse at every
+/// admitted label and at rejection) is pinned by
+/// [`tests::test_digest_algorithm_from_str_agrees_with_parse`].
+///
+/// THEORY.md §V.4 typed primitives: the canonical-label parse surface
+/// is a typed-primitive site on [`DigestAlgorithm`] itself (one
+/// [`FromStr`](std::str::FromStr) impl routing through the
+/// [`DigestAlgorithm::parse`] inverse oracle), not a per-consumer
+/// `match s { "sha256" => ... }` restatement at every downstream site
+/// that dispatches on the algorithm label. THEORY.md §VI.1 one-oracle:
+/// canonical-label parsing lives at one site
+/// ([`DigestAlgorithm::parse`]) and every read surface — the inverse
+/// oracle itself, the [`ContentDigest::parse`] grammar oracle's
+/// algorithm arm, this [`FromStr`](std::str::FromStr) impl — reads
+/// through it.
+impl std::str::FromStr for DigestAlgorithm {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| {
+            anyhow::anyhow!("Invalid digest algorithm '{s}' — use sha256, sha512, or blake3")
+        })
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6055,6 +6141,91 @@ mod tests {
         let blake3 = ContentDigest::parse(&format!("blake3:{D2}")).unwrap();
         assert_eq!(blake3.algorithm_kind(), DigestAlgorithm::Blake3);
         assert_eq!(blake3.algorithm_kind().as_str(), blake3.algorithm());
+    }
+
+    /// `algo.as_str().parse::<DigestAlgorithm>()` recovers `algo` at every
+    /// [`DigestAlgorithm::ALL`] variant — the [`std::str::FromStr`] impl
+    /// is the round-trip inverse of [`DigestAlgorithm::as_str`] across the
+    /// full canonical-label set. Guards the label ↔ variant isomorphism
+    /// at the parse frontier so a future variant insertion at either the
+    /// projection or the inverse silently drifting apart lights up here.
+    /// Structural mirror of
+    /// [`crate::version::tests::test_bump_level_from_str_round_trips_every_variant`]
+    /// at the version-bump-magnitude ladder — the four canonical-label
+    /// typed sums each pin the FromStr round-trip against their shared
+    /// `as_str` oracle.
+    #[test]
+    fn test_digest_algorithm_from_str_round_trips_every_variant() {
+        for algo in DigestAlgorithm::ALL {
+            let parsed: DigestAlgorithm = algo
+                .as_str()
+                .parse()
+                .expect("canonical label must parse back to its variant");
+            assert_eq!(parsed, algo, "FromStr must round-trip as_str at {algo:?}",);
+        }
+    }
+
+    /// [`str::parse::<DigestAlgorithm>`] rejects labels outside the
+    /// canonical three-label set with an error naming both the offending
+    /// input and the admitted labels (`sha256`, `sha512`, `blake3`).
+    /// Pins the rejection wording so a downstream CLI surface that
+    /// forwards the parse error to the operator reads the byte-identical
+    /// text at every unknown-label rejection. Guards against silent
+    /// widening of the accepted set (an accidental `Ok(default)` fallback,
+    /// a case-insensitive match arm) and against wording drift (a
+    /// canonical label dropped from the enumeration).
+    #[test]
+    fn test_digest_algorithm_from_str_rejects_unknown_label() {
+        for bad in ["SHA256", "sha-256", "md5", "", "sha256 ", " sha256"] {
+            let err = bad
+                .parse::<DigestAlgorithm>()
+                .expect_err("non-canonical label must reject");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("'{bad}'")),
+                "error must quote the offending input at '{bad}'; got: {msg}"
+            );
+            for canonical in ["sha256", "sha512", "blake3"] {
+                assert!(
+                    msg.contains(canonical),
+                    "error must enumerate canonical label '{canonical}' at input '{bad}'; got: {msg}"
+                );
+            }
+        }
+    }
+
+    /// The [`std::str::FromStr`] impl agrees with the inherent
+    /// [`DigestAlgorithm::parse`] inverse oracle on both the admitted-
+    /// label side and the rejection side: `s.parse::<DigestAlgorithm>().ok()
+    /// == DigestAlgorithm::parse(s)` at every canonical-label input AND
+    /// at a representative unknown-label input. The load-bearing structural
+    /// pin that ties the [`std::str::FromStr`] parse surface to the ONE
+    /// canonical-label inverse oracle: a regression that inlined a
+    /// divergent match (e.g., case-insensitive folding, whitespace-tolerant
+    /// trimming, an alias like `"sha-256"`) into
+    /// [`std::str::FromStr`] fails here at this ONE named site instead of
+    /// leaking to every downstream consumer that reads through
+    /// [`FromStr`](std::str::FromStr) (CLI `clap` value parser, config-
+    /// file loader, telemetry label backfill).
+    #[test]
+    fn test_digest_algorithm_from_str_agrees_with_parse() {
+        for algo in DigestAlgorithm::ALL {
+            let label = algo.as_str();
+            let via_from_str = label.parse::<DigestAlgorithm>().ok();
+            let via_inherent = DigestAlgorithm::parse(label);
+            assert_eq!(
+                via_from_str, via_inherent,
+                "FromStr and inherent parse must agree on canonical label '{label}'",
+            );
+        }
+        for bad in ["SHA256", "sha-256", "md5", ""] {
+            let via_from_str = bad.parse::<DigestAlgorithm>().ok();
+            let via_inherent = DigestAlgorithm::parse(bad);
+            assert_eq!(
+                via_from_str, via_inherent,
+                "FromStr and inherent parse must agree on non-canonical label '{bad}'",
+            );
+        }
     }
 
     /// `str::parse::<ContentDigest>()` succeeds on a well-formed sha256
