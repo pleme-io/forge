@@ -217,6 +217,84 @@ impl std::fmt::Display for DigestAlgorithm {
     }
 }
 
+/// [`AsRef<str>`] impl routes through [`DigestAlgorithm::as_str`] so a
+/// downstream consumer that accepts `impl AsRef<str>` (a path-segment
+/// builder assembling a per-algorithm cache-key partition, a
+/// [`std::collections::HashMap<&str, _>`] keyed by algorithm label, an
+/// OpenTelemetry / tracing attribute setter that keys by
+/// `Into<Cow<'static, str>>`, a `format!("{prefix}:{}", algo.as_ref())`
+/// stamp) reads the canonical lowercase label (`"sha256"`, `"sha512"`,
+/// `"blake3"`) directly from a [`DigestAlgorithm`] value without going
+/// through the [`std::fmt::Display`] formatter buffer or an
+/// intermediate [`String`] allocation. The zero-cost byte-slice-
+/// coercion peer of the format-machinery [`std::fmt::Display`] surface,
+/// both routing through the same [`DigestAlgorithm::as_str`]
+/// canonical-label oracle.
+///
+/// Sibling of the [`std::fmt::Display`] impl directly above — the same
+/// lift at the byte-slice-access layer instead of the format layer.
+/// Together with the [`Display`](std::fmt::Display) impl this closes
+/// the `as_str` ⇢ {`Display`, `AsRef<str>`} emission pair at the
+/// digest-algorithm axis against the shared canonical-label oracle.
+/// Structural mirror of `impl AsRef<str> for BumpLevel` (line 1426 of
+/// `version.rs` — the same lift at the version-bump-magnitude ladder,
+/// routing through [`crate::version::BumpLevel::as_str`]),
+/// `impl AsRef<str> for AdmissionTier` (commit 7acca19 — the same
+/// lift at the admission-tier ladder, routing through
+/// [`crate::probe_outcome::AdmissionTier::as_str`]), and
+/// `impl AsRef<str> for PerAttemptRegion` (commit 8c8cffe — the same
+/// lift at the per-attempt-region ladder, routing through
+/// [`crate::retry::PerAttemptRegion::as_str`]). With this impl, all
+/// four repo-internal canonical-label typed sums that carry
+/// `as_str` + [`Display`](std::fmt::Display) also carry
+/// [`AsRef<str>`] routing through the shared canonical-label oracle —
+/// the label-axis grammar at every canonical-label typed sum is now a
+/// one-oracle surface at every Rust-idiomatic borrowed-view reading.
+///
+/// Zero-cost by construction: the returned `&str` is `'static`
+/// (delegated from [`DigestAlgorithm::as_str`]'s `&'static str`
+/// return type), so a consumer that borrows the slice reads directly
+/// into the static-string constant table without a copy, matching
+/// the zero-allocation discipline [`std::fmt::Display`] doesn't offer
+/// (which writes through a [`std::fmt::Formatter`] into a caller-
+/// provided buffer).
+///
+/// The inherent [`DigestAlgorithm::as_str`] takes `self` by value
+/// ([`DigestAlgorithm`] is [`Copy`]), so the impl body dereferences
+/// `*self` before invoking the projection; the returned `&'static str`
+/// is unaffected by the receiver-shape difference between the
+/// [`AsRef::as_ref`] `&self` signature and the inherent
+/// [`DigestAlgorithm::as_str`] by-value receiver.
+///
+/// A future variant insertion (a `sha384` arm the distribution spec
+/// might normatively adopt, a per-attestation-frontier arm forge
+/// might land) updates the [`DigestAlgorithm::as_str`] match body
+/// alone and every consumer — cache-key partition, HashMap key,
+/// tracing attribute stamper — that accepts `impl AsRef<str>`
+/// inherits the new canonical label automatically with no downstream
+/// retyping.
+///
+/// The identity `algo.as_ref() == algo.as_str()` at every
+/// [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_as_ref_str_agrees_with_as_str`];
+/// the identity carrying through a generic `impl AsRef<str>` consumer
+/// at every variant is pinned by
+/// [`tests::test_digest_algorithm_as_ref_str_carries_through_generic_consumer`].
+///
+/// THEORY.md §V.4 typed primitives: the byte-slice-coercion surface
+/// is a typed-primitive site on [`DigestAlgorithm`] itself (one
+/// `AsRef<str>` impl routing through [`DigestAlgorithm::as_str`]),
+/// not a per-consumer `.as_str()` restatement at every downstream
+/// site that accepts `impl AsRef<str>`. THEORY.md §VI.1 one-oracle:
+/// the canonical label is named at one site
+/// ([`DigestAlgorithm::as_str`]) and every surface — `as_str`,
+/// `Display`, this `AsRef<str>` — reads through it.
+impl AsRef<str> for DigestAlgorithm {
+    fn as_ref(&self) -> &str {
+        (*self).as_str()
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5879,6 +5957,81 @@ mod tests {
             }
         }
         assert_eq!(DigestAlgorithm::ALL.len(), 3);
+    }
+
+    /// At every [`DigestAlgorithm`] variant enumerated by
+    /// [`DigestAlgorithm::ALL`], `<DigestAlgorithm as AsRef<str>>::as_ref(&algo)`
+    /// (the [`AsRef<str>`] impl body) equals `algo.as_str()` (the
+    /// canonical-label oracle) exactly. The load-bearing structural pin
+    /// that ties the byte-slice-coercion surface to the shared
+    /// [`DigestAlgorithm::as_str`] oracle: a regression that swapped
+    /// [`AsRef<str>`] to route through the [`std::fmt::Display`]
+    /// formatter buffer (paying a [`String`] allocation), or drifted
+    /// the [`AsRef<str>`] grammar from [`DigestAlgorithm::as_str`]'s
+    /// lowercase labels, fails here at ONE named site instead of
+    /// leaking to every downstream consumer that accepts
+    /// `impl AsRef<str>` (per-algorithm cache-key partition,
+    /// [`std::collections::HashMap<&str, _>`] key lookup keyed by
+    /// algorithm label, OpenTelemetry / tracing attribute setter,
+    /// `format!("{prefix}:{}", algo.as_ref())` stamp). Structural
+    /// mirror of
+    /// [`crate::version::tests::test_bump_level_as_ref_str_agrees_with_as_str`]
+    /// at the version-bump-magnitude ladder,
+    /// `test_admission_tier_as_ref_str_agrees_with_as_str` (commit
+    /// 7acca19) at the admission-tier ladder, and
+    /// `test_per_attempt_region_as_ref_str_agrees_with_as_str` (commit
+    /// 8c8cffe) at the per-attempt-region ladder — the four agreement
+    /// pins together close the read-side agreement across every
+    /// canonical-label typed sum in forge's typed-primitive algebra at
+    /// the byte-slice surface ([`AsRef<str>`]) against the shared
+    /// canonical-label oracle.
+    #[test]
+    fn test_digest_algorithm_as_ref_str_agrees_with_as_str() {
+        for algo in DigestAlgorithm::ALL {
+            let borrowed: &str = algo.as_ref();
+            assert_eq!(
+                borrowed,
+                algo.as_str(),
+                "AsRef<str> and as_str must agree at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<str>`] identity carries through a generic
+    /// `impl AsRef<str>` consumer at every [`DigestAlgorithm::ALL`]
+    /// variant. A tiny generic function `fn read<T: AsRef<str>>(t: &T) ->
+    /// &str { t.as_ref() }` — the shape of an actual downstream consumer
+    /// (per-algorithm cache-key partition, HashMap key lookup, tracing
+    /// attribute setter, `format!("{prefix}:{}", algo.as_ref())` stamp) —
+    /// reads the canonical lowercase label directly from a
+    /// [`DigestAlgorithm`] value without going through the
+    /// [`std::fmt::Display`] formatter buffer or an intermediate
+    /// [`String`] allocation. The structural witness that a
+    /// [`DigestAlgorithm`] is genuinely usable at `impl AsRef<str>` call
+    /// sites — a regression that drifted the [`AsRef<str>`] impl
+    /// signature (e.g., returning an owned [`String`] instead of a
+    /// `&str`, or requiring a `&mut self`) fails here at compile time
+    /// instead of at every downstream generic call site. Structural
+    /// mirror of
+    /// [`crate::version::tests::test_bump_level_as_ref_str_carries_through_generic_consumer`]
+    /// at the version-bump-magnitude ladder,
+    /// `test_admission_tier_as_ref_str_carries_through_generic_consumer`
+    /// (commit 7acca19) at the admission-tier ladder, and
+    /// `test_per_attempt_region_as_ref_str_carries_through_generic_consumer`
+    /// (commit 8c8cffe) at the per-attempt-region ladder.
+    #[test]
+    fn test_digest_algorithm_as_ref_str_carries_through_generic_consumer() {
+        fn read<T: AsRef<str>>(t: &T) -> &str {
+            t.as_ref()
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(
+                read(&algo),
+                algo.as_str(),
+                "generic AsRef<str> consumer must read canonical label at {algo:?}",
+            );
+        }
     }
 
     /// [`ContentDigest::algorithm_kind`] projects the validated digest
