@@ -575,6 +575,119 @@ impl TryFrom<String> for DigestAlgorithm {
     }
 }
 
+/// [`TryFrom<Cow<'_, str>>`] impl routes through
+/// [`<DigestAlgorithm as std::str::FromStr>::from_str`] on the underlying
+/// [`str`] view of the caller-supplied [`std::borrow::Cow`] (borrowed
+/// through [`Cow::as_ref`] from the [`Cow::Borrowed`] arm, dereferenced
+/// off the [`String`] in the [`Cow::Owned`] arm without cloning), so a
+/// downstream consumer bound by `impl TryFrom<Cow<'_, str>>` (a serde-
+/// compatible deserializer that hands its container an owned-or-borrowed
+/// [`Cow<'_, str>`] to preserve zero-copy where the input allows it, a
+/// generic try-conversion helper
+/// `fn parse_algo<'a, T: TryFrom<Cow<'a, str>>>` that opts into the
+/// borrowed-or-owned frontier at the receiver-shape layer, a
+/// [`serde::Deserialize`] adapter opting into
+/// `#[serde(try_from = "Cow<'_, str>")]` on a wrapper field to defer the
+/// ownership decision to the underlying [`serde::Deserializer`]) recovers
+/// a [`DigestAlgorithm`] variant from its canonical lowercase label
+/// through the same one-oracle grammar the direct
+/// `.parse::<DigestAlgorithm>()` call sites and the sibling
+/// [`TryFrom<&str>`] / [`TryFrom<String>`] impls already read.
+///
+/// The borrowed/owned-frontier try-conversion peer of [`TryFrom<&str>`]
+/// and [`TryFrom<String>`] directly above — [`TryFrom<&str>`] is the
+/// by-reference frontier of the canonical-label conversion surface,
+/// [`TryFrom<String>`] is the by-value owned-string frontier, this
+/// [`TryFrom<Cow<'_, str>>`] is the borrowed-or-owned frontier that
+/// bridges the two under a single receiver type. All three route through
+/// the shared [`<Self as std::str::FromStr>::from_str`] canonical-grammar
+/// oracle: the [`&str`] peer through `from_str(s)` directly, the
+/// [`String`] peer through `from_str(s.as_str())`, this [`Cow`] peer
+/// through `from_str(s.as_ref())` — the same canonical grammar lifted to
+/// the borrowed-or-owned frontier, with the receiver-side
+/// [`Cow::as_ref`] call yielding a borrowed `&str` view of the
+/// caller-supplied payload at zero allocation cost on either arm, so the
+/// impl body pays the by-reference [`FromStr`] cost and does not clone
+/// the input on the [`Cow::Owned`] arm.
+///
+/// Sibling of [`std::fmt::Display`], [`AsRef<str>`],
+/// [`std::str::FromStr`], [`TryFrom<&str>`], and [`TryFrom<String>`]
+/// above — the same lift at the borrowed-or-owned frontier instead of
+/// the format / borrow / stdlib-parse / by-reference-try / by-value-try
+/// layers. Together with those impls this extends the `as_str` ⇢
+/// {`Display`, `AsRef<str>`} emission pair and the {`FromStr`,
+/// `TryFrom<&str>`, `TryFrom<String>`, `TryFrom<Cow<'_, str>>`} parse set
+/// at the digest-algorithm axis against the shared canonical-label
+/// oracle. Structural mirror of
+/// [`TryFrom<Cow<'_, str>> for ContentDigest`] (commit 3a28035) — the
+/// same lift at the borrowed-or-owned frontier of the parallel
+/// canonical-string typed primitive on the same module, delegating
+/// through its sum's by-reference parse oracle on the
+/// [`Cow::as_ref`] view of the caller-supplied payload.
+///
+/// The natural bridge to the `serde` `try_from` container attribute
+/// (`#[serde(try_from = "Cow<'_, str>")]`) so a downstream config-schema
+/// field that wraps a [`DigestAlgorithm`] and wants serde's `try_from`
+/// grammar with a borrowed-or-owned receiver composes with one blanket
+/// impl at the typed-primitive site, not a per-consumer inline
+/// `#[serde(deserialize_with)]` cascade. The [`FromStr`] impl carries
+/// the load-bearing route through [`DigestAlgorithm::parse`]; this
+/// [`TryFrom<Cow<'_, str>>`] impl delegates through it, so the parse-
+/// oracle discipline is preserved end-to-end and a future variant
+/// insertion (a `sha384` arm the OCI distribution spec might normatively
+/// adopt, a per-attestation-frontier arm forge might land) remains a
+/// one-site edit at the [`DigestAlgorithm::parse`] match body plus the
+/// matching `as_str` / `hex_len` arm additions.
+///
+/// The error type is [`anyhow::Error`] — the exact shape the [`FromStr`]
+/// impl and the [`TryFrom<&str>`] / [`TryFrom<String>`] impls above all
+/// carry. Rejection wording is inherited from [`FromStr`]: an unknown
+/// label surfaces an [`anyhow::Error`] naming the offending input and
+/// the canonical three-label set — no per-peer rejection-message drift
+/// across the borrowed / owned / borrowed-or-owned receiver frontier.
+///
+/// The parser is strict for the same reason [`std::str::FromStr`] is:
+/// only the canonical lowercase labels emitted by
+/// [`DigestAlgorithm::as_str`] parse. Uppercase (`"SHA256"`), hyphenated
+/// (`"sha-256"`), unknown labels (`"md5"`), empty input, and edge-
+/// whitespace variants (`"sha256 "`, `" sha256"`) all reject on both the
+/// [`Cow::Borrowed`] and [`Cow::Owned`] arms — the strictness is
+/// delegated from the underlying [`FromStr`] impl (in turn from
+/// [`DigestAlgorithm::parse`]).
+///
+/// The identity
+/// `DigestAlgorithm::try_from(Cow::Borrowed(algo.as_str())).unwrap() ==
+/// algo` and the [`Cow::Owned`] mirror at every
+/// [`DigestAlgorithm::ALL`] variant are pinned by
+/// [`tests::test_digest_algorithm_try_from_cow_str_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl TryFrom<Cow<'_, str>>` consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_try_from_cow_str_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical input at both arms is
+/// pinned by
+/// [`tests::test_digest_algorithm_try_from_cow_str_rejects_non_canonical_input`].
+///
+/// THEORY.md §III.1 typescape: the borrowed-or-owned frontier try-
+/// conversion surface is a typed-primitive site on [`DigestAlgorithm`]
+/// itself (one `TryFrom<Cow<'_, str>>` impl routing through the
+/// [`std::str::FromStr`] parse oracle on [`Cow::as_ref`]), not a
+/// per-consumer `cow.as_ref().parse::<DigestAlgorithm>()` bridge at
+/// every downstream site that types its parse contract as
+/// `impl TryFrom<Cow<'_, str>>` rather than [`std::str::FromStr`].
+/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// grammar is named at one site ([`DigestAlgorithm::as_str`]), inverted
+/// at one site ([`DigestAlgorithm::parse`]), and every parse surface —
+/// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`], this
+/// [`TryFrom<Cow<'_, str>>`], the [`ContentDigest::parse`] grammar
+/// oracle's algorithm arm — reads through it.
+impl TryFrom<std::borrow::Cow<'_, str>> for DigestAlgorithm {
+    type Error = anyhow::Error;
+
+    fn try_from(s: std::borrow::Cow<'_, str>) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s.as_ref())
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6613,6 +6726,151 @@ mod tests {
             assert_eq!(
                 via_try_from, via_from_str,
                 "TryFrom<String> and FromStr must agree on rejection at {bad:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Cow<'_, str>> for DigestAlgorithm`] impl round-trips
+    /// every canonical label emitted by [`DigestAlgorithm::as_str`] on
+    /// BOTH the [`Cow::Borrowed`] and [`Cow::Owned`] arms and agrees with
+    /// [`std::str::FromStr`] byte-for-byte at every
+    /// [`DigestAlgorithm::ALL`] variant. Pins the delegate-through-
+    /// [`FromStr`] discipline at the borrowed-or-owned frontier try-
+    /// conversion peer: a regression that drifted the
+    /// [`TryFrom<Cow<'_, str>>`] impl body (e.g., pattern-matching the
+    /// [`Cow`] arms and routing them through divergent oracles, cloning
+    /// the [`Cow::Owned`] payload into a fresh [`String`] and re-parsing
+    /// through a case-folded branch, admitting an empty label on the
+    /// [`Cow::Borrowed`] arm through a short-circuit) fails here rather
+    /// than at every downstream `TryFrom<Cow<'_, str>>` call site.
+    #[test]
+    fn test_digest_algorithm_try_from_cow_str_agrees_with_from_str() {
+        use std::borrow::Cow;
+        for algo in DigestAlgorithm::ALL {
+            let label = algo.as_str();
+
+            let via_borrowed = <DigestAlgorithm as std::convert::TryFrom<Cow<'_, str>>>::try_from(
+                Cow::Borrowed(label),
+            )
+            .expect("canonical label must parse through TryFrom<Cow::Borrowed>");
+            assert_eq!(
+                via_borrowed, algo,
+                "TryFrom<Cow::Borrowed> must round-trip through as_str at {algo:?}",
+            );
+
+            let via_owned = <DigestAlgorithm as std::convert::TryFrom<Cow<'_, str>>>::try_from(
+                Cow::Owned(label.to_owned()),
+            )
+            .expect("canonical label must parse through TryFrom<Cow::Owned>");
+            assert_eq!(
+                via_owned, algo,
+                "TryFrom<Cow::Owned> must round-trip through as_str at {algo:?}",
+            );
+
+            let via_from_str = label
+                .parse::<DigestAlgorithm>()
+                .expect("canonical label must parse through FromStr");
+            assert_eq!(
+                via_borrowed, via_from_str,
+                "TryFrom<Cow::Borrowed> and FromStr must agree at {algo:?}",
+            );
+            assert_eq!(
+                via_owned, via_from_str,
+                "TryFrom<Cow::Owned> and FromStr must agree at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Cow<'_, str>> for DigestAlgorithm`] identity carries
+    /// through a generic `impl TryFrom<Cow<'_, str>>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn parse<'a, T>(s: Cow<'a, str>) -> T where T: TryFrom<Cow<'a,
+    /// str>>, T::Error: Debug` — the shape of an actual downstream
+    /// consumer (borrowed-or-owned pipeline that consumes [`Cow`] to
+    /// defer the ownership decision to its caller, serde
+    /// `try_from = "Cow<'_, str>"` wrapper, generic try-conversion helper
+    /// that opts into the borrowed-or-owned frontier at the receiver-
+    /// shape layer) — recovers the canonical variant from the canonical
+    /// lowercase label on BOTH [`Cow`] arms at every variant. The
+    /// structural witness that a [`DigestAlgorithm`] is genuinely usable
+    /// at `impl TryFrom<Cow<'_, str>>` call sites — a regression that
+    /// drifted the [`TryFrom<Cow<'_, str>>`] impl signature (e.g.,
+    /// binding the [`Cow`] lifetime to `'static` and rejecting borrowed
+    /// non-static payloads, returning a different variant than
+    /// [`FromStr`] would) fails here at compile time or at the assertion
+    /// instead of at every downstream generic call site.
+    #[test]
+    fn test_digest_algorithm_try_from_cow_str_carries_through_generic_consumer() {
+        use std::borrow::Cow;
+        fn parse<'a, T>(s: Cow<'a, str>) -> T
+        where
+            T: std::convert::TryFrom<Cow<'a, str>>,
+            <T as std::convert::TryFrom<Cow<'a, str>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<Cow<'a, str>>>::try_from(s)
+                .expect("canonical label must parse through generic TryFrom<Cow<'_, str>>")
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(
+                parse::<DigestAlgorithm>(Cow::Borrowed(algo.as_str())),
+                algo,
+                "generic TryFrom<Cow::Borrowed> consumer must recover canonical variant at {algo:?}",
+            );
+            assert_eq!(
+                parse::<DigestAlgorithm>(Cow::Owned(algo.as_str().to_owned())),
+                algo,
+                "generic TryFrom<Cow::Owned> consumer must recover canonical variant at {algo:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, str>> for DigestAlgorithm`] rejects non-canonical
+    /// input with the same strictness [`std::str::FromStr`],
+    /// [`TryFrom<&str>`], and [`TryFrom<String>`] enforce — empty string,
+    /// uppercase, hyphenated, unknown labels, and edge-whitespace variants
+    /// all reject on BOTH the [`Cow::Borrowed`] and [`Cow::Owned`] arms.
+    /// Pins the strict-rejection contract at the borrowed-or-owned
+    /// frontier try-conversion surface so a downstream consumer bound by
+    /// [`TryFrom<Cow<'_, str>>`] (a serde `try_from = "Cow<'_, str>"`
+    /// container, a generic try-conversion helper that receives a
+    /// borrowed-or-owned payload) inherits the same canonical-only
+    /// grammar the direct `.parse::<DigestAlgorithm>()` call sites
+    /// already read. Also pins the delegate-through-[`FromStr`]
+    /// discipline: rejection at [`TryFrom<Cow<'_, str>>`] tracks
+    /// rejection at [`FromStr`] byte-for-byte at every reject-set element
+    /// on both arms, so a future permissive-parse regression at the
+    /// underlying [`FromStr`] impl lights up here rather than drifting
+    /// silently through the borrowed-or-owned frontier try-conversion
+    /// surface.
+    #[test]
+    fn test_digest_algorithm_try_from_cow_str_rejects_non_canonical_input() {
+        use std::borrow::Cow;
+        for bad in ["SHA256", "sha-256", "md5", "", "sha256 ", " sha256"] {
+            let via_borrowed = <DigestAlgorithm as std::convert::TryFrom<Cow<'_, str>>>::try_from(
+                Cow::Borrowed(bad),
+            )
+            .ok();
+            let via_owned = <DigestAlgorithm as std::convert::TryFrom<Cow<'_, str>>>::try_from(
+                Cow::Owned(bad.to_owned()),
+            )
+            .ok();
+            let via_from_str = bad.parse::<DigestAlgorithm>().ok();
+            assert!(
+                via_borrowed.is_none(),
+                "TryFrom<Cow::Borrowed> must reject non-canonical input {bad:?}",
+            );
+            assert!(
+                via_owned.is_none(),
+                "TryFrom<Cow::Owned> must reject non-canonical input {bad:?}",
+            );
+            assert_eq!(
+                via_borrowed, via_from_str,
+                "TryFrom<Cow::Borrowed> and FromStr must agree on rejection at {bad:?}",
+            );
+            assert_eq!(
+                via_owned, via_from_str,
+                "TryFrom<Cow::Owned> and FromStr must agree on rejection at {bad:?}",
             );
         }
     }
