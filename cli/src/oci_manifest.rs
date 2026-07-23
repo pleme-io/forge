@@ -3499,6 +3499,153 @@ impl PartialEq<ContentDigest> for std::sync::Arc<[u8]> {
     }
 }
 
+/// Ergonomic canonical-digest equality query at the thread-local
+/// shared-owned byte-slice frontier — the [`std::rc::Rc<[u8]>`] peer
+/// of the cross-thread shared-owned [`Arc<[u8]>`] pair
+/// [`PartialEq<std::sync::Arc<[u8]>> for ContentDigest`] +
+/// [`PartialEq<ContentDigest> for std::sync::Arc<[u8]>`] (commit
+/// 13c64ad) and the thread-local shared-owned UTF-8 pair
+/// [`PartialEq<std::rc::Rc<str>> for ContentDigest`] +
+/// [`PartialEq<ContentDigest> for std::rc::Rc<str>`] (commit fdb2bdd)
+/// directly above. A downstream consumer that holds a canonical
+/// `<algorithm>:<hex>` label as a thread-local shared-owned
+/// [`Rc<[u8]>`] byte-buffer handle (a same-thread registry cache that
+/// stores a validated digest label under an [`Rc<[u8]>`] to share the
+/// raw byte payload across per-task closures within a single worker
+/// thread without per-clone allocation while retaining direct
+/// byte-oriented access — a `blake3` / `sha2` hasher `update` slot, a
+/// `serde_bytes` transport frontier, a content-addressed-store key
+/// surface, an emitted-peer consumer that received a digest label
+/// through [`From<ContentDigest> for std::rc::Rc<[u8]>`] (commit
+/// 578dbc6) and asks whether it names the same canonical form as a
+/// live [`ContentDigest`] value) answers the boolean equality query
+/// `digest == rc_bytes` at ONE composition rather than a per-site
+/// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) == &**rc_bytes` /
+/// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) == rc_bytes.as_ref()`
+/// restatement that repeats the canonical-digest oracle name at every
+/// downstream comparison site.
+///
+/// Route: the impl body composes
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`] with the standard library
+/// [`<[u8] as PartialEq<[u8]>>::eq`] on the [`Rc<[u8]>`] deref
+/// coercion (`Rc<[u8]>: Deref<Target = [u8]>`), so the comparison
+/// reads the same canonical-digest bytes at zero allocation, zero
+/// temporary [`Vec<u8>`] construction, and zero [`std::fmt::Display`]
+/// formatter-buffer round trip per call — the same zero-cost
+/// discipline the sibling cross-thread shared-owned
+/// [`PartialEq<std::sync::Arc<[u8]>>`], shrunk-owned
+/// [`PartialEq<Box<[u8]>>`], owned [`PartialEq<Vec<u8>>`], and
+/// borrowed-or-owned [`PartialEq<Cow<'_, [u8]>>`] peers carry, at a
+/// per-comparison cost of one non-atomic-refcount-free pointer
+/// indirection to the [`Rc<[u8]>`] backing slice plus one byte-slice
+/// equality.
+///
+/// Sibling of the by-value thread-local shared-owned byte-slice emit
+/// peer [`From<ContentDigest> for std::rc::Rc<[u8]>`] (commit
+/// 578dbc6) and the by-value thread-local shared-owned byte-slice
+/// parse peer [`TryFrom<std::rc::Rc<[u8]>> for ContentDigest`]
+/// (commit 0eeac6d): the three surfaces bridge the [`ContentDigest`]
+/// value and the [`Rc<[u8]>`] thread-local shared-owned byte-slice
+/// frontier — the parse peer recovers a [`ContentDigest`] from a
+/// canonical `<algorithm>:<hex>` [`Rc<[u8]>`] payload through the
+/// [`ContentDigest::parse`] oracle, the emit peer hands off the
+/// validated canonical form as an [`Rc<[u8]>`] through a fresh
+/// [`Rc::from`] allocation, this comparison peer asks whether an
+/// already-held [`Rc<[u8]>`] byte-buffer label names the same
+/// canonical form as the [`ContentDigest`] value on the left.
+///
+/// Closes the shared-owned byte-slice receiver duo on the equality
+/// axis with its cross-thread [`Arc<[u8]>`] sibling directly above
+/// (commit 13c64ad). Together with the [`Arc<str>`] + [`Rc<str>`]
+/// UTF-8 equality peers (commits 57fbde1, fdb2bdd) and the parse /
+/// emit peers on both sides (`Arc<[u8]>` parse d2ccc5d, `Rc<[u8]>`
+/// parse 0eeac6d, `Arc<[u8]>` emit 49111c1, `Rc<[u8]>` emit
+/// 578dbc6), this commit closes the shared-owned three-axis
+/// (parse / emit / equality) family across both `str` and `[u8]`
+/// frontiers to the same four-receiver closure (`Arc<str>`,
+/// `Rc<str>`, `Arc<[u8]>`, `Rc<[u8]>`). Subsequent follow-ups
+/// extend the same equality pattern to further receiver shapes
+/// (e.g. `PartialEq<PathBuf>`, `PartialEq<OsString>`) as those
+/// receiver families come up on the parse / emit axes.
+///
+/// THEORY.md §III.1 typescape: the [`Rc<[u8]>`] comparison surface
+/// is a typed-primitive site on [`ContentDigest`] itself (one
+/// [`PartialEq<std::rc::Rc<[u8]>>`] impl routing through
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a per-consumer
+/// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) == &**rc_bytes`
+/// restatement at every downstream site that receives an
+/// [`Rc<[u8]>`] and asks whether it names a specific canonical
+/// `<algorithm>:<hex>`. THEORY.md §VI.1 one-oracle: the validated
+/// full-digest slice is named at one site
+/// ([`ContentDigest::as_str`], read as bytes through [`AsRef<[u8]>`]),
+/// and every comparison surface reads through the same one-oracle
+/// discipline projected onto its own receiver shape.
+impl PartialEq<std::rc::Rc<[u8]>> for ContentDigest {
+    fn eq(&self, other: &std::rc::Rc<[u8]>) -> bool {
+        <Self as AsRef<[u8]>>::as_ref(self) == other.as_ref()
+    }
+}
+
+/// Symmetric thread-local shared-owned byte-slice comparison peer:
+/// `<Rc<[u8]> as PartialEq<ContentDigest>>::eq` — the reverse-
+/// direction sibling of
+/// [`PartialEq<std::rc::Rc<[u8]>> for ContentDigest`] directly
+/// above. The pair together closes the [`Rc<[u8]>`] comparison
+/// surface across both receiver directions, so a caller who holds
+/// an [`Rc<[u8]>`] byte-buffer label writes `rc_bytes == digest`
+/// (or the standard-library-derived symmetric composition a generic
+/// `PartialEq`-bounded consumer performs internally) and answers a
+/// boolean equality query against a [`ContentDigest`] value at the
+/// same thread-local shared-owned byte-slice frontier the forward-
+/// direction peer covers, at zero allocation, zero temporary
+/// [`Vec<u8>`] construction, and zero [`std::fmt::Display`]
+/// formatter-buffer round trip per call.
+///
+/// Route: [`<ContentDigest as AsRef<[u8]>>::as_ref`] composed with
+/// [`<[u8] as PartialEq<[u8]>>::eq`] on the [`Rc<[u8]>`] deref
+/// coercion, so the comparison reads the same canonical-digest bytes
+/// as the forward-direction peer, and the symmetry axiom
+/// `<Rc<[u8]> as PartialEq<ContentDigest>>::eq(rc, &d)
+/// == <ContentDigest as PartialEq<Rc<[u8]>>>::eq(&d, rc)` holds by
+/// construction at every `(rc, digest)` pair.
+///
+/// Together with the forward peer directly above and the
+/// [`Arc<[u8]>`] pair (commit 13c64ad), this commit closes the
+/// shared-owned byte-slice comparison-pair duo across both receiver
+/// shapes and both directions — the equality-axis analog of the
+/// shared-owned byte-slice parse and emit peer duos already closed
+/// on the [`Arc<[u8]>`] + [`Rc<[u8]>`] receiver pair.
+///
+/// Prior to this impl the digest reference-grammar family carried
+/// only the forward direction at the [`Rc<[u8]>`] frontier
+/// (`digest == rc_bytes` compiled but `rc_bytes == digest` did
+/// not), so a generic `PartialEq`-bounded consumer that composed the
+/// two through its own symmetric-check protocol could not thread a
+/// [`ContentDigest`] through the [`Rc<[u8]>`] side of the bound
+/// without a per-consumer
+/// `&**rc_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
+/// bridge.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction [`Rc<[u8]>`]
+/// comparison surface is a typed-primitive site on [`ContentDigest`]
+/// itself (one [`PartialEq<ContentDigest>`] impl on [`Rc<[u8]>`]
+/// routing through [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a
+/// per-consumer
+/// `&**rc_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
+/// restatement at every downstream site that asks whether an
+/// [`Rc<[u8]>`] handle names the same canonical `<algorithm>:<hex>`
+/// as a [`ContentDigest`] value. THEORY.md §VI.1 one-oracle: the
+/// validated full-digest slice is named at one site
+/// ([`ContentDigest::as_str`], read as bytes through [`AsRef<[u8]>`]),
+/// and this reverse-direction [`Rc<[u8]>`] receiver reads through
+/// the same one-oracle discipline every sibling comparison surface
+/// already carries.
+impl PartialEq<ContentDigest> for std::rc::Rc<[u8]> {
+    fn eq(&self, other: &ContentDigest) -> bool {
+        self.as_ref() == <ContentDigest as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
 /// [`From<ContentDigest>`] for [`String`] moves the validated
 /// `<algorithm>:<hex>` backing string out of the consumed
 /// [`ContentDigest`] value at zero-copy — no allocation, no
@@ -13735,7 +13882,8 @@ mod tests {
             format!("sha512:{hex512}"),
         ] {
             let d = ContentDigest::parse(&raw).unwrap();
-            let canonical: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(d.as_str().as_bytes());
+            let canonical: std::sync::Arc<[u8]> =
+                std::sync::Arc::<[u8]>::from(d.as_str().as_bytes());
             assert!(
                 <ContentDigest as PartialEq<std::sync::Arc<[u8]>>>::eq(&d, &canonical),
                 "PartialEq<Arc<[u8]>> must recognise self canonical form at {raw:?}",
@@ -13775,9 +13923,10 @@ mod tests {
         }
         let d1_canonical: std::sync::Arc<[u8]> =
             std::sync::Arc::<[u8]>::from(format!("sha256:{D1}").as_bytes());
-        assert!(
-            !<ContentDigest as PartialEq<std::sync::Arc<[u8]>>>::eq(&d2, &d1_canonical),
-        );
+        assert!(!<ContentDigest as PartialEq<std::sync::Arc<[u8]>>>::eq(
+            &d2,
+            &d1_canonical
+        ),);
     }
 
     /// The reverse-direction cross-thread shared-owned byte-slice
@@ -13863,6 +14012,213 @@ mod tests {
             let other_arced: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(other.as_bytes());
             assert!(!fwd_via_bound(&d, &other_arced));
             assert!(!rev_via_bound(&other_arced, &d));
+        }
+    }
+
+    /// `PartialEq<Rc<[u8]>> for ContentDigest` agrees byte-for-byte
+    /// with the borrowed-view [`AsRef<[u8]>`] oracle across the same
+    /// 4-canonical × ~8-label grid the sibling cross-thread shared-
+    /// owned [`Arc<[u8]>`] peer pins (test
+    /// `test_partial_eq_arc_bytes_agrees_with_as_ref`, commit 13c64ad),
+    /// threaded through a thread-local shared-owned [`Rc<[u8]>`]
+    /// handle so the caller writes `digest == rc_bytes`.
+    #[test]
+    fn test_partial_eq_rc_bytes_agrees_with_as_ref() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let rced: Vec<std::rc::Rc<[u8]>> = digests
+            .iter()
+            .flat_map(|d| {
+                [
+                    std::rc::Rc::<[u8]>::from(d.as_bytes()),
+                    std::rc::Rc::<[u8]>::from(format!("SHA256:{}", &d[7..]).as_bytes()),
+                    std::rc::Rc::<[u8]>::from(format!(" {d}").as_bytes()),
+                    std::rc::Rc::<[u8]>::from(format!("{d}\n").as_bytes()),
+                ]
+            })
+            .chain([
+                std::rc::Rc::<[u8]>::from(&[][..]),
+                std::rc::Rc::<[u8]>::from(&b"sha256:"[..]),
+                std::rc::Rc::<[u8]>::from(&b"not-a-digest"[..]),
+                std::rc::Rc::<[u8]>::from(&[0xff, 0xfe, 0xfd][..]),
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &rced {
+                assert_eq!(
+                    <ContentDigest as PartialEq<std::rc::Rc<[u8]>>>::eq(&d, label),
+                    <ContentDigest as AsRef<[u8]>>::as_ref(&d) == label.as_ref(),
+                    "PartialEq<Rc<[u8]>> and AsRef<[u8]> equality must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// At every validated [`ContentDigest`] value, the peer recognises
+    /// the digest's own emitted canonical form as an [`Rc<[u8]>`] AND
+    /// round-trips through the sibling by-value thread-local shared-
+    /// owned byte-slice emit peer
+    /// [`From<ContentDigest> for std::rc::Rc<[u8]>`] (commit
+    /// 578dbc6) — so the two thread-local shared-owned byte-slice
+    /// surfaces agree at their shared canonical form. Structural
+    /// mirror of `test_partial_eq_arc_bytes_reflexive_at_own_digest`
+    /// (commit 13c64ad) at the sibling cross-thread shared-owned
+    /// byte-slice frontier.
+    #[test]
+    fn test_partial_eq_rc_bytes_reflexive_at_own_digest() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let canonical: std::rc::Rc<[u8]> = std::rc::Rc::<[u8]>::from(d.as_str().as_bytes());
+            assert!(
+                <ContentDigest as PartialEq<std::rc::Rc<[u8]>>>::eq(&d, &canonical),
+                "PartialEq<Rc<[u8]>> must recognise self canonical form at {raw:?}",
+            );
+            let emitted: std::rc::Rc<[u8]> = std::rc::Rc::<[u8]>::from(d.clone());
+            assert!(
+                <ContentDigest as PartialEq<std::rc::Rc<[u8]>>>::eq(&d, &emitted),
+                "PartialEq<Rc<[u8]>> must agree with From<ContentDigest> for Rc<[u8]> at {raw:?}",
+            );
+        }
+    }
+
+    /// Every thread-local shared-owned [`Rc<[u8]>`] that is NOT the
+    /// digest's own emitted canonical form fails equality through
+    /// [`PartialEq<Rc<[u8]>>`] — the same canonicity discipline the
+    /// sibling receiver peers enforce, projected onto the
+    /// [`Rc<[u8]>`] byte-buffer receiver. Structural mirror of
+    /// `test_partial_eq_arc_bytes_rejects_non_canonical_labels`
+    /// (commit 13c64ad) at the sibling cross-thread shared-owned
+    /// byte-slice frontier.
+    #[test]
+    fn test_partial_eq_rc_bytes_rejects_non_canonical_labels() {
+        let d1 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        let d2 = ContentDigest::parse(&format!("sha256:{D2}")).unwrap();
+        let bad: [std::rc::Rc<[u8]>; 8] = [
+            std::rc::Rc::<[u8]>::from(&[][..]),
+            std::rc::Rc::<[u8]>::from(&b"sha256:"[..]),
+            std::rc::Rc::<[u8]>::from(&b"not-a-digest"[..]),
+            std::rc::Rc::<[u8]>::from(format!("SHA256:{D1}").as_bytes()),
+            std::rc::Rc::<[u8]>::from(format!(" sha256:{D1}").as_bytes()),
+            std::rc::Rc::<[u8]>::from(format!("sha256:{D1}\n").as_bytes()),
+            std::rc::Rc::<[u8]>::from(format!("sha256:{D2}").as_bytes()),
+            std::rc::Rc::<[u8]>::from(&[0xff, 0xfe, 0xfd][..]),
+        ];
+        for label in &bad {
+            assert!(
+                !<ContentDigest as PartialEq<std::rc::Rc<[u8]>>>::eq(&d1, label),
+                "PartialEq<Rc<[u8]>> must reject non-canonical label {label:?} at sha256:{D1}",
+            );
+        }
+        let d1_canonical: std::rc::Rc<[u8]> =
+            std::rc::Rc::<[u8]>::from(format!("sha256:{D1}").as_bytes());
+        assert!(!<ContentDigest as PartialEq<std::rc::Rc<[u8]>>>::eq(
+            &d2,
+            &d1_canonical
+        ),);
+    }
+
+    /// The reverse-direction thread-local shared-owned byte-slice
+    /// comparison peer `<Rc<[u8]> as PartialEq<ContentDigest>>::eq`
+    /// agrees byte-for-byte with the borrowed-view [`AsRef<[u8]>`]
+    /// oracle across the same grid AND is symmetric with the forward-
+    /// direction peer at every `(rc, digest)` pair. Structural mirror
+    /// of `test_arc_bytes_partial_eq_content_digest_symmetric_and_agrees_with_as_ref`
+    /// (commit 13c64ad) at the sibling cross-thread shared-owned
+    /// byte-slice frontier.
+    #[test]
+    fn test_rc_bytes_partial_eq_content_digest_symmetric_and_agrees_with_as_ref() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let rced: Vec<std::rc::Rc<[u8]>> = digests
+            .iter()
+            .map(|d| std::rc::Rc::<[u8]>::from(d.as_bytes()))
+            .chain([
+                std::rc::Rc::<[u8]>::from(&[][..]),
+                std::rc::Rc::<[u8]>::from(&b"sha256:"[..]),
+                std::rc::Rc::<[u8]>::from(&b"not-a-digest"[..]),
+                std::rc::Rc::<[u8]>::from(format!("SHA256:{D1}").as_bytes()),
+                std::rc::Rc::<[u8]>::from(format!(" sha256:{D1}").as_bytes()),
+                std::rc::Rc::<[u8]>::from(format!("sha256:{D1}\n").as_bytes()),
+                std::rc::Rc::<[u8]>::from(&[0xff, 0xfe, 0xfd][..]),
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &rced {
+                assert_eq!(
+                    <std::rc::Rc<[u8]> as PartialEq<ContentDigest>>::eq(label, &d),
+                    label.as_ref() == <ContentDigest as AsRef<[u8]>>::as_ref(&d),
+                    "reverse Rc<[u8]> and AsRef<[u8]> equality must agree at ({label:?}, {raw:?})",
+                );
+                assert_eq!(
+                    <std::rc::Rc<[u8]> as PartialEq<ContentDigest>>::eq(label, &d),
+                    <ContentDigest as PartialEq<std::rc::Rc<[u8]>>>::eq(&d, label),
+                    "reverse-Rc<[u8]> vs forward-Rc<[u8]> direction must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// The thread-local shared-owned [`Rc<[u8]>`] forward and reverse
+    /// peers compose with a generic
+    /// `PartialEq<Rc<[u8]>>`- / `PartialEq<ContentDigest>`-bounded
+    /// consumer — a downstream site that types its comparison contract
+    /// as `impl PartialEq<Rc<[u8]>>` recovers the same answer as a
+    /// direct `<ContentDigest as PartialEq<Rc<[u8]>>>::eq` call, and
+    /// the reverse-direction bound `impl PartialEq<ContentDigest>`
+    /// recovers the same answer as a direct
+    /// `<Rc<[u8]> as PartialEq<ContentDigest>>::eq` call. Structural
+    /// mirror of
+    /// `test_partial_eq_content_digest_arc_bytes_carries_through_generic_consumer`
+    /// (commit 13c64ad) at the sibling cross-thread shared-owned
+    /// byte-slice frontier.
+    #[test]
+    fn test_partial_eq_content_digest_rc_bytes_carries_through_generic_consumer() {
+        fn fwd_via_bound<T: PartialEq<std::rc::Rc<[u8]>>>(
+            t: &T,
+            expected: &std::rc::Rc<[u8]>,
+        ) -> bool {
+            <T as PartialEq<std::rc::Rc<[u8]>>>::eq(t, expected)
+        }
+        fn rev_via_bound<T: PartialEq<ContentDigest>>(t: &T, expected: &ContentDigest) -> bool {
+            <T as PartialEq<ContentDigest>>::eq(t, expected)
+        }
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let rced: std::rc::Rc<[u8]> = std::rc::Rc::<[u8]>::from(raw.as_bytes());
+            assert!(fwd_via_bound(&d, &rced));
+            assert!(rev_via_bound(&rced, &d));
+            let other = if raw.starts_with("sha256:") {
+                format!("sha512:{}", "0".repeat(SHA512_HEX_LEN))
+            } else {
+                format!("sha256:{D1}")
+            };
+            let other_rced: std::rc::Rc<[u8]> = std::rc::Rc::<[u8]>::from(other.as_bytes());
+            assert!(!fwd_via_bound(&d, &other_rced));
+            assert!(!rev_via_bound(&other_rced, &d));
         }
     }
 }
