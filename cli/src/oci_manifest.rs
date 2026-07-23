@@ -2693,6 +2693,154 @@ impl PartialEq<ContentDigest> for std::borrow::Cow<'_, str> {
     }
 }
 
+/// Ergonomic canonical-digest equality query at the borrowed-or-
+/// owned-frontier byte-slice receiver — the [`Cow<'_, [u8]>`] peer
+/// of the borrowed-byte-slice comparison pair
+/// [`PartialEq<[u8]> for ContentDigest`] +
+/// [`PartialEq<&[u8]> for ContentDigest`], the owned-byte-slice
+/// comparison peer [`PartialEq<Vec<u8>> for ContentDigest`], and
+/// the byte-side projection of the borrowed-or-owned UTF-8 pair
+/// [`PartialEq<Cow<'_, str>> for ContentDigest`] +
+/// [`PartialEq<ContentDigest> for Cow<'_, str>`] (commit 38b2165)
+/// above. A downstream consumer that holds a canonical
+/// `<algorithm>:<hex>` label at the [`Cow<'_, [u8]>`] frontier (a
+/// `bytes::Bytes`-backed decoder that hands off a
+/// [`Cow<'_, [u8]>`] whose borrowed arm aliases the wire buffer
+/// and whose owned arm carries a normalised copy, a `nom` /
+/// `winnow` byte parser whose output type is `Cow<'_, [u8]>`
+/// because the borrowed slice may reference the input buffer or
+/// an owned canonicalisation result, a
+/// `sigstore` / `sigstore_rs` verifier that surfaces a Content-
+/// Digest header value as [`Cow<'_, [u8]>`] so a borrowed HTTP-
+/// header slot and an owned normalised form share one contract,
+/// a `serde_bytes` field decoded as [`Cow<'_, [u8]>`] whose zero-
+/// copy fast path yields `Cow::Borrowed` and whose escaped-bytes
+/// arm yields `Cow::Owned`) answers the boolean equality query
+/// `digest == cow_bytes` at ONE composition rather than a per-
+/// site `<ContentDigest as AsRef<[u8]>>::as_ref(&digest)
+/// == cow_bytes.as_ref()` restatement that repeats the canonical-
+/// digest oracle name at every downstream comparison site.
+///
+/// Route: the impl body composes
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`] with the standard
+/// library [`<[u8] as PartialEq<[u8]>>::eq`] on the
+/// [`Cow<'_, [u8]>`] deref coercion (via [`AsRef::as_ref`]), so
+/// the comparison reads the same canonical-digest bytes
+/// independently of which [`Cow`] arm the caller holds — the
+/// borrowed and owned arms alias the same underlying byte-slice
+/// view at zero allocation, zero temporary [`Vec<u8>`]
+/// construction, and zero [`std::fmt::Display`] formatter-buffer
+/// round trip per call.
+///
+/// Sibling of [`TryFrom<Cow<'_, [u8]>> for ContentDigest`]
+/// (commit cc9fcb3): both surfaces bridge the [`ContentDigest`]
+/// value and the [`Cow<'_, [u8]>`] borrowed-or-owned-frontier —
+/// the parse peer recovers a [`ContentDigest`] from a canonical
+/// `<algorithm>:<hex>` [`Cow<'_, [u8]>`] payload through the
+/// [`ContentDigest::parse`] oracle (after a UTF-8 admission check),
+/// this comparison peer asks whether an already-held
+/// [`Cow<'_, [u8]>`] label names the same canonical
+/// `<algorithm>:<hex>` as the [`ContentDigest`] value on the left
+/// — so a downstream site that received input at the
+/// [`Cow<'_, [u8]>`] frontier and needs to answer either query
+/// reads through the ContentDigest primitive at that frontier
+/// without a per-site `cow_bytes.as_ref()` restatement.
+///
+/// Structural mirror of the sibling borrowed-bytes
+/// [`PartialEq<[u8]> for ContentDigest`], owned-bytes
+/// [`PartialEq<Vec<u8>> for ContentDigest`], and borrowed-or-
+/// owned-UTF-8 [`PartialEq<Cow<'_, str>> for ContentDigest`] peers
+/// — the same canonical-digest comparison lift, now extended to
+/// the arm-collapsing [`Cow`] receiver on the byte-slice side so
+/// the full byte-slice comparison receiver set on the reference-
+/// grammar family (borrowed [u8], borrowed &[u8], owned Vec<u8>,
+/// borrowed-or-owned Cow<'_, [u8]>) is closed on the forward
+/// direction — the exact mirror of the four-shape UTF-8 receiver
+/// set (str, &str, String, Cow<'_, str>) already carried.
+///
+/// THEORY.md §III.1 typescape: the [`Cow<'_, [u8]>`] comparison
+/// surface is a typed-primitive site on [`ContentDigest`] itself
+/// (one [`PartialEq<Cow<'_, [u8]>>`] impl routing through
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a per-consumer
+/// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) == cow.as_ref()`
+/// restatement at every downstream site that receives a
+/// [`Cow<'_, [u8]>`] and asks whether it names a specific
+/// canonical `<algorithm>:<hex>`. THEORY.md §VI.1 one-oracle: the
+/// validated full-digest slice is named at one site
+/// ([`ContentDigest::as_str`], read as bytes through
+/// [`AsRef<[u8]>`]), and every comparison surface — the borrowed-
+/// str pair, the borrowed-byte pair, the owned-String pair, the
+/// owned-Vec<u8> pair, the borrowed-or-owned [`Cow<'_, str>`]
+/// pair, this borrowed-or-owned [`Cow<'_, [u8]>`] peer — reads
+/// through the same one-oracle discipline projected onto its own
+/// receiver shape.
+impl PartialEq<std::borrow::Cow<'_, [u8]>> for ContentDigest {
+    fn eq(&self, other: &std::borrow::Cow<'_, [u8]>) -> bool {
+        <Self as AsRef<[u8]>>::as_ref(self) == other.as_ref()
+    }
+}
+
+/// Symmetric borrowed-or-owned byte-slice comparison peer:
+/// `<Cow<'_, [u8]> as PartialEq<ContentDigest>>::eq` — the
+/// reverse-direction sibling of
+/// [`PartialEq<Cow<'_, [u8]>> for ContentDigest`] (directly above).
+/// The pair together closes the [`Cow<'_, [u8]>`] comparison
+/// surface across both receiver directions, so a caller who holds
+/// a [`Cow<'_, [u8]>`] byte-slice label writes
+/// `cow_bytes == digest` (or the standard-library-derived
+/// `if a == b || b == a`-style symmetric composition a generic
+/// `PartialEq`-bounded consumer performs internally) and answers a
+/// boolean equality query against a [`ContentDigest`] value at the
+/// same arm-collapsing byte-slice frontier the forward-direction
+/// peer covers, at zero allocation, zero temporary [`Vec<u8>`]
+/// construction, and zero [`std::fmt::Display`] formatter-buffer
+/// round trip per call.
+///
+/// Route: the impl body composes
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`] with
+/// [`<[u8] as PartialEq<[u8]>>::eq`] on the [`Cow<'_, [u8]>`]
+/// deref coercion (via [`AsRef::as_ref`]), so the comparison reads
+/// the same canonical-digest bytes as the forward-direction
+/// [`PartialEq<Cow<'_, [u8]>> for ContentDigest`] peer, and the
+/// symmetry axiom
+/// `<Cow<'_, [u8]> as PartialEq<ContentDigest>>::eq(cow, &d)
+/// == <ContentDigest as PartialEq<Cow<'_, [u8]>>>::eq(&d, cow)`
+/// holds by construction at every `(cow, digest)` pair on either
+/// [`Cow`] arm.
+///
+/// Prior to this impl the digest reference-grammar family carried
+/// only the forward direction at the [`Cow<'_, [u8]>`] frontier
+/// (`digest == cow_bytes` compiled but `cow_bytes == digest` did
+/// not), so a generic `PartialEq`-bounded consumer that composed
+/// the two through its own symmetric-check protocol could not
+/// thread a [`ContentDigest`] through the [`Cow<'_, [u8]>`] side
+/// of the bound without a per-consumer
+/// `cow_bytes.as_ref() == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
+/// bridge.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction
+/// [`Cow<'_, [u8]>`] comparison surface is a typed-primitive site
+/// on [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`]
+/// impl on [`Cow<'_, [u8]>`] routing through
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a per-consumer
+/// `cow_bytes.as_ref() == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
+/// restatement at every downstream site that asks whether a
+/// [`Cow<'_, [u8]>`] handle names the same canonical
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value. THEORY.md
+/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// one site ([`ContentDigest::as_str`], read as bytes through
+/// [`AsRef<[u8]>`]), and this reverse-direction
+/// [`Cow<'_, [u8]>`] receiver reads through the same one-oracle
+/// discipline every sibling comparison surface (borrowed str
+/// × 2 × 2, borrowed bytes × 2 × 2, owned String × 2, owned
+/// Vec<u8> × 2, borrowed-or-owned [`Cow<'_, str>`] × 2, forward
+/// [`Cow<'_, [u8]>`]) already carries.
+impl PartialEq<ContentDigest> for std::borrow::Cow<'_, [u8]> {
+    fn eq(&self, other: &ContentDigest) -> bool {
+        self.as_ref() == <ContentDigest as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
 /// [`From<ContentDigest>`] for [`String`] moves the validated
 /// `<algorithm>:<hex>` backing string out of the consumed
 /// [`ContentDigest`] value at zero-copy — no allocation, no
@@ -11791,6 +11939,251 @@ mod tests {
             for cow in [
                 Cow::<'_, str>::Borrowed(other_raw.as_str()),
                 Cow::<'_, str>::Owned(other_raw.clone()),
+            ] {
+                assert!(!fwd_via_bound(&d, &cow));
+                assert!(!rev_via_bound(&cow, &d));
+            }
+        }
+    }
+
+    /// `PartialEq<Cow<'_, [u8]>> for ContentDigest` agrees byte-for-
+    /// byte with the borrowed-view [`AsRef<[u8]>`] oracle across the
+    /// same 4-canonical × ~8-label grid the borrowed-byte / owned-
+    /// Vec<u8> / borrowed-or-owned [`Cow<'_, str>`] sibling peers pin,
+    /// threaded through a [`Cow<'_, [u8]>`] label constructed on BOTH
+    /// `Cow::Borrowed` and `Cow::Owned` arms so the arm-collapsing
+    /// route is exercised on both discriminator arms. Pins the
+    /// borrowed-or-owned forward-direction agreement across arms so a
+    /// future refactor that diverged one arm from the
+    /// [`AsRef<[u8]>`] read oracle breaks this pin at at least one
+    /// `(digest, label, arm)` triple rather than at every downstream
+    /// `digest == cow_bytes` call site.
+    #[test]
+    fn test_partial_eq_cow_bytes_agrees_with_as_ref() {
+        use std::borrow::Cow;
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let owned: Vec<Vec<u8>> = digests
+            .iter()
+            .flat_map(|d| {
+                [
+                    d.as_bytes().to_vec(),
+                    format!("SHA256:{}", &d[7..]).into_bytes(),
+                    format!(" {d}").into_bytes(),
+                    format!("{d}\n").into_bytes(),
+                ]
+            })
+            .chain([
+                Vec::new(),
+                b"sha256:".to_vec(),
+                b"not-a-digest".to_vec(),
+                vec![0xff, 0xfe, 0xfd],
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &owned {
+                let borrowed: Cow<'_, [u8]> = Cow::Borrowed(label.as_slice());
+                let owned_arm: Cow<'_, [u8]> = Cow::Owned(label.clone());
+                for (arm, cow) in [("Borrowed", &borrowed), ("Owned", &owned_arm)] {
+                    assert_eq!(
+                        <ContentDigest as PartialEq<Cow<'_, [u8]>>>::eq(&d, cow),
+                        <ContentDigest as AsRef<[u8]>>::as_ref(&d) == label.as_slice(),
+                        "PartialEq<Cow<'_, [u8]>> and AsRef<[u8]> equality must agree at ({arm}, {label:?}, {raw:?})",
+                    );
+                }
+            }
+        }
+    }
+
+    /// At every validated [`ContentDigest`] value,
+    /// `<Self as PartialEq<Cow<'_, [u8]>>>::eq(&digest, &Cow::Borrowed(digest.as_str().as_bytes()))`
+    /// and the [`Cow::Owned`] variant both return true — the digest
+    /// recognises its own emitted canonical form as a
+    /// [`Cow<'_, [u8]>`] on either discriminator arm through the
+    /// borrowed-or-owned peer.
+    #[test]
+    fn test_partial_eq_cow_bytes_reflexive_at_own_digest() {
+        use std::borrow::Cow;
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let canonical: Vec<u8> = d.as_str().as_bytes().to_vec();
+            let borrowed: Cow<'_, [u8]> = Cow::Borrowed(canonical.as_slice());
+            let owned_arm: Cow<'_, [u8]> = Cow::Owned(canonical.clone());
+            assert!(
+                <ContentDigest as PartialEq<Cow<'_, [u8]>>>::eq(&d, &borrowed),
+                "PartialEq<Cow<'_, [u8]>> must recognise self canonical form on Borrowed arm at {raw:?}",
+            );
+            assert!(
+                <ContentDigest as PartialEq<Cow<'_, [u8]>>>::eq(&d, &owned_arm),
+                "PartialEq<Cow<'_, [u8]>> must recognise self canonical form on Owned arm at {raw:?}",
+            );
+        }
+    }
+
+    /// Every [`Cow<'_, [u8]>`] that is NOT the digest's own emitted
+    /// canonical form fails equality through
+    /// `PartialEq<Cow<'_, [u8]>>` on BOTH arms — the same canonicity
+    /// discipline the borrowed-byte and owned-Vec<u8> sibling peers
+    /// enforce, projected onto the borrowed-or-owned [`Cow`]
+    /// receiver.
+    #[test]
+    fn test_partial_eq_cow_bytes_rejects_non_canonical_labels() {
+        use std::borrow::Cow;
+        let d1 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        let d2 = ContentDigest::parse(&format!("sha256:{D2}")).unwrap();
+        let bad: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"sha256:".to_vec(),
+            b"not-a-digest".to_vec(),
+            format!("SHA256:{D1}").into_bytes(),
+            format!(" sha256:{D1}").into_bytes(),
+            format!("sha256:{D1}\n").into_bytes(),
+            format!("sha256:{D2}").into_bytes(),
+            vec![0xff, 0xfe, 0xfd],
+        ];
+        for label in &bad {
+            for cow in [
+                Cow::<'_, [u8]>::Borrowed(label.as_slice()),
+                Cow::<'_, [u8]>::Owned(label.clone()),
+            ] {
+                assert!(
+                    !<ContentDigest as PartialEq<Cow<'_, [u8]>>>::eq(&d1, &cow),
+                    "PartialEq<Cow<'_, [u8]>> must reject non-canonical label {label:?} ({cow:?}) at sha256:{D1}",
+                );
+            }
+        }
+        // Peer surface is symmetric — d2 rejects d1's canonical form
+        // through the Cow<[u8]> receiver on either arm as well.
+        let d1_canonical = format!("sha256:{D1}").into_bytes();
+        for cow in [
+            Cow::<'_, [u8]>::Borrowed(d1_canonical.as_slice()),
+            Cow::<'_, [u8]>::Owned(d1_canonical.clone()),
+        ] {
+            assert!(!<ContentDigest as PartialEq<Cow<'_, [u8]>>>::eq(&d2, &cow));
+        }
+    }
+
+    /// The reverse-direction borrowed-or-owned byte-slice comparison
+    /// peer `<Cow<'_, [u8]> as PartialEq<ContentDigest>>::eq` agrees
+    /// byte-for-byte with the borrowed-view [`AsRef<[u8]>`] oracle
+    /// across the same grid AND is symmetric with the forward-
+    /// direction `<ContentDigest as PartialEq<Cow<'_, [u8]>>>::eq`
+    /// peer at every `(cow, digest, arm)` triple. Pins the reverse-
+    /// direction agreement and the symmetry axiom
+    /// `<Cow<'_, [u8]> as PartialEq<ContentDigest>>::eq(cow, &d)
+    /// == <ContentDigest as PartialEq<Cow<'_, [u8]>>>::eq(&d, cow)`
+    /// on both [`Cow`] arms so a future refactor that diverged one
+    /// impl from its symmetric peer breaks this pin at at least one
+    /// triple rather than propagating unnoticed through downstream
+    /// generic `PartialEq`-bounded consumers that thread a
+    /// [`ContentDigest`] through either side of a `==` operator.
+    #[test]
+    fn test_cow_bytes_partial_eq_content_digest_symmetric_and_agrees_with_as_ref() {
+        use std::borrow::Cow;
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let owned: Vec<Vec<u8>> = digests
+            .iter()
+            .map(|d| d.as_bytes().to_vec())
+            .chain([
+                Vec::new(),
+                b"sha256:".to_vec(),
+                b"not-a-digest".to_vec(),
+                format!("SHA256:{D1}").into_bytes(),
+                format!(" sha256:{D1}").into_bytes(),
+                format!("sha256:{D1}\n").into_bytes(),
+                vec![0xff, 0xfe, 0xfd],
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &owned {
+                let borrowed: Cow<'_, [u8]> = Cow::Borrowed(label.as_slice());
+                let owned_arm: Cow<'_, [u8]> = Cow::Owned(label.clone());
+                for (arm, cow) in [("Borrowed", &borrowed), ("Owned", &owned_arm)] {
+                    assert_eq!(
+                        <Cow<'_, [u8]> as PartialEq<ContentDigest>>::eq(cow, &d),
+                        label.as_slice() == <ContentDigest as AsRef<[u8]>>::as_ref(&d),
+                        "reverse Cow<[u8]> and AsRef<[u8]> equality must agree at ({arm}, {label:?}, {raw:?})",
+                    );
+                    assert_eq!(
+                        <Cow<'_, [u8]> as PartialEq<ContentDigest>>::eq(cow, &d),
+                        <ContentDigest as PartialEq<Cow<'_, [u8]>>>::eq(&d, cow),
+                        "reverse-Cow<[u8]> vs forward-Cow<[u8]> direction must agree at ({arm}, {label:?}, {raw:?})",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The [`Cow<'_, [u8]>`] forward and reverse peers compose with a
+    /// generic `PartialEq<Cow<'_, [u8]>>`- /
+    /// `PartialEq<ContentDigest>`-bounded consumer — a downstream
+    /// site that types its comparison contract as
+    /// `impl PartialEq<Cow<'_, [u8]>>` (a `matches!` predicate on a
+    /// [`Cow`] arm, an integration-test oracle that generic-bounds
+    /// its borrowed-or-owned byte-slice equality check) recovers the
+    /// same answer as a direct
+    /// `<ContentDigest as PartialEq<Cow<'_, [u8]>>>::eq` call, and
+    /// the reverse-direction bound `impl PartialEq<ContentDigest>`
+    /// recovers the same answer as a direct
+    /// `<Cow<'_, [u8]> as PartialEq<ContentDigest>>::eq` call.
+    #[test]
+    fn test_partial_eq_content_digest_cow_bytes_carries_through_generic_consumer() {
+        use std::borrow::Cow;
+        // The `&Cow<'_, [u8]>` receiver is load-bearing: this test pins
+        // the exact `PartialEq<Cow<'_, [u8]>>` bound the impl above
+        // exposes, so the sibling clippy suggestion to relax it to
+        // `&[u8]` would collapse the bound this test exists to exercise.
+        #[allow(clippy::ptr_arg)]
+        fn fwd_via_bound<'a, T: PartialEq<Cow<'a, [u8]>>>(t: &T, expected: &Cow<'a, [u8]>) -> bool {
+            <T as PartialEq<Cow<'a, [u8]>>>::eq(t, expected)
+        }
+        fn rev_via_bound<T: PartialEq<ContentDigest>>(t: &T, expected: &ContentDigest) -> bool {
+            <T as PartialEq<ContentDigest>>::eq(t, expected)
+        }
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let raw_bytes: Vec<u8> = raw.as_bytes().to_vec();
+            for cow in [
+                Cow::<'_, [u8]>::Borrowed(raw_bytes.as_slice()),
+                Cow::<'_, [u8]>::Owned(raw_bytes.clone()),
+            ] {
+                assert!(fwd_via_bound(&d, &cow));
+                assert!(rev_via_bound(&cow, &d));
+            }
+            let other_raw = if raw.starts_with("sha256:") {
+                format!("sha512:{}", "0".repeat(SHA512_HEX_LEN))
+            } else {
+                format!("sha256:{D1}")
+            };
+            let other_bytes: Vec<u8> = other_raw.into_bytes();
+            for cow in [
+                Cow::<'_, [u8]>::Borrowed(other_bytes.as_slice()),
+                Cow::<'_, [u8]>::Owned(other_bytes.clone()),
             ] {
                 assert!(!fwd_via_bound(&d, &cow));
                 assert!(!rev_via_bound(&cow, &d));
