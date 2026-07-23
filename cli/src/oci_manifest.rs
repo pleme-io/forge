@@ -2280,6 +2280,158 @@ impl PartialEq<ContentDigest> for String {
     }
 }
 
+/// Ergonomic canonical-digest equality query at the owned byte-slice
+/// frontier — the owned-bytes peer of the borrowed-byte-slice
+/// comparison pair [`PartialEq<[u8]> for ContentDigest`] +
+/// [`PartialEq<&[u8]> for ContentDigest`] above, and the byte-side
+/// projection of the owned-UTF-8 pair
+/// [`PartialEq<String> for ContentDigest`] +
+/// [`PartialEq<ContentDigest> for String`] directly above. A
+/// downstream consumer that owns a [`Vec<u8>`] (a
+/// [`bytes::Bytes::to_vec`] snapshot of a wire-received
+/// Content-Digest header value, a
+/// [`std::collections::HashMap<Vec<u8>, _>`] value read out by
+/// clone, a config-schema field that stores a canonical
+/// `<algorithm>:<hex>` as owned [`Vec<u8>`] for downstream signing,
+/// a [`std::io::Read::read_to_end`] buffer that captured a
+/// registry-response line into an owned [`Vec<u8>`] and asks
+/// whether it names a specific [`ContentDigest`] value) answers the
+/// boolean equality query `digest == owned_bytes` at ONE
+/// composition rather than a per-site
+/// `<ContentDigest as AsRef<[u8]>>::as_ref(&digest)
+/// == owned_bytes.as_slice()` restatement that repeats the
+/// canonical-digest oracle name at every downstream comparison
+/// site.
+///
+/// Route: the impl body composes
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`] with the standard
+/// library [`<[u8] as PartialEq<[u8]>>::eq`] on the [`Vec<u8>`]-
+/// side deref coercion (`Vec<u8>: Deref<Target = [u8]>`), so the
+/// comparison reads the same canonical-digest bytes at zero
+/// allocation, zero temporary [`Vec<u8>`] construction, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call —
+/// the same zero-cost discipline the borrowed-bytes sibling peers
+/// carry.
+///
+/// Sibling of the by-value owned-byte-slice emit peer
+/// [`From<ContentDigest> for Vec<u8>`] (commit e1ea855): both
+/// surfaces bridge the [`ContentDigest`] value and the [`Vec<u8>`]
+/// owned-input frontier — the emit peer moves the validated
+/// backing bytes out (`Vec::<u8>::from(digest)`), this comparison
+/// peer asks whether the owned [`Vec<u8>`] on the right names the
+/// same canonical `<algorithm>:<hex>` as the [`ContentDigest`]
+/// value on the left (`digest == owned_bytes`) — so a downstream
+/// site that received an owned [`Vec<u8>`] and needs to answer
+/// either query reads through the ContentDigest primitive at the
+/// [`Vec<u8>`] frontier without a per-site
+/// `<ContentDigest as AsRef<[u8]>>::as_ref` restatement.
+///
+/// Mirrors the standard-library idiom [`Vec<u8>`] carries through
+/// its own [`PartialEq<Vec<u8>> for [u8]`] +
+/// [`PartialEq<Vec<u8>> for &[u8]`] symmetric owned-bytes
+/// comparison surface: an owned canonical-bytes primitive
+/// compares against a [`Vec<u8>`] handle at either frontier with
+/// the same zero-cost projection through the primitive's read-back
+/// accessor. This impl is the byte-side projection of the
+/// [`PartialEq<String>`] owned-UTF-8 peer directly above; where
+/// that peer answers the query at the UTF-8 frontier through
+/// [`ContentDigest::as_str`], this peer answers the same query at
+/// the byte-slice frontier through
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`] (which itself
+/// composes [`ContentDigest::as_str`] with [`str::as_bytes`]).
+///
+/// Closes the fourth and last uncovered corner of the reference-
+/// grammar comparison cross-product noted in commit 06cb6f5 (the
+/// [`PartialEq<String>`] forward peer): borrowed-str × 2 × 2
+/// (17c63ca + d894159), borrowed-bytes × 2 × 2 (9acc9aa + 94a61bb),
+/// owned-str × 2 (06cb6f5), and this owned-bytes × 2 pair — the
+/// full 12-impl closure of the borrowed and owned string/bytes
+/// receiver-shape × direction cross-product at the reference-
+/// grammar family, matching the closure the standard library
+/// itself carries across [`str`] / [`String`] / [`[u8]`] /
+/// [`Vec<u8>`].
+///
+/// THEORY.md §III.1 typescape: the owned byte-slice comparison
+/// surface is a typed-primitive site on [`ContentDigest`] itself
+/// (one [`PartialEq<Vec<u8>>`] impl routing through
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a per-consumer
+/// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) == owned.as_slice()`
+/// restatement at every downstream site that asks whether a
+/// [`ContentDigest`] value names a specific canonical
+/// `<algorithm>:<hex>` through an owned [`Vec<u8>`] handle.
+/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// named at one site ([`ContentDigest::as_str`]), and every
+/// comparison surface — the borrowed-UTF-8 pair, the borrowed-
+/// byte-slice pair, the owned-UTF-8 pair, this owned-byte-slice
+/// peer — reads through the same one-oracle discipline projected
+/// onto its own intent × frontier.
+impl PartialEq<Vec<u8>> for ContentDigest {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        <Self as AsRef<[u8]>>::as_ref(self) == other.as_slice()
+    }
+}
+
+/// Symmetric owned byte-slice comparison peer:
+/// `<Vec<u8> as PartialEq<ContentDigest>>::eq` — the reverse-
+/// direction sibling of [`PartialEq<Vec<u8>> for ContentDigest`]
+/// directly above. The pair together closes the owned byte-slice
+/// comparison surface across both receiver directions, so a caller
+/// who holds an owned [`Vec<u8>`] writes `owned_bytes == digest`
+/// (or the standard-library-derived `if a == b || b == a`-style
+/// symmetric composition a generic `PartialEq`-bounded consumer
+/// performs internally) and answers a boolean equality query
+/// against a [`ContentDigest`] value at the same owned byte-slice
+/// frontier the forward-direction peer covers, at zero allocation,
+/// zero temporary [`Vec<u8>`] construction, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call.
+///
+/// Route: the impl body composes
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`] with
+/// [`<[u8] as PartialEq<[u8]>>::eq`] on the [`Vec<u8>`]-side deref
+/// coercion, so the comparison reads the same canonical-digest
+/// bytes as the forward-direction
+/// [`PartialEq<Vec<u8>> for ContentDigest`] peer, and the symmetry
+/// axiom
+/// `<Vec<u8> as PartialEq<ContentDigest>>::eq(owned, &digest)
+/// == <ContentDigest as PartialEq<Vec<u8>>>::eq(&digest, owned)`
+/// holds by construction at every `(owned, digest)` pair.
+///
+/// Mirrors the standard-library idiom [`Vec<u8>`] carries through
+/// its own [`PartialEq<Vec<u8>> for [u8]`] symmetric receiver-shape
+/// pair: a borrowed / owned byte-slice handle compares against the
+/// counter-shape byte-slice primitive in either direction with the
+/// same zero-cost projection through the primitive's read-back
+/// accessor. Prior to this impl the digest reference-grammar family
+/// carried only the forward direction at the owned-byte-slice
+/// frontier (`digest == owned_bytes` compiled but
+/// `owned_bytes == digest` did not), so a generic `PartialEq`-
+/// bounded consumer that composed the two through its own
+/// symmetric-check protocol could not thread a [`ContentDigest`]
+/// through the [`Vec<u8>`] side of the bound without a per-consumer
+/// `owned_bytes.as_slice() == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
+/// bridge.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction owned byte-
+/// slice comparison surface is a typed-primitive site on
+/// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl
+/// on [`Vec<u8>`] routing through
+/// [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a per-consumer
+/// `owned_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
+/// restatement at every downstream site that asks whether an owned
+/// [`Vec<u8>`] handle names the same canonical
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value.
+/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// named at one site ([`ContentDigest::as_str`]), and this reverse-
+/// direction owned-byte-slice receiver surface reads through the
+/// same one-oracle discipline every sibling comparison surface
+/// (borrowed str × 2 × 2, borrowed bytes × 2 × 2, owned-string
+/// × 2, forward owned-bytes) already carries.
+impl PartialEq<ContentDigest> for Vec<u8> {
+    fn eq(&self, other: &ContentDigest) -> bool {
+        self.as_slice() == <ContentDigest as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
 /// [`From<ContentDigest>`] for [`String`] moves the validated
 /// `<algorithm>:<hex>` backing string out of the consumed
 /// [`ContentDigest`] value at zero-copy — no allocation, no
@@ -10697,6 +10849,205 @@ mod tests {
                 format!("sha512:{}", "0".repeat(SHA512_HEX_LEN))
             } else {
                 format!("sha256:{D1}")
+            };
+            assert!(!fwd_via_bound(&d, &other));
+            assert!(!rev_via_bound(&other, &d));
+        }
+    }
+
+    /// `PartialEq<Vec<u8>> for ContentDigest` agrees byte-for-byte
+    /// with the borrowed-view `<ContentDigest as AsRef<[u8]>>::as_ref`
+    /// oracle across the same 4-canonical × ~9-label grid the borrowed-
+    /// bytes pair pins, threaded through an owned [`Vec<u8>`] label so
+    /// the caller writes `digest == owned_bytes`. Pins the owned-byte-
+    /// slice forward-direction agreement so a future refactor that
+    /// inlined a divergent read into the owned-bytes impl breaks this
+    /// pin at at least one `(digest, owned)` pair rather than at every
+    /// downstream `digest == owned_bytes` call site.
+    #[test]
+    fn test_partial_eq_vec_bytes_agrees_with_as_ref() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let owned: Vec<Vec<u8>> = digests
+            .iter()
+            .flat_map(|d| {
+                [
+                    d.as_bytes().to_vec(),
+                    format!("SHA256:{}", &d[7..]).into_bytes(),
+                    format!(" {d}").into_bytes(),
+                    format!("{d}\n").into_bytes(),
+                ]
+            })
+            .chain([
+                Vec::<u8>::new(),
+                b"sha256:".to_vec(),
+                b"SHA256:0123".to_vec(),
+                b"not-a-digest".to_vec(),
+                vec![0xff, 0xfe, 0xfd],
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &owned {
+                assert_eq!(
+                    <ContentDigest as PartialEq<Vec<u8>>>::eq(&d, label),
+                    <ContentDigest as AsRef<[u8]>>::as_ref(&d) == label.as_slice(),
+                    "PartialEq<Vec<u8>> and AsRef<[u8]> equality must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// At every validated [`ContentDigest`] value,
+    /// `<Self as PartialEq<Vec<u8>>>::eq(&digest, &digest.as_str().as_bytes().to_vec())`
+    /// returns true — the digest recognises its own emitted canonical
+    /// form as owned [`Vec<u8>`] through the owned-bytes peer.
+    #[test]
+    fn test_partial_eq_vec_bytes_reflexive_at_own_digest() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let canonical: Vec<u8> = d.as_str().as_bytes().to_vec();
+            assert!(
+                <ContentDigest as PartialEq<Vec<u8>>>::eq(&d, &canonical),
+                "PartialEq<Vec<u8>> must recognise self canonical form at {raw:?}",
+            );
+        }
+    }
+
+    /// Every owned [`Vec<u8>`] that is NOT the digest's own emitted
+    /// canonical byte form fails equality through
+    /// `PartialEq<Vec<u8>>` — the same canonicity discipline the
+    /// borrowed-bytes sibling peers enforce, projected onto the owned
+    /// [`Vec<u8>`] receiver. Invalid-UTF-8 sequences (e.g.
+    /// `[0xff, 0xfe, 0xfd]`) are included so the pin also refuses
+    /// arbitrary bytes drift toward acceptance under any future
+    /// misguided UTF-8-relaxation refactor.
+    #[test]
+    fn test_partial_eq_vec_bytes_rejects_non_canonical_labels() {
+        let d1 = ContentDigest::parse(&format!("sha256:{D1}")).unwrap();
+        let d2 = ContentDigest::parse(&format!("sha256:{D2}")).unwrap();
+        let bad: [Vec<u8>; 8] = [
+            Vec::<u8>::new(),
+            b"sha256:".to_vec(),
+            b"not-a-digest".to_vec(),
+            format!("SHA256:{D1}").into_bytes(),
+            format!(" sha256:{D1}").into_bytes(),
+            format!("sha256:{D1}\n").into_bytes(),
+            format!("sha256:{D2}").into_bytes(),
+            vec![0xff, 0xfe, 0xfd],
+        ];
+        for label in &bad {
+            assert!(
+                !<ContentDigest as PartialEq<Vec<u8>>>::eq(&d1, label),
+                "PartialEq<Vec<u8>> must reject non-canonical label {label:?} at sha256:{D1}",
+            );
+        }
+        let d1_canonical_bytes = format!("sha256:{D1}").into_bytes();
+        assert!(!<ContentDigest as PartialEq<Vec<u8>>>::eq(
+            &d2,
+            &d1_canonical_bytes,
+        ));
+    }
+
+    /// The reverse-direction owned byte-slice comparison peer
+    /// `<Vec<u8> as PartialEq<ContentDigest>>::eq` agrees byte-for-
+    /// byte with the borrowed-view
+    /// `<ContentDigest as AsRef<[u8]>>::as_ref` oracle across the same
+    /// grid AND is symmetric with the forward-direction
+    /// `<ContentDigest as PartialEq<Vec<u8>>>::eq` peer at every
+    /// `(owned, digest)` pair. Pins the reverse-direction agreement
+    /// and the symmetry axiom
+    /// `<Vec<u8> as PartialEq<ContentDigest>>::eq(owned, &d)
+    /// == <ContentDigest as PartialEq<Vec<u8>>>::eq(&d, owned)` so a
+    /// future refactor that diverged one impl from its symmetric peer
+    /// breaks this pin at at least one pair rather than propagating
+    /// unnoticed through downstream generic `PartialEq`-bounded
+    /// consumers that thread a [`ContentDigest`] through either side
+    /// of a `==` operator.
+    #[test]
+    fn test_vec_bytes_partial_eq_content_digest_symmetric_and_agrees_with_as_ref() {
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        let digests = [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ];
+        let owned: Vec<Vec<u8>> = digests
+            .iter()
+            .map(|d| d.as_bytes().to_vec())
+            .chain([
+                Vec::<u8>::new(),
+                b"sha256:".to_vec(),
+                b"not-a-digest".to_vec(),
+                format!("SHA256:{D1}").into_bytes(),
+                format!(" sha256:{D1}").into_bytes(),
+                format!("sha256:{D1}\n").into_bytes(),
+                vec![0xff, 0xfe, 0xfd],
+            ])
+            .collect();
+        for raw in &digests {
+            let d = ContentDigest::parse(raw).unwrap();
+            for label in &owned {
+                assert_eq!(
+                    <Vec<u8> as PartialEq<ContentDigest>>::eq(label, &d),
+                    label.as_slice() == <ContentDigest as AsRef<[u8]>>::as_ref(&d),
+                    "reverse Vec<u8> and AsRef<[u8]> equality must agree at ({label:?}, {raw:?})",
+                );
+                assert_eq!(
+                    <Vec<u8> as PartialEq<ContentDigest>>::eq(label, &d),
+                    <ContentDigest as PartialEq<Vec<u8>>>::eq(&d, label),
+                    "reverse-Vec<u8> vs forward-Vec<u8> direction must agree at ({label:?}, {raw:?})",
+                );
+            }
+        }
+    }
+
+    /// The owned-byte-slice forward and reverse peers compose with a
+    /// generic `PartialEq<Vec<u8>>`- / `PartialEq<ContentDigest>`-
+    /// bounded consumer — a downstream site that types its comparison
+    /// contract as `impl PartialEq<Vec<u8>>` (a `matches!` predicate
+    /// on an owned-`Vec<u8>` arm, an integration-test oracle that
+    /// generic-bounds its owned-bytes equality check) recovers the
+    /// same answer as a direct
+    /// `<ContentDigest as PartialEq<Vec<u8>>>::eq` call, and the
+    /// reverse-direction bound `impl PartialEq<ContentDigest>`
+    /// recovers the same answer as a direct
+    /// `<Vec<u8> as PartialEq<ContentDigest>>::eq` call.
+    #[test]
+    fn test_partial_eq_content_digest_vec_bytes_carries_through_generic_consumer() {
+        fn fwd_via_bound<T: PartialEq<Vec<u8>>>(t: &T, expected: &Vec<u8>) -> bool {
+            <T as PartialEq<Vec<u8>>>::eq(t, expected)
+        }
+        fn rev_via_bound<T: PartialEq<ContentDigest>>(t: &T, expected: &ContentDigest) -> bool {
+            <T as PartialEq<ContentDigest>>::eq(t, expected)
+        }
+        let hex512 = "f".repeat(SHA512_HEX_LEN);
+        for raw in [
+            format!("sha256:{D1}"),
+            format!("sha256:{D2}"),
+            format!("sha256:{D3}"),
+            format!("sha512:{hex512}"),
+        ] {
+            let d = ContentDigest::parse(&raw).unwrap();
+            let owned = raw.clone().into_bytes();
+            assert!(fwd_via_bound(&d, &owned));
+            assert!(rev_via_bound(&owned, &d));
+            let other = if raw.starts_with("sha256:") {
+                format!("sha512:{}", "0".repeat(SHA512_HEX_LEN)).into_bytes()
+            } else {
+                format!("sha256:{D1}").into_bytes()
             };
             assert!(!fwd_via_bound(&d, &other));
             assert!(!rev_via_bound(&other, &d));
