@@ -3159,6 +3159,86 @@ impl From<DigestAlgorithm> for std::borrow::Cow<'static, [u8]> {
     }
 }
 
+/// Ergonomic canonical-label equality query at the borrowed UTF-8
+/// frontier through a dereffed `str` receiver — a downstream consumer
+/// bound by [`PartialEq<str>`] (a `matches!` predicate that reads a
+/// canonical algorithm label off a `Cow::Borrowed(s)` arm without a
+/// per-arm [`DigestAlgorithm::parse`] parse-and-discard round trip, a
+/// config-audit assertion that names a specific canonical
+/// [`DigestAlgorithm`] variant against an already-borrowed `str` slot
+/// without a downstream `.as_str()` restatement, an integration-test
+/// oracle that compares a captured stdout / journal / telemetry-
+/// breadcrumb label against a specific canonical algorithm as
+/// `algo == *captured_line_ref` where `captured_line_ref: &str`)
+/// answers the boolean equality query `algo == *label_ref` at ONE
+/// composition rather than a per-site `algo.as_str() == label_ref`
+/// restatement that repeats the canonical-label oracle name at every
+/// downstream comparison site.
+///
+/// Route: the impl body composes [`DigestAlgorithm::as_str`] (invoked
+/// by-value through `(*self).as_str()` since [`DigestAlgorithm`] is
+/// [`Copy`] and the inherent projection takes `self` by value) with
+/// the standard library [`<str as PartialEq<str>>::eq`] (byte-for-
+/// byte UTF-8 equality against the borrowed right-hand-side view), so
+/// the comparison reads the same canonical-label bytes at zero
+/// allocation, zero temporary [`String`] construction, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call — the
+/// same zero-cost discipline the sibling [`AsRef<str>`] borrowed-view
+/// surface carries.
+///
+/// Discipline-mirror of [`impl PartialEq<str> for
+/// crate::retry::PerAttemptRegion`] (line 8586 of `cli/src/retry.rs`),
+/// [`impl PartialEq<str> for crate::probe_outcome::AdmissionTier`],
+/// [`impl PartialEq<str> for crate::version::BumpLevel`], and
+/// [`impl PartialEq<str> for ContentDigest`] (line 5070 of this file)
+/// — the same borrowed UTF-8 dereffed-str-receiver comparison lift
+/// the sibling label-axis ordered typed sums and the digest reference-
+/// grammar family already carry, now extended to the digest-algorithm
+/// axis so the borrowed UTF-8 comparison surface opens at
+/// [`DigestAlgorithm`] alongside the algorithm-label oracle
+/// [`DigestAlgorithm::as_str`] that every emit / parse / borrowed-view
+/// peer already reads through.
+///
+/// A future variant insertion (a `sha384` arm the OCI distribution
+/// spec might normatively adopt, a per-attestation-frontier arm forge
+/// might land) updates the [`DigestAlgorithm::as_str`] match body
+/// alone and every consumer bound by [`PartialEq<str>`] inherits the
+/// new canonical label automatically with no downstream retyping.
+///
+/// The identity `(algo == *label_ref) == (algo.as_str() == label_ref)`
+/// at every [`DigestAlgorithm::ALL`] variant × every string in the
+/// union of {canonical labels, common non-canonical labels, empty} is
+/// pinned by
+/// [`tests::test_digest_algorithm_partial_eq_str_agrees_with_as_str`];
+/// the reflexivity identity `algo == *algo.as_str()` at every variant
+/// is pinned by
+/// [`tests::test_digest_algorithm_partial_eq_str_reflexive_at_own_label`];
+/// the canonicity discipline (only exact lowercase
+/// [`DigestAlgorithm::as_str`] emissions equal a [`DigestAlgorithm`]
+/// value through this surface — no case-fold, no whitespace tolerance,
+/// no cross-variant collision) at every variant × known-bad label pair
+/// is pinned by
+/// [`tests::test_digest_algorithm_partial_eq_str_rejects_non_canonical_labels`].
+///
+/// THEORY.md §III.1 typescape: the borrowed UTF-8 dereffed-str-
+/// receiver comparison surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one [`PartialEq<str>`] impl routing
+/// through [`DigestAlgorithm::as_str`]), not a per-consumer
+/// `algo.as_str() == label_ref` restatement at every downstream site
+/// that asks whether a [`DigestAlgorithm`] value names a specific
+/// canonical algorithm label through an already-dereffed `str` handle.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`DigestAlgorithm::as_str`]), and every borrowed UTF-8
+/// surface — the [`AsRef<str>`] borrowed-view sibling yielding `&str`,
+/// this [`PartialEq<str>`] answering a boolean equality query — reads
+/// through the same one-oracle discipline projected onto its own
+/// intent.
+impl PartialEq<str> for DigestAlgorithm {
+    fn eq(&self, other: &str) -> bool {
+        (*self).as_str() == other
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12248,6 +12328,173 @@ mod tests {
                 recovered, algo,
                 "round-trip through TryFrom<Cow<'_, [u8]>> must recover {algo:?} from emitted {emitted:?}",
             );
+        }
+    }
+
+    /// At every [`DigestAlgorithm`] variant × every string in the
+    /// union of {canonical algorithm labels, common non-canonical
+    /// labels including CamelCase / ALLCAPS / whitespace-fringed /
+    /// unrelated-sibling-ladder labels, empty}, the [`PartialEq<str>`]
+    /// comparison `<Self as PartialEq<str>>::eq(&algo, label)` equals
+    /// the direct `algo.as_str() == label` composition. Pins the
+    /// agreement identity that the borrowed UTF-8 dereffed-str-
+    /// receiver comparison surface reads the same canonical-label
+    /// oracle the [`AsRef<str>`] borrowed-view sibling reads,
+    /// projected through the boolean equality query at a dereffed
+    /// `str` value rather than at a borrow. A regression that swapped
+    /// the [`PartialEq<str>`] impl body onto a stale label table,
+    /// drifted it off the [`DigestAlgorithm::as_str`] oracle (a hand-
+    /// rolled `matches!` on the variant tag with hard-coded per-arm
+    /// labels that a future variant insertion could silently leave
+    /// out), or introduced case-folding / whitespace-tolerance
+    /// leniency would break this composition equality at at least one
+    /// (variant, label) pair and fail here at the canonical-label pin,
+    /// not at every downstream `algo == *label_ref` call site.
+    #[test]
+    fn test_digest_algorithm_partial_eq_str_agrees_with_as_str() {
+        let labels = [
+            "sha256",
+            "sha512",
+            "blake3",
+            "",
+            "SHA256",
+            "SHA512",
+            "BLAKE3",
+            "Sha256",
+            "Sha512",
+            "Blake3",
+            " sha256",
+            "sha256 ",
+            "\tsha512",
+            "blake3\n",
+            "sha-256",
+            "sha_256",
+            "md5",
+            "sha1",
+            "sha384",
+            "before_first",
+            "patch",
+        ];
+        for algo in DigestAlgorithm::ALL {
+            for label in labels {
+                assert_eq!(
+                    <DigestAlgorithm as PartialEq<str>>::eq(&algo, label),
+                    algo.as_str() == label,
+                    "PartialEq<str> and as_str() equality must agree at ({algo:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`DigestAlgorithm`] variant,
+    /// `<Self as PartialEq<str>>::eq(&algo, algo.as_str())` returns
+    /// true. Pins the reflexivity identity that a variant compared
+    /// against its own canonical-label emission always answers true —
+    /// the load-bearing "self-recognition" property the borrowed
+    /// UTF-8 comparison surface promises. A future variant insertion
+    /// that landed a label the [`DigestAlgorithm::as_str`] oracle
+    /// emits but the [`PartialEq<str>`] impl silently misses (a
+    /// divergent hand-rolled label table drifting past the one-oracle
+    /// discipline) would break this pin at the new variant, not at a
+    /// downstream consumer's aggregate.
+    #[test]
+    fn test_digest_algorithm_partial_eq_str_reflexive_at_own_label() {
+        for algo in DigestAlgorithm::ALL {
+            let label: &str = algo.as_str();
+            assert!(
+                <DigestAlgorithm as PartialEq<str>>::eq(&algo, label),
+                "PartialEq<str> must recognise self canonical label at {algo:?}",
+            );
+        }
+    }
+
+    /// At every [`DigestAlgorithm`] variant × every entry in a known-
+    /// bad label set (empty, CamelCase forms of every variant
+    /// including the target variant's own CamelCase name, ALLCAPS
+    /// forms, whitespace-fringed forms, hyphen-instead-of-no-separator
+    /// / underscore-instead-of-no-separator forms, unrelated labels
+    /// from sibling ladders like [`crate::retry::PerAttemptRegion`]
+    /// / [`crate::version::BumpLevel`], the sibling registry-adjacent
+    /// but currently-unsupported `md5` / `sha1` / `sha384` labels),
+    /// the [`PartialEq<str>`] impl returns false. Pins the canonicity
+    /// discipline at the borrowed UTF-8 comparison surface: only the
+    /// exact lowercase labels [`DigestAlgorithm::as_str`] emits
+    /// (`"sha256"`, `"sha512"`, `"blake3"`) equal a
+    /// [`DigestAlgorithm`] value through this surface — drift toward
+    /// accepting a case-folded, ALLCAPS, hyphen-separated, or
+    /// whitespace-tolerant grammar is refused at ONE pin covering the
+    /// full variant × known-bad grid, matching the canonicity
+    /// discipline the sibling [`TryFrom<&str>`] parse surface enforces
+    /// at [`test_digest_algorithm_try_from_str_rejects_non_canonical_input`].
+    #[test]
+    fn test_digest_algorithm_partial_eq_str_rejects_non_canonical_labels() {
+        let bad = [
+            "",
+            "SHA256",
+            "SHA512",
+            "BLAKE3",
+            "Sha256",
+            "Sha512",
+            "Blake3",
+            "sha-256",
+            "sha_256",
+            "sha 256",
+            " sha256",
+            "sha256 ",
+            "\tsha512",
+            "blake3\n",
+            "md5",
+            "sha1",
+            "sha384",
+            "before_first",
+            "patch",
+            "minor",
+            "major",
+            "nonsense",
+        ];
+        for algo in DigestAlgorithm::ALL {
+            for label in bad {
+                if label == algo.as_str() {
+                    continue;
+                }
+                assert!(
+                    !<DigestAlgorithm as PartialEq<str>>::eq(&algo, label),
+                    "PartialEq<str> must reject non-canonical label {label:?} at {algo:?}",
+                );
+            }
+        }
+    }
+
+    /// The [`PartialEq<str>`] impl composes with a generic
+    /// `PartialEq<str>`-bounded consumer — a downstream site that
+    /// types its comparison contract as `impl PartialEq<str>` (a
+    /// `matches!` predicate on a `Cow::Borrowed(s)` arm, an
+    /// integration-test oracle that generic-bounds its equality check)
+    /// recovers the same answer as a direct
+    /// `<DigestAlgorithm as PartialEq<str>>::eq` call at every
+    /// [`DigestAlgorithm::ALL`] variant × known label pair. Pins the
+    /// trait-generic consumer surface parallel to the sibling
+    /// borrowed-view [`AsRef<str>`] test
+    /// [`test_digest_algorithm_as_ref_str_carries_through_generic_consumer`]
+    /// so a downstream generic consumer that stayed inside the
+    /// [`PartialEq`] bound reads the same canonical-label answer the
+    /// direct-call peer reads.
+    #[test]
+    fn test_digest_algorithm_partial_eq_str_carries_through_generic_consumer() {
+        fn eq_via_bound<T: PartialEq<str> + ?Sized>(lhs: &T, rhs: &str) -> bool {
+            lhs == rhs
+        }
+        let labels = [
+            "sha256", "sha512", "blake3", "", "SHA256", "sha-256", "md5", "sha384",
+        ];
+        for algo in DigestAlgorithm::ALL {
+            for label in labels {
+                assert_eq!(
+                    eq_via_bound(&algo, label),
+                    <DigestAlgorithm as PartialEq<str>>::eq(&algo, label),
+                    "generic PartialEq<str>-bounded consumer must match direct call at ({algo:?}, {label:?})",
+                );
+            }
         }
     }
 
