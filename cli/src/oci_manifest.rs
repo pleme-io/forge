@@ -1795,6 +1795,122 @@ impl TryFrom<std::borrow::Cow<'_, [u8]>> for DigestAlgorithm {
     }
 }
 
+/// [`From<DigestAlgorithm>`] for [`&'static str`] routes through
+/// [`DigestAlgorithm::as_str`] so a downstream consumer that takes an
+/// owned `&'static str` via [`Into<&'static str>`] (a `const`-adjacent
+/// registry-URL path-segment builder that stashes the algorithm label
+/// in a `&'static str` slot, a `phf`-style static lookup table keyed by
+/// canonical algorithm label, an OpenTelemetry / `tracing` attribute
+/// slot that keys by `&'static str` for the zero-copy fast path, a
+/// [`std::borrow::Cow<'static, str>`] sink taking
+/// `Into<Cow<'static, str>>`, an `http::HeaderValue::from_static`
+/// consumer whose contract requires a `&'static str`) reads the
+/// canonical lowercase label (`"sha256"`, `"sha512"`, `"blake3"`)
+/// directly from a [`DigestAlgorithm`] value with `'static` lifetime
+/// preserved. The zero-cost by-value conversion peer of the
+/// [`AsRef<str>`] borrow surface above (line 293), both routing through
+/// the same [`DigestAlgorithm::as_str`] canonical-label oracle — the
+/// difference is that [`AsRef<str>`] borrows through the receiver's
+/// lifetime (a caller with a short-lived [`DigestAlgorithm`] gets a
+/// short-lived `&str` back), whereas this [`From`] impl consumes the
+/// receiver by value ([`DigestAlgorithm`] is [`Copy`], so "consume" is
+/// a bitcopy) and returns `&'static str` (a caller that no longer
+/// needs the [`DigestAlgorithm`] value gets a `'static`-lived label
+/// back, unbound from the receiver's lifetime).
+///
+/// Sibling of the [`std::fmt::Display`], [`std::str::FromStr`], and
+/// [`AsRef<str>`] impls above — the same lift at the by-value
+/// static-lifetime conversion layer instead of the format / parse /
+/// borrow layers. Together with those impls this extends the
+/// `as_str` ⇢ {`Display`, `AsRef<str>`, `AsRef<[u8]>`, `From<T> for
+/// &'static str`} emission set and the {`FromStr`, `TryFrom<&str>`,
+/// `TryFrom<String>`, `TryFrom<Cow<'_, str>>`, `TryFrom<Box<str>>`,
+/// `TryFrom<Arc<str>>`, `TryFrom<Rc<str>>`, `TryFrom<&[u8]>`,
+/// `TryFrom<Vec<u8>>`, `TryFrom<Box<[u8]>>`, `TryFrom<Arc<[u8]>>`,
+/// `TryFrom<Rc<[u8]>>`, `TryFrom<Cow<'_, [u8]>>`} parse set at the
+/// digest-algorithm axis against the shared canonical-label oracle.
+/// Structural mirror of
+/// `impl From<PerAttemptRegion> for &'static str`
+/// (`retry.rs:1352` — the by-value static-lifetime peer at the
+/// per-attempt-region ladder, routing through
+/// [`crate::retry::PerAttemptRegion::as_str`]),
+/// `impl From<AdmissionTier> for &'static str`
+/// (`probe_outcome.rs:6006` — the by-value static-lifetime peer at
+/// the admission-tier ladder, routing through
+/// [`crate::probe_outcome::AdmissionTier::as_str`]), and
+/// `impl From<BumpLevel> for &'static str` (`version.rs:6643` —
+/// the by-value static-lifetime peer at the version-bump-magnitude
+/// ladder, routing through [`crate::version::BumpLevel::as_str`]).
+/// After this commit all four repo-internal canonical-label typed sums
+/// that carry `as_str` + [`std::fmt::Display`] + [`AsRef<str>`] also
+/// carry `From<T> for &'static str` routing through the shared
+/// canonical-label oracle — the by-value static-lifetime UTF-8-emit
+/// axis at canonical-label typed sums is now a one-oracle surface
+/// across forge without exception, matching the closure order the
+/// `AsRef<[u8]>` axis reached at commit 17c86d1. The natural bridge
+/// to the [`strum::IntoStaticStr`] / [`strum_macros::IntoStaticStr`]
+/// frontier idiom (`strum` derives exactly this pattern via
+/// `#[derive(IntoStaticStr)]`) — here hand-written at ONE typed-
+/// primitive site so the routing through the shared
+/// [`DigestAlgorithm::as_str`] oracle is explicit and inspectable
+/// rather than macro-generated.
+///
+/// Zero-cost by construction: the returned `&'static str` is
+/// delegated from [`DigestAlgorithm::as_str`]'s `&'static str` return
+/// type, so a consumer that receives the slice reads directly into
+/// the static-string constant table without a copy, matching the
+/// zero-allocation discipline the [`std::fmt::Display`] format
+/// surface doesn't offer (which writes through a
+/// [`std::fmt::Formatter`] into a caller-provided buffer). Where
+/// [`AsRef<str>`] would force the caller to keep the
+/// [`DigestAlgorithm`] value alive across the borrow (so a
+/// stashed-into-a-`&'static str`-slot use case would hit an
+/// escaped-borrow lifetime error), this impl frees the caller from
+/// that constraint at zero runtime cost — the `'static` lifetime is
+/// preserved through the by-value conversion because
+/// [`DigestAlgorithm::as_str`] itself returns `&'static str`, and
+/// `From::from` takes the receiver by value so no receiver-borrow
+/// lifetime bound leaks into the return type.
+///
+/// A future variant insertion (a `sha384` arm the OCI distribution
+/// spec might normatively adopt, a per-attestation-frontier arm
+/// forge might land) updates the [`DigestAlgorithm::as_str`] match
+/// body alone and every consumer — registry-URL path-segment builder
+/// holding `&'static str` slots, `phf`-style static lookup table
+/// keyed by canonical algorithm label, OpenTelemetry / `tracing`
+/// attribute slot, [`std::borrow::Cow<'static, str>`] sink,
+/// `http::HeaderValue::from_static` frontier — that accepts
+/// `impl Into<&'static str>` inherits the new canonical label
+/// automatically with no downstream retyping.
+///
+/// The identity `<&'static str>::from(algo) == algo.as_str()` at
+/// every [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_from_into_static_str_agrees_with_as_str`];
+/// the identity carried through a generic `impl Into<&'static str>`
+/// consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_static_str_carries_through_generic_consumer`];
+/// the parse round-trip through the emitted `&'static str` (feeding
+/// it back into [`DigestAlgorithm::parse`] recovers the original
+/// variant) at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_static_str_round_trips_through_parse`].
+///
+/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// UTF-8 conversion surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one
+/// `From<DigestAlgorithm> for &'static str` impl routing through
+/// [`DigestAlgorithm::as_str`]), not a per-consumer `.as_str()`
+/// restatement at every downstream site that accepts
+/// `impl Into<&'static str>`. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site
+/// ([`DigestAlgorithm::as_str`]) and every emit surface —
+/// [`std::fmt::Display`], [`AsRef<str>`], [`AsRef<[u8]>`], this
+/// `From<T> for &'static str` — reads through it.
+impl From<DigestAlgorithm> for &'static str {
+    fn from(algorithm: DigestAlgorithm) -> &'static str {
+        algorithm.as_str()
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9421,6 +9537,83 @@ mod tests {
             assert!(
                 owned_msg.contains("not valid UTF-8"),
                 "UTF-8-invalid rejection on Cow::Owned must name the failure mode, got {owned_msg:?}",
+            );
+        }
+    }
+
+    /// `<&'static str>::from(algo)` equals `algo.as_str()` at every
+    /// [`DigestAlgorithm::ALL`] variant. Pins the by-value static-
+    /// lifetime UTF-8 emit surface to the canonical-label oracle: the
+    /// [`From<DigestAlgorithm>`] impl on `&'static str` must project
+    /// through [`DigestAlgorithm::as_str`] rather than restate the
+    /// variant → label match at the emit site. The identity carries
+    /// through every variant so a downstream consumer bound by
+    /// `impl Into<&'static str>` reads the same canonical label the
+    /// [`AsRef<str>`] borrow surface, the [`std::fmt::Display`] format
+    /// surface, and the [`DigestAlgorithm::as_str`] inherent accessor
+    /// all read — one canonical-label oracle, four emission surfaces.
+    #[test]
+    fn test_digest_algorithm_from_into_static_str_agrees_with_as_str() {
+        for algo in DigestAlgorithm::ALL {
+            let via_from: &'static str = <&'static str>::from(algo);
+            let via_as_str: &'static str = algo.as_str();
+            assert_eq!(
+                via_from, via_as_str,
+                "From<DigestAlgorithm> for &'static str must project through as_str at {algo:?}",
+            );
+        }
+    }
+
+    /// A generic `impl Into<&'static str>` consumer receives the
+    /// canonical label at every [`DigestAlgorithm::ALL`] variant. Pins
+    /// the trait-generic reading of the by-value static-lifetime UTF-8
+    /// emit surface: a downstream site that takes
+    /// `fn take<T: Into<&'static str>>(t: T) -> &'static str` reads the
+    /// canonical lowercase label through the [`Into`] blanket-impl
+    /// route without a per-consumer `.as_str()` bridge. The `'static`
+    /// lifetime is preserved through the generic consumer because the
+    /// [`From`] impl returns `&'static str` and the [`Into`] blanket
+    /// preserves the associated type — a caller that stashes the
+    /// returned slice into a `&'static str` slot has no receiver-
+    /// borrow lifetime bound to satisfy.
+    #[test]
+    fn test_digest_algorithm_into_static_str_carries_through_generic_consumer() {
+        fn take<T: Into<&'static str>>(t: T) -> &'static str {
+            t.into()
+        }
+        for algo in DigestAlgorithm::ALL {
+            let via_generic: &'static str = take(algo);
+            assert_eq!(
+                via_generic,
+                algo.as_str(),
+                "Into<&'static str> generic consumer must carry the canonical label at {algo:?}",
+            );
+        }
+    }
+
+    /// Feeding the emitted `&'static str` back through
+    /// [`DigestAlgorithm::parse`] recovers the original variant at
+    /// every [`DigestAlgorithm::ALL`] variant. Pins the round-trip
+    /// discipline against the canonical-label inverse oracle: the
+    /// [`From<DigestAlgorithm>`] emit surface and the
+    /// [`DigestAlgorithm::parse`] parse surface agree on the same
+    /// canonical grammar by construction, so a downstream consumer
+    /// that stashes the emitted `&'static str` and later re-parses it
+    /// recovers the original variant without drift. This is the emit-
+    /// surface analogue of the [`FromStr`] round-trip pinned at
+    /// [`test_digest_algorithm_from_str_round_trips_every_variant`].
+    #[test]
+    fn test_digest_algorithm_into_static_str_round_trips_through_parse() {
+        for algo in DigestAlgorithm::ALL {
+            let emitted: &'static str = <&'static str>::from(algo);
+            let recovered = DigestAlgorithm::parse(emitted).unwrap_or_else(|| {
+                panic!(
+                    "emitted &'static str {emitted:?} for {algo:?} must parse back through DigestAlgorithm::parse",
+                )
+            });
+            assert_eq!(
+                recovered, algo,
+                "round-trip through parse must recover {algo:?} from emitted {emitted:?}",
             );
         }
     }
