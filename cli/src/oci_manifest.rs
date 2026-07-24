@@ -1607,6 +1607,105 @@ impl TryFrom<std::rc::Rc<[u8]>> for DigestAlgorithm {
     }
 }
 
+/// [`TryFrom<Cow<'_, [u8]>>`] for [`DigestAlgorithm`] dispatches on the
+/// [`Cow`] arm and routes each branch through the matching by-shape
+/// byte-slice parse peer: [`Cow::Borrowed`] flows into the borrowed-byte
+/// oracle [`TryFrom<&[u8]> for DigestAlgorithm`] (commit a403501) and
+/// [`Cow::Owned`] flows into the owned-byte oracle
+/// [`TryFrom<Vec<u8>> for DigestAlgorithm`] (commit 0689fde) — so a
+/// downstream consumer holding a borrowed-or-owned byte payload at a
+/// [`Cow<'_, [u8]>`] frontier (a `serde_bytes` container that opts into
+/// `#[serde(try_from = "Cow<'_, [u8]>")]` on a byte-frontier field, a
+/// codec sink that yields either a zero-copy borrowed sub-slice into a
+/// larger buffer or an owned [`Vec<u8>`] depending on framing, a generic
+/// try-conversion helper that defers the ownership decision on the
+/// caller-supplied byte payload to the caller) recovers a
+/// [`DigestAlgorithm`] variant from its canonical lowercase-ASCII byte
+/// serialization through the same one-oracle grammar the direct
+/// `.parse::<DigestAlgorithm>()` string call sites and the sibling
+/// by-shape byte-frontier peers already read — WITHOUT the by-reference
+/// bridge (`DigestAlgorithm::try_from(cow.as_ref())`) that leaks the
+/// owned [`Cow::Owned`] allocation past the parse gate for the delegated
+/// oracle to ignore.
+///
+/// Zero-copy on the borrowed arm: the [`Cow::Borrowed`] payload routes
+/// through [`TryFrom<&[u8]>`] with no intermediate allocation.
+/// Move-through on the owned arm: the [`Cow::Owned`] payload is consumed
+/// and its [`Vec<u8>`] backing flowed into [`TryFrom<Vec<u8>>`] whose
+/// [`String::from_utf8`] happy path reuses the same allocation as the
+/// intermediate [`String`] backing storage — one allocation, consumed at
+/// intake, carried through the byte-frontier UTF-8 gate and the string
+/// oracle, landed on the [`Copy`]-returned typed variant.
+///
+/// The borrowed-or-owned-byte-slice parse peer of [`TryFrom<&[u8]>`] and
+/// [`TryFrom<Vec<u8>>`] — the parse surface at the digest-algorithm axis
+/// now closes the borrowed-or-owned byte-slice frontier alongside the
+/// borrowed-or-owned UTF-8 frontier [`TryFrom<Cow<'_, str>>`] (commit
+/// 66533a6) so a downstream site that receives its input at a
+/// [`Cow<'_, [u8]>`] frontier routes through the same
+/// [`DigestAlgorithm::parse`] oracle without a per-consumer
+/// match-and-dispatch across the two [`Cow`] arms. Structural mirror of
+/// [`TryFrom<Cow<'_, [u8]>> for ContentDigest`] (commit cc9fcb3) at the
+/// parallel canonical-string typed primitive on the same module — the
+/// same lift at the borrowed-or-owned-byte-slice frontier of the
+/// reference-grammar family, delegating through the underlying label
+/// sum's by-shape byte-slice parse peers.
+///
+/// The error type is [`anyhow::Error`] — the exact shape the [`FromStr`]
+/// impl and every sibling by-reference and by-value parse peer carry.
+/// Rejection modes on both arms track the underlying per-shape peer
+/// byte-for-byte: a UTF-8-invalid byte payload surfaces an
+/// [`anyhow::Error`] naming the offending bytes' lossy-decoded
+/// rendering; a UTF-8-valid but non-canonical label (uppercase,
+/// hyphenated, unknown, empty, edge-whitespace) surfaces the same
+/// [`anyhow::Error`] the underlying [`FromStr`] impl emits — no per-arm
+/// rejection-message drift across the borrowed-or-owned byte receiver
+/// frontier.
+///
+/// The identity
+/// `DigestAlgorithm::try_from(Cow::Borrowed(algo.as_str().as_bytes()))
+/// .unwrap() == algo` on the borrowed arm and
+/// `DigestAlgorithm::try_from(Cow::Owned(algo.as_str().as_bytes()
+/// .to_vec())).unwrap() == algo` on the owned arm at every
+/// [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_try_from_cow_bytes_agrees_with_from_str`];
+/// the identity carried through a generic
+/// `impl for<'a> TryFrom<Cow<'a, [u8]>>` consumer at every variant is
+/// pinned by
+/// [`tests::test_digest_algorithm_try_from_cow_bytes_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical UTF-8-valid input on
+/// both arms is pinned by
+/// [`tests::test_digest_algorithm_try_from_cow_bytes_rejects_non_canonical_input`];
+/// the UTF-8-invalid rejection contract on both arms is pinned by
+/// [`tests::test_digest_algorithm_try_from_cow_bytes_rejects_invalid_utf8`].
+///
+/// THEORY.md §III.1 typescape: the by-value borrowed-or-owned-frontier
+/// byte-slice try-conversion surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one [`TryFrom<Cow<'_, [u8]>>`] impl
+/// dispatching to the two by-shape peers), not a per-consumer
+/// `match cow { Cow::Borrowed(s) => s.try_into(), Cow::Owned(v) =>
+/// v.try_into() }` bridge at every downstream site that owns a
+/// borrowed-or-owned byte payload. THEORY.md §VI.1 generation over
+/// composition: the canonical-label grammar is named at one site
+/// ([`DigestAlgorithm::as_str`]), inverted at one site
+/// ([`DigestAlgorithm::parse`]), and every parse surface —
+/// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`],
+/// this [`TryFrom<Cow<'_, [u8]>>`], the [`ContentDigest::parse`]
+/// grammar oracle's algorithm arm — reads through it.
+impl TryFrom<std::borrow::Cow<'_, [u8]>> for DigestAlgorithm {
+    type Error = anyhow::Error;
+
+    fn try_from(bytes: std::borrow::Cow<'_, [u8]>) -> Result<Self, Self::Error> {
+        match bytes {
+            std::borrow::Cow::Borrowed(slice) => <Self as TryFrom<&[u8]>>::try_from(slice),
+            std::borrow::Cow::Owned(owned) => <Self as TryFrom<Vec<u8>>>::try_from(owned),
+        }
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8914,6 +9013,224 @@ mod tests {
             assert_eq!(
                 via_rc, via_slice,
                 "TryFrom<Rc<[u8]>> and TryFrom<&[u8]> must agree on rejection at {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>> for DigestAlgorithm`] agrees with
+    /// [`std::str::FromStr`] on every [`DigestAlgorithm::ALL`] variant on
+    /// BOTH the [`Cow::Borrowed`] and [`Cow::Owned`] arms when the byte
+    /// payload is the canonical lowercase label's UTF-8 bytes. Pins the
+    /// borrowed-or-owned-byte-slice parse peer against the shared
+    /// canonical-label oracle and against the by-shape byte-slice peers
+    /// it delegates to ([`TryFrom<&[u8]>`] on the borrowed arm,
+    /// [`TryFrom<Vec<u8>>`] on the owned arm) — a regression that drifted
+    /// the [`Cow<'_, [u8]>`] arm dispatch (routing both arms through the
+    /// borrowed peer and losing the owned-arm move-through, cloning the
+    /// [`Cow::Owned`] payload into a fresh [`Vec`] and re-parsing through
+    /// a case-folded branch, admitting an empty label on the
+    /// [`Cow::Borrowed`] arm through a short-circuit) fails here rather
+    /// than at every downstream `TryFrom<Cow<'_, [u8]>>` call site.
+    #[test]
+    fn test_digest_algorithm_try_from_cow_bytes_agrees_with_from_str() {
+        use std::borrow::Cow;
+        for algo in DigestAlgorithm::ALL {
+            let label = algo.as_str();
+
+            let via_borrowed = <DigestAlgorithm as std::convert::TryFrom<Cow<'_, [u8]>>>::try_from(
+                Cow::Borrowed(label.as_bytes()),
+            )
+            .expect("canonical label bytes must parse through TryFrom<Cow::Borrowed>");
+            assert_eq!(
+                via_borrowed, algo,
+                "TryFrom<Cow::Borrowed<[u8]>> must round-trip through as_str at {algo:?}",
+            );
+
+            let via_owned = <DigestAlgorithm as std::convert::TryFrom<Cow<'_, [u8]>>>::try_from(
+                Cow::Owned(label.as_bytes().to_vec()),
+            )
+            .expect("canonical label owned bytes must parse through TryFrom<Cow::Owned>");
+            assert_eq!(
+                via_owned, algo,
+                "TryFrom<Cow::Owned<[u8]>> must round-trip through as_str at {algo:?}",
+            );
+
+            let via_from_str = label
+                .parse::<DigestAlgorithm>()
+                .expect("canonical label must parse through FromStr");
+            assert_eq!(
+                via_borrowed, via_from_str,
+                "TryFrom<Cow::Borrowed<[u8]>> and FromStr must agree at {algo:?}",
+            );
+            assert_eq!(
+                via_owned, via_from_str,
+                "TryFrom<Cow::Owned<[u8]>> and FromStr must agree at {algo:?}",
+            );
+
+            let via_slice =
+                <DigestAlgorithm as std::convert::TryFrom<&[u8]>>::try_from(label.as_bytes())
+                    .expect("canonical label bytes must parse through TryFrom<&[u8]>");
+            assert_eq!(
+                via_borrowed, via_slice,
+                "TryFrom<Cow::Borrowed<[u8]>> and TryFrom<&[u8]> must agree at {algo:?}",
+            );
+
+            let via_vec = <DigestAlgorithm as std::convert::TryFrom<Vec<u8>>>::try_from(
+                label.as_bytes().to_vec(),
+            )
+            .expect("canonical label owned bytes must parse through TryFrom<Vec<u8>>");
+            assert_eq!(
+                via_owned, via_vec,
+                "TryFrom<Cow::Owned<[u8]>> and TryFrom<Vec<u8>> must agree at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Cow<'_, [u8]>> for DigestAlgorithm`] identity carries
+    /// through a generic `impl for<'a> TryFrom<Cow<'a, [u8]>>` consumer at
+    /// every [`DigestAlgorithm::ALL`] variant on BOTH [`Cow`] arms. A tiny
+    /// generic function
+    /// `fn parse<'a, T>(bytes: Cow<'a, [u8]>) -> T
+    /// where T: TryFrom<Cow<'a, [u8]>>, T::Error: Debug` — the shape of
+    /// an actual downstream consumer (borrowed-or-owned byte pipeline
+    /// that consumes [`Cow<'_, [u8]>`] to defer the ownership decision to
+    /// its caller, serde `try_from = "Cow<'_, [u8]>"` wrapper on a
+    /// `serde_bytes` field, generic try-conversion helper that opts into
+    /// the borrowed-or-owned byte frontier at the receiver-shape layer)
+    /// — recovers the canonical variant from the canonical lowercase
+    /// label's UTF-8 bytes on both arms at every variant. The structural
+    /// witness that a [`DigestAlgorithm`] is genuinely usable at
+    /// `impl for<'a> TryFrom<Cow<'a, [u8]>>` call sites — a regression
+    /// that drifted the [`TryFrom<Cow<'_, [u8]>>`] impl signature (e.g.,
+    /// binding the [`Cow`] lifetime to `'static` and rejecting borrowed
+    /// non-static payloads, returning a different variant than the
+    /// by-shape peers would) fails here at compile time or at the
+    /// assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_digest_algorithm_try_from_cow_bytes_carries_through_generic_consumer() {
+        use std::borrow::Cow;
+        fn parse<'a, T>(bytes: Cow<'a, [u8]>) -> T
+        where
+            T: std::convert::TryFrom<Cow<'a, [u8]>>,
+            <T as std::convert::TryFrom<Cow<'a, [u8]>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<Cow<'a, [u8]>>>::try_from(bytes)
+                .expect("canonical label bytes must parse through generic TryFrom<Cow<'_, [u8]>>")
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(
+                parse::<DigestAlgorithm>(Cow::Borrowed(algo.as_str().as_bytes())),
+                algo,
+                "generic TryFrom<Cow::Borrowed<[u8]>> consumer must recover canonical variant at {algo:?}",
+            );
+            assert_eq!(
+                parse::<DigestAlgorithm>(Cow::Owned(algo.as_str().as_bytes().to_vec())),
+                algo,
+                "generic TryFrom<Cow::Owned<[u8]>> consumer must recover canonical variant at {algo:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>> for DigestAlgorithm`] rejects UTF-8-valid
+    /// but non-canonical input with the same strictness the sibling
+    /// [`std::str::FromStr`], [`TryFrom<&[u8]>`], and [`TryFrom<Vec<u8>>`]
+    /// peers enforce on BOTH the [`Cow::Borrowed`] and [`Cow::Owned`]
+    /// arms — empty input, uppercase, hyphenated, unknown labels, and
+    /// edge-whitespace variants all reject. Pins the strict-rejection
+    /// contract at the borrowed-or-owned-byte frontier try-conversion
+    /// surface so a downstream consumer bound by
+    /// [`TryFrom<Cow<'_, [u8]>>`] (a serde `try_from = "Cow<'_, [u8]>"`
+    /// container on a `serde_bytes` field, a codec sink that yields
+    /// either a zero-copy borrowed sub-slice or an owned [`Vec<u8>`])
+    /// inherits the same canonical-only grammar the direct
+    /// `.parse::<DigestAlgorithm>()` call sites already read. Also pins
+    /// the delegate-through-by-shape-peer discipline: rejection on the
+    /// [`Cow::Borrowed`] arm tracks [`TryFrom<&[u8]>`] rejection
+    /// byte-for-byte and rejection on the [`Cow::Owned`] arm tracks
+    /// [`TryFrom<Vec<u8>>`] rejection byte-for-byte, so a future
+    /// permissive-parse regression at the underlying [`FromStr`] impl
+    /// lights up here rather than drifting silently through the
+    /// borrowed-or-owned-byte-slice frontier surface.
+    #[test]
+    fn test_digest_algorithm_try_from_cow_bytes_rejects_non_canonical_input() {
+        use std::borrow::Cow;
+        for bad in ["SHA256", "sha-256", "md5", "", "sha256 ", " sha256"] {
+            let via_borrowed = <DigestAlgorithm as std::convert::TryFrom<Cow<'_, [u8]>>>::try_from(
+                Cow::Borrowed(bad.as_bytes()),
+            )
+            .ok();
+            let via_owned = <DigestAlgorithm as std::convert::TryFrom<Cow<'_, [u8]>>>::try_from(
+                Cow::Owned(bad.as_bytes().to_vec()),
+            )
+            .ok();
+            let via_slice =
+                <DigestAlgorithm as std::convert::TryFrom<&[u8]>>::try_from(bad.as_bytes()).ok();
+            let via_vec = <DigestAlgorithm as std::convert::TryFrom<Vec<u8>>>::try_from(
+                bad.as_bytes().to_vec(),
+            )
+            .ok();
+            assert!(
+                via_borrowed.is_none(),
+                "TryFrom<Cow::Borrowed<[u8]>> must reject non-canonical UTF-8-valid input {bad:?}",
+            );
+            assert!(
+                via_owned.is_none(),
+                "TryFrom<Cow::Owned<[u8]>> must reject non-canonical UTF-8-valid input {bad:?}",
+            );
+            assert_eq!(
+                via_borrowed, via_slice,
+                "TryFrom<Cow::Borrowed<[u8]>> and TryFrom<&[u8]> must agree on rejection at {bad:?}",
+            );
+            assert_eq!(
+                via_owned, via_vec,
+                "TryFrom<Cow::Owned<[u8]>> and TryFrom<Vec<u8>> must agree on rejection at {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>> for DigestAlgorithm`] rejects UTF-8-invalid
+    /// byte payloads on BOTH the [`Cow::Borrowed`] and [`Cow::Owned`]
+    /// arms — a stray non-UTF-8 sequence, a partial-write byte tail that
+    /// clips a UTF-8 continuation — before the input reaches the string
+    /// oracle. Pins the two-stage validation contract inherited from the
+    /// by-shape byte peers on both arms: UTF-8 validation runs first,
+    /// then the canonical-label grammar. The rejection message names the
+    /// failure mode so a downstream consumer pinning a per-shape handling
+    /// policy at its frontier can distinguish UTF-8-invalid input from
+    /// non-canonical labels off the returned error string.
+    #[test]
+    fn test_digest_algorithm_try_from_cow_bytes_rejects_invalid_utf8() {
+        use std::borrow::Cow;
+        for bad in [
+            &b"\xffsha256"[..],
+            &b"sha256\xff"[..],
+            &b"\xc3\x28"[..],
+            &b"\xed\xa0\x80"[..],
+        ] {
+            let via_borrowed = <DigestAlgorithm as std::convert::TryFrom<Cow<'_, [u8]>>>::try_from(
+                Cow::Borrowed(bad),
+            );
+            let via_owned = <DigestAlgorithm as std::convert::TryFrom<Cow<'_, [u8]>>>::try_from(
+                Cow::Owned(bad.to_vec()),
+            );
+            assert!(
+                via_borrowed.is_err(),
+                "TryFrom<Cow::Borrowed<[u8]>> must reject UTF-8-invalid input {bad:?}",
+            );
+            assert!(
+                via_owned.is_err(),
+                "TryFrom<Cow::Owned<[u8]>> must reject UTF-8-invalid input {bad:?}",
+            );
+            let borrowed_msg = via_borrowed.unwrap_err().to_string();
+            let owned_msg = via_owned.unwrap_err().to_string();
+            assert!(
+                borrowed_msg.contains("not valid UTF-8"),
+                "UTF-8-invalid rejection on Cow::Borrowed must name the failure mode, got {borrowed_msg:?}",
+            );
+            assert!(
+                owned_msg.contains("not valid UTF-8"),
+                "UTF-8-invalid rejection on Cow::Owned must name the failure mode, got {owned_msg:?}",
             );
         }
     }
