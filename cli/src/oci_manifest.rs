@@ -2113,6 +2113,117 @@ impl From<DigestAlgorithm> for String {
     }
 }
 
+/// [`From<DigestAlgorithm>`] for [`Vec<u8>`] routes through
+/// [`DigestAlgorithm::as_str`] composed with [`str::as_bytes`] and
+/// [`<[u8]>::to_vec`] so a downstream consumer bound by
+/// `impl Into<Vec<u8>>` — an OCI / GHCR blob-upload sink whose input is
+/// an owned [`Vec<u8>`] payload, a [`bytes::Bytes::from`] bridge that
+/// takes an owned [`Vec<u8>`] before handing the buffer to a shared-
+/// owned reader, a `reqwest::Body::from` request-body builder over an
+/// owned buffer, a SLSA / sigstore attestation-subject bytes builder
+/// that owns its payload for signing, a `hmac::Mac::update`
+/// accumulator fed a caller-owned label buffer across an async
+/// closure boundary — reads the canonical lowercase label bytes
+/// (`b"sha256"`, `b"sha512"`, `b"blake3"`) directly from a
+/// [`DigestAlgorithm`] value as an owned [`Vec<u8>`] with no per-
+/// consumer `algo.as_str().as_bytes().to_vec()` bridge, no
+/// [`String::from`]-then-[`String::into_bytes`] round trip through the
+/// UTF-8 owner shape, and no [`Vec::with_capacity`]-then-
+/// [`Vec::extend_from_slice`] hand-roll paying extra allocation slack.
+///
+/// The owned byte-slice emit peer that closes the emit-side lifetime-
+/// choice ladder [`From<DigestAlgorithm>`] for `&'static [u8]` (zero-
+/// copy `'static` borrow, line 1991) → this
+/// [`From<DigestAlgorithm>`] for [`Vec<u8>`] (single-allocation owned
+/// [`Vec<u8>`] for consumers that must own their input buffer) at the
+/// byte-slice frontier of the digest-algorithm axis. The byte-slice
+/// analogue of the UTF-8 owned-string emit peer
+/// [`From<DigestAlgorithm> for String`] directly above: where the
+/// [`String`] peer serves a receiver bound by `impl Into<String>`
+/// through `as_str().to_owned()`, this [`Vec<u8>`] peer serves a
+/// receiver bound by `impl Into<Vec<u8>>` through
+/// `as_str().as_bytes().to_vec()` — the same by-value owned-buffer
+/// emit discipline projected onto the byte-slice frontier instead of
+/// the UTF-8 frontier. Together with [`AsRef<[u8]>`] (line 381) and
+/// [`From<DigestAlgorithm> for &'static [u8]`] (line 1991) this closes
+/// the {borrowed-view, `'static`-lifetime by-value, owned-buffer by-
+/// value} byte-slice emit trio at the digest-algorithm axis against
+/// the shared [`DigestAlgorithm::as_str`] + [`str::as_bytes`]
+/// canonical-label-bytes oracle.
+///
+/// Structural mirror of [`crate::retry::PerAttemptRegion`]'s
+/// `From<PerAttemptRegion> for Vec<u8>` (retry.rs line 2787),
+/// [`crate::probe_outcome::AdmissionTier`]'s
+/// `From<AdmissionTier> for Vec<u8>` (probe_outcome.rs line 6198),
+/// and [`crate::version::BumpLevel`]'s `From<BumpLevel> for Vec<u8>`
+/// (version.rs line 6842) at the digest-algorithm ladder: the same
+/// `as_str().as_bytes().to_vec()` lift by construction, through the
+/// same one-oracle discipline, at the remaining canonical-label
+/// typed sum in forge's typed-primitive algebra. After this commit
+/// all four repo-internal canonical-label typed sums that carry
+/// [`as_str`] + [`std::fmt::Display`] + [`AsRef<str>`] +
+/// [`AsRef<[u8]>`] + [`From<T> for &'static str`] +
+/// [`From<T> for &'static [u8]`] + [`From<T> for String`]
+/// ([`DigestAlgorithm`], [`crate::retry::PerAttemptRegion`],
+/// [`crate::probe_outcome::AdmissionTier`],
+/// [`crate::version::BumpLevel`]) also carry [`From<T> for Vec<u8>`]
+/// routing through the shared canonical-label-bytes oracle — the by-
+/// value owned-buffer byte-slice emit surface at canonical-label
+/// typed sums is now a one-oracle surface across forge without
+/// exception.
+///
+/// The impl body picks [`<[u8]>::to_vec`] rather than
+/// [`String::from`]-then-[`String::into_bytes`] or
+/// [`Vec::with_capacity`]-then-[`Vec::extend_from_slice`]:
+/// [`<[u8]>::to_vec`] issues ONE allocation at exactly the byte-
+/// slice's length (no [`String`] growth-header, no
+/// [`Vec::with_capacity`] over-allocation slack), and the composed
+/// call [`DigestAlgorithm::as_str`] + [`str::as_bytes`] +
+/// [`<[u8]>::to_vec`] yields the same discipline the sibling
+/// [`From<DigestAlgorithm> for String`] peer applies at the UTF-8
+/// frontier through [`str::to_owned`] — a single exact-capacity
+/// allocation per emit.
+///
+/// A future variant insertion (a `sha384` arm the OCI distribution
+/// spec might normatively adopt, a per-attestation-frontier arm forge
+/// might land) updates the [`DigestAlgorithm::as_str`] match body
+/// alone and every consumer accepting `impl Into<Vec<u8>>` inherits
+/// the new canonical owned-buffer label bytes automatically with no
+/// downstream retyping.
+///
+/// The identity `Vec::<u8>::from(algo) == algo.as_str().as_bytes()`
+/// at every [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_from_into_owned_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carrying through a generic `impl Into<Vec<u8>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_owned_bytes_carries_through_generic_consumer`];
+/// the round-trip through [`TryFrom<Vec<u8>>`] recovering the
+/// canonical variant from the emitted [`Vec<u8>`] at every variant is
+/// pinned by
+/// [`tests::test_digest_algorithm_into_owned_bytes_round_trips_through_try_from`].
+///
+/// THEORY.md §III.1 typescape: the by-value owned-buffer byte-slice
+/// conversion surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one `From<DigestAlgorithm> for Vec<u8>`
+/// impl routing through [`DigestAlgorithm::as_str`] composed with
+/// [`str::as_bytes`] and [`<[u8]>::to_vec`]), not a per-consumer
+/// `.as_str().as_bytes().to_vec()` restatement at every downstream
+/// site that accepts `impl Into<Vec<u8>>`.
+/// THEORY.md §VI.1 generation over composition: the canonical label
+/// is named at one site ([`DigestAlgorithm::as_str`]) and every emit
+/// surface — the inherent [`as_str`] accessor, the
+/// [`std::fmt::Display`] format machinery, the [`AsRef<str>`] /
+/// [`AsRef<[u8]>`] borrowed-view peers, the
+/// [`From<DigestAlgorithm>`] for `&'static str` / `&'static [u8]` /
+/// [`String`] by-value emit peers, this
+/// [`From<DigestAlgorithm>`] for [`Vec<u8>`] by-value owned-buffer
+/// byte-slice emit peer — reads through it.
+impl From<DigestAlgorithm> for Vec<u8> {
+    fn from(algorithm: DigestAlgorithm) -> Vec<u8> {
+        algorithm.as_str().as_bytes().to_vec()
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10006,6 +10117,119 @@ mod tests {
             assert_eq!(
                 recovered, algo,
                 "round-trip through parse must recover {algo:?} from emitted {emitted:?}",
+            );
+        }
+    }
+
+    /// `Vec::<u8>::from(algo)` equals `algo.as_str().as_bytes()` at
+    /// every [`DigestAlgorithm::ALL`] variant. Pins the by-value
+    /// owned-buffer byte-slice emit surface to the canonical-label
+    /// oracle: the [`From<DigestAlgorithm>`] impl on [`Vec<u8>`] must
+    /// project through [`DigestAlgorithm::as_str`] composed with
+    /// [`str::as_bytes`] + [`<[u8]>::to_vec`] rather than restate the
+    /// variant → label-bytes match at the emit site, route through the
+    /// [`std::fmt::Display`] format machinery, or chain through
+    /// [`String::from`] + [`String::into_bytes`] (which would still
+    /// agree byte-for-byte but pays a [`String`] growth-header
+    /// round-trip cost). Together with
+    /// [`test_digest_algorithm_from_into_static_bytes_agrees_with_as_str_as_bytes`]
+    /// and [`test_digest_algorithm_from_into_string_agrees_with_as_str`]
+    /// this pins that the same canonical-label oracle drives every
+    /// by-value emit surface across BOTH the {borrowed, owned}
+    /// ownership axis AND the {UTF-8, byte-slice} representation axis
+    /// — a discriminant-byte cast, a byte-swapped label, or a
+    /// mangled encoding fails here at ONE named site instead of at
+    /// every downstream `impl Into<Vec<u8>>` consumer.
+    #[test]
+    fn test_digest_algorithm_from_into_owned_bytes_agrees_with_as_str_as_bytes() {
+        for algo in DigestAlgorithm::ALL {
+            let owned: Vec<u8> = Vec::<u8>::from(algo);
+            assert_eq!(
+                owned.as_slice(),
+                algo.as_str().as_bytes(),
+                "From<DigestAlgorithm> for Vec<u8> must project through as_str().as_bytes() at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`From<DigestAlgorithm>`] for [`Vec<u8>`] identity carries
+    /// through a generic `impl Into<Vec<u8>>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn take<T: Into<Vec<u8>>>(t: T) -> Vec<u8> { t.into() }` — the
+    /// shape of an actual downstream consumer (an OCI / GHCR
+    /// blob-upload sink whose input is an owned [`Vec<u8>`] payload,
+    /// a [`bytes::Bytes::from`] bridge that takes an owned [`Vec<u8>`]
+    /// before handing the buffer to a shared-owned reader, a
+    /// `reqwest::Body::from` request-body builder over an owned
+    /// buffer, a SLSA / sigstore attestation-subject bytes builder
+    /// that owns its payload for signing) — reads the canonical
+    /// lowercase label bytes directly from a [`DigestAlgorithm`] value
+    /// as an owned [`Vec<u8>`]. The structural witness that a
+    /// [`DigestAlgorithm`] is genuinely usable at `impl Into<Vec<u8>>`
+    /// call sites — a regression that drifted the [`From`] impl
+    /// signature (returning `&'static [u8]` instead of [`Vec<u8>`],
+    /// returning a [`std::borrow::Cow<'_, [u8]>`] wrapper instead of
+    /// the bare owned buffer, requiring `&DigestAlgorithm` and losing
+    /// the by-value semantics) fails here at compile time instead of
+    /// at every downstream generic call site. Structural mirror of
+    /// [`crate::retry`]'s
+    /// `test_per_attempt_region_into_owned_bytes_carries_through_generic_consumer`,
+    /// [`crate::probe_outcome`]'s
+    /// `test_admission_tier_into_owned_bytes_carries_through_generic_consumer`,
+    /// and [`crate::version`]'s
+    /// `test_bump_level_into_owned_bytes_carries_through_generic_consumer`
+    /// at the digest-algorithm ladder.
+    #[test]
+    fn test_digest_algorithm_into_owned_bytes_carries_through_generic_consumer() {
+        fn take<T: Into<Vec<u8>>>(t: T) -> Vec<u8> {
+            t.into()
+        }
+        for algo in DigestAlgorithm::ALL {
+            let via_generic: Vec<u8> = take(algo);
+            assert_eq!(
+                via_generic,
+                algo.as_str().as_bytes(),
+                "Into<Vec<u8>> generic consumer must carry the canonical label bytes at {algo:?}",
+            );
+        }
+    }
+
+    /// Feeding the emitted [`Vec<u8>`] back through
+    /// [`TryFrom<Vec<u8>>`] recovers the original variant at every
+    /// [`DigestAlgorithm::ALL`] variant. Ties the by-value
+    /// owned-buffer byte-slice emit surface to its byte-slice
+    /// parse-side sibling
+    /// [`TryFrom<Vec<u8>> for DigestAlgorithm`] (line 968) at the same
+    /// one-oracle discipline: a regression that drifted the emit impl
+    /// body toward non-canonical bytes (a byte-swapped label, a
+    /// mangled encoding, a numeric-discriminant byte cast) OR drifted
+    /// the parse impl body away from the shared
+    /// [`std::str::from_utf8`] + [`DigestAlgorithm::parse`]
+    /// composition fails here at ONE named site instead of leaking to
+    /// every downstream owned-byte-buffer round-trip consumer (an OCI
+    /// / GHCR annotation-value writer that reads its own emitted
+    /// label back, a SLSA / sigstore attestation-subject bytes replay
+    /// verifier, a cache-index owned-key re-parse). The
+    /// owned-[`Vec<u8>`] analogue of the [`&'static [u8]`] round-trip
+    /// pinned at
+    /// [`test_digest_algorithm_into_static_bytes_round_trips_through_from_utf8`]:
+    /// the same one-oracle grammar at the owned-buffer emit layer
+    /// instead of the borrowed static-lifetime emit layer.
+    #[test]
+    fn test_digest_algorithm_into_owned_bytes_round_trips_through_try_from() {
+        for algo in DigestAlgorithm::ALL {
+            let emitted: Vec<u8> = Vec::<u8>::from(algo);
+            let recovered = <DigestAlgorithm as std::convert::TryFrom<Vec<u8>>>::try_from(
+                emitted.clone(),
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "emitted Vec<u8> {emitted:?} for {algo:?} must parse back through TryFrom<Vec<u8>> (got {err})",
+                )
+            });
+            assert_eq!(
+                recovered, algo,
+                "round-trip through TryFrom<Vec<u8>> must recover {algo:?} from emitted {emitted:?}",
             );
         }
     }
