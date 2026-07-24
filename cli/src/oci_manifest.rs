@@ -288,10 +288,99 @@ impl std::fmt::Display for DigestAlgorithm {
 /// site that accepts `impl AsRef<str>`. THEORY.md §VI.1 one-oracle:
 /// the canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]) and every surface — `as_str`,
-/// `Display`, this `AsRef<str>` — reads through it.
+/// `Display`, this `AsRef<str>`, the byte-slice peer [`AsRef<[u8]>
+/// for DigestAlgorithm`] directly below — reads through it.
 impl AsRef<str> for DigestAlgorithm {
     fn as_ref(&self) -> &str {
         (*self).as_str()
+    }
+}
+
+/// [`AsRef<[u8]>`] for [`DigestAlgorithm`] routes through
+/// [`<DigestAlgorithm as AsRef<str>>::as_ref`] (in turn
+/// [`DigestAlgorithm::as_str`]) via [`str::as_bytes`] so a downstream
+/// consumer bound by `impl AsRef<[u8]>` (a `blake3::Hasher::update` /
+/// `sha2::Digest::update` / `crate::tameshi::Blake3Hash::digest`
+/// streaming hasher sink that folds the canonical algorithm label
+/// into an attestation-chain fingerprint alongside the digest body
+/// bytes the sibling `impl AsRef<[u8]> for ContentDigest` (line 3411)
+/// already exposes, a [`std::collections::HashSet<&[u8]>`] membership
+/// probe against a set of allowed algorithm labels keyed by their
+/// byte-slice identity, a raw-write output sink
+/// (`out.write_all(algo.as_ref())`), a `nom` / `winnow` byte-slice
+/// parser that reads the algorithm prefix as a bounded byte token, an
+/// `hmac::Mac::update` MAC accumulator that reads its input as bytes)
+/// reads the canonical lowercase label (`"sha256"`, `"sha512"`,
+/// `"blake3"`) directly from a [`DigestAlgorithm`] value as UTF-8
+/// bytes without a per-consumer `algo.as_str().as_bytes()` bridge,
+/// without a [`std::fmt::Display`] format-buffer step, and without an
+/// intermediate [`String`] / [`Vec<u8>`] allocation.
+///
+/// The byte-slice borrowed-view read peer of the UTF-8 borrowed-view
+/// read surface [`AsRef<str> for DigestAlgorithm`] directly above —
+/// both read the same underlying canonical-label slice through
+/// [`DigestAlgorithm::as_str`], one exposing it at the UTF-8 frontier
+/// (`&str`) and this one at the byte-slice frontier (`&[u8]`) that
+/// streaming hashers, MAC accumulators, and raw-write sinks pin their
+/// input contract on. Structural mirror of
+/// [`impl AsRef<[u8]> for crate::retry::PerAttemptRegion`] (commit
+/// af44439), [`impl AsRef<[u8]> for crate::probe_outcome::AdmissionTier`]
+/// (commit 13abcc4), and [`impl AsRef<[u8]> for crate::version::BumpLevel`]
+/// (`version.rs` line 1508) — the same borrowed-view lift at the
+/// byte-slice frontier the sibling canonical-label typed sums already
+/// carry, each routing through the shared canonical-label oracle —
+/// now extended to the digest-algorithm axis so every canonical-label
+/// typed sum in forge's typed-primitive algebra exposes the same
+/// trait-generic byte-slice borrowed-view surface without exception.
+///
+/// Zero-cost by construction: the returned `&[u8]` is a
+/// zero-length-check-free view of the static-lifetime label constant
+/// table's UTF-8 bytes — [`str::as_bytes`] is a zero-cost transmute
+/// at the borrow-view boundary, no allocation, no copy, no branching
+/// over the variant discriminant beyond what [`DigestAlgorithm::as_str`]
+/// itself does at its match body.
+///
+/// The identity
+/// `<DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo)
+/// == algo.as_str().as_bytes()` at every [`DigestAlgorithm::ALL`]
+/// variant is pinned by
+/// [`tests::test_digest_algorithm_as_ref_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carrying through a generic `impl AsRef<[u8]>` consumer
+/// at every variant is pinned by
+/// [`tests::test_digest_algorithm_as_ref_bytes_carries_through_generic_consumer`];
+/// the round-trip through [`std::str::from_utf8`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_digest_algorithm_as_ref_bytes_round_trips_through_from_utf8`].
+///
+/// The canonical labels this impl surfaces are pure lowercase ASCII
+/// by construction (`"sha256"`, `"sha512"`, `"blake3"` are the only
+/// canonicals [`DigestAlgorithm::as_str`] emits), so a byte-slice
+/// consumer that treats the input as ASCII (a case-insensitive
+/// comparator, an ASCII classifier, a `[u8; N]`-keyed lookup table)
+/// reads the same canonicalised form the UTF-8 surface exposes with
+/// no multibyte-boundary hazard.
+///
+/// A future variant insertion (a `sha384` arm the distribution spec
+/// might normatively adopt, a per-attestation-frontier arm forge
+/// might land) updates the [`DigestAlgorithm::as_str`] match body
+/// alone and every consumer — streaming hasher sink, HashSet-of-bytes
+/// probe, raw-write output sink, MAC accumulator — that accepts
+/// `impl AsRef<[u8]>` inherits the new canonical label automatically
+/// with no downstream retyping.
+///
+/// THEORY.md §III.1 typescape: the byte-slice borrowed-view surface
+/// is a typed-primitive site on [`DigestAlgorithm`] itself (one
+/// `AsRef<[u8]>` impl routing through [`AsRef<str>`] and
+/// [`str::as_bytes`]), not a per-consumer `algo.as_str().as_bytes()`
+/// restatement at every downstream site that accepts
+/// `impl AsRef<[u8]>`. THEORY.md §VI.1 generation over composition:
+/// the canonical label is named at one site
+/// ([`DigestAlgorithm::as_str`]) and every borrowed-view surface —
+/// [`AsRef<str>`] (yields `&str`), this [`AsRef<[u8]>`] (yields
+/// `&[u8]`) — reads through it.
+impl AsRef<[u8]> for DigestAlgorithm {
+    fn as_ref(&self) -> &[u8] {
+        <Self as AsRef<str>>::as_ref(self).as_bytes()
     }
 }
 
@@ -7441,6 +7530,107 @@ mod tests {
                 read(&algo),
                 algo.as_str(),
                 "generic AsRef<str> consumer must read canonical label at {algo:?}",
+            );
+        }
+    }
+
+    /// `<DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo)
+    /// == algo.as_str().as_bytes()` at every [`DigestAlgorithm::ALL`]
+    /// variant. Pins the composition identity that the byte-slice
+    /// borrowed-view surface reads the same static-lifetime label
+    /// bytes the [`AsRef<str>`] peer and the [`DigestAlgorithm::as_str`]
+    /// canonical-label oracle already project — a regression that
+    /// drifted the [`AsRef<[u8]>`] impl to yield anything other than
+    /// `self.as_str().as_bytes()` (a discriminant-byte cast, a
+    /// mangled-encoding trap, an owned-buffer allocation) fails here
+    /// at one named site instead of at every downstream
+    /// `impl AsRef<[u8]>` consumer. Structural mirror of
+    /// [`crate::version::tests::test_bump_level_as_ref_bytes_agrees_with_as_str_as_bytes`]
+    /// at the version-bump-magnitude ladder,
+    /// `test_admission_tier_as_ref_bytes_agrees_with_as_str_as_bytes`
+    /// (commit 13abcc4) at the admission-tier ladder, and
+    /// `test_per_attempt_region_as_ref_bytes_agrees_with_as_str_as_bytes`
+    /// (commit af44439) at the per-attempt-region ladder.
+    #[test]
+    fn test_digest_algorithm_as_ref_bytes_agrees_with_as_str_as_bytes() {
+        for algo in DigestAlgorithm::ALL {
+            let borrowed: &[u8] = algo.as_ref();
+            assert_eq!(
+                borrowed,
+                algo.as_str().as_bytes(),
+                "AsRef<[u8]> and as_str().as_bytes() must agree at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`AsRef<[u8]>`] identity carries through a generic
+    /// `impl AsRef<[u8]>` consumer at every [`DigestAlgorithm::ALL`]
+    /// variant. A tiny generic function `fn read<T: AsRef<[u8]>>(t:
+    /// &T) -> &[u8] { t.as_ref() }` — the shape of an actual downstream
+    /// consumer (a `blake3::Hasher::update` call folding the algorithm
+    /// prefix into an attestation-chain fingerprint, a
+    /// [`std::io::Write::write_all`] sink stamping the label into a
+    /// raw-write output surface, a `HashSet<&[u8]>::contains` probe
+    /// against an allow-list of canonical algorithm bytes, a memchr-
+    /// driven classifier over the canonical labels) — reads the
+    /// canonical lowercase label bytes directly from a
+    /// [`DigestAlgorithm`] value without going through the
+    /// [`std::fmt::Display`] formatter buffer or an intermediate
+    /// [`String::into_bytes`] [`Vec<u8>`] allocation. The structural
+    /// witness that a [`DigestAlgorithm`] is genuinely usable at
+    /// `impl AsRef<[u8]>` call sites — a regression that drifted the
+    /// [`AsRef<[u8]>`] impl signature (e.g., returning an owned
+    /// [`Vec<u8>`] instead of a `&[u8]`, or requiring a `&mut self`)
+    /// fails here at compile time instead of at every downstream
+    /// generic call site. Structural mirror of
+    /// [`crate::version::tests::test_bump_level_as_ref_bytes_carries_through_generic_consumer`]
+    /// at the version-bump-magnitude ladder.
+    #[test]
+    fn test_digest_algorithm_as_ref_bytes_carries_through_generic_consumer() {
+        fn read<T: AsRef<[u8]>>(t: &T) -> &[u8] {
+            t.as_ref()
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(
+                read(&algo),
+                algo.as_str().as_bytes(),
+                "generic AsRef<[u8]> consumer must read canonical label bytes at {algo:?}",
+            );
+        }
+    }
+
+    /// At every [`DigestAlgorithm`] variant enumerated by
+    /// [`DigestAlgorithm::ALL`], the borrowed byte-slice view from the
+    /// [`AsRef<[u8]>`] impl round-trips through [`std::str::from_utf8`]
+    /// back to the canonical lowercase label exactly. The load-bearing
+    /// structural pin that ties the byte frontier to the UTF-8
+    /// frontier through the standard library's UTF-8 validator,
+    /// without a per-consumer restatement of "the canonical labels are
+    /// ASCII and UTF-8-valid" at every downstream site: a regression
+    /// that drifted [`AsRef<[u8]>`] to yield non-UTF-8 bytes (a
+    /// numeric-discriminant byte cast, a byte-swapped label, a
+    /// mangled encoding) fails here at ONE named site with a
+    /// [`std::str::Utf8Error`] at the [`std::str::from_utf8`] boundary
+    /// or a label mismatch at the round-trip assertion. Together with
+    /// [`test_digest_algorithm_as_ref_bytes_agrees_with_as_str_as_bytes`]
+    /// this closes the byte-slice borrowed-view surface against both
+    /// the composition oracle (`.as_str().as_bytes()`) and the UTF-8
+    /// validity oracle ([`std::str::from_utf8`]) at every
+    /// [`DigestAlgorithm::ALL`] variant. Structural mirror of
+    /// [`crate::version::tests::test_bump_level_as_ref_bytes_round_trips_through_from_utf8`]
+    /// at the version-bump-magnitude ladder.
+    #[test]
+    fn test_digest_algorithm_as_ref_bytes_round_trips_through_from_utf8() {
+        for algo in DigestAlgorithm::ALL {
+            let borrowed: &[u8] = algo.as_ref();
+            let decoded = std::str::from_utf8(borrowed).unwrap_or_else(|err| {
+                panic!("AsRef<[u8]> bytes for {algo:?} must be valid UTF-8 (got {err})")
+            });
+            assert_eq!(
+                decoded,
+                algo.as_str(),
+                "from_utf8 round-trip must recover canonical label at {algo:?}",
             );
         }
     }
