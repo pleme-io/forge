@@ -3010,6 +3010,155 @@ impl From<DigestAlgorithm> for std::borrow::Cow<'static, str> {
     }
 }
 
+/// [`From<DigestAlgorithm>`] for [`std::borrow::Cow<'static, [u8]>`] routes
+/// through [`DigestAlgorithm::as_str`] composed with [`str::as_bytes`] into
+/// [`std::borrow::Cow::Borrowed`] so a downstream consumer bound by
+/// `impl Into<Cow<'static, [u8]>>` — a `serde_bytes`-fronted container that
+/// opts into `#[serde(from = "Cow<'static, [u8]>")]` at a borrowed-or-owned
+/// byte-frontier field, a `bytes::Bytes::copy_from_slice`-fed accumulator
+/// that pins its input contract at [`std::borrow::Cow<'static, [u8]>`] to
+/// share the borrowed arm without copying, a `blake3::Hasher::update` /
+/// `sha2::Digest::update` / [`crate::tameshi::Blake3Hash::digest`]
+/// streaming hasher sink that folds the canonical algorithm label into an
+/// attestation-chain fingerprint through
+/// `impl Into<Cow<'static, [u8]>>`, a `nom` / `winnow` byte-slice parser
+/// whose static-lifetime input contract is
+/// [`std::borrow::Cow<'static, [u8]>`], a config-loader field whose
+/// byte-slice value may be injected as a compile-time literal (borrowed)
+/// or read from disk (owned) and typed as
+/// [`std::borrow::Cow<'static, [u8]>`] — reads the canonical lowercase
+/// label bytes (`b"sha256"`, `b"sha512"`, `b"blake3"`) directly from a
+/// [`DigestAlgorithm`] value as a [`std::borrow::Cow::Borrowed`] carrying
+/// the same `&'static [u8]` the
+/// [`DigestAlgorithm::as_str`]-composed-with-[`str::as_bytes`] projection
+/// returns, with no per-consumer `Cow::Borrowed(algo.as_str().as_bytes())`
+/// bridge, and no `algo.as_str().as_bytes().to_owned()`-then-
+/// `Cow::Owned` hand-roll paying a redundant [`Vec<u8>`] allocation the
+/// borrowed arm can serve out of the static rodata segment for free.
+///
+/// The borrowed/owned-frontier byte-slice emit peer of the {borrowed
+/// static [`&'static [u8]`] emit peer
+/// [`From<DigestAlgorithm> for &'static [u8]`] (line 1991), owned
+/// [`Vec<u8>`] emit peer [`From<DigestAlgorithm> for Vec<u8>`]
+/// (line 2221), shrunk-owned [`Box<[u8]>`] emit peer
+/// [`From<DigestAlgorithm> for Box<[u8]>`] (line 2440), cross-thread
+/// shared-owned [`std::sync::Arc<[u8]>`] emit peer
+/// [`From<DigestAlgorithm> for std::sync::Arc<[u8]>`] (line 2684),
+/// thread-local shared-owned [`std::rc::Rc<[u8]>`] emit peer
+/// [`From<DigestAlgorithm> for std::rc::Rc<[u8]>`] (line 2891)} byte-slice
+/// emit-peer set: this [`std::borrow::Cow<'static, [u8]>`] emit peer is
+/// the only byte-slice emit surface that pays zero allocations at the
+/// emit call — every other byte-slice emit peer copies the canonical
+/// label bytes into a freshly-allocated owned buffer (heap,
+/// refcount-headered, or shrunk-owned), while this peer projects the
+/// `&'static [u8]` returned by
+/// [`DigestAlgorithm::as_str`]-composed-with-[`str::as_bytes`] straight
+/// into the borrowed arm of [`std::borrow::Cow`] and hands it out of the
+/// static rodata segment at no runtime cost. Downstream consumers that
+/// thread a [`std::borrow::Cow<'static, [u8]>`] and only allocate when
+/// they mutate — the `Cow` sharing-and-CoW discipline lifted onto the
+/// byte-slice axis — inherit the zero-alloc emit path all the way from
+/// the [`DigestAlgorithm`] primitive through to the first mutation site
+/// (if any).
+///
+/// The byte-slice-frontier symmetric peer of the by-value borrowed-or-
+/// owned UTF-8 emit peer
+/// [`From<DigestAlgorithm> for std::borrow::Cow<'static, str>`] directly
+/// above (line 3007): the UTF-8 peer serves receivers whose byte-slice
+/// discipline is `Cow<'static, str>` (serde `#[serde(from = "Cow<'static,
+/// str>")]` label frontiers, `tracing::Span` UTF-8 attribute slots,
+/// `clap` default-value slots typed as `Cow<'static, str>`), while this
+/// byte-slice peer serves receivers whose discipline is
+/// `Cow<'static, [u8]>` (serde `#[serde(from = "Cow<'static, [u8]>")]`
+/// byte-frontier fields, `bytes::Bytes`-fronted zero-copy accumulators,
+/// streaming hasher / MAC sinks that read `Cow<'static, [u8]>` inputs).
+/// Together the two peers close the {UTF-8, byte-slice} half of the
+/// borrowed-or-owned emit frontier at the [`DigestAlgorithm`] primitive
+/// through the same one-oracle canonical-label site — the
+/// [`std::borrow::Cow<'static, str>`] peer routing
+/// [`DigestAlgorithm::as_str`] straight into
+/// [`std::borrow::Cow::Borrowed`], this peer composing
+/// [`DigestAlgorithm::as_str`] with [`str::as_bytes`] before
+/// [`std::borrow::Cow::Borrowed`].
+///
+/// The emit-side sibling of the borrowed-or-owned byte-slice frontier
+/// parse peer [`TryFrom<Cow<'_, [u8]>> for DigestAlgorithm`] (line 1787):
+/// where the parse peer routes an inbound borrowed-or-owned byte-slice
+/// label through [`std::borrow::Cow::as_ref`] into the shared
+/// UTF-8-then-[`std::str::FromStr`] grammar oracle (accepting both
+/// [`std::borrow::Cow::Borrowed`] and [`std::borrow::Cow::Owned`] arms at
+/// one type-level surface), this emit peer routes an outbound
+/// [`DigestAlgorithm`] variant through
+/// [`DigestAlgorithm::as_str`]-composed-with-[`str::as_bytes`] into a
+/// [`std::borrow::Cow::Borrowed`]-carrying
+/// [`std::borrow::Cow<'static, [u8]>`] — the same one-oracle discipline
+/// projected onto the emit direction, closing the {parse, emit} pair at
+/// the borrowed-or-owned byte-slice frontier.
+///
+/// The impl body picks [`std::borrow::Cow::Borrowed`] applied directly to
+/// the `&'static [u8]` returned by
+/// [`DigestAlgorithm::as_str`]-composed-with-[`str::as_bytes`] over
+/// [`std::borrow::Cow::Owned`] carrying a [`Vec<u8>`]: both variants
+/// project the same canonical label bytes, but the
+/// [`std::borrow::Cow::Borrowed`] arm serves them out of the static
+/// rodata segment at zero allocations while the
+/// [`std::borrow::Cow::Owned`] arm would pay a redundant [`Vec<u8>`]
+/// allocation the borrowed arm renders unnecessary. Downstream
+/// consumers that only need to read the byte-slice label — the vast
+/// majority of [`std::borrow::Cow<'static, [u8]>`] use sites — inherit
+/// the zero-alloc path; consumers that must mutate get a lazy
+/// [`std::borrow::Cow::to_mut`] copy at the mutation site, not at the
+/// emit site.
+///
+/// A future variant insertion (a `sha384` arm the OCI distribution spec
+/// might normatively adopt, a per-attestation-frontier arm forge might
+/// land) updates the [`DigestAlgorithm::as_str`] match body alone and
+/// every consumer accepting `impl Into<Cow<'static, [u8]>>` inherits the
+/// new canonical borrowed-or-owned byte-slice label automatically with
+/// no downstream retyping.
+///
+/// The identity `Cow::<'static, [u8]>::from(algo) ==
+/// Cow::Borrowed(algo.as_str().as_bytes())` at every
+/// [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_from_into_cow_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carrying through a generic
+/// `impl Into<Cow<'static, [u8]>>` consumer at every variant is pinned
+/// by
+/// [`tests::test_digest_algorithm_into_cow_bytes_carries_through_generic_consumer`];
+/// the zero-alloc [`std::borrow::Cow::Borrowed`] discriminant at every
+/// variant is pinned by
+/// [`tests::test_digest_algorithm_into_cow_bytes_is_borrowed_zero_alloc`];
+/// the round-trip through the sibling parse peer
+/// [`TryFrom<Cow<'_, [u8]>>`] recovering the canonical variant from the
+/// emitted [`std::borrow::Cow<'static, [u8]>`] at every variant is
+/// pinned by
+/// [`tests::test_digest_algorithm_into_cow_bytes_round_trips_through_try_from`].
+///
+/// THEORY.md §III.1 typescape: the by-value borrowed-or-owned frontier
+/// byte-slice emit surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one
+/// `From<DigestAlgorithm> for Cow<'static, [u8]>` impl routing through
+/// [`DigestAlgorithm::as_str`]-composed-with-[`str::as_bytes`] into
+/// [`std::borrow::Cow::Borrowed`]), not a per-consumer
+/// `Cow::Borrowed(algo.as_str().as_bytes())` restatement at every
+/// downstream site that accepts `impl Into<Cow<'static, [u8]>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// ([`DigestAlgorithm::as_str`]) and every emit surface — the inherent
+/// [`as_str`] accessor, the [`std::fmt::Display`] format machinery, the
+/// [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view peers, the
+/// [`From<DigestAlgorithm>`] for `&'static str` / `&'static [u8]` /
+/// [`String`] / [`Vec<u8>`] / [`Box<str>`] / [`Box<[u8]>`] /
+/// [`std::sync::Arc<str>`] / [`std::sync::Arc<[u8]>`] /
+/// [`std::rc::Rc<str>`] / [`std::rc::Rc<[u8]>`] /
+/// [`std::borrow::Cow<'static, str>`] by-value emit peers, this
+/// [`From<DigestAlgorithm>`] for [`std::borrow::Cow<'static, [u8]>`]
+/// by-value borrowed-or-owned byte-slice emit peer — reads through it.
+impl From<DigestAlgorithm> for std::borrow::Cow<'static, [u8]> {
+    fn from(algorithm: DigestAlgorithm) -> std::borrow::Cow<'static, [u8]> {
+        std::borrow::Cow::Borrowed(algorithm.as_str().as_bytes())
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11934,6 +12083,170 @@ mod tests {
             assert_eq!(
                 recovered, algo,
                 "round-trip through TryFrom<Cow<'_, str>> must recover {algo:?} from emitted {emitted:?}",
+            );
+        }
+    }
+
+    /// The [`From<DigestAlgorithm>`] for [`std::borrow::Cow<'static, [u8]>`]
+    /// emit body agrees byte-for-byte with the composition
+    /// [`DigestAlgorithm::as_str`] `→` [`str::as_bytes`] at every
+    /// [`DigestAlgorithm::ALL`] variant. Pins the emit body to the shared
+    /// canonical-label oracle so a subsequent variant insertion or arm
+    /// rewording that drifted the emit body away from
+    /// [`std::borrow::Cow::Borrowed`] applied to
+    /// [`DigestAlgorithm::as_str`]-composed-with-[`str::as_bytes`] — a
+    /// route through the [`std::fmt::Display`] format machinery into a
+    /// [`String`]-into-[`Vec<u8>`]-into-[`std::borrow::Cow::Owned`] chain
+    /// that would still agree byte-for-byte but pay a redundant
+    /// [`Vec<u8>`] allocation the borrowed arm can serve out of the static
+    /// rodata segment for free, a `[u8]::to_vec`-then-`Cow::Owned`
+    /// hand-roll that pays the same redundant allocation — fails here at
+    /// ONE named site instead of at every downstream
+    /// `impl Into<Cow<'static, [u8]>>` consumer (a `serde_bytes` container
+    /// that opts into `#[serde(from = "Cow<'static, [u8]>")]`, a
+    /// `bytes::Bytes`-fronted zero-copy accumulator, a streaming hasher /
+    /// MAC sink that reads `Cow<'static, [u8]>` inputs).
+    #[test]
+    fn test_digest_algorithm_from_into_cow_bytes_agrees_with_as_str_as_bytes() {
+        for algo in DigestAlgorithm::ALL {
+            let cow: std::borrow::Cow<'static, [u8]> =
+                std::borrow::Cow::<'static, [u8]>::from(algo);
+            assert_eq!(
+                cow.as_ref(),
+                algo.as_str().as_bytes(),
+                "From<DigestAlgorithm> for Cow<'static, [u8]> must project through as_str().as_bytes() at {algo:?}",
+            );
+            assert_eq!(
+                &*cow,
+                algo.as_str().as_bytes(),
+                "Cow<'static, [u8]> deref must equal as_str().as_bytes() at {algo:?}",
+            );
+            assert_eq!(
+                cow.len(),
+                algo.as_str().len(),
+                "Cow<'static, [u8]> length must equal the canonical label length at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`From<DigestAlgorithm>`] for [`std::borrow::Cow<'static, [u8]>`]
+    /// identity carries through a generic
+    /// `impl Into<Cow<'static, [u8]>>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn take<T: Into<Cow<'static, [u8]>>>(t: T) -> Cow<'static, [u8]> { t.into() }`
+    /// — the shape of an actual downstream consumer (a `serde_bytes`
+    /// container that opts into `#[serde(from = "Cow<'static, [u8]>")]`,
+    /// a `bytes::Bytes`-fronted zero-copy accumulator that pins its input
+    /// contract at [`std::borrow::Cow<'static, [u8]>`], a streaming hasher
+    /// / MAC sink that folds a `Cow<'static, [u8]>` into an attestation
+    /// fingerprint, a `nom` / `winnow` byte-slice parser whose
+    /// static-lifetime input contract is
+    /// [`std::borrow::Cow<'static, [u8]>`], a config-loader field whose
+    /// byte-slice value may be injected as a compile-time literal or read
+    /// from disk and typed as [`std::borrow::Cow<'static, [u8]>`]) —
+    /// reads the canonical lowercase label bytes directly from a
+    /// [`DigestAlgorithm`] value as a [`std::borrow::Cow<'static, [u8]>`].
+    /// The structural witness that a [`DigestAlgorithm`] is genuinely
+    /// usable at `impl Into<Cow<'static, [u8]>>` call sites — a regression
+    /// that drifted the [`From`] impl signature (returning
+    /// [`std::borrow::Cow<'_, [u8]>`] with a non-`'static` lifetime,
+    /// returning [`std::borrow::Cow<'static, str>`] with a UTF-8 payload,
+    /// requiring `&DigestAlgorithm` and losing the by-value semantics) —
+    /// fails here at compile time instead of at every downstream generic
+    /// call site.
+    #[test]
+    fn test_digest_algorithm_into_cow_bytes_carries_through_generic_consumer() {
+        fn take<T: Into<std::borrow::Cow<'static, [u8]>>>(t: T) -> std::borrow::Cow<'static, [u8]> {
+            t.into()
+        }
+        for algo in DigestAlgorithm::ALL {
+            let via_generic: std::borrow::Cow<'static, [u8]> = take(algo);
+            assert_eq!(
+                &*via_generic,
+                algo.as_str().as_bytes(),
+                "Into<Cow<'static, [u8]>> generic consumer must carry the canonical label bytes at {algo:?}",
+            );
+        }
+    }
+
+    /// The emitted [`std::borrow::Cow<'static, [u8]>`] is the
+    /// [`std::borrow::Cow::Borrowed`] discriminant at every
+    /// [`DigestAlgorithm::ALL`] variant, so the emit path pays zero
+    /// allocations and hands the canonical label bytes out of the static
+    /// rodata segment. Pins the zero-alloc discipline that distinguishes
+    /// this emit peer from every other byte-slice emit peer in the sibling
+    /// set — [`Vec<u8>`], [`Box<[u8]>`], [`std::sync::Arc<[u8]>`],
+    /// [`std::rc::Rc<[u8]>`] all copy the label bytes into a fresh owned
+    /// buffer; this peer projects `&'static [u8]` straight into the
+    /// borrowed arm. A regression that drifted the impl body toward
+    /// [`std::borrow::Cow::Owned`] carrying a [`Vec<u8>`] — a
+    /// `[u8]::to_vec`-then-`Cow::Owned` hand-roll, a
+    /// `Vec::from(algo.as_str().as_bytes())` composed with `Cow::Owned` —
+    /// fails here at ONE named site instead of silently regressing every
+    /// downstream `Cow<'static, [u8]>` consumer's expected zero-alloc emit
+    /// path. Also witnesses that the borrowed pointer is bit-for-bit the
+    /// same `&'static [u8]` [`DigestAlgorithm::as_str`]-composed-with-
+    /// [`str::as_bytes`] returns, so a subsequent
+    /// [`std::borrow::Cow::to_mut`]-driven copy-on-write mutation is
+    /// deferred to the mutation site (not paid at the emit site) at every
+    /// variant.
+    #[test]
+    fn test_digest_algorithm_into_cow_bytes_is_borrowed_zero_alloc() {
+        for algo in DigestAlgorithm::ALL {
+            let cow: std::borrow::Cow<'static, [u8]> =
+                std::borrow::Cow::<'static, [u8]>::from(algo);
+            assert!(
+                matches!(cow, std::borrow::Cow::Borrowed(_)),
+                "From<DigestAlgorithm> for Cow<'static, [u8]> must emit Cow::Borrowed (zero-alloc) at {algo:?}, got Cow::Owned",
+            );
+            if let std::borrow::Cow::Borrowed(borrowed) = cow {
+                assert!(
+                    std::ptr::eq(borrowed.as_ptr(), algo.as_str().as_bytes().as_ptr()),
+                    "Cow::Borrowed must carry the same &'static [u8] pointer as as_str().as_bytes() at {algo:?}",
+                );
+                assert_eq!(
+                    borrowed.len(),
+                    algo.as_str().len(),
+                    "Cow::Borrowed length must equal the canonical label length at {algo:?}",
+                );
+            }
+        }
+    }
+
+    /// Feeding the emitted [`std::borrow::Cow<'static, [u8]>`] back
+    /// through [`TryFrom<Cow<'_, [u8]>>`] recovers the original variant
+    /// at every [`DigestAlgorithm::ALL`] variant. Ties the by-value
+    /// borrowed-or-owned byte-slice emit surface to its parse-side sibling
+    /// [`TryFrom<Cow<'_, [u8]>> for DigestAlgorithm`] (line 1787) at the
+    /// same one-oracle discipline: a regression that drifted the emit
+    /// impl body toward non-canonical bytes (a byte-swapped label, a
+    /// mangled encoding, a variant-discriminant cast lifted into the
+    /// [`std::borrow::Cow`] payload) OR drifted the parse impl body away
+    /// from the shared UTF-8-then-[`std::str::FromStr`] composition fails
+    /// here at ONE named site instead of leaking to every downstream
+    /// borrowed-or-owned byte-slice round-trip consumer (a `serde_bytes`
+    /// container that opts into
+    /// `#[serde(from = "Cow<'_, [u8]>", into = "Cow<'static, [u8]>")]`
+    /// at both frontiers, a validated-input newtype whose canonical
+    /// parse AND re-emit contracts are both stated as
+    /// [`std::borrow::Cow<'_, [u8]>`] / [`std::borrow::Cow<'static, [u8]>`]).
+    #[test]
+    fn test_digest_algorithm_into_cow_bytes_round_trips_through_try_from() {
+        for algo in DigestAlgorithm::ALL {
+            let emitted: std::borrow::Cow<'static, [u8]> =
+                std::borrow::Cow::<'static, [u8]>::from(algo);
+            let recovered =
+                <DigestAlgorithm as std::convert::TryFrom<std::borrow::Cow<'_, [u8]>>>::try_from(
+                    emitted.clone(),
+                )
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "emitted Cow<'static, [u8]> {emitted:?} for {algo:?} must parse back through TryFrom<Cow<'_, [u8]>> (got {err})",
+                    )
+                });
+            assert_eq!(
+                recovered, algo,
+                "round-trip through TryFrom<Cow<'_, [u8]>> must recover {algo:?} from emitted {emitted:?}",
             );
         }
     }
