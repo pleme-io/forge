@@ -2224,6 +2224,124 @@ impl From<DigestAlgorithm> for Vec<u8> {
     }
 }
 
+/// [`From<DigestAlgorithm>`] for [`Box<str>`] routes through
+/// [`DigestAlgorithm::as_str`] composed with [`str::to_owned`] and
+/// [`String::into_boxed_str`] so a downstream consumer bound by
+/// `impl Into<Box<str>>` — a
+/// [`std::collections::HashMap<Box<str>, _>`] key insertion keyed on
+/// the canonical algorithm label, a validated-input newtype whose
+/// algorithm-label field is stored as [`Box<str>`] to shed the
+/// [`String`] growth header for a long-lived per-value slot, a
+/// `phf`-style keyed-table value slot that owns its label as a boxed
+/// slice, an [`std::sync::Arc<Manifest>`] field where the manifest's
+/// algorithm slot is a [`Box<str>`] chosen for its two-machine-word
+/// footprint over the three-word [`String`], a serde container that
+/// opts into `#[serde(from = "Box<str>")]` at the shrunk-owned
+/// frontier — reads the canonical lowercase label (`"sha256"`,
+/// `"sha512"`, `"blake3"`) directly from a [`DigestAlgorithm`] value
+/// as a heap-owned [`Box<str>`] with no per-consumer
+/// `algo.as_str().to_owned().into_boxed_str()` bridge, no
+/// [`Box::<str>::from`]-then-round-trip through the borrowed-view peer,
+/// and no [`String::with_capacity`]-then-[`String::push_str`] hand-roll
+/// paying extra allocation slack.
+///
+/// The shrunk-owned UTF-8 emit peer of the by-value owned-UTF-8 emit
+/// peer [`From<DigestAlgorithm> for String`] (line 2110) and the
+/// by-value owned-byte-slice emit peer
+/// [`From<DigestAlgorithm> for Vec<u8>`] (line 2221): all three
+/// surfaces project the same canonical-label bytes off the shared
+/// [`DigestAlgorithm::as_str`] oracle, differing only on the
+/// owner-shape of the emitted receiver — [`String`] for resizable
+/// growth-header owners, [`Vec<u8>`] for byte-oriented sinks, this
+/// [`Box<str>`] for immutable heap-owned label slots that trade the
+/// [`String`] growth-header word for a two-word slice pointer. All
+/// three route through the same
+/// [`DigestAlgorithm::as_str`] canonical-label oracle: the [`String`]
+/// peer applies [`str::to_owned`] directly, the [`Vec<u8>`] peer
+/// chains through [`str::as_bytes`] + [`<[u8]>::to_vec`], this
+/// [`Box<str>`] peer chains through [`str::to_owned`] +
+/// [`String::into_boxed_str`] — the three agree byte-for-byte on the
+/// canonical label by construction, and a future variant insertion at
+/// [`DigestAlgorithm::as_str`] propagates to the shrunk-owned UTF-8
+/// emit surface at zero per-consumer cost.
+///
+/// Structural mirror of [`ContentDigest`]'s
+/// [`From<ContentDigest> for Box<str>`] (line 6175) at the
+/// digest-algorithm ladder: where the [`ContentDigest`] peer moves
+/// the runtime-parsed [`ContentDigest::full`] backing string out at
+/// zero-copy through [`String::into_boxed_str`], this
+/// [`DigestAlgorithm`] peer materialises the `'static`-lifetime
+/// canonical-label bytes into a fresh heap-owned [`Box<str>`] through
+/// [`str::to_owned`] + [`String::into_boxed_str`] because
+/// [`DigestAlgorithm::as_str`] returns a `&'static str` off the
+/// static-string constant table — the shrunk-owned discipline lands
+/// on the branch its oracle backing shape mandates without paying a
+/// re-parse to shoehorn onto the other. Discipline-mirror of
+/// [`crate::retry::PerAttemptRegion`]'s
+/// `From<PerAttemptRegion> for Box<str>`,
+/// [`crate::probe_outcome::AdmissionTier`]'s
+/// `From<AdmissionTier> for Box<str>`, and
+/// [`crate::version::BumpLevel`]'s `From<BumpLevel> for Box<str>`
+/// at their sibling canonical-label typed sums — the same
+/// `as_str().to_owned().into_boxed_str()` lift by construction,
+/// through the same one-oracle discipline, projected onto the
+/// shrunk-owned UTF-8 emit surface.
+///
+/// The impl body picks [`str::to_owned`] + [`String::into_boxed_str`]
+/// over [`Box::<str>::from`] taken on a `&str` borrow: the two paths
+/// agree byte-for-byte on the emitted [`Box<str>`] (both allocate a
+/// fresh heap buffer at exact length and repackage as the
+/// two-machine-word slice pointer), but the composed
+/// [`str::to_owned`] + [`String::into_boxed_str`] chain names the
+/// canonical-label oracle at the same [`DigestAlgorithm::as_str`]
+/// site the sibling emit peers read through, so a future
+/// canonicalising refinement (a normalising projection at the
+/// [`as_str`] frontier, a per-variant label change) propagates by
+/// construction. The exact-capacity allocation discipline the
+/// sibling [`From<DigestAlgorithm> for String`] emit peer applies
+/// through [`str::to_owned`] carries through
+/// [`String::into_boxed_str`] which is a zero-realloc repackage when
+/// capacity equals length (the [`str::to_owned`] output does).
+///
+/// A future variant insertion (a `sha384` arm the OCI distribution
+/// spec might normatively adopt, a per-attestation-frontier arm forge
+/// might land) updates the [`DigestAlgorithm::as_str`] match body
+/// alone and every consumer accepting `impl Into<Box<str>>` inherits
+/// the new canonical shrunk-owned label bytes automatically with no
+/// downstream retyping.
+///
+/// The identity `Box::<str>::from(algo).as_ref() == algo.as_str()`
+/// at every [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_from_into_box_str_agrees_with_as_str`];
+/// the identity carrying through a generic `impl Into<Box<str>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_box_str_carries_through_generic_consumer`];
+/// the round-trip through the sibling parse peer
+/// [`TryFrom<Box<str>>`] recovering the canonical variant from the
+/// emitted [`Box<str>`] at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_box_str_round_trips_through_try_from`].
+///
+/// THEORY.md §III.1 typescape: the by-value shrunk-owned UTF-8 emit
+/// surface is a typed-primitive site on [`DigestAlgorithm`] itself
+/// (one `From<DigestAlgorithm> for Box<str>` impl routing through
+/// [`DigestAlgorithm::as_str`] composed with [`str::to_owned`] and
+/// [`String::into_boxed_str`]), not a per-consumer
+/// `.as_str().to_owned().into_boxed_str()` restatement at every
+/// downstream site that accepts `impl Into<Box<str>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`DigestAlgorithm::as_str`]) and every emit surface — the
+/// inherent [`as_str`] accessor, the [`std::fmt::Display`] format
+/// machinery, the [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view
+/// peers, the [`From<DigestAlgorithm>`] for `&'static str` /
+/// `&'static [u8]` / [`String`] / [`Vec<u8>`] by-value emit peers,
+/// this [`From<DigestAlgorithm>`] for [`Box<str>`] by-value
+/// shrunk-owned UTF-8 emit peer — reads through it.
+impl From<DigestAlgorithm> for Box<str> {
+    fn from(algorithm: DigestAlgorithm) -> Box<str> {
+        algorithm.as_str().to_owned().into_boxed_str()
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10230,6 +10348,128 @@ mod tests {
             assert_eq!(
                 recovered, algo,
                 "round-trip through TryFrom<Vec<u8>> must recover {algo:?} from emitted {emitted:?}",
+            );
+        }
+    }
+
+    /// `Box::<str>::from(algo).as_ref()` equals `algo.as_str()` at
+    /// every [`DigestAlgorithm::ALL`] variant. Pins the by-value
+    /// shrunk-owned UTF-8 emit surface to the canonical-label oracle:
+    /// the [`From<DigestAlgorithm>`] impl on [`Box<str>`] must project
+    /// through [`DigestAlgorithm::as_str`] composed with
+    /// [`str::to_owned`] + [`String::into_boxed_str`] rather than
+    /// restate the variant → label match at the emit site, route
+    /// through the [`std::fmt::Display`] format machinery, or chain
+    /// through a `Box::<str>::from(&*algo.as_str())` bridge that
+    /// would still agree byte-for-byte but skip the shared oracle
+    /// discipline. Together with
+    /// [`test_digest_algorithm_from_into_string_agrees_with_as_str`]
+    /// and
+    /// [`test_digest_algorithm_from_into_owned_bytes_agrees_with_as_str_as_bytes`]
+    /// this pins that the same canonical-label oracle drives every
+    /// by-value emit surface across BOTH the {borrowed, owned,
+    /// shrunk-owned} ownership axis AND the {UTF-8, byte-slice}
+    /// representation axis — a discriminant-byte cast, a byte-swapped
+    /// label, or a mangled encoding fails here at ONE named site
+    /// instead of at every downstream `impl Into<Box<str>>` consumer.
+    #[test]
+    fn test_digest_algorithm_from_into_box_str_agrees_with_as_str() {
+        for algo in DigestAlgorithm::ALL {
+            let boxed: Box<str> = Box::<str>::from(algo);
+            assert_eq!(
+                boxed.as_ref(),
+                algo.as_str(),
+                "From<DigestAlgorithm> for Box<str> must project through as_str() at {algo:?}",
+            );
+            assert_eq!(
+                &*boxed,
+                algo.as_str(),
+                "Box<str> deref must equal as_str() at {algo:?}",
+            );
+            assert_eq!(
+                boxed.len(),
+                algo.as_str().len(),
+                "Box<str> length must equal the canonical label length at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`From<DigestAlgorithm>`] for [`Box<str>`] identity carries
+    /// through a generic `impl Into<Box<str>>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn take<T: Into<Box<str>>>(t: T) -> Box<str> { t.into() }` —
+    /// the shape of an actual downstream consumer (a
+    /// [`std::collections::HashMap<Box<str>, _>`] key insertion keyed
+    /// on the canonical algorithm label, a validated-input newtype
+    /// whose algorithm-label field is stored as [`Box<str>`] to shed
+    /// the [`String`] growth header, a `phf`-style keyed-table value
+    /// slot that owns its label as a boxed slice, a serde container
+    /// that opts into `#[serde(from = "Box<str>")]`) — reads the
+    /// canonical lowercase label directly from a [`DigestAlgorithm`]
+    /// value as a heap-owned [`Box<str>`]. The structural witness
+    /// that a [`DigestAlgorithm`] is genuinely usable at
+    /// `impl Into<Box<str>>` call sites — a regression that drifted
+    /// the [`From`] impl signature (returning `&'static str` instead
+    /// of [`Box<str>`], returning a [`std::borrow::Cow<'static, str>`]
+    /// wrapper instead of the bare boxed slice, requiring
+    /// `&DigestAlgorithm` and losing the by-value semantics) fails
+    /// here at compile time instead of at every downstream generic
+    /// call site. Structural mirror of the by-value owned-UTF-8 emit
+    /// peer's carries-through generic sibling
+    /// [`test_digest_algorithm_into_owned_bytes_carries_through_generic_consumer`]
+    /// projected onto the shrunk-owned UTF-8 emit surface.
+    #[test]
+    fn test_digest_algorithm_into_box_str_carries_through_generic_consumer() {
+        fn take<T: Into<Box<str>>>(t: T) -> Box<str> {
+            t.into()
+        }
+        for algo in DigestAlgorithm::ALL {
+            let via_generic: Box<str> = take(algo);
+            assert_eq!(
+                &*via_generic,
+                algo.as_str(),
+                "Into<Box<str>> generic consumer must carry the canonical label at {algo:?}",
+            );
+        }
+    }
+
+    /// Feeding the emitted [`Box<str>`] back through
+    /// [`TryFrom<Box<str>>`] recovers the original variant at every
+    /// [`DigestAlgorithm::ALL`] variant. Ties the by-value
+    /// shrunk-owned UTF-8 emit surface to its shrunk-owned parse-side
+    /// sibling [`TryFrom<Box<str>> for DigestAlgorithm`] (line 1077)
+    /// at the same one-oracle discipline: a regression that drifted
+    /// the emit impl body toward non-canonical bytes (a byte-swapped
+    /// label, a mangled encoding, a numeric-discriminant cast) OR
+    /// drifted the parse impl body away from the shared
+    /// [`DigestAlgorithm::parse`] composition fails here at ONE named
+    /// site instead of leaking to every downstream shrunk-owned
+    /// round-trip consumer (a
+    /// [`std::collections::HashMap<Box<str>, _>`] key round-trip, a
+    /// serde container that opts into
+    /// `#[serde(from = "Box<str>", into = "Box<str>")]` at both
+    /// frontiers, a validated-input newtype whose canonical parse
+    /// AND re-emit contracts are both stated as [`Box<str>`]). The
+    /// shrunk-owned UTF-8 analogue of the by-value owned-buffer
+    /// round-trip pinned at
+    /// [`test_digest_algorithm_into_owned_bytes_round_trips_through_try_from`]:
+    /// the same one-oracle grammar at the shrunk-owned UTF-8 emit
+    /// layer instead of the owned-byte-buffer emit layer.
+    #[test]
+    fn test_digest_algorithm_into_box_str_round_trips_through_try_from() {
+        for algo in DigestAlgorithm::ALL {
+            let emitted: Box<str> = Box::<str>::from(algo);
+            let recovered = <DigestAlgorithm as std::convert::TryFrom<Box<str>>>::try_from(
+                emitted.clone(),
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "emitted Box<str> {emitted:?} for {algo:?} must parse back through TryFrom<Box<str>> (got {err})",
+                )
+            });
+            assert_eq!(
+                recovered, algo,
+                "round-trip through TryFrom<Box<str>> must recover {algo:?} from emitted {emitted:?}",
             );
         }
     }
