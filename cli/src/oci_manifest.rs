@@ -1994,6 +1994,125 @@ impl From<DigestAlgorithm> for &'static [u8] {
     }
 }
 
+/// [`From<DigestAlgorithm>`] for [`String`] routes through
+/// [`DigestAlgorithm::as_str`] via [`str::to_owned`] so a downstream
+/// consumer bound by `impl Into<String>` — a
+/// [`std::collections::HashMap<String, _>::insert`] key builder that
+/// owns its key, an environment-variable setter that owns its value
+/// slot, a release-manifest field builder that owns its algorithm-
+/// label emission, a [`serde_json::Value::String`] constructor slot, a
+/// [`String::push_str`] sink over a caller-owned buffer — reads the
+/// canonical lowercase label (`"sha256"`, `"sha512"`, `"blake3"`)
+/// directly from a [`DigestAlgorithm`] value as an owned [`String`]
+/// with no per-consumer `algo.as_str().to_owned()` bridge, no
+/// [`std::fmt::Display`] format-buffer step, and no
+/// [`DigestAlgorithm::to_string`] round-trip through the formatter.
+///
+/// The owned-string emit peer that closes the emit-side lifetime-
+/// choice ladder [`From<DigestAlgorithm>`] for `&'static str` (zero-
+/// copy `'static` borrow, line 1908) → this
+/// [`From<DigestAlgorithm>`] for [`String`] (single-allocation owned
+/// [`String`] for consumers that must own their input buffer) at the
+/// UTF-8 frontier of the digest-algorithm axis. Where the
+/// `&'static str` emit peer serves a receiver bound by
+/// `impl Into<&'static str>` — a [`http::HeaderValue::from_static`]
+/// consumer, a `phf`-style static lookup, a `tracing::Span` attribute
+/// slot keyed by `&'static str` — this owned-[`String`] emit peer
+/// serves a receiver bound by `impl Into<String>` — a
+/// [`std::collections::HashMap<String, _>`] key builder, an
+/// environment-variable setter, a [`serde_json::Value::String`]
+/// constructor, a [`String::push_str`] sink — through the shared
+/// [`DigestAlgorithm::as_str`] canonical-label oracle. The two by-value
+/// emit peers together consume the two canonical string-owner shapes
+/// at the UTF-8 emit frontier — `&'static str` (borrowed) and
+/// [`String`] (owned) — through one oracle: the borrowed peer through
+/// [`as_str`] directly, this owned peer through `as_str().to_owned()`
+/// — the same canonical grammar lifted to the owned-string emit
+/// layer.
+///
+/// Structural mirror of `impl From<PerAttemptRegion> for String` at
+/// [`crate::retry`] line 1505 (the by-value owned-string emit peer at
+/// the per-attempt-region canonical-label ladder),
+/// `impl From<AdmissionTier> for String` at
+/// [`crate::probe_outcome`] line 7370 (the by-value owned-string emit
+/// peer at the admission-tier canonical-label ladder), and
+/// `impl From<BumpLevel> for String` at [`crate::version`] line 8100
+/// (the by-value owned-string emit peer at the version-bump-magnitude
+/// canonical-label ladder) at the digest-algorithm ladder: the same
+/// `as_str().to_owned()` lift by construction, through the same one-
+/// oracle discipline, at the remaining canonical-label typed sum in
+/// forge's typed-primitive algebra. After this commit all four repo-
+/// internal canonical-label typed sums that carry [`as_str`] +
+/// [`std::fmt::Display`] + [`AsRef<str>`] + [`AsRef<[u8]>`] +
+/// [`From<T> for &'static str`] + [`From<T> for &'static [u8]`]
+/// ([`DigestAlgorithm`], [`crate::retry::PerAttemptRegion`],
+/// [`crate::probe_outcome::AdmissionTier`],
+/// [`crate::version::BumpLevel`]) also carry
+/// [`From<T> for String`] routing through the shared canonical-label
+/// oracle — the by-value owned-string UTF-8 emit surface at
+/// canonical-label typed sums is now a one-oracle surface across
+/// forge without exception.
+///
+/// A single [`String`] allocation at the emit boundary — the same
+/// allocation cost a manual `algo.as_str().to_owned()` bridge would
+/// pay, but routed through the typed-primitive site rather than
+/// restated at every downstream `impl Into<String>` consumer.
+/// Consumers that want to avoid the allocation entirely reach for the
+/// [`From<DigestAlgorithm>`] for `&'static str` sibling above (which
+/// preserves the `'static` lifetime through the by-value conversion)
+/// or the [`AsRef<str>`] borrowed-view peer (which borrows the
+/// receiver at zero allocation cost); this [`From<DigestAlgorithm>`]
+/// for [`String`] impl exists for the class of consumers that
+/// structurally require an owned [`String`] (serde container fields
+/// typed as [`String`], keyed containers whose key slots own their
+/// buffers, buffered-write sinks that append into a caller-owned
+/// [`String`]).
+///
+/// A future variant insertion (a `sha384` arm the OCI distribution
+/// spec might normatively adopt, a per-attestation-frontier arm forge
+/// might land) updates the [`DigestAlgorithm::as_str`] match body
+/// alone and every consumer accepting `impl Into<String>` inherits
+/// the new canonical owned-string label automatically with no
+/// downstream retyping.
+///
+/// The identity `String::from(algo) == algo.as_str()` at every
+/// [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_from_into_string_agrees_with_as_str`];
+/// the identity carrying through a generic `impl Into<String>`
+/// consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_string_carries_through_generic_consumer`];
+/// the round-trip through [`DigestAlgorithm::parse`] recovering the
+/// canonical variant from the emitted [`String`] at every variant is
+/// pinned by
+/// [`tests::test_digest_algorithm_into_string_round_trips_through_parse`].
+///
+/// THEORY.md §III.1 typescape: the by-value owned-string UTF-8
+/// conversion surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one `From<DigestAlgorithm> for String`
+/// impl routing through [`DigestAlgorithm::as_str`] via
+/// [`str::to_owned`]), not a per-consumer `.as_str().to_owned()`
+/// restatement at every downstream site that accepts
+/// `impl Into<String>`. THEORY.md §V.4 typed primitives: the by-
+/// value owned-string emit surface is closed at the primitive rather
+/// than at each downstream registry-URL / release-manifest / serde-
+/// container / attestation-storage call site.
+/// THEORY.md §VI.1 generation over composition: the canonical label
+/// is named at one site ([`DigestAlgorithm::as_str`]) and every emit
+/// surface — the inherent [`as_str`] accessor, the
+/// [`std::fmt::Display`] format machinery, the [`AsRef<str>`] /
+/// [`AsRef<[u8]>`] borrowed-view peers, the
+/// [`From<DigestAlgorithm>`] for `&'static str` / `&'static [u8]`
+/// by-value static-lifetime emit peers, this
+/// [`From<DigestAlgorithm>`] for [`String`] by-value owned-string
+/// UTF-8 emit peer — reads through it, so a future variant insertion
+/// propagates by construction to every emit surface without a per-
+/// surface rewrite.
+impl From<DigestAlgorithm> for String {
+    fn from(algorithm: DigestAlgorithm) -> String {
+        algorithm.as_str().to_owned()
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9787,6 +9906,106 @@ mod tests {
                 decoded,
                 algo.as_str(),
                 "from_utf8 round-trip must recover canonical label at {algo:?}",
+            );
+        }
+    }
+
+    /// `String::from(algo)` equals `algo.as_str()` at every
+    /// [`DigestAlgorithm::ALL`] variant. Pins the by-value owned-string
+    /// UTF-8 emit surface to the canonical-label oracle: the
+    /// [`From<DigestAlgorithm>`] impl on [`String`] must project through
+    /// [`DigestAlgorithm::as_str`] via [`str::to_owned`] rather than
+    /// restate the variant → label match at the emit site or route
+    /// through the [`std::fmt::Display`] format machinery (which would
+    /// still agree by construction but pays a formatter-buffer cost).
+    /// Together with
+    /// [`test_digest_algorithm_from_into_static_str_agrees_with_as_str`]
+    /// this pins that the same canonical-label oracle drives every by-
+    /// value UTF-8 emit surface at both string-owner shapes —
+    /// `&'static str` (borrowed) and [`String`] (owned) — so a
+    /// regression that drifted the [`From`] impl to yield the
+    /// [`DigestAlgorithm::to_string`] rendering of the variant name
+    /// (`"Sha256"` in UpperCamel instead of the canonical lowercase
+    /// `"sha256"`) fails here at ONE named site instead of at every
+    /// downstream `impl Into<String>` consumer.
+    #[test]
+    fn test_digest_algorithm_from_into_string_agrees_with_as_str() {
+        for algo in DigestAlgorithm::ALL {
+            let owned: String = String::from(algo);
+            assert_eq!(
+                owned,
+                algo.as_str(),
+                "From<DigestAlgorithm> for String must project through as_str at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`From<DigestAlgorithm>`] for [`String`] identity carries
+    /// through a generic `impl Into<String>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn take<T: Into<String>>(t: T) -> String { t.into() }` — the
+    /// shape of an actual downstream consumer
+    /// ([`std::collections::HashMap<String, _>::insert`] key builder, an
+    /// environment-variable setter that owns its value slot, a
+    /// release-manifest field builder that owns its algorithm-label
+    /// emission, a [`serde_json::Value::String`] constructor, a
+    /// [`String::push_str`] sink over a caller-owned buffer) — reads
+    /// the canonical lowercase label directly from a
+    /// [`DigestAlgorithm`] value as an owned [`String`]. The structural
+    /// witness that a [`DigestAlgorithm`] is genuinely usable at
+    /// `impl Into<String>` call sites — a regression that drifted the
+    /// [`From`] impl signature (returning [`&'static str`] instead of
+    /// [`String`], requiring [`&DigestAlgorithm`] and losing the by-
+    /// value semantics) fails here at compile time instead of at every
+    /// downstream generic call site. Structural mirror of
+    /// [`crate::retry`]'s
+    /// `test_per_attempt_region_into_string_carries_through_generic_consumer`,
+    /// [`crate::probe_outcome`]'s
+    /// `test_admission_tier_into_string_carries_through_generic_consumer`,
+    /// and [`crate::version`]'s
+    /// `test_bump_level_into_string_carries_through_generic_consumer`
+    /// at the digest-algorithm ladder.
+    #[test]
+    fn test_digest_algorithm_into_string_carries_through_generic_consumer() {
+        fn take<T: Into<String>>(t: T) -> String {
+            t.into()
+        }
+        for algo in DigestAlgorithm::ALL {
+            let via_generic: String = take(algo);
+            assert_eq!(
+                via_generic,
+                algo.as_str(),
+                "Into<String> generic consumer must carry the canonical label at {algo:?}",
+            );
+        }
+    }
+
+    /// Feeding the emitted [`String`] back through
+    /// [`DigestAlgorithm::parse`] recovers the original variant at
+    /// every [`DigestAlgorithm::ALL`] variant. Pins the round-trip
+    /// discipline against the canonical-label inverse oracle: the
+    /// [`From<DigestAlgorithm>`] for [`String`] emit surface and the
+    /// [`DigestAlgorithm::parse`] parse surface agree on the same
+    /// canonical grammar by construction, so a downstream consumer
+    /// that stashes the emitted [`String`] into an owned buffer and
+    /// later re-parses it recovers the original variant without drift.
+    /// This is the owned-[`String`] analogue of the
+    /// [`&'static str`] round-trip pinned at
+    /// [`test_digest_algorithm_into_static_str_round_trips_through_parse`]:
+    /// the same one-oracle grammar at the owned-string emit layer
+    /// instead of the borrowed static-lifetime emit layer.
+    #[test]
+    fn test_digest_algorithm_into_string_round_trips_through_parse() {
+        for algo in DigestAlgorithm::ALL {
+            let emitted: String = String::from(algo);
+            let recovered = DigestAlgorithm::parse(&emitted).unwrap_or_else(|| {
+                panic!(
+                    "emitted String {emitted:?} for {algo:?} must parse back through DigestAlgorithm::parse",
+                )
+            });
+            assert_eq!(
+                recovered, algo,
+                "round-trip through parse must recover {algo:?} from emitted {emitted:?}",
             );
         }
     }
