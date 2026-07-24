@@ -2776,6 +2776,124 @@ impl From<DigestAlgorithm> for std::rc::Rc<str> {
     }
 }
 
+/// [`From<DigestAlgorithm>`] for [`std::rc::Rc<[u8]>`] routes through
+/// [`DigestAlgorithm::as_str`] composed with [`str::as_bytes`] via
+/// [`std::rc::Rc::<[u8]>::from`] so a downstream single-threaded consumer
+/// bound by `impl Into<Rc<[u8]>>` — a
+/// [`std::collections::HashMap<std::rc::Rc<[u8]>, _>`] thread-local
+/// registry cache keyed on the raw canonical algorithm-label bytes, a
+/// `!Send` per-task lookaside whose algorithm-label bytes field is an
+/// [`std::rc::Rc<[u8]>`] for cheap [`std::rc::Rc::clone`] across owned
+/// closures on the same thread, a serde container that opts into
+/// `#[serde(from = "Rc<[u8]>")]` at a single-thread shared-owned raw-byte
+/// frontier, a per-request context struct pinned to a single thread whose
+/// algorithm-label bytes field is an [`std::rc::Rc<[u8]>`] to avoid
+/// per-hop allocation — reads the canonical lowercase label bytes
+/// (`b"sha256"`, `b"sha512"`, `b"blake3"`) directly from a
+/// [`DigestAlgorithm`] value as a thread-local shared-owned
+/// [`std::rc::Rc<[u8]>`] with no per-consumer
+/// `Rc::<[u8]>::from(algo.as_str().as_bytes())` bridge, and no
+/// [`<[u8]>::to_vec`]-then-[`std::rc::Rc::from`] hand-roll paying a
+/// redundant intermediate [`Vec<u8>`] allocation.
+///
+/// The thread-local shared-owned byte-slice emit peer of the cross-thread
+/// shared-owned byte-slice emit peer
+/// [`From<DigestAlgorithm> for std::sync::Arc<[u8]>`] (line 2684): both
+/// surfaces project the same canonical-label bytes off the shared
+/// [`DigestAlgorithm::as_str`] oracle, differing only on the
+/// sharing-discipline axis — [`std::sync::Arc<[u8]>`] pays an atomic
+/// refcount for cross-thread [`std::sync::Arc::clone`], this
+/// [`std::rc::Rc<[u8]>`] pays a non-atomic refcount for single-threaded
+/// [`std::rc::Rc::clone`] at fewer instructions per clone / drop and no
+/// atomic-fence overhead. Both allocate the refcount-headered payload at
+/// exact length in one heap call via [`std::rc::Rc::<[u8]>::from`] /
+/// [`std::sync::Arc::<[u8]>::from`] on the `&[u8]` borrow, so they agree
+/// byte-for-byte on the emitted label bytes by construction.
+///
+/// The byte-slice sibling of the thread-local shared-owned UTF-8 emit
+/// peer [`From<DigestAlgorithm> for std::rc::Rc<str>`] (line 2773): both
+/// surfaces project through [`DigestAlgorithm::as_str`] and both allocate
+/// the refcount-headered payload in one heap call via
+/// [`std::rc::Rc::<T>::from`] on a borrow, differing only on the
+/// representation axis — the [`std::rc::Rc<str>`] peer preserves the
+/// UTF-8-validated `str` slice type suffix on the fat pointer for
+/// consumers that require it (a [`tracing::Span`] attribute slot that
+/// formats through [`std::fmt::Display`]), this [`std::rc::Rc<[u8]>`]
+/// peer emits the raw-byte slice type suffix on the fat pointer for
+/// consumers that consume raw bytes without a UTF-8 validation step (a
+/// [`bytes::Bytes::from(Rc<[u8]>)`] bridge into a single-threaded reader,
+/// a [`std::collections::HashMap<std::rc::Rc<[u8]>, _>`] thread-local
+/// registry cache keyed on raw label bytes). Together with the sibling
+/// [`std::rc::Rc<str>`] emit peer they close the thread-local shared-owned
+/// {UTF-8 str, byte-slice `[u8]`} representation pair at the non-atomic
+/// refcount frontier, mirroring the {[`std::sync::Arc<str>`],
+/// [`std::sync::Arc<[u8]>`]} cross-thread shared-owned pair at lines 2548
+/// and 2684 and the {[`Box<str>`], [`Box<[u8]>`]} shrunk-owned pair at
+/// lines 2339 and 2440.
+///
+/// The emit-side sibling of the thread-local shared-owned byte-slice
+/// parse peer [`TryFrom<Rc<[u8]>> for DigestAlgorithm`] at line 1691:
+/// where the parse peer routes an inbound thread-local shared-owned
+/// label-byte buffer through [`std::rc::Rc::<[u8]>::as_ref`] into the
+/// shared canonical-label oracle, this emit peer routes an outbound
+/// [`DigestAlgorithm`] variant through [`DigestAlgorithm::as_str`] +
+/// [`str::as_bytes`] into a thread-local shared-owned label-byte
+/// buffer — the same one-oracle discipline projected onto the emit
+/// direction, closing the {parse, emit} pair at the thread-local
+/// shared-owned byte-slice frontier.
+///
+/// The impl body picks [`std::rc::Rc::<[u8]>::from`] applied directly to
+/// the `&[u8]` borrow returned by
+/// [`str::as_bytes`]-on-[`DigestAlgorithm::as_str`] over
+/// [`<[u8]>::to_vec`] + [`std::rc::Rc::from`]-on-`Vec<u8>`: both paths
+/// agree byte-for-byte on the emitted [`std::rc::Rc<[u8]>`] (both
+/// allocate a fresh refcount-headered heap buffer at exact length), but
+/// the direct [`std::rc::Rc::<[u8]>::from`] path skips the intermediate
+/// [`Vec<u8>`] allocation and its growth-header slack, paying one heap
+/// call at exact-length capacity instead of two.
+///
+/// A future variant insertion (a `sha384` arm the OCI distribution spec
+/// might normatively adopt, a per-attestation-frontier arm forge might
+/// land) updates the [`DigestAlgorithm::as_str`] match body alone and
+/// every consumer accepting `impl Into<Rc<[u8]>>` inherits the new
+/// canonical thread-local shared-owned label bytes automatically with no
+/// downstream retyping.
+///
+/// The identity `Rc::<[u8]>::from(algo).as_ref() ==
+/// algo.as_str().as_bytes()` at every [`DigestAlgorithm::ALL`] variant
+/// is pinned by
+/// [`tests::test_digest_algorithm_from_into_rc_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carrying through a generic `impl Into<Rc<[u8]>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_rc_bytes_carries_through_generic_consumer`];
+/// the round-trip through the sibling parse peer [`TryFrom<Rc<[u8]>>`]
+/// recovering the canonical variant from the emitted
+/// [`std::rc::Rc<[u8]>`] at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_rc_bytes_round_trips_through_try_from`].
+///
+/// THEORY.md §III.1 typescape: the by-value thread-local shared-owned
+/// byte-slice emit surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one `From<DigestAlgorithm> for Rc<[u8]>`
+/// impl routing through [`DigestAlgorithm::as_str`] composed with
+/// [`str::as_bytes`] and [`std::rc::Rc::<[u8]>::from`]), not a
+/// per-consumer `Rc::<[u8]>::from(algo.as_str().as_bytes())` restatement
+/// at every downstream site that accepts `impl Into<Rc<[u8]>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// ([`DigestAlgorithm::as_str`]) and every emit surface — the inherent
+/// [`as_str`] accessor, the [`std::fmt::Display`] format machinery, the
+/// [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view peers, the
+/// [`From<DigestAlgorithm>`] for `&'static str` / `&'static [u8]` /
+/// [`String`] / [`Vec<u8>`] / [`Box<str>`] / [`Box<[u8]>`] /
+/// [`std::sync::Arc<str>`] / [`std::sync::Arc<[u8]>`] /
+/// [`std::rc::Rc<str>`] by-value emit peers, this
+/// [`From<DigestAlgorithm>`] for [`std::rc::Rc<[u8]>`] by-value
+/// thread-local shared-owned byte-slice emit peer — reads through it.
+impl From<DigestAlgorithm> for std::rc::Rc<[u8]> {
+    fn from(algorithm: DigestAlgorithm) -> std::rc::Rc<[u8]> {
+        std::rc::Rc::<[u8]>::from(algorithm.as_str().as_bytes())
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11415,6 +11533,137 @@ mod tests {
         }
     }
 
+    /// `Rc::<[u8]>::from(algo).as_ref()` equals `algo.as_str().as_bytes()`
+    /// at every [`DigestAlgorithm::ALL`] variant. Pins the by-value
+    /// thread-local shared-owned byte-slice emit surface to the
+    /// canonical-label oracle: the [`From<DigestAlgorithm>`] impl on
+    /// [`std::rc::Rc<[u8]>`] must project through
+    /// [`DigestAlgorithm::as_str`] composed with [`str::as_bytes`] via
+    /// [`std::rc::Rc::<[u8]>::from`] rather than restate the variant →
+    /// label match at the emit site, route through the
+    /// [`std::fmt::Display`] format machinery, or chain through a
+    /// [`<[u8]>::to_vec`] + [`std::rc::Rc::from`]-on-[`Vec<u8>`] bridge
+    /// that would still agree byte-for-byte but pay a redundant
+    /// intermediate [`Vec<u8>`] allocation. A drifted emit body — a
+    /// byte-swapped label, a mangled encoding, a variant-discriminant
+    /// cast lifted into the refcount-headered payload — fails here at
+    /// ONE named site instead of at every downstream
+    /// `impl Into<Rc<[u8]>>` consumer (a
+    /// [`std::collections::HashMap<std::rc::Rc<[u8]>, _>`] thread-local
+    /// registry cache, a serde container that opts into
+    /// `#[serde(from = "Rc<[u8]>")]`). Together with
+    /// [`test_digest_algorithm_from_into_arc_bytes_agrees_with_as_str_as_bytes`]
+    /// and
+    /// [`test_digest_algorithm_from_into_box_bytes_agrees_with_as_str_as_bytes`]
+    /// this pins that the same canonical-label oracle drives every
+    /// by-value byte-slice emit surface across the full {borrowed,
+    /// owned, shrunk-owned, cross-thread shared-owned, thread-local
+    /// shared-owned} ownership axis at the byte-slice representation
+    /// crossing.
+    #[test]
+    fn test_digest_algorithm_from_into_rc_bytes_agrees_with_as_str_as_bytes() {
+        for algo in DigestAlgorithm::ALL {
+            let shared: std::rc::Rc<[u8]> = std::rc::Rc::<[u8]>::from(algo);
+            assert_eq!(
+                shared.as_ref(),
+                algo.as_str().as_bytes(),
+                "From<DigestAlgorithm> for Rc<[u8]> must project through as_str().as_bytes() at {algo:?}",
+            );
+            assert_eq!(
+                &*shared,
+                algo.as_str().as_bytes(),
+                "Rc<[u8]> deref must equal as_str().as_bytes() at {algo:?}",
+            );
+            assert_eq!(
+                shared.len(),
+                algo.as_str().len(),
+                "Rc<[u8]> length must equal the canonical label length at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`From<DigestAlgorithm>`] for [`std::rc::Rc<[u8]>`] identity
+    /// carries through a generic `impl Into<Rc<[u8]>>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn take<T: Into<Rc<[u8]>>>(t: T) -> Rc<[u8]> { t.into() }` — the
+    /// shape of an actual downstream consumer (a
+    /// [`std::collections::HashMap<std::rc::Rc<[u8]>, _>`] thread-local
+    /// registry cache keyed on the canonical algorithm-label bytes, a
+    /// `!Send` per-task lookaside whose algorithm-label bytes field is an
+    /// [`std::rc::Rc<[u8]>`] for cheap [`std::rc::Rc::clone`] across owned
+    /// closures on the same thread, a serde container that opts into
+    /// `#[serde(from = "Rc<[u8]>")]`, a per-request context struct pinned
+    /// to a single thread whose algorithm-label bytes field is an
+    /// [`std::rc::Rc<[u8]>`] for cheap [`std::rc::Rc::clone`] across the
+    /// call graph) — reads the canonical lowercase label bytes directly
+    /// from a [`DigestAlgorithm`] value as a thread-local shared-owned
+    /// [`std::rc::Rc<[u8]>`]. The structural witness that a
+    /// [`DigestAlgorithm`] is genuinely usable at `impl Into<Rc<[u8]>>`
+    /// call sites — a regression that drifted the [`From`] impl signature
+    /// (returning [`Box<[u8]>`] instead of [`std::rc::Rc<[u8]>`], returning
+    /// [`std::rc::Rc<Vec<u8>>`] with an intermediate [`Vec<u8>`]
+    /// allocation, requiring `&DigestAlgorithm` and losing the by-value
+    /// semantics) fails here at compile time instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_digest_algorithm_into_rc_bytes_carries_through_generic_consumer() {
+        fn take<T: Into<std::rc::Rc<[u8]>>>(t: T) -> std::rc::Rc<[u8]> {
+            t.into()
+        }
+        for algo in DigestAlgorithm::ALL {
+            let via_generic: std::rc::Rc<[u8]> = take(algo);
+            assert_eq!(
+                &*via_generic,
+                algo.as_str().as_bytes(),
+                "Into<Rc<[u8]>> generic consumer must carry the canonical label bytes at {algo:?}",
+            );
+        }
+    }
+
+    /// Feeding the emitted [`std::rc::Rc<[u8]>`] back through
+    /// [`TryFrom<Rc<[u8]>>`] recovers the original variant at every
+    /// [`DigestAlgorithm::ALL`] variant. Ties the by-value thread-local
+    /// shared-owned byte-slice emit surface to its parse-side sibling
+    /// [`TryFrom<Rc<[u8]>> for DigestAlgorithm`] (line 1691) at the same
+    /// one-oracle discipline: a regression that drifted the emit impl
+    /// body toward non-canonical bytes (a byte-swapped label, a mangled
+    /// encoding, a numeric-discriminant cast lifted into the
+    /// refcount-headered payload) OR drifted the parse impl body away
+    /// from the shared [`std::rc::Rc::<[u8]>::as_ref`] +
+    /// [`DigestAlgorithm::TryFrom<&[u8]>::try_from`] composition fails
+    /// here at ONE named site instead of leaking to every downstream
+    /// thread-local shared-owned byte-slice round-trip consumer (a
+    /// [`std::collections::HashMap<std::rc::Rc<[u8]>, _>`] thread-local
+    /// registry key round-trip, a serde container that opts into
+    /// `#[serde(from = "Rc<[u8]>", into = "Rc<[u8]>")]` at both
+    /// frontiers, a validated-input newtype whose canonical parse AND
+    /// re-emit contracts are both stated as [`std::rc::Rc<[u8]>`]). The
+    /// thread-local shared-owned byte-slice analogue of the cross-thread
+    /// shared-owned byte-slice round-trip pinned at
+    /// [`test_digest_algorithm_into_arc_bytes_round_trips_through_try_from`]:
+    /// the same one-oracle grammar at the thread-local shared-owned
+    /// byte-slice emit layer instead of the cross-thread shared-owned
+    /// byte-slice emit layer.
+    #[test]
+    fn test_digest_algorithm_into_rc_bytes_round_trips_through_try_from() {
+        for algo in DigestAlgorithm::ALL {
+            let emitted: std::rc::Rc<[u8]> = std::rc::Rc::<[u8]>::from(algo);
+            let recovered =
+                <DigestAlgorithm as std::convert::TryFrom<std::rc::Rc<[u8]>>>::try_from(
+                    emitted.clone(),
+                )
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "emitted Rc<[u8]> {emitted:?} for {algo:?} must parse back through TryFrom<Rc<[u8]>> (got {err})",
+                    )
+                });
+            assert_eq!(
+                recovered, algo,
+                "round-trip through TryFrom<Rc<[u8]>> must recover {algo:?} from emitted {emitted:?}",
+            );
+        }
+    }
+
     /// `str::parse::<ContentDigest>()` succeeds on a well-formed sha256
     /// digest and yields the same validated value as the inherent
     /// [`ContentDigest::parse`] oracle. Pins the derived
@@ -18478,8 +18727,11 @@ mod tests {
 
         assert!(set.contains(raw1.as_str()));
         assert!(set.contains(raw2.as_str()));
-        assert!(!set
-            .contains("sha256:0000000000000000000000000000000000000000000000000000000000000000"));
+        assert!(
+            !set.contains(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            )
+        );
         // Whitespace-drift variant is a byte-level miss through the
         // canonical trimmed key, matching the HashMap probe surface.
         let padded = format!(" sha256:{D1}\n");
