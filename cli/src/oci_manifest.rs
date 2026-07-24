@@ -1243,6 +1243,123 @@ impl TryFrom<std::rc::Rc<str>> for DigestAlgorithm {
     }
 }
 
+/// [`TryFrom<Box<[u8]>>`] for [`DigestAlgorithm`] routes through
+/// [`Vec::<u8>::from`] (which unboxes the `Box<[u8]>` at zero-copy into
+/// the same heap allocation as the returned [`Vec<u8>`]'s backing
+/// storage, per the standard library's length-only conversion contract)
+/// then delegates to [`<DigestAlgorithm as TryFrom<Vec<u8>>>::try_from`]
+/// so a downstream consumer holding a shrunk-owned raw-byte label buffer
+/// at a two-word boxed-slice frontier (a serde container that opts into
+/// `#[serde(try_from = "Box<[u8]>")]` on a byte-frontier wrapper field
+/// to consume a shrunk-owned raw-byte record without a per-consumer
+/// allocation, a `Cow<'_, [u8]>::Owned` arm that shed its growth-header
+/// capacity through [`Vec::into_boxed_slice`] before landing on a
+/// downstream parse gate, a validated-builder frontier whose canonical
+/// input contract is pinned as [`Box<[u8]>`] to shed the growth-header
+/// word off the intake before the parse pass, a `Vec<Box<[u8]>>`
+/// per-attempt algorithm-label byte-list flowed into a parse worker
+/// without cloning per element) recovers a [`DigestAlgorithm`] variant
+/// from its canonical lowercase-ASCII owned-byte serialization through
+/// the same one-oracle grammar the direct `.parse::<DigestAlgorithm>()`
+/// string call sites and the sibling [`TryFrom<Vec<u8>>`] peer already
+/// read — WITHOUT a per-consumer `Vec::from(boxed).try_into()` bridge
+/// at every downstream site, WITHOUT the by-reference bridge
+/// (`DigestAlgorithm::try_from(boxed.as_ref())`) that would leak the
+/// owned [`Box<[u8]>`] allocation past the parse gate for the delegated
+/// byte-slice oracle to ignore.
+///
+/// Zero-copy on the happy path: [`Vec::<u8>::from(Box<[u8]>)`] takes
+/// ownership of the boxed slice's heap allocation and reuses it as the
+/// returned [`Vec<u8>`]'s backing storage (the standard library
+/// documents this as a length-only conversion with no re-allocation).
+/// The resulting owned [`Vec<u8>`] then flows into the by-value
+/// owned-byte-slice parse peer [`TryFrom<Vec<u8>> for DigestAlgorithm`]
+/// which routes through [`String::from_utf8`] (which itself performs an
+/// in-place UTF-8 check reusing the same allocation as the returned
+/// [`String`]'s backing storage) then the [`TryFrom<String>`] peer that
+/// delegates through [`String::as_str`] to the [`FromStr`] oracle at
+/// zero further allocation — one allocation, consumed at intake,
+/// dropped at end of scope, with the validated [`DigestAlgorithm`]
+/// [`Copy`]-returned free of any backing storage.
+///
+/// The by-value shrunk-owned byte-slice parse peer of
+/// [`TryFrom<&str> for DigestAlgorithm`] (commit 5a59611),
+/// [`TryFrom<String> for DigestAlgorithm`] (commit 91f6d88),
+/// [`TryFrom<Cow<'_, str>> for DigestAlgorithm`] (commit 66533a6),
+/// [`TryFrom<&[u8]> for DigestAlgorithm`] (commit a403501),
+/// [`TryFrom<Vec<u8>> for DigestAlgorithm`] (commit 0689fde),
+/// [`TryFrom<Box<str>> for DigestAlgorithm`] (commit 32659e5),
+/// [`TryFrom<Arc<str>> for DigestAlgorithm`] (commit 6d7085a), and
+/// [`TryFrom<Rc<str>> for DigestAlgorithm`] (commit 8b8742d) on the
+/// canonical-label family — the parse surface widens across the
+/// borrowed-string, owned-string, borrowed-or-owned-string,
+/// borrowed-byte-slice, owned-byte-slice, shrunk-owned-string,
+/// cross-thread shared-owned string, thread-local shared-owned string,
+/// AND shrunk-owned-byte-slice input frontiers so a downstream site
+/// that receives its input at any of those frontiers routes through
+/// the same [`DigestAlgorithm::parse`] canonical-label oracle without
+/// a per-consumer bridge — the pattern this impl absorbs at one site
+/// so no downstream site restates it. Structural mirror of the sibling
+/// [`TryFrom<Box<[u8]>> for ContentDigest`] impl below (commit f5f98f6)
+/// on the composite digest reference-grammar type: the digest
+/// reference-grammar family carries the complete shrunk / shared
+/// byte-slice parse-peer surface ([`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<Arc<[u8]>>`], [`TryFrom<Rc<[u8]>>`]), and the
+/// algorithm-axis typed sum this impl widens is the underlying label
+/// oracle that reference-grammar surface routes through — the two
+/// typed primitives grow in lockstep so a consumer that types both the
+/// label axis and the composite digest at their shrunk-owned
+/// byte-slice frontiers reads the same one-oracle grammar at both
+/// layers.
+///
+/// The error type is [`anyhow::Error`] — the exact shape the
+/// [`FromStr`] impl and every sibling by-reference and by-value parse
+/// peer carry. Two rejection modes carry through unchanged from the
+/// underlying [`TryFrom<Vec<u8>>`] peer: a UTF-8-invalid byte input (a
+/// stray non-UTF-8 sequence in a shrunk-owned wire capture, a
+/// partial-write byte tail that clips a UTF-8 continuation and later
+/// landed in a `Box<[u8]>` slot) surfaces an [`anyhow::Error`] naming
+/// the offending bytes' lossy-decoded rendering so a caller can still
+/// attach the offending input to a failure record; a UTF-8-valid but
+/// non-canonical label (uppercase, hyphenated, unknown, empty,
+/// edge-whitespace) surfaces the same [`anyhow::Error`] the underlying
+/// [`FromStr`] impl emits — no per-peer rejection-message drift across
+/// the shrunk-owned byte-slice receiver frontier.
+///
+/// The identity
+/// `DigestAlgorithm::try_from(Box::<[u8]>::from(algo.as_str().as_bytes())).unwrap()
+/// == algo` at every [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_try_from_box_bytes_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<Box<[u8]>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_try_from_box_bytes_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical UTF-8-valid input is
+/// pinned by
+/// [`tests::test_digest_algorithm_try_from_box_bytes_rejects_non_canonical_input`].
+///
+/// THEORY.md §III.1 typescape: the by-value shrunk-owned byte-slice
+/// try-conversion surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one [`TryFrom<Box<[u8]>>`] impl routing
+/// through [`Vec::<u8>::from`] then [`TryFrom<Vec<u8>>`]), not a
+/// per-consumer `Vec::from(boxed).try_into()` bridge at every
+/// downstream site that owns a shrunk-owned raw-byte label buffer.
+/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// grammar is named at one site ([`DigestAlgorithm::as_str`]),
+/// inverted at one site ([`DigestAlgorithm::parse`]), and every parse
+/// surface — [`std::str::FromStr`], [`TryFrom<&str>`],
+/// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`],
+/// [`TryFrom<Vec<u8>>`], [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`],
+/// [`TryFrom<Rc<str>>`], this [`TryFrom<Box<[u8]>>`], the
+/// [`ContentDigest::parse`] grammar oracle's algorithm arm — reads
+/// through it.
+impl TryFrom<Box<[u8]>> for DigestAlgorithm {
+    type Error = anyhow::Error;
+
+    fn try_from(boxed: Box<[u8]>) -> Result<Self, Self::Error> {
+        <Self as TryFrom<Vec<u8>>>::try_from(Vec::<u8>::from(boxed))
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8117,6 +8234,145 @@ mod tests {
             assert_eq!(
                 via_rc, via_arc,
                 "TryFrom<Rc<str>> and TryFrom<Arc<str>> must agree on rejection at {bad:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Box<[u8]>> for DigestAlgorithm`] impl round-trips
+    /// every canonical label emitted by [`DigestAlgorithm::as_str`]
+    /// through a shrunk-owned [`Box<[u8]>`] receiver and agrees with
+    /// [`std::str::FromStr`] AND the sibling [`TryFrom<Vec<u8>>`] peer
+    /// byte-for-byte at every [`DigestAlgorithm::ALL`] variant. Pins the
+    /// delegate-through-[`TryFrom<Vec<u8>>`] discipline at the shrunk-
+    /// owned byte-slice frontier: a regression that drifted the
+    /// [`TryFrom<Box<[u8]>>`] impl body (routing through a divergent
+    /// oracle, cloning the boxed slice into a fresh [`Vec<u8>`] and
+    /// re-parsing through a case-folded branch, admitting an empty
+    /// label through a short-circuit, coercing a UTF-8-invalid tail
+    /// through a lossy decode instead of the strict
+    /// [`String::from_utf8`] gate) fails here rather than at every
+    /// downstream [`TryFrom<Box<[u8]>>`] call site. Also pins the
+    /// cross-agreement with the sibling [`TryFrom<Vec<u8>>`] peer so a
+    /// downstream consumer that receives its byte-slice label at
+    /// either the growth-headered [`Vec<u8>`] frontier or the
+    /// shrunk-headered [`Box<[u8]>`] frontier (a serde container that
+    /// opts into `#[serde(try_from = "Box<[u8]>")]` on a byte-frontier
+    /// wrapper field, a validated-builder frontier pinned at the
+    /// boxed-slice intake) recovers the exact canonical variant the
+    /// paired sibling peer recovers — no per-peer variant drift across
+    /// the owned-byte-slice receiver frontier.
+    #[test]
+    fn test_digest_algorithm_try_from_box_bytes_agrees_with_from_str() {
+        for algo in DigestAlgorithm::ALL {
+            let label = algo.as_str();
+
+            let boxed: Box<[u8]> = Box::from(label.as_bytes());
+            let via_box = <DigestAlgorithm as std::convert::TryFrom<Box<[u8]>>>::try_from(boxed)
+                .expect("canonical label shrunk-owned bytes must parse through TryFrom<Box<[u8]>>");
+            assert_eq!(
+                via_box, algo,
+                "TryFrom<Box<[u8]>> must round-trip through as_str at {algo:?}",
+            );
+
+            let via_from_str = label
+                .parse::<DigestAlgorithm>()
+                .expect("canonical label must parse through FromStr");
+            assert_eq!(
+                via_box, via_from_str,
+                "TryFrom<Box<[u8]>> and FromStr must agree at {algo:?}",
+            );
+
+            let via_vec = <DigestAlgorithm as std::convert::TryFrom<Vec<u8>>>::try_from(
+                label.as_bytes().to_vec(),
+            )
+            .expect("canonical label owned bytes must parse through TryFrom<Vec<u8>>");
+            assert_eq!(
+                via_box, via_vec,
+                "TryFrom<Box<[u8]>> and TryFrom<Vec<u8>> must agree at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Box<[u8]>> for DigestAlgorithm`] identity carries
+    /// through a generic `impl TryFrom<Box<[u8]>>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(boxed: Box<[u8]>) -> T where T: TryFrom<Box<[u8]>>,
+    /// T::Error: Debug` — the shape of an actual downstream consumer
+    /// (validated-input newtype builder whose canonical intake contract
+    /// is pinned as [`Box<[u8]>`] to shed the growth-header word off
+    /// the intake before the parse pass, serde `try_from = "Box<[u8]>"`
+    /// wrapper on a shrunk-owned byte-frontier label field, generic
+    /// try-conversion helper that opts into the shrunk-owned byte-slice
+    /// frontier at the receiver-shape layer) — recovers the canonical
+    /// variant from the shrunk-owned canonical lowercase-ASCII label
+    /// bytes at every variant. The structural witness that a
+    /// [`DigestAlgorithm`] is genuinely usable at
+    /// `impl TryFrom<Box<[u8]>>` call sites — a regression that drifted
+    /// the [`TryFrom<Box<[u8]>>`] impl signature (accepting only
+    /// borrowed byte slices at some coercion site, returning a
+    /// different variant than the sibling peers would) fails here at
+    /// compile time or at the assertion instead of at every downstream
+    /// generic call site.
+    #[test]
+    fn test_digest_algorithm_try_from_box_bytes_carries_through_generic_consumer() {
+        fn parse<T>(boxed: Box<[u8]>) -> T
+        where
+            T: std::convert::TryFrom<Box<[u8]>>,
+            <T as std::convert::TryFrom<Box<[u8]>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<Box<[u8]>>>::try_from(boxed).expect(
+                "canonical label shrunk-owned bytes must parse through generic TryFrom<Box<[u8]>>",
+            )
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(
+                parse::<DigestAlgorithm>(Box::<[u8]>::from(algo.as_str().as_bytes())),
+                algo,
+                "generic TryFrom<Box<[u8]>> consumer must recover canonical variant at {algo:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Box<[u8]>> for DigestAlgorithm`] rejects UTF-8-valid
+    /// but non-canonical input with the same strictness the sibling
+    /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+    /// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`],
+    /// [`TryFrom<Vec<u8>>`], [`TryFrom<Box<str>>`],
+    /// [`TryFrom<Arc<str>>`], and [`TryFrom<Rc<str>>`] peers enforce —
+    /// empty input, uppercase, hyphenated, unknown labels, and edge-
+    /// whitespace variants all reject. Pins the strict-rejection
+    /// contract at the by-value shrunk-owned byte-slice frontier
+    /// try-conversion surface so a downstream consumer bound by
+    /// [`TryFrom<Box<[u8]>>`] (a serde `try_from = "Box<[u8]>"`
+    /// container on a shrunk-owned byte-frontier field, a validated-
+    /// builder frontier pinned at the boxed-slice intake) inherits the
+    /// same canonical-only grammar the direct
+    /// `.parse::<DigestAlgorithm>()` call sites already read. Also pins
+    /// the delegate-through-[`TryFrom<Vec<u8>>`] discipline: rejection
+    /// at [`TryFrom<Box<[u8]>>`] tracks rejection at
+    /// [`TryFrom<Vec<u8>>`] byte-for-byte at every reject-set element,
+    /// so a future permissive-parse regression at the underlying
+    /// [`FromStr`] impl lights up here rather than drifting silently
+    /// through the shrunk-owned byte-slice frontier try-conversion
+    /// surface.
+    #[test]
+    fn test_digest_algorithm_try_from_box_bytes_rejects_non_canonical_input() {
+        for bad in ["SHA256", "sha-256", "md5", "", "sha256 ", " sha256"] {
+            let boxed: Box<[u8]> = Box::from(bad.as_bytes());
+            let via_box =
+                <DigestAlgorithm as std::convert::TryFrom<Box<[u8]>>>::try_from(boxed).ok();
+            let via_vec = <DigestAlgorithm as std::convert::TryFrom<Vec<u8>>>::try_from(
+                bad.as_bytes().to_vec(),
+            )
+            .ok();
+            assert!(
+                via_box.is_none(),
+                "TryFrom<Box<[u8]>> must reject non-canonical UTF-8-valid input {bad:?}",
+            );
+            assert_eq!(
+                via_box, via_vec,
+                "TryFrom<Box<[u8]>> and TryFrom<Vec<u8>> must agree on rejection at {bad:?}",
             );
         }
     }
