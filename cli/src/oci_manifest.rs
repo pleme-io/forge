@@ -2894,6 +2894,122 @@ impl From<DigestAlgorithm> for std::rc::Rc<[u8]> {
     }
 }
 
+/// [`From<DigestAlgorithm>`] for [`std::borrow::Cow<'static, str>`] routes
+/// through [`DigestAlgorithm::as_str`] into [`std::borrow::Cow::Borrowed`]
+/// so a downstream consumer bound by `impl Into<Cow<'static, str>>` — a
+/// serde container that opts into `#[serde(from = "Cow<'static, str>")]`
+/// at a borrowed-or-owned label frontier, a `clap`-derived subcommand
+/// argument whose default value is typed as [`std::borrow::Cow<'static, str>`],
+/// a `tracing::Span` attribute slot that formats a
+/// [`std::borrow::Cow<'static, str>`] through
+/// [`std::fmt::Display`], a config-loader field whose value may be
+/// injected as a compile-time literal (borrowed) or read from disk
+/// (owned) and typed as [`std::borrow::Cow<'static, str>`] — reads the
+/// canonical lowercase label (`"sha256"`, `"sha512"`, `"blake3"`)
+/// directly from a [`DigestAlgorithm`] value as a
+/// [`std::borrow::Cow::Borrowed`] carrying the same `&'static str` the
+/// [`DigestAlgorithm::as_str`] oracle returns, with no per-consumer
+/// `Cow::Borrowed(algo.as_str())` bridge, and no
+/// [`str::to_owned`]-then-[`std::borrow::Cow::Owned`] hand-roll paying a
+/// redundant [`String`] allocation the borrowed arm can serve out of the
+/// static rodata segment for free.
+///
+/// The borrowed/owned-frontier emit peer of the {borrowed static
+/// [`&'static str`] emit peer [`From<DigestAlgorithm> for &'static str`]
+/// (line 1908), owned [`String`] emit peer
+/// [`From<DigestAlgorithm> for String`] (line 2110), shrunk-owned
+/// [`Box<str>`] emit peer [`From<DigestAlgorithm> for Box<str>`]
+/// (line 2339), cross-thread shared-owned [`std::sync::Arc<str>`] emit
+/// peer [`From<DigestAlgorithm> for std::sync::Arc<str>`] (line 2548),
+/// thread-local shared-owned [`std::rc::Rc<str>`] emit peer
+/// [`From<DigestAlgorithm> for std::rc::Rc<str>`] (line 2773)} UTF-8
+/// emit-peer set: this [`std::borrow::Cow<'static, str>`] emit peer is
+/// the only UTF-8 emit surface that pays zero allocations at the emit
+/// call — every other UTF-8 emit peer copies the canonical label into a
+/// freshly-allocated owned buffer (heap, refcount-headered, or
+/// shrunk-owned), while this peer projects the `&'static str` returned
+/// by [`DigestAlgorithm::as_str`] straight into the borrowed arm of
+/// [`std::borrow::Cow`] and hands it out of the static rodata segment
+/// at no runtime cost. Downstream consumers that thread a
+/// [`std::borrow::Cow<'static, str>`] and only allocate when they
+/// mutate — the `Cow` sharing-and-CoW discipline — inherit the
+/// zero-alloc emit path all the way from the [`DigestAlgorithm`]
+/// primitive through to the first mutation site (if any).
+///
+/// The emit-side sibling of the borrowed-or-owned frontier parse peer
+/// [`TryFrom<Cow<'_, str>> for DigestAlgorithm`] (line 772): where the
+/// parse peer routes an inbound borrowed-or-owned label through
+/// [`std::borrow::Cow::as_ref`] into the shared [`std::str::FromStr`]
+/// grammar oracle (accepting both [`std::borrow::Cow::Borrowed`] and
+/// [`std::borrow::Cow::Owned`] arms at one type-level surface), this
+/// emit peer routes an outbound [`DigestAlgorithm`] variant through
+/// [`DigestAlgorithm::as_str`] into a
+/// [`std::borrow::Cow::Borrowed`]-carrying [`std::borrow::Cow<'static,
+/// str>`] — the same one-oracle discipline projected onto the emit
+/// direction, closing the {parse, emit} pair at the borrowed-or-owned
+/// UTF-8 frontier.
+///
+/// The impl body picks [`std::borrow::Cow::Borrowed`] applied directly
+/// to the `&'static str` returned by [`DigestAlgorithm::as_str`] over
+/// [`std::borrow::Cow::Owned`] carrying a [`String`]: both variants
+/// project the same canonical label bytes, but the
+/// [`std::borrow::Cow::Borrowed`] arm serves them out of the static
+/// rodata segment at zero allocations while the
+/// [`std::borrow::Cow::Owned`] arm would pay a redundant [`String`]
+/// allocation the borrowed arm renders unnecessary. Downstream
+/// consumers that only need to read the label — the vast majority of
+/// [`std::borrow::Cow<'static, str>`] use sites — inherit the zero-alloc
+/// path; consumers that must mutate get a lazy
+/// [`std::borrow::Cow::to_mut`] copy at the mutation site, not at the
+/// emit site.
+///
+/// A future variant insertion (a `sha384` arm the OCI distribution spec
+/// might normatively adopt, a per-attestation-frontier arm forge might
+/// land) updates the [`DigestAlgorithm::as_str`] match body alone and
+/// every consumer accepting `impl Into<Cow<'static, str>>` inherits the
+/// new canonical borrowed-or-owned label automatically with no
+/// downstream retyping.
+///
+/// The identity `Cow::<'static, str>::from(algo) ==
+/// Cow::Borrowed(algo.as_str())` at every [`DigestAlgorithm::ALL`]
+/// variant is pinned by
+/// [`tests::test_digest_algorithm_from_into_cow_str_agrees_with_as_str`];
+/// the identity carrying through a generic
+/// `impl Into<Cow<'static, str>>` consumer at every variant is pinned
+/// by
+/// [`tests::test_digest_algorithm_into_cow_str_carries_through_generic_consumer`];
+/// the zero-alloc [`std::borrow::Cow::Borrowed`] discriminant at every
+/// variant is pinned by
+/// [`tests::test_digest_algorithm_into_cow_str_is_borrowed_zero_alloc`];
+/// the round-trip through the sibling parse peer
+/// [`TryFrom<Cow<'_, str>>`] recovering the canonical variant from the
+/// emitted [`std::borrow::Cow<'static, str>`] at every variant is
+/// pinned by
+/// [`tests::test_digest_algorithm_into_cow_str_round_trips_through_try_from`].
+///
+/// THEORY.md §III.1 typescape: the by-value borrowed-or-owned frontier
+/// UTF-8 emit surface is a typed-primitive site on [`DigestAlgorithm`]
+/// itself (one `From<DigestAlgorithm> for Cow<'static, str>` impl
+/// routing through [`DigestAlgorithm::as_str`] into
+/// [`std::borrow::Cow::Borrowed`]), not a per-consumer
+/// `Cow::Borrowed(algo.as_str())` restatement at every downstream site
+/// that accepts `impl Into<Cow<'static, str>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// ([`DigestAlgorithm::as_str`]) and every emit surface — the inherent
+/// [`as_str`] accessor, the [`std::fmt::Display`] format machinery, the
+/// [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view peers, the
+/// [`From<DigestAlgorithm>`] for `&'static str` / `&'static [u8]` /
+/// [`String`] / [`Vec<u8>`] / [`Box<str>`] / [`Box<[u8]>`] /
+/// [`std::sync::Arc<str>`] / [`std::sync::Arc<[u8]>`] /
+/// [`std::rc::Rc<str>`] / [`std::rc::Rc<[u8]>`] by-value emit peers,
+/// this [`From<DigestAlgorithm>`] for [`std::borrow::Cow<'static, str>`]
+/// by-value borrowed-or-owned UTF-8 emit peer — reads through it.
+impl From<DigestAlgorithm> for std::borrow::Cow<'static, str> {
+    fn from(algorithm: DigestAlgorithm) -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(algorithm.as_str())
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11664,6 +11780,164 @@ mod tests {
         }
     }
 
+    /// `Cow::<'static, str>::from(algo)` equals `Cow::Borrowed(algo.as_str())`
+    /// at every [`DigestAlgorithm::ALL`] variant. Pins the by-value
+    /// borrowed-or-owned frontier UTF-8 emit surface to the
+    /// canonical-label oracle: the [`From<DigestAlgorithm>`] impl on
+    /// [`std::borrow::Cow<'static, str>`] must project through
+    /// [`DigestAlgorithm::as_str`] into [`std::borrow::Cow::Borrowed`]
+    /// rather than restate the variant → label match at the emit site,
+    /// route through the [`std::fmt::Display`] format machinery, or wrap
+    /// a [`str::to_owned`] result in [`std::borrow::Cow::Owned`] that
+    /// would still agree byte-for-byte but pay a redundant [`String`]
+    /// allocation the borrowed arm can serve out of the static rodata
+    /// segment for free. A drifted emit body — a byte-swapped label, a
+    /// mangled encoding, a variant-discriminant cast lifted into the
+    /// [`std::borrow::Cow`] payload — fails here at ONE named site
+    /// instead of at every downstream `impl Into<Cow<'static, str>>`
+    /// consumer (a serde container that opts into
+    /// `#[serde(from = "Cow<'static, str>")]`, a `clap`-derived
+    /// subcommand argument whose default value is typed as
+    /// [`std::borrow::Cow<'static, str>`]).
+    #[test]
+    fn test_digest_algorithm_from_into_cow_str_agrees_with_as_str() {
+        for algo in DigestAlgorithm::ALL {
+            let cow: std::borrow::Cow<'static, str> = std::borrow::Cow::<'static, str>::from(algo);
+            assert_eq!(
+                cow.as_ref(),
+                algo.as_str(),
+                "From<DigestAlgorithm> for Cow<'static, str> must project through as_str() at {algo:?}",
+            );
+            assert_eq!(
+                &*cow,
+                algo.as_str(),
+                "Cow<'static, str> deref must equal as_str() at {algo:?}",
+            );
+            assert_eq!(
+                cow.len(),
+                algo.as_str().len(),
+                "Cow<'static, str> length must equal the canonical label length at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`From<DigestAlgorithm>`] for [`std::borrow::Cow<'static, str>`]
+    /// identity carries through a generic
+    /// `impl Into<Cow<'static, str>>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn take<T: Into<Cow<'static, str>>>(t: T) -> Cow<'static, str> { t.into() }`
+    /// — the shape of an actual downstream consumer (a serde container
+    /// that opts into `#[serde(from = "Cow<'static, str>")]`, a
+    /// `clap`-derived subcommand argument whose default value is typed
+    /// as [`std::borrow::Cow<'static, str>`], a `tracing::Span`
+    /// attribute slot that formats a [`std::borrow::Cow<'static, str>`]
+    /// through [`std::fmt::Display`], a config-loader field whose value
+    /// may be injected as a compile-time literal or read from disk and
+    /// typed as [`std::borrow::Cow<'static, str>`]) — reads the
+    /// canonical lowercase label directly from a [`DigestAlgorithm`]
+    /// value as a [`std::borrow::Cow<'static, str>`]. The structural
+    /// witness that a [`DigestAlgorithm`] is genuinely usable at
+    /// `impl Into<Cow<'static, str>>` call sites — a regression that
+    /// drifted the [`From`] impl signature (returning
+    /// [`std::borrow::Cow<'_, str>`] with a non-`'static` lifetime,
+    /// returning [`std::borrow::Cow<'static, [u8]>`] with a byte-slice
+    /// payload, requiring `&DigestAlgorithm` and losing the by-value
+    /// semantics) fails here at compile time instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_digest_algorithm_into_cow_str_carries_through_generic_consumer() {
+        fn take<T: Into<std::borrow::Cow<'static, str>>>(t: T) -> std::borrow::Cow<'static, str> {
+            t.into()
+        }
+        for algo in DigestAlgorithm::ALL {
+            let via_generic: std::borrow::Cow<'static, str> = take(algo);
+            assert_eq!(
+                &*via_generic,
+                algo.as_str(),
+                "Into<Cow<'static, str>> generic consumer must carry the canonical label at {algo:?}",
+            );
+        }
+    }
+
+    /// The emitted [`std::borrow::Cow<'static, str>`] is the
+    /// [`std::borrow::Cow::Borrowed`] discriminant at every
+    /// [`DigestAlgorithm::ALL`] variant, so the emit path pays zero
+    /// allocations and hands the canonical label out of the static
+    /// rodata segment. Pins the zero-alloc discipline that distinguishes
+    /// this emit peer from every other UTF-8 emit peer in the sibling
+    /// set — [`String`], [`Box<str>`], [`std::sync::Arc<str>`],
+    /// [`std::rc::Rc<str>`] all copy the label into a fresh owned
+    /// buffer; this peer projects `&'static str` straight into the
+    /// borrowed arm. A regression that drifted the impl body toward
+    /// [`std::borrow::Cow::Owned`] carrying a [`String`] — a
+    /// `str::to_owned`-then-`Cow::Owned` hand-roll, a
+    /// `String::from(algo.as_str())` composed with `Cow::Owned` — fails
+    /// here at ONE named site instead of silently regressing every
+    /// downstream `Cow<'static, str>` consumer's expected zero-alloc
+    /// emit path. Also witnesses that a subsequent
+    /// [`std::borrow::Cow::to_mut`]-driven copy-on-write mutation is
+    /// deferred to the mutation site (not paid at the emit site) at
+    /// every variant.
+    #[test]
+    fn test_digest_algorithm_into_cow_str_is_borrowed_zero_alloc() {
+        for algo in DigestAlgorithm::ALL {
+            let cow: std::borrow::Cow<'static, str> = std::borrow::Cow::<'static, str>::from(algo);
+            assert!(
+                matches!(cow, std::borrow::Cow::Borrowed(_)),
+                "From<DigestAlgorithm> for Cow<'static, str> must emit Cow::Borrowed (zero-alloc) at {algo:?}, got Cow::Owned",
+            );
+            if let std::borrow::Cow::Borrowed(borrowed) = cow {
+                assert!(
+                    std::ptr::eq(borrowed.as_ptr(), algo.as_str().as_ptr()),
+                    "Cow::Borrowed must carry the same &'static str pointer as as_str() at {algo:?}",
+                );
+                assert_eq!(
+                    borrowed.len(),
+                    algo.as_str().len(),
+                    "Cow::Borrowed length must equal the canonical label length at {algo:?}",
+                );
+            }
+        }
+    }
+
+    /// Feeding the emitted [`std::borrow::Cow<'static, str>`] back
+    /// through [`TryFrom<Cow<'_, str>>`] recovers the original variant
+    /// at every [`DigestAlgorithm::ALL`] variant. Ties the by-value
+    /// borrowed-or-owned UTF-8 emit surface to its parse-side sibling
+    /// [`TryFrom<Cow<'_, str>> for DigestAlgorithm`] (line 772) at the
+    /// same one-oracle discipline: a regression that drifted the emit
+    /// impl body toward non-canonical bytes (a byte-swapped label, a
+    /// mangled encoding, a variant-discriminant cast lifted into the
+    /// [`std::borrow::Cow`] payload) OR drifted the parse impl body
+    /// away from the shared [`std::borrow::Cow::as_ref`] +
+    /// [`std::str::FromStr`] composition fails here at ONE named site
+    /// instead of leaking to every downstream borrowed-or-owned UTF-8
+    /// round-trip consumer (a serde container that opts into
+    /// `#[serde(from = "Cow<'static, str>", into = "Cow<'static, str>")]`
+    /// at both frontiers, a validated-input newtype whose canonical
+    /// parse AND re-emit contracts are both stated as
+    /// [`std::borrow::Cow<'static, str>`]).
+    #[test]
+    fn test_digest_algorithm_into_cow_str_round_trips_through_try_from() {
+        for algo in DigestAlgorithm::ALL {
+            let emitted: std::borrow::Cow<'static, str> =
+                std::borrow::Cow::<'static, str>::from(algo);
+            let recovered =
+                <DigestAlgorithm as std::convert::TryFrom<std::borrow::Cow<'_, str>>>::try_from(
+                    emitted.clone(),
+                )
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "emitted Cow<'static, str> {emitted:?} for {algo:?} must parse back through TryFrom<Cow<'_, str>> (got {err})",
+                    )
+                });
+            assert_eq!(
+                recovered, algo,
+                "round-trip through TryFrom<Cow<'_, str>> must recover {algo:?} from emitted {emitted:?}",
+            );
+        }
+    }
+
     /// `str::parse::<ContentDigest>()` succeeds on a well-formed sha256
     /// digest and yields the same validated value as the inherent
     /// [`ContentDigest::parse`] oracle. Pins the derived
@@ -18727,11 +19001,8 @@ mod tests {
 
         assert!(set.contains(raw1.as_str()));
         assert!(set.contains(raw2.as_str()));
-        assert!(
-            !set.contains(
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-            )
-        );
+        assert!(!set
+            .contains("sha256:0000000000000000000000000000000000000000000000000000000000000000"));
         // Whitespace-drift variant is a byte-level miss through the
         // canonical trimmed key, matching the HashMap probe surface.
         let padded = format!(" sha256:{D1}\n");
