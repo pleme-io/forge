@@ -2443,6 +2443,114 @@ impl From<DigestAlgorithm> for Box<[u8]> {
     }
 }
 
+/// [`From<DigestAlgorithm>`] for [`std::sync::Arc<str>`] routes through
+/// [`DigestAlgorithm::as_str`] via [`std::sync::Arc::<str>::from`] so a
+/// downstream consumer bound by `impl Into<Arc<str>>` — a
+/// [`tracing::Span`] attribute slot keyed on a shared-owned label that
+/// crosses `.instrument(span)` boundaries, a [`std::sync::Arc<Manifest>`]
+/// field whose algorithm slot is an [`std::sync::Arc<str>`] chosen for
+/// cheap [`std::sync::Arc::clone`] across worker threads, a
+/// [`std::collections::HashMap<Arc<str>, _>`] cross-thread registry cache
+/// keyed on the canonical algorithm label, a serde container that opts
+/// into `#[serde(from = "Arc<str>")]` at the cross-thread shared-owned
+/// frontier, a [`tokio::sync::watch::Sender<Arc<str>>`] channel whose
+/// payload is the canonical algorithm label shared across await points,
+/// a per-request context struct threaded through an `async` task tree
+/// whose algorithm-label field is an [`std::sync::Arc<str>`] to avoid
+/// per-hop allocation — reads the canonical lowercase label
+/// (`"sha256"`, `"sha512"`, `"blake3"`) directly from a
+/// [`DigestAlgorithm`] value as a cross-thread shared-owned
+/// [`std::sync::Arc<str>`] with no per-consumer
+/// `Arc::<str>::from(algo.as_str())` bridge, no
+/// [`std::sync::Arc::<str>::from`]-then-round-trip through the borrowed-
+/// view peer, and no [`String::to_owned`]-then-[`std::sync::Arc::from`]
+/// hand-roll paying a redundant intermediate [`String`] allocation.
+///
+/// The cross-thread shared-owned UTF-8 emit peer of the by-value
+/// shrunk-owned UTF-8 emit peer [`From<DigestAlgorithm> for Box<str>`]
+/// (line 2339): both surfaces project the same canonical-label bytes
+/// off the shared [`DigestAlgorithm::as_str`] oracle, differing only on
+/// the owner-shape axis — [`Box<str>`] for immutable heap-owned label
+/// slots that trade the [`String`] growth-header word for a two-word
+/// slice pointer, this [`std::sync::Arc<str>`] for cross-thread
+/// shared-owned label slots that trade the shrunk-owned Box's exclusive
+/// ownership for atomic reference-counted sharing across threads via
+/// [`std::sync::Arc::clone`] at a two-word fat pointer plus an atomic
+/// refcount header. Both route through the same
+/// [`DigestAlgorithm::as_str`] canonical-label oracle: the [`Box<str>`]
+/// peer chains through [`str::to_owned`] + [`String::into_boxed_str`],
+/// this [`std::sync::Arc<str>`] peer routes through
+/// [`std::sync::Arc::<str>::from`] on a `&str` borrow which allocates
+/// the atomic-refcount-headered payload at exact length in one heap
+/// call — the two agree byte-for-byte on the canonical label by
+/// construction, and a future variant insertion at
+/// [`DigestAlgorithm::as_str`] propagates to the cross-thread
+/// shared-owned UTF-8 emit surface at zero per-consumer cost.
+///
+/// The emit-side sibling of the shared-owned UTF-8 parse peer
+/// [`TryFrom<Arc<str>> for DigestAlgorithm`] at line 1188: where the
+/// parse peer routes an inbound cross-thread shared-owned label through
+/// [`std::sync::Arc::<str>::as_ref`] into the shared canonical-label
+/// oracle, this emit peer routes an outbound
+/// [`DigestAlgorithm`] variant through [`DigestAlgorithm::as_str`] into
+/// a cross-thread shared-owned label buffer — the same one-oracle
+/// discipline projected onto the emit direction, closing the
+/// {parse, emit} pair at the cross-thread shared-owned UTF-8 frontier.
+///
+/// The impl body picks [`std::sync::Arc::<str>::from`] applied directly
+/// to the `&'static str` returned by [`DigestAlgorithm::as_str`] over
+/// [`str::to_owned`] + [`std::sync::Arc::from`]-on-`String`: the two
+/// paths agree byte-for-byte on the emitted [`std::sync::Arc<str>`]
+/// (both allocate a fresh atomic-refcount-headered heap buffer at exact
+/// length), but the direct [`std::sync::Arc::<str>::from`] path skips
+/// the intermediate [`String`] allocation and its growth-header slack,
+/// paying one heap call at exact-length capacity instead of two. The
+/// canonical-label oracle is named at the same
+/// [`DigestAlgorithm::as_str`] site the sibling emit peers read
+/// through, so a future canonicalising refinement (a normalising
+/// projection at the [`as_str`] frontier, a per-variant label change)
+/// propagates by construction.
+///
+/// A future variant insertion (a `sha384` arm the OCI distribution
+/// spec might normatively adopt, a per-attestation-frontier arm forge
+/// might land) updates the [`DigestAlgorithm::as_str`] match body
+/// alone and every consumer accepting `impl Into<Arc<str>>` inherits
+/// the new canonical cross-thread shared-owned label bytes
+/// automatically with no downstream retyping.
+///
+/// The identity `Arc::<str>::from(algo).as_ref() == algo.as_str()`
+/// at every [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_from_into_arc_str_agrees_with_as_str`];
+/// the identity carrying through a generic `impl Into<Arc<str>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_arc_str_carries_through_generic_consumer`];
+/// the round-trip through the sibling parse peer
+/// [`TryFrom<Arc<str>>`] recovering the canonical variant from the
+/// emitted [`std::sync::Arc<str>`] at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_arc_str_round_trips_through_try_from`].
+///
+/// THEORY.md §III.1 typescape: the by-value cross-thread shared-owned
+/// UTF-8 emit surface is a typed-primitive site on [`DigestAlgorithm`]
+/// itself (one `From<DigestAlgorithm> for Arc<str>` impl routing
+/// through [`DigestAlgorithm::as_str`] via
+/// [`std::sync::Arc::<str>::from`]), not a per-consumer
+/// `Arc::<str>::from(algo.as_str())` restatement at every downstream
+/// site that accepts `impl Into<Arc<str>>`.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`DigestAlgorithm::as_str`]) and every emit surface — the
+/// inherent [`as_str`] accessor, the [`std::fmt::Display`] format
+/// machinery, the [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view
+/// peers, the [`From<DigestAlgorithm>`] for `&'static str` /
+/// `&'static [u8]` / [`String`] / [`Vec<u8>`] / [`Box<str>`] /
+/// [`Box<[u8]>`] by-value emit peers, this
+/// [`From<DigestAlgorithm>`] for [`std::sync::Arc<str>`] by-value
+/// cross-thread shared-owned UTF-8 emit peer — reads through it.
+impl From<DigestAlgorithm> for std::sync::Arc<str> {
+    fn from(algorithm: DigestAlgorithm) -> std::sync::Arc<str> {
+        std::sync::Arc::<str>::from(algorithm.as_str())
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10697,6 +10805,135 @@ mod tests {
             assert_eq!(
                 recovered, algo,
                 "round-trip through TryFrom<Box<[u8]>> must recover {algo:?} from emitted {emitted:?}",
+            );
+        }
+    }
+
+    /// `Arc::<str>::from(algo).as_ref()` equals `algo.as_str()` at every
+    /// [`DigestAlgorithm::ALL`] variant. Pins the by-value cross-thread
+    /// shared-owned UTF-8 emit surface to the canonical-label oracle: the
+    /// [`From<DigestAlgorithm>`] impl on [`std::sync::Arc<str>`] must
+    /// project through [`DigestAlgorithm::as_str`] via
+    /// [`std::sync::Arc::<str>::from`] rather than restate the variant →
+    /// label match at the emit site, route through the
+    /// [`std::fmt::Display`] format machinery, or chain through a
+    /// [`str::to_owned`] + [`std::sync::Arc::from`]-on-[`String`] bridge
+    /// that would still agree byte-for-byte but pay a redundant
+    /// intermediate [`String`] allocation. A drifted emit body — a
+    /// byte-swapped label, a mangled encoding, a variant-discriminant
+    /// cast lifted into the atomic-refcount-headered payload — fails
+    /// here at ONE named site instead of at every downstream
+    /// `impl Into<Arc<str>>` consumer (a
+    /// [`std::collections::HashMap<Arc<str>, _>`] cross-thread registry
+    /// cache, a [`tracing::Span`] attribute slot crossing await points,
+    /// a serde container that opts into `#[serde(from = "Arc<str>")]`).
+    /// Together with
+    /// [`test_digest_algorithm_from_into_box_str_agrees_with_as_str`]
+    /// this pins that the same canonical-label oracle drives every
+    /// by-value UTF-8 emit surface across the full {borrowed, owned,
+    /// shrunk-owned, cross-thread shared-owned} ownership axis at the
+    /// UTF-8 representation crossing.
+    #[test]
+    fn test_digest_algorithm_from_into_arc_str_agrees_with_as_str() {
+        for algo in DigestAlgorithm::ALL {
+            let shared: std::sync::Arc<str> = std::sync::Arc::<str>::from(algo);
+            assert_eq!(
+                shared.as_ref(),
+                algo.as_str(),
+                "From<DigestAlgorithm> for Arc<str> must project through as_str() at {algo:?}",
+            );
+            assert_eq!(
+                &*shared,
+                algo.as_str(),
+                "Arc<str> deref must equal as_str() at {algo:?}",
+            );
+            assert_eq!(
+                shared.len(),
+                algo.as_str().len(),
+                "Arc<str> length must equal the canonical label length at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`From<DigestAlgorithm>`] for [`std::sync::Arc<str>`] identity
+    /// carries through a generic `impl Into<Arc<str>>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn take<T: Into<Arc<str>>>(t: T) -> Arc<str> { t.into() }` —
+    /// the shape of an actual downstream consumer (a
+    /// [`std::collections::HashMap<Arc<str>, _>`] cross-thread registry
+    /// cache keyed on the canonical algorithm label, a
+    /// [`tracing::Span`] attribute slot whose payload is shared across
+    /// `.instrument(span)` await boundaries, a
+    /// [`tokio::sync::watch::Sender<Arc<str>>`] channel over the
+    /// algorithm label, a serde container that opts into
+    /// `#[serde(from = "Arc<str>")]`, a per-request async context
+    /// whose algorithm-label field is an [`std::sync::Arc<str>`] for
+    /// cheap [`std::sync::Arc::clone`] across the task tree) — reads
+    /// the canonical lowercase label directly from a
+    /// [`DigestAlgorithm`] value as a cross-thread shared-owned
+    /// [`std::sync::Arc<str>`]. The structural witness that a
+    /// [`DigestAlgorithm`] is genuinely usable at
+    /// `impl Into<Arc<str>>` call sites — a regression that drifted
+    /// the [`From`] impl signature (returning [`Box<str>`] instead of
+    /// [`std::sync::Arc<str>`], returning
+    /// [`std::sync::Arc<String>`] with an intermediate [`String`]
+    /// allocation, requiring `&DigestAlgorithm` and losing the by-value
+    /// semantics) fails here at compile time instead of at every
+    /// downstream generic call site.
+    #[test]
+    fn test_digest_algorithm_into_arc_str_carries_through_generic_consumer() {
+        fn take<T: Into<std::sync::Arc<str>>>(t: T) -> std::sync::Arc<str> {
+            t.into()
+        }
+        for algo in DigestAlgorithm::ALL {
+            let via_generic: std::sync::Arc<str> = take(algo);
+            assert_eq!(
+                &*via_generic,
+                algo.as_str(),
+                "Into<Arc<str>> generic consumer must carry the canonical label at {algo:?}",
+            );
+        }
+    }
+
+    /// Feeding the emitted [`std::sync::Arc<str>`] back through
+    /// [`TryFrom<Arc<str>>`] recovers the original variant at every
+    /// [`DigestAlgorithm::ALL`] variant. Ties the by-value cross-thread
+    /// shared-owned UTF-8 emit surface to its parse-side sibling
+    /// [`TryFrom<Arc<str>> for DigestAlgorithm`] (line 1188) at the
+    /// same one-oracle discipline: a regression that drifted the emit
+    /// impl body toward non-canonical bytes (a byte-swapped label, a
+    /// mangled encoding, a numeric-discriminant cast lifted into the
+    /// atomic-refcount payload) OR drifted the parse impl body away
+    /// from the shared [`std::sync::Arc::<str>::as_ref`] +
+    /// [`DigestAlgorithm::parse`] composition fails here at ONE named
+    /// site instead of leaking to every downstream cross-thread
+    /// shared-owned round-trip consumer (a
+    /// [`std::collections::HashMap<Arc<str>, _>`] cross-thread registry
+    /// key round-trip, a serde container that opts into
+    /// `#[serde(from = "Arc<str>", into = "Arc<str>")]` at both
+    /// frontiers, a validated-input newtype whose canonical parse AND
+    /// re-emit contracts are both stated as [`std::sync::Arc<str>`]).
+    /// The cross-thread shared-owned UTF-8 analogue of the shrunk-owned
+    /// UTF-8 round-trip pinned at
+    /// [`test_digest_algorithm_into_box_str_round_trips_through_try_from`]:
+    /// the same one-oracle grammar at the cross-thread shared-owned
+    /// UTF-8 emit layer instead of the shrunk-owned UTF-8 emit layer.
+    #[test]
+    fn test_digest_algorithm_into_arc_str_round_trips_through_try_from() {
+        for algo in DigestAlgorithm::ALL {
+            let emitted: std::sync::Arc<str> = std::sync::Arc::<str>::from(algo);
+            let recovered =
+                <DigestAlgorithm as std::convert::TryFrom<std::sync::Arc<str>>>::try_from(
+                    emitted.clone(),
+                )
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "emitted Arc<str> {emitted:?} for {algo:?} must parse back through TryFrom<Arc<str>> (got {err})",
+                    )
+                });
+            assert_eq!(
+                recovered, algo,
+                "round-trip through TryFrom<Arc<str>> must recover {algo:?} from emitted {emitted:?}",
             );
         }
     }
