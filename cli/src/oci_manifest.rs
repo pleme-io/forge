@@ -1911,6 +1911,89 @@ impl From<DigestAlgorithm> for &'static str {
     }
 }
 
+/// [`From<DigestAlgorithm>`] for `&'static [u8]` routes through
+/// [`DigestAlgorithm::as_str`] via [`str::as_bytes`] so a downstream
+/// consumer bound by `impl Into<&'static [u8]>` — an
+/// `http::HeaderValue::from_bytes` frontier whose contract admits a
+/// static-lifetime byte slice for the zero-copy header-value fast path,
+/// a `phf`-style static lookup table keyed by canonical algorithm
+/// bytes, a `nom` / `winnow` byte-slice parser that pins its algorithm
+/// token as a `&'static [u8]` constant, a `hmac::Mac::update` MAC
+/// accumulator fed the algorithm label bytes across an async closure
+/// boundary that needs the label to outlive the borrow, a raw-write
+/// sink writing the canonical bytes into a `&'static [u8]`-typed slot
+/// — reads the canonical lowercase label bytes (`b"sha256"`,
+/// `b"sha512"`, `b"blake3"`) directly from a [`DigestAlgorithm`] value
+/// with `'static` lifetime preserved, no per-consumer
+/// `algo.as_str().as_bytes()` bridge, no keep-the-`DigestAlgorithm`-
+/// alive receiver-borrow lifetime constraint, no intermediate
+/// [`Vec<u8>`] allocation.
+///
+/// The byte-slice peer of the [`From<DigestAlgorithm>`] for
+/// `&'static str` emit surface directly above and the by-value emit
+/// peer of the [`AsRef<[u8]>`] borrowed-view surface at line 381 —
+/// together they close the {[`AsRef<str>`], [`AsRef<[u8]>`],
+/// `From<T> for &'static str`, `From<T> for &'static [u8]`} borrowed-
+/// view + by-value emit quartet at the digest-algorithm axis against
+/// the shared [`DigestAlgorithm::as_str`] canonical-label oracle.
+/// Where [`AsRef<[u8]>`] would force the caller to keep the
+/// [`DigestAlgorithm`] value alive across the borrow (so a stashed-
+/// into-a-`&'static [u8]`-slot use case would hit an escaped-borrow
+/// lifetime error), this impl frees the caller from that constraint
+/// at zero runtime cost — the `'static` lifetime is preserved through
+/// the by-value conversion because [`DigestAlgorithm::as_str`] itself
+/// returns `&'static str` (a static-lifetime slice into the constant
+/// table) and [`str::as_bytes`] is a zero-cost transmute at the
+/// borrow-view boundary that preserves the underlying slice's
+/// lifetime.
+///
+/// Zero-cost by construction: no allocation, no copy, no branching
+/// over the variant discriminant beyond what
+/// [`DigestAlgorithm::as_str`] itself does at its match body;
+/// [`str::as_bytes`] is a compile-time-elided pointer-and-length cast
+/// with no runtime work. The canonical labels this impl surfaces are
+/// pure lowercase ASCII by construction, so a byte-slice consumer that
+/// treats the input as ASCII reads the same bytes the UTF-8 emit
+/// surface directly above emits without a per-consumer round-trip
+/// through [`std::str::from_utf8`].
+///
+/// A future variant insertion (a `sha384` arm the OCI distribution
+/// spec might normatively adopt, a per-attestation-frontier arm
+/// forge might land) updates the [`DigestAlgorithm::as_str`] match
+/// body alone and every consumer accepting `impl Into<&'static [u8]>`
+/// inherits the new canonical byte-slice label automatically with no
+/// downstream retyping.
+///
+/// The identity `<&'static [u8]>::from(algo) == algo.as_str().as_bytes()`
+/// at every [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_from_into_static_bytes_agrees_with_as_str_as_bytes`];
+/// the identity carrying through a generic `impl Into<&'static [u8]>`
+/// consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_static_bytes_carries_through_generic_consumer`];
+/// the round-trip through [`std::str::from_utf8`] recovering the
+/// canonical label at every variant is pinned by
+/// [`tests::test_digest_algorithm_into_static_bytes_round_trips_through_from_utf8`].
+///
+/// THEORY.md §III.1 typescape: the by-value static-lifetime byte-slice
+/// conversion surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one `From<DigestAlgorithm> for
+/// &'static [u8]` impl routing through [`DigestAlgorithm::as_str`]),
+/// not a per-consumer `.as_str().as_bytes()` restatement at every
+/// downstream site that accepts `impl Into<&'static [u8]>`.
+/// THEORY.md §VI.1 generation over composition: the canonical label
+/// is named at one site ([`DigestAlgorithm::as_str`]) and every emit
+/// surface — the inherent `as_str` accessor, the [`std::fmt::Display`]
+/// format machinery, the [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-
+/// view peers, the [`From<DigestAlgorithm>`] for `&'static str`
+/// by-value UTF-8 emit peer, this
+/// [`From<DigestAlgorithm>`] for `&'static [u8]` by-value byte-slice
+/// emit peer — reads through it.
+impl From<DigestAlgorithm> for &'static [u8] {
+    fn from(algorithm: DigestAlgorithm) -> &'static [u8] {
+        algorithm.as_str().as_bytes()
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9614,6 +9697,96 @@ mod tests {
             assert_eq!(
                 recovered, algo,
                 "round-trip through parse must recover {algo:?} from emitted {emitted:?}",
+            );
+        }
+    }
+
+    /// `<&'static [u8]>::from(algo)` equals `algo.as_str().as_bytes()`
+    /// at every [`DigestAlgorithm::ALL`] variant. Pins the by-value
+    /// static-lifetime byte-slice emit surface to the canonical-label
+    /// oracle: the [`From<DigestAlgorithm>`] impl on `&'static [u8]`
+    /// must project through [`DigestAlgorithm::as_str`] via
+    /// [`str::as_bytes`] rather than restate the variant → bytes match
+    /// at the emit site. Together with
+    /// [`test_digest_algorithm_from_into_static_str_agrees_with_as_str`]
+    /// this pins that the same canonical-label oracle drives every
+    /// by-value emit surface — a discriminant-byte cast, a mangled
+    /// encoding trap, or an owned-buffer allocation fails here at one
+    /// named site instead of at every downstream
+    /// `impl Into<&'static [u8]>` consumer.
+    #[test]
+    fn test_digest_algorithm_from_into_static_bytes_agrees_with_as_str_as_bytes() {
+        for algo in DigestAlgorithm::ALL {
+            let via_from: &'static [u8] = <&'static [u8]>::from(algo);
+            let via_as_str_bytes: &'static [u8] = algo.as_str().as_bytes();
+            assert_eq!(
+                via_from, via_as_str_bytes,
+                "From<DigestAlgorithm> for &'static [u8] must project through as_str().as_bytes() at {algo:?}",
+            );
+        }
+    }
+
+    /// A generic `impl Into<&'static [u8]>` consumer receives the
+    /// canonical label bytes at every [`DigestAlgorithm::ALL`] variant.
+    /// Pins the trait-generic reading of the by-value static-lifetime
+    /// byte-slice emit surface: a downstream site that takes
+    /// `fn take<T: Into<&'static [u8]>>(t: T) -> &'static [u8]` — the
+    /// shape of an actual downstream consumer (an
+    /// `http::HeaderValue::from_bytes` frontier, a `phf`-static byte-
+    /// key lookup, a `nom` / `winnow` byte-token pin, an
+    /// `hmac::Mac::update` accumulator, a `&'static [u8]`-typed sink)
+    /// — reads the canonical lowercase label bytes through the
+    /// [`Into`] blanket-impl route without a per-consumer
+    /// `.as_str().as_bytes()` bridge. The `'static` lifetime is
+    /// preserved through the generic consumer because the [`From`]
+    /// impl returns `&'static [u8]` and the [`Into`] blanket preserves
+    /// the associated type — a caller that stashes the returned slice
+    /// into a `&'static [u8]` slot has no receiver-borrow lifetime
+    /// bound to satisfy.
+    #[test]
+    fn test_digest_algorithm_into_static_bytes_carries_through_generic_consumer() {
+        fn take<T: Into<&'static [u8]>>(t: T) -> &'static [u8] {
+            t.into()
+        }
+        for algo in DigestAlgorithm::ALL {
+            let via_generic: &'static [u8] = take(algo);
+            assert_eq!(
+                via_generic,
+                algo.as_str().as_bytes(),
+                "Into<&'static [u8]> generic consumer must carry the canonical label bytes at {algo:?}",
+            );
+        }
+    }
+
+    /// The emitted `&'static [u8]` round-trips through
+    /// [`std::str::from_utf8`] back to the canonical lowercase label at
+    /// every [`DigestAlgorithm::ALL`] variant. Pins the byte-slice
+    /// emit surface to the UTF-8 frontier through the standard
+    /// library's UTF-8 validator without a per-consumer restatement of
+    /// "the canonical labels are ASCII and UTF-8-valid" at every
+    /// downstream site: a regression that drifted
+    /// `From<DigestAlgorithm> for &'static [u8]` to yield non-UTF-8
+    /// bytes (a numeric-discriminant byte cast, a byte-swapped label,
+    /// a mangled encoding) fails here at ONE named site with a
+    /// [`std::str::Utf8Error`] at the [`std::str::from_utf8`] boundary
+    /// or a label mismatch at the round-trip assertion. Together with
+    /// [`test_digest_algorithm_from_into_static_bytes_agrees_with_as_str_as_bytes`]
+    /// this closes the by-value static-lifetime byte-slice emit
+    /// surface against both the composition oracle
+    /// (`.as_str().as_bytes()`) and the UTF-8 validity oracle
+    /// ([`std::str::from_utf8`]) at every [`DigestAlgorithm::ALL`]
+    /// variant.
+    #[test]
+    fn test_digest_algorithm_into_static_bytes_round_trips_through_from_utf8() {
+        for algo in DigestAlgorithm::ALL {
+            let emitted: &'static [u8] = <&'static [u8]>::from(algo);
+            let decoded = std::str::from_utf8(emitted).unwrap_or_else(|err| {
+                panic!("emitted &'static [u8] for {algo:?} must be valid UTF-8 (got {err})",)
+            });
+            assert_eq!(
+                decoded,
+                algo.as_str(),
+                "from_utf8 round-trip must recover canonical label at {algo:?}",
             );
         }
     }
