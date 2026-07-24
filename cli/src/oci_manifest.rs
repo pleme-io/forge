@@ -790,6 +790,106 @@ impl TryFrom<&[u8]> for DigestAlgorithm {
     }
 }
 
+/// [`TryFrom<Vec<u8>>`] routes through [`String::from_utf8`] then delegates
+/// to [`<DigestAlgorithm as TryFrom<String>>::try_from`] so a downstream
+/// consumer holding an owned byte buffer at a raw-byte frontier (a consumed
+/// `reqwest::Response::bytes()` future materialised into [`Vec<u8>`], a
+/// moved [`std::fs::read`] of a cached algorithm-label file, a
+/// `serde_bytes`-decoded field on an owned schema value, a
+/// tokio-mpsc-received [`Vec<u8>`] frame that carries the algorithm token
+/// as its payload) recovers a [`DigestAlgorithm`] variant from its
+/// canonical lowercase owned-byte serialization through the same one-oracle
+/// grammar the `.parse::<DigestAlgorithm>()` string call sites already
+/// read — WITHOUT the by-reference bridge
+/// (`DigestAlgorithm::try_from(bytes.as_slice())`) that leaves the owned
+/// [`Vec<u8>`] on the caller and forces the string oracle to receive only
+/// a borrowed view.
+///
+/// Zero-copy on the happy path: [`String::from_utf8`] consumes the owned
+/// [`Vec<u8>`] and — on successful UTF-8 validation — reuses the same
+/// allocation as the returned [`String`]'s backing storage (the standard
+/// library documents this as an in-place check, no re-allocation). The
+/// resulting owned [`String`] then flows into the by-value string parse
+/// peer [`TryFrom<String> for DigestAlgorithm`] which routes through the
+/// [`FromStr`] oracle on [`String::as_str`] — one allocation, consumed at
+/// intake, carried through parse, discarded when the typed variant lands
+/// (variants are copy-cheap enums, not backing-string-holding newtypes).
+///
+/// The by-value owned-byte-slice parse peer of [`TryFrom<&str>`],
+/// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`], and [`TryFrom<&[u8]>`]
+/// above — the parse surface at the digest-algorithm axis is now closed
+/// across the borrowed-string ([`TryFrom<&str>`]), owned-string
+/// ([`TryFrom<String>`]), borrowed-or-owned-string
+/// ([`TryFrom<Cow<'_, str>>`]), borrowed-byte-slice
+/// ([`TryFrom<&[u8]>`]), AND owned-byte-slice (this [`TryFrom<Vec<u8>>`])
+/// input frontiers, so a downstream site that receives its input at any
+/// of those frontiers routes through the same [`DigestAlgorithm::parse`]
+/// oracle without an intermediate
+/// `String::from_utf8(bytes)?.try_into::<DigestAlgorithm>()` bridge per
+/// consumer. Structural mirror of [`TryFrom<Vec<u8>> for ContentDigest`]
+/// (commit 67c5485) at the parallel canonical-string typed primitive on
+/// the same module — the same lift at the owned-byte-slice frontier of
+/// the reference-grammar family, delegating through its sum's by-value
+/// parse oracle on the [`String::from_utf8`] view of the caller-supplied
+/// byte payload.
+///
+/// The error type is [`anyhow::Error`] — the exact shape the [`FromStr`]
+/// impl and the [`TryFrom<&str>`] / [`TryFrom<String>`] /
+/// [`TryFrom<Cow<'_, str>>`] / [`TryFrom<&[u8]>`] impls above all carry.
+/// Two rejection modes: a UTF-8-invalid byte input (a stray non-UTF-8
+/// sequence in a raw wire capture, a partial-write byte tail that clips a
+/// UTF-8 continuation) surfaces an [`anyhow::Error`] naming the offending
+/// bytes' lossy-decoded rendering so a caller can still attach the
+/// offending input to a failure record; a UTF-8-valid but non-canonical
+/// label (uppercase, hyphenated, unknown, empty, edge-whitespace)
+/// surfaces the same [`anyhow::Error`] the underlying [`FromStr`] impl
+/// emits — no per-peer rejection-message drift across the owned-string /
+/// owned-byte-slice receiver frontier once UTF-8 validation clears. On
+/// the UTF-8-invalid path the owned [`Vec<u8>`] is recovered through
+/// [`std::string::FromUtf8Error::into_bytes`] so the lossy rendering names
+/// the exact bytes the caller supplied — no data loss between the intake
+/// buffer and the failure record.
+///
+/// The identity
+/// `DigestAlgorithm::try_from(algo.as_str().as_bytes().to_vec()).unwrap() == algo`
+/// at every [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_try_from_vec_bytes_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<Vec<u8>>` consumer
+/// at every variant is pinned by
+/// [`tests::test_digest_algorithm_try_from_vec_bytes_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical UTF-8-valid input is
+/// pinned by
+/// [`tests::test_digest_algorithm_try_from_vec_bytes_rejects_non_canonical_input`];
+/// the UTF-8-invalid rejection contract is pinned by
+/// [`tests::test_digest_algorithm_try_from_vec_bytes_rejects_invalid_utf8`].
+///
+/// THEORY.md §III.1 typescape: the by-value owned-byte-slice
+/// try-conversion surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one [`TryFrom<Vec<u8>>`] impl routing
+/// through [`String::from_utf8`] then [`TryFrom<String>`]), not a
+/// per-consumer `String::from_utf8(bytes)?.try_into()` bridge at every
+/// downstream site that owns a byte buffer. THEORY.md §VI.1 generation
+/// over composition: the canonical-label grammar is named at one site
+/// ([`DigestAlgorithm::as_str`]), inverted at one site
+/// ([`DigestAlgorithm::parse`]), and every parse surface —
+/// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], this
+/// [`TryFrom<Vec<u8>>`], the [`ContentDigest::parse`] grammar oracle's
+/// algorithm arm — reads through it.
+impl TryFrom<Vec<u8>> for DigestAlgorithm {
+    type Error = anyhow::Error;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        match String::from_utf8(bytes) {
+            Ok(s) => <Self as TryFrom<String>>::try_from(s),
+            Err(err) => Err(anyhow::anyhow!(
+                "Invalid digest algorithm byte input '{}' (lossy-decoded) is not valid UTF-8",
+                String::from_utf8_lossy(&err.into_bytes())
+            )),
+        }
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7117,6 +7217,163 @@ mod tests {
                 "TryFrom<&[u8]> must reject UTF-8-invalid input {bad:?}",
             );
             let msg = via_bytes.unwrap_err().to_string();
+            assert!(
+                msg.contains("not valid UTF-8"),
+                "UTF-8-invalid rejection message must name the failure mode, got {msg:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Vec<u8>> for DigestAlgorithm`] round-trips the canonical
+    /// lowercase label byte serialization at every [`DigestAlgorithm::ALL`]
+    /// variant AND agrees byte-for-byte with the by-reference
+    /// [`TryFrom<&[u8]>`] and by-value [`TryFrom<String>`] peers at every
+    /// variant. Pins the delegate-through-[`String::from_utf8`]-then-
+    /// [`TryFrom<String>`] discipline: parse at [`TryFrom<Vec<u8>>`] tracks
+    /// parse at both sibling peers byte-for-byte at every canonical
+    /// variant, so a future regression that reroutes the owned-byte-slice
+    /// arm away from the shared oracle (a per-peer inline `match` that
+    /// drifts an arm's variant assignment, a per-peer accepted-label set
+    /// that widens beyond the canonical grammar) lights up here rather
+    /// than silently at downstream call sites.
+    #[test]
+    fn test_digest_algorithm_try_from_vec_bytes_agrees_with_from_str() {
+        for algo in DigestAlgorithm::ALL {
+            let label = algo.as_str();
+
+            let via_vec = <DigestAlgorithm as std::convert::TryFrom<Vec<u8>>>::try_from(
+                label.as_bytes().to_vec(),
+            )
+            .expect("canonical label owned bytes must parse through TryFrom<Vec<u8>>");
+            assert_eq!(
+                via_vec, algo,
+                "TryFrom<Vec<u8>> must round-trip through as_str at {algo:?}",
+            );
+
+            let via_bytes =
+                <DigestAlgorithm as std::convert::TryFrom<&[u8]>>::try_from(label.as_bytes())
+                    .expect("canonical label bytes must parse through TryFrom<&[u8]>");
+            assert_eq!(
+                via_vec, via_bytes,
+                "TryFrom<Vec<u8>> and TryFrom<&[u8]> must agree at {algo:?}",
+            );
+
+            let via_string =
+                <DigestAlgorithm as std::convert::TryFrom<String>>::try_from(label.to_owned())
+                    .expect("canonical label owned string must parse through TryFrom<String>");
+            assert_eq!(
+                via_vec, via_string,
+                "TryFrom<Vec<u8>> and TryFrom<String> must agree at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Vec<u8>> for DigestAlgorithm`] identity carries
+    /// through a generic `impl TryFrom<Vec<u8>>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(bytes: Vec<u8>) -> T where T: TryFrom<Vec<u8>>,
+    /// T::Error: Debug` — the shape of an actual downstream consumer
+    /// (owned-byte pipeline that parses algorithm labels off a wire
+    /// capture materialised as [`Vec<u8>`], serde `try_from = "Vec<u8>"`
+    /// wrapper on a `serde_bytes` field, generic try-conversion helper
+    /// that opts into the owned-byte-slice frontier at the receiver-shape
+    /// layer) — recovers the canonical variant from the canonical
+    /// lowercase label's owned UTF-8 bytes at every variant. The
+    /// structural witness that a [`DigestAlgorithm`] is genuinely usable
+    /// at `impl TryFrom<Vec<u8>>` call sites — a regression that drifted
+    /// the [`TryFrom<Vec<u8>>`] impl signature (e.g., accepting only
+    /// borrowed byte slices at some coercion site, returning a different
+    /// variant than the sibling peers would) fails here at compile time
+    /// or at the assertion instead of at every downstream generic call
+    /// site.
+    #[test]
+    fn test_digest_algorithm_try_from_vec_bytes_carries_through_generic_consumer() {
+        fn parse<T>(bytes: Vec<u8>) -> T
+        where
+            T: std::convert::TryFrom<Vec<u8>>,
+            <T as std::convert::TryFrom<Vec<u8>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<Vec<u8>>>::try_from(bytes)
+                .expect("canonical label owned bytes must parse through generic TryFrom<Vec<u8>>")
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(
+                parse::<DigestAlgorithm>(algo.as_str().as_bytes().to_vec()),
+                algo,
+                "generic TryFrom<Vec<u8>> consumer must recover canonical variant at {algo:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Vec<u8>> for DigestAlgorithm`] rejects UTF-8-valid but
+    /// non-canonical input with the same strictness the sibling
+    /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+    /// [`TryFrom<Cow<'_, str>>`], and [`TryFrom<&[u8]>`] peers enforce —
+    /// empty input, uppercase, hyphenated, unknown labels, and edge-
+    /// whitespace variants all reject. Pins the strict-rejection contract
+    /// at the by-value owned-byte-slice frontier try-conversion surface
+    /// so a downstream consumer bound by [`TryFrom<Vec<u8>>`] (a serde
+    /// `try_from = "Vec<u8>"` container on a `serde_bytes` field, an
+    /// owned-byte pipeline that yields a bounded canonical-label token)
+    /// inherits the same canonical-only grammar the direct
+    /// `.parse::<DigestAlgorithm>()` call sites already read. Also pins
+    /// the delegate-through-[`TryFrom<String>`] discipline: rejection at
+    /// [`TryFrom<Vec<u8>>`] tracks rejection at [`TryFrom<String>`]
+    /// byte-for-byte at every reject-set element once UTF-8 validation
+    /// clears, so a future permissive-parse regression at the underlying
+    /// [`FromStr`] impl lights up here rather than drifting silently
+    /// through the by-value owned-byte-slice frontier try-conversion
+    /// surface.
+    #[test]
+    fn test_digest_algorithm_try_from_vec_bytes_rejects_non_canonical_input() {
+        for bad in ["SHA256", "sha-256", "md5", "", "sha256 ", " sha256"] {
+            let via_vec = <DigestAlgorithm as std::convert::TryFrom<Vec<u8>>>::try_from(
+                bad.as_bytes().to_vec(),
+            )
+            .ok();
+            let via_string =
+                <DigestAlgorithm as std::convert::TryFrom<String>>::try_from(bad.to_owned()).ok();
+            assert!(
+                via_vec.is_none(),
+                "TryFrom<Vec<u8>> must reject non-canonical UTF-8-valid input {bad:?}",
+            );
+            assert_eq!(
+                via_vec, via_string,
+                "TryFrom<Vec<u8>> and TryFrom<String> must agree on rejection at {bad:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Vec<u8>> for DigestAlgorithm`] rejects UTF-8-invalid
+    /// owned-byte input — a stray non-UTF-8 sequence, a partial-write
+    /// byte tail that clips a UTF-8 continuation — before the input
+    /// reaches the string oracle. Pins the two-stage validation contract:
+    /// the owned-byte-slice peer validates UTF-8 first at
+    /// [`String::from_utf8`] (the only rejection mode the string-frontier
+    /// peers cannot emit by construction, since a [`String`] receiver is
+    /// already guaranteed UTF-8) then delegates the canonical-label
+    /// grammar to the [`TryFrom<String>`] peer. The UTF-8-invalid
+    /// rejection error carries a lossy-decoded rendering of the offending
+    /// bytes recovered through [`std::string::FromUtf8Error::into_bytes`]
+    /// so a caller pinning a failure record can still attach the
+    /// offending input to the record without an intermediate
+    /// [`String::from_utf8_lossy`] call at every downstream site.
+    #[test]
+    fn test_digest_algorithm_try_from_vec_bytes_rejects_invalid_utf8() {
+        for bad in [
+            &b"\xffsha256"[..],
+            &b"sha256\xff"[..],
+            &b"\xc3\x28"[..],
+            &b"\xed\xa0\x80"[..],
+        ] {
+            let via_vec =
+                <DigestAlgorithm as std::convert::TryFrom<Vec<u8>>>::try_from(bad.to_vec());
+            assert!(
+                via_vec.is_err(),
+                "TryFrom<Vec<u8>> must reject UTF-8-invalid input {bad:?}",
+            );
+            let msg = via_vec.unwrap_err().to_string();
             assert!(
                 msg.contains("not valid UTF-8"),
                 "UTF-8-invalid rejection message must name the failure mode, got {msg:?}",
