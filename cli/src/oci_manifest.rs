@@ -1502,6 +1502,111 @@ impl TryFrom<std::sync::Arc<[u8]>> for DigestAlgorithm {
     }
 }
 
+/// [`TryFrom<Rc<[u8]>>`] for [`DigestAlgorithm`] routes through
+/// [`<Rc<[u8]> as AsRef<[u8]>>::as_ref`] (a zero-copy borrow of the
+/// shared allocation's raw-byte payload that does NOT touch the
+/// non-atomic-refcount header) then delegates to
+/// [`<DigestAlgorithm as TryFrom<&[u8]>>::try_from`] so a downstream
+/// consumer holding a thread-local shared-owned raw-byte label buffer at
+/// an [`std::rc::Rc<[u8]>`] frontier (a serde container that opts into
+/// `#[serde(try_from = "Rc<[u8]>")]` on a byte-frontier wrapper field to
+/// consume a thread-local shared-owned raw-byte label without a
+/// per-consumer allocation, a validated-input newtype builder whose parse
+/// contract accepts a caller-supplied [`Rc<[u8]>`] label slot at the
+/// thread-local shared-owned raw-byte frontier for cheap-clone semantics
+/// on the input inside a single-threaded arena, a `Vec<Rc<[u8]>>`
+/// per-attempt algorithm-label byte-list handed cheaply through
+/// [`Rc::clone`] to each parse pass inside a thread-local table build
+/// pipeline) recovers a [`DigestAlgorithm`] variant from its canonical
+/// lowercase-ASCII shared-owned-byte serialization through the same
+/// one-oracle grammar the direct `.parse::<DigestAlgorithm>()` string
+/// call sites and the sibling [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Box<[u8]>>`], and [`TryFrom<Arc<[u8]>>`] byte-frontier peers
+/// already read — WITHOUT a per-consumer `shared.as_ref().try_into()`
+/// restatement at every downstream site, WITHOUT an [`Rc::try_unwrap`]-
+/// fallback-clone-then-parse cascade that would negotiate the refcount at
+/// every intake, and WITHOUT an [`Rc::<[u8]>::to_vec`]-then-parse round
+/// trip that would allocate a fresh owned [`Vec<u8>`] off the shared
+/// borrow for each parse pass.
+///
+/// Closes the shrunk / cross-thread-shared / thread-local-shared
+/// byte-slice parse trio at [`DigestAlgorithm`]: [`TryFrom<Box<[u8]>>`]
+/// (commit a37ed68, shrunk-owned) opened the trio,
+/// [`TryFrom<Arc<[u8]>>`] (commit 1cd856a, cross-thread shared-owned)
+/// held the middle, and this [`TryFrom<Rc<[u8]>>`] (thread-local
+/// shared-owned) closes the third leg — mirroring the shrunk / shared
+/// UTF-8-string trio (commits 32659e5, 6d7085a, 8b8742d) already closed
+/// on the sibling axis. Every owned-shape receiver frontier — shrunk,
+/// cross-thread shared, thread-local shared, across both the UTF-8
+/// string surface and the raw-byte-slice surface — now carries a
+/// matching parse peer on the algorithm-axis typed sum, so a downstream
+/// consumer that receives its input at any of those six frontiers routes
+/// through the same [`DigestAlgorithm::parse`] canonical-label oracle
+/// without a per-consumer bridge.
+///
+/// Structural mirror of the sibling
+/// [`TryFrom<Rc<[u8]>> for ContentDigest`] impl above (commit 0eeac6d)
+/// on the composite digest reference-grammar type: the digest
+/// reference-grammar family already carries the complete shrunk /
+/// cross-thread-shared / thread-local-shared byte-slice parse-peer
+/// surface ([`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`],
+/// [`TryFrom<Rc<[u8]>>`]); the algorithm-axis typed sum this impl widens
+/// is the underlying label oracle that reference-grammar surface routes
+/// through — the two typed primitives now grow in lockstep on the
+/// thread-local shared-owned leg so a consumer that types both the
+/// label axis and the composite digest at their thread-local
+/// shared-owned byte-slice frontiers reads the same one-oracle grammar
+/// at both layers.
+///
+/// The error type is [`anyhow::Error`] — the exact shape the [`FromStr`]
+/// impl and every sibling by-reference and by-value parse peer carry.
+/// Two rejection modes carry through unchanged from the underlying
+/// [`TryFrom<&[u8]>`] peer: a UTF-8-invalid byte input (a stray non-UTF-8
+/// sequence in a thread-local shared-owned wire capture, a partial-write
+/// byte tail that clips a UTF-8 continuation and later landed in an
+/// [`Rc<[u8]>`] slot handed inside a single-threaded arena) surfaces an
+/// [`anyhow::Error`] naming the offending bytes' lossy-decoded rendering
+/// so a caller can still attach the offending input to a failure record;
+/// a UTF-8-valid but non-canonical label (uppercase, hyphenated,
+/// unknown, empty, edge-whitespace) surfaces the same [`anyhow::Error`]
+/// the underlying [`FromStr`] impl emits — no per-peer rejection-message
+/// drift across the thread-local shared-owned byte-slice receiver
+/// frontier.
+///
+/// The identity
+/// `DigestAlgorithm::try_from(Rc::<[u8]>::from(algo.as_str().as_bytes())).unwrap()
+/// == algo` at every [`DigestAlgorithm::ALL`] variant is pinned by
+/// [`tests::test_digest_algorithm_try_from_rc_bytes_agrees_with_from_str`];
+/// the identity carried through a generic `impl TryFrom<Rc<[u8]>>`
+/// consumer at every variant is pinned by
+/// [`tests::test_digest_algorithm_try_from_rc_bytes_carries_through_generic_consumer`];
+/// the strict-rejection contract on non-canonical UTF-8-valid input is
+/// pinned by
+/// [`tests::test_digest_algorithm_try_from_rc_bytes_rejects_non_canonical_input`].
+///
+/// THEORY.md §III.1 typescape: the by-value thread-local shared-owned
+/// byte-slice try-conversion surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one [`TryFrom<Rc<[u8]>>`] impl routing
+/// through [`AsRef::as_ref`] then [`TryFrom<&[u8]>`]), not a per-consumer
+/// `shared.as_ref().try_into()` restatement at every downstream site
+/// that owns a thread-local shared raw-byte label buffer.
+/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// grammar is named at one site ([`DigestAlgorithm::as_str`]), inverted
+/// at one site ([`DigestAlgorithm::parse`]), and every parse surface —
+/// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+/// [`TryFrom<Box<[u8]>>`], [`TryFrom<Arc<[u8]>>`], this
+/// [`TryFrom<Rc<[u8]>>`], the [`ContentDigest::parse`] grammar oracle's
+/// algorithm arm — reads through it.
+impl TryFrom<std::rc::Rc<[u8]>> for DigestAlgorithm {
+    type Error = anyhow::Error;
+
+    fn try_from(shared: std::rc::Rc<[u8]>) -> Result<Self, Self::Error> {
+        <Self as TryFrom<&[u8]>>::try_from(shared.as_ref())
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8656,6 +8761,159 @@ mod tests {
             assert_eq!(
                 via_arc, via_slice,
                 "TryFrom<Arc<[u8]>> and TryFrom<&[u8]> must agree on rejection at {bad:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Rc<[u8]>> for DigestAlgorithm`] impl round-trips
+    /// every canonical label emitted by [`DigestAlgorithm::as_str`]
+    /// through a thread-local shared-owned [`std::rc::Rc<[u8]>`]
+    /// receiver and agrees with [`std::str::FromStr`] AND the sibling
+    /// [`TryFrom<&[u8]>`] peer byte-for-byte at every
+    /// [`DigestAlgorithm::ALL`] variant. Pins the delegate-through-
+    /// [`TryFrom<&[u8]>`] discipline at the thread-local shared-owned
+    /// byte-slice frontier: a regression that drifted the
+    /// [`TryFrom<Rc<[u8]>>`] impl body (routing through a divergent
+    /// oracle, cloning the shared bytes into a fresh [`Vec<u8>`] and
+    /// re-parsing through a case-folded branch, negotiating the
+    /// non-atomic refcount through an [`std::rc::Rc::try_unwrap`]-
+    /// fallback-clone-then-parse cascade, coercing a UTF-8-invalid tail
+    /// through a lossy decode instead of the strict
+    /// [`std::str::from_utf8`] gate) fails here rather than at every
+    /// downstream [`TryFrom<Rc<[u8]>>`] call site. Also pins the
+    /// cross-agreement with the sibling [`TryFrom<&[u8]>`] and
+    /// [`TryFrom<Arc<[u8]>>`] peers so a downstream consumer that
+    /// receives its byte-slice label at either the borrowed [`&[u8]`]
+    /// frontier, the cross-thread shared-owned [`std::sync::Arc<[u8]>`]
+    /// frontier, or the thread-local shared-owned [`std::rc::Rc<[u8]>`]
+    /// frontier (a serde container that opts into
+    /// `#[serde(try_from = "Rc<[u8]>")]` on a byte-frontier wrapper
+    /// field, a validated-builder frontier pinned at the shared-owned
+    /// raw-byte intake inside a single-threaded arena) recovers the
+    /// exact canonical variant the paired sibling peers recover — no
+    /// per-peer variant drift across the thread-local shared-owned
+    /// byte-slice receiver frontier.
+    #[test]
+    fn test_digest_algorithm_try_from_rc_bytes_agrees_with_from_str() {
+        for algo in DigestAlgorithm::ALL {
+            let label = algo.as_str();
+
+            let shared: std::rc::Rc<[u8]> = std::rc::Rc::from(label.as_bytes());
+            let via_rc = <DigestAlgorithm as std::convert::TryFrom<std::rc::Rc<[u8]>>>::try_from(
+                shared,
+            )
+            .expect("canonical label thread-local shared-owned bytes must parse through TryFrom<Rc<[u8]>>");
+            assert_eq!(
+                via_rc, algo,
+                "TryFrom<Rc<[u8]>> must round-trip through as_str at {algo:?}",
+            );
+
+            let via_from_str = label
+                .parse::<DigestAlgorithm>()
+                .expect("canonical label must parse through FromStr");
+            assert_eq!(
+                via_rc, via_from_str,
+                "TryFrom<Rc<[u8]>> and FromStr must agree at {algo:?}",
+            );
+
+            let via_slice =
+                <DigestAlgorithm as std::convert::TryFrom<&[u8]>>::try_from(label.as_bytes())
+                    .expect("canonical label borrowed bytes must parse through TryFrom<&[u8]>");
+            assert_eq!(
+                via_rc, via_slice,
+                "TryFrom<Rc<[u8]>> and TryFrom<&[u8]> must agree at {algo:?}",
+            );
+
+            let via_arc = <DigestAlgorithm as std::convert::TryFrom<std::sync::Arc<[u8]>>>::try_from(
+                std::sync::Arc::<[u8]>::from(label.as_bytes()),
+            )
+            .expect("canonical label cross-thread shared-owned bytes must parse through TryFrom<Arc<[u8]>>");
+            assert_eq!(
+                via_rc, via_arc,
+                "TryFrom<Rc<[u8]>> and TryFrom<Arc<[u8]>> must agree at {algo:?}",
+            );
+        }
+    }
+
+    /// The [`TryFrom<Rc<[u8]>> for DigestAlgorithm`] identity carries
+    /// through a generic `impl TryFrom<Rc<[u8]>>` consumer at every
+    /// [`DigestAlgorithm::ALL`] variant. A tiny generic function
+    /// `fn parse<T>(shared: Rc<[u8]>) -> T where T: TryFrom<Rc<[u8]>>,
+    /// T::Error: Debug` — the shape of an actual downstream consumer
+    /// (validated-input newtype builder whose canonical intake contract
+    /// is pinned as [`Rc<[u8]>`] for thread-local cheap-clone semantics
+    /// on the input, serde `try_from = "Rc<[u8]>"` wrapper on a
+    /// thread-local shared-owned byte-frontier label field, generic
+    /// try-conversion helper that opts into the thread-local shared-owned
+    /// byte-slice frontier at the receiver-shape layer) — recovers the
+    /// canonical variant from the thread-local shared-owned canonical
+    /// lowercase-ASCII label bytes at every variant. The structural
+    /// witness that a [`DigestAlgorithm`] is genuinely usable at
+    /// `impl TryFrom<Rc<[u8]>>` call sites — a regression that drifted
+    /// the [`TryFrom<Rc<[u8]>>`] impl signature (accepting only borrowed
+    /// byte slices at some coercion site, returning a different variant
+    /// than the sibling peers would) fails here at compile time or at
+    /// the assertion instead of at every downstream generic call site.
+    #[test]
+    fn test_digest_algorithm_try_from_rc_bytes_carries_through_generic_consumer() {
+        fn parse<T>(shared: std::rc::Rc<[u8]>) -> T
+        where
+            T: std::convert::TryFrom<std::rc::Rc<[u8]>>,
+            <T as std::convert::TryFrom<std::rc::Rc<[u8]>>>::Error: std::fmt::Debug,
+        {
+            <T as std::convert::TryFrom<std::rc::Rc<[u8]>>>::try_from(shared).expect(
+                "canonical label thread-local shared-owned bytes must parse through generic TryFrom<Rc<[u8]>>",
+            )
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(
+                parse::<DigestAlgorithm>(std::rc::Rc::<[u8]>::from(algo.as_str().as_bytes())),
+                algo,
+                "generic TryFrom<Rc<[u8]>> consumer must recover canonical variant at {algo:?}",
+            );
+        }
+    }
+
+    /// [`TryFrom<Rc<[u8]>> for DigestAlgorithm`] rejects UTF-8-valid
+    /// but non-canonical input with the same strictness the sibling
+    /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
+    /// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`],
+    /// [`TryFrom<Vec<u8>>`], [`TryFrom<Box<str>>`],
+    /// [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`],
+    /// [`TryFrom<Box<[u8]>>`], and [`TryFrom<Arc<[u8]>>`] peers enforce —
+    /// empty input, uppercase, hyphenated, unknown labels, and
+    /// edge-whitespace variants all reject. Pins the strict-rejection
+    /// contract at the by-value thread-local shared-owned byte-slice
+    /// frontier try-conversion surface so a downstream consumer bound
+    /// by [`TryFrom<Rc<[u8]>>`] (a serde `try_from = "Rc<[u8]>"`
+    /// container on a thread-local shared-owned byte-frontier field, a
+    /// validated-builder frontier pinned at the shared-owned raw-byte
+    /// intake inside a single-threaded arena) inherits the same
+    /// canonical-only grammar the direct `.parse::<DigestAlgorithm>()`
+    /// call sites already read. Also pins the delegate-through-
+    /// [`TryFrom<&[u8]>`] discipline: rejection at [`TryFrom<Rc<[u8]>>`]
+    /// tracks rejection at [`TryFrom<&[u8]>`] byte-for-byte at every
+    /// reject-set element, so a future permissive-parse regression at
+    /// the underlying [`FromStr`] impl lights up here rather than
+    /// drifting silently through the thread-local shared-owned byte-slice
+    /// frontier try-conversion surface.
+    #[test]
+    fn test_digest_algorithm_try_from_rc_bytes_rejects_non_canonical_input() {
+        for bad in ["SHA256", "sha-256", "md5", "", "sha256 ", " sha256"] {
+            let shared: std::rc::Rc<[u8]> = std::rc::Rc::from(bad.as_bytes());
+            let via_rc =
+                <DigestAlgorithm as std::convert::TryFrom<std::rc::Rc<[u8]>>>::try_from(shared)
+                    .ok();
+            let via_slice =
+                <DigestAlgorithm as std::convert::TryFrom<&[u8]>>::try_from(bad.as_bytes()).ok();
+            assert!(
+                via_rc.is_none(),
+                "TryFrom<Rc<[u8]>> must reject non-canonical UTF-8-valid input {bad:?}",
+            );
+            assert_eq!(
+                via_rc, via_slice,
+                "TryFrom<Rc<[u8]>> and TryFrom<&[u8]> must agree on rejection at {bad:?}",
             );
         }
     }
