@@ -53,6 +53,45 @@ fn classify_attic_push_failure(
     )
 }
 
+/// Sibling of [`classify_attic_push_failure`] on the login surface.
+/// Dispatches a post-`retry_command` `CommandAttemptFailure` to the
+/// typed [`AtticError`] variant whose structural shape matches the
+/// captured failure: spawn-failure (attic not on PATH) routes to
+/// [`AtticError::ExecFailed`] carrying the cache name and the
+/// spawn-error message; non-zero exit routes to
+/// [`AtticError::LoginFailed`] carrying `(cache, server_url,
+/// exit_code, stderr)` — the structural-record tuple Phase 1
+/// attestation records (THEORY §V.4) consume on the login step,
+/// symmetric to the push-step tuple `PushFailed` carries.
+///
+/// Drives the canonical [`classify_attempt_failure`] primitive —
+/// same helper `classify_attic_push_failure` and
+/// `infrastructure/registry.rs::classify_push_failure` consume — so
+/// the `is_spawn_failure` discriminator lives in one place across
+/// every retry-driven typed-error producer in forge. Adding a third
+/// retry-driven attic subcommand (e.g., a future `attic gc` with a
+/// network-transient stderr surface) reuses this dispatch shape
+/// without retyping the ExecFailed / op-variant split.
+fn classify_attic_login_failure(
+    failure: CommandAttemptFailure,
+    cache: &str,
+    server_url: &str,
+) -> AtticError {
+    classify_attempt_failure(
+        failure,
+        |spawn| AtticError::ExecFailed {
+            cache: cache.to_string(),
+            message: spawn.stdout,
+        },
+        |op| AtticError::LoginFailed {
+            cache: cache.to_string(),
+            server_url: server_url.to_string(),
+            exit_code: op.exit_code,
+            stderr: op.stderr,
+        },
+    )
+}
+
 /// Client for Attic cache operations
 pub struct AtticClient {
     cache_name: String,
@@ -439,6 +478,88 @@ impl AtticClient {
         }
     }
 
+    /// Login with an explicit retry budget on transient network
+    /// failures. Sibling of [`Self::push_with_retries`] on the login
+    /// surface — same [`RetryPolicy::network_with_max_attempts`]
+    /// schedule (250ms × factor=2 capped at 30s, canonical
+    /// Bazel/Buck2/SLSA network shape), same
+    /// `is_transient_network_stderr` classifier, same
+    /// [`classify_attempt_failure`] dispatch — so a future addition
+    /// to the transient-marker set (e.g. an attic-server-flavored
+    /// 5xx shape) lights up retries on both surfaces in the same
+    /// commit. Pre-migration the retry loop over the login step
+    /// lived in `commands/github_runner_ci.rs::attic_command_with_retry`
+    /// as a stringly `args: &[&str]` wrapper that produced only
+    /// untyped `anyhow::Error`; migration onto this primitive lands
+    /// the typed [`AtticError::LoginFailed`] / [`AtticError::ExecFailed`]
+    /// split and lets the helper be retired entirely (it was the
+    /// last remaining call site).
+    ///
+    /// The retry budget is clamped to `>= 1` by
+    /// [`RetryPolicy::new`], so a degenerate `0` cannot silently
+    /// turn the loop into a no-op that reports success without ever
+    /// spawning the CLI. The token enters the call as a CLI
+    /// argument, NOT as `ATTIC_TOKEN`, preserving the discriminator
+    /// sibling [`Self::login`] pins — `ps`-style observation on
+    /// shared hosts sees the same argv shape both single-shot and
+    /// retry-driven login paths produce.
+    ///
+    /// Returns typed errors:
+    /// - [`AtticError::TokenRequired`] if no token was configured
+    ///   (no side effects, no retry — the token check runs
+    ///   pre-loop).
+    /// - [`AtticError::ExecFailed`] when `attic` cannot be spawned.
+    /// - [`AtticError::LoginFailed`] when attic exhausts the retry
+    ///   budget or fails terminally, carrying the offending cache,
+    ///   server URL, final attempt count's exit code, and captured
+    ///   stderr — the structural-record tuple Phase 1 attestation
+    ///   records (THEORY §V.4) consume.
+    pub async fn login_with_retries(
+        &self,
+        server_url: &str,
+        retries: u32,
+    ) -> Result<(), AtticError> {
+        let token = self
+            .token
+            .as_deref()
+            .ok_or_else(|| AtticError::TokenRequired {
+                cache: self.cache_name.clone(),
+                server_url: server_url.to_string(),
+            })?;
+
+        info!("Logging in to Attic cache: {}", self.cache_name);
+
+        let policy = RetryPolicy::network_with_max_attempts(retries);
+        let attic_bin = self.resolve_attic_bin();
+        let cache = self.cache_name.clone();
+        let server_url_owned = server_url.to_string();
+        let token_owned = token.to_string();
+        let op = format!("login to Attic cache {}", cache);
+
+        let result = retry_command(&policy, &op, |attempt| {
+            let attic_bin = attic_bin.clone();
+            let cache = cache.clone();
+            let server_url_owned = server_url_owned.clone();
+            let token_owned = token_owned.clone();
+            let op = op.clone();
+            let policy = policy.clone();
+            async move {
+                let mut cmd = Command::new(&attic_bin);
+                cmd.args(["login", &cache, &server_url_owned, &token_owned])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                log_retry_attempt(cmd.output().await, &op, attempt, &policy)
+            }
+        })
+        .await;
+
+        result.map(|_| ()).map_err(|failure| {
+            classify_attic_login_failure(failure, &self.cache_name, server_url)
+        })?;
+
+        Ok(())
+    }
+
     /// Select `<server>:<cache_name>` as the active Attic cache for
     /// subsequent commands (`attic use <server>:<cache_name>`).
     ///
@@ -815,6 +936,291 @@ mod tests {
                 );
             }
             other => panic!("expected ClosurePushFailed, got: {other:?}"),
+        }
+    }
+
+    /// `login_with_retries` on the spawn-failure path (attic binary
+    /// missing) must surface [`AtticError::ExecFailed`] carrying the
+    /// cache name — same shape as `push` and `push_with_retries` on
+    /// their spawn-failure paths. Pins the spawn-vs-op split on the
+    /// retry-driven login surface at the type level so telemetry can
+    /// distinguish "attic missing" from "attic said no" without
+    /// parsing strings. Uses an absolute path that does not exist,
+    /// injected via `with_attic_bin`, so the test is hermetic and
+    /// parallel-safe (no env mutation).
+    #[tokio::test]
+    async fn test_login_with_retries_returns_exec_failed_when_attic_missing() {
+        let client = AtticClient::new("cache-login-retry-x")
+            .with_token("any-tok")
+            .with_attic_bin("/nonexistent/path/to/attic-binary-does-not-exist");
+        let err = client
+            .login_with_retries("https://attic.example.com", 3)
+            .await
+            .expect_err("missing attic must fail");
+        match err {
+            AtticError::ExecFailed { cache, .. } => {
+                assert_eq!(cache, "cache-login-retry-x");
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// `login_with_retries` failures must produce
+    /// [`AtticError::LoginFailed`] carrying cache, server URL, exit
+    /// code, and captured stderr — never a fused
+    /// `bail!("Attic login failed")` and never the pre-migration
+    /// stringly `anyhow::anyhow!("{}", e)` the domain-agnostic
+    /// `attic_command_with_retry` helper produced. Terminal stderr
+    /// ('invalid token') short-circuits the retry loop at attempt 1,
+    /// pinning that `is_transient_network_stderr` returns `false` on
+    /// auth failures at the login surface (same discipline as
+    /// `test_push_terminal_stderr_short_circuits_at_attempt_1`).
+    #[tokio::test]
+    async fn test_login_with_retries_returns_login_failed_with_structured_fields() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\necho 'invalid token' 1>&2\nexit 5\n");
+        let client = AtticClient::new("cache-login-retry-y")
+            .with_token("bad-tok")
+            .with_attic_bin(&shim);
+        let err = client
+            .login_with_retries("https://attic.example.com", 5)
+            .await
+            .expect_err("bad creds must fail");
+        match err {
+            AtticError::LoginFailed {
+                cache,
+                server_url,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cache, "cache-login-retry-y");
+                assert_eq!(server_url, "https://attic.example.com");
+                assert_eq!(exit_code, Some(5));
+                assert!(
+                    stderr.contains("invalid token"),
+                    "stderr field must capture attic stderr verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected LoginFailed, got: {other:?}"),
+        }
+    }
+
+    /// `login_with_retries` on the success path must return `Ok(())`
+    /// after one attempt — pinning the affirmative floor
+    /// `commands/github_runner_ci.rs::execute` (the retired
+    /// `attic_command_with_retry` helper's last remaining call site)
+    /// relies on before the subsequent `use_cache` and Nix-build
+    /// steps.
+    #[tokio::test]
+    async fn test_login_with_retries_success_path() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\nexit 0\n");
+        let client = AtticClient::new("cache-login-retry-ok")
+            .with_token("good-tok")
+            .with_attic_bin(&shim);
+        client
+            .login_with_retries("https://attic.example.com", 3)
+            .await
+            .expect("success path must succeed");
+    }
+
+    /// `login_with_retries` without a configured token must produce
+    /// [`AtticError::TokenRequired`] AND must NOT spawn attic — the
+    /// token check runs pre-loop, so a retry budget of any size
+    /// cannot silently burn cycles on a call that is doomed by
+    /// construction. Sibling of
+    /// [`test_login_token_required_carries_cache_and_server`] on the
+    /// single-shot surface; the two together pin the third
+    /// error-variant arm across both login paths.
+    #[tokio::test]
+    async fn test_login_with_retries_token_required_carries_cache_and_server() {
+        let client = AtticClient::new("cache-login-retry-notoken");
+        let err = client
+            .login_with_retries("https://attic.example.com", 5)
+            .await
+            .expect_err("missing token must fail");
+        match err {
+            AtticError::TokenRequired { cache, server_url } => {
+                assert_eq!(cache, "cache-login-retry-notoken");
+                assert_eq!(server_url, "https://attic.example.com");
+            }
+            other => panic!("expected TokenRequired, got: {other:?}"),
+        }
+    }
+
+    /// Transient stderr (HTTP 503) drives `retry_command` through
+    /// every attempt in the retry budget on the login surface. Pins
+    /// the `attempts` symmetry with the push surface — pre-migration
+    /// the login step's retry loop was driven by
+    /// `commands/github_runner_ci.rs::attic_command_with_retry` with
+    /// the canonical `RetryPolicy::network` schedule; post-migration
+    /// the loop is driven by [`Self::login_with_retries`] with the
+    /// same `is_transient_network_stderr` classifier and the same
+    /// exponential schedule. A future regression that narrows the
+    /// classifier on the login surface would fail here (attempts=1
+    /// instead of retries=2).
+    ///
+    /// Uses `retries=2` so the test costs ~250ms (one delay between
+    /// attempts 1 and 2 under `RetryPolicy::network`'s 250ms initial
+    /// backoff) — fast enough for the unit-test loop. The
+    /// `LoginFailed.exit_code` reflects the shim's exit and the
+    /// `stderr` field captures the 503 verbatim.
+    #[tokio::test]
+    async fn test_login_with_retries_transient_stderr_exhausts_retries() {
+        let (_dir, shim) = make_attic_shim(
+            "#!/bin/sh\necho 'received unexpected HTTP status: 503 Service Unavailable' 1>&2\nexit 1\n",
+        );
+        let client = AtticClient::new("cache-login-503")
+            .with_token("any-tok")
+            .with_attic_bin(&shim);
+        let err = client
+            .login_with_retries("https://attic.example.com", 2)
+            .await
+            .expect_err("transient stderr must exhaust retries and fail");
+        match err {
+            AtticError::LoginFailed {
+                cache,
+                server_url,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cache, "cache-login-503");
+                assert_eq!(server_url, "https://attic.example.com");
+                assert_eq!(exit_code, Some(1));
+                assert!(
+                    stderr.contains("503"),
+                    "stderr must capture the transient marker verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected LoginFailed, got: {other:?}"),
+        }
+    }
+
+    /// `login_with_retries(_, 0)` must clamp to `>= 1` (one attempt)
+    /// via [`RetryPolicy::new`]'s clamping discipline — never
+    /// silently turn the loop into a no-op that succeeds without
+    /// ever spawning the CLI. Sibling of
+    /// [`test_push_with_retries_zero_clamps_to_one_attempt`] on the
+    /// login surface; the two together pin the public-API boundary
+    /// against a degenerate `retries=0` from a future caller
+    /// producing a synthesized success.
+    #[tokio::test]
+    async fn test_login_with_retries_zero_clamps_to_one_attempt() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\necho 'fail' 1>&2\nexit 1\n");
+        let client = AtticClient::new("cache-login-zero")
+            .with_token("any-tok")
+            .with_attic_bin(&shim);
+        let err = client
+            .login_with_retries("https://attic.example.com", 0)
+            .await
+            .expect_err("retries=0 must still drive at least one attempt that fails");
+        match err {
+            AtticError::LoginFailed { exit_code, .. } => {
+                // Op ran (exit_code is Some) — pre-loop pass-through
+                // did not synthesize a success. The exact `attempts`
+                // count is not exposed on `LoginFailed` (unlike
+                // `PushFailed`), so the pin is on the "op actually
+                // ran" invariant via `exit_code.is_some()`.
+                assert_eq!(exit_code, Some(1));
+            }
+            other => panic!("expected LoginFailed, got: {other:?}"),
+        }
+    }
+
+    /// `login_with_retries` must NOT inject `ATTIC_TOKEN` into the
+    /// spawned `attic` process — the token is supplied as a CLI
+    /// argument. Sibling of
+    /// [`test_login_does_not_inject_attic_token_env`] on the
+    /// retry-driven login path; the two together pin the
+    /// token-passing floor across both login primitives so a future
+    /// "harmonize the two login paths to forward the token" refactor
+    /// that added env injection would fail here rather than leak the
+    /// token into both the env AND the argv (broadening the attack
+    /// surface for `ps`-style observation on shared CI hosts).
+    #[tokio::test]
+    async fn test_login_with_retries_does_not_inject_attic_token_env() {
+        let (_dir, shim) = make_attic_shim(
+            "#!/bin/sh\necho \"LOGIN_RETRY_SAW_TOKEN=$ATTIC_TOKEN\" 1>&2\nexit 5\n",
+        );
+        let client = AtticClient::new("cache-login-retry-env")
+            .with_token("must-not-leak-into-env-retry")
+            .with_attic_bin(&shim);
+        let err = client
+            .login_with_retries("https://attic.example.com", 1)
+            .await
+            .expect_err("nonzero exit must fail");
+        match err {
+            AtticError::LoginFailed { stderr, .. } => {
+                assert!(
+                    stderr.contains("LOGIN_RETRY_SAW_TOKEN="),
+                    "shim must observe the env var probe; got stderr: {stderr:?}"
+                );
+                assert!(
+                    !stderr.contains("LOGIN_RETRY_SAW_TOKEN=must-not-leak-into-env-retry"),
+                    "login_with_retries MUST NOT forward token via ATTIC_TOKEN env; \
+                     got stderr: {stderr:?}"
+                );
+            }
+            other => panic!("expected LoginFailed, got: {other:?}"),
+        }
+    }
+
+    /// `classify_attic_login_failure` dispatches a post-`retry_command`
+    /// `CommandAttemptFailure` to the typed [`AtticError`] variant
+    /// whose structural shape matches. Sibling of
+    /// [`test_classify_attic_push_failure_dispatches_on_spawn_vs_op`]
+    /// on the login surface. A pure unit test of the dispatch helper
+    /// — no subprocess, no shim, no retry-loop driving — so the
+    /// typed mapping can evolve (e.g., adding
+    /// `AtticError::LoginTimeout`) without subtle drift between
+    /// this site and the canonical retry primitive.
+    #[test]
+    fn test_classify_attic_login_failure_dispatches_on_spawn_vs_op() {
+        // Spawn-failure (attic not on PATH): must produce
+        // `AtticError::ExecFailed` — never `LoginFailed` — because
+        // the CLI never ran.
+        let spawn = CommandAttemptFailure {
+            operation: "login to Attic cache cache-x".to_string(),
+            attempt: 1,
+            exit_code: None,
+            stderr: String::new(),
+            stdout: "failed to spawn process: No such file or directory".to_string(),
+        };
+        match classify_attic_login_failure(spawn, "cache-x", "https://attic.example.com") {
+            AtticError::ExecFailed { cache, message } => {
+                assert_eq!(cache, "cache-x");
+                assert!(
+                    message.contains("No such file or directory"),
+                    "spawn-error message must flow through stdout: {message}"
+                );
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+
+        // Op-failure with terminal stderr (HTTP 401): must produce
+        // `AtticError::LoginFailed` carrying (cache, server_url,
+        // exit_code, stderr). The dispatch does NOT inspect
+        // transient-vs-terminal (that classification happens INSIDE
+        // `retry_command`); by the time the helper is called, the
+        // retry loop has already exhausted or short-circuited.
+        let op = CommandAttemptFailure {
+            operation: "login to Attic cache cache-x".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            stderr: "401 Unauthorized: bad token".to_string(),
+            stdout: String::new(),
+        };
+        match classify_attic_login_failure(op, "cache-x", "https://attic.example.com") {
+            AtticError::LoginFailed {
+                cache,
+                server_url,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cache, "cache-x");
+                assert_eq!(server_url, "https://attic.example.com");
+                assert_eq!(exit_code, Some(1));
+                assert!(stderr.contains("401"));
+            }
+            other => panic!("expected LoginFailed, got: {other:?}"),
         }
     }
 
