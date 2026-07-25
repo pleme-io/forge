@@ -112,7 +112,7 @@ const BLAKE3_HEX_LEN: usize = 64;
 /// grammar oracle, the [`ContentDigest::algorithm_kind`] read-back
 /// accessor, the [`crate::helm_provenance`] sha256-only cross-check —
 /// reads through it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DigestAlgorithm {
     /// The OCI / Docker distribution-spec canonical registry-side
     /// digest — 256-bit SHA-2 output rendered as 64 lowercase-hex chars
@@ -381,6 +381,198 @@ impl AsRef<str> for DigestAlgorithm {
 impl AsRef<[u8]> for DigestAlgorithm {
     fn as_ref(&self) -> &[u8] {
         <Self as AsRef<str>>::as_ref(self).as_bytes()
+    }
+}
+
+/// Hand-rolled [`Ord`] impl for [`DigestAlgorithm`] routes through
+/// [`DigestAlgorithm::as_str`] and delegates to
+/// [`<str as Ord>::cmp`] so the total ordering at the variant sum is
+/// byte-for-byte identical to the ordering [`Ord`] on the canonical
+/// label `&str` produces — the load-bearing coherence axiom the sibling
+/// [`std::borrow::Borrow<str> for DigestAlgorithm`] impl (below) depends
+/// on so a [`std::collections::BTreeMap<DigestAlgorithm, V>::get`] probe
+/// keyed by a raw `&str` does NOT silently return [`None`] for a key
+/// that IS present (`BTreeMap` walks its tree by comparing the stored
+/// key's [`Borrow<Q>::borrow`] projection against the probe with
+/// [`<Q as Ord>::cmp`], and if the tree was constructed under a
+/// discriminant-ordered `Ord` that disagrees with `<str as Ord>::cmp`
+/// the probe descends into the wrong subtree and misses valid keys).
+/// Replacing the enum's derived [`Ord`] (which orders by discriminant
+/// token, `Sha256 < Sha512 < Blake3`) with this delegation preserves
+/// [`Ord`] as a total order (equal variants project to equal canonical
+/// labels; distinct variants project to pairwise distinct canonical
+/// labels), and the only observable difference is the ordering key:
+/// alphabetical over the canonical label bytes
+/// (`Blake3 < Sha256 < Sha512`) rather than declaration-order over the
+/// enum discriminant. No downstream site in the repo compares
+/// [`DigestAlgorithm`] values by order (grep-verified — the only
+/// cross-module use is the discriminant-equality check in
+/// [`crate::helm_provenance`] line 351), so the change is invisible
+/// outside a `BTreeMap` / `sort_by` / `min` / `max` consumer.
+impl Ord for DigestAlgorithm {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+/// [`PartialOrd`] delegates to the hand-rolled [`Ord`] impl directly
+/// above so the two comparison surfaces stay coherent (the standard
+/// idiom for a type that is [`Ord`] but does not use the derived
+/// [`PartialOrd`]). Preserves the [`PartialOrd`] ⇢ [`Ord`] agreement
+/// axiom without which a downstream generic consumer bound by
+/// [`PartialOrd`] observes a different ordering than one bound by
+/// [`Ord`].
+impl PartialOrd for DigestAlgorithm {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Hand-rolled [`std::hash::Hash`] impl for [`DigestAlgorithm`] routes
+/// through [`DigestAlgorithm::as_str`] and delegates to
+/// [`<str as std::hash::Hash>::hash`] so the byte-write trace at every
+/// variant is byte-for-byte identical to the trace [`Hash`] on the
+/// canonical label `&str` produces — the load-bearing coherence axiom
+/// the sibling [`std::borrow::Borrow<str> for DigestAlgorithm`] impl
+/// directly below depends on so a
+/// [`std::collections::HashMap<DigestAlgorithm, V>::get`] probe keyed by
+/// a raw `&str` (`"sha256"`, `"sha512"`, `"blake3"`) does NOT silently
+/// return [`None`] for a key that IS present. Structural mirror of the
+/// implicit derived-[`Hash`] discipline that
+/// [`ContentDigest`]`{ full: String }` carries at commit 8eb95a2's
+/// [`Borrow<str>`] landing (derived [`Hash`] on the newtype delegates to
+/// [`Hash`] on [`String`] which delegates to [`Hash`] on [`str`]); at
+/// the sum-type frontier this repo takes the hand-rolled route because
+/// `derive(Hash)` on an `enum` hashes the variant discriminant token
+/// (`state.write_u32(disc)`), which shares no byte-write trace with
+/// [`Hash`] on the canonical `&str` label the [`Borrow<str>`] projection
+/// yields — the derived path would break coherence at every variant.
+///
+/// Replacing the enum's derived [`Hash`] with this delegation preserves
+/// [`Eq`] → [`Hash`] agreement (equal variants still hash equal — they
+/// project to the same canonical label and the same downstream
+/// [`str::hash`] byte-write trace) and the standard
+/// [`std::collections::HashMap<DigestAlgorithm, _>`] /
+/// [`std::collections::HashSet<DigestAlgorithm>`] container behaviour
+/// stays intact by keyed identity; the only observable difference is
+/// the specific bit-pattern the hasher accumulates, which every
+/// standard-library identity container treats as opaque.
+///
+/// Zero-cost by construction: the impl body invokes
+/// [`DigestAlgorithm::as_str`] (a match on the [`Copy`] receiver
+/// returning a `&'static str`) then delegates to [`<str as Hash>::hash`]
+/// with no allocation, no formatter round-trip, and no additional
+/// per-variant byte writes beyond what [`<str as Hash>::hash`] itself
+/// performs on the canonical label bytes.
+///
+/// THEORY.md §III.1 typescape: the identity-container-key hashing
+/// surface is a typed-primitive site on [`DigestAlgorithm`] itself (one
+/// hand-rolled [`Hash`] impl routing through [`DigestAlgorithm::as_str`]),
+/// not an opaque derived discriminant hash whose byte-write trace
+/// downstream `HashMap`-probe machinery cannot align with a raw `&str`
+/// key. THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// one site ([`DigestAlgorithm::as_str`]), and every byte-write
+/// surface — the format machinery [`std::fmt::Display`], the borrowed-
+/// view read peers [`AsRef<str>`] / [`AsRef<[u8]>`], this
+/// identity-container-key [`Hash`] projection, the identity-container-
+/// probe [`Borrow<str>`] projection directly below — reads through it.
+impl std::hash::Hash for DigestAlgorithm {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+/// [`std::borrow::Borrow<str>`] for [`DigestAlgorithm`] routes through
+/// [`DigestAlgorithm::as_str`] so a downstream consumer that keys an
+/// identity container on [`DigestAlgorithm`] — a
+/// [`std::collections::HashMap<DigestAlgorithm, V>`] mapping each
+/// canonical algorithm to its per-algorithm policy / registry
+/// preference / hasher configuration record, a
+/// [`std::collections::HashSet<DigestAlgorithm>`] of admitted
+/// algorithms guarding an attestation-frontier acceptance check, a
+/// [`std::collections::BTreeMap<DigestAlgorithm, V>`] emitting a
+/// deterministic canonical-order dump — probes the container by an
+/// incoming `&str` (a captured registry-response `<algorithm>` token, a
+/// config-file algorithm slot, a CLI argument like `--algorithm sha256`,
+/// a captured `<algorithm>:<hex>` prefix split at the `:` delimiter)
+/// WITHOUT allocating a fresh [`DigestAlgorithm`] key per probe.
+///
+/// The identity-container-lookup peer of the trait-generic borrowed-view
+/// read peer [`AsRef<str> for DigestAlgorithm`] (line 293) — both
+/// project the same canonical label slice through
+/// [`DigestAlgorithm::as_str`], split by intent: [`AsRef<str>`] yields
+/// the slice for a generic `impl AsRef<str>` read consumer (a
+/// formatter frontier, a hasher [`update`](std::hash::Hasher::write)
+/// sink, a [`std::path::Path::new`] path-segment builder), this
+/// [`Borrow<str>`] answers the identity-container's own probe contract
+/// (`HashMap::get<Q>` / `BTreeMap::get<Q>` / `HashSet::contains<Q>`
+/// where `K: Borrow<Q>`) directly at the [`DigestAlgorithm`] key slot
+/// without a per-probe `DigestAlgorithm::parse(str_key)
+/// .and_then(|a| map.get(&a))` restatement that pays a parse round
+/// trip per lookup AND surfaces parse failure as probe-inapplicable
+/// when the probe intent was strictly "is this raw string present as
+/// a key."
+///
+/// [`Eq`] → [`Hash`] coherence with [`Borrow<str>`] is discharged by
+/// the sibling hand-rolled [`Hash for DigestAlgorithm`] impl directly
+/// above, which routes through the same [`DigestAlgorithm::as_str`]
+/// projection and delegates to [`<str as Hash>::hash`]: `hash(&algo)`
+/// and `hash(algo.borrow() as &str)` step through the exact same
+/// [`str::hash`] byte-write trace at every variant with any
+/// [`std::hash::Hasher`], discharging the [`Borrow`] contract's
+/// `k.borrow().hash(h) == k.hash(h)` axiom. [`Eq`] agreement follows
+/// the sibling [`PartialEq<str> for DigestAlgorithm`] peer (line 3236)
+/// whose comparison route reads the same canonical label bytes
+/// through the same [`<str as PartialEq<str>>::eq`] the borrowed-str
+/// probe path invokes.
+///
+/// Structural mirror of [`impl std::borrow::Borrow<str> for
+/// ContentDigest`] (line 5587, commit 8eb95a2) — the same identity-
+/// container-lookup lift at the sibling reference-grammar primitive,
+/// projecting the same borrowed UTF-8 canonical-slice frontier through
+/// the primitive's own `as_str` read oracle so the same
+/// standard-library `HashMap` / `BTreeMap` / `HashSet` raw-`&str`
+/// probe discipline the [`String`] → [`str`] projection carries in the
+/// stdlib now works against a bounded-variant algorithm-family key
+/// type — a strictly stronger identity contract than [`String`]
+/// carries (a [`DigestAlgorithm`] key is provably one of the three
+/// canonical labels; a [`String`] key is not), at the same
+/// zero-allocation probe cost.
+///
+/// Zero-cost by construction: the returned `&str` is `'static`
+/// (delegated from [`DigestAlgorithm::as_str`]'s `&'static str` return
+/// type), so a container probe reads directly into the static-string
+/// constant table without a copy, an allocation, or a formatter
+/// round-trip.
+///
+/// Frontier inspiration: Bazel / Buck2 / Pants remote-build cache keys
+/// and BuildKit / SLSA content-addressed manifests probe per-algorithm
+/// policy tables (`HashMap<&str, HasherConfig>`) against wire-received
+/// algorithm labels by the thousand per build fingerprint check; the
+/// [`String`] → [`str`] [`Borrow`] projection is the stdlib idiom that
+/// lets those flows read raw strings against canonical string keys
+/// without per-probe validation. This impl projects that idiom onto
+/// the typed [`DigestAlgorithm`] key slot so the same probe discipline
+/// works against a bounded-variant key type — a strictly stronger
+/// identity contract than [`String`] carries, at the same
+/// zero-allocation probe cost.
+///
+/// THEORY.md §III.1 typescape: the identity-container-lookup borrowed
+/// UTF-8 projection is a typed-primitive site on [`DigestAlgorithm`]
+/// itself (one [`Borrow<str>`] impl routing through
+/// [`DigestAlgorithm::as_str`]), not a per-consumer
+/// `DigestAlgorithm::parse(str_key).and_then(|a| map.get(&a))`
+/// restatement at every downstream identity-container probe site.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`DigestAlgorithm::as_str`]), and every borrowed-view surface —
+/// the format machinery [`std::fmt::Display`], the trait-generic UTF-8
+/// read peer [`AsRef<str>`], the trait-generic byte-slice read peer
+/// [`AsRef<[u8]>`], the identity-container-key [`Hash`] projection, this
+/// identity-container-probe [`Borrow<str>`] projection — reads through
+/// it.
+impl std::borrow::Borrow<str> for DigestAlgorithm {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -22869,6 +23061,297 @@ mod tests {
                     eq_via_bound(label_ref, &algo),
                     <[u8] as PartialEq<DigestAlgorithm>>::eq(label_ref, &algo),
                     "generic PartialEq<DigestAlgorithm>-bounded consumer must match direct [u8] call at ({algo:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// `<DigestAlgorithm as Borrow<str>>::borrow` returns the same
+    /// borrowed canonical-label slice as `<DigestAlgorithm as
+    /// AsRef<str>>::as_ref` and the inherent `DigestAlgorithm::as_str`
+    /// accessor at every variant — the identity-container-lookup peer
+    /// routes through the same one-oracle canonical-label surface the
+    /// trait-generic borrowed-view read peer already carries. Pins the
+    /// "borrow ⇒ as_ref ⇒ as_str ⇒ canonical label" invariant: a
+    /// future refactor that inlined a divergent projection into the
+    /// [`Borrow<str>`] impl fails this test.
+    #[test]
+    fn test_digest_algorithm_borrow_str_matches_as_ref_str() {
+        use std::borrow::Borrow;
+        for algo in DigestAlgorithm::ALL {
+            let via_borrow: &str = <DigestAlgorithm as Borrow<str>>::borrow(&algo);
+            let via_as_ref: &str = <DigestAlgorithm as AsRef<str>>::as_ref(&algo);
+            assert_eq!(via_borrow, via_as_ref);
+            assert_eq!(via_borrow, algo.as_str());
+        }
+    }
+
+    /// The `Borrow` contract requires `k.borrow().hash(h) == k.hash(h)`
+    /// at every hasher `h` — the load-bearing safety condition without
+    /// which a `HashMap<DigestAlgorithm, _>::get::<str>(str_key)` probe
+    /// silently returns [`None`] for keys that ARE present. Pins the
+    /// axiom at every canonical variant against the process-default
+    /// hasher: the hand-rolled [`Hash for DigestAlgorithm`] impl
+    /// (routing through [`DigestAlgorithm::as_str`] and delegating to
+    /// [`<str as Hash>::hash`]) steps through the same `str::hash`
+    /// byte-write trace as [`Hash`] on the borrowed `&str` canonical
+    /// label. A future refactor that reverted to `derive(Hash)` (which
+    /// hashes the enum discriminant token, breaking coherence with
+    /// [`str::hash`]) fails this test rather than degrading a
+    /// downstream [`HashMap`] probe into a silent-miss bug at the
+    /// map lookup call site.
+    #[test]
+    fn test_digest_algorithm_borrow_str_hash_agrees_with_borrowed_str_hash() {
+        use std::borrow::Borrow;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of<T: Hash + ?Sized>(t: &T) -> u64 {
+            let mut h = DefaultHasher::new();
+            t.hash(&mut h);
+            h.finish()
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            let borrowed: &str = <DigestAlgorithm as Borrow<str>>::borrow(&algo);
+            assert_eq!(
+                hash_of(&algo),
+                hash_of(borrowed),
+                "Borrow<str> Hash coherence: hash(&algo) must agree with \
+                 hash(algo.borrow() as &str) at {algo:?}",
+            );
+        }
+    }
+
+    /// `HashMap<DigestAlgorithm, V>::get(&str_key)` finds a value keyed
+    /// by a validated [`DigestAlgorithm`] through a raw `&str` probe
+    /// without allocating (or parsing to) a fresh [`DigestAlgorithm`]
+    /// key per lookup — the identity-container-lookup surface
+    /// [`Borrow<str>`] unlocks on the bounded-variant algorithm-family
+    /// key type. Pins the load-bearing motivation for the impl:
+    /// pre-[`Borrow<str>`] the probe had to route through
+    /// `DigestAlgorithm::parse(str_key).and_then(|a| map.get(&a))` at
+    /// every consumer, paying a parse round trip per lookup AND
+    /// surfacing parse failure as probe-inapplicable when the probe
+    /// intent was strictly "is this raw string present as a key."
+    /// Also pins the negative arm: a raw `&str` that does NOT match a
+    /// canonical algorithm label (case-drift variant, unrelated
+    /// algorithm-family label, syntactically invalid probe) returns
+    /// [`None`].
+    #[test]
+    fn test_digest_algorithm_borrow_str_hash_map_probe_by_str_key() {
+        use std::collections::HashMap;
+
+        let mut map: HashMap<DigestAlgorithm, &'static str> = HashMap::new();
+        map.insert(DigestAlgorithm::Sha256, "oci-registry-default");
+        map.insert(DigestAlgorithm::Sha512, "oci-registry-long");
+        map.insert(DigestAlgorithm::Blake3, "attestation-frontier");
+
+        // Positive: probe by raw &str hits the correct value at every
+        // canonical algorithm label.
+        assert_eq!(map.get("sha256"), Some(&"oci-registry-default"));
+        assert_eq!(map.get("sha512"), Some(&"oci-registry-long"));
+        assert_eq!(map.get("blake3"), Some(&"attestation-frontier"));
+
+        // Positive: probe by owned-key value agrees with probe by
+        // borrowed-str view at every variant.
+        for algo in DigestAlgorithm::ALL {
+            assert_eq!(
+                map.get(algo.as_str()),
+                map.get(&algo),
+                "raw &str probe must agree with owned-key probe at {algo:?}",
+            );
+        }
+
+        // Negative: case-drift variant returns None — the map stores
+        // the canonical lowercase label and the raw-str probe matches
+        // byte-for-byte through Borrow<str>.
+        assert_eq!(map.get("SHA256"), None);
+        assert_eq!(map.get("Sha256"), None);
+
+        // Negative: an unrelated algorithm-family label returns None.
+        assert_eq!(map.get("sha1"), None);
+        assert_eq!(map.get("sha384"), None);
+        assert_eq!(map.get("md5"), None);
+
+        // Negative: a syntactically invalid string returns None (does
+        // NOT panic, does NOT need a fallible parse round-trip at the
+        // probe site).
+        assert_eq!(map.get("not-an-algorithm"), None);
+        assert_eq!(map.get(""), None);
+    }
+
+    /// `BTreeMap<DigestAlgorithm, V>::get(&str_key)` works through the
+    /// same [`Borrow<str>`] projection [`HashMap`] uses — the identity-
+    /// container-lookup surface at the ordered-map key slot.
+    /// [`BTreeMap`] additionally exercises the sibling `Ord` derive on
+    /// [`DigestAlgorithm`] (line 115), so a probe by borrowed `&str`
+    /// composes [`Borrow<str>`] with the derived [`Ord`] to walk the
+    /// tree — the same walk a probe by owned [`DigestAlgorithm`] key
+    /// walks. Pins the ordered-map identity-container surface as well
+    /// as the hash-map one, so a downstream site that pins its
+    /// container choice on determinism (a canonical-order per-algorithm
+    /// dump, a deterministic algorithm-family iteration) inherits the
+    /// same raw-`&str` probe discipline.
+    #[test]
+    fn test_digest_algorithm_borrow_str_btree_map_probe_by_str_key() {
+        use std::collections::BTreeMap;
+
+        let mut map: BTreeMap<DigestAlgorithm, u32> = BTreeMap::new();
+        map.insert(DigestAlgorithm::Sha256, 1);
+        map.insert(DigestAlgorithm::Sha512, 2);
+        map.insert(DigestAlgorithm::Blake3, 3);
+
+        assert_eq!(map.get("sha256"), Some(&1));
+        assert_eq!(map.get("sha512"), Some(&2));
+        assert_eq!(map.get("blake3"), Some(&3));
+        assert_eq!(map.get("sha384"), None);
+        assert_eq!(map.get("SHA256"), None);
+    }
+
+    /// `HashSet<DigestAlgorithm>::contains(&str_key)` returns `true`
+    /// for a raw `&str` that matches any inserted [`DigestAlgorithm`]'s
+    /// canonical label, `false` otherwise — the identity-container
+    /// membership surface [`Borrow<str>`] unlocks on
+    /// [`HashSet`]-keyed admission sets. A downstream algorithm-family
+    /// acceptance guard now probes a raw wire / config / CLI string
+    /// against the typed key set without allocating a fresh
+    /// [`DigestAlgorithm`] per probe AND without threading
+    /// [`DigestAlgorithm::parse`] failure into the "is this admitted"
+    /// question.
+    #[test]
+    fn test_digest_algorithm_borrow_str_hash_set_contains_by_str_key() {
+        use std::collections::HashSet;
+
+        let mut set: HashSet<DigestAlgorithm> = HashSet::new();
+        set.insert(DigestAlgorithm::Sha256);
+        set.insert(DigestAlgorithm::Blake3);
+
+        // Positive membership: the canonical labels of inserted
+        // variants probe true through Borrow<str>.
+        assert!(set.contains("sha256"));
+        assert!(set.contains("blake3"));
+
+        // Negative membership: the canonical label of an uninserted
+        // variant probes false.
+        assert!(!set.contains("sha512"));
+
+        // Negative membership: case-drift, unrelated algorithm-family
+        // labels, and syntactically invalid probes all clean-miss
+        // rather than panic or parse-fail.
+        assert!(!set.contains("SHA256"));
+        assert!(!set.contains("sha1"));
+        assert!(!set.contains("sha384"));
+        assert!(!set.contains("md5"));
+        assert!(!set.contains("not-an-algorithm"));
+    }
+
+    /// The [`Borrow<str>`] impl composes with a generic
+    /// identity-container-probe helper bounded by `V: Borrow<str>` —
+    /// the compositional motivation for landing the trait separately
+    /// from the sibling [`AsRef<str>`] and inherent
+    /// [`DigestAlgorithm::as_str`] read peers. Pins the trait-generic
+    /// identity-container consumer surface: a downstream site that
+    /// types its input contract as `V: Borrow<str>` (a per-algorithm
+    /// policy lookup helper, a canonical-label normalisation utility,
+    /// an admission-record probe) recovers the same borrowed
+    /// canonical-label slice a direct
+    /// `.as_str()` / `.as_ref::<str>()` call would at every variant.
+    #[test]
+    fn test_digest_algorithm_borrow_str_carries_through_generic_consumer() {
+        use std::borrow::Borrow;
+
+        fn first_byte_of<V: Borrow<str>>(v: &V) -> u8 {
+            v.borrow().as_bytes()[0]
+        }
+        fn length_of<V: Borrow<str>>(v: &V) -> usize {
+            v.borrow().len()
+        }
+        fn equals<V: Borrow<str>>(v: &V, expected: &str) -> bool {
+            v.borrow() == expected
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            let expected = algo.as_str();
+            assert_eq!(first_byte_of(&algo), expected.as_bytes()[0]);
+            assert_eq!(length_of(&algo), expected.len());
+            assert!(equals(&algo, expected));
+
+            // Composes with the sibling AsRef<str> read peer at the
+            // same borrowed slice: T: Borrow<str> and T: AsRef<str>
+            // read the same underlying canonical-label slice through
+            // the same one-oracle discipline.
+            assert_eq!(
+                <DigestAlgorithm as Borrow<str>>::borrow(&algo),
+                <DigestAlgorithm as AsRef<str>>::as_ref(&algo),
+            );
+        }
+    }
+
+    /// Equal [`DigestAlgorithm`] variants hash equal at every hasher —
+    /// the [`Eq`] → [`Hash`] agreement axiom the hand-rolled
+    /// [`Hash for DigestAlgorithm`] impl preserves after replacing the
+    /// derived discriminant-hash path. Pins the axiom at every
+    /// `(algo, algo)` self-pair as well as the reflexivity property a
+    /// downstream [`std::collections::HashMap`] / [`HashSet`] key slot
+    /// silently depends on: two [`DigestAlgorithm`] values that
+    /// compare equal MUST hash equal or the identity container's
+    /// bucket-lookup path never finds a stored key by an equal probe.
+    #[test]
+    fn test_digest_algorithm_hash_eq_agreement() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of<T: Hash + ?Sized>(t: &T) -> u64 {
+            let mut h = DefaultHasher::new();
+            t.hash(&mut h);
+            h.finish()
+        }
+
+        for algo in DigestAlgorithm::ALL {
+            let clone = algo;
+            assert_eq!(algo, clone);
+            assert_eq!(
+                hash_of(&algo),
+                hash_of(&clone),
+                "equal DigestAlgorithm values must hash equal at {algo:?}",
+            );
+        }
+    }
+
+    /// Distinct [`DigestAlgorithm`] variants hash to distinct byte-
+    /// write traces at the process-default hasher — the canonical
+    /// labels `"sha256"`, `"sha512"`, `"blake3"` are pairwise
+    /// distinct bytes-strings, and the hand-rolled [`Hash`] projection
+    /// delegates to [`<str as Hash>::hash`] on each. Pins the
+    /// distinct-label distinct-hash property against the process-
+    /// default hasher: a future refactor that collapsed two variant
+    /// labels (a name-collision bug, an alias arm the parser admits
+    /// but the label projection stops distinguishing) breaks this
+    /// pin. Sound because [`<str as Hash>::hash`] terminates its
+    /// byte-write trace with a distinguishing terminator, so distinct
+    /// string labels produce distinct finalised hashes at the
+    /// [`std::collections::hash_map::DefaultHasher`] this test uses.
+    #[test]
+    fn test_digest_algorithm_hash_distinguishes_distinct_variants() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of<T: Hash + ?Sized>(t: &T) -> u64 {
+            let mut h = DefaultHasher::new();
+            t.hash(&mut h);
+            h.finish()
+        }
+
+        for i in 0..DigestAlgorithm::ALL.len() {
+            for j in (i + 1)..DigestAlgorithm::ALL.len() {
+                let a = DigestAlgorithm::ALL[i];
+                let b = DigestAlgorithm::ALL[j];
+                assert_ne!(
+                    hash_of(&a),
+                    hash_of(&b),
+                    "distinct DigestAlgorithm variants must hash to distinct values \
+                     under DefaultHasher at ({a:?}, {b:?})",
                 );
             }
         }
