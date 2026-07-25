@@ -9594,6 +9594,115 @@ impl PartialEq<&[u8]> for BumpLevel {
     }
 }
 
+/// Ergonomic canonical-label equality query at the borrowed byte-slice
+/// frontier through a dereffed `[u8]` receiver on the left, a
+/// [`BumpLevel`] value on the right — the reverse-direction sibling of
+/// [`PartialEq<[u8]> for BumpLevel`] (line 9545) and the opening peer
+/// of the reverse-direction 2×2 byte-slice comparison pair on the
+/// version-bump-magnitude typed sum. A downstream site that holds a
+/// dereffed `[u8]` value on the left of an equality operator
+/// (`*label_bytes_ref == level`, a byte-stream cache-index lookup that
+/// keys off an already-dereffed slice, an integration-test symmetric
+/// oracle that walks both directions of `==` at the byte frontier)
+/// answers the boolean equality query at ONE composition rather than a
+/// per-site `*label_bytes_ref == <BumpLevel as AsRef<[u8]>>::as_ref(&level)`
+/// restatement.
+///
+/// Route: the impl body composes
+/// [`<BumpLevel as AsRef<[u8]>>::as_ref`] with the standard library
+/// [`<[u8] as PartialEq<[u8]>>::eq`] on the `&[u8]` self receiver, so
+/// the comparison reads the same canonical-label bytes as the forward-
+/// direction sibling at zero allocation and zero intermediate buffer,
+/// and the symmetry axiom
+/// `<[u8] as PartialEq<BumpLevel>>::eq(bytes, &level)
+/// == <BumpLevel as PartialEq<[u8]>>::eq(&level, bytes)` holds by
+/// construction at every `(bytes, level)` pair.
+///
+/// Mid peer of the reverse-direction borrowed byte-slice comparison
+/// trio at the ordered typed-sum ladder set — the sibling per-attempt-
+/// region ladder already carries it at `cli/src/retry.rs::9018` /
+/// `::9068` (commit 0f43079); the sibling admission-tier ladder at
+/// `cli/src/probe_outcome.rs` is the outstanding third leg after this
+/// pair lands. Mirrors the four-impl closure the standard library
+/// gives [`Vec<u8>`] through [`PartialEq<[u8]> for Vec<u8>`] +
+/// [`PartialEq<&[u8]> for Vec<u8>`] + [`PartialEq<Vec<u8>> for [u8]`] +
+/// [`PartialEq<Vec<u8>> for &[u8]`] and the four-impl byte-slice
+/// closure the sibling reference-grammar family
+/// [`crate::oci_manifest::DigestAlgorithm`] carries at
+/// `cli/src/oci_manifest.rs::3738` / `::3809` (forward pair) /
+/// `::3889` / `::3938` (reverse pair).
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// byte-slice `[u8]`-receiver comparison surface is a typed-primitive
+/// site on [`BumpLevel`] itself (one [`PartialEq<BumpLevel>`] impl on
+/// [`[u8]`] routing through [`<BumpLevel as AsRef<[u8]>>::as_ref`]),
+/// not a per-consumer restatement at every downstream site that holds
+/// an already-dereffed `[u8]` handle on the left of an equality
+/// operator. THEORY.md §VI.1 one-oracle: the canonical label is named
+/// at one site ([`BumpLevel::as_str`], projected onto bytes through
+/// [`str::as_bytes`] at the [`AsRef<[u8]>`] surface at line 1508), and
+/// every borrowed byte-slice comparison surface — the forward-
+/// direction [`PartialEq<[u8]> for BumpLevel`] +
+/// [`PartialEq<&[u8]> for BumpLevel`] pair (lines 9545 / 9591), this
+/// reverse-direction [`PartialEq<BumpLevel> for [u8]`] +
+/// [`PartialEq<BumpLevel> for &[u8]`] pair — reads through the same
+/// one-oracle discipline projected onto its own direction × receiver
+/// shape.
+impl PartialEq<BumpLevel> for [u8] {
+    fn eq(&self, other: &BumpLevel) -> bool {
+        self == <BumpLevel as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
+/// Reverse-direction borrowed byte-slice comparison peer through a
+/// `&[u8]` receiver — the reverse-direction sibling of
+/// [`PartialEq<&[u8]> for BumpLevel`] (line 9591) and the receiver-
+/// shape peer of [`PartialEq<BumpLevel> for [u8]`] (directly above),
+/// split by receiver shape so the caller writes
+/// `label_bytes_ref == level` without the explicit `*` deref at every
+/// comparison site. The four [`PartialEq`] impls together on the byte-
+/// slice frontier — forward × receiver-shape (lines 9545 / 9591) and
+/// reverse × receiver-shape (directly above and this impl) — close the
+/// borrowed byte-slice comparison surface across the full 2×2 cross-
+/// product on the version-bump-magnitude typed sum, matching the
+/// four-impl closure the standard library gives [`Vec<u8>`] through
+/// [`PartialEq<[u8]> for Vec<u8>`] + [`PartialEq<&[u8]> for Vec<u8>`] +
+/// [`PartialEq<Vec<u8>> for [u8]`] + [`PartialEq<Vec<u8>> for &[u8]`]
+/// and the four-impl byte-slice closure the sibling reference-grammar
+/// family [`crate::oci_manifest::DigestAlgorithm`] carries at
+/// `cli/src/oci_manifest.rs::3738` / `::3809` / `::3889` / `::3938`,
+/// closing the 2×2 byte-frontier cross-product to match the closed
+/// 2×2 UTF-8 cross-product this typed sum already carries at lines
+/// 9255 / 9351 / 9428 / 9468.
+///
+/// Route: the impl body composes
+/// [`<BumpLevel as AsRef<[u8]>>::as_ref`] with the standard library
+/// [`<[u8] as PartialEq<[u8]>>::eq`] on the dereffed `&[u8]` self
+/// receiver, so the comparison reads the same canonical-label bytes as
+/// the sibling receiver-shape peer at zero allocation and zero
+/// intermediate buffer, and the symmetry axiom
+/// `<&[u8] as PartialEq<BumpLevel>>::eq(&bytes_ref, &level)
+/// == <BumpLevel as PartialEq<&[u8]>>::eq(&level, &bytes_ref)` holds by
+/// construction at every `(bytes_ref, level)` pair.
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// byte-slice `&[u8]`-receiver comparison surface is a typed-primitive
+/// site on [`BumpLevel`] itself (one [`PartialEq<BumpLevel>`] impl on
+/// [`&[u8]`] routing through [`<BumpLevel as AsRef<[u8]>>::as_ref`]),
+/// not a per-consumer restatement at every downstream site that asks
+/// whether an already-borrowed `&[u8]` handle names the same canonical
+/// bump-magnitude label as a [`BumpLevel`] value. THEORY.md §VI.1
+/// one-oracle: the canonical label is named at one site
+/// ([`BumpLevel::as_str`]), and this reverse-direction `&[u8]`-receiver
+/// surface reads through the same one-oracle discipline the three
+/// sibling byte-slice comparison surfaces (forward-`[u8]`,
+/// forward-`&[u8]`, reverse-`[u8]`) already carry.
+impl PartialEq<BumpLevel> for &[u8] {
+    fn eq(&self, other: &BumpLevel) -> bool {
+        *self == <BumpLevel as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -21167,6 +21276,186 @@ mod tests {
                     <BumpLevel as PartialEq<&[u8]>>::eq(&level, &label_ref),
                     <BumpLevel as PartialEq<[u8]>>::eq(&level, label_ref),
                     "PartialEq<&[u8]> and PartialEq<[u8]> receiver-shape peers must agree at ({level:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`BumpLevel`] variant × every entry in a canonical ×
+    /// cross-ladder × known-bad × invalid-UTF-8 byte-slice label grid,
+    /// `<[u8] as PartialEq<BumpLevel>>::eq(label, &level)` answers the
+    /// same boolean as
+    /// `*label == <BumpLevel as AsRef<[u8]>>::as_ref(&level)`. Pins the
+    /// reverse-direction one-oracle discipline at the byte frontier so a
+    /// future refactor that inlined a divergent read into the reverse-
+    /// direction impl (a stale per-variant byte table, a case-fold on
+    /// the label side, a whitespace-tolerance branch) breaks this pin
+    /// at at least one (level, label) pair rather than at every
+    /// downstream `*label_bytes_ref == level` call site. Mirrors the
+    /// sibling per-attempt-region pin
+    /// [`crate::retry::tests::test_bytes_partial_eq_per_attempt_region_agrees_with_as_ref`]
+    /// (commit 0f43079) and the sibling reference-grammar pin
+    /// [`crate::oci_manifest::tests::test_bytes_partial_eq_digest_algorithm_agrees_with_as_ref`]
+    /// at the parallel primitives.
+    #[test]
+    fn test_bytes_partial_eq_bump_level_agrees_with_as_ref() {
+        let owned: Vec<Vec<u8>> = [
+            b"patch".to_vec(),
+            b"minor".to_vec(),
+            b"major".to_vec(),
+            Vec::<u8>::new(),
+            b"Patch".to_vec(),
+            b"MINOR".to_vec(),
+            b" patch".to_vec(),
+            b"major ".to_vec(),
+            b"\tminor".to_vec(),
+            b"nonsense".to_vec(),
+            b"refused".to_vec(),
+            b"strict".to_vec(),
+            b"staging_only".to_vec(),
+            b"first".to_vec(),
+            b"before_first".to_vec(),
+            b"over_budget".to_vec(),
+            b"sha256".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        let labels: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        for level in BumpLevel::ALL {
+            for label in &labels {
+                assert_eq!(
+                    <[u8] as PartialEq<BumpLevel>>::eq(label, &level),
+                    *label == <BumpLevel as AsRef<[u8]>>::as_ref(&level),
+                    "PartialEq<BumpLevel> for [u8] and AsRef<[u8]> equality must agree at ({level:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`BumpLevel`] variant,
+    /// `<[u8] as PartialEq<BumpLevel>>::eq(level.as_ref(), &level)`
+    /// returns true — the variant's own emitted canonical-label bytes
+    /// recognise themselves as a match through the reverse-direction
+    /// `[u8]`-receiver peer, mirroring the forward-direction sibling
+    /// [`test_bump_level_partial_eq_bytes_reflexive_at_own_label`] and
+    /// the sibling per-attempt-region pin
+    /// [`crate::retry::tests::test_bytes_partial_eq_per_attempt_region_reflexive_at_own_label`].
+    #[test]
+    fn test_bytes_partial_eq_bump_level_reflexive_at_own_label() {
+        for level in BumpLevel::ALL {
+            let canonical: &[u8] = <BumpLevel as AsRef<[u8]>>::as_ref(&level);
+            assert!(
+                <[u8] as PartialEq<BumpLevel>>::eq(canonical, &level),
+                "PartialEq<BumpLevel> for [u8] must recognise self canonical label bytes at {level:?}",
+            );
+        }
+    }
+
+    /// `<&[u8] as PartialEq<BumpLevel>>::eq(&label_ref, &level)` agrees
+    /// byte-for-byte with the borrowed-view
+    /// [`<BumpLevel as AsRef<[u8]>>::as_ref`] oracle across the same
+    /// grid, threaded through a `&[u8]` self receiver so the caller
+    /// writes `label_bytes_ref == level` without the explicit `*`
+    /// deref. Pins the reverse-direction `&[u8]`-receiver agreement,
+    /// mirroring the forward-direction sibling
+    /// [`test_bump_level_partial_eq_bytes_ref_agrees_with_as_ref`] and
+    /// the sibling per-attempt-region pin
+    /// [`crate::retry::tests::test_bytes_ref_partial_eq_per_attempt_region_agrees_with_as_ref`].
+    #[test]
+    fn test_bytes_ref_partial_eq_bump_level_agrees_with_as_ref() {
+        let owned: Vec<Vec<u8>> = [
+            b"patch".to_vec(),
+            b"minor".to_vec(),
+            b"major".to_vec(),
+            Vec::<u8>::new(),
+            b"Patch".to_vec(),
+            b"MINOR".to_vec(),
+            b" patch".to_vec(),
+            b"major ".to_vec(),
+            b"\tminor".to_vec(),
+            b"nonsense".to_vec(),
+            b"refused".to_vec(),
+            b"strict".to_vec(),
+            b"staging_only".to_vec(),
+            b"first".to_vec(),
+            b"before_first".to_vec(),
+            b"over_budget".to_vec(),
+            b"sha256".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for level in BumpLevel::ALL {
+            for label in &owned {
+                let label_ref: &[u8] = label;
+                assert_eq!(
+                    <&[u8] as PartialEq<BumpLevel>>::eq(&label_ref, &level),
+                    label_ref == <BumpLevel as AsRef<[u8]>>::as_ref(&level),
+                    "PartialEq<BumpLevel> for &[u8] and AsRef<[u8]> equality must agree at ({level:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`BumpLevel`] variant,
+    /// `<&[u8] as PartialEq<BumpLevel>>::eq(&level.as_ref(), &level)`
+    /// returns true — the variant's own emitted canonical-label bytes
+    /// recognise themselves as a match through the reverse-direction
+    /// `&[u8]`-receiver peer without the caller's explicit `*` deref.
+    #[test]
+    fn test_bytes_ref_partial_eq_bump_level_reflexive_at_own_label() {
+        for level in BumpLevel::ALL {
+            let canonical: &[u8] = <BumpLevel as AsRef<[u8]>>::as_ref(&level);
+            assert!(
+                <&[u8] as PartialEq<BumpLevel>>::eq(&canonical, &level),
+                "PartialEq<BumpLevel> for &[u8] must recognise self canonical label bytes at {level:?}",
+            );
+        }
+    }
+
+    /// The reverse-direction and forward-direction borrowed byte-slice
+    /// comparison surfaces agree byte-for-byte at every `(label, level)`
+    /// pair — the symmetry axiom
+    /// `<[u8] as PartialEq<BumpLevel>>::eq(bytes, &level)
+    /// == <BumpLevel as PartialEq<[u8]>>::eq(&level, bytes)` (and its
+    /// `&[u8]`-receiver peer) holds across the canonical × broken ×
+    /// invalid-UTF-8 grid. Pins the full 2×2 receiver × direction
+    /// cross-product closure on the byte-slice frontier at the
+    /// version-bump-magnitude typed sum so a future refactor that
+    /// diverged one impl from its symmetric peer breaks this pin at at
+    /// least one pair rather than propagating unnoticed through
+    /// downstream generic [`PartialEq`]-bounded consumers, mirroring
+    /// the sibling per-attempt-region pin
+    /// [`crate::retry::tests::test_partial_eq_per_attempt_region_bytes_symmetric_with_forward_direction`].
+    #[test]
+    fn test_partial_eq_bump_level_bytes_symmetric_with_forward_direction() {
+        let owned: Vec<Vec<u8>> = [
+            b"patch".to_vec(),
+            b"minor".to_vec(),
+            b"major".to_vec(),
+            Vec::<u8>::new(),
+            b"Patch".to_vec(),
+            b"MINOR".to_vec(),
+            b" patch".to_vec(),
+            b"nonsense".to_vec(),
+            b"refused".to_vec(),
+            b"strict".to_vec(),
+            b"first".to_vec(),
+            b"sha256".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for level in BumpLevel::ALL {
+            for label in &owned {
+                let label_ref: &[u8] = label;
+                assert_eq!(
+                    <[u8] as PartialEq<BumpLevel>>::eq(label_ref, &level),
+                    <BumpLevel as PartialEq<[u8]>>::eq(&level, label_ref),
+                    "reverse-direction PartialEq<BumpLevel> for [u8] must agree with forward-direction PartialEq<[u8]> for BumpLevel at ({level:?}, {label:?})",
+                );
+                assert_eq!(
+                    <&[u8] as PartialEq<BumpLevel>>::eq(&label_ref, &level),
+                    <BumpLevel as PartialEq<&[u8]>>::eq(&level, &label_ref),
+                    "reverse-direction PartialEq<BumpLevel> for &[u8] must agree with forward-direction PartialEq<&[u8]> for BumpLevel at ({level:?}, {label:?})",
                 );
             }
         }
