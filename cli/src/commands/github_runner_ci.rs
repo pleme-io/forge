@@ -188,12 +188,38 @@ pub async fn execute(
         info!("📤 Pushing to Attic cache...");
         debug!("Pushing {} to cache {}", build_output, cache_name);
 
-        let push_result = attic_command_with_retry(
-            &["push", &cache_name, &build_output],
-            "push to Attic cache",
-            safe_mode,
-        )
-        .await;
+        // Delegated to the typed
+        // `crate::infrastructure::attic::AtticClient::push_with_retries`
+        // primitive so a non-zero exit surfaces as
+        // `AtticError::PushFailed` carrying the (cache, store_path,
+        // attempts, exit_code, stderr) structural-record tuple Phase 1
+        // attestation records (THEORY §V.4) consume; a spawn failure
+        // (attic not on PATH under the CI runner's toolchain) surfaces
+        // as `AtticError::ExecFailed` carrying the cache and the
+        // spawn-error message. Pre-migration the stringly
+        // `attic_command_with_retry` helper at this site produced
+        // only untyped `anyhow::Error` — the non-fatal-warn branch
+        // below now debug-logs a structured `AtticError` record via
+        // `{:?}` instead of a fused string.
+        //
+        // The retry budget mirrors the safe_mode partition the
+        // domain-agnostic helper encoded: safe_mode=true → 5 attempts
+        // (matching `RetryPolicy::network`'s canonical budget on the
+        // migrated `build.rs` / `push.rs` sibling surfaces);
+        // safe_mode=false → 1 attempt (no retry). `push_with_retries`
+        // clamps `retries=0` to 1 at `RetryPolicy::new`, so the
+        // partition cannot silently collapse into a no-op.
+        //
+        // No `.with_token(...)` on the client: the token was seeded
+        // into attic's on-disk config by the earlier `login` step, and
+        // the pre-migration call at this site did NOT inject
+        // `ATTIC_TOKEN` into the spawned process's env either.
+        // Preserving the absent-env property means a ps-visible
+        // observation surface on shared CI hosts is unchanged.
+        let attic_push_retries = if safe_mode { 5 } else { 1 };
+        let push_result = crate::infrastructure::attic::AtticClient::new(cache_name.clone())
+            .push_with_retries(&build_output, attic_push_retries)
+            .await;
 
         match push_result {
             Ok(_) => info!("✅ Cached in Attic"),
@@ -754,4 +780,89 @@ async fn push_with_retry(
     .await;
 
     result.map(|_| ()).map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regression shield: the `attic push` step inside `execute()`
+    /// must route through
+    /// [`crate::infrastructure::attic::AtticClient::push_with_retries`]
+    /// rather than the domain-agnostic
+    /// [`attic_command_with_retry`] helper. Pre-migration this call
+    /// site spawned `attic push` via a stringly `args: &[&str]`
+    /// wrapper that produced only untyped `anyhow::Error`;
+    /// post-migration the typed
+    /// [`crate::error::AtticError::PushFailed`] and
+    /// [`crate::error::AtticError::ExecFailed`] variants reach the
+    /// call site so the non-fatal-warn branch's
+    /// `debug!("Attic push error details: {:?}", e)` line surfaces a
+    /// structural record — (cache, store_path, attempts, exit_code,
+    /// stderr) — rather than a fused string.
+    ///
+    /// Sibling of the regression shields the prior three migration
+    /// commits (36fd3b1 push.rs::push_optional; 0365a59 build.rs::
+    /// login_optional; 99aab8b build.rs::use_cache) pinned on their
+    /// respective `execute()` bodies. The four shields together
+    /// close the "no raw `attic <sub>` spawn survives in an execute()
+    /// body" floor across every forge command that talks to attic
+    /// through a client-owned surface.
+    ///
+    /// Structural, not behavioral — reads this module's own source
+    /// via `include_str!` and inspects the `execute()` body slice
+    /// (bounded above by the fn header, below by the free-standing
+    /// `attic_command_with_retry` helper that immediately follows).
+    /// A future regression that re-fuses the push step back onto the
+    /// stringly helper — even without changing observable behavior —
+    /// fails this test rather than silently un-migrating the
+    /// typed-error surface.
+    #[test]
+    fn test_execute_routes_attic_push_through_attic_client_not_helper() {
+        let source = include_str!("github_runner_ci.rs");
+        let execute_start = source
+            .find("pub async fn execute(")
+            .expect("execute() must be present in this module's source");
+        let helper_marker = "\nasync fn attic_command_with_retry";
+        let execute_end = source[execute_start..]
+            .find(helper_marker)
+            .map(|i| execute_start + i)
+            .expect(
+                "the `attic_command_with_retry` helper must follow `execute()` — \
+                 the shield's slice boundary relies on this module ordering",
+            );
+        let execute_body = &source[execute_start..execute_end];
+
+        // Post-migration invariant #1: no `attic_command_with_retry`
+        // call spawning `attic push` remains in `execute()`. The
+        // literal `&["push",` sub-slice is the load-bearing marker
+        // that pre-migration the call was routed through the stringly
+        // helper; if a future regression rewires the push step back
+        // onto that helper, the marker reappears and this shield
+        // fires.
+        assert!(
+            !execute_body.contains("&[\"push\","),
+            "execute() must not spawn `attic push` via the domain-agnostic \
+             `attic_command_with_retry` helper — the `&[\"push\", ...]` args \
+             slice was found in execute(). Route the push step through \
+             `crate::infrastructure::attic::AtticClient::new(cache_name.clone()\
+              ).push_with_retries(&build_output, ...)` instead."
+        );
+
+        // Post-migration invariant #2: the delegation to
+        // `AtticClient::push_with_retries` is present. Pins the
+        // positive form of the migration so a future regression that
+        // silently drops the call (e.g., stripping the push step
+        // entirely) fails this test rather than silently skipping the
+        // cache-write.
+        assert!(
+            execute_body.contains("push_with_retries"),
+            "execute() must delegate the push step to \
+             `AtticClient::push_with_retries` — the `push_with_retries` \
+             method call was not found in execute()."
+        );
+        assert!(
+            execute_body.contains("AtticClient::new"),
+            "execute() must construct an `AtticClient` for the push step \
+             — the `AtticClient::new` string was not found in execute()."
+        );
+    }
 }
