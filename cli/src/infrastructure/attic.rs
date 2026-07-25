@@ -398,6 +398,47 @@ impl AtticClient {
         Ok(())
     }
 
+    /// Login to Attic cache, ignoring failures (non-fatal). Sibling of
+    /// [`Self::push_optional`] on the login surface — wraps [`Self::login`]
+    /// so the wrapped body inherits the `ATTIC_BIN` env resolution
+    /// (`get_tool_path("ATTIC_BIN", "attic")` at
+    /// [`Self::resolve_attic_bin`]) and the typed [`AtticError`] dispatch
+    /// (`ExecFailed` / `LoginFailed` / `TokenRequired`) — a caller that
+    /// wants the non-fatal contract but the load-bearing wrapping (env
+    /// override + typed error) can compose the two by calling this method
+    /// directly instead of hand-rolling
+    /// `Command::new("attic").args(["login", server, url, token]).status()`
+    /// (which drops both).
+    ///
+    /// The [`warn!`] on the failure arm carries the typed error, so a
+    /// downstream reader sees the offending `AtticError` variant
+    /// (`ExecFailed` vs `LoginFailed` vs `TokenRequired`) — not just a
+    /// bare "login failed" line, and not silent as the pre-migration
+    /// `Stdio::null()` + un-checked exit body was.
+    ///
+    /// # Consumers
+    ///
+    /// Canonical non-fatal attic-login primitive. Consumed by
+    /// `commands/build.rs::execute` for the pre-Nix-build cache
+    /// configuration step (a pre-migration
+    /// `Command::new("attic").args(["login", server, url, token])
+    /// .stdout(null).stderr(null).status()` inline body that bypassed
+    /// both load-bearing properties this wrapper carries). Future
+    /// non-fatal attic-login call sites should compose through this
+    /// method rather than spawning `attic` directly.
+    pub async fn login_optional(&self, server_url: &str) -> bool {
+        match self.login(server_url).await {
+            Ok(()) => {
+                info!("Logged in to Attic cache: {}", self.cache_name);
+                true
+            }
+            Err(e) => {
+                warn!("Failed to login to Attic cache (non-fatal): {}", e);
+                false
+            }
+        }
+    }
+
     /// Check if attic CLI is available
     pub async fn is_available() -> bool {
         let attic_bin = get_tool_path("ATTIC_BIN", "attic");
@@ -701,6 +742,56 @@ mod tests {
             }
             other => panic!("expected ClosurePushFailed, got: {other:?}"),
         }
+    }
+
+    /// `login_optional` on the failure arm must swallow the typed
+    /// [`AtticError::LoginFailed`] into `false` — the non-fatal contract
+    /// `commands/build.rs::execute` relies on when attic login exits
+    /// non-zero. Sibling of [`test_push_optional_returns_false_on_failure`]
+    /// on the login surface. Uses a shim invoked by absolute path so the
+    /// test is hermetic and parallel-safe (no env mutation).
+    #[tokio::test]
+    async fn test_login_optional_returns_false_on_failure() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\necho 'invalid token' 1>&2\nexit 5\n");
+        let client = AtticClient::new("cache-login-opt-fail")
+            .with_token("bad-tok")
+            .with_attic_bin(&shim);
+        let ok = client.login_optional("https://attic.example.com").await;
+        assert!(!ok, "login_optional must return false on non-zero exit");
+    }
+
+    /// `login_optional` on the success arm must return `true` — pinning
+    /// the affirmative half of the two-arm bool split so a future refactor
+    /// that inverts the arms (or silently drops the `Ok(()) => true`
+    /// case) breaks here rather than at the downstream `if !ok { ... }`
+    /// reader. Sibling of [`test_push_optional_returns_true_on_success`]
+    /// on the login surface.
+    #[tokio::test]
+    async fn test_login_optional_returns_true_on_success() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\nexit 0\n");
+        let client = AtticClient::new("cache-login-opt-ok")
+            .with_token("good-tok")
+            .with_attic_bin(&shim);
+        let ok = client.login_optional("https://attic.example.com").await;
+        assert!(ok, "login_optional must return true on success");
+    }
+
+    /// `login_optional` with no token configured must return `false` —
+    /// the pre-fire `TokenRequired` short-circuit at [`Self::login`]
+    /// must ALSO swallow to the boolean, never panic or bubble.
+    /// Pins the third arm of the three-error dispatch
+    /// (`ExecFailed` / `LoginFailed` / `TokenRequired` → `false`) so a
+    /// future refactor that adds a `.expect("token")` on the token
+    /// look-up regresses here rather than at a call site that assumed
+    /// bounded failure.
+    #[tokio::test]
+    async fn test_login_optional_returns_false_when_token_missing() {
+        let client = AtticClient::new("cache-login-opt-notoken");
+        let ok = client.login_optional("https://attic.example.com").await;
+        assert!(
+            !ok,
+            "login_optional must return false when no token is configured"
+        );
     }
 
     /// `push_optional` must swallow typed errors into a boolean (the
