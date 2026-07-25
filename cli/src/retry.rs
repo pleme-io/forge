@@ -8680,6 +8680,145 @@ impl PartialEq<&str> for PerAttemptRegion {
     }
 }
 
+/// Reverse-direction borrowed UTF-8 comparison peer — the symmetric
+/// sibling of [`PartialEq<str> for PerAttemptRegion`] (line 8586). A
+/// downstream caller who holds a [`str`] value (a `matches!` arm on
+/// a `str` binding, a dereffed `&Cow::Borrowed(s)`) writes
+/// `*label_ref == region` (or the standard-library-derived
+/// `if a == b || b == a`-style symmetric composition a generic
+/// [`PartialEq`]-bounded consumer performs internally) and answers a
+/// boolean equality query against a [`PerAttemptRegion`] value at the
+/// same borrowed UTF-8 frontier the forward-direction peer covers,
+/// at zero allocation, zero temporary [`String`] construction, and
+/// zero [`std::fmt::Display`] formatter-buffer round trip per call.
+///
+/// Route: the impl body composes [`PerAttemptRegion::as_str`]
+/// (invoked by-value through `other.as_str()` since
+/// [`PerAttemptRegion`] is [`Copy`] and the inherent projection
+/// takes `self` by value) with the standard library
+/// [`<str as PartialEq<str>>::eq`] on the `str` self receiver, so
+/// the comparison reads the same canonical-label bytes as the
+/// forward-direction [`PartialEq<str> for PerAttemptRegion`] peer,
+/// and the symmetry axiom
+/// `<str as PartialEq<PerAttemptRegion>>::eq(label, &region)
+/// == <PerAttemptRegion as PartialEq<str>>::eq(&region, label)`
+/// holds by construction at every `(label, region)` pair.
+///
+/// Mirrors the standard-library idiom [`String`] carries through
+/// its own [`PartialEq<String> for str`] +
+/// [`PartialEq<String> for &str`] symmetric receiver-shape pair: a
+/// borrowed UTF-8 handle compares against an owned canonical-string
+/// primitive in either direction with the same zero-cost projection
+/// through the primitive's read-back accessor. Prior to this impl
+/// the per-attempt-region typed sum carried only the forward
+/// direction (`region == label` compiled but `label == region` did
+/// not), so a generic [`PartialEq`]-bounded consumer that composed
+/// the two through its own symmetric-check protocol could not
+/// thread a [`PerAttemptRegion`] through the [`str`] side of the
+/// bound without a per-consumer `label == region.as_str()` bridge
+/// — the same 2×2 receiver × direction cross-product closure the
+/// sibling reference-grammar family [`crate::oci_manifest::DigestAlgorithm`]
+/// already carries at lines 3428 / 3506 (forward pair) / 3597 /
+/// 3640 (reverse pair) of `cli/src/oci_manifest.rs`.
+///
+/// Opens the reverse-direction borrowed UTF-8 comparison trio at
+/// the per-attempt-region ladder; two subsequent commits close it
+/// at the [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the forward-
+/// direction [`PartialEq<str>`] opening order at the sibling
+/// borrowed UTF-8 comparison surface. After the trio closes, the
+/// reverse-direction borrowed UTF-8 comparison axis spans all three
+/// ordered typed sums on the ladder set against ONE canonical-label
+/// oracle each, and future trios extend the same pattern to
+/// [`PartialEq<PerAttemptRegion> for &str`] (the receiver-shape
+/// peer directly below) and to the remaining reference-grammar
+/// receiver families ([`String`], [`std::borrow::Cow<'_, str>`]).
+///
+/// The identity
+/// `<str as PartialEq<PerAttemptRegion>>::eq(label, &region)
+/// == (label == region.as_str())` at every
+/// [`PerAttemptRegion::ALL`] variant × every string in the union of
+/// {canonical labels, common non-canonical labels, empty} is pinned
+/// by [`tests::test_str_partial_eq_per_attempt_region_agrees_with_as_str`];
+/// the reflexivity identity
+/// `<str as PartialEq<PerAttemptRegion>>::eq(region.as_str(), &region)`
+/// at every variant is pinned by
+/// [`tests::test_str_partial_eq_per_attempt_region_reflexive_at_own_label`];
+/// the symmetry axiom
+/// `<str as PartialEq<PerAttemptRegion>>::eq(label, &region)
+/// == <PerAttemptRegion as PartialEq<str>>::eq(&region, label)` at
+/// every (variant, label) pair is pinned by
+/// [`tests::test_partial_eq_per_attempt_region_symmetric_with_forward_direction`].
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// UTF-8 comparison surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one [`PartialEq<PerAttemptRegion>`]
+/// impl on [`str`] routing through [`PerAttemptRegion::as_str`]),
+/// not a per-consumer `label == region.as_str()` restatement at
+/// every downstream site that asks whether a borrowed UTF-8 handle
+/// names the same canonical per-attempt-region label as a
+/// [`PerAttemptRegion`] value. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]), and every borrowed UTF-8
+/// comparison surface — the forward-direction
+/// [`PartialEq<str> for PerAttemptRegion`] +
+/// [`PartialEq<&str> for PerAttemptRegion`] pair, this reverse-
+/// direction [`PartialEq<PerAttemptRegion> for str`] +
+/// [`PartialEq<PerAttemptRegion> for &str`] pair — reads through
+/// the same one-oracle discipline projected onto its own direction
+/// × receiver shape.
+impl PartialEq<PerAttemptRegion> for str {
+    fn eq(&self, other: &PerAttemptRegion) -> bool {
+        self == other.as_str()
+    }
+}
+
+/// Reverse-direction borrowed UTF-8 comparison peer through a `&str`
+/// receiver — the reverse-direction sibling of
+/// [`PartialEq<&str> for PerAttemptRegion`] (line 8677) and the
+/// receiver-shape peer of [`PartialEq<PerAttemptRegion> for str`]
+/// (directly above), split by receiver shape so the caller writes
+/// `label_ref == region` without the explicit `*` deref at every
+/// comparison site. The four [`PartialEq`] impls together — forward
+/// × receiver-shape and reverse × receiver-shape — close the
+/// borrowed UTF-8 comparison surface across the full 2×2 cross-
+/// product on the per-attempt-region typed sum, matching the
+/// standard-library idiom [`String`] carries through its own four-
+/// impl closure ([`PartialEq<str> for String`] +
+/// [`PartialEq<&str> for String`] + [`PartialEq<String> for str`] +
+/// [`PartialEq<String> for &str`]) and mirroring the sibling
+/// reference-grammar family [`crate::oci_manifest::DigestAlgorithm`]'s
+/// four-impl closure at lines 3428 / 3506 / 3597 / 3640 of
+/// `cli/src/oci_manifest.rs`.
+///
+/// Route: the impl body composes [`PerAttemptRegion::as_str`] with
+/// [`<str as PartialEq<str>>::eq`] on the dereffed `&str` self
+/// receiver, so the comparison reads the same canonical-label bytes
+/// as the sibling receiver-shape peer at zero allocation and zero
+/// intermediate buffer, and the symmetry axiom
+/// `<&str as PartialEq<PerAttemptRegion>>::eq(&label_ref, &region)
+/// == <PerAttemptRegion as PartialEq<&str>>::eq(&region, &label_ref)`
+/// holds by construction at every `(label_ref, region)` pair.
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// UTF-8 `&str`-receiver comparison surface is a typed-primitive
+/// site on [`PerAttemptRegion`] itself (one
+/// [`PartialEq<PerAttemptRegion>`] impl on [`&str`] routing through
+/// [`PerAttemptRegion::as_str`]), not a per-consumer
+/// `label_ref == region.as_str()` restatement at every downstream
+/// site that asks whether a borrowed `&str` handle names the same
+/// canonical per-attempt-region label as a [`PerAttemptRegion`]
+/// value. THEORY.md §VI.1 one-oracle: the canonical label is named
+/// at one site ([`PerAttemptRegion::as_str`]), and this reverse-
+/// direction `&str`-receiver surface reads through the same one-
+/// oracle discipline the three sibling comparison surfaces
+/// (forward-str, forward-&str, reverse-str) already carry.
+impl PartialEq<PerAttemptRegion> for &str {
+    fn eq(&self, other: &PerAttemptRegion) -> bool {
+        *self == other.as_str()
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -27391,6 +27530,193 @@ mod tests {
                 assert!(
                     !<PerAttemptRegion as PartialEq<&str>>::eq(&region, &label),
                     "PartialEq<&str> must reject non-canonical label {label:?} at {region:?}",
+                );
+            }
+        }
+    }
+
+    /// `<str as PartialEq<PerAttemptRegion>>::eq(label, &region)`
+    /// agrees byte-for-byte with the borrowed-view
+    /// [`PerAttemptRegion::as_str`] oracle across the same
+    /// (variant × label) grid the forward-direction sibling
+    /// [`test_per_attempt_region_partial_eq_str_agrees_with_as_str`]
+    /// covers, threaded through the reverse-direction `str` self
+    /// receiver so the caller may write `*label_ref == region`
+    /// (or the standard-library-derived symmetric composition) and
+    /// answer the same boolean equality query as the forward-
+    /// direction [`PartialEq<str> for PerAttemptRegion`] peer.
+    /// Pins the reverse-direction agreement so a future refactor
+    /// that inlined a divergent read into the reverse-direction
+    /// impl (a hand-rolled `matches!` on the variant tag with
+    /// hard-coded per-arm labels that drift off
+    /// [`PerAttemptRegion::as_str`], an accidental case-fold on
+    /// the reverse side that never touched the forward side)
+    /// breaks this pin at at least one (region, label) pair rather
+    /// than at every downstream `*label_ref == region` call site.
+    #[test]
+    fn test_str_partial_eq_per_attempt_region_agrees_with_as_str() {
+        let labels = [
+            "before_first",
+            "first",
+            "interim",
+            "final",
+            "over_budget",
+            "",
+            "BeforeFirst",
+            "First",
+            "Interim",
+            "Final",
+            "OverBudget",
+            "FIRST",
+            "beforefirst",
+            "overbudget",
+            " first",
+            "first ",
+            "before first",
+            "over budget",
+            "nonsense",
+            "patch",
+            "minor",
+            "major",
+        ];
+        for region in PerAttemptRegion::ALL {
+            for label in labels {
+                assert_eq!(
+                    <str as PartialEq<PerAttemptRegion>>::eq(label, &region),
+                    label == region.as_str(),
+                    "PartialEq<PerAttemptRegion> for str and as_str() equality must agree at ({label:?}, {region:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant,
+    /// `<str as PartialEq<PerAttemptRegion>>::eq(region.as_str(), &region)`
+    /// returns true. Pins the reflexivity identity that a variant
+    /// compared against its own canonical-label emission through
+    /// the reverse-direction [`str`]-receiver peer always answers
+    /// true — the load-bearing "self-recognition" property the
+    /// borrowed UTF-8 comparison surface promises, mirroring the
+    /// forward-direction sibling
+    /// [`test_per_attempt_region_partial_eq_str_reflexive_at_own_label`].
+    #[test]
+    fn test_str_partial_eq_per_attempt_region_reflexive_at_own_label() {
+        for region in PerAttemptRegion::ALL {
+            let label: &str = region.as_str();
+            assert!(
+                <str as PartialEq<PerAttemptRegion>>::eq(label, &region),
+                "PartialEq<PerAttemptRegion> for str must recognise self canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// `<&str as PartialEq<PerAttemptRegion>>::eq(&label_ref, &region)`
+    /// agrees byte-for-byte with the borrowed-view
+    /// [`PerAttemptRegion::as_str`] oracle across the same grid,
+    /// threaded through a `&str` self receiver so the caller writes
+    /// `label_ref == region` without the explicit `*` deref. Pins
+    /// the reverse-direction `&str`-receiver agreement, mirroring
+    /// the forward-direction sibling
+    /// [`test_per_attempt_region_partial_eq_str_ref_agrees_with_as_str`].
+    #[test]
+    fn test_str_ref_partial_eq_per_attempt_region_agrees_with_as_str() {
+        let labels = [
+            "before_first",
+            "first",
+            "interim",
+            "final",
+            "over_budget",
+            "",
+            "BeforeFirst",
+            "First",
+            "Interim",
+            "Final",
+            "OverBudget",
+            "FIRST",
+            "beforefirst",
+            "overbudget",
+            " first",
+            "first ",
+            "before first",
+            "over budget",
+            "nonsense",
+            "patch",
+            "minor",
+            "major",
+        ];
+        for region in PerAttemptRegion::ALL {
+            for label in labels {
+                let label_ref: &str = label;
+                assert_eq!(
+                    <&str as PartialEq<PerAttemptRegion>>::eq(&label_ref, &region),
+                    label_ref == region.as_str(),
+                    "PartialEq<PerAttemptRegion> for &str and as_str() equality must agree at ({label:?}, {region:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant,
+    /// `<&str as PartialEq<PerAttemptRegion>>::eq(&region.as_str(), &region)`
+    /// returns true — the variant's own emitted canonical label
+    /// recognises itself as a match through the reverse-direction
+    /// `&str`-receiver peer without the caller's explicit `*` deref.
+    #[test]
+    fn test_str_ref_partial_eq_per_attempt_region_reflexive_at_own_label() {
+        for region in PerAttemptRegion::ALL {
+            let label: &str = region.as_str();
+            assert!(
+                <&str as PartialEq<PerAttemptRegion>>::eq(&label, &region),
+                "PartialEq<PerAttemptRegion> for &str must recognise self canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// The reverse-direction and forward-direction borrowed UTF-8
+    /// comparison surfaces on the per-attempt-region typed sum
+    /// agree byte-for-byte at every `(label, region)` pair — the
+    /// symmetry axiom
+    /// `<str as PartialEq<PerAttemptRegion>>::eq(label, &region)
+    /// == <PerAttemptRegion as PartialEq<str>>::eq(&region, label)`
+    /// (and its `&str`-receiver peer) holds across the canonical ×
+    /// known-bad label grid. Pins the full 2×2 receiver × direction
+    /// cross-product closure so a future refactor that diverged one
+    /// impl from its symmetric peer breaks this pin at at least one
+    /// pair rather than propagating unnoticed through downstream
+    /// generic [`PartialEq`]-bounded consumers that thread a
+    /// [`PerAttemptRegion`] through either side of a `==` operator.
+    /// Mirrors the sibling reference-grammar pin
+    /// [`crate::oci_manifest::tests::test_partial_eq_digest_algorithm_symmetric_with_forward_direction`]
+    /// at the parallel primitive
+    /// [`crate::oci_manifest::DigestAlgorithm`].
+    #[test]
+    fn test_partial_eq_per_attempt_region_symmetric_with_forward_direction() {
+        let labels = [
+            "before_first",
+            "first",
+            "interim",
+            "final",
+            "over_budget",
+            "",
+            "FIRST",
+            "First",
+            " first",
+            "over budget",
+            "nonsense",
+            "patch",
+        ];
+        for region in PerAttemptRegion::ALL {
+            for label in labels {
+                assert_eq!(
+                    <str as PartialEq<PerAttemptRegion>>::eq(label, &region),
+                    <PerAttemptRegion as PartialEq<str>>::eq(&region, label),
+                    "reverse-str and forward-str PartialEq peers must agree at ({label:?}, {region:?})",
+                );
+                let label_ref: &str = label;
+                assert_eq!(
+                    <&str as PartialEq<PerAttemptRegion>>::eq(&label_ref, &region),
+                    <PerAttemptRegion as PartialEq<&str>>::eq(&region, &label_ref),
+                    "reverse-&str and forward-&str PartialEq peers must agree at ({label:?}, {region:?})",
                 );
             }
         }
