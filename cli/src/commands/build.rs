@@ -52,14 +52,31 @@ pub async fn execute(
     // Attic server alias — configurable via ATTIC_SERVER_NAME (default: "default")
     let attic_server = std::env::var("ATTIC_SERVER_NAME").unwrap_or_else(|_| "default".to_string());
 
-    // Login to Attic
-    Command::new("attic")
-        .args(&["login", &attic_server, &cache_url, &attic_token])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .context("Failed to login to Attic")?;
+    // Login to Attic. Routes through
+    // [`crate::infrastructure::attic::AtticClient::login_optional`] so
+    // two load-bearing properties this site previously bypassed land at
+    // ONE call:
+    //   1. `ATTIC_BIN` env override — the pre-migration raw-spawn body
+    //      here ignored the env var every other attic-invocation site in
+    //      the workspace honors via `get_tool_path("ATTIC_BIN", "attic")`
+    //      (`infrastructure/attic.rs::resolve_attic_bin`).
+    //   2. Typed-error dispatch — a spawn failure vs. a non-zero exit
+    //      landed as an untyped `Result<ExitStatus>` (with `Stdio::null()`
+    //      hiding stderr and the exit status silently discarded); the
+    //      primitive routes through `classify_capture` to the
+    //      `AtticError::ExecFailed` / `AtticError::LoginFailed` /
+    //      `AtticError::TokenRequired` split so the failure mode is
+    //      named at the type level and the captured stderr flows into
+    //      the `warn!` telemetry that `login_optional` emits.
+    // The non-fatal contract this site had (login failure did not abort
+    // the build — the subsequent `nix build` surfaces cache-unreachable
+    // errors loudly on its own) is preserved by `login_optional`
+    // swallowing the typed error into a boolean. Sibling of the
+    // `commands/push.rs::execute` migration onto `push_optional`.
+    let _login_ok = crate::infrastructure::attic::AtticClient::new(attic_server.clone())
+        .with_token(attic_token.clone())
+        .login_optional(&cache_url)
+        .await;
 
     // Use cache
     Command::new("attic")
@@ -199,4 +216,87 @@ pub async fn execute(
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regression-shield: `commands/build.rs::execute` must route its
+    /// Attic-login step through
+    /// [`crate::infrastructure::attic::AtticClient::login_optional`]
+    /// rather than spawning `attic` directly. Pre-migration a raw
+    /// `Command::new("attic").args(&["login", server, url, token])
+    /// .stdout(Stdio::null()).stderr(Stdio::null()).status()` body lived
+    /// at this call site and bypassed two load-bearing properties the
+    /// typed primitive carries: the `ATTIC_BIN` env override every other
+    /// attic-invocation site honors via
+    /// `get_tool_path("ATTIC_BIN", "attic")`, and the typed
+    /// [`crate::error::AtticError`] dispatch
+    /// (`ExecFailed` vs `LoginFailed` vs `TokenRequired`) the untyped
+    /// `Result<ExitStatus>` collapsed away — a distinction Phase 1
+    /// attestation records (THEORY §V.4) rely on so a "cache
+    /// misconfigured" telemetry entry is separable from an "attic
+    /// binary missing" one at the type level.
+    ///
+    /// This test reads this module's own source via [`include_str!`] and
+    /// asserts the raw `Command::new("attic").args(&["login"` string
+    /// does not reappear inside `execute()` while the delegation to
+    /// `AtticClient::new(...).with_token(...).login_optional(...)` does.
+    /// A future regression that re-fuses the raw-spawn body fails here,
+    /// not silently in production where a bypassed `ATTIC_BIN` override
+    /// or dropped typed-error dispatch would surface only as a
+    /// mysterious "attic not found" or a silently-ignored bad-token
+    /// login (which the subsequent `nix build` would report as a
+    /// substituter-fetch failure with no structural link back to the
+    /// login-time cause).
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — a behavioral test would require
+    /// wiring up the full `execute` flow with mocked nix / attic /
+    /// filesystem surfaces, which is disproportionate to the invariant
+    /// being pinned. Same regression-shield discipline as
+    /// `commands/push.rs::tests::test_execute_routes_attic_push_through_attic_client_not_raw_command`.
+    #[test]
+    fn test_execute_routes_attic_login_through_attic_client_not_raw_command() {
+        const SOURCE: &str = include_str!("build.rs");
+
+        // Locate the `execute` function body. The regression-shield only
+        // cares about code inside `execute`, not the docstring/test
+        // module which legitimately references the pre-migration string
+        // for context.
+        let execute_marker = "pub async fn execute(";
+        let start = SOURCE
+            .find(execute_marker)
+            .expect("build.rs must contain `pub async fn execute(` — module invariant");
+        let after_execute = &SOURCE[start..];
+        // Bound the search at the tests module marker so the docstring
+        // in THIS test — which legitimately spells the pre-migration
+        // `Command::new("attic").args(&["login"` string for context — is
+        // excluded from the scan. Every real code site sits strictly
+        // between the `execute(` marker and the `#[cfg(test)]` marker.
+        let end_relative = after_execute
+            .find("\n#[cfg(test)]")
+            .expect("build.rs must contain `#[cfg(test)]` tests module — this module's own marker");
+        let execute_body = &after_execute[..end_relative];
+
+        assert!(
+            !execute_body.contains("Command::new(\"attic\").args(&[\"login\""),
+            "execute() must NOT spawn `attic login` directly — route through \
+             `crate::infrastructure::attic::AtticClient::new(...).with_token(...)\
+             .login_optional(...)` so `ATTIC_BIN` overrides and the typed \
+             `AtticError` dispatch both land at the shared primitive. Found \
+             the pre-migration raw-spawn body in execute()."
+        );
+        assert!(
+            execute_body.contains("AtticClient::new"),
+            "execute() must construct an `AtticClient` for the login step \
+             — the `AtticClient::new` string was not found in execute()."
+        );
+        assert!(
+            execute_body.contains("login_optional"),
+            "execute() must call `login_optional(...)` to preserve the \
+             non-fatal-on-failure contract while inheriting the env \
+             resolution and typed error dispatch — the call string was \
+             not found in execute()."
+        );
+    }
 }
