@@ -385,6 +385,25 @@ pub enum AtticError {
         stderr: String,
     },
 
+    /// `attic use <server>:<cache>` failed (non-zero exit). Sibling of
+    /// [`Self::LoginFailed`] on the cache-selection surface — the split
+    /// is which post-config attic subcommand fired: `login` seeds the
+    /// server token in local attic config; `use` selects a
+    /// server-scoped cache as the current one for subsequent commands.
+    /// Both consume `(cache, server, exit_code, stderr)` — the
+    /// structural-record tuple Phase 1 attestation records
+    /// (THEORY §V.4) pattern-match on. Keeping `server` and `cache` as
+    /// distinct fields (not fused into a single `{server}:{cache}`
+    /// string) lets telemetry group failures by either dimension
+    /// without parsing the joined ref.
+    #[error("Attic use {server}:{cache} failed (exit {exit_code:?}): {stderr}")]
+    UseFailed {
+        cache: String,
+        server: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+
     #[error("Attic login to {server_url} for cache {cache} requires a token (none provided)")]
     TokenRequired { cache: String, server_url: String },
 }
@@ -1489,6 +1508,29 @@ mod tests {
         assert!(msg.contains("bad creds"), "stderr must appear: {msg}");
     }
 
+    /// `UseFailed`'s Display must surface the cache, the server alias,
+    /// and the captured stderr — the same three fields telemetry
+    /// destructures when a subsequent `nix build` on a
+    /// mis-`use`d cache surfaces a substituter-fetch failure that
+    /// traces back to the wrong active cache. Sibling of the
+    /// `test_attic_error_login_failed_display` shield on the login
+    /// surface; the two together pin the display floor for both post-
+    /// config attic subcommands (`login` seeds the token, `use`
+    /// selects the active cache).
+    #[test]
+    fn test_attic_error_use_failed_display() {
+        let err = AtticError::UseFailed {
+            cache: "system".into(),
+            server: "default".into(),
+            exit_code: Some(2),
+            stderr: "no such cache".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("system"), "cache must appear: {msg}");
+        assert!(msg.contains("default"), "server must appear: {msg}");
+        assert!(msg.contains("no such cache"), "stderr must appear: {msg}");
+    }
+
     #[test]
     fn test_attic_error_token_required_display() {
         let err = AtticError::TokenRequired {
@@ -1518,6 +1560,7 @@ mod tests {
                 AtticError::PushFailed { .. } => "push",
                 AtticError::ClosurePushFailed { .. } => "closure-push",
                 AtticError::LoginFailed { .. } => "login",
+                AtticError::UseFailed { .. } => "use",
                 AtticError::TokenRequired { .. } => "token",
             }
         }
@@ -1554,6 +1597,15 @@ mod tests {
                 stderr: "x".into(),
             }),
             "login"
+        );
+        assert_eq!(
+            classify(&AtticError::UseFailed {
+                cache: "c".into(),
+                server: "s".into(),
+                exit_code: Some(1),
+                stderr: "x".into(),
+            }),
+            "use"
         );
         assert_eq!(
             classify(&AtticError::TokenRequired {

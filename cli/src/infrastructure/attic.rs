@@ -439,6 +439,80 @@ impl AtticClient {
         }
     }
 
+    /// Select `<server>:<cache_name>` as the active Attic cache for
+    /// subsequent commands (`attic use <server>:<cache_name>`).
+    ///
+    /// Post-login sibling of [`Self::login`]: after `login` seeds the
+    /// server token in the local attic config, `use_cache` selects the
+    /// server-scoped cache reference as the current one so subsequent
+    /// `attic push` / `nix build --substituters` calls route through
+    /// it. The cache identity comes from `self.cache_name`; the server
+    /// alias arrives as `server`. The ref is joined here (not by the
+    /// caller) so a future change to the ref shape — e.g. an attic
+    /// upgrade that adds a shard qualifier — lands in one place.
+    ///
+    /// Spawn-vs-op dispatch flows through
+    /// [`crate::retry::classify_capture`] — same shape as
+    /// [`Self::login`], with the op-failure closure producing
+    /// [`AtticError::UseFailed`] carrying `(cache, server, exit_code,
+    /// stderr)` — the structural-record tuple Phase 1 attestation
+    /// records (THEORY §V.4) consume. The `attic use` subcommand does
+    /// not consume a token (auth is already seeded by the prior
+    /// `login`), so no `ATTIC_TOKEN` env injection happens here —
+    /// mirroring the token-passing discipline `login` established.
+    ///
+    /// Returns typed errors:
+    /// - [`AtticError::ExecFailed`] when `attic` cannot be spawned.
+    /// - [`AtticError::UseFailed`] when attic exits non-zero, carrying
+    ///   cache, server alias, exit code, and captured stderr.
+    ///
+    /// # Consumers
+    ///
+    /// Canonical `attic use` primitive. Consumed by
+    /// `commands/build.rs::execute` for the post-login cache selection
+    /// step (a pre-migration `Command::new("attic").args(&["use",
+    /// &format!("{server}:{cache}")]).stdout(Stdio::null()).stderr(
+    /// Stdio::null()).status()` inline body that bypassed both
+    /// load-bearing properties this wrapper carries: `ATTIC_BIN` env
+    /// resolution via [`Self::resolve_attic_bin`], and typed-error
+    /// dispatch — a spawn failure vs. a non-zero exit landed as an
+    /// untyped `Result<ExitStatus>` and `Stdio::null()` hid the
+    /// stderr entirely, so a "wrong cache alias" error surfaced only
+    /// as a mysterious substituter-fetch failure from the next `nix
+    /// build`). Future `attic use` call sites (e.g.
+    /// `commands/github_runner_ci.rs::execute` — currently routes
+    /// through the domain-agnostic `attic_command_with_retry`) should
+    /// compose through this method rather than spawning `attic use`
+    /// directly.
+    pub async fn use_cache(&self, server: &str) -> Result<(), AtticError> {
+        let attic_bin = self.resolve_attic_bin();
+        let cache_ref = format!("{}:{}", server, self.cache_name);
+        let mut cmd = Command::new(&attic_bin);
+        cmd.args(["use", &cache_ref])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        classify_capture(
+            cmd.output().await,
+            |e| AtticError::ExecFailed {
+                cache: self.cache_name.clone(),
+                message: e.to_string(),
+            },
+            |cf| AtticError::UseFailed {
+                cache: self.cache_name.clone(),
+                server: server.to_string(),
+                exit_code: cf.exit_code,
+                stderr: cf.stderr,
+            },
+        )?;
+
+        info!(
+            "Selected active Attic cache: {}:{}",
+            server, self.cache_name
+        );
+        Ok(())
+    }
+
     /// Check if attic CLI is available
     pub async fn is_available() -> bool {
         let attic_bin = get_tool_path("ATTIC_BIN", "attic");
@@ -1167,6 +1241,141 @@ mod tests {
                 );
             }
             other => panic!("expected PushFailed, got: {other:?}"),
+        }
+    }
+
+    /// When the `attic` binary cannot be spawned, `use_cache` must
+    /// surface [`AtticError::ExecFailed`] carrying the cache name —
+    /// never a stringly anyhow "Failed to configure attic cache".
+    /// Sibling of `test_login_returns_exec_failed_when_attic_missing`
+    /// on the cache-selection surface; pins the spawn-vs-op split at
+    /// the type level so telemetry can distinguish "attic missing"
+    /// from "attic said no" without parsing strings. Uses an absolute
+    /// path that does not exist, injected via `with_attic_bin`, so
+    /// the test is hermetic and parallel-safe (no env mutation).
+    #[tokio::test]
+    async fn test_use_cache_returns_exec_failed_when_attic_missing() {
+        let client = AtticClient::new("cache-use-x")
+            .with_attic_bin("/nonexistent/path/to/attic-binary-does-not-exist");
+        let err = client
+            .use_cache("default")
+            .await
+            .expect_err("missing attic must fail");
+        match err {
+            AtticError::ExecFailed { cache, .. } => assert_eq!(cache, "cache-use-x"),
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// `use_cache` failures must produce [`AtticError::UseFailed`]
+    /// carrying cache, server alias, exit code, and captured stderr —
+    /// never a fused `bail!("Attic use failed")`. Mirror of
+    /// `test_login_returns_login_failed_with_structured_fields` on the
+    /// cache-selection surface; guarantees the structural-record tuple
+    /// Phase 1 attestation records (THEORY §V.4) destructure.
+    #[tokio::test]
+    async fn test_use_cache_returns_use_failed_with_structured_fields() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\necho 'unknown cache' 1>&2\nexit 7\n");
+        let client = AtticClient::new("cache-use-y").with_attic_bin(&shim);
+        let err = client
+            .use_cache("default")
+            .await
+            .expect_err("nonzero exit must fail");
+        match err {
+            AtticError::UseFailed {
+                cache,
+                server,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(cache, "cache-use-y");
+                assert_eq!(server, "default");
+                assert_eq!(exit_code, Some(7));
+                assert!(
+                    stderr.contains("unknown cache"),
+                    "stderr field must capture attic stderr verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected UseFailed, got: {other:?}"),
+        }
+    }
+
+    /// On the success path, `use_cache` must complete without error —
+    /// pins the affirmative floor `commands/build.rs::execute` relies
+    /// on after a successful `attic login`. Sibling of
+    /// `test_push_success_path` and `test_login_returns_login_failed_...`
+    /// on the login/push surfaces.
+    #[tokio::test]
+    async fn test_use_cache_success_path() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\nexit 0\n");
+        let client = AtticClient::new("cache-use-ok").with_attic_bin(&shim);
+        client
+            .use_cache("default")
+            .await
+            .expect("success path must succeed");
+    }
+
+    /// `use_cache` must pass `<server>:<cache_name>` as the CLI arg to
+    /// `attic use` — a single joined ref rather than two separate
+    /// tokens. Pre-migration the ref was joined at each call site via
+    /// `format!("{server}:{cache}")`; post-migration the join lives in
+    /// the primitive so a future change to the ref shape (e.g. an
+    /// attic upgrade adding a shard qualifier) lands in one place. The
+    /// shim echoes its argv to stderr and exits non-zero so the
+    /// captured stderr in [`AtticError::UseFailed`] round-trips the
+    /// observed arg — pinning the ref format structurally.
+    #[tokio::test]
+    async fn test_use_cache_passes_joined_server_and_cache_ref_to_attic() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\necho \"argv=$*\" 1>&2\nexit 11\n");
+        let client = AtticClient::new("cache-ref-probe").with_attic_bin(&shim);
+        let err = client
+            .use_cache("srv-probe")
+            .await
+            .expect_err("nonzero exit must fail");
+        match err {
+            AtticError::UseFailed { stderr, .. } => {
+                assert!(
+                    stderr.contains("argv=use srv-probe:cache-ref-probe"),
+                    "use_cache must invoke `attic use <server>:<cache>` verbatim; got stderr: {stderr:?}"
+                );
+            }
+            other => panic!("expected UseFailed, got: {other:?}"),
+        }
+    }
+
+    /// `use_cache` must NOT inject `ATTIC_TOKEN` into the spawned
+    /// `attic` process — the `attic use` subcommand consumes no token
+    /// (auth is seeded by the prior `attic login`). Sibling of
+    /// `test_login_does_not_inject_attic_token_env` on the login
+    /// surface; the two together pin the token-passing floor for both
+    /// post-config attic subcommands. Guards against a future
+    /// "harmonize all attic invocations to forward the token" refactor
+    /// that would broaden the attack surface for `ps`-style
+    /// observation on shared hosts by leaking the token into the env
+    /// of a subcommand that never needed it.
+    #[tokio::test]
+    async fn test_use_cache_does_not_inject_attic_token_env() {
+        let (_dir, shim) =
+            make_attic_shim("#!/bin/sh\necho \"USE_SAW_TOKEN=$ATTIC_TOKEN\" 1>&2\nexit 13\n");
+        let client = AtticClient::new("cache-use-tok")
+            .with_token("must-not-leak-into-env")
+            .with_attic_bin(&shim);
+        let err = client
+            .use_cache("default")
+            .await
+            .expect_err("nonzero exit must fail");
+        match err {
+            AtticError::UseFailed { stderr, .. } => {
+                assert!(
+                    stderr.contains("USE_SAW_TOKEN="),
+                    "shim must observe the env var probe; got stderr: {stderr:?}"
+                );
+                assert!(
+                    !stderr.contains("USE_SAW_TOKEN=must-not-leak-into-env"),
+                    "use_cache MUST NOT forward token via ATTIC_TOKEN env; got stderr: {stderr:?}"
+                );
+            }
+            other => panic!("expected UseFailed, got: {other:?}"),
         }
     }
 }

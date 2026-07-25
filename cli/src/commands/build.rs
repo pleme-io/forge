@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -78,14 +77,38 @@ pub async fn execute(
         .login_optional(&cache_url)
         .await;
 
-    // Use cache
-    Command::new("attic")
-        .args(&["use", &format!("{}:{}", attic_server, cache_name)])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .context("Failed to configure Attic cache")?;
+    // Select the server-scoped cache as active. Routes through
+    // [`crate::infrastructure::attic::AtticClient::use_cache`] so two
+    // load-bearing properties this site previously bypassed land at ONE
+    // call:
+    //   1. `ATTIC_BIN` env override — the pre-migration raw-spawn body
+    //      here ignored the env var every other attic-invocation site in
+    //      the workspace honors via `get_tool_path("ATTIC_BIN", "attic")`
+    //      (`infrastructure/attic.rs::resolve_attic_bin`), so a shipped
+    //      `attic` binary at a Nix store path could not be routed to at
+    //      THIS `use` site — `forge build` on a Nix-hermetic runner
+    //      silently fell through to whatever `attic` was on the PATH.
+    //   2. Typed-error dispatch — a spawn failure vs. a non-zero exit
+    //      landed as an untyped `Result<ExitStatus>` (with
+    //      `Stdio::null()` hiding stderr and only a bare "Failed to
+    //      configure Attic cache" context on the anyhow boundary); the
+    //      primitive routes through `classify_capture` to the
+    //      `AtticError::ExecFailed` / `AtticError::UseFailed` split so
+    //      a "wrong server alias" surfaces at the type level with the
+    //      captured stderr attached, instead of as a mysterious
+    //      substituter-fetch failure from the subsequent `nix build`
+    //      with no structural link back to the mis-`use`d cache.
+    // The hard-fail contract this site had (a `use` failure aborts the
+    // build because subsequent nix substituter fetches would target the
+    // wrong cache) is preserved by the `?` propagation onto the
+    // `AtticError` variant. Sibling of the login-step migration one
+    // block above and of the `commands/push.rs::execute` migration onto
+    // `push_optional`. The regression-shield
+    // `tests::test_execute_routes_attic_use_through_attic_client_not_raw_command`
+    // pins the delegation structurally against a future re-fusion.
+    crate::infrastructure::attic::AtticClient::new(cache_name.clone())
+        .use_cache(&attic_server)
+        .await?;
 
     info!("✅ Attic configured");
     println!();
@@ -297,6 +320,78 @@ mod tests {
              non-fatal-on-failure contract while inheriting the env \
              resolution and typed error dispatch — the call string was \
              not found in execute()."
+        );
+    }
+
+    /// Regression-shield: `commands/build.rs::execute` must route its
+    /// Attic-`use` (cache-selection) step through
+    /// [`crate::infrastructure::attic::AtticClient::use_cache`] rather
+    /// than spawning `attic` directly. Pre-migration a raw
+    /// `Command::new("attic").args(&["use", &format!("{server}:{cache}")])
+    /// .stdout(Stdio::null()).stderr(Stdio::null()).status()` body lived
+    /// at this call site and bypassed two load-bearing properties the
+    /// typed primitive carries: the `ATTIC_BIN` env override every
+    /// other attic-invocation site honors via
+    /// `get_tool_path("ATTIC_BIN", "attic")`
+    /// (`infrastructure/attic.rs::resolve_attic_bin`), and the typed
+    /// [`crate::error::AtticError`] dispatch (`ExecFailed` vs
+    /// `UseFailed`) the untyped `Result<ExitStatus>` collapsed away —
+    /// a distinction Phase 1 attestation records (THEORY §V.4) rely
+    /// on so a "wrong server alias" telemetry entry is separable from
+    /// an "attic binary missing" one at the type level, and the
+    /// `Stdio::null()` stderr suppression that previously erased the
+    /// underlying attic error message is inverted by the primitive
+    /// (which pipes stderr through `classify_capture` into the typed
+    /// variant's `stderr` field).
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("attic").args(&["use"` string
+    /// does not reappear inside `execute()` while the delegation to
+    /// `AtticClient::new(...).use_cache(...)` does. A future regression
+    /// that re-fuses the raw-spawn body fails here, not silently in
+    /// production where a bypassed `ATTIC_BIN` override or dropped
+    /// typed-error dispatch would surface only as a mysterious
+    /// substituter-fetch failure from the subsequent `nix build` with
+    /// no structural link back to the mis-`use`d cache.
+    ///
+    /// Sibling of the login-step regression shield above; the two
+    /// together pin the "no raw attic spawn survives in execute()"
+    /// floor across both post-config attic subcommands (`login` seeds
+    /// the token, `use` selects the active cache). Same structural-
+    /// substring discipline as
+    /// `commands/push.rs::tests::test_execute_routes_attic_push_through_attic_client_not_raw_command`.
+    #[test]
+    fn test_execute_routes_attic_use_through_attic_client_not_raw_command() {
+        const SOURCE: &str = include_str!("build.rs");
+
+        let execute_marker = "pub async fn execute(";
+        let start = SOURCE
+            .find(execute_marker)
+            .expect("build.rs must contain `pub async fn execute(` — module invariant");
+        let after_execute = &SOURCE[start..];
+        // Bound the search at the tests module marker so the docstring
+        // in THIS test — which legitimately spells the pre-migration
+        // `Command::new("attic").args(&["use"` string for context — is
+        // excluded from the scan. Every real code site sits strictly
+        // between the `execute(` marker and the `#[cfg(test)]` marker.
+        let end_relative = after_execute
+            .find("\n#[cfg(test)]")
+            .expect("build.rs must contain `#[cfg(test)]` tests module — this module's own marker");
+        let execute_body = &after_execute[..end_relative];
+
+        assert!(
+            !execute_body.contains("Command::new(\"attic\").args(&[\"use\""),
+            "execute() must NOT spawn `attic use` directly — route through \
+             `crate::infrastructure::attic::AtticClient::new(...).use_cache(...)` \
+             so `ATTIC_BIN` overrides and the typed `AtticError` dispatch \
+             both land at the shared primitive. Found the pre-migration \
+             raw-spawn body in execute()."
+        );
+        assert!(
+            execute_body.contains("use_cache"),
+            "execute() must call `use_cache(...)` to route the cache-selection \
+             step through the typed primitive — the call string was not found \
+             in execute()."
         );
     }
 }
