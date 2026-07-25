@@ -13428,6 +13428,191 @@ impl PartialEq<&[u8]> for AdmissionTier {
     }
 }
 
+/// Reverse-direction borrowed byte-slice comparison peer — the symmetric
+/// sibling of [`PartialEq<[u8]> for AdmissionTier`] (line 13382). A
+/// downstream caller who holds a dereffed [`[u8]`] value (a byte-stream
+/// cache-index oracle keyed on admission-tier label bytes without per-
+/// comparison UTF-8 conversion, a `nom` / `winnow` byte-slice parser that
+/// captured the admission-tier label as a `Cow::Borrowed(&[u8])` binding
+/// on a raw-byte grammar arm and now needs to answer whether the
+/// borrowed bytes name a specific canonical admission-tier variant, a
+/// low-level protocol frame whose canonical-label slot arrives as
+/// `&[u8]` after a length-prefix decode and is compared against an
+/// [`AdmissionTier`] value on the right of a `==` operator) writes
+/// `*label_bytes_ref == tier` and answers the borrowed byte-slice
+/// equality query against an [`AdmissionTier`] value at the same
+/// canonical-label-bytes oracle
+/// [`<AdmissionTier as AsRef<[u8]>>::as_ref`] the forward-direction
+/// [`PartialEq<[u8]> for AdmissionTier`] peer reads through.
+///
+/// Route: the impl body composes the standard library
+/// [`<[u8] as PartialEq<[u8]>>::eq`] on the `self` dereffed `&[u8]`
+/// receiver with [`<AdmissionTier as AsRef<[u8]>>::as_ref`] on the
+/// [`AdmissionTier`] value on the right, so the comparison reads the
+/// same canonical-label bytes as the forward-direction sibling at zero
+/// allocation, zero intermediate buffer, and zero
+/// [`std::fmt::Display`] formatter round trip per call — the same
+/// zero-cost discipline the forward-direction peer carries.
+///
+/// Sibling of [`PartialEq<AdmissionTier> for str`] (line 13264) — the
+/// same one-oracle discipline projected onto the byte frontier through
+/// [`str::as_bytes`] at the [`AsRef<[u8]>`] surface (line 5938). Where
+/// the reverse-direction UTF-8 dereffed-`str`-receiver peer answers the
+/// UTF-8 equality query `*label_ref == tier`, this reverse-direction
+/// byte-slice dereffed-`[u8]`-receiver peer answers the byte-for-byte
+/// equality query `*label_bytes_ref == tier` against the same
+/// canonical-label oracle projected onto bytes.
+///
+/// Mid-trio peer of the reverse-direction borrowed byte-slice comparison
+/// trio opened at [`crate::retry::PerAttemptRegion`] (commit 0f43079 —
+/// the structural mirror at the sibling per-attempt-region ladder,
+/// routing through
+/// [`<crate::retry::PerAttemptRegion as AsRef<[u8]>>::as_ref`] at
+/// `cli/src/retry.rs::9018`) and closed at [`crate::version::BumpLevel`]
+/// (commit ed95c8d — the structural mirror at the sibling version-bump-
+/// magnitude ladder, routing through
+/// [`<crate::version::BumpLevel as AsRef<[u8]>>::as_ref`] at
+/// `cli/src/version.rs::9651`), matching the [`PartialEq<AdmissionTier>`]
+/// mid-trio closing order at the sibling reverse-direction UTF-8
+/// dereffed-`str`-receiver surface (203f63b → c48f819 → b89b26b). With
+/// this commit the reverse-direction borrowed byte-slice `[u8]`-
+/// receiver comparison axis spans all three ordered typed sums on the
+/// ladder set against ONE canonical-label oracle each, mirroring the
+/// sibling reference-grammar family
+/// [`crate::oci_manifest::DigestAlgorithm`]'s reverse byte-slice pair
+/// at `cli/src/oci_manifest.rs::3889` / `::3938`.
+///
+/// The four [`PartialEq`] impls together on the byte-slice frontier at
+/// the admission-tier typed sum — forward × receiver-shape (lines 13382
+/// / 13425) and reverse × receiver-shape (this impl and the one
+/// directly below) — close the borrowed byte-slice comparison surface
+/// across the full 2×2 cross-product on the admission-tier ladder,
+/// matching the four-impl closure the standard library gives
+/// [`Vec<u8>`] through its own [`PartialEq<[u8]> for Vec<u8>`] +
+/// [`PartialEq<&[u8]> for Vec<u8>`] + [`PartialEq<Vec<u8>> for [u8]`] +
+/// [`PartialEq<Vec<u8>> for &[u8]`] symmetric receiver-shape pair, and
+/// mirroring the four-impl byte-slice closure the sibling
+/// per-attempt-region ladder carries at `cli/src/retry.rs::8895` /
+/// `::8939` (forward pair) / `::9018` / `::9068` (reverse pair) and the
+/// sibling version-bump-magnitude ladder carries at
+/// `cli/src/version.rs::9545` / `::9591` (forward pair) / `::9651` /
+/// `::9700` (reverse pair).
+///
+/// Prior to this pair the admission-tier typed sum carried only the
+/// forward direction at the byte-slice frontier (`tier == label_bytes`
+/// compiled but `label_bytes == tier` did not), so a generic
+/// [`PartialEq`]-bounded consumer that composed both directions through
+/// its own symmetric-check protocol (`if a == b || b == a { … }`, a
+/// bidirectional-equality integration-test oracle, a byte-stream cache-
+/// index oracle that computes a canonical-label lookup key from either
+/// side of the `==`) could not thread an [`AdmissionTier`] through the
+/// [`[u8]`] side of the bound without a per-consumer
+/// `label_bytes == <AdmissionTier as AsRef<[u8]>>::as_ref(&tier)`
+/// bridge. With this pair landed, every borrowed byte-slice comparison
+/// direction at the admission-tier frontier reads the SAME
+/// [`<AdmissionTier as AsRef<[u8]>>::as_ref`] one-oracle table (in turn
+/// [`AdmissionTier::as_str`] via [`str::as_bytes`]), and a downstream
+/// site writes `label_bytes == tier` at ONE composition instead of the
+/// per-site restatement.
+///
+/// The identity
+/// `<[u8] as PartialEq<AdmissionTier>>::eq(label, &tier)
+/// == (*label == <AdmissionTier as AsRef<[u8]>>::as_ref(&tier))` at
+/// every [`AdmissionTier::ALL`] variant × every entry in the union of
+/// {canonical byte labels, cross-ladder byte labels, invalid-UTF-8
+/// bytes, empty} is pinned by
+/// [`tests::test_bytes_partial_eq_admission_tier_agrees_with_as_ref`];
+/// the reflexivity identity
+/// `<AdmissionTier as AsRef<[u8]>>::as_ref(&tier) == tier` at every
+/// variant is pinned by
+/// [`tests::test_bytes_partial_eq_admission_tier_reflexive_at_own_label`];
+/// the symmetry axiom against the forward-direction peer is pinned by
+/// [`tests::test_partial_eq_admission_tier_bytes_symmetric_with_forward_direction`].
+///
+/// THEORY.md §III.1 typescape: the reverse-direction borrowed byte-slice
+/// dereffed-`[u8]`-receiver comparison surface is a typed-primitive site
+/// on [`AdmissionTier`] itself (one [`PartialEq<AdmissionTier>`] impl on
+/// [`[u8]`] routing through [`<AdmissionTier as AsRef<[u8]>>::as_ref`]),
+/// not a per-consumer
+/// `*label_bytes_ref == <AdmissionTier as AsRef<[u8]>>::as_ref(&tier)`
+/// restatement at every downstream site that holds an already-dereffed
+/// `[u8]` handle on the left of an equality operator against an
+/// [`AdmissionTier`] value. THEORY.md §VI.1 generation over composition
+/// (one-oracle): the canonical label is named at ONE site
+/// ([`AdmissionTier::as_str`]) and every borrowed byte-slice comparison
+/// surface at either direction × either receiver shape reads through it
+/// (in turn via [`str::as_bytes`]) projected onto its own intent, so a
+/// future variant insertion at the admission-tier ladder remains a one-
+/// site edit at [`AdmissionTier::as_str`]; every byte-slice comparison
+/// peer inherits it automatically.
+impl PartialEq<AdmissionTier> for [u8] {
+    fn eq(&self, other: &AdmissionTier) -> bool {
+        self == <AdmissionTier as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
+/// Reverse-direction borrowed byte-slice comparison peer through a
+/// `&[u8]` receiver — the reverse-direction sibling of
+/// [`PartialEq<&[u8]> for AdmissionTier`] (line 13425) and the receiver-
+/// shape peer of [`PartialEq<AdmissionTier> for [u8]`] (directly above),
+/// split by receiver shape so the caller writes `label_bytes_ref == tier`
+/// without the explicit `*` deref at every comparison site. The four
+/// [`PartialEq`] impls together on the byte-slice frontier at the
+/// admission-tier typed sum — forward × receiver-shape (lines 13382 /
+/// 13425) and reverse × receiver-shape (directly above and this impl) —
+/// close the borrowed byte-slice comparison surface across the full 2×2
+/// cross-product on the admission-tier ladder, matching the four-impl
+/// closure the standard library gives [`Vec<u8>`] through its own
+/// [`PartialEq<[u8]> for Vec<u8>`] + [`PartialEq<&[u8]> for Vec<u8>`] +
+/// [`PartialEq<Vec<u8>> for [u8]`] + [`PartialEq<Vec<u8>> for &[u8]`]
+/// symmetric receiver-shape pair, and mirroring the four-impl byte-slice
+/// closure the sibling per-attempt-region ladder carries at
+/// `cli/src/retry.rs::8895` / `::8939` (forward pair) / `::9018` /
+/// `::9068` (reverse pair) and the sibling version-bump-magnitude
+/// ladder carries at `cli/src/version.rs::9545` / `::9591` (forward
+/// pair) / `::9651` / `::9700` (reverse pair).
+///
+/// Route: the impl body composes
+/// [`<AdmissionTier as AsRef<[u8]>>::as_ref`] with the standard library
+/// [`<[u8] as PartialEq<[u8]>>::eq`] on the dereffed `&[u8]` self
+/// receiver, so the comparison reads the same canonical-label bytes as
+/// the sibling receiver-shape peer at zero allocation and zero
+/// intermediate buffer, and the symmetry axiom
+/// `<&[u8] as PartialEq<AdmissionTier>>::eq(&bytes_ref, &tier)
+/// == <AdmissionTier as PartialEq<&[u8]>>::eq(&tier, &bytes_ref)`
+/// holds by construction at every `(bytes_ref, tier)` pair.
+///
+/// Mirrors the standard-library idiom [`Vec<u8>`] carries through its
+/// own [`PartialEq<Vec<u8>> for [u8]`] + [`PartialEq<Vec<u8>> for &[u8]`]
+/// symmetric receiver-shape pair: an owned canonical-bytes primitive
+/// compares against a borrowed byte-slice handle at either receiver
+/// shape with the same zero-cost projection through the primitive's
+/// read-back accessor. Here that idiom projects onto a bounded-variant
+/// typed sum whose read-back accessor is
+/// [`<AdmissionTier as AsRef<[u8]>>::as_ref`] — a strictly stronger
+/// identity contract than [`Vec<u8>`] carries — at the same zero-
+/// allocation comparison cost.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction borrowed byte-slice
+/// `&[u8]`-receiver comparison surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one [`PartialEq<AdmissionTier>`] impl on
+/// [`&[u8]`] routing through
+/// [`<AdmissionTier as AsRef<[u8]>>::as_ref`]), not a per-consumer
+/// `label_bytes_ref == <AdmissionTier as AsRef<[u8]>>::as_ref(&tier)`
+/// restatement at every downstream site that asks whether an already-
+/// borrowed `&[u8]` handle names the same canonical admission-tier
+/// label as an [`AdmissionTier`] value. THEORY.md §VI.1 one-oracle:
+/// the canonical label is named at one site ([`AdmissionTier::as_str`]),
+/// and this reverse-direction `&[u8]`-receiver surface reads through
+/// the same one-oracle discipline the three sibling byte-slice
+/// comparison surfaces (forward-`[u8]`, forward-`&[u8]`, reverse-
+/// `[u8]`) already carry.
+impl PartialEq<AdmissionTier> for &[u8] {
+    fn eq(&self, other: &AdmissionTier) -> bool {
+        *self == <AdmissionTier as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -39278,6 +39463,199 @@ mod tests {
                     <AdmissionTier as PartialEq<&[u8]>>::eq(&tier, &label_ref),
                     <AdmissionTier as PartialEq<[u8]>>::eq(&tier, label_ref),
                     "PartialEq<&[u8]> and PartialEq<[u8]> receiver-shape peers must agree at ({tier:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// `<[u8] as PartialEq<AdmissionTier>>::eq(label, &tier)` agrees
+    /// byte-for-byte with the borrowed-view
+    /// [`<AdmissionTier as AsRef<[u8]>>::as_ref`] oracle across every
+    /// [`AdmissionTier::ALL`] variant × the same canonical × cross-
+    /// ladder × known-bad × invalid-UTF-8 byte-slice grid the forward-
+    /// direction pair pins, threaded through a `[u8]` self receiver so
+    /// the caller writes `*label_bytes_ref == tier` and answers the
+    /// same boolean equality query as the forward-direction
+    /// [`PartialEq<[u8]> for AdmissionTier`] peer. Pins the reverse-
+    /// direction agreement at the byte frontier so a future refactor
+    /// that inlined a divergent read into the reverse-direction impl
+    /// (a stale per-variant byte table a future variant insertion could
+    /// silently leave out, an accidental case-fold on the label side,
+    /// a whitespace-tolerance branch) breaks this pin at at least one
+    /// (tier, label) pair rather than at every downstream
+    /// `*label_bytes_ref == tier` call site. Mirrors the sibling
+    /// per-attempt-region pin
+    /// [`crate::retry::tests::test_bytes_partial_eq_per_attempt_region_agrees_with_as_ref`]
+    /// (commit 0f43079) and the sibling version-bump-magnitude pin
+    /// [`crate::version::tests::test_bytes_partial_eq_bump_level_agrees_with_as_ref`]
+    /// (commit ed95c8d) at the parallel primitives, and the sibling
+    /// reference-grammar pin
+    /// [`crate::oci_manifest::tests::test_bytes_partial_eq_digest_algorithm_agrees_with_as_ref`].
+    #[test]
+    fn test_bytes_partial_eq_admission_tier_agrees_with_as_ref() {
+        let owned: Vec<Vec<u8>> = [
+            b"refused".to_vec(),
+            b"staging_only".to_vec(),
+            b"strict".to_vec(),
+            Vec::<u8>::new(),
+            b"REFUSED".to_vec(),
+            b"Strict".to_vec(),
+            b" refused".to_vec(),
+            b"strict ".to_vec(),
+            b"staging only".to_vec(),
+            b"stagingonly".to_vec(),
+            b"nonsense".to_vec(),
+            b"patch".to_vec(),
+            b"minor".to_vec(),
+            b"before_first".to_vec(),
+            b"over_budget".to_vec(),
+            b"sha256".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        let labels: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        for tier in AdmissionTier::ALL {
+            for label in &labels {
+                assert_eq!(
+                    <[u8] as PartialEq<AdmissionTier>>::eq(label, &tier),
+                    *label == <AdmissionTier as AsRef<[u8]>>::as_ref(&tier),
+                    "PartialEq<AdmissionTier> for [u8] and AsRef<[u8]> equality must agree at ({tier:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant,
+    /// `<[u8] as PartialEq<AdmissionTier>>::eq(tier.as_ref(), &tier)`
+    /// returns true — the variant's own emitted canonical-label bytes
+    /// recognise themselves as a match through the reverse-direction
+    /// `[u8]`-receiver peer, mirroring the forward-direction sibling
+    /// [`test_admission_tier_partial_eq_bytes_reflexive_at_own_label`]
+    /// and the per-attempt-region sibling
+    /// [`crate::retry::tests::test_bytes_partial_eq_per_attempt_region_reflexive_at_own_label`].
+    #[test]
+    fn test_bytes_partial_eq_admission_tier_reflexive_at_own_label() {
+        for tier in AdmissionTier::ALL {
+            let canonical: &[u8] = <AdmissionTier as AsRef<[u8]>>::as_ref(&tier);
+            assert!(
+                <[u8] as PartialEq<AdmissionTier>>::eq(canonical, &tier),
+                "PartialEq<AdmissionTier> for [u8] must recognise self canonical label bytes at {tier:?}",
+            );
+        }
+    }
+
+    /// `<&[u8] as PartialEq<AdmissionTier>>::eq(&label_ref, &tier)`
+    /// agrees byte-for-byte with the borrowed-view
+    /// [`<AdmissionTier as AsRef<[u8]>>::as_ref`] oracle across the
+    /// same grid, threaded through a `&[u8]` self receiver so the
+    /// caller writes `label_bytes_ref == tier` without the explicit
+    /// `*` deref. Pins the reverse-direction `&[u8]`-receiver
+    /// agreement, mirroring the forward-direction sibling
+    /// [`test_admission_tier_partial_eq_bytes_ref_agrees_with_as_ref`]
+    /// and the per-attempt-region sibling
+    /// [`crate::retry::tests::test_bytes_ref_partial_eq_per_attempt_region_agrees_with_as_ref`].
+    #[test]
+    fn test_bytes_ref_partial_eq_admission_tier_agrees_with_as_ref() {
+        let owned: Vec<Vec<u8>> = [
+            b"refused".to_vec(),
+            b"staging_only".to_vec(),
+            b"strict".to_vec(),
+            Vec::<u8>::new(),
+            b"REFUSED".to_vec(),
+            b"Strict".to_vec(),
+            b" refused".to_vec(),
+            b"strict ".to_vec(),
+            b"staging only".to_vec(),
+            b"stagingonly".to_vec(),
+            b"nonsense".to_vec(),
+            b"patch".to_vec(),
+            b"minor".to_vec(),
+            b"before_first".to_vec(),
+            b"over_budget".to_vec(),
+            b"sha256".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for tier in AdmissionTier::ALL {
+            for label in &owned {
+                let label_ref: &[u8] = label;
+                assert_eq!(
+                    <&[u8] as PartialEq<AdmissionTier>>::eq(&label_ref, &tier),
+                    label_ref == <AdmissionTier as AsRef<[u8]>>::as_ref(&tier),
+                    "PartialEq<AdmissionTier> for &[u8] and AsRef<[u8]> equality must agree at ({tier:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant,
+    /// `<&[u8] as PartialEq<AdmissionTier>>::eq(&tier.as_ref(), &tier)`
+    /// returns true — the variant's own emitted canonical-label bytes
+    /// recognise themselves as a match through the reverse-direction
+    /// `&[u8]`-receiver peer without the caller's explicit `*` deref.
+    /// Mirrors the sibling
+    /// [`crate::retry::tests::test_bytes_ref_partial_eq_per_attempt_region_reflexive_at_own_label`]
+    /// pin at the parallel per-attempt-region primitive.
+    #[test]
+    fn test_bytes_ref_partial_eq_admission_tier_reflexive_at_own_label() {
+        for tier in AdmissionTier::ALL {
+            let canonical: &[u8] = <AdmissionTier as AsRef<[u8]>>::as_ref(&tier);
+            assert!(
+                <&[u8] as PartialEq<AdmissionTier>>::eq(&canonical, &tier),
+                "PartialEq<AdmissionTier> for &[u8] must recognise self canonical label bytes at {tier:?}",
+            );
+        }
+    }
+
+    /// The reverse-direction and forward-direction borrowed byte-slice
+    /// comparison surfaces agree byte-for-byte at every `(label, tier)`
+    /// pair — the symmetry axiom
+    /// `<[u8] as PartialEq<AdmissionTier>>::eq(bytes, &tier)
+    /// == <AdmissionTier as PartialEq<[u8]>>::eq(&tier, bytes)`
+    /// (and its `&[u8]`-receiver peer) holds across the canonical ×
+    /// cross-ladder × known-bad × invalid-UTF-8 grid. Pins the full
+    /// 2×2 receiver × direction cross-product closure on the byte-slice
+    /// frontier at the admission-tier typed sum so a future refactor
+    /// that diverged one impl from its symmetric peer breaks this pin
+    /// at at least one pair rather than propagating unnoticed through
+    /// downstream generic [`PartialEq`]-bounded consumers that thread
+    /// an [`AdmissionTier`] through either side of a `==` operator at
+    /// the byte frontier, mirroring the sibling
+    /// [`test_partial_eq_admission_tier_symmetric_with_forward_direction`]
+    /// pin at the UTF-8 frontier and the per-attempt-region sibling
+    /// [`crate::retry::tests::test_partial_eq_per_attempt_region_bytes_symmetric_with_forward_direction`]
+    /// pin at the parallel byte-slice frontier.
+    #[test]
+    fn test_partial_eq_admission_tier_bytes_symmetric_with_forward_direction() {
+        let owned: Vec<Vec<u8>> = [
+            b"refused".to_vec(),
+            b"staging_only".to_vec(),
+            b"strict".to_vec(),
+            Vec::<u8>::new(),
+            b"REFUSED".to_vec(),
+            b"Strict".to_vec(),
+            b" refused".to_vec(),
+            b"strict ".to_vec(),
+            b"staging only".to_vec(),
+            b"stagingonly".to_vec(),
+            b"nonsense".to_vec(),
+            b"patch".to_vec(),
+            b"sha256".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for tier in AdmissionTier::ALL {
+            for label in &owned {
+                let label_ref: &[u8] = label;
+                assert_eq!(
+                    <[u8] as PartialEq<AdmissionTier>>::eq(label_ref, &tier),
+                    <AdmissionTier as PartialEq<[u8]>>::eq(&tier, label_ref),
+                    "reverse-direction PartialEq<AdmissionTier> for [u8] must agree with forward-direction PartialEq<[u8]> for AdmissionTier at ({tier:?}, {label:?})",
+                );
+                assert_eq!(
+                    <&[u8] as PartialEq<AdmissionTier>>::eq(&label_ref, &tier),
+                    <AdmissionTier as PartialEq<&[u8]>>::eq(&tier, &label_ref),
+                    "reverse-direction PartialEq<AdmissionTier> for &[u8] must agree with forward-direction PartialEq<&[u8]> for AdmissionTier at ({tier:?}, {label:?})",
                 );
             }
         }
