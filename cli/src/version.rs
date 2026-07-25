@@ -9354,6 +9354,123 @@ impl PartialEq<&str> for BumpLevel {
     }
 }
 
+/// Reverse-direction borrowed UTF-8 comparison peer — the symmetric
+/// sibling of [`PartialEq<str> for BumpLevel`] (line 9255). A downstream
+/// caller who holds a [`str`] value (a `matches!` arm on a `str`
+/// binding, a dereffed `&Cow::Borrowed(s)`) writes `*label_ref == level`
+/// (or the standard-library-derived `if a == b || b == a`-style
+/// symmetric composition a generic [`PartialEq`]-bounded consumer
+/// performs internally) and answers a boolean equality query against a
+/// [`BumpLevel`] value at the same borrowed UTF-8 frontier the forward-
+/// direction peer covers, at zero allocation, zero temporary [`String`]
+/// construction, and zero [`std::fmt::Display`] formatter-buffer round
+/// trip per call.
+///
+/// Route: the impl body composes [`BumpLevel::as_str`] (invoked
+/// by-value through `other.as_str()` since [`BumpLevel`] is [`Copy`]
+/// and the inherent projection takes `self` by value) with the
+/// standard library [`<str as PartialEq<str>>::eq`] on the `str` self
+/// receiver, so the comparison reads the same canonical-label bytes as
+/// the forward-direction [`PartialEq<str> for BumpLevel`] peer, and
+/// the symmetry axiom
+/// `<str as PartialEq<BumpLevel>>::eq(label, &level)
+/// == <BumpLevel as PartialEq<str>>::eq(&level, label)` holds by
+/// construction at every `(label, level)` pair.
+///
+/// Closes the reverse-direction borrowed UTF-8 comparison trio at the
+/// version-bump-magnitude ladder — opened at
+/// [`crate::retry::PerAttemptRegion`] (commit 203f63b — the structural
+/// mirror at the sibling per-attempt-region ladder, routing through
+/// [`crate::retry::PerAttemptRegion::as_str`]) and mid-slotted at
+/// [`crate::probe_outcome::AdmissionTier`] (commit c48f819 — the
+/// structural mirror at the sibling admission-tier ladder, routing
+/// through [`crate::probe_outcome::AdmissionTier::as_str`]), matching
+/// the forward-direction [`PartialEq<str>`] closing order at the
+/// sibling borrowed UTF-8 comparison surface (ac5f0af → 8f0a8cc →
+/// f891f6e). With this commit the reverse-direction borrowed UTF-8
+/// comparison axis spans all three ordered typed sums on the ladder
+/// set against ONE canonical-label oracle each — matching the same
+/// four-impl closure the standard library gives [`String`]
+/// ([`PartialEq<str> for String`] + [`PartialEq<&str> for String`] +
+/// [`PartialEq<String> for str`] + [`PartialEq<String> for &str`]) and
+/// the sibling reference-grammar family
+/// [`crate::oci_manifest::DigestAlgorithm`] already carries at
+/// `cli/src/oci_manifest.rs::3428` / `::3506` (forward pair) /
+/// `::3597` / `::3640` (reverse pair).
+///
+/// The identity `<str as PartialEq<BumpLevel>>::eq(label, &level)
+/// == (label == level.as_str())` at every [`BumpLevel::ALL`] variant ×
+/// every string in the union of {canonical labels, common
+/// non-canonical labels, empty} is pinned by
+/// [`tests::test_str_partial_eq_bump_level_agrees_with_as_str`]; the
+/// reflexivity identity
+/// `<str as PartialEq<BumpLevel>>::eq(level.as_str(), &level)` at
+/// every variant is pinned by
+/// [`tests::test_str_partial_eq_bump_level_reflexive_at_own_label`];
+/// the symmetry axiom
+/// `<str as PartialEq<BumpLevel>>::eq(label, &level)
+/// == <BumpLevel as PartialEq<str>>::eq(&level, label)` at every
+/// (variant, label) pair is pinned by
+/// [`tests::test_partial_eq_bump_level_symmetric_with_forward_direction`].
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// UTF-8 comparison surface is a typed-primitive site on [`BumpLevel`]
+/// itself (one [`PartialEq<BumpLevel>`] impl on [`str`] routing
+/// through [`BumpLevel::as_str`]), not a per-consumer
+/// `label == level.as_str()` restatement at every downstream site.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`BumpLevel::as_str`]), and every borrowed UTF-8 comparison
+/// surface — the forward-direction [`PartialEq<str> for BumpLevel`] +
+/// [`PartialEq<&str> for BumpLevel`] pair, this reverse-direction
+/// [`PartialEq<BumpLevel> for str`] + [`PartialEq<BumpLevel> for &str`]
+/// pair — reads through the same one-oracle discipline projected onto
+/// its own direction × receiver shape.
+impl PartialEq<BumpLevel> for str {
+    fn eq(&self, other: &BumpLevel) -> bool {
+        self == other.as_str()
+    }
+}
+
+/// Reverse-direction borrowed UTF-8 comparison peer through a `&str`
+/// receiver — the reverse-direction sibling of
+/// [`PartialEq<&str> for BumpLevel`] (line 9351) and the receiver-
+/// shape peer of [`PartialEq<BumpLevel> for str`] (directly above),
+/// split by receiver shape so the caller writes `label_ref == level`
+/// without the explicit `*` deref at every comparison site. The four
+/// [`PartialEq`] impls together — forward × receiver-shape and reverse
+/// × receiver-shape — close the borrowed UTF-8 comparison surface
+/// across the full 2×2 cross-product on the version-bump-magnitude
+/// typed sum, matching the standard-library idiom [`String`] carries
+/// through its own four-impl closure and mirroring the sibling
+/// reference-grammar family
+/// [`crate::oci_manifest::DigestAlgorithm`]'s four-impl closure at
+/// lines 3428 / 3506 / 3597 / 3640 of `cli/src/oci_manifest.rs`.
+///
+/// Route: the impl body composes [`BumpLevel::as_str`] with
+/// [`<str as PartialEq<str>>::eq`] on the dereffed `&str` self
+/// receiver, so the comparison reads the same canonical-label bytes as
+/// the sibling receiver-shape peer at zero allocation and zero
+/// intermediate buffer, and the symmetry axiom
+/// `<&str as PartialEq<BumpLevel>>::eq(&label_ref, &level)
+/// == <BumpLevel as PartialEq<&str>>::eq(&level, &label_ref)` holds by
+/// construction at every `(label_ref, level)` pair.
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// UTF-8 `&str`-receiver comparison surface is a typed-primitive site
+/// on [`BumpLevel`] itself (one [`PartialEq<BumpLevel>`] impl on
+/// [`&str`] routing through [`BumpLevel::as_str`]), not a per-consumer
+/// `label_ref == level.as_str()` restatement at every downstream site.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`BumpLevel::as_str`]), and this reverse-direction `&str`-
+/// receiver surface reads through the same one-oracle discipline the
+/// three sibling comparison surfaces (forward-str, forward-&str,
+/// reverse-str) already carry.
+impl PartialEq<BumpLevel> for &str {
+    fn eq(&self, other: &BumpLevel) -> bool {
+        *self == other.as_str()
+    }
+}
+
 /// Bump a version by the given typed [`BumpLevel`] component. The typed-
 /// primitive peer of [`bump_semver`]: the level axis carries a typed sum
 /// surface, making the function TOTAL over the level domain — every
@@ -20577,6 +20694,194 @@ mod tests {
                 assert!(
                     !<BumpLevel as PartialEq<&str>>::eq(&level, &label),
                     "PartialEq<&str> must reject non-canonical label {label:?} at {level:?}",
+                );
+            }
+        }
+    }
+
+    /// `<str as PartialEq<BumpLevel>>::eq(label, &level)` agrees byte-
+    /// for-byte with the borrowed-view [`BumpLevel::as_str`] oracle
+    /// across the same (variant × label) grid the forward-direction
+    /// sibling [`test_bump_level_partial_eq_str_agrees_with_as_str`]
+    /// covers, threaded through the reverse-direction `str` self
+    /// receiver so the caller may write `*label_ref == level` (or the
+    /// standard-library-derived symmetric composition) and answer the
+    /// same boolean equality query as the forward-direction
+    /// [`PartialEq<str> for BumpLevel`] peer. Pins the reverse-
+    /// direction agreement so a future refactor that inlined a
+    /// divergent read into the reverse-direction impl (a hand-rolled
+    /// `matches!` on the variant tag with hard-coded per-arm labels
+    /// that drift off [`BumpLevel::as_str`], an accidental case-fold
+    /// on the reverse side that never touched the forward side)
+    /// breaks this pin at at least one (level, label) pair rather
+    /// than at every downstream `*label_ref == level` call site.
+    /// Structural mirror of
+    /// [`crate::retry::tests::test_str_partial_eq_per_attempt_region_agrees_with_as_str`]
+    /// (commit 203f63b) at the sibling per-attempt-region ladder and
+    /// [`crate::probe_outcome::tests::test_str_partial_eq_admission_tier_agrees_with_as_str`]
+    /// (commit c48f819) at the sibling admission-tier ladder.
+    #[test]
+    fn test_str_partial_eq_bump_level_agrees_with_as_str() {
+        let labels = [
+            "patch",
+            "minor",
+            "major",
+            "",
+            "Patch",
+            "Minor",
+            "Major",
+            "PATCH",
+            "MINOR",
+            "MAJOR",
+            "patch ",
+            " patch",
+            "\tminor",
+            "major\n",
+            "pat",
+            "nonsense",
+            "refused",
+            "staging_only",
+            "strict",
+            "first",
+            "before_first",
+            "over_budget",
+        ];
+        for level in BumpLevel::ALL {
+            for label in labels {
+                assert_eq!(
+                    <str as PartialEq<BumpLevel>>::eq(label, &level),
+                    label == level.as_str(),
+                    "PartialEq<BumpLevel> for str and as_str() equality must agree at ({label:?}, {level:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`BumpLevel`] variant,
+    /// `<str as PartialEq<BumpLevel>>::eq(level.as_str(), &level)`
+    /// returns true. Pins the reflexivity identity that a variant
+    /// compared against its own canonical-label emission through the
+    /// reverse-direction [`str`]-receiver peer always answers true —
+    /// the load-bearing "self-recognition" property the borrowed UTF-8
+    /// comparison surface promises, mirroring the forward-direction
+    /// sibling [`test_bump_level_partial_eq_str_reflexive_at_own_label`].
+    #[test]
+    fn test_str_partial_eq_bump_level_reflexive_at_own_label() {
+        for level in BumpLevel::ALL {
+            let label: &str = level.as_str();
+            assert!(
+                <str as PartialEq<BumpLevel>>::eq(label, &level),
+                "PartialEq<BumpLevel> for str must recognise self canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// `<&str as PartialEq<BumpLevel>>::eq(&label_ref, &level)` agrees
+    /// byte-for-byte with the borrowed-view [`BumpLevel::as_str`]
+    /// oracle across the same grid, threaded through a `&str` self
+    /// receiver so the caller writes `label_ref == level` without the
+    /// explicit `*` deref. Pins the reverse-direction `&str`-receiver
+    /// agreement, mirroring the forward-direction sibling
+    /// [`test_bump_level_partial_eq_str_ref_agrees_with_as_str`].
+    #[test]
+    fn test_str_ref_partial_eq_bump_level_agrees_with_as_str() {
+        let labels = [
+            "patch",
+            "minor",
+            "major",
+            "",
+            "Patch",
+            "Minor",
+            "Major",
+            "PATCH",
+            "MINOR",
+            "MAJOR",
+            "patch ",
+            " patch",
+            "\tminor",
+            "major\n",
+            "pat",
+            "nonsense",
+            "refused",
+            "staging_only",
+            "strict",
+            "first",
+            "before_first",
+            "over_budget",
+        ];
+        for level in BumpLevel::ALL {
+            for label in labels {
+                let label_ref: &str = label;
+                assert_eq!(
+                    <&str as PartialEq<BumpLevel>>::eq(&label_ref, &level),
+                    label_ref == level.as_str(),
+                    "PartialEq<BumpLevel> for &str and as_str() equality must agree at ({label:?}, {level:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`BumpLevel`] variant,
+    /// `<&str as PartialEq<BumpLevel>>::eq(&level.as_str(), &level)`
+    /// returns true — the variant's own emitted canonical label
+    /// recognises itself as a match through the reverse-direction
+    /// `&str`-receiver peer without the caller's explicit `*` deref.
+    #[test]
+    fn test_str_ref_partial_eq_bump_level_reflexive_at_own_label() {
+        for level in BumpLevel::ALL {
+            let label: &str = level.as_str();
+            assert!(
+                <&str as PartialEq<BumpLevel>>::eq(&label, &level),
+                "PartialEq<BumpLevel> for &str must recognise self canonical label at {level:?}",
+            );
+        }
+    }
+
+    /// The reverse-direction and forward-direction borrowed UTF-8
+    /// comparison surfaces on the version-bump-magnitude typed sum
+    /// agree byte-for-byte at every `(label, level)` pair — the
+    /// symmetry axiom
+    /// `<str as PartialEq<BumpLevel>>::eq(label, &level)
+    /// == <BumpLevel as PartialEq<str>>::eq(&level, label)` (and its
+    /// `&str`-receiver peer) holds across the canonical × known-bad
+    /// label grid. Pins the full 2×2 receiver × direction cross-
+    /// product closure so a future refactor that diverged one impl
+    /// from its symmetric peer breaks this pin at at least one pair
+    /// rather than propagating unnoticed through downstream generic
+    /// [`PartialEq`]-bounded consumers that thread a [`BumpLevel`]
+    /// through either side of a `==` operator. Structural mirror of
+    /// [`crate::retry::tests::test_partial_eq_per_attempt_region_symmetric_with_forward_direction`]
+    /// (commit 203f63b) at the sibling per-attempt-region ladder and
+    /// [`crate::probe_outcome::tests::test_partial_eq_admission_tier_symmetric_with_forward_direction`]
+    /// (commit c48f819) at the sibling admission-tier ladder.
+    #[test]
+    fn test_partial_eq_bump_level_symmetric_with_forward_direction() {
+        let labels = [
+            "patch",
+            "minor",
+            "major",
+            "",
+            "Patch",
+            "PATCH",
+            "patch ",
+            " patch",
+            "nonsense",
+            "first",
+            "before_first",
+            "refused",
+        ];
+        for level in BumpLevel::ALL {
+            for label in labels {
+                assert_eq!(
+                    <str as PartialEq<BumpLevel>>::eq(label, &level),
+                    <BumpLevel as PartialEq<str>>::eq(&level, label),
+                    "reverse-str and forward-str PartialEq peers must agree at ({label:?}, {level:?})",
+                );
+                let label_ref: &str = label;
+                assert_eq!(
+                    <&str as PartialEq<BumpLevel>>::eq(&label_ref, &level),
+                    <BumpLevel as PartialEq<&str>>::eq(&level, &label_ref),
+                    "reverse-&str and forward-&str PartialEq peers must agree at ({label:?}, {level:?})",
                 );
             }
         }
