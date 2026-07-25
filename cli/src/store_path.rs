@@ -347,6 +347,68 @@ impl TryFrom<String> for StorePath {
     }
 }
 
+/// Borrowed-or-owned UTF-8 try-conversion peer for [`StorePath::parse`] via
+/// the [`TryFrom<Cow<'_, str>>`] trait — the borrowed/owned frontier that
+/// bridges the [`TryFrom<&str>`] by-reference and [`TryFrom<String>`]
+/// by-value peers directly above under a single receiver type.
+///
+/// Delegates through `<Self as std::str::FromStr>::from_str` on the borrowed
+/// [`str`] view of the caller-supplied [`std::borrow::Cow`] (borrowed
+/// through [`std::borrow::Cow::as_ref`] from the [`Cow::Borrowed`] arm,
+/// dereferenced off the owned [`String`] in the [`Cow::Owned`] arm without
+/// cloning), so the store-path grammar stays defined at ONE construction
+/// surface — the [`std::str::FromStr`] peer, which itself delegates to
+/// [`StorePath::parse`]. No clone of the input buffer on the [`Cow::Owned`]
+/// arm, no divergent grammar between the two arms: the impl body pays the
+/// by-reference [`std::str::FromStr`] cost at zero allocation on either arm.
+///
+/// # Why the trait peer earns its keep
+///
+/// [`TryFrom<&str>`] covers the by-reference frontier
+/// (`#[serde(try_from = "&str")]`, `fn f<T: for<'a> TryFrom<&'a str>>`).
+/// [`TryFrom<String>`] covers the by-value owned-string frontier
+/// (`#[serde(try_from = "String")]`, `fn f<T: TryFrom<String>>`).
+/// [`TryFrom<Cow<'_, str>>`] covers the disjoint borrowed-or-owned frontier
+/// stdlib and the wider ecosystem key off separately:
+///
+/// - `#[serde(try_from = "Cow<'_, str>")]` — the serde container attribute
+///   for the borrowed-or-owned case (a deserializer that hands its container
+///   a [`std::borrow::Cow`] to defer the ownership decision to the
+///   underlying [`serde::Deserializer`] and preserve zero-copy where the
+///   input allows it) keys off [`TryFrom<Cow<'_, str>>`], not
+///   [`TryFrom<&str>`], [`TryFrom<String>`], or [`FromStr`]. A future serde
+///   field wrapping a `StorePath` and opting into the borrowed-or-owned
+///   `try_from` grammar reaches the store-path check through this impl
+///   without a shim.
+/// - Generic try-conversion bounds
+///   (`fn parse_path<'a, T: TryFrom<Cow<'a, str>>>`) — a validated-input
+///   newtype builder or closure-doc field reader whose parse contract is
+///   stated at the borrowed-or-owned receiver-shape layer (rather than
+///   fixed at borrow or owned) can name `StorePath` alongside every other
+///   borrowed-or-owned try-conversion primitive without routing through a
+///   shim.
+/// - Sibling canonical-string typed primitives in this crate already carry
+///   the pair: `impl TryFrom<Cow<'_, str>> for DigestAlgorithm` at
+///   `oci_manifest.rs::964`; `StorePath` is the store-path primitive
+///   counterpart at the same borrowed-or-owned try-conversion frontier.
+///
+/// # Error shape
+///
+/// `Self::Error = StorePathError`. The typed grammar-clause enum
+/// (`MissingStorePrefix` / `HasSubpath` / `TooShort` / `InvalidHash` /
+/// `MissingSeparator` / `EmptyName`) carries through from [`FromStr`] —
+/// no widening to [`anyhow::Error`] or `Box<dyn Error>` hides between the
+/// borrowed-or-owned try-conversion surface and the inherent constructor,
+/// so a caller can still `match` on the exact clause the input violated at
+/// the trait entry point on either [`Cow`] arm.
+impl TryFrom<std::borrow::Cow<'_, str>> for StorePath {
+    type Error = StorePathError;
+
+    fn try_from(s: std::borrow::Cow<'_, str>) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s.as_ref())
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -848,6 +910,157 @@ mod tests {
         let trimmed: StorePath = parse_via_try_from(raw_nl)
             .expect("trailing newline must be trimmed at TryFrom<String> surface");
         assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// [`TryFrom<Cow<'_, str>>`] must accept every input the inherent
+    /// [`StorePath::parse`] accepts on BOTH the [`Cow::Borrowed`] and
+    /// [`Cow::Owned`] arms and produce a value equal to the [`FromStr`]
+    /// round-trip on the borrowed view of the same buffer. Pins the
+    /// delegate-through-[`FromStr`] discipline at the borrowed-or-owned
+    /// frontier try-conversion peer: a regression that drifted the impl
+    /// body (e.g., pattern-matched the [`Cow`] arms and routed them through
+    /// divergent oracles, cloned the [`Cow::Owned`] payload into a fresh
+    /// [`String`] and re-parsed through a stale grammar clause, admitted an
+    /// empty label on the [`Cow::Borrowed`] arm through a short-circuit)
+    /// fails here rather than at every downstream `TryFrom<Cow<'_, str>>`
+    /// call site.
+    #[test]
+    fn test_try_from_cow_str_success_agrees_with_fromstr() {
+        use std::borrow::Cow;
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let via_borrowed =
+            <StorePath as TryFrom<Cow<'_, str>>>::try_from(Cow::Borrowed(raw.as_str()))
+                .expect("valid store path parses via TryFrom<Cow::Borrowed>");
+        let via_owned = <StorePath as TryFrom<Cow<'_, str>>>::try_from(Cow::Owned(raw.clone()))
+            .expect("valid store path parses via TryFrom<Cow::Owned>");
+        let via_fromstr: StorePath = raw.parse().expect("valid store path parses via FromStr");
+        assert_eq!(
+            via_borrowed, via_fromstr,
+            "TryFrom<Cow::Borrowed> must yield the same StorePath value as FromStr"
+        );
+        assert_eq!(
+            via_owned, via_fromstr,
+            "TryFrom<Cow::Owned> must yield the same StorePath value as FromStr"
+        );
+        // And a name-with-hyphens case — the load-bearing shape most real
+        // store outputs carry — on both arms, guarding against a future
+        // refactor that clones on the way in and truncates at the first `-`.
+        let raw2 = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let via_borrowed2 =
+            <StorePath as TryFrom<Cow<'_, str>>>::try_from(Cow::Borrowed(raw2.as_str()))
+                .expect("hyphenated-name store path parses via TryFrom<Cow::Borrowed>");
+        let via_owned2 = <StorePath as TryFrom<Cow<'_, str>>>::try_from(Cow::Owned(raw2.clone()))
+            .expect("hyphenated-name store path parses via TryFrom<Cow::Owned>");
+        assert_eq!(via_borrowed2.name(), "foo-bar-1.2.3");
+        assert_eq!(via_owned2.name(), "foo-bar-1.2.3");
+        assert_eq!(via_borrowed2, via_owned2);
+    }
+
+    /// [`TryFrom<Cow<'_, str>>`] must reject every input the inherent
+    /// [`StorePath::parse`] rejects on BOTH arms, and must surface the SAME
+    /// typed [`StorePathError`] variant carrying the SAME offending input
+    /// through both the [`Cow::Borrowed`] and [`Cow::Owned`] arm. Pins that
+    /// no error-widening shim (`anyhow!(...)`, `Box<dyn Error>`) hides
+    /// between the borrowed-or-owned try-conversion surface and the inherent
+    /// constructor — the typed grammar clause stays legible at the trait
+    /// entry point on either arm.
+    #[test]
+    fn test_try_from_cow_str_failure_preserves_typed_error_variant() {
+        use std::borrow::Cow;
+        // Cover every grammar clause once, and cross-check byte-for-byte
+        // that the borrowed-or-owned try-conversion surface surfaces the
+        // SAME typed error variant (with the SAME offending input in each
+        // variant) as the inherent constructor on BOTH arms. Pin against a
+        // future refactor that silently coerced one variant into another,
+        // widened the error to `anyhow::Error`, or let the two arms drift.
+        type ExpectVariant = fn(&StorePathError) -> bool;
+        let cases: &[(&str, ExpectVariant)] = &[
+            ("", |e| {
+                matches!(e, StorePathError::MissingStorePrefix { .. })
+            }),
+            ("nix/store/abc-x", |e| {
+                matches!(e, StorePathError::MissingStorePrefix { .. })
+            }),
+            ("/nix/store/unknown-mysvc.drv", |e| {
+                matches!(e, StorePathError::TooShort { .. })
+            }),
+            ("/nix/store/eeeeoooouuuutttteeeeoooouuuutttt-x", |e| {
+                matches!(e, StorePathError::InvalidHash { .. })
+            }),
+            ("/nix/store/0123456789abcdfghijklmnpqrsvwxyzx", |e| {
+                matches!(e, StorePathError::MissingSeparator { .. })
+            }),
+            ("/nix/store/0123456789abcdfghijklmnpqrsvwxyz-", |e| {
+                matches!(e, StorePathError::EmptyName { .. })
+            }),
+        ];
+        for (bad, is_expected_variant) in cases {
+            let via_borrowed_err =
+                <StorePath as TryFrom<Cow<'_, str>>>::try_from(Cow::Borrowed(*bad))
+                    .expect_err("malformed store path must fail via TryFrom<Cow::Borrowed>");
+            let via_owned_err =
+                <StorePath as TryFrom<Cow<'_, str>>>::try_from(Cow::Owned((*bad).to_string()))
+                    .expect_err("malformed store path must fail via TryFrom<Cow::Owned>");
+            let inherent_err =
+                StorePath::parse(bad).expect_err("malformed store path must fail inherently");
+            assert_eq!(
+                via_borrowed_err, inherent_err,
+                "TryFrom<Cow::Borrowed> must surface the same typed error as the inherent constructor for {bad:?}"
+            );
+            assert_eq!(
+                via_owned_err, inherent_err,
+                "TryFrom<Cow::Owned> must surface the same typed error as the inherent constructor for {bad:?}"
+            );
+            assert!(
+                is_expected_variant(&via_borrowed_err),
+                "unexpected error variant for {bad:?} on Cow::Borrowed arm: {via_borrowed_err:?}"
+            );
+            assert!(
+                is_expected_variant(&via_owned_err),
+                "unexpected error variant for {bad:?} on Cow::Owned arm: {via_owned_err:?}"
+            );
+        }
+    }
+
+    /// A generic `fn f<'a, T: TryFrom<Cow<'a, str>>>` consumer must recover
+    /// a valid [`StorePath`] through the trait bound on BOTH the
+    /// [`Cow::Borrowed`] and [`Cow::Owned`] arm. This is the structural
+    /// witness that `StorePath` is genuinely usable at
+    /// `TryFrom<Cow<'_, str>>` call sites — the surface that
+    /// `#[serde(try_from = "Cow<'_, str>")]` and generic borrowed-or-owned
+    /// try-conversion bounds key off. If a future change narrowed the bound
+    /// (e.g., bound the [`Cow`] lifetime to `'static` and rejected borrowed
+    /// non-static payloads, gated the impl on a lifetime or trait shape the
+    /// generic surface couldn't hit), this test fails at compile time.
+    #[test]
+    fn test_try_from_cow_str_generic_consumer_recovers_identity() {
+        use std::borrow::Cow;
+        fn parse_via_try_from<'a, T>(s: Cow<'a, str>) -> Result<T, T::Error>
+        where
+            T: TryFrom<Cow<'a, str>>,
+        {
+            T::try_from(s)
+        }
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let via_borrowed: StorePath = parse_via_try_from(Cow::Borrowed(raw.as_str()))
+            .expect("valid store path parses via generic TryFrom<Cow::Borrowed> bound");
+        assert_eq!(via_borrowed.name(), "foo-bar-1.2.3");
+        assert_eq!(via_borrowed.hash(), H);
+        let via_owned: StorePath = parse_via_try_from(Cow::Owned(raw.clone()))
+            .expect("valid store path parses via generic TryFrom<Cow::Owned> bound");
+        assert_eq!(via_owned.name(), "foo-bar-1.2.3");
+        assert_eq!(via_owned.hash(), H);
+        // The trimming discipline reaches through the generic bound on
+        // both arms too: a caller that holds a nix-build-stdout Cow does
+        // not need to pre-trim before handing it to the generic
+        // try-conversion helper — the grammar owns the trim in one place.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let trimmed_borrowed: StorePath = parse_via_try_from(Cow::Borrowed(raw_nl.as_str()))
+            .expect("trailing newline must be trimmed at TryFrom<Cow::Borrowed> surface");
+        let trimmed_owned: StorePath = parse_via_try_from(Cow::Owned(raw_nl.clone()))
+            .expect("trailing newline must be trimmed at TryFrom<Cow::Owned> surface");
+        assert_eq!(trimmed_borrowed.as_str(), format!("/nix/store/{H}-x"));
+        assert_eq!(trimmed_owned.as_str(), format!("/nix/store/{H}-x"));
     }
 
     #[test]
