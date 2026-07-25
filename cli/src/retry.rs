@@ -8819,6 +8819,129 @@ impl PartialEq<PerAttemptRegion> for &str {
     }
 }
 
+/// Ergonomic canonical-label equality query at the borrowed byte-slice
+/// frontier — a downstream consumer bound by [`PartialEq<[u8]>`] (a
+/// `matches!` predicate that reads a canonical label off a
+/// `Cow::Borrowed(bytes)` arm without a per-arm
+/// [`PerAttemptRegion::from_str`] parse-and-discard round trip, a
+/// [`blake3`] / [`sha2`]-style hasher input-classification sink that
+/// asks whether an already-borrowed `&[u8]` names a specific canonical
+/// per-attempt-region label without a downstream
+/// `<PerAttemptRegion as AsRef<[u8]>>::as_ref` restatement) answers
+/// the boolean equality query `region == *label_bytes_ref` at ONE
+/// composition rather than a per-site
+/// `<PerAttemptRegion as AsRef<[u8]>>::as_ref(&region) == label_bytes`
+/// restatement that repeats the canonical-label oracle name at every
+/// downstream comparison site.
+///
+/// Sibling of [`AsRef<[u8]>`] (line 2574) — the same canonical-label
+/// oracle at the same borrowed byte-slice frontier, split by intent:
+/// [`AsRef<[u8]>`] yields the label bytes for a generic
+/// `impl AsRef<[u8]>` consumer to read (a hasher
+/// [`update`](std::hash::Hasher::write) sink, a raw-write byte-buffer
+/// frontier), this [`PartialEq<[u8]>`] answers a boolean equality
+/// query directly at the [`PerAttemptRegion`] value without threading
+/// the caller through the intermediate
+/// `<PerAttemptRegion as AsRef<[u8]>>::as_ref` name at every
+/// comparison site.
+///
+/// Route: the impl body composes
+/// [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`] with the standard
+/// library [`<[u8] as PartialEq<[u8]>>::eq`] (byte-for-byte equality
+/// against the borrowed right-hand-side view), so the comparison
+/// reads the same canonical-label bytes at zero allocation, zero
+/// temporary [`Vec<u8>`] construction, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call — the
+/// same zero-cost discipline the sibling [`AsRef<[u8]>`] borrowed-
+/// view surface carries.
+///
+/// Opens the borrowed byte-slice comparison trio at the per-attempt-
+/// region ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and
+/// [`crate::version::BumpLevel`] ladders, matching the
+/// [`PartialEq<str>`] (ac5f0af → 8f0a8cc → f891f6e), the reverse-
+/// direction [`PartialEq<X> for str`] (203f63b → c48f819 → b89b26b),
+/// the [`AsRef<[u8]>`] (af44439 → 13abcc4 → 833d706), and every
+/// prior borrowed-view trio's opening order at the per-attempt-region
+/// ladder. After the trio closes, the borrowed byte-slice comparison
+/// axis spans all three ordered typed sums on the ladder set against
+/// ONE canonical-label oracle each, and future trios extend the same
+/// pattern to [`PartialEq<&[u8]>`], the reverse-direction
+/// [`PartialEq<X> for [u8]`] + [`PartialEq<X> for &[u8]`] pair, and
+/// the remaining owner-shape frontiers ([`Vec<u8>`],
+/// [`std::borrow::Cow<'_, [u8]>`]); the follow-up trios are not in
+/// this commit.
+///
+/// Mirrors the sibling reference-grammar family
+/// [`crate::oci_manifest::DigestAlgorithm`]'s
+/// [`PartialEq<[u8]>`] impl at `cli/src/oci_manifest.rs::3738` — the
+/// same canonical-label oracle at the same borrowed byte-slice
+/// frontier, projected onto the digest-algorithm ladder.
+///
+/// THEORY.md §III typed primitives: the borrowed byte-slice
+/// comparison surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one [`PartialEq<[u8]>`] impl routing
+/// through [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`]), not a
+/// per-consumer restatement at every downstream site that asks
+/// whether a [`PerAttemptRegion`] value names a specific canonical
+/// label through an already-borrowed `&[u8]` handle. THEORY.md §VI.1
+/// one-oracle: the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`], projected onto bytes through
+/// [`str::as_bytes`] at the [`AsRef<[u8]>`] surface), and every
+/// borrowed byte-slice surface — the [`AsRef<[u8]>`] borrowed-view
+/// sibling yielding `&[u8]`, this [`PartialEq<[u8]>`] answering a
+/// boolean equality query — reads through the same one-oracle
+/// discipline projected onto its own intent × frontier.
+impl PartialEq<[u8]> for PerAttemptRegion {
+    fn eq(&self, other: &[u8]) -> bool {
+        <Self as AsRef<[u8]>>::as_ref(self) == other
+    }
+}
+
+/// Ergonomic canonical-label equality query at the borrowed byte-slice
+/// frontier through a `&[u8]` receiver — the peer of
+/// [`PartialEq<[u8]> for PerAttemptRegion`] (directly above), split by
+/// receiver shape: [`PartialEq<[u8]>`] answers the boolean equality
+/// query against a dereffed `[u8]` value
+/// (`region == *label_bytes_ref`), this [`PartialEq<&[u8]>`] answers
+/// the same boolean equality query against a `&[u8]` reference
+/// (`region == label_bytes_ref`) without the caller's explicit `*`
+/// deref at every comparison site. The two receiver-shape peers
+/// together give the borrowed byte-slice comparison surface at the
+/// per-attempt-region ladder the same ergonomic reach the UTF-8-side
+/// [`PartialEq<str>`] + [`PartialEq<&str>`] receiver-shape pair
+/// already covers, matching the two-receiver byte-slice comparison
+/// pair the sibling reference-grammar family
+/// [`crate::oci_manifest::DigestAlgorithm`] already carries at
+/// `cli/src/oci_manifest.rs::3738` / `::3809`.
+///
+/// Route: the impl body composes
+/// [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`] with the standard
+/// library [`<[u8] as PartialEq<[u8]>>::eq`] on the dereffed `&[u8]`
+/// self receiver, so the comparison reads the same canonical-label
+/// bytes as the sibling receiver-shape peer at zero allocation and
+/// zero intermediate buffer.
+///
+/// THEORY.md §III typed primitives: the borrowed byte-slice
+/// `&[u8]`-receiver comparison surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one [`PartialEq<&[u8]>`] impl routing
+/// through [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`]), not a
+/// per-consumer restatement at every downstream site that asks
+/// whether a [`PerAttemptRegion`] value names a specific canonical
+/// label through an already-borrowed `&[u8]` handle without an
+/// explicit `*` deref. THEORY.md §VI.1 one-oracle: the canonical
+/// label is named at one site ([`PerAttemptRegion::as_str`],
+/// projected onto bytes through [`str::as_bytes`] at the
+/// [`AsRef<[u8]>`] surface), and this [`PartialEq<&[u8]>`] receiver-
+/// shape surface reads through the same one-oracle discipline the
+/// two sibling comparison surfaces ([`AsRef<[u8]>`],
+/// [`PartialEq<[u8]>`]) already carry.
+impl PartialEq<&[u8]> for PerAttemptRegion {
+    fn eq(&self, other: &&[u8]) -> bool {
+        <Self as AsRef<[u8]>>::as_ref(self) == *other
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -27717,6 +27840,160 @@ mod tests {
                     <&str as PartialEq<PerAttemptRegion>>::eq(&label_ref, &region),
                     <PerAttemptRegion as PartialEq<&str>>::eq(&region, &label_ref),
                     "reverse-&str and forward-&str PartialEq peers must agree at ({label:?}, {region:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant × every entry in a
+    /// canonical × cross-ladder × known-bad byte-slice label grid,
+    /// `<PerAttemptRegion as PartialEq<[u8]>>::eq(&region, label)`
+    /// answers the same boolean as
+    /// `<PerAttemptRegion as AsRef<[u8]>>::as_ref(&region) == *label`.
+    /// Pins the one-oracle discipline the borrowed byte-slice
+    /// comparison surface commits to at ONE pin over the closed 5 × N
+    /// grid so a future refactor that drifts the impl off
+    /// [`AsRef<[u8]>`] (a hand-rolled `matches!` with per-arm label
+    /// bytes a future variant insertion could silently leave out, an
+    /// accidental case-fold on the byte-comparison side) breaks this
+    /// pin at at least one (variant, label) pair rather than
+    /// propagating unnoticed. Mirrors the sibling reference-grammar
+    /// pin
+    /// [`crate::oci_manifest::tests::test_digest_algorithm_partial_eq_bytes_agrees_with_as_ref`]
+    /// at the parallel primitive
+    /// [`crate::oci_manifest::DigestAlgorithm`].
+    #[test]
+    fn test_per_attempt_region_partial_eq_bytes_agrees_with_as_ref() {
+        let owned: Vec<Vec<u8>> = [
+            b"before_first".to_vec(),
+            b"first".to_vec(),
+            b"interim".to_vec(),
+            b"final".to_vec(),
+            b"over_budget".to_vec(),
+            Vec::<u8>::new(),
+            b"BEFORE_FIRST".to_vec(),
+            b"First".to_vec(),
+            b" first".to_vec(),
+            b"final ".to_vec(),
+            b"over budget".to_vec(),
+            b"over-budget".to_vec(),
+            b"nonsense".to_vec(),
+            b"patch".to_vec(),
+            b"sha256".to_vec(),
+            b"soft".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        let labels: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        for region in PerAttemptRegion::ALL {
+            for label in &labels {
+                assert_eq!(
+                    <PerAttemptRegion as PartialEq<[u8]>>::eq(&region, label),
+                    <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region) == *label,
+                    "PartialEq<[u8]> and AsRef<[u8]> equality must agree at ({region:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant,
+    /// `<PerAttemptRegion as PartialEq<[u8]>>::eq(&region,
+    /// <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region))` returns
+    /// true. Pins the reflexivity identity that a variant compared
+    /// against its own emitted canonical-label bytes through the
+    /// dereffed-slice-receiver peer always answers true — the load-
+    /// bearing "self-recognition" property the borrowed byte-slice
+    /// comparison surface promises, mirroring the UTF-8-side sibling
+    /// [`test_per_attempt_region_partial_eq_str_reflexive_at_own_label`]
+    /// and the digest-algorithm sibling
+    /// [`crate::oci_manifest::tests::test_digest_algorithm_partial_eq_bytes_reflexive_at_own_label`].
+    #[test]
+    fn test_per_attempt_region_partial_eq_bytes_reflexive_at_own_label() {
+        for region in PerAttemptRegion::ALL {
+            let canonical: &[u8] = <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region);
+            assert!(
+                <PerAttemptRegion as PartialEq<[u8]>>::eq(&region, canonical),
+                "PartialEq<[u8]> must recognise self canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// Same discipline as
+    /// [`test_per_attempt_region_partial_eq_bytes_agrees_with_as_ref`],
+    /// projected onto the `&[u8]`-receiver peer. Pins the receiver-
+    /// shape ergonomic axis at the byte-slice frontier so a downstream
+    /// site writes `region == label_bytes_ref` (no explicit `*`
+    /// deref) and the two receiver-shape peers agree on the answer at
+    /// every (variant, label) pair across the canonical × cross-
+    /// ladder × known-bad grid.
+    #[test]
+    fn test_per_attempt_region_partial_eq_bytes_ref_agrees_with_as_ref() {
+        let owned: Vec<Vec<u8>> = [
+            b"before_first".to_vec(),
+            b"first".to_vec(),
+            b"interim".to_vec(),
+            b"final".to_vec(),
+            b"over_budget".to_vec(),
+            Vec::<u8>::new(),
+            b"BEFORE_FIRST".to_vec(),
+            b"First".to_vec(),
+            b" first".to_vec(),
+            b"final ".to_vec(),
+            b"over budget".to_vec(),
+            b"over-budget".to_vec(),
+            b"nonsense".to_vec(),
+            b"patch".to_vec(),
+            b"sha256".to_vec(),
+            b"soft".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for region in PerAttemptRegion::ALL {
+            for label in owned.iter() {
+                let label_ref: &[u8] = label.as_slice();
+                assert_eq!(
+                    <PerAttemptRegion as PartialEq<&[u8]>>::eq(&region, &label_ref),
+                    <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region) == label_ref,
+                    "PartialEq<&[u8]> and AsRef<[u8]> equality must agree at ({region:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// The two receiver-shape peers at the byte-slice frontier agree
+    /// on the answer at every (variant, label) pair across the
+    /// canonical × cross-ladder × known-bad grid — the dereffed
+    /// `[u8]`-receiver impl answers the same boolean as the
+    /// `&[u8]`-receiver impl once the caller supplies the explicit
+    /// `*` deref. Pins the receiver-shape symmetry so a future refactor
+    /// that drifts one receiver-shape impl off the other breaks this
+    /// pin at at least one pair rather than propagating unnoticed
+    /// through downstream generic `PartialEq`-bounded consumers.
+    /// Mirrors the sibling
+    /// [`crate::oci_manifest::tests::test_digest_algorithm_partial_eq_bytes_ref_agrees_with_deref_peer`]
+    /// pin at the digest-algorithm axis.
+    #[test]
+    fn test_per_attempt_region_partial_eq_bytes_ref_agrees_with_deref_peer() {
+        let owned: Vec<Vec<u8>> = [
+            b"before_first".to_vec(),
+            b"first".to_vec(),
+            b"interim".to_vec(),
+            b"final".to_vec(),
+            b"over_budget".to_vec(),
+            Vec::<u8>::new(),
+            b"BEFORE_FIRST".to_vec(),
+            b" first".to_vec(),
+            b"nonsense".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for region in PerAttemptRegion::ALL {
+            for label in owned.iter() {
+                let label_ref: &[u8] = label.as_slice();
+                assert_eq!(
+                    <PerAttemptRegion as PartialEq<&[u8]>>::eq(&region, &label_ref),
+                    <PerAttemptRegion as PartialEq<[u8]>>::eq(&region, label_ref),
+                    "PartialEq<&[u8]> and PartialEq<[u8]> receiver-shape peers must agree at ({region:?}, {label:?})",
                 );
             }
         }
