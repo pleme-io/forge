@@ -129,13 +129,47 @@ pub async fn execute(
         )
         .await?;
 
-        // Use cache with retry logic
-        attic_command_with_retry(
-            &["use", &format!("{}:{}", attic_server, cache_name)],
-            "configure Attic cache",
-            safe_mode,
-        )
-        .await?;
+        // Select the server-scoped cache as active. Routes through
+        // [`crate::infrastructure::attic::AtticClient::use_cache`] so two
+        // load-bearing properties this site previously bypassed land at
+        // ONE call:
+        //   1. `ATTIC_BIN` env override — the pre-migration
+        //      `attic_command_with_retry` helper resolved `attic` via
+        //      `get_tool_path("ATTIC_BIN", "attic")` at the top of the
+        //      free-standing helper, but the `use_cache` primitive
+        //      resolves it via `resolve_attic_bin` in the same shape
+        //      every other `AtticClient` method uses — pinning ONE
+        //      env-override discovery site across the typed client.
+        //   2. Typed-error dispatch — pre-migration the helper produced
+        //      untyped `anyhow::Error`; post-migration the failure lands
+        //      as `AtticError::UseFailed { cache, server, exit_code,
+        //      stderr }` (or `AtticError::ExecFailed` on spawn) — the
+        //      structural-record tuple Phase 1 attestation records
+        //      (THEORY §V.4) consume. A "wrong server alias" now
+        //      surfaces at the type level with the captured stderr
+        //      attached, instead of as a mysterious substituter-fetch
+        //      failure from the subsequent `nix build` with no
+        //      structural link back to the mis-`use`d cache.
+        // The retry loop the pre-migration helper wrapped around this
+        // call is dropped: `attic use` is a local operation that writes
+        // to `~/.config/attic/config.toml` and does not touch the
+        // network, so retrying on transient network stderr markers was
+        // wasted budget by construction — the sibling `build.rs`
+        // migration (99aab8b) established the same drop against a
+        // pre-existing raw `Command::new("attic")` invocation with a
+        // `use`-subcommand args slice that also did not retry. The
+        // hard-fail contract this
+        // site had (a `use` failure aborts CI because subsequent
+        // substituter fetches would target the wrong cache) is
+        // preserved by the `?` propagation onto the `AtticError`
+        // variant. Sibling of the `attic push` migration at line ~220
+        // above (09f05fb) and of the `build.rs::use_cache` migration
+        // (99aab8b). The regression-shield
+        // `tests::test_execute_routes_attic_use_through_attic_client_not_helper`
+        // pins the delegation structurally against a future re-fusion.
+        crate::infrastructure::attic::AtticClient::new(cache_name.clone())
+            .use_cache(&attic_server)
+            .await?;
 
         info!("✅ Attic configured");
         println!();
@@ -863,6 +897,94 @@ mod tests {
             execute_body.contains("AtticClient::new"),
             "execute() must construct an `AtticClient` for the push step \
              — the `AtticClient::new` string was not found in execute()."
+        );
+    }
+
+    /// Regression shield: the `attic use` step inside `execute()`
+    /// must route through
+    /// [`crate::infrastructure::attic::AtticClient::use_cache`] rather
+    /// than the domain-agnostic
+    /// [`attic_command_with_retry`] helper. Pre-migration this call
+    /// site spawned `attic use` via a stringly
+    /// `&["use", &format!("{}:{}", attic_server, cache_name)]` slice
+    /// wrapper that produced only untyped `anyhow::Error`;
+    /// post-migration the typed
+    /// [`crate::error::AtticError::UseFailed`] and
+    /// [`crate::error::AtticError::ExecFailed`] variants reach the
+    /// call site so a "wrong server alias" surfaces as a structural
+    /// record — (cache, server, exit_code, stderr) — instead of a
+    /// mysterious substituter-fetch failure from the subsequent
+    /// `nix build` with no structural link back to the mis-`use`d
+    /// cache.
+    ///
+    /// Sibling of the four regression shields the prior migration
+    /// commits pinned:
+    /// - 36fd3b1 `push.rs::execute` → `push_optional`
+    /// - 0365a59 `build.rs::execute` → `login_optional`
+    /// - 99aab8b `build.rs::execute` → `use_cache`
+    /// - 09f05fb `github_runner_ci.rs::execute` → `push_with_retries`
+    ///   (the shield above this one)
+    /// The five shields together close the "no `attic <sub>` invocation
+    /// via the domain-agnostic stringly `attic_command_with_retry` /
+    /// raw `Command::new("attic").args(&[<sub>, ...])` helper survives
+    /// in an `execute()` body" floor across every forge command that
+    /// talks to attic through a client-owned surface — with the sole
+    /// remaining exception being the `attic login` call at the top of
+    /// THIS `execute()` (a future run's target).
+    ///
+    /// Structural, not behavioral — reads this module's own source
+    /// via `include_str!` and inspects the `execute()` body slice
+    /// (bounded above by the fn header, below by the free-standing
+    /// `attic_command_with_retry` helper that immediately follows).
+    /// A future regression that re-fuses the `use` step back onto the
+    /// stringly helper — even without changing observable behavior —
+    /// fails this test rather than silently un-migrating the
+    /// typed-error surface.
+    #[test]
+    fn test_execute_routes_attic_use_through_attic_client_not_helper() {
+        let source = include_str!("github_runner_ci.rs");
+        let execute_start = source
+            .find("pub async fn execute(")
+            .expect("execute() must be present in this module's source");
+        let helper_marker = "\nasync fn attic_command_with_retry";
+        let execute_end = source[execute_start..]
+            .find(helper_marker)
+            .map(|i| execute_start + i)
+            .expect(
+                "the `attic_command_with_retry` helper must follow `execute()` — \
+                 the shield's slice boundary relies on this module ordering",
+            );
+        let execute_body = &source[execute_start..execute_end];
+
+        // Post-migration invariant #1: no `attic_command_with_retry`
+        // call spawning `attic use` remains in `execute()`. The
+        // literal `&["use",` sub-slice is the load-bearing marker
+        // that pre-migration the call was routed through the stringly
+        // helper; if a future regression rewires the `use` step back
+        // onto that helper, the marker reappears and this shield
+        // fires.
+        assert!(
+            !execute_body.contains("&[\"use\","),
+            "execute() must not spawn `attic use` via the domain-agnostic \
+             `attic_command_with_retry` helper — the `&[\"use\", ...]` args \
+             slice was found in execute(). Route the use step through \
+             `crate::infrastructure::attic::AtticClient::new(cache_name.clone()\
+              ).use_cache(&attic_server)` instead."
+        );
+
+        // Post-migration invariant #2: the delegation to
+        // `AtticClient::use_cache` is present. Pins the positive form
+        // of the migration so a future regression that silently drops
+        // the call (e.g., stripping the cache-selection step
+        // entirely) fails this test rather than silently skipping the
+        // `attic use` — which would leave subsequent nix substituter
+        // fetches routed at whatever cache was previously selected in
+        // `~/.config/attic/config.toml`.
+        assert!(
+            execute_body.contains("use_cache"),
+            "execute() must delegate the use step to \
+             `AtticClient::use_cache` — the `use_cache` \
+             method call was not found in execute()."
         );
     }
 }
