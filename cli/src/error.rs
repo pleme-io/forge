@@ -408,6 +408,60 @@ pub enum AtticError {
     TokenRequired { cache: String, server_url: String },
 }
 
+impl AtticError {
+    /// Construct an [`Self::ExecFailed`] variant carrying the given cache
+    /// name and spawn-error message. Convenience factory for the eight
+    /// production sites in `cli/src/infrastructure/attic.rs` that
+    /// previously spelled out
+    /// ```text
+    /// AtticError::ExecFailed {
+    ///     cache: <cache>.to_string() | self.cache_name.clone(),
+    ///     message: <message>,
+    /// }
+    /// ```
+    /// verbatim across three surfaces:
+    ///
+    /// 1. `classify_attic_push_failure` and `classify_attic_login_failure`
+    ///    (the retry-loop post-dispatch helpers) on the `spawn.stdout`
+    ///    branch of [`crate::retry::classify_attempt_failure`].
+    /// 2. `AtticClient::push_closure_via_stdin` — four verbatim sites
+    ///    across `Command::spawn().map_err`, `child.stdin.take().ok_or_else`,
+    ///    `AsyncWriteExt::write_all().map_err`, and `wait_with_output().map_err`.
+    /// 3. `AtticClient::login` and `AtticClient::use_cache` on the
+    ///    spawn arm of [`crate::retry::classify_capture`].
+    ///
+    /// Eight occurrences past THEORY §VI.1's three-is-a-law threshold
+    /// (PRIME DIRECTIVE: duplication budget is zero) consolidate onto
+    /// this typed constructor. A downstream extension to the variant's
+    /// field list — e.g., an `operation: String` context field to
+    /// disambiguate "spawn attic push" from "spawn attic login" at
+    /// telemetry / Phase 1 attestation record surfaces (THEORY §V.4)
+    /// — lands here once instead of at each of the eight sites.
+    ///
+    /// Sibling of the existing typed-error factory
+    /// [`GitError::from_capture`] — both lift the verbatim typed-error
+    /// construction pattern into a single-oracle constructor on the
+    /// error type itself. The two constructors together close the
+    /// "typed-error variant is never hand-constructed at the call site"
+    /// discipline across the two error families that have crossed the
+    /// three-times-rule threshold.
+    ///
+    /// # Ergonomic contract
+    ///
+    /// `cache: impl Into<String>` and `message: impl Into<String>`
+    /// accept both `&str` (allocates) and `String` (moves) — matches
+    /// the pre-migration call sites, which mixed `.to_string()`,
+    /// `.clone()`, and `format!(...)` forms. A regression that added
+    /// a required extra parameter would fail this constructor at
+    /// compile time across every migrated site simultaneously.
+    pub fn exec_failed(cache: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::ExecFailed {
+            cache: cache.into(),
+            message: message.into(),
+        }
+    }
+}
+
 /// Infrastructure errors (docker, compose, services)
 #[derive(Error, Debug)]
 pub enum InfraError {
@@ -1407,6 +1461,72 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("main"), "cache must appear: {msg}");
         assert!(msg.contains("No such file"), "message must appear: {msg}");
+    }
+
+    /// `AtticError::exec_failed` must produce a variant structurally
+    /// identical to the hand-constructed
+    /// `AtticError::ExecFailed { cache, message }` literal — same
+    /// discriminant, same field values, same `Display` output. Pins
+    /// the constructor's contract so a migrated call site is
+    /// semantically indistinguishable from its pre-migration form.
+    /// A future refactor that added a required extra field to the
+    /// variant would fail this test rather than silently drift the
+    /// constructor away from the struct literal.
+    #[test]
+    fn test_attic_error_exec_failed_factory_matches_variant() {
+        let via_factory = AtticError::exec_failed("main", "No such file or directory");
+        let via_literal = AtticError::ExecFailed {
+            cache: "main".into(),
+            message: "No such file or directory".into(),
+        };
+        match (&via_factory, &via_literal) {
+            (
+                AtticError::ExecFailed {
+                    cache: c1,
+                    message: m1,
+                },
+                AtticError::ExecFailed {
+                    cache: c2,
+                    message: m2,
+                },
+            ) => {
+                assert_eq!(c1, c2, "cache field must match");
+                assert_eq!(m1, m2, "message field must match");
+            }
+            _ => panic!("both forms must produce ExecFailed"),
+        }
+        assert_eq!(
+            via_factory.to_string(),
+            via_literal.to_string(),
+            "Display output must match between factory and literal forms"
+        );
+    }
+
+    /// `AtticError::exec_failed` takes `impl Into<String>` on both
+    /// parameters — both `&str` and `String` callers must compile and
+    /// produce the same typed error. Mirrors the ergonomic contract
+    /// pinned by [`GitError::from_capture`]'s `op: impl Into<String>`
+    /// test: pre-migration the eight call sites in
+    /// `infrastructure/attic.rs` used a mix of `.to_string()`,
+    /// `.clone()`, and `format!(...)` forms — the constructor must
+    /// accept all of them without extra allocation at the call site
+    /// for the owned-`String` case (verified structurally by the
+    /// `impl Into<String>` bound: `String::from(String)` is a no-op
+    /// move).
+    #[test]
+    fn test_attic_error_exec_failed_factory_accepts_str_and_string() {
+        let from_str = AtticError::exec_failed("cache-x", "boom");
+        let from_string = AtticError::exec_failed(String::from("cache-x"), String::from("boom"));
+        let from_owned_format = AtticError::exec_failed("cache-x", format!("bo{}", "om"));
+        assert_eq!(from_str.to_string(), from_string.to_string());
+        assert_eq!(from_str.to_string(), from_owned_format.to_string());
+        match from_str {
+            AtticError::ExecFailed { cache, message } => {
+                assert_eq!(cache, "cache-x");
+                assert_eq!(message, "boom");
+            }
+            _ => panic!("expected ExecFailed"),
+        }
     }
 
     #[test]

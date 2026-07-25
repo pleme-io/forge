@@ -39,10 +39,7 @@ fn classify_attic_push_failure(
 ) -> AtticError {
     classify_attempt_failure(
         failure,
-        |spawn| AtticError::ExecFailed {
-            cache: cache.to_string(),
-            message: spawn.stdout,
-        },
+        |spawn| AtticError::exec_failed(cache, spawn.stdout),
         |op| AtticError::PushFailed {
             cache: cache.to_string(),
             store_path: store_path.to_string(),
@@ -79,10 +76,7 @@ fn classify_attic_login_failure(
 ) -> AtticError {
     classify_attempt_failure(
         failure,
-        |spawn| AtticError::ExecFailed {
-            cache: cache.to_string(),
-            message: spawn.stdout,
-        },
+        |spawn| AtticError::exec_failed(cache, spawn.stdout),
         |op| AtticError::LoginFailed {
             cache: cache.to_string(),
             server_url: server_url.to_string(),
@@ -347,35 +341,28 @@ impl AtticClient {
             cmd.env("ATTIC_TOKEN", t);
         }
 
-        let mut child = cmd.spawn().map_err(|e| AtticError::ExecFailed {
-            cache: self.cache_name.clone(),
-            message: e.to_string(),
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| AtticError::exec_failed(&self.cache_name, e.to_string()))?;
 
         // Stdio::piped() guarantees child.stdin is Some; the `take`
         // returning None case is structurally impossible. We map it to
         // ExecFailed so the typed surface is total.
-        let mut stdin = child.stdin.take().ok_or_else(|| AtticError::ExecFailed {
-            cache: self.cache_name.clone(),
-            message: "child stdin missing despite Stdio::piped()".to_string(),
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            AtticError::exec_failed(
+                &self.cache_name,
+                "child stdin missing despite Stdio::piped()",
+            )
         })?;
         use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(closure_bytes)
-            .await
-            .map_err(|e| AtticError::ExecFailed {
-                cache: self.cache_name.clone(),
-                message: format!("write to attic stdin: {}", e),
-            })?;
+        stdin.write_all(closure_bytes).await.map_err(|e| {
+            AtticError::exec_failed(&self.cache_name, format!("write to attic stdin: {}", e))
+        })?;
         drop(stdin);
 
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|e| AtticError::ExecFailed {
-                cache: self.cache_name.clone(),
-                message: format!("wait for attic push: {}", e),
-            })?;
+        let output = child.wait_with_output().await.map_err(|e| {
+            AtticError::exec_failed(&self.cache_name, format!("wait for attic push: {}", e))
+        })?;
 
         if output.status.success() {
             Ok(())
@@ -422,10 +409,7 @@ impl AtticClient {
 
         classify_capture(
             cmd.output().await,
-            |e| AtticError::ExecFailed {
-                cache: self.cache_name.clone(),
-                message: e.to_string(),
-            },
+            |e| AtticError::exec_failed(&self.cache_name, e.to_string()),
             |cf| AtticError::LoginFailed {
                 cache: self.cache_name.clone(),
                 server_url: server_url.to_string(),
@@ -615,10 +599,7 @@ impl AtticClient {
 
         classify_capture(
             cmd.output().await,
-            |e| AtticError::ExecFailed {
-                cache: self.cache_name.clone(),
-                message: e.to_string(),
-            },
+            |e| AtticError::exec_failed(&self.cache_name, e.to_string()),
             |cf| AtticError::UseFailed {
                 cache: self.cache_name.clone(),
                 server: server.to_string(),
@@ -664,6 +645,86 @@ mod tests {
     }
 
     use crate::test_support::make_executable_shim;
+
+    /// Regression shield: no production site in this module constructs
+    /// [`AtticError::ExecFailed`] via the struct literal
+    /// `AtticError::ExecFailed { cache: ..., message: ... }`. Every
+    /// spawn / io-failure arm must route through the
+    /// [`AtticError::exec_failed`] typed factory
+    /// (`cli/src/error.rs`) so the "cache + message" tuple is
+    /// constructed at exactly one call shape across the eight sites
+    /// this module previously carried:
+    ///
+    /// - `classify_attic_push_failure` and `classify_attic_login_failure`
+    ///   spawn arms of [`crate::retry::classify_attempt_failure`]
+    /// - `AtticClient::push_closure_via_stdin` — four sites across
+    ///   `Command::spawn`, `child.stdin.take`, `AsyncWriteExt::write_all`,
+    ///   and `child.wait_with_output`
+    /// - `AtticClient::login` and `AtticClient::use_cache` spawn arms
+    ///   of [`crate::retry::classify_capture`]
+    ///
+    /// Structural, not behavioral — reads this module's own source
+    /// via `include_str!` and inspects the production body slice
+    /// (bounded above by the enum-consumer preamble, below by the
+    /// `\n#[cfg(test)]` tests-module marker) so the shield's own
+    /// docstring — which legitimately spells the pre-migration
+    /// `AtticError::ExecFailed {` literal for context — is excluded
+    /// from the scan. A future regression that re-introduces the
+    /// struct literal — even without changing observable behavior —
+    /// fails this test rather than silently drifting a call site off
+    /// the typed factory (which would leave a future extension to the
+    /// variant's field list stranded at the drifted site).
+    ///
+    /// Sibling of the shield family in
+    /// `commands/github_runner_ci.rs` (`test_execute_routes_attic_*_through_attic_client_not_helper`)
+    /// — same `include_str!`-plus-slice-boundary technique, applied
+    /// on the typed-error construction surface here instead of the
+    /// stringly-helper call surface there. THEORY §VI.1 (three-times
+    /// rule / duplication budget) redeemed by the factory; this
+    /// shield keeps it redeemed.
+    #[test]
+    fn test_no_bare_attic_error_exec_failed_literal_in_production_body() {
+        let source = include_str!("attic.rs");
+        // Bound the search at the `\n#[cfg(test)]` tests-module marker
+        // so this test's own docstring (which spells the pre-migration
+        // literal for context) is excluded from the production-body
+        // scan — same boundary technique the sibling
+        // `test_execute_routes_attic_*_through_attic_client_not_helper`
+        // shields in `commands/github_runner_ci.rs` use.
+        let tests_marker = "\n#[cfg(test)]";
+        let tests_start = source
+            .find(tests_marker)
+            .expect("attic.rs must contain a `#[cfg(test)]` tests-module marker");
+        let production_body = &source[..tests_start];
+
+        // The load-bearing marker: `AtticError::ExecFailed {` — the
+        // struct-literal opener the eight migrated sites previously
+        // carried verbatim. Post-migration every production site
+        // routes through `AtticError::exec_failed(cache, message)`
+        // instead, which never spells the `{` opener.
+        let literal_marker = "AtticError::ExecFailed {";
+        assert!(
+            !production_body.contains(literal_marker),
+            "no production site in `infrastructure/attic.rs` may construct \
+             `AtticError::ExecFailed {{ cache: ..., message: ... }}` via the \
+             struct literal — route it through the typed factory \
+             `crate::error::AtticError::exec_failed(cache, message)` instead. \
+             A future extension to the `ExecFailed` variant's field list \
+             (e.g. an `operation` context field) must land in the factory \
+             once, not at each drifted call site."
+        );
+
+        // Positive form: the migration is present. Pins that a future
+        // regression that strips the factory calls entirely (leaving
+        // the ExecFailed construction to some other surface) fails
+        // this test rather than silently un-migrating.
+        assert!(
+            production_body.contains("AtticError::exec_failed("),
+            "the typed factory `AtticError::exec_failed(...)` must be the \
+             sole construction surface for `ExecFailed` in this module — \
+             the call was not found in the production body."
+        );
+    }
 
     /// Write an executable shim script that pretends to be `attic`.
     /// Delegates to the shared
