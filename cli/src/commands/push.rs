@@ -267,22 +267,38 @@ pub async fn execute(
     info!("🏷️  Tags: {}", tags.join(", "));
     println!();
 
-    // Push to Attic cache first (if requested)
+    // Push to Attic cache first (if requested). Routes through
+    // [`crate::infrastructure::attic::AtticClient::push_optional`] so
+    // three load-bearing properties this site previously bypassed land
+    // at ONE call:
+    //   1. `ATTIC_BIN` env override — the pre-migration raw-spawn body
+    //      here ignored the env var every other attic-push site in the
+    //      workspace honors via `get_tool_path("ATTIC_BIN", "attic")`
+    //      (`infrastructure/attic.rs::resolve_attic_bin`).
+    //   2. Retry-policy semantics — a transient network failure (HTTP
+    //      5xx from the attic backend, mid-stream EOF, connection
+    //      refused) dropped straight into the `warn!` non-fatal arm on
+    //      attempt 1; the typed primitive drives the canonical
+    //      `RetryPolicy::network` schedule (250ms × factor=2 capped at
+    //      30s) via `retry_command` so transient failures retry before
+    //      being classified non-fatal.
+    //   3. Typed-error dispatch — a spawn failure vs. a non-zero exit
+    //      landed as an untyped `Result<ExitStatus>` here; the primitive
+    //      routes through `classify_attic_push_failure` to the
+    //      `AtticError::ExecFailed` / `AtticError::PushFailed` split.
+    // The `warn!` on failure lives inside `push_optional` itself, so
+    // the non-fatal-on-failure contract this site had is preserved by
+    // construction. Sibling of the `commands/build.rs::execute` and
+    // `commands/rust_service.rs::push_rust_service` migrations that
+    // already routed their attic-push bodies through the primitive.
+    // The regression-shield
+    // `tests::test_execute_routes_attic_push_through_attic_client_not_raw_command`
+    // pins the delegation structurally against a future re-fusion.
     if push_attic {
         info!("📤 Pushing to Attic cache...");
-        let attic_result = Command::new("attic")
-            .args(&["push", &attic_cache, &image_path])
-            .status()
+        let _ok = crate::infrastructure::attic::AtticClient::discover(attic_cache.clone())
+            .push_optional(&image_path)
             .await;
-
-        match attic_result {
-            Ok(status) if status.success() => {
-                info!("✅ Pushed to Attic cache: {}", attic_cache);
-            }
-            _ => {
-                warn!("⚠️  Failed to push to Attic cache (non-fatal, continuing...)");
-            }
-        }
         println!();
     }
 
@@ -350,6 +366,89 @@ pub async fn execute(
 /// (THEORY §VI.1). The `retries` parameter is preserved as skopeo's
 /// internal `--retry-times` (per-blob retry inside skopeo); the OUTER
 /// loop is bounded by the typed policy.
+#[cfg(test)]
+mod tests {
+    /// Regression-shield: `commands/push.rs::execute` must route its
+    /// Attic-cache push through
+    /// [`crate::infrastructure::attic::AtticClient`] rather than spawning
+    /// `attic` directly. Pre-migration a raw
+    /// `Command::new("attic").args(["push", cache, path]).status()` body
+    /// lived at this call site and bypassed three load-bearing properties
+    /// the typed primitive carries: the `ATTIC_BIN` env override every
+    /// other attic-invocation site honors via
+    /// `get_tool_path("ATTIC_BIN", "attic")`, the
+    /// [`crate::retry::RetryPolicy::network`] retry schedule (250ms ×
+    /// factor=2 capped at 30s) that turns a transient HTTP 5xx from the
+    /// attic backend into a retry instead of an immediate non-fatal
+    /// warn, and the typed [`crate::error::AtticError`] dispatch
+    /// (`ExecFailed` vs `PushFailed`) the untyped `Result<ExitStatus>`
+    /// collapsed away.
+    ///
+    /// This test reads this module's own source via [`include_str!`] and
+    /// asserts the raw `Command::new("attic")` string does not reappear
+    /// while the delegation to `AtticClient` does. A future regression
+    /// that re-fuses the raw-spawn body fails here, not silently in
+    /// production where a bypassed `ATTIC_BIN` override or dropped
+    /// retry-policy wrapping would surface only as a mysterious "attic
+    /// not found" or "cache push failed on the first try" report from
+    /// the field.
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — a behavioral test would require
+    /// wiring up the full `execute` flow with mocked registry / attic /
+    /// filesystem surfaces, which is disproportionate to the invariant
+    /// being pinned. The regression-shield discipline mirrors the
+    /// `#![deny(unused_mut)]` and `#![deny(clippy::field_reassign_with_default)]`
+    /// crate-root lints main.rs installs to turn "achievement reached
+    /// fleet-wide" invariants into hard failures.
+    #[test]
+    fn test_execute_routes_attic_push_through_attic_client_not_raw_command() {
+        const SOURCE: &str = include_str!("push.rs");
+
+        // Locate the `execute` function body. The regression-shield only
+        // cares about code inside `execute`, not about the docstring/test
+        // module which legitimately references the pre-migration string
+        // for context.
+        let execute_marker = "pub async fn execute(";
+        let start = SOURCE
+            .find(execute_marker)
+            .expect("push.rs must contain `pub async fn execute(` — module invariant");
+        let after_execute = &SOURCE[start..];
+        // Bound the search at the tests module marker so the docstring
+        // in THIS test — which legitimately spells the pre-migration
+        // `Command::new("attic")` string for context — is excluded from
+        // the scan. Every real code site sits strictly between the
+        // `execute(` marker and the `#[cfg(test)]` marker in this file.
+        let end_relative = after_execute
+            .find("\n#[cfg(test)]")
+            .expect("push.rs must contain `#[cfg(test)]` tests module — this module's own marker");
+        let execute_body = &after_execute[..end_relative];
+
+        assert!(
+            !execute_body.contains("Command::new(\"attic\")"),
+            "execute() must NOT spawn `attic` directly — route through \
+             `crate::infrastructure::attic::AtticClient::discover(...)\
+             .push_optional(...)` so `ATTIC_BIN` overrides, the network \
+             retry policy, and the typed `AtticError` dispatch all land \
+             at the shared primitive. Found the pre-migration spawn body \
+             in execute()."
+        );
+        assert!(
+            execute_body.contains("AtticClient::discover"),
+            "execute() must delegate the attic push to \
+             `AtticClient::discover(...).push_optional(...)` — the \
+             delegation string was not found in execute()."
+        );
+        assert!(
+            execute_body.contains("push_optional"),
+            "execute() must call `push_optional(...)` to preserve the \
+             non-fatal-on-failure contract while inheriting the retry \
+             policy, env resolution, and typed error dispatch — the \
+             call string was not found in execute()."
+        );
+    }
+}
+
 pub async fn push_with_retry(
     image_path: &str,
     registry: &str,
