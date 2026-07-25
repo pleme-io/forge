@@ -8942,6 +8942,135 @@ impl PartialEq<&[u8]> for PerAttemptRegion {
     }
 }
 
+/// Reverse-direction borrowed byte-slice comparison peer through a `[u8]`
+/// self receiver — the reverse-direction sibling of
+/// [`PartialEq<[u8]> for PerAttemptRegion`] (line 8895) and the byte-frontier
+/// mirror of the reverse-direction UTF-8 pair
+/// [`PartialEq<PerAttemptRegion> for str`] (line 8770) +
+/// [`PartialEq<PerAttemptRegion> for &str`] (line 8816) above. A downstream
+/// consumer that holds an already-borrowed `&[u8]` handle carrying a
+/// per-attempt-region label capture (a `Cow::Borrowed(&[u8])` binding on a
+/// raw-byte grammar arm, a byte-stream cache-index oracle keyed on the
+/// per-attempt-region label bytes without per-comparison UTF-8 conversion,
+/// a `nom` / `winnow` byte-slice parser scrutinee whose captured region-
+/// label slice sits on the left of the equality operator) writes
+/// `*label_bytes_ref == region` (or, through the derived `&`-receiver
+/// auto-ref, `b"first" == region`) at ONE composition rather than a
+/// per-site `label_bytes == <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region)`
+/// restatement that repeats the canonical-label-bytes oracle name at every
+/// downstream comparison site.
+///
+/// Route: the impl body composes
+/// [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`] (in turn
+/// [`PerAttemptRegion::as_str`] via [`str::as_bytes`]) with the standard
+/// library [`<[u8] as PartialEq<[u8]>>::eq`] on the borrowed `&[u8]` self
+/// receiver, so the comparison reads the same canonical-label bytes at
+/// zero allocation, zero temporary [`Vec<u8>`] construction, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call — the same
+/// zero-cost discipline the forward-direction byte-slice peers (lines 8895
+/// / 8939) and the [`AsRef<[u8]>`] borrowed-view sibling carry. The
+/// symmetry axiom
+/// `<[u8] as PartialEq<PerAttemptRegion>>::eq(&bytes, &region)
+/// == <PerAttemptRegion as PartialEq<[u8]>>::eq(&region, &bytes)` holds by
+/// construction at every `(bytes, region)` pair.
+///
+/// Prior to this pair the per-attempt-region typed sum carried only the
+/// forward direction at the byte-slice frontier (`region == label_bytes`
+/// compiled but `label_bytes == region` did not), so a generic
+/// [`PartialEq`]-bounded consumer that composed both directions through
+/// its own symmetric-check protocol (`if a == b || b == a { … }`, a
+/// bidirectional-equality integration-test oracle, a byte-stream cache-
+/// index oracle that computes a canonical-label lookup key from either
+/// side of the ==) could not thread a [`PerAttemptRegion`] through the
+/// `[u8]` side of the bound without a per-consumer
+/// `label_bytes == <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region)`
+/// bridge. With this pair landed, every borrowed byte-slice comparison
+/// direction at the per-attempt-region frontier reads the SAME
+/// [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`] one-oracle table, and a
+/// downstream site writes `label_bytes == region` at ONE composition
+/// instead of the per-site restatement — mirroring the four-impl closure
+/// the sibling reference-grammar family
+/// [`crate::oci_manifest::DigestAlgorithm`] already carries across
+/// forward × receiver-shape (`cli/src/oci_manifest.rs::3738` / `::3809`)
+/// and reverse × receiver-shape (`cli/src/oci_manifest.rs::3889` /
+/// `::3938`), and the four-impl UTF-8 closure the per-attempt-region
+/// typed sum itself already carries at lines 8586 / 8677 (forward) /
+/// 8770 / 8816 (reverse).
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed byte-
+/// slice comparison surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one [`PartialEq<PerAttemptRegion>`] impl
+/// on [`[u8]`] routing through
+/// [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`]), not a per-consumer
+/// `label_bytes == <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region)`
+/// restatement at every downstream site that asks whether an already-
+/// borrowed `&[u8]` handle names the same canonical per-attempt-region
+/// label as a [`PerAttemptRegion`] value. THEORY.md §VI.1 one-oracle:
+/// the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]), and every borrowed byte-slice
+/// comparison surface — the forward-direction
+/// [`PartialEq<[u8]> for PerAttemptRegion`] +
+/// [`PartialEq<&[u8]> for PerAttemptRegion`] pair, this reverse-direction
+/// [`PartialEq<PerAttemptRegion> for [u8]`] +
+/// [`PartialEq<PerAttemptRegion> for &[u8]`] pair — reads through the
+/// same one-oracle discipline projected onto its own direction × receiver
+/// shape.
+impl PartialEq<PerAttemptRegion> for [u8] {
+    fn eq(&self, other: &PerAttemptRegion) -> bool {
+        self == <PerAttemptRegion as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
+/// Reverse-direction borrowed byte-slice comparison peer through a `&[u8]`
+/// receiver — the reverse-direction sibling of
+/// [`PartialEq<&[u8]> for PerAttemptRegion`] (line 8939) and the receiver-
+/// shape peer of [`PartialEq<PerAttemptRegion> for [u8]`] (directly
+/// above), split by receiver shape so the caller writes
+/// `label_bytes_ref == region` without the explicit `*` deref at every
+/// comparison site. The four [`PartialEq`] impls together on the byte-
+/// slice frontier — forward × receiver-shape (lines 8895 / 8939) and
+/// reverse × receiver-shape (directly above and this impl) — close the
+/// borrowed byte-slice comparison surface across the full 2×2 cross-
+/// product on the per-attempt-region typed sum, matching the four-impl
+/// closure the standard library gives [`Vec<u8>`] through its own
+/// [`PartialEq<[u8]> for Vec<u8>`] + [`PartialEq<&[u8]> for Vec<u8>`] +
+/// [`PartialEq<Vec<u8>> for [u8]`] + [`PartialEq<Vec<u8>> for &[u8]`]
+/// symmetric receiver-shape pair, and mirroring the four-impl byte-slice
+/// closure the sibling reference-grammar family
+/// [`crate::oci_manifest::DigestAlgorithm`] already carries at
+/// `cli/src/oci_manifest.rs::3738` / `::3809` (forward pair) / `::3889` /
+/// `::3938` (reverse pair).
+///
+/// Route: the impl body composes
+/// [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`] with the standard
+/// library [`<[u8] as PartialEq<[u8]>>::eq`] on the dereffed `&[u8]` self
+/// receiver, so the comparison reads the same canonical-label bytes as
+/// the sibling receiver-shape peer at zero allocation and zero
+/// intermediate buffer, and the symmetry axiom
+/// `<&[u8] as PartialEq<PerAttemptRegion>>::eq(&bytes_ref, &region)
+/// == <PerAttemptRegion as PartialEq<&[u8]>>::eq(&region, &bytes_ref)`
+/// holds by construction at every `(bytes_ref, region)` pair.
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed byte-
+/// slice `&[u8]`-receiver comparison surface is a typed-primitive site on
+/// [`PerAttemptRegion`] itself (one [`PartialEq<PerAttemptRegion>`] impl
+/// on [`&[u8]`] routing through
+/// [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`]), not a per-consumer
+/// `label_bytes_ref == <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region)`
+/// restatement at every downstream site that asks whether an already-
+/// borrowed `&[u8]` handle names the same canonical per-attempt-region
+/// label as a [`PerAttemptRegion`] value. THEORY.md §VI.1 one-oracle:
+/// the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]), and this reverse-direction `&[u8]`-
+/// receiver surface reads through the same one-oracle discipline the
+/// three sibling byte-slice comparison surfaces (forward-`[u8]`,
+/// forward-`&[u8]`, reverse-`[u8]`) already carry.
+impl PartialEq<PerAttemptRegion> for &[u8] {
+    fn eq(&self, other: &PerAttemptRegion) -> bool {
+        *self == <PerAttemptRegion as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
 impl RetryPolicy {
     /// Zero retry — call once, return what you got. Useful where the caller
     /// already drove the schedule itself or where retry is unsafe (mutating
@@ -27994,6 +28123,190 @@ mod tests {
                     <PerAttemptRegion as PartialEq<&[u8]>>::eq(&region, &label_ref),
                     <PerAttemptRegion as PartialEq<[u8]>>::eq(&region, label_ref),
                     "PartialEq<&[u8]> and PartialEq<[u8]> receiver-shape peers must agree at ({region:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// `<[u8] as PartialEq<PerAttemptRegion>>::eq(label, &region)` agrees
+    /// byte-for-byte with the borrowed-view
+    /// [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`] oracle across every
+    /// [`PerAttemptRegion::ALL`] variant × the same canonical × cross-
+    /// ladder × known-bad × invalid-UTF-8 byte-slice grid the forward-
+    /// direction pair pins, threaded through a `[u8]` self receiver so
+    /// the caller writes `*label_bytes_ref == region` and answers the
+    /// same boolean equality query as the forward-direction
+    /// [`PartialEq<[u8]> for PerAttemptRegion`] peer. Pins the reverse-
+    /// direction agreement at the byte frontier so a future refactor
+    /// that inlined a divergent read into the reverse-direction impl
+    /// (a stale per-variant byte table, a case-fold on the label side,
+    /// a whitespace-tolerance branch) breaks this pin at at least one
+    /// (region, label) pair rather than at every downstream
+    /// `*label_bytes_ref == region` call site. Mirrors the sibling
+    /// reference-grammar pin
+    /// [`crate::oci_manifest::tests::test_bytes_partial_eq_digest_algorithm_agrees_with_as_ref`]
+    /// at the parallel primitive
+    /// [`crate::oci_manifest::DigestAlgorithm`].
+    #[test]
+    fn test_bytes_partial_eq_per_attempt_region_agrees_with_as_ref() {
+        let owned: Vec<Vec<u8>> = [
+            b"before_first".to_vec(),
+            b"first".to_vec(),
+            b"interim".to_vec(),
+            b"final".to_vec(),
+            b"over_budget".to_vec(),
+            Vec::<u8>::new(),
+            b"BEFORE_FIRST".to_vec(),
+            b"First".to_vec(),
+            b" first".to_vec(),
+            b"final ".to_vec(),
+            b"over budget".to_vec(),
+            b"over-budget".to_vec(),
+            b"nonsense".to_vec(),
+            b"patch".to_vec(),
+            b"sha256".to_vec(),
+            b"soft".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        let labels: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        for region in PerAttemptRegion::ALL {
+            for label in &labels {
+                assert_eq!(
+                    <[u8] as PartialEq<PerAttemptRegion>>::eq(label, &region),
+                    *label == <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region),
+                    "PartialEq<PerAttemptRegion> for [u8] and AsRef<[u8]> equality must agree at ({region:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant,
+    /// `<[u8] as PartialEq<PerAttemptRegion>>::eq(region.as_ref(), &region)`
+    /// returns true — the variant's own emitted canonical-label bytes
+    /// recognise themselves as a match through the reverse-direction
+    /// `[u8]`-receiver peer, mirroring the forward-direction sibling
+    /// [`test_per_attempt_region_partial_eq_bytes_reflexive_at_own_label`]
+    /// and the digest-algorithm sibling
+    /// [`crate::oci_manifest::tests::test_bytes_partial_eq_digest_algorithm_reflexive_at_own_label`].
+    #[test]
+    fn test_bytes_partial_eq_per_attempt_region_reflexive_at_own_label() {
+        for region in PerAttemptRegion::ALL {
+            let canonical: &[u8] = <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region);
+            assert!(
+                <[u8] as PartialEq<PerAttemptRegion>>::eq(canonical, &region),
+                "PartialEq<PerAttemptRegion> for [u8] must recognise self canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// `<&[u8] as PartialEq<PerAttemptRegion>>::eq(&label_ref, &region)`
+    /// agrees byte-for-byte with the borrowed-view
+    /// [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`] oracle across the
+    /// same grid, threaded through a `&[u8]` self receiver so the caller
+    /// writes `label_bytes_ref == region` without the explicit `*`
+    /// deref. Pins the reverse-direction `&[u8]`-receiver agreement,
+    /// mirroring the forward-direction sibling
+    /// [`test_per_attempt_region_partial_eq_bytes_ref_agrees_with_as_ref`].
+    #[test]
+    fn test_bytes_ref_partial_eq_per_attempt_region_agrees_with_as_ref() {
+        let owned: Vec<Vec<u8>> = [
+            b"before_first".to_vec(),
+            b"first".to_vec(),
+            b"interim".to_vec(),
+            b"final".to_vec(),
+            b"over_budget".to_vec(),
+            Vec::<u8>::new(),
+            b"BEFORE_FIRST".to_vec(),
+            b"First".to_vec(),
+            b" first".to_vec(),
+            b"final ".to_vec(),
+            b"over budget".to_vec(),
+            b"over-budget".to_vec(),
+            b"nonsense".to_vec(),
+            b"patch".to_vec(),
+            b"sha256".to_vec(),
+            b"soft".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for region in PerAttemptRegion::ALL {
+            for label in &owned {
+                let label_ref: &[u8] = label;
+                assert_eq!(
+                    <&[u8] as PartialEq<PerAttemptRegion>>::eq(&label_ref, &region),
+                    label_ref == <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region),
+                    "PartialEq<PerAttemptRegion> for &[u8] and AsRef<[u8]> equality must agree at ({region:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant,
+    /// `<&[u8] as PartialEq<PerAttemptRegion>>::eq(&region.as_ref(), &region)`
+    /// returns true — the variant's own emitted canonical-label bytes
+    /// recognise themselves as a match through the reverse-direction
+    /// `&[u8]`-receiver peer without the caller's explicit `*` deref.
+    #[test]
+    fn test_bytes_ref_partial_eq_per_attempt_region_reflexive_at_own_label() {
+        for region in PerAttemptRegion::ALL {
+            let canonical: &[u8] = <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region);
+            assert!(
+                <&[u8] as PartialEq<PerAttemptRegion>>::eq(&canonical, &region),
+                "PartialEq<PerAttemptRegion> for &[u8] must recognise self canonical label bytes at {region:?}",
+            );
+        }
+    }
+
+    /// The reverse-direction and forward-direction borrowed byte-slice
+    /// comparison surfaces agree byte-for-byte at every `(label, region)`
+    /// pair — the symmetry axiom
+    /// `<[u8] as PartialEq<PerAttemptRegion>>::eq(bytes, &region)
+    /// == <PerAttemptRegion as PartialEq<[u8]>>::eq(&region, bytes)`
+    /// (and its `&[u8]`-receiver peer) holds across the canonical ×
+    /// broken × invalid-UTF-8 grid. Pins the full 2×2 receiver ×
+    /// direction cross-product closure on the byte-slice frontier at
+    /// the per-attempt-region typed sum so a future refactor that
+    /// diverged one impl from its symmetric peer breaks this pin at at
+    /// least one pair rather than propagating unnoticed through
+    /// downstream generic [`PartialEq`]-bounded consumers that thread a
+    /// [`PerAttemptRegion`] through either side of a `==` operator at
+    /// the byte frontier, mirroring the sibling
+    /// [`test_partial_eq_per_attempt_region_symmetric_with_forward_direction`]
+    /// pin at the UTF-8 frontier and the digest-algorithm-side sibling
+    /// [`crate::oci_manifest::tests::test_partial_eq_digest_algorithm_bytes_symmetric_with_forward_direction`].
+    #[test]
+    fn test_partial_eq_per_attempt_region_bytes_symmetric_with_forward_direction() {
+        let owned: Vec<Vec<u8>> = [
+            b"before_first".to_vec(),
+            b"first".to_vec(),
+            b"interim".to_vec(),
+            b"final".to_vec(),
+            b"over_budget".to_vec(),
+            Vec::<u8>::new(),
+            b"BEFORE_FIRST".to_vec(),
+            b"First".to_vec(),
+            b" first".to_vec(),
+            b"over budget".to_vec(),
+            b"over-budget".to_vec(),
+            b"nonsense".to_vec(),
+            b"patch".to_vec(),
+            b"sha256".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for region in PerAttemptRegion::ALL {
+            for label in &owned {
+                let label_ref: &[u8] = label;
+                assert_eq!(
+                    <[u8] as PartialEq<PerAttemptRegion>>::eq(label_ref, &region),
+                    <PerAttemptRegion as PartialEq<[u8]>>::eq(&region, label_ref),
+                    "reverse-direction PartialEq<PerAttemptRegion> for [u8] must agree with forward-direction PartialEq<[u8]> for PerAttemptRegion at ({region:?}, {label:?})",
+                );
+                assert_eq!(
+                    <&[u8] as PartialEq<PerAttemptRegion>>::eq(&label_ref, &region),
+                    <PerAttemptRegion as PartialEq<&[u8]>>::eq(&region, &label_ref),
+                    "reverse-direction PartialEq<PerAttemptRegion> for &[u8] must agree with forward-direction PartialEq<&[u8]> for PerAttemptRegion at ({region:?}, {label:?})",
                 );
             }
         }
