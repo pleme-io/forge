@@ -196,6 +196,53 @@ impl std::fmt::Display for StorePath {
     }
 }
 
+/// Canonical parse-peer for [`StorePath::parse`] via the [`std::str::FromStr`]
+/// trait — the Rust idiom for "this type reads back from a string".
+///
+/// Delegates verbatim to [`StorePath::parse`], so the store-path grammar
+/// (`/nix/store/<32-char-base32-hash>-<name>`, no subpath, non-empty name)
+/// stays defined at ONE construction surface. Adding a new grammar clause
+/// (e.g., a future output-hash prefix or a fixed-output store-path shape)
+/// lands in `parse` once, and both the inherent constructor and the trait
+/// peer light up in the same commit.
+///
+/// # Why the trait peer earns its keep
+///
+/// The inherent [`StorePath::parse`] is the direct constructor; the trait
+/// peer opens the same oracle to every downstream context that already
+/// speaks [`std::str::FromStr`]:
+///
+/// - The `str::parse` turbofish (`"/nix/store/…".parse::<StorePath>()`) —
+///   the idiomatic Rust surface any reader reaches for first.
+/// - Generic bounds (`fn from_string_column<T: FromStr>(s: &str) -> …`) —
+///   a downstream CSV / config-loader / attestation-record reader that
+///   validates typed columns can name `StorePath` alongside every other
+///   `FromStr` typed primitive without a shim.
+/// - `serde(try_from = "String")` — a future serde consumer that
+///   deserializes store paths from JSON / YAML gets the grammar check
+///   through this trait without duplicating the parse call.
+/// - `clap(value_parser)` — a future `forge` CLI subcommand that accepts
+///   a store path on the argv can bind directly on `StorePath` and let
+///   clap route through this trait, so the "malformed store path" error
+///   surfaces at argv-parse time rather than deep inside the attestation
+///   or attic-push pipeline.
+///
+/// # Error shape
+///
+/// `Self::Err = StorePathError`. The typed enum names the exact grammar
+/// clause the input violated — `MissingStorePrefix` / `HasSubpath` /
+/// `TooShort` / `InvalidHash` / `MissingSeparator` / `EmptyName` — and
+/// carries the offending input in each variant, so a caller can attach
+/// the failure to a structural record (THEORY §V.4 Phase 1 attestation)
+/// without re-parsing the error string.
+impl std::str::FromStr for StorePath {
+    type Err = StorePathError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -432,6 +479,83 @@ mod tests {
                 {{"path":"/nix/store/{H2}-b"}}]"#
         );
         assert_eq!(canonical_closure_fingerprint(&doc), format!("{H}\n{H2}"));
+    }
+
+    /// The [`std::str::FromStr`] trait peer must accept every input the
+    /// inherent [`StorePath::parse`] accepts and produce an equal
+    /// [`StorePath`] value. Pins the delegation: a future refactor that
+    /// severs the trait impl from `Self::parse` (e.g., inlining a stale
+    /// grammar clause into `from_str`) would silently drift the two
+    /// construction surfaces apart; this test fails first.
+    #[test]
+    fn test_fromstr_success_agrees_with_inherent_parse() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let via_trait: StorePath = raw.parse().expect("valid store path parses via trait");
+        let via_inherent = StorePath::parse(&raw).expect("valid store path parses inherently");
+        assert_eq!(
+            via_trait, via_inherent,
+            "FromStr must yield the same StorePath value as the inherent constructor"
+        );
+    }
+
+    /// The [`std::str::FromStr`] trait peer must reject every input the
+    /// inherent [`StorePath::parse`] rejects, and must surface the SAME
+    /// typed [`StorePathError`] variant carrying the SAME offending input.
+    /// Pins that no error-widening shim (`.map_err(anyhow!(...))`,
+    /// `Box<dyn Error>` coercion) hides between the two surfaces — the
+    /// typed grammar clause the input violated stays legible at the
+    /// trait entry point.
+    #[test]
+    fn test_fromstr_failure_preserves_typed_error_variant() {
+        // `unknown-mysvc.drv` is < 34 chars so it trips TooShort under both
+        // constructors — the load-bearing shape the attestation gate reads
+        // when the pipeline synthesises the I/O-error sentinel.
+        let bad = "/nix/store/unknown-mysvc.drv";
+        let trait_err = bad
+            .parse::<StorePath>()
+            .expect_err("malformed store path must fail via trait");
+        let inherent_err =
+            StorePath::parse(bad).expect_err("malformed store path must fail inherently");
+        assert_eq!(
+            trait_err, inherent_err,
+            "FromStr must surface the same typed error as the inherent constructor"
+        );
+        assert!(matches!(trait_err, StorePathError::TooShort { .. }));
+    }
+
+    /// Round-trip via the turbofish `str::parse` surface — the idiom every
+    /// Rust reader reaches for first — must produce a value whose `Display`
+    /// re-emits the (trimmed) input verbatim. Pins the `FromStr` /
+    /// `Display` peer discipline the store-path grammar rests on: the
+    /// parse-round-trip is byte-stable, so a future consumer that
+    /// serializes a `StorePath` through `format!("{path}")` and rehydrates
+    /// via `str::parse` recovers the same identity.
+    #[test]
+    fn test_fromstr_display_roundtrip_is_stable() {
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let path: StorePath = raw.parse().expect("valid store path parses via trait");
+        assert_eq!(
+            path.to_string(),
+            raw,
+            "Display must re-emit the trimmed input verbatim"
+        );
+        let reparsed: StorePath = path
+            .to_string()
+            .parse()
+            .expect("Display output must round-trip through FromStr");
+        assert_eq!(reparsed, path, "the round-trip must preserve identity");
+    }
+
+    /// The trait peer must also honor the trailing-newline trim that the
+    /// inherent constructor applies to nix-build stdout (which carries a
+    /// stray `\n`). Pins that a generic `T: FromStr` consumer reading
+    /// nix-build stdout through the trait surface does not need to trim
+    /// upstream — the grammar owns the trim in one place.
+    #[test]
+    fn test_fromstr_trims_trailing_newline_like_parse() {
+        let raw = format!("/nix/store/{H}-x\n");
+        let path: StorePath = raw.parse().expect("trailing newline must be trimmed");
+        assert_eq!(path.as_str(), format!("/nix/store/{H}-x"));
     }
 
     #[test]
