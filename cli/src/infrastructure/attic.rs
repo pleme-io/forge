@@ -203,7 +203,31 @@ impl AtticClient {
         Ok(())
     }
 
-    /// Push a store path, ignoring failures (non-fatal)
+    /// Push a store path, ignoring failures (non-fatal). Wraps
+    /// [`Self::push`] so the wrapped body inherits the `ATTIC_BIN` env
+    /// resolution, the [`RetryPolicy::network`] schedule (250ms ×
+    /// factor=2 capped at 30s, canonical frontier shape), and the typed
+    /// [`AtticError`] dispatch — a caller that wants the non-fatal
+    /// contract but the load-bearing wrapping (retry + typed error +
+    /// env override) can compose the three by calling this method
+    /// directly instead of hand-rolling
+    /// `Command::new("attic").args(["push", cache, path]).status()`
+    /// (which drops all three).
+    ///
+    /// The [`warn!`] on the failure arm carries the typed error, so a
+    /// downstream reader sees the offending `AtticError` variant
+    /// (`ExecFailed` vs `PushFailed`) — not just a bare
+    /// "push failed" line.
+    ///
+    /// # Consumers
+    ///
+    /// Canonical non-fatal attic-push primitive. Consumed by
+    /// `commands/push.rs::execute` for the `--push-attic` code path (a
+    /// pre-migration `Command::new("attic").args(["push", cache, path])
+    /// .status()` inline body that bypassed all three load-bearing
+    /// properties this wrapper carries). Future non-fatal attic-push
+    /// call sites should compose through this method rather than
+    /// spawning `attic` directly.
     pub async fn push_optional(&self, store_path: &str) -> bool {
         match self.push(store_path).await {
             Ok(()) => {
@@ -689,6 +713,50 @@ mod tests {
         let client = AtticClient::new("cache-opt").with_attic_bin(&shim);
         let ok = client.push_optional("/nix/store/whatever").await;
         assert!(!ok, "push_optional must return false on failure");
+    }
+
+    /// `push_optional` on the success arm must return `true` — pinning
+    /// the boolean split so a future refactor that inverts the arms (or
+    /// silently drops the `Ok(()) => true` case) breaks here. Sibling of
+    /// [`test_push_optional_returns_false_on_failure`] closing the
+    /// affirmative half of the two-arm split.
+    #[tokio::test]
+    async fn test_push_optional_returns_true_on_success() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\nexit 0\n");
+        let client = AtticClient::new("cache-opt-ok").with_attic_bin(&shim);
+        let ok = client.push_optional("/nix/store/aaa-ok").await;
+        assert!(ok, "push_optional must return true on success");
+    }
+
+    /// [`AtticClient::discover`] composed with
+    /// [`AtticClient::push_optional`] is the exact call path
+    /// `commands/push.rs::execute` routes its attic cache push through
+    /// (via `AtticClient::discover(attic_cache).push_optional(&image_path)`).
+    /// Pin the composition here so a future regression at either end
+    /// — `discover` shape drift, `push_optional` boolean-arm inversion,
+    /// or a re-fusion of the raw `Command::new("attic")` body at the
+    /// push.rs call site — fails against the shared shape.
+    ///
+    /// `discover` reads `ATTIC_TOKEN` from process env (not set here, so
+    /// the constructed client carries `token: None`), then falls through
+    /// to `resolve_attic_bin` which honors `ATTIC_BIN` via
+    /// [`get_tool_path`]. We chain `.with_attic_bin(shim)` (the test-
+    /// only `#[cfg(test)]` builder) to inject a hermetic shim without
+    /// mutating process env — same discipline every other
+    /// binary-invocation test in this module carries. The shim exits
+    /// non-zero, so `push_optional` returns `false` — pinning that the
+    /// error path composes correctly through the discover-shaped client.
+    #[tokio::test]
+    async fn test_discover_composed_with_push_optional_returns_false_on_failure() {
+        let (_dir, shim) = make_attic_shim("#!/bin/sh\nexit 3\n");
+        let ok = AtticClient::discover("cache-discover-opt")
+            .with_attic_bin(&shim)
+            .push_optional("/nix/store/whatever-discover")
+            .await;
+        assert!(
+            !ok,
+            "discover().push_optional() must return false when attic exits non-zero"
+        );
     }
 
     /// `push` must forward `self.token` to the spawned `attic` process
