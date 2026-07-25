@@ -243,6 +243,56 @@ impl std::str::FromStr for StorePath {
     }
 }
 
+/// By-reference try-conversion peer for [`StorePath::parse`] via the
+/// [`TryFrom<&str>`] trait — the stdlib idiom that pairs with
+/// [`std::str::FromStr`] at the try-conversion frontier.
+///
+/// Delegates verbatim through `<Self as std::str::FromStr>::from_str`, so
+/// the store-path grammar stays defined at ONE construction surface — the
+/// FromStr peer, which itself delegates to [`StorePath::parse`]. A grammar
+/// clause added to `parse` lights up here without a second edit.
+///
+/// # Why the trait peer earns its keep
+///
+/// [`std::str::FromStr`] covers the turbofish (`"…".parse::<StorePath>()`)
+/// and generic `T: FromStr` bounds. `TryFrom<&str>` covers a disjoint set
+/// of downstream idioms that key off `TryFrom` rather than `FromStr`:
+///
+/// - `#[serde(try_from = "&str")]` — the serde container attribute keys
+///   off [`TryFrom`], not [`FromStr`]. A future serde field that borrows
+///   the incoming `&str` (no per-field allocation) reaches the store-path
+///   grammar check through this impl without a shim.
+/// - Generic try-conversion bounds (`fn parse_field<T: for<'a> TryFrom<&'a str>>`)
+///   — a validated-input newtype builder or attestation-column reader
+///   that types its parse contract as `TryFrom<&str>` rather than
+///   `FromStr` can name `StorePath` alongside every other by-reference
+///   try-conversion primitive without routing through a shim.
+/// - Uniform trait-object surfaces (`&dyn AttestationField` witnesses
+///   whose parse contract is stated as `TryFrom<&str>`) — the parallel
+///   canonical-label typed sums in this crate already carry the pair
+///   (`impl TryFrom<&str> for PerAttemptRegion` at `retry.rs`,
+///   `impl TryFrom<&str> for AdmissionTier` at `probe_outcome.rs`,
+///   `impl TryFrom<&str> for DigestAlgorithm` at `oci_manifest.rs`);
+///   `StorePath` is the store-path primitive counterpart at the same
+///   try-conversion frontier.
+///
+/// # Error shape
+///
+/// `Self::Error = StorePathError`. The typed grammar-clause enum
+/// (`MissingStorePrefix` / `HasSubpath` / `TooShort` / `InvalidHash` /
+/// `MissingSeparator` / `EmptyName`) carries through — no widening to
+/// [`anyhow::Error`] or `Box<dyn Error>` hides between the by-reference
+/// try-conversion surface and the inherent constructor, so a caller can
+/// still `match` on the exact clause the input violated at the trait
+/// entry point.
+impl TryFrom<&str> for StorePath {
+    type Error = StorePathError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(s)
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -556,6 +606,79 @@ mod tests {
         let raw = format!("/nix/store/{H}-x\n");
         let path: StorePath = raw.parse().expect("trailing newline must be trimmed");
         assert_eq!(path.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// [`TryFrom<&str>`] must accept every input the inherent
+    /// [`StorePath::parse`] accepts and produce a value equal to the
+    /// [`FromStr`] round-trip. Pins the delegation through the FromStr
+    /// oracle: a future refactor that severed the trait impl from
+    /// `<Self as FromStr>::from_str` (e.g., re-inlining `Self::parse`
+    /// with a stale grammar clause) would drift the by-reference
+    /// try-conversion surface away from the shared oracle; this test
+    /// fails first.
+    #[test]
+    fn test_try_from_str_success_agrees_with_fromstr() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let via_try_from = <StorePath as TryFrom<&str>>::try_from(raw.as_str())
+            .expect("valid store path parses via TryFrom<&str>");
+        let via_fromstr: StorePath = raw.parse().expect("valid store path parses via FromStr");
+        assert_eq!(
+            via_try_from, via_fromstr,
+            "TryFrom<&str> must yield the same StorePath value as FromStr"
+        );
+    }
+
+    /// [`TryFrom<&str>`] must reject every input the inherent
+    /// [`StorePath::parse`] rejects, and must surface the SAME typed
+    /// [`StorePathError`] variant carrying the SAME offending input.
+    /// Pins that no error-widening shim (`anyhow!(...)`,
+    /// `Box<dyn Error>`) hides between the try-conversion surface and
+    /// the inherent constructor — the typed grammar clause stays
+    /// legible at the trait entry point.
+    #[test]
+    fn test_try_from_str_failure_preserves_typed_error_variant() {
+        // `unknown-mysvc.drv` is < 34 chars so it trips TooShort — the
+        // load-bearing shape the attestation gate reads when the
+        // pipeline synthesises the I/O-error sentinel.
+        let bad = "/nix/store/unknown-mysvc.drv";
+        let try_from_err = <StorePath as TryFrom<&str>>::try_from(bad)
+            .expect_err("malformed store path must fail via TryFrom<&str>");
+        let inherent_err =
+            StorePath::parse(bad).expect_err("malformed store path must fail inherently");
+        assert_eq!(
+            try_from_err, inherent_err,
+            "TryFrom<&str> must surface the same typed error as the inherent constructor"
+        );
+        assert!(matches!(try_from_err, StorePathError::TooShort { .. }));
+    }
+
+    /// A generic `fn f<T: for<'a> TryFrom<&'a str>>` consumer must
+    /// recover a valid [`StorePath`] through the trait bound. This is
+    /// the structural witness that `StorePath` is genuinely usable at
+    /// `TryFrom<&str>` call sites — the surface that
+    /// `#[serde(try_from = "&str")]` and generic try-conversion
+    /// bounds key off. If a future change narrowed the bound (e.g.,
+    /// scoped the impl to a lifetime shape the generic surface
+    /// couldn't hit), this test fails at compile time.
+    #[test]
+    fn test_try_from_str_generic_consumer_recovers_identity() {
+        fn parse_via_try_from<'a, T>(s: &'a str) -> Result<T, T::Error>
+        where
+            T: TryFrom<&'a str>,
+        {
+            T::try_from(s)
+        }
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let path: StorePath =
+            parse_via_try_from(&raw).expect("valid store path parses via generic TryFrom bound");
+        assert_eq!(path.name(), "foo-bar-1.2.3");
+        assert_eq!(path.hash(), H);
+        // And the trimming discipline reaches through the generic bound
+        // too — a caller does not need to trim upstream.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let trimmed: StorePath = parse_via_try_from(&raw_nl)
+            .expect("trailing newline must be trimmed at TryFrom surface");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
     }
 
     #[test]
