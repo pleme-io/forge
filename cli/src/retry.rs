@@ -8819,6 +8819,100 @@ impl PartialEq<PerAttemptRegion> for &str {
     }
 }
 
+/// Owned UTF-8 comparison peer — a downstream consumer bound by
+/// [`PartialEq<String>`] (a `matches!` predicate that reads a canonical
+/// label off a heap-owned [`String`] handle without a per-arm
+/// [`PerAttemptRegion::from_str`] parse-and-discard round trip, a
+/// config-schema audit that names a specific canonical
+/// [`PerAttemptRegion`] variant against a deserialized owned label without
+/// a downstream `.as_str()` restatement or an explicit `label.as_str()`
+/// deref, a captured stdout / journal / telemetry-breadcrumb line stored
+/// as `owned: String` compared against a specific canonical label as
+/// `region == owned`) answers the boolean equality query
+/// `region == owned` at ONE composition rather than a per-site
+/// `region.as_str() == owned.as_str()` restatement that repeats the
+/// canonical-label oracle name at every downstream comparison site.
+///
+/// Sibling of [`PartialEq<str>`] (line 8586) and [`PartialEq<&str>`]
+/// (line 8677) — the same canonical-label oracle at the sibling owned-
+/// string frontier, split by receiver ownership: [`PartialEq<str>`]
+/// answers the boolean equality query against a dereffed `str` value,
+/// [`PartialEq<&str>`] against a `&str` reference, this
+/// [`PartialEq<String>`] against a heap-owned [`String`] handle without
+/// the caller's explicit `.as_str()` deref at every comparison site. The
+/// three receiver-shape peers together give the UTF-8 comparison surface
+/// the same ergonomic reach the standard library gives [`String`] through
+/// its own [`PartialEq<str>`] + [`PartialEq<&str>`] + [`PartialEq<String>`]
+/// receiver-shape triple.
+///
+/// Route: the impl body composes [`PerAttemptRegion::as_str`] with
+/// [`<String as std::ops::Deref>::deref`] (through [`String::as_str`]
+/// on the borrowed right-hand-side view) then delegates to
+/// [`<str as PartialEq<str>>::eq`] (byte-for-byte UTF-8 equality against
+/// the borrowed heap-owned buffer), so the comparison reads the same
+/// canonical-label bytes at zero extra allocation, zero temporary
+/// [`String`] construction on the [`PerAttemptRegion`] side, and zero
+/// [`std::fmt::Display`] formatter-buffer round trip per call — the
+/// same zero-cost discipline the borrowed [`PartialEq<str>`] /
+/// [`PartialEq<&str>`] receiver-shape siblings carry, extended to the
+/// heap-owned [`String`] receiver.
+///
+/// Opens the owned UTF-8 comparison trio at the per-attempt-region
+/// ladder; two subsequent commits close it at the
+/// [`crate::probe_outcome::AdmissionTier`] and [`crate::version::BumpLevel`]
+/// ladders, matching the [`PartialEq<str>`] opening order at the sibling
+/// borrowed UTF-8 dereffed-str-receiver comparison surface (ac5f0af →
+/// 8f0a8cc → f891f6e), the [`PartialEq<&str>`] opening order at the
+/// sibling borrowed UTF-8 `&str`-receiver comparison surface (25970af →
+/// 29c6cbb → 626dbe2 for the neighbouring byte-slice trio), and every
+/// prior borrowed-view trio's opening order at the per-attempt-region
+/// ladder. After the trio closes, the owned UTF-8 comparison axis spans
+/// all three ordered typed sums on the ladder set against ONE canonical-
+/// label oracle each, and future trios extend the same pattern to
+/// [`PartialEq<PerAttemptRegion> for String`] (the reverse-direction
+/// receiver peer) and to [`PartialEq<std::borrow::Cow<'_, str>>`] (the
+/// remaining borrowed-or-owned receiver at the UTF-8 comparison
+/// frontier); the follow-up trios are not in this commit.
+///
+/// Mirrors the sibling reference-grammar family
+/// [`crate::oci_manifest::ContentDigest`]'s [`PartialEq<String>`] impl
+/// at `cli/src/oci_manifest.rs::6300` — the same canonical-label oracle
+/// at the same owned UTF-8 frontier, projected onto the per-attempt-
+/// region ladder.
+///
+/// The identity `(region == owned) == (region.as_str() == owned.as_str())`
+/// at every [`PerAttemptRegion::ALL`] variant × every string in the union
+/// of {canonical labels, common non-canonical labels, empty} is pinned by
+/// [`tests::test_per_attempt_region_partial_eq_string_agrees_with_as_str`];
+/// the reflexivity identity `region == String::from(region.as_str())` at
+/// every variant is pinned by
+/// [`tests::test_per_attempt_region_partial_eq_string_reflexive_at_own_label`];
+/// the canonicity discipline (only exact snake_case
+/// [`PerAttemptRegion::as_str`] emissions equal a [`PerAttemptRegion`]
+/// value through this surface — no case-fold, no whitespace tolerance,
+/// no cross-variant collision) at every variant × known-bad owned-label
+/// pair is pinned by
+/// [`tests::test_per_attempt_region_partial_eq_string_rejects_non_canonical_labels`].
+///
+/// THEORY.md §V.4 typed primitives: the owned UTF-8 comparison surface
+/// is a typed-primitive site on [`PerAttemptRegion`] itself (one
+/// [`PartialEq<String>`] impl routing through [`PerAttemptRegion::as_str`]
+/// and [`String::as_str`]), not a per-consumer
+/// `region.as_str() == owned.as_str()` restatement at every downstream
+/// site that asks whether a [`PerAttemptRegion`] value names a specific
+/// canonical label through a heap-owned [`String`] handle. THEORY.md
+/// §VI.1 one-oracle: the canonical label is named at one site
+/// ([`PerAttemptRegion::as_str`]), and every UTF-8 comparison surface —
+/// the [`PartialEq<str>`] dereffed-str-receiver, the [`PartialEq<&str>`]
+/// borrowed-&str-receiver, this [`PartialEq<String>`] heap-owned-receiver
+/// — reads through the same one-oracle discipline projected onto its own
+/// receiver ownership × frontier.
+impl PartialEq<String> for PerAttemptRegion {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
 /// Ergonomic canonical-label equality query at the borrowed byte-slice
 /// frontier — a downstream consumer bound by [`PartialEq<[u8]>`] (a
 /// `matches!` predicate that reads a canonical label off a
@@ -27782,6 +27876,146 @@ mod tests {
                 assert!(
                     !<PerAttemptRegion as PartialEq<&str>>::eq(&region, &label),
                     "PartialEq<&str> must reject non-canonical label {label:?} at {region:?}",
+                );
+            }
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant × every string in the
+    /// union of {canonical labels, common non-canonical labels,
+    /// empty}, the [`PartialEq<String>`] comparison
+    /// `<Self as PartialEq<String>>::eq(&region, &owned)` equals the
+    /// direct `region.as_str() == owned.as_str()` composition. Pins
+    /// the agreement identity that the owned UTF-8 comparison surface
+    /// reads the same canonical-label oracle the [`AsRef<str>`] /
+    /// [`PartialEq<str>`] borrowed-view siblings read, projected
+    /// through the boolean equality query at a heap-owned [`String`]
+    /// receiver rather than a dereffed `str` value or a `&str`
+    /// reference. A regression that swapped the [`PartialEq<String>`]
+    /// impl body onto a stale label table, drifted it off the
+    /// [`PerAttemptRegion::as_str`] oracle (a hand-rolled `matches!`
+    /// on the variant tag with hard-coded per-arm labels that a
+    /// future variant insertion could silently leave out), or
+    /// introduced case-folding / whitespace-tolerance leniency would
+    /// break this composition equality at at least one (variant,
+    /// label) pair and fail here at the canonical-label pin, not at
+    /// every downstream `region == owned` call site.
+    #[test]
+    fn test_per_attempt_region_partial_eq_string_agrees_with_as_str() {
+        let labels = [
+            "before_first",
+            "first",
+            "interim",
+            "final",
+            "over_budget",
+            "",
+            "BeforeFirst",
+            "First",
+            "Interim",
+            "Final",
+            "OverBudget",
+            "FIRST",
+            "beforefirst",
+            "overbudget",
+            " first",
+            "first ",
+            "before first",
+            "over budget",
+            "nonsense",
+            "patch",
+            "minor",
+            "major",
+        ];
+        for region in PerAttemptRegion::ALL {
+            for label in labels {
+                let owned = String::from(label);
+                assert_eq!(
+                    <PerAttemptRegion as PartialEq<String>>::eq(&region, &owned),
+                    region.as_str() == owned.as_str(),
+                    "PartialEq<String> and as_str() equality must agree at ({region:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant,
+    /// `<Self as PartialEq<String>>::eq(&region, &String::from(region.as_str()))`
+    /// returns true. Pins the reflexivity identity that a variant
+    /// compared against a heap-owned copy of its own canonical-label
+    /// emission always answers true — the load-bearing "self-
+    /// recognition" property the owned UTF-8 comparison surface
+    /// promises. A future variant insertion that landed a label the
+    /// [`PerAttemptRegion::as_str`] oracle emits but the
+    /// [`PartialEq<String>`] impl silently misses (a divergent hand-
+    /// rolled label table drifting past the one-oracle discipline)
+    /// would break this pin at the new variant, not at a downstream
+    /// consumer's aggregate.
+    #[test]
+    fn test_per_attempt_region_partial_eq_string_reflexive_at_own_label() {
+        for region in PerAttemptRegion::ALL {
+            let owned: String = String::from(region.as_str());
+            assert!(
+                <PerAttemptRegion as PartialEq<String>>::eq(&region, &owned),
+                "PartialEq<String> must recognise self canonical label at {region:?}",
+            );
+        }
+    }
+
+    /// At every [`PerAttemptRegion`] variant × every entry in a
+    /// known-bad label set (empty, CamelCase forms of every variant
+    /// including the target variant's own CamelCase name, ALLCAPS
+    /// forms, no-underscore forms, whitespace-fringed forms, space-
+    /// instead-of-underscore forms, unrelated labels from sibling
+    /// ladders like [`crate::version::BumpLevel`]) presented as a
+    /// heap-owned [`String`], the [`PartialEq<String>`] impl returns
+    /// false. Pins the canonicity discipline at the owned UTF-8
+    /// comparison surface: only heap-owned copies of the exact
+    /// snake_case labels [`PerAttemptRegion::as_str`] emits
+    /// (`"before_first"`, `"first"`, `"interim"`, `"final"`,
+    /// `"over_budget"`) equal a [`PerAttemptRegion`] value through
+    /// this surface — drift toward accepting a case-folded, ALLCAPS,
+    /// no-underscore, whitespace-tolerant, or space-substituted
+    /// grammar is refused at ONE pin covering the full variant ×
+    /// known-bad grid, matching the canonicity discipline the sibling
+    /// [`PartialEq<str>`] / [`PartialEq<&str>`] borrowed-receiver
+    /// surfaces enforce at
+    /// [`test_per_attempt_region_partial_eq_str_rejects_non_canonical_labels`]
+    /// and
+    /// [`test_per_attempt_region_partial_eq_str_ref_rejects_non_canonical_labels`].
+    #[test]
+    fn test_per_attempt_region_partial_eq_string_rejects_non_canonical_labels() {
+        let bad = [
+            "",
+            "BeforeFirst",
+            "First",
+            "Interim",
+            "Final",
+            "OverBudget",
+            "FIRST",
+            "INTERIM",
+            "FINAL",
+            "beforefirst",
+            "overbudget",
+            "before first",
+            "over budget",
+            " first",
+            "first ",
+            "\tfinal",
+            "final\n",
+            "nonsense",
+            "patch",
+            "minor",
+            "major",
+        ];
+        for region in PerAttemptRegion::ALL {
+            for label in bad {
+                if label == region.as_str() {
+                    continue;
+                }
+                let owned = String::from(label);
+                assert!(
+                    !<PerAttemptRegion as PartialEq<String>>::eq(&region, &owned),
+                    "PartialEq<String> must reject non-canonical label {label:?} at {region:?}",
                 );
             }
         }
