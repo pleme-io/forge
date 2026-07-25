@@ -121,13 +121,49 @@ pub async fn execute(
         debug!("Attic cache URL: {}", cache_url);
         debug!("Attic cache name: {}", cache_name);
 
-        // Login to Attic with retry logic
-        attic_command_with_retry(
-            &["login", &attic_server, &cache_url, &attic_token],
-            "login to Attic",
-            safe_mode,
-        )
-        .await?;
+        // Login to Attic. Routes through
+        // [`crate::infrastructure::attic::AtticClient::login_with_retries`]
+        // so THREE load-bearing properties this site previously bypassed
+        // via the domain-agnostic stringly `attic_command_with_retry`
+        // helper land at ONE call:
+        //   1. `ATTIC_BIN` env override — the pre-migration helper
+        //      resolved `attic` via `get_tool_path("ATTIC_BIN", "attic")`
+        //      at the top of the free-standing helper; the
+        //      `login_with_retries` primitive resolves it via
+        //      `resolve_attic_bin` in the same shape every other
+        //      `AtticClient` method uses — pinning ONE env-override
+        //      discovery site across the typed client.
+        //   2. Typed-error dispatch — pre-migration the helper produced
+        //      only untyped `anyhow::Error`; post-migration the failure
+        //      lands as `AtticError::LoginFailed { cache, server_url,
+        //      exit_code, stderr }` (or `AtticError::ExecFailed` on
+        //      spawn, or `AtticError::TokenRequired` if the caller
+        //      forgot the token) — the structural-record tuple Phase 1
+        //      attestation records (THEORY §V.4) consume. A "bad token"
+        //      now surfaces at the type level with the captured stderr
+        //      attached, instead of as a fused string on the anyhow
+        //      boundary.
+        //   3. Retiring the domain-agnostic helper — this was the LAST
+        //      remaining call site of `attic_command_with_retry`
+        //      (siblings 09f05fb `push` and 8569c0a `use` migrated in
+        //      prior runs). Deleting the helper removes ~40 lines of
+        //      stringly `args: &[&str]` glue and pins the "no
+        //      domain-agnostic attic invocation wrapper survives"
+        //      floor across every forge command that talks to attic.
+        // The `safe_mode` partition maps directly to the retry-budget
+        // parameter `login_with_retries` accepts: safe_mode=true → 5
+        // attempts (matching `RetryPolicy::network`'s canonical budget
+        // on the migrated `push_with_retries` sibling); safe_mode=false
+        // → 1 attempt (no retry). `login_with_retries` clamps
+        // `retries=0` to 1 at `RetryPolicy::new`, so the partition
+        // cannot silently collapse into a no-op. The regression-shield
+        // `tests::test_execute_routes_attic_login_through_attic_client_not_helper`
+        // pins the delegation structurally against a future re-fusion.
+        let attic_login_retries = if safe_mode { 5 } else { 1 };
+        crate::infrastructure::attic::AtticClient::new(attic_server.clone())
+            .with_token(attic_token.clone())
+            .login_with_retries(&cache_url, attic_login_retries)
+            .await?;
 
         // Select the server-scoped cache as active. Routes through
         // [`crate::infrastructure::attic::AtticClient::use_cache`] so two
@@ -660,59 +696,6 @@ pub async fn execute(
     Ok(())
 }
 
-/// Execute an `attic` subcommand with retry-on-transient.
-///
-/// Drives [`crate::retry::retry_command`] with a network-shaped policy
-/// (5 attempts × 250ms × factor=2 capped at 30s) when `safe_mode` is on,
-/// or [`RetryPolicy::immediate`] (no retry) when off. The lifted helper
-/// composes the canonical `is_transient_network_stderr` classifier with
-/// the canonical `CommandAttemptFailure::from_capture` mapping in one
-/// primitive — the duplication budget on the hand-rolled retry loops in
-/// `commands/push.rs::push_with_retry` and `commands/github_runner_ci.rs`
-/// is redeemed by construction (THEORY §VI.1). The LAST
-/// `CommandAttemptFailure` from the loop is mapped to `anyhow::Error` at
-/// the public boundary so existing call sites remain unchanged.
-async fn attic_command_with_retry(args: &[&str], operation: &str, safe_mode: bool) -> Result<()> {
-    let policy = RetryPolicy::network_or_immediate(safe_mode);
-    let attic = get_tool_path("ATTIC_BIN", "attic");
-    let op = operation.to_string();
-
-    let result = retry_command(&policy, &op, |attempt| {
-        let attic = attic.clone();
-        let op = op.clone();
-        let policy = policy.clone();
-        async move {
-            debug!("Running: attic {}", args.join(" "));
-            let outcome = Command::new(&attic)
-                .args(args)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()
-                .await;
-
-            // Domain-specific debug observability. The non-success
-            // streams-tee dispatch flows through the canonical
-            // [`debug_log_capture_streams`] primitive — sibling of
-            // [`log_retry_attempt`] in the retry primitive set, so the
-            // `<tool> stdout/stderr: <trimmed>` message format is pinned
-            // by one test in `cli/src/retry.rs` instead of duplicated
-            // across every retry-driven CI surface. The success arm is
-            // domain-specific (per-call-site context).
-            if let Ok(out) = outcome.as_ref() {
-                if out.status.success() {
-                    debug!("attic command succeeded on attempt {}", attempt);
-                } else {
-                    debug_log_capture_streams(out, "attic");
-                }
-            }
-            log_retry_attempt(outcome, &op, attempt, &policy)
-        }
-    })
-    .await;
-
-    result.map(|_| ()).map_err(|e| anyhow::anyhow!("{}", e))
-}
-
 async fn push_with_retry(
     image_path: &str,
     registry: &str,
@@ -821,11 +804,12 @@ mod tests {
     /// Regression shield: the `attic push` step inside `execute()`
     /// must route through
     /// [`crate::infrastructure::attic::AtticClient::push_with_retries`]
-    /// rather than the domain-agnostic
-    /// [`attic_command_with_retry`] helper. Pre-migration this call
-    /// site spawned `attic push` via a stringly `args: &[&str]`
-    /// wrapper that produced only untyped `anyhow::Error`;
-    /// post-migration the typed
+    /// rather than the retired domain-agnostic
+    /// `attic_command_with_retry` helper (deleted in the migration
+    /// that landed the sibling login shield below). Pre-migration
+    /// this call site spawned `attic push` via a stringly
+    /// `args: &[&str]` wrapper that produced only untyped
+    /// `anyhow::Error`; post-migration the typed
     /// [`crate::error::AtticError::PushFailed`] and
     /// [`crate::error::AtticError::ExecFailed`] variants reach the
     /// call site so the non-fatal-warn branch's
@@ -833,34 +817,45 @@ mod tests {
     /// structural record — (cache, store_path, attempts, exit_code,
     /// stderr) — rather than a fused string.
     ///
-    /// Sibling of the regression shields the prior three migration
+    /// Sibling of the regression shields the prior four migration
     /// commits (36fd3b1 push.rs::push_optional; 0365a59 build.rs::
-    /// login_optional; 99aab8b build.rs::use_cache) pinned on their
-    /// respective `execute()` bodies. The four shields together
-    /// close the "no raw `attic <sub>` spawn survives in an execute()
-    /// body" floor across every forge command that talks to attic
-    /// through a client-owned surface.
+    /// login_optional; 99aab8b build.rs::use_cache; 8569c0a
+    /// github_runner_ci.rs::use_cache — this file's sibling shield
+    /// below) pinned on their respective `execute()` bodies. The
+    /// FIVE shields together close the "no raw `attic <sub>` spawn
+    /// survives in an execute() body" floor across every forge
+    /// command that talks to attic through a client-owned surface,
+    /// and — with the retirement of the `attic_command_with_retry`
+    /// helper — the "no domain-agnostic stringly attic wrapper
+    /// survives" floor too.
     ///
     /// Structural, not behavioral — reads this module's own source
     /// via `include_str!` and inspects the `execute()` body slice
-    /// (bounded above by the fn header, below by the free-standing
-    /// `attic_command_with_retry` helper that immediately follows).
-    /// A future regression that re-fuses the push step back onto the
-    /// stringly helper — even without changing observable behavior —
-    /// fails this test rather than silently un-migrating the
-    /// typed-error surface.
+    /// (bounded above by the fn header, below by the `#[cfg(test)]`
+    /// marker for this tests module). A future regression that
+    /// re-fuses the push step back onto a raw `attic push` spawn or
+    /// a resurrected stringly helper — even without changing
+    /// observable behavior — fails this test rather than silently
+    /// un-migrating the typed-error surface.
     #[test]
     fn test_execute_routes_attic_push_through_attic_client_not_helper() {
         let source = include_str!("github_runner_ci.rs");
         let execute_start = source
             .find("pub async fn execute(")
             .expect("execute() must be present in this module's source");
-        let helper_marker = "\nasync fn attic_command_with_retry";
+        // Bound the search at the tests module marker so this test's
+        // own docstring — which legitimately spells the pre-migration
+        // `&["push", ...]` args slice for context — is excluded from
+        // the scan. The pre-migration `\nasync fn attic_command_with_retry`
+        // boundary marker was retired when the helper itself was
+        // deleted; the tests-module boundary is the load-bearing
+        // marker every real `execute()` code site sits strictly above.
+        let helper_marker = "\n#[cfg(test)]";
         let execute_end = source[execute_start..]
             .find(helper_marker)
             .map(|i| execute_start + i)
             .expect(
-                "the `attic_command_with_retry` helper must follow `execute()` — \
+                "the `#[cfg(test)]` tests-module marker must follow `execute()` — \
                  the shield's slice boundary relies on this module ordering",
             );
         let execute_body = &source[execute_start..execute_end];
@@ -903,9 +898,10 @@ mod tests {
     /// Regression shield: the `attic use` step inside `execute()`
     /// must route through
     /// [`crate::infrastructure::attic::AtticClient::use_cache`] rather
-    /// than the domain-agnostic
-    /// [`attic_command_with_retry`] helper. Pre-migration this call
-    /// site spawned `attic use` via a stringly
+    /// than the retired domain-agnostic `attic_command_with_retry`
+    /// helper (deleted in the migration that landed the sibling
+    /// login shield below). Pre-migration this call site spawned
+    /// `attic use` via a stringly
     /// `&["use", &format!("{}:{}", attic_server, cache_name)]` slice
     /// wrapper that produced only untyped `anyhow::Error`;
     /// post-migration the typed
@@ -917,41 +913,51 @@ mod tests {
     /// `nix build` with no structural link back to the mis-`use`d
     /// cache.
     ///
-    /// Sibling of the four regression shields the prior migration
-    /// commits pinned:
+    /// Sibling of the five regression shields the prior migration
+    /// commits pinned (and the sibling login shield this run adds):
     /// - 36fd3b1 `push.rs::execute` → `push_optional`
     /// - 0365a59 `build.rs::execute` → `login_optional`
     /// - 99aab8b `build.rs::execute` → `use_cache`
     /// - 09f05fb `github_runner_ci.rs::execute` → `push_with_retries`
     ///   (the shield above this one)
-    /// The five shields together close the "no `attic <sub>` invocation
-    /// via the domain-agnostic stringly `attic_command_with_retry` /
-    /// raw `Command::new("attic").args(&[<sub>, ...])` helper survives
+    /// - this-run `github_runner_ci.rs::execute` →
+    ///   `login_with_retries` (the shield below this one)
+    ///
+    /// The six shields together close the "no `attic <sub>`
+    /// invocation via the domain-agnostic stringly
+    /// `attic_command_with_retry` / raw
+    /// `Command::new("attic").args(&[<sub>, ...])` helper survives
     /// in an `execute()` body" floor across every forge command that
-    /// talks to attic through a client-owned surface — with the sole
-    /// remaining exception being the `attic login` call at the top of
-    /// THIS `execute()` (a future run's target).
+    /// talks to attic through a client-owned surface — AND the
+    /// helper itself is now retired (the last remaining call site
+    /// migrated in this run).
     ///
     /// Structural, not behavioral — reads this module's own source
     /// via `include_str!` and inspects the `execute()` body slice
-    /// (bounded above by the fn header, below by the free-standing
-    /// `attic_command_with_retry` helper that immediately follows).
-    /// A future regression that re-fuses the `use` step back onto the
-    /// stringly helper — even without changing observable behavior —
-    /// fails this test rather than silently un-migrating the
-    /// typed-error surface.
+    /// (bounded above by the fn header, below by the `#[cfg(test)]`
+    /// marker for this tests module). A future regression that
+    /// re-fuses the `use` step back onto a raw `attic use` spawn or
+    /// a resurrected stringly helper — even without changing
+    /// observable behavior — fails this test rather than silently
+    /// un-migrating the typed-error surface.
     #[test]
     fn test_execute_routes_attic_use_through_attic_client_not_helper() {
         let source = include_str!("github_runner_ci.rs");
         let execute_start = source
             .find("pub async fn execute(")
             .expect("execute() must be present in this module's source");
-        let helper_marker = "\nasync fn attic_command_with_retry";
+        // Bound the search at the tests module marker so this test's
+        // own docstring — which legitimately spells the pre-migration
+        // `&["use", ...]` args slice for context — is excluded from
+        // the scan. The pre-migration `\nasync fn attic_command_with_retry`
+        // boundary marker was retired when the helper itself was
+        // deleted.
+        let helper_marker = "\n#[cfg(test)]";
         let execute_end = source[execute_start..]
             .find(helper_marker)
             .map(|i| execute_start + i)
             .expect(
-                "the `attic_command_with_retry` helper must follow `execute()` — \
+                "the `#[cfg(test)]` tests-module marker must follow `execute()` — \
                  the shield's slice boundary relies on this module ordering",
             );
         let execute_body = &source[execute_start..execute_end];
@@ -985,6 +991,122 @@ mod tests {
             "execute() must delegate the use step to \
              `AtticClient::use_cache` — the `use_cache` \
              method call was not found in execute()."
+        );
+    }
+
+    /// Regression shield: the `attic login` step at the top of
+    /// `execute()` must route through
+    /// [`crate::infrastructure::attic::AtticClient::login_with_retries`]
+    /// rather than the retired domain-agnostic
+    /// `attic_command_with_retry` helper. Pre-migration this call
+    /// site spawned `attic login` via a stringly
+    /// `&["login", &attic_server, &cache_url, &attic_token]` slice
+    /// wrapper that produced only untyped `anyhow::Error`;
+    /// post-migration the typed
+    /// [`crate::error::AtticError::LoginFailed`],
+    /// [`crate::error::AtticError::ExecFailed`], and
+    /// [`crate::error::AtticError::TokenRequired`] variants reach
+    /// the call site so a "bad token" surfaces as a structural
+    /// record — (cache, server_url, exit_code, stderr) — instead of
+    /// a fused string on the anyhow boundary.
+    ///
+    /// This migration retired the `attic_command_with_retry` helper
+    /// entirely (deletion in the same commit as this shield): the
+    /// login step was the LAST remaining call site. Sibling of the
+    /// prior five migration shields; the six together close BOTH
+    /// the "no raw `attic <sub>` spawn in an `execute()` body" AND
+    /// the "no domain-agnostic stringly `attic_command_with_retry`
+    /// helper survives anywhere in the workspace" floors, so the
+    /// only sanctioned path for a forge command to talk to attic is
+    /// through an `AtticClient` method.
+    ///
+    /// Structural, not behavioral — reads this module's own source
+    /// via `include_str!` and asserts the raw `&["login",` slice
+    /// does not reappear inside `execute()` while the delegation to
+    /// `AtticClient::new(attic_server.clone()).with_token(...)
+    /// .login_with_retries(&cache_url, retries)` does. A future
+    /// regression that re-fuses the login step back onto a raw
+    /// stringly-args wrapper fails here rather than silently
+    /// un-migrating the typed-error surface.
+    #[test]
+    fn test_execute_routes_attic_login_through_attic_client_not_helper() {
+        let source = include_str!("github_runner_ci.rs");
+        let execute_start = source
+            .find("pub async fn execute(")
+            .expect("execute() must be present in this module's source");
+        // Bound the search at the tests module marker so this test's
+        // own docstring — which legitimately spells the pre-migration
+        // `&["login", ...]` args slice for context — is excluded from
+        // the scan.
+        let helper_marker = "\n#[cfg(test)]";
+        let execute_end = source[execute_start..]
+            .find(helper_marker)
+            .map(|i| execute_start + i)
+            .expect(
+                "the `#[cfg(test)]` tests-module marker must follow `execute()` — \
+                 the shield's slice boundary relies on this module ordering",
+            );
+        let execute_body = &source[execute_start..execute_end];
+
+        // Post-migration invariant #1: no `attic_command_with_retry`
+        // call spawning `attic login` remains in `execute()`. The
+        // literal `&["login",` sub-slice is the load-bearing marker
+        // that pre-migration the call was routed through the
+        // (now-retired) stringly helper; if a future regression
+        // rewires the login step back onto a resurrected helper or
+        // a raw spawn with the same args shape, the marker reappears
+        // and this shield fires.
+        assert!(
+            !execute_body.contains("&[\"login\","),
+            "execute() must not spawn `attic login` via a stringly \
+             `args: &[&str]` wrapper — the `&[\"login\", ...]` args slice \
+             was found in execute(). Route the login step through \
+             `crate::infrastructure::attic::AtticClient::new(attic_server\
+              .clone()).with_token(attic_token.clone()).login_with_retries\
+              (&cache_url, retries)` instead."
+        );
+
+        // Post-migration invariant #2: the domain-agnostic helper
+        // itself must NOT resurface anywhere in this module.
+        // Pre-migration the helper lived at ~line 675 as a
+        // free-standing (module-level, unindented) async fn; the
+        // migration deleted it. Guards against a future regression
+        // that re-introduces the helper (even if the login step
+        // above doesn't wire onto it) — the retirement is
+        // load-bearing across every attic subcommand in forge, not
+        // just the login one.
+        //
+        // The marker below is a real-newline + unindented
+        // `async fn` definition prefix: since sibling shields'
+        // documentation references the retired name only inside
+        // 8-space-indented `//` comments (never at column 0), this
+        // predicate fires solely on an actual module-level
+        // definition — not on documentation drift.
+        let retired_helper_marker =
+            concat!("\n", "async fn ", "attic_command_with_retry");
+        assert!(
+            !source.contains(retired_helper_marker),
+            "the domain-agnostic `attic_command_with_retry` helper was \
+             retired in the login-migration commit — it must not be \
+             resurrected. Route new retry-driven attic subcommands \
+             through `AtticClient` methods (e.g., `login_with_retries`, \
+             `push_with_retries`) instead of re-lifting a stringly \
+             `args: &[&str]` wrapper."
+        );
+
+        // Post-migration invariant #3: the delegation to
+        // `AtticClient::login_with_retries` is present. Pins the
+        // positive form of the migration so a future regression that
+        // silently drops the call (e.g., stripping the login step
+        // entirely) fails this test rather than silently skipping
+        // the login — which would leave subsequent `attic push` /
+        // `nix build --substituters` calls without a seeded auth
+        // token in `~/.config/attic/config.toml`.
+        assert!(
+            execute_body.contains("login_with_retries"),
+            "execute() must delegate the login step to \
+             `AtticClient::login_with_retries` — the \
+             `login_with_retries` method call was not found in execute()."
         );
     }
 }
