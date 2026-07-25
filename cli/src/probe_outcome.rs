@@ -13190,6 +13190,128 @@ impl PartialEq<&str> for AdmissionTier {
     }
 }
 
+/// Reverse-direction borrowed UTF-8 comparison peer — the symmetric
+/// sibling of [`PartialEq<str> for AdmissionTier`] (line 13095). A
+/// downstream caller who holds a [`str`] value (a `matches!` arm on
+/// a `str` binding, a dereffed `&Cow::Borrowed(s)`) writes
+/// `*label_ref == tier` (or the standard-library-derived
+/// `if a == b || b == a`-style symmetric composition a generic
+/// [`PartialEq`]-bounded consumer performs internally) and answers a
+/// boolean equality query against an [`AdmissionTier`] value at the
+/// same borrowed UTF-8 frontier the forward-direction peer covers,
+/// at zero allocation, zero temporary [`String`] construction, and
+/// zero [`std::fmt::Display`] formatter-buffer round trip per call.
+///
+/// Route: the impl body composes [`AdmissionTier::as_str`] with the
+/// standard library [`<str as PartialEq<str>>::eq`] on the `str`
+/// self receiver, so the comparison reads the same canonical-label
+/// bytes as the forward-direction [`PartialEq<str> for AdmissionTier`]
+/// peer, and the symmetry axiom
+/// `<str as PartialEq<AdmissionTier>>::eq(label, &tier)
+/// == <AdmissionTier as PartialEq<str>>::eq(&tier, label)` holds by
+/// construction at every `(label, tier)` pair.
+///
+/// Mid-trio peer of the reverse-direction borrowed UTF-8 comparison
+/// trio opened at [`crate::retry::PerAttemptRegion`] (commit 203f63b
+/// — the structural mirror at the sibling per-attempt-region ladder,
+/// routing through [`crate::retry::PerAttemptRegion::as_str`]) and
+/// closed by the follow-up [`crate::version::BumpLevel`] peer,
+/// matching the forward-direction [`PartialEq<str>`] mid-trio order
+/// at the sibling borrowed UTF-8 dereffed-str-receiver surface
+/// (ac5f0af → 8f0a8cc → f891f6e). After the trio closes, the reverse-
+/// direction borrowed UTF-8 comparison axis spans all three ordered
+/// typed sums on the ladder set against ONE canonical-label oracle
+/// each, matching the same 2×2 closure the standard library carries
+/// on [`String`] (through [`PartialEq<String> for str`] +
+/// [`PartialEq<String> for &str`] + [`PartialEq<str> for String`] +
+/// [`PartialEq<&str> for String`]) and the sibling reference-grammar
+/// family [`crate::oci_manifest::DigestAlgorithm`] already carries at
+/// lines 3428 / 3506 (forward pair) / 3597 / 3640 (reverse pair) of
+/// `cli/src/oci_manifest.rs`.
+///
+/// The identity
+/// `<str as PartialEq<AdmissionTier>>::eq(label, &tier)
+/// == (label == tier.as_str())` at every [`AdmissionTier::ALL`]
+/// variant × every string in the union of {canonical labels, common
+/// non-canonical labels, empty} is pinned by
+/// [`tests::test_str_partial_eq_admission_tier_agrees_with_as_str`];
+/// the reflexivity identity
+/// `<str as PartialEq<AdmissionTier>>::eq(tier.as_str(), &tier)` at
+/// every variant is pinned by
+/// [`tests::test_str_partial_eq_admission_tier_reflexive_at_own_label`];
+/// the symmetry axiom
+/// `<str as PartialEq<AdmissionTier>>::eq(label, &tier)
+/// == <AdmissionTier as PartialEq<str>>::eq(&tier, label)` at every
+/// (variant, label) pair is pinned by
+/// [`tests::test_partial_eq_admission_tier_symmetric_with_forward_direction`].
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// UTF-8 comparison surface is a typed-primitive site on
+/// [`AdmissionTier`] itself (one [`PartialEq<AdmissionTier>`] impl
+/// on [`str`] routing through [`AdmissionTier::as_str`]), not a
+/// per-consumer `label == tier.as_str()` restatement at every
+/// downstream site that asks whether a borrowed UTF-8 handle names
+/// the same canonical admission-tier label as an [`AdmissionTier`]
+/// value. THEORY.md §VI.1 one-oracle: the canonical label is named
+/// at one site ([`AdmissionTier::as_str`]), and every borrowed UTF-8
+/// comparison surface — the forward-direction
+/// [`PartialEq<str> for AdmissionTier`] +
+/// [`PartialEq<&str> for AdmissionTier`] pair, this reverse-
+/// direction [`PartialEq<AdmissionTier> for str`] +
+/// [`PartialEq<AdmissionTier> for &str`] pair — reads through the
+/// same one-oracle discipline projected onto its own direction ×
+/// receiver shape.
+impl PartialEq<AdmissionTier> for str {
+    fn eq(&self, other: &AdmissionTier) -> bool {
+        self == other.as_str()
+    }
+}
+
+/// Reverse-direction borrowed UTF-8 comparison peer through a `&str`
+/// receiver — the reverse-direction sibling of
+/// [`PartialEq<&str> for AdmissionTier`] (line 13187) and the
+/// receiver-shape peer of [`PartialEq<AdmissionTier> for str`]
+/// (directly above), split by receiver shape so the caller writes
+/// `label_ref == tier` without the explicit `*` deref at every
+/// comparison site. The four [`PartialEq`] impls together — forward
+/// × receiver-shape and reverse × receiver-shape — close the
+/// borrowed UTF-8 comparison surface across the full 2×2 cross-
+/// product on the admission-tier typed sum, matching the standard-
+/// library idiom [`String`] carries through its own four-impl closure
+/// ([`PartialEq<str> for String`] + [`PartialEq<&str> for String`] +
+/// [`PartialEq<String> for str`] + [`PartialEq<String> for &str`])
+/// and mirroring the sibling reference-grammar family
+/// [`crate::oci_manifest::DigestAlgorithm`]'s four-impl closure at
+/// lines 3428 / 3506 / 3597 / 3640 of `cli/src/oci_manifest.rs`.
+///
+/// Route: the impl body composes [`AdmissionTier::as_str`] with
+/// [`<str as PartialEq<str>>::eq`] on the dereffed `&str` self
+/// receiver, so the comparison reads the same canonical-label bytes
+/// as the sibling receiver-shape peer at zero allocation and zero
+/// intermediate buffer, and the symmetry axiom
+/// `<&str as PartialEq<AdmissionTier>>::eq(&label_ref, &tier)
+/// == <AdmissionTier as PartialEq<&str>>::eq(&tier, &label_ref)`
+/// holds by construction at every `(label_ref, tier)` pair.
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// UTF-8 `&str`-receiver comparison surface is a typed-primitive
+/// site on [`AdmissionTier`] itself (one
+/// [`PartialEq<AdmissionTier>`] impl on [`&str`] routing through
+/// [`AdmissionTier::as_str`]), not a per-consumer
+/// `label_ref == tier.as_str()` restatement at every downstream site
+/// that asks whether a borrowed `&str` handle names the same
+/// canonical admission-tier label as an [`AdmissionTier`] value.
+/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// site ([`AdmissionTier::as_str`]), and this reverse-direction
+/// `&str`-receiver surface reads through the same one-oracle
+/// discipline the three sibling comparison surfaces (forward-str,
+/// forward-&str, reverse-str) already carry.
+impl PartialEq<AdmissionTier> for &str {
+    fn eq(&self, other: &AdmissionTier) -> bool {
+        *self == other.as_str()
+    }
+}
+
 /// Lift the three-bool admission-tier surface
 /// ([`compose_admission_eligible_strict`] /
 /// [`compose_relaxed_eligible_strict_refused`] / negated
@@ -38696,6 +38818,196 @@ mod tests {
                 assert!(
                     !<AdmissionTier as PartialEq<&str>>::eq(&tier, &label),
                     "PartialEq<&str> must reject non-canonical label {label:?} at {tier:?}",
+                );
+            }
+        }
+    }
+
+    /// `<str as PartialEq<AdmissionTier>>::eq(label, &tier)` agrees
+    /// byte-for-byte with the borrowed-view [`AdmissionTier::as_str`]
+    /// oracle across the same (variant × label) grid the forward-
+    /// direction sibling
+    /// [`test_admission_tier_partial_eq_str_agrees_with_as_str`] covers,
+    /// threaded through the reverse-direction `str` self receiver so
+    /// the caller may write `*label_ref == tier` (or the standard-
+    /// library-derived symmetric composition) and answer the same
+    /// boolean equality query as the forward-direction
+    /// [`PartialEq<str> for AdmissionTier`] peer. Pins the reverse-
+    /// direction agreement so a future refactor that inlined a
+    /// divergent read into the reverse-direction impl (a hand-rolled
+    /// `matches!` on the variant tag with hard-coded per-arm labels
+    /// that drift off [`AdmissionTier::as_str`], an accidental case-
+    /// fold on the reverse side that never touched the forward side)
+    /// breaks this pin at at least one (tier, label) pair rather than
+    /// at every downstream `*label_ref == tier` call site. Structural
+    /// mirror of
+    /// [`crate::retry::tests::test_str_partial_eq_per_attempt_region_agrees_with_as_str`]
+    /// (commit 203f63b) at the sibling per-attempt-region ladder.
+    #[test]
+    fn test_str_partial_eq_admission_tier_agrees_with_as_str() {
+        let labels = [
+            "refused",
+            "staging_only",
+            "strict",
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            "STRICT",
+            "stagingonly",
+            "refused ",
+            " refused",
+            "staging only",
+            "\trefused",
+            "refused\n",
+            "nonsense",
+            "patch",
+            "minor",
+            "major",
+            "before_first",
+            "over_budget",
+        ];
+        for tier in AdmissionTier::ALL {
+            for label in labels {
+                assert_eq!(
+                    <str as PartialEq<AdmissionTier>>::eq(label, &tier),
+                    label == tier.as_str(),
+                    "PartialEq<AdmissionTier> for str and as_str() equality must agree at ({label:?}, {tier:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant,
+    /// `<str as PartialEq<AdmissionTier>>::eq(tier.as_str(), &tier)`
+    /// returns true. Pins the reflexivity identity that a variant
+    /// compared against its own canonical-label emission through the
+    /// reverse-direction [`str`]-receiver peer always answers true —
+    /// the load-bearing "self-recognition" property the borrowed UTF-8
+    /// comparison surface promises, mirroring the forward-direction
+    /// sibling
+    /// [`test_admission_tier_partial_eq_str_reflexive_at_own_label`].
+    #[test]
+    fn test_str_partial_eq_admission_tier_reflexive_at_own_label() {
+        for tier in AdmissionTier::ALL {
+            let label: &str = tier.as_str();
+            assert!(
+                <str as PartialEq<AdmissionTier>>::eq(label, &tier),
+                "PartialEq<AdmissionTier> for str must recognise self canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// `<&str as PartialEq<AdmissionTier>>::eq(&label_ref, &tier)`
+    /// agrees byte-for-byte with the borrowed-view
+    /// [`AdmissionTier::as_str`] oracle across the same grid, threaded
+    /// through a `&str` self receiver so the caller writes
+    /// `label_ref == tier` without the explicit `*` deref. Pins the
+    /// reverse-direction `&str`-receiver agreement, mirroring the
+    /// forward-direction sibling
+    /// [`test_admission_tier_partial_eq_str_ref_agrees_with_as_str`].
+    #[test]
+    fn test_str_ref_partial_eq_admission_tier_agrees_with_as_str() {
+        let labels = [
+            "refused",
+            "staging_only",
+            "strict",
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "REFUSED",
+            "STRICT",
+            "stagingonly",
+            "refused ",
+            " refused",
+            "staging only",
+            "\trefused",
+            "refused\n",
+            "nonsense",
+            "patch",
+            "minor",
+            "major",
+            "before_first",
+            "over_budget",
+        ];
+        for tier in AdmissionTier::ALL {
+            for label in labels {
+                let label_ref: &str = label;
+                assert_eq!(
+                    <&str as PartialEq<AdmissionTier>>::eq(&label_ref, &tier),
+                    label_ref == tier.as_str(),
+                    "PartialEq<AdmissionTier> for &str and as_str() equality must agree at ({label:?}, {tier:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`AdmissionTier`] variant,
+    /// `<&str as PartialEq<AdmissionTier>>::eq(&tier.as_str(), &tier)`
+    /// returns true — the variant's own emitted canonical label
+    /// recognises itself as a match through the reverse-direction
+    /// `&str`-receiver peer without the caller's explicit `*` deref.
+    #[test]
+    fn test_str_ref_partial_eq_admission_tier_reflexive_at_own_label() {
+        for tier in AdmissionTier::ALL {
+            let label: &str = tier.as_str();
+            assert!(
+                <&str as PartialEq<AdmissionTier>>::eq(&label, &tier),
+                "PartialEq<AdmissionTier> for &str must recognise self canonical label at {tier:?}",
+            );
+        }
+    }
+
+    /// The reverse-direction and forward-direction borrowed UTF-8
+    /// comparison surfaces on the admission-tier typed sum agree
+    /// byte-for-byte at every `(label, tier)` pair — the symmetry
+    /// axiom
+    /// `<str as PartialEq<AdmissionTier>>::eq(label, &tier)
+    /// == <AdmissionTier as PartialEq<str>>::eq(&tier, label)` (and
+    /// its `&str`-receiver peer) holds across the canonical × known-
+    /// bad label grid. Pins the full 2×2 receiver × direction cross-
+    /// product closure so a future refactor that diverged one impl
+    /// from its symmetric peer breaks this pin at at least one pair
+    /// rather than propagating unnoticed through downstream generic
+    /// [`PartialEq`]-bounded consumers that thread an
+    /// [`AdmissionTier`] through either side of a `==` operator.
+    /// Structural mirror of
+    /// [`crate::retry::tests::test_partial_eq_per_attempt_region_symmetric_with_forward_direction`]
+    /// (commit 203f63b) at the sibling per-attempt-region ladder, and
+    /// of the sibling reference-grammar pin
+    /// [`crate::oci_manifest::tests::test_partial_eq_digest_algorithm_symmetric_with_forward_direction`]
+    /// at the parallel primitive
+    /// [`crate::oci_manifest::DigestAlgorithm`].
+    #[test]
+    fn test_partial_eq_admission_tier_symmetric_with_forward_direction() {
+        let labels = [
+            "refused",
+            "staging_only",
+            "strict",
+            "",
+            "Refused",
+            "StagingOnly",
+            "Strict",
+            "STRICT",
+            "stagingonly",
+            "staging only",
+            "nonsense",
+            "patch",
+        ];
+        for tier in AdmissionTier::ALL {
+            for label in labels {
+                assert_eq!(
+                    <str as PartialEq<AdmissionTier>>::eq(label, &tier),
+                    <AdmissionTier as PartialEq<str>>::eq(&tier, label),
+                    "reverse-str and forward-str PartialEq peers must agree at ({label:?}, {tier:?})",
+                );
+                let label_ref: &str = label;
+                assert_eq!(
+                    <&str as PartialEq<AdmissionTier>>::eq(&label_ref, &tier),
+                    <AdmissionTier as PartialEq<&str>>::eq(&tier, &label_ref),
+                    "reverse-&str and forward-&str PartialEq peers must agree at ({label:?}, {tier:?})",
                 );
             }
         }
