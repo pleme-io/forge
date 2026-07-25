@@ -3620,6 +3620,135 @@ impl PartialEq<&[u8]> for DigestAlgorithm {
     }
 }
 
+/// Reverse-direction borrowed byte-slice comparison peer through a `[u8]`
+/// self receiver — the reverse-direction sibling of
+/// [`PartialEq<[u8]> for DigestAlgorithm`] (line 3546) and the byte-frontier
+/// mirror of the reverse-direction UTF-8 pair
+/// [`PartialEq<DigestAlgorithm> for str`] (line 3405) +
+/// [`PartialEq<DigestAlgorithm> for &str`] (line 3448) above. A downstream
+/// consumer that holds an already-borrowed `&[u8]` handle carrying an
+/// algorithm-token capture (a captured `Content-Digest` HTTP header's
+/// algorithm token before UTF-8 validation, a `nom` / `winnow` byte-slice
+/// parser scrutinee whose captured algorithm-token slice sits on the
+/// left of the equality operator, a byte-stream cache-index oracle
+/// keyed on the algorithm-label bytes without per-comparison UTF-8
+/// conversion, a `Cow::Borrowed(&[u8])` binding on a raw-byte grammar
+/// arm) writes `*label_bytes_ref == algo` (or, through the derived
+/// `&`-receiver auto-ref, `b"sha256" == algo`) at ONE composition
+/// rather than a per-site
+/// `label_bytes == <DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo)`
+/// restatement that repeats the canonical-label-bytes oracle name at
+/// every downstream comparison site.
+///
+/// Route: the impl body composes
+/// [`<DigestAlgorithm as AsRef<[u8]>>::as_ref`] (in turn
+/// [`DigestAlgorithm::as_str`] via [`str::as_bytes`]) with the standard
+/// library [`<[u8] as PartialEq<[u8]>>::eq`] on the borrowed `&[u8]`
+/// self receiver, so the comparison reads the same canonical-label
+/// bytes at zero allocation, zero temporary [`Vec<u8>`] construction,
+/// and zero [`std::fmt::Display`] formatter-buffer round trip per call
+/// — the same zero-cost discipline the forward-direction byte-slice
+/// peers (lines 3546 / 3617) and the [`AsRef<[u8]>`] borrowed-view
+/// sibling carry. The symmetry axiom
+/// `<[u8] as PartialEq<DigestAlgorithm>>::eq(&bytes, &algo)
+/// == <DigestAlgorithm as PartialEq<[u8]>>::eq(&algo, &bytes)` holds
+/// by construction at every `(bytes, algo)` pair.
+///
+/// Prior to this pair the digest-algorithm typed sum carried only the
+/// forward direction at the byte-slice frontier (`algo == label_bytes`
+/// compiled but `label_bytes == algo` did not), so a generic
+/// [`PartialEq`]-bounded consumer that composed both directions through
+/// its own symmetric-check protocol
+/// (`if a == b || b == a { … }`, a bidirectional-equality integration-
+/// test oracle, a byte-stream cache-index oracle that computes a
+/// canonical-label lookup key from either side of the ==) could not
+/// thread a [`DigestAlgorithm`] through the `[u8]` side of the bound
+/// without a per-consumer
+/// `label_bytes == <DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo)`
+/// bridge. With this pair landed, every borrowed byte-slice comparison
+/// direction at the digest-algorithm frontier reads the SAME
+/// [`<DigestAlgorithm as AsRef<[u8]>>::as_ref`] one-oracle table, and
+/// a downstream site writes `label_bytes == algo` at ONE composition
+/// instead of the per-site restatement — the same closure discipline
+/// the sibling reference-grammar family [`ContentDigest`] already
+/// carries at [`PartialEq<ContentDigest> for [u8]`] +
+/// [`PartialEq<ContentDigest> for &[u8]`] (lines 5869 / 5918 of this
+/// file) and the digest-algorithm typed sum itself already carries at
+/// the UTF-8 frontier through the reverse-direction pair
+/// [`PartialEq<DigestAlgorithm> for str`] +
+/// [`PartialEq<DigestAlgorithm> for &str`] (lines 3405 / 3448).
+///
+/// THEORY.md §III.1 typescape: the reverse-direction borrowed byte-slice
+/// comparison surface is a typed-primitive site on [`DigestAlgorithm`]
+/// itself (one [`PartialEq<DigestAlgorithm>`] impl on [`[u8]`] routing
+/// through [`<DigestAlgorithm as AsRef<[u8]>>::as_ref`]), not a per-
+/// consumer `label_bytes == <DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo)`
+/// restatement at every downstream site that asks whether an already-
+/// borrowed `&[u8]` handle names the same canonical algorithm label as
+/// a [`DigestAlgorithm`] value. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`DigestAlgorithm::as_str`]),
+/// and every borrowed byte-slice comparison surface — the forward-
+/// direction [`PartialEq<[u8]> for DigestAlgorithm`] +
+/// [`PartialEq<&[u8]> for DigestAlgorithm`] pair, this reverse-
+/// direction [`PartialEq<DigestAlgorithm> for [u8]`] +
+/// [`PartialEq<DigestAlgorithm> for &[u8]`] pair — reads through the
+/// same one-oracle discipline projected onto its own direction ×
+/// receiver shape.
+impl PartialEq<DigestAlgorithm> for [u8] {
+    fn eq(&self, other: &DigestAlgorithm) -> bool {
+        self == <DigestAlgorithm as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
+/// Reverse-direction borrowed byte-slice comparison peer through a
+/// `&[u8]` receiver — the reverse-direction sibling of
+/// [`PartialEq<&[u8]> for DigestAlgorithm`] (line 3617) and the
+/// receiver-shape peer of [`PartialEq<DigestAlgorithm> for [u8]`]
+/// (directly above), split by receiver shape so the caller writes
+/// `label_bytes_ref == algo` without the explicit `*` deref at every
+/// comparison site. The four [`PartialEq`] impls together on the
+/// byte-slice frontier — forward × receiver-shape (lines 3546 / 3617)
+/// and reverse × receiver-shape (directly above and this impl) — close
+/// the borrowed byte-slice comparison surface across the full 2×2
+/// cross-product on the digest-algorithm typed sum, matching the full
+/// four-impl closure the standard library gives [`Vec<u8>`] through
+/// its own [`PartialEq<[u8]> for Vec<u8>`] + [`PartialEq<&[u8]> for
+/// Vec<u8>`] + [`PartialEq<Vec<u8>> for [u8]`] +
+/// [`PartialEq<Vec<u8>> for &[u8]`] symmetric receiver-shape pair, and
+/// mirroring the four-impl closure the sibling reference-grammar
+/// family [`ContentDigest`] already carries at lines 5584 / 5630
+/// (forward pair) / 5869 / 5918 (reverse pair) of this file.
+///
+/// Route: the impl body composes
+/// [`<DigestAlgorithm as AsRef<[u8]>>::as_ref`] with the standard
+/// library [`<[u8] as PartialEq<[u8]>>::eq`] on the dereffed `&[u8]`
+/// self receiver, so the comparison reads the same canonical-label
+/// bytes as the sibling receiver-shape peer at zero allocation and
+/// zero intermediate buffer, and the symmetry axiom
+/// `<&[u8] as PartialEq<DigestAlgorithm>>::eq(&bytes_ref, &algo)
+/// == <DigestAlgorithm as PartialEq<&[u8]>>::eq(&algo, &bytes_ref)`
+/// holds by construction at every `(bytes_ref, algo)` pair.
+///
+/// THEORY.md §III.1 typescape: the reverse-direction borrowed byte-slice
+/// `&[u8]`-receiver comparison surface is a typed-primitive site on
+/// [`DigestAlgorithm`] itself (one [`PartialEq<DigestAlgorithm>`] impl
+/// on [`&[u8]`] routing through
+/// [`<DigestAlgorithm as AsRef<[u8]>>::as_ref`]), not a per-consumer
+/// `label_bytes_ref == <DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo)`
+/// restatement at every downstream site that asks whether an already-
+/// borrowed `&[u8]` handle names the same canonical algorithm label as
+/// a [`DigestAlgorithm`] value. THEORY.md §VI.1 one-oracle: the
+/// canonical label is named at one site ([`DigestAlgorithm::as_str`]),
+/// and this reverse-direction `&[u8]`-receiver surface reads through
+/// the same one-oracle discipline the three sibling byte-slice
+/// comparison surfaces (forward-`[u8]`, forward-`&[u8]`, reverse-
+/// `[u8]`) already carry.
+impl PartialEq<DigestAlgorithm> for &[u8] {
+    fn eq(&self, other: &DigestAlgorithm) -> bool {
+        *self == <DigestAlgorithm as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
 /// Why a string failed to parse as an OCI / Docker content digest. Carries
 /// the offending input so a caller can attach it to a failure record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22505,6 +22634,241 @@ mod tests {
                 assert!(
                     !<DigestAlgorithm as PartialEq<&[u8]>>::eq(&algo, &label_ref),
                     "PartialEq<&[u8]> must reject non-canonical label {label:?} at {algo:?}",
+                );
+            }
+        }
+    }
+
+    /// `PartialEq<DigestAlgorithm> for [u8]` agrees byte-for-byte with
+    /// the borrowed-view [`<DigestAlgorithm as AsRef<[u8]>>::as_ref`]
+    /// oracle across every [`DigestAlgorithm::ALL`] variant × the same
+    /// canonical / CamelCase / ALLCAPS / whitespace-fringed / hyphen /
+    /// underscore / sibling-ladder / unsupported-algorithm / empty /
+    /// invalid-UTF-8 byte-slice grid the forward-direction pair pins,
+    /// threaded through a `[u8]` self receiver so the caller writes
+    /// `*label_bytes_ref == algo` and answers the same boolean equality
+    /// query as the forward-direction
+    /// [`PartialEq<[u8]> for DigestAlgorithm`] peer. Pins the reverse-
+    /// direction agreement at the byte frontier so a future refactor
+    /// that inlined a divergent read into the reverse-direction impl
+    /// (a stale per-variant byte table, a case-fold on the label side,
+    /// a whitespace-tolerance branch) breaks this pin at at least one
+    /// (algo, label) pair rather than at every downstream
+    /// `*label_bytes_ref == algo` call site.
+    #[test]
+    fn test_bytes_partial_eq_digest_algorithm_agrees_with_as_ref() {
+        let owned: Vec<Vec<u8>> = [
+            b"sha256".to_vec(),
+            b"sha512".to_vec(),
+            b"blake3".to_vec(),
+            Vec::<u8>::new(),
+            b"SHA256".to_vec(),
+            b"SHA512".to_vec(),
+            b"BLAKE3".to_vec(),
+            b"Sha256".to_vec(),
+            b"Sha512".to_vec(),
+            b"Blake3".to_vec(),
+            b" sha256".to_vec(),
+            b"sha256 ".to_vec(),
+            b"\tsha512".to_vec(),
+            b"blake3\n".to_vec(),
+            b"sha-256".to_vec(),
+            b"sha_256".to_vec(),
+            b"md5".to_vec(),
+            b"sha1".to_vec(),
+            b"sha384".to_vec(),
+            b"before_first".to_vec(),
+            b"patch".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        let labels: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        for algo in DigestAlgorithm::ALL {
+            for label in &labels {
+                assert_eq!(
+                    <[u8] as PartialEq<DigestAlgorithm>>::eq(label, &algo),
+                    *label == <DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo),
+                    "PartialEq<DigestAlgorithm> for [u8] and AsRef<[u8]> equality must agree at ({algo:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`DigestAlgorithm`] variant,
+    /// `<[u8] as PartialEq<DigestAlgorithm>>::eq(algo.as_ref(), &algo)`
+    /// returns true — the variant's own emitted canonical-label bytes
+    /// recognise themselves as a match through the reverse-direction
+    /// `[u8]`-receiver peer, mirroring the forward-direction sibling
+    /// [`test_digest_algorithm_partial_eq_bytes_reflexive_at_own_label`].
+    #[test]
+    fn test_bytes_partial_eq_digest_algorithm_reflexive_at_own_label() {
+        for algo in DigestAlgorithm::ALL {
+            let canonical: &[u8] = <DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo);
+            assert!(
+                <[u8] as PartialEq<DigestAlgorithm>>::eq(canonical, &algo),
+                "PartialEq<DigestAlgorithm> for [u8] must recognise self canonical label bytes at {algo:?}",
+            );
+        }
+    }
+
+    /// `PartialEq<DigestAlgorithm> for &[u8]` agrees byte-for-byte with
+    /// the borrowed-view [`<DigestAlgorithm as AsRef<[u8]>>::as_ref`]
+    /// oracle across the same grid, threaded through a `&[u8]` self
+    /// receiver so the caller writes `label_bytes_ref == algo` without
+    /// the explicit `*` deref. Pins the reverse-direction `&[u8]`-
+    /// receiver agreement, mirroring the forward-direction sibling
+    /// [`test_digest_algorithm_partial_eq_bytes_ref_agrees_with_as_ref`].
+    #[test]
+    fn test_bytes_ref_partial_eq_digest_algorithm_agrees_with_as_ref() {
+        let owned: Vec<Vec<u8>> = [
+            b"sha256".to_vec(),
+            b"sha512".to_vec(),
+            b"blake3".to_vec(),
+            Vec::<u8>::new(),
+            b"SHA256".to_vec(),
+            b"SHA512".to_vec(),
+            b"BLAKE3".to_vec(),
+            b"Sha256".to_vec(),
+            b"Sha512".to_vec(),
+            b"Blake3".to_vec(),
+            b" sha256".to_vec(),
+            b"sha256 ".to_vec(),
+            b"\tsha512".to_vec(),
+            b"blake3\n".to_vec(),
+            b"sha-256".to_vec(),
+            b"sha_256".to_vec(),
+            b"md5".to_vec(),
+            b"sha1".to_vec(),
+            b"sha384".to_vec(),
+            b"before_first".to_vec(),
+            b"patch".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for algo in DigestAlgorithm::ALL {
+            for label in &owned {
+                let label_ref: &[u8] = label;
+                assert_eq!(
+                    <&[u8] as PartialEq<DigestAlgorithm>>::eq(&label_ref, &algo),
+                    label_ref == <DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo),
+                    "PartialEq<DigestAlgorithm> for &[u8] and AsRef<[u8]> equality must agree at ({algo:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// At every [`DigestAlgorithm`] variant,
+    /// `<&[u8] as PartialEq<DigestAlgorithm>>::eq(&algo.as_ref(), &algo)`
+    /// returns true — the variant's own emitted canonical-label bytes
+    /// recognise themselves as a match through the reverse-direction
+    /// `&[u8]`-receiver peer without the caller's explicit `*` deref.
+    #[test]
+    fn test_bytes_ref_partial_eq_digest_algorithm_reflexive_at_own_label() {
+        for algo in DigestAlgorithm::ALL {
+            let canonical: &[u8] = <DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo);
+            assert!(
+                <&[u8] as PartialEq<DigestAlgorithm>>::eq(&canonical, &algo),
+                "PartialEq<DigestAlgorithm> for &[u8] must recognise self canonical label bytes at {algo:?}",
+            );
+        }
+    }
+
+    /// The reverse-direction and forward-direction borrowed byte-slice
+    /// comparison surfaces agree byte-for-byte at every `(label, algo)`
+    /// pair — the symmetry axiom
+    /// `<[u8] as PartialEq<DigestAlgorithm>>::eq(bytes, &algo) ==
+    /// <DigestAlgorithm as PartialEq<[u8]>>::eq(&algo, bytes)` (and its
+    /// `&[u8]`-receiver peer) holds across the canonical × broken ×
+    /// invalid-UTF-8 grid. Pins the full 2×2 receiver × direction
+    /// cross-product closure on the byte-slice frontier at the digest-
+    /// algorithm typed sum so a future refactor that diverged one impl
+    /// from its symmetric peer breaks this pin at at least one pair
+    /// rather than propagating unnoticed through downstream generic
+    /// `PartialEq`-bounded consumers that thread a [`DigestAlgorithm`]
+    /// through either side of a `==` operator at the byte frontier,
+    /// mirroring the ContentDigest-side sibling
+    /// [`test_partial_eq_content_digest_bytes_symmetric_with_forward_direction`].
+    #[test]
+    fn test_partial_eq_digest_algorithm_bytes_symmetric_with_forward_direction() {
+        let owned: Vec<Vec<u8>> = [
+            b"sha256".to_vec(),
+            b"sha512".to_vec(),
+            b"blake3".to_vec(),
+            Vec::<u8>::new(),
+            b"SHA256".to_vec(),
+            b"SHA512".to_vec(),
+            b"BLAKE3".to_vec(),
+            b"Sha256".to_vec(),
+            b"sha-256".to_vec(),
+            b"sha_256".to_vec(),
+            b" sha256".to_vec(),
+            b"sha256 ".to_vec(),
+            b"blake3\n".to_vec(),
+            b"md5".to_vec(),
+            b"sha1".to_vec(),
+            b"sha384".to_vec(),
+            b"before_first".to_vec(),
+            b"patch".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for algo in DigestAlgorithm::ALL {
+            for label in &owned {
+                let label_ref: &[u8] = label;
+                assert_eq!(
+                    <[u8] as PartialEq<DigestAlgorithm>>::eq(label_ref, &algo),
+                    <DigestAlgorithm as PartialEq<[u8]>>::eq(&algo, label_ref),
+                    "reverse-direction PartialEq<DigestAlgorithm> for [u8] must agree with forward-direction PartialEq<[u8]> for DigestAlgorithm at ({algo:?}, {label:?})",
+                );
+                assert_eq!(
+                    <&[u8] as PartialEq<DigestAlgorithm>>::eq(&label_ref, &algo),
+                    <DigestAlgorithm as PartialEq<&[u8]>>::eq(&algo, &label_ref),
+                    "reverse-direction PartialEq<DigestAlgorithm> for &[u8] must agree with forward-direction PartialEq<&[u8]> for DigestAlgorithm at ({algo:?}, {label:?})",
+                );
+            }
+        }
+    }
+
+    /// The reverse-direction [`PartialEq<DigestAlgorithm> for [u8]`]
+    /// impl composes with a generic `PartialEq<DigestAlgorithm>`-bounded
+    /// consumer — a downstream site that types its comparison contract
+    /// as `impl PartialEq<DigestAlgorithm>` on an already-borrowed
+    /// `&[u8]` handle (a byte-slice cache-index oracle that generic-
+    /// bounds its equality check, a `matches!` predicate on a
+    /// `Cow::Borrowed(&[u8])` arm on a raw-byte grammar rule) recovers
+    /// the same answer as a direct
+    /// `<[u8] as PartialEq<DigestAlgorithm>>::eq` call at every
+    /// [`DigestAlgorithm::ALL`] variant × known-label pair. Pins the
+    /// trait-generic consumer surface parallel to the forward-direction
+    /// sibling
+    /// [`test_digest_algorithm_partial_eq_bytes_carries_through_generic_consumer`].
+    #[test]
+    fn test_bytes_partial_eq_digest_algorithm_carries_through_generic_consumer() {
+        fn eq_via_bound<T: PartialEq<DigestAlgorithm> + ?Sized>(
+            lhs: &T,
+            rhs: &DigestAlgorithm,
+        ) -> bool {
+            lhs == rhs
+        }
+        let owned: Vec<Vec<u8>> = [
+            b"sha256".to_vec(),
+            b"sha512".to_vec(),
+            b"blake3".to_vec(),
+            Vec::<u8>::new(),
+            b"SHA256".to_vec(),
+            b"sha-256".to_vec(),
+            b"md5".to_vec(),
+            b"sha384".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ]
+        .to_vec();
+        for algo in DigestAlgorithm::ALL {
+            for label in &owned {
+                let label_ref: &[u8] = label;
+                assert_eq!(
+                    eq_via_bound(label_ref, &algo),
+                    <[u8] as PartialEq<DigestAlgorithm>>::eq(label_ref, &algo),
+                    "generic PartialEq<DigestAlgorithm>-bounded consumer must match direct [u8] call at ({algo:?}, {label:?})",
                 );
             }
         }
