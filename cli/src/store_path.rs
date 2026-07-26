@@ -540,6 +540,79 @@ impl TryFrom<std::sync::Arc<str>> for StorePath {
     }
 }
 
+/// Thread-local shared-owned UTF-8 try-conversion peer for
+/// [`StorePath::parse`] via the [`TryFrom<Rc<str>>`] trait — the
+/// non-atomically refcounted shared-buffer frontier that pairs with the
+/// [`TryFrom<Arc<str>>`] cross-thread shared-owned peer directly above
+/// under a receiver shape whose payload is cheap-cloned within a single
+/// thread through [`std::rc::Rc::clone`] rather than the atomically
+/// refcounted [`std::sync::Arc::clone`] used across worker threads.
+///
+/// Delegates through `<Self as std::str::FromStr>::from_str` on the borrowed
+/// [`str`] view of the caller-supplied [`Rc<str>`] (via
+/// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`], a zero-copy borrow of
+/// the shared allocation's UTF-8 backing bytes that does NOT touch the
+/// non-atomic refcount header), so the store-path grammar stays defined at
+/// ONE construction surface — the [`std::str::FromStr`] peer, which itself
+/// delegates to [`StorePath::parse`]. No refcount bump, no buffer clone,
+/// no divergent grammar: the impl body pays the by-reference [`FromStr`]
+/// cost at zero allocation on the incoming thread-local shared handle.
+///
+/// # Why the trait peer earns its keep
+///
+/// [`TryFrom<Arc<str>>`] covers the cross-thread shared-owned frontier
+/// (`#[serde(try_from = "Arc<str>")]`, `fn f<T: TryFrom<Arc<str>>>`).
+/// [`TryFrom<Rc<str>>`] covers the disjoint thread-local shared-owned
+/// frontier stdlib and the wider ecosystem key off separately:
+///
+/// - `#[serde(try_from = "Rc<str>")]` — the serde container attribute for
+///   the thread-local shared-owned case (a deserializer that hands out
+///   non-atomically refcounted UTF-8 label buffers so peers inside a
+///   single-thread graph hold cheap-clone shared ownership without paying
+///   the atomic-refcount cost of [`std::sync::Arc`]) keys off
+///   [`TryFrom<Rc<str>>`], not [`TryFrom<Arc<str>>`], [`TryFrom<Box<str>>`],
+///   [`TryFrom<String>`], [`TryFrom<&str>`], or [`FromStr`]. A future
+///   serde field wrapping a `StorePath` and opting into the thread-local
+///   shared-owned `try_from` grammar reaches the store-path check through
+///   this impl without a shim.
+/// - Generic try-conversion bounds (`fn parse_field<T: TryFrom<Rc<str>>>`)
+///   — a validated-input newtype builder or closure-doc-column reader whose
+///   parse contract is stated at the thread-local shared-owned receiver
+///   layer (a non-atomically refcounted UTF-8 label handed cheaply among
+///   sibling readers on a single thread through [`std::rc::Rc::clone`]
+///   rather than [`std::sync::Arc::clone`]) can name `StorePath` alongside
+///   every other thread-local shared-owned try-conversion primitive
+///   without routing through a shim.
+/// - A `HashMap<Rc<str>, StorePath>` single-thread intern table — a
+///   closure-scan or attic-push staging pool that keys a validated store
+///   path off its raw-input label buffer and hands the same buffer to
+///   sibling readers on the same thread through [`std::rc::Rc::clone`] —
+///   can populate its entries by `try_from`-ing the raw buffer directly
+///   through this impl without a `parse::<StorePath>(&*rc)` shim, and
+///   sheds the atomic-refcount cost the [`std::sync::Arc`] peer would pay.
+/// - Sibling canonical-string typed primitives in this crate already
+///   carry the pair: `impl TryFrom<Rc<str>> for DigestAlgorithm` at
+///   `oci_manifest.rs::1519`; `StorePath` is the store-path primitive
+///   counterpart at the same thread-local shared-owned try-conversion
+///   frontier.
+///
+/// # Error shape
+///
+/// `Self::Error = StorePathError`. The typed grammar-clause enum
+/// (`MissingStorePrefix` / `HasSubpath` / `TooShort` / `InvalidHash` /
+/// `MissingSeparator` / `EmptyName`) carries through from [`FromStr`] —
+/// no widening to [`anyhow::Error`] or `Box<dyn Error>` hides between the
+/// thread-local shared-owned try-conversion surface and the inherent
+/// constructor, so a caller can still `match` on the exact clause the
+/// input violated at the trait entry point.
+impl TryFrom<std::rc::Rc<str>> for StorePath {
+    type Error = StorePathError;
+
+    fn try_from(shared: std::rc::Rc<str>) -> Result<Self, Self::Error> {
+        <Self as std::str::FromStr>::from_str(shared.as_ref())
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -1432,6 +1505,128 @@ mod tests {
         let raw_nl = format!("/nix/store/{H}-x\n");
         let trimmed: StorePath = parse_via_try_from(Arc::from(raw_nl.as_str()))
             .expect("trailing newline must be trimmed at TryFrom<Arc<str>> surface");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// [`TryFrom<Rc<str>>`] must accept every input the inherent
+    /// [`StorePath::parse`] accepts and produce a value equal to the
+    /// [`FromStr`] round-trip on the borrowed view of the same buffer.
+    /// Pins the delegation through the [`FromStr`] oracle via
+    /// [`Rc::as_ref`]: a future refactor that severed the trait impl from
+    /// `<Self as FromStr>::from_str(shared.as_ref())` (e.g., inlined a
+    /// `Self::parse` call with a stale grammar clause, or cloned the shared
+    /// buffer into a fresh `String` and let the two surfaces drift on
+    /// whitespace handling) would fail here first.
+    #[test]
+    fn test_try_from_rc_str_success_agrees_with_fromstr() {
+        use std::rc::Rc;
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let via_try_from = <StorePath as TryFrom<Rc<str>>>::try_from(Rc::from(raw.as_str()))
+            .expect("valid store path parses via TryFrom<Rc<str>>");
+        let via_fromstr: StorePath = raw.parse().expect("valid store path parses via FromStr");
+        assert_eq!(
+            via_try_from, via_fromstr,
+            "TryFrom<Rc<str>> must yield the same StorePath value as FromStr"
+        );
+        // And a name-with-hyphens case — the load-bearing shape most real
+        // store outputs carry — to guard against a future refactor that
+        // truncates at the first `-` on the way through the shared peer.
+        let raw2 = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let via_try_from2 = <StorePath as TryFrom<Rc<str>>>::try_from(Rc::from(raw2.as_str()))
+            .expect("hyphenated-name store path parses via TryFrom<Rc<str>>");
+        let via_fromstr2: StorePath = raw2
+            .parse()
+            .expect("hyphenated-name store path parses via FromStr");
+        assert_eq!(via_try_from2, via_fromstr2);
+        assert_eq!(via_try_from2.name(), "foo-bar-1.2.3");
+    }
+
+    /// [`TryFrom<Rc<str>>`] must reject every input the inherent
+    /// [`StorePath::parse`] rejects, and must surface the SAME typed
+    /// [`StorePathError`] variant carrying the SAME offending input.
+    /// Pins that no error-widening shim (`anyhow!(...)`,
+    /// `Box<dyn Error>`) hides between the thread-local shared-owned
+    /// try-conversion surface and the inherent constructor — the typed
+    /// grammar clause stays legible at the trait entry point even when
+    /// the caller holds a non-atomically refcounted UTF-8 buffer.
+    #[test]
+    fn test_try_from_rc_str_failure_preserves_typed_error_variant() {
+        use std::rc::Rc;
+        // Cover every grammar clause once, and cross-check byte-for-byte
+        // that the thread-local shared-owned try-conversion surface
+        // surfaces the SAME typed error variant (with the SAME offending
+        // input in each variant) as the inherent constructor. Pin against
+        // a future refactor that silently coerced one variant into another
+        // or widened the error to `anyhow::Error`.
+        type ExpectVariant = fn(&StorePathError) -> bool;
+        let cases: &[(&str, ExpectVariant)] = &[
+            ("", |e| {
+                matches!(e, StorePathError::MissingStorePrefix { .. })
+            }),
+            ("nix/store/abc-x", |e| {
+                matches!(e, StorePathError::MissingStorePrefix { .. })
+            }),
+            ("/nix/store/unknown-mysvc.drv", |e| {
+                matches!(e, StorePathError::TooShort { .. })
+            }),
+            ("/nix/store/eeeeoooouuuutttteeeeoooouuuutttt-x", |e| {
+                matches!(e, StorePathError::InvalidHash { .. })
+            }),
+            ("/nix/store/0123456789abcdfghijklmnpqrsvwxyzx", |e| {
+                matches!(e, StorePathError::MissingSeparator { .. })
+            }),
+            ("/nix/store/0123456789abcdfghijklmnpqrsvwxyz-", |e| {
+                matches!(e, StorePathError::EmptyName { .. })
+            }),
+        ];
+        for (bad, is_expected_variant) in cases {
+            let try_from_err = <StorePath as TryFrom<Rc<str>>>::try_from(Rc::from(*bad))
+                .expect_err("malformed store path must fail via TryFrom<Rc<str>>");
+            let inherent_err =
+                StorePath::parse(bad).expect_err("malformed store path must fail inherently");
+            assert_eq!(
+                try_from_err, inherent_err,
+                "TryFrom<Rc<str>> must surface the same typed error as the inherent constructor for {bad:?}"
+            );
+            assert!(
+                is_expected_variant(&try_from_err),
+                "unexpected error variant for {bad:?}: {try_from_err:?}"
+            );
+        }
+    }
+
+    /// A generic `fn f<T: TryFrom<Rc<str>>>` consumer must recover a
+    /// valid [`StorePath`] through the trait bound. This is the
+    /// structural witness that `StorePath` is genuinely usable at
+    /// `TryFrom<Rc<str>>` call sites — the surface that
+    /// `#[serde(try_from = "Rc<str>")]`, a `HashMap<Rc<str>, StorePath>`
+    /// single-thread intern-table populate, and generic thread-local
+    /// shared-owned try-conversion bounds key off. If a future change
+    /// narrowed the bound (e.g., gated the impl on a lifetime or trait
+    /// shape the generic surface couldn't hit), this test fails at
+    /// compile time.
+    #[test]
+    fn test_try_from_rc_str_generic_consumer_recovers_identity() {
+        use std::rc::Rc;
+        fn parse_via_try_from<T>(s: Rc<str>) -> Result<T, T::Error>
+        where
+            T: TryFrom<Rc<str>>,
+        {
+            T::try_from(s)
+        }
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let path: StorePath = parse_via_try_from(Rc::from(raw.as_str()))
+            .expect("valid store path parses via generic TryFrom<Rc<str>> bound");
+        assert_eq!(path.name(), "foo-bar-1.2.3");
+        assert_eq!(path.hash(), H);
+        // The trimming discipline reaches through the generic bound too:
+        // a caller that holds a nix-build-stdout Rc<str> shared among
+        // single-thread sibling readers does not need to pre-trim before
+        // handing it to the generic try-conversion helper — the grammar
+        // owns the trim in one place.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let trimmed: StorePath = parse_via_try_from(Rc::from(raw_nl.as_str()))
+            .expect("trailing newline must be trimmed at TryFrom<Rc<str>> surface");
         assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
     }
 
