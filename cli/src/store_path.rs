@@ -409,6 +409,68 @@ impl TryFrom<std::borrow::Cow<'_, str>> for StorePath {
     }
 }
 
+/// Shrunk-owned UTF-8 try-conversion peer for [`StorePath::parse`] via the
+/// [`TryFrom<Box<str>>`] trait — the boxed-string frontier that pairs with
+/// the [`TryFrom<String>`] by-value peer under a receiver shape that has
+/// dropped the [`String`] capacity header so only the UTF-8 payload
+/// bytes and the pointer remain.
+///
+/// Delegates through [`<Self as TryFrom<String>>::try_from`] on the
+/// [`String::from`] recovery of the caller-supplied [`Box<str>`], so the
+/// store-path grammar stays defined at ONE construction surface — the
+/// [`std::str::FromStr`] peer, which itself delegates to
+/// [`StorePath::parse`]. [`String::from(Box<str>)`] is a zero-copy
+/// ownership transfer: it reuses the boxed slice's allocation as the
+/// [`String`] buffer (with `len == capacity`), so the impl body pays no
+/// buffer-cloning cost on the way through the by-value peer.
+///
+/// # Why the trait peer earns its keep
+///
+/// [`TryFrom<String>`] covers the by-value owned-buffer frontier
+/// (`#[serde(try_from = "String")]`, `fn f<T: TryFrom<String>>`).
+/// [`TryFrom<Cow<'_, str>>`] covers the borrowed-or-owned frontier
+/// (`#[serde(try_from = "Cow<'_, str>")]`,
+/// `fn f<'a, T: TryFrom<Cow<'a, str>>>`). [`TryFrom<Box<str>>`] covers the
+/// disjoint shrunk-owned frontier stdlib and the wider ecosystem key off
+/// separately:
+///
+/// - `#[serde(try_from = "Box<str>")]` — the serde container attribute for
+///   the shrunk-owned case (a deserializer that shrinks its owned UTF-8
+///   buffer to `len == capacity` before handing it off, saving the
+///   [`String`] capacity header) keys off [`TryFrom<Box<str>>`], not
+///   [`TryFrom<String>`], [`TryFrom<&str>`], or [`FromStr`]. A future
+///   serde field wrapping a `StorePath` and opting into the shrunk-owned
+///   `try_from` grammar reaches the store-path check through this impl
+///   without a shim.
+/// - Generic try-conversion bounds (`fn parse_field<T: TryFrom<Box<str>>>`)
+///   — a validated-input newtype builder or attestation-column reader
+///   whose parse contract is stated at the shrunk-owned receiver-shape
+///   layer (an owned UTF-8 label without the capacity header, common in
+///   memory-tight caches and long-lived tables of parsed labels) can name
+///   `StorePath` alongside every other shrunk-owned try-conversion
+///   primitive without routing through a shim.
+/// - Sibling canonical-string typed primitives in this crate already
+///   carry the pair: `impl TryFrom<Box<str>> for DigestAlgorithm` at
+///   `oci_manifest.rs::1269`; `StorePath` is the store-path primitive
+///   counterpart at the same shrunk-owned try-conversion frontier.
+///
+/// # Error shape
+///
+/// `Self::Error = StorePathError`. The typed grammar-clause enum
+/// (`MissingStorePrefix` / `HasSubpath` / `TooShort` / `InvalidHash` /
+/// `MissingSeparator` / `EmptyName`) carries through from [`FromStr`] —
+/// no widening to [`anyhow::Error`] or `Box<dyn Error>` hides between the
+/// shrunk-owned try-conversion surface and the inherent constructor, so
+/// a caller can still `match` on the exact clause the input violated at
+/// the trait entry point.
+impl TryFrom<Box<str>> for StorePath {
+    type Error = StorePathError;
+
+    fn try_from(boxed: Box<str>) -> Result<Self, Self::Error> {
+        <Self as TryFrom<String>>::try_from(String::from(boxed))
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -1061,6 +1123,126 @@ mod tests {
             .expect("trailing newline must be trimmed at TryFrom<Cow::Owned> surface");
         assert_eq!(trimmed_borrowed.as_str(), format!("/nix/store/{H}-x"));
         assert_eq!(trimmed_owned.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// [`TryFrom<Box<str>>`] must accept every input the inherent
+    /// [`StorePath::parse`] accepts and produce a value equal to the
+    /// [`FromStr`] round-trip on the borrowed view of the same buffer.
+    /// Pins the delegation through the [`TryFrom<String>`] peer (which
+    /// itself routes through the [`FromStr`] oracle): a future refactor
+    /// that severed the trait impl from
+    /// `<Self as TryFrom<String>>::try_from(String::from(boxed))` (e.g.,
+    /// inlined a `Self::parse` call with a stale grammar clause, or
+    /// dropped through a shim that cloned the boxed buffer into a fresh
+    /// `String` and let the two surfaces drift on whitespace handling)
+    /// would fail here first.
+    #[test]
+    fn test_try_from_box_str_success_agrees_with_fromstr() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let via_try_from = <StorePath as TryFrom<Box<str>>>::try_from(raw.clone().into_boxed_str())
+            .expect("valid store path parses via TryFrom<Box<str>>");
+        let via_fromstr: StorePath = raw.parse().expect("valid store path parses via FromStr");
+        assert_eq!(
+            via_try_from, via_fromstr,
+            "TryFrom<Box<str>> must yield the same StorePath value as FromStr"
+        );
+        // And a name-with-hyphens case — the load-bearing shape most real
+        // store outputs carry — to guard against a future refactor that
+        // truncates at the first `-` on the way through the boxed peer.
+        let raw2 = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let via_try_from2 =
+            <StorePath as TryFrom<Box<str>>>::try_from(raw2.clone().into_boxed_str())
+                .expect("hyphenated-name store path parses via TryFrom<Box<str>>");
+        let via_fromstr2: StorePath = raw2
+            .parse()
+            .expect("hyphenated-name store path parses via FromStr");
+        assert_eq!(via_try_from2, via_fromstr2);
+        assert_eq!(via_try_from2.name(), "foo-bar-1.2.3");
+    }
+
+    /// [`TryFrom<Box<str>>`] must reject every input the inherent
+    /// [`StorePath::parse`] rejects, and must surface the SAME typed
+    /// [`StorePathError`] variant carrying the SAME offending input.
+    /// Pins that no error-widening shim (`anyhow!(...)`,
+    /// `Box<dyn Error>`) hides between the shrunk-owned try-conversion
+    /// surface and the inherent constructor — the typed grammar clause
+    /// stays legible at the trait entry point even when the caller owns
+    /// a boxed UTF-8 buffer.
+    #[test]
+    fn test_try_from_box_str_failure_preserves_typed_error_variant() {
+        // Cover every grammar clause once, and cross-check byte-for-byte
+        // that the shrunk-owned try-conversion surface surfaces the SAME
+        // typed error variant (with the SAME offending input in each
+        // variant) as the inherent constructor. Pin against a future
+        // refactor that silently coerced one variant into another or
+        // widened the error to `anyhow::Error`.
+        type ExpectVariant = fn(&StorePathError) -> bool;
+        let cases: &[(&str, ExpectVariant)] = &[
+            ("", |e| {
+                matches!(e, StorePathError::MissingStorePrefix { .. })
+            }),
+            ("nix/store/abc-x", |e| {
+                matches!(e, StorePathError::MissingStorePrefix { .. })
+            }),
+            ("/nix/store/unknown-mysvc.drv", |e| {
+                matches!(e, StorePathError::TooShort { .. })
+            }),
+            ("/nix/store/eeeeoooouuuutttteeeeoooouuuutttt-x", |e| {
+                matches!(e, StorePathError::InvalidHash { .. })
+            }),
+            ("/nix/store/0123456789abcdfghijklmnpqrsvwxyzx", |e| {
+                matches!(e, StorePathError::MissingSeparator { .. })
+            }),
+            ("/nix/store/0123456789abcdfghijklmnpqrsvwxyz-", |e| {
+                matches!(e, StorePathError::EmptyName { .. })
+            }),
+        ];
+        for (bad, is_expected_variant) in cases {
+            let try_from_err =
+                <StorePath as TryFrom<Box<str>>>::try_from((*bad).to_string().into_boxed_str())
+                    .expect_err("malformed store path must fail via TryFrom<Box<str>>");
+            let inherent_err =
+                StorePath::parse(bad).expect_err("malformed store path must fail inherently");
+            assert_eq!(
+                try_from_err, inherent_err,
+                "TryFrom<Box<str>> must surface the same typed error as the inherent constructor for {bad:?}"
+            );
+            assert!(
+                is_expected_variant(&try_from_err),
+                "unexpected error variant for {bad:?}: {try_from_err:?}"
+            );
+        }
+    }
+
+    /// A generic `fn f<T: TryFrom<Box<str>>>` consumer must recover a
+    /// valid [`StorePath`] through the trait bound. This is the
+    /// structural witness that `StorePath` is genuinely usable at
+    /// `TryFrom<Box<str>>` call sites — the surface that
+    /// `#[serde(try_from = "Box<str>")]` and generic shrunk-owned
+    /// try-conversion bounds key off. If a future change narrowed the
+    /// bound (e.g., gated the impl on a lifetime or trait shape the
+    /// generic surface couldn't hit), this test fails at compile time.
+    #[test]
+    fn test_try_from_box_str_generic_consumer_recovers_identity() {
+        fn parse_via_try_from<T>(s: Box<str>) -> Result<T, T::Error>
+        where
+            T: TryFrom<Box<str>>,
+        {
+            T::try_from(s)
+        }
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let path: StorePath = parse_via_try_from(raw.clone().into_boxed_str())
+            .expect("valid store path parses via generic TryFrom<Box<str>> bound");
+        assert_eq!(path.name(), "foo-bar-1.2.3");
+        assert_eq!(path.hash(), H);
+        // The trimming discipline reaches through the generic bound too:
+        // a caller that owns a nix-build-stdout Box<str> does not need
+        // to pre-trim before handing it to the generic try-conversion
+        // helper — the grammar owns the trim in one place.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let trimmed: StorePath = parse_via_try_from(raw_nl.into_boxed_str())
+            .expect("trailing newline must be trimmed at TryFrom<Box<str>> surface");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
     }
 
     #[test]
