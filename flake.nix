@@ -25,6 +25,27 @@
     # and why forge CI has been red since 2026-07-17.
     devenv.follows = "substrate/devenv";
 
+    # Required BY devenv's own containers module, which is instantiated the
+    # moment `inputs.devenv.flakeModule` is imported below. Without them
+    # `nix flake check` fails with devenv's own instruction:
+    #   error: To use 'containers', Add the following to flake.nix:
+    #   inputs.nix2container.url = "github:nlewo/nix2container";
+    #   inputs.mk-shell-bin.url  = "github:rrbutani/nix-mk-shell-bin";
+    #
+    # forge is the only pleme-io repo that imports devenv.flakeModule —
+    # substrate declares devenv but merely EXPORTS devenvModules, and
+    # iac-forge passes devenv into substrate's builder. Neither instantiates
+    # the container module, which is why neither needs these and why this
+    # failure was forge-only. The import is legitimate, not a deviation: it
+    # is how forge consumes substrate's exported devenvModules.rust.
+    #
+    # Both follow our nixpkgs so no second nixpkgs enters the closure.
+    nix2container = {
+      url = "github:nlewo/nix2container";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    mk-shell-bin.url = "github:rrbutani/nix-mk-shell-bin";
+
     substrate = {
       url = "github:pleme-io/substrate";
       inputs.fenix.follows = "fenix";
