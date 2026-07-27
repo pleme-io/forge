@@ -1,4 +1,16 @@
 [package]
+# Not published to crates.io — bump + tag only. The name `forge` belongs to a
+# third party there (gakonst, 5.5k downloads), so publishing would auto-rename
+# to `pleme-io-forge`, permanently forking this tool's public identity from its
+# repo name. It buys nothing: forge is a CLI delivered via nix (`nix run`) and
+# its own image/binary releases, and nothing imports it as a library.
+#
+# This is a DECISION, not an oversight — hence declared rather than left to the
+# publish step's rename fallback, which would otherwise mint pleme-io-forge on
+# the next release now that the repo is public. AUTO-RELEASE still bumps the
+# version and tags every merge (proven: v0.1.1 via crate-path); only the
+# registry push is off.
+publish = false
 name = "forge"
 version = "0.1.1"
 edition = "2021"
