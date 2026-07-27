@@ -1,7 +1,29 @@
 name: ci
-
 on: [push, pull_request]
-
 jobs:
   check:
     uses: pleme-io/substrate/.github/workflows/cargo-ci.yml@main
+    with:
+      # --impure is required because this flake exposes a devenv devShell.
+      #
+      # `nix flake check` evaluates EVERY output, including devShells, and a
+      # devenv shell cannot be evaluated purely — it needs the working
+      # directory, so a pure eval aborts with:
+      #   error: Failed assertions:
+      #   - devenv was not able to determine the current directory.
+      #
+      # Verified on this repo: pure `nix eval .#devShells.<sys>.default.name`
+      # fails with that assertion; the same eval under --impure yields
+      # "devenv-shell". It is an eval-time property of devenv, not a defect
+      # here, and it is why this CI was red from 2026-07-17 until today.
+      #
+      # Scope of the weakening is narrow and worth naming: it applies to the
+      # EVALUATION of this repo's flake outputs in CI. The checks themselves
+      # are still sandboxed nix builds. It does NOT make other repos impure —
+      # cargo-ci defaults flake-args to "" and the other five consumers are
+      # unaffected.
+      #
+      # The pure alternative is to stop exposing a devenv devShell (or to
+      # build `checks.<system>.*` explicitly instead of `flake check`). Either
+      # is a larger change than this repo's CI warrants right now.
+      flake-args: "--impure"
