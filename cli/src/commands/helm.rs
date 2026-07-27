@@ -5,7 +5,7 @@
 
 use crate::version;
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -578,12 +578,9 @@ fn mirror_one(
     registry: &str,
     timeout: Duration,
 ) -> Result<bool> {
-    let oci_ref = format!("{reg}/{name}");
-
-    // Already mirrored? `helm show chart` succeeds iff the ref exists.
-    if run_program_timed("helm", &["show", "chart", &oci_ref, "--version", version], timeout)
-        .unwrap_or(false)
-    {
+    // Already mirrored? Shares ONE definition of "already published" with the
+    // release path — see `chart_published`.
+    if chart_published(reg, name, version, timeout) {
         info!("Mirror: {name}:{version} already in {reg} — skip");
         return Ok(false);
     }
@@ -953,6 +950,90 @@ pub fn bump(
     Ok((old_version, new_version))
 }
 
+/// Read `version:` from a chart directory's `Chart.yaml`.
+fn chart_version_at(chart_dir: &str) -> Result<String> {
+    let content = std::fs::read_to_string(Path::new(chart_dir).join("Chart.yaml"))
+        .with_context(|| format!("read Chart.yaml in {chart_dir}"))?;
+    extract_yaml_field(&content, "version")
+}
+
+/// Package + push the library chart itself.
+///
+/// `Ok(Some(version))` = published, `Ok(None)` = already present (skipped).
+///
+/// A `type: library` chart has no templates of its own to render, so it is
+/// NOT linted here — `helm lint` on a library chart reports no-templates as
+/// a failure, which is exactly the kind of false red that would tempt the
+/// next person to exclude it again. It is packaged and pushed directly.
+fn release_lib_chart(
+    charts_dir: &str,
+    lib_chart_dir: Option<&str>,
+    lib_chart_name: &str,
+    registry: &str,
+    output_dir: &str,
+) -> Result<Option<String>> {
+    let lib_path = match lib_chart_dir {
+        Some(d) => PathBuf::from(d),
+        None => Path::new(charts_dir).join(lib_chart_name),
+    };
+    if !lib_path.join("Chart.yaml").exists() {
+        bail!("library chart not found at {}", lib_path.display());
+    }
+    let lib_str = lib_path.to_string_lossy().to_string();
+    let version = chart_version_at(&lib_str)?;
+
+    println!();
+    println!("==========================================");
+    println!("  Releasing {lib_chart_name} {version} (library)");
+    println!("==========================================");
+
+    if !republish_enabled()
+        && chart_published(
+            registry,
+            lib_chart_name,
+            &version,
+            Duration::from_secs(DEP_TIMEOUT_SECS),
+        )
+    {
+        println!("SKIP: {lib_chart_name} {version} already published (immutable)");
+        return Ok(None);
+    }
+
+    let tgz = package(&lib_str, output_dir, None)?;
+    push(&tgz, registry)?;
+    println!("DONE: {lib_chart_name} {version}");
+    Ok(Some(version))
+}
+
+/// Is `(name, version)` already published to `reg`?
+///
+/// `helm show chart <ref> --version <v>` succeeds iff the ref exists, so a
+/// failure is read as "absent". Deliberately fail-OPEN (absent on error): a
+/// registry hiccup must produce a redundant push, never a silent skip that
+/// looks like a successful release.
+///
+/// This is the probe `release_all` was missing. Both the helmworks and the
+/// substrate `helm-monorepo-auto-release.yml` headers already CLAIM the
+/// release path "404-probes each (name, version) and SKIPS anything already
+/// published" — it never did; only `mirror` probed. Extracted here so the
+/// two paths share ONE definition of "already published" rather than the
+/// docs describing a second, imaginary one.
+fn chart_published(reg: &str, name: &str, version: &str, timeout: Duration) -> bool {
+    let oci_ref = format!("{reg}/{name}");
+    run_program_timed("helm", &["show", "chart", &oci_ref, "--version", version], timeout)
+        .unwrap_or(false)
+}
+
+/// Should an already-published `(name, version)` be pushed over?
+///
+/// Off by default — a published chart version is immutable, which is what
+/// makes `version:` in a HelmRelease mean anything. `FORGE_HELM_REPUBLISH=1`
+/// re-enables the old overwrite-always behaviour for the rare case of
+/// repairing a corrupt upload (configure-off, not delete).
+fn republish_enabled() -> bool {
+    std::env::var("FORGE_HELM_REPUBLISH").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 /// Discover chart directories inside a parent directory.
 ///
 /// Returns chart names that have a Chart.yaml, excluding `exclude_name`.
@@ -1100,6 +1181,70 @@ mod file_dep_tests {
         assert!(file_dep_paths(oci).is_empty());
         assert!(file_dep_paths("name: x\nversion: 0.1.0\n").is_empty());
     }
+}
+
+#[cfg(test)]
+mod release_publish_tests {
+    use super::{chart_version_at, discover_charts, republish_enabled};
+
+    #[test]
+    fn chart_version_at_reads_the_chart_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Chart.yaml"),
+            "apiVersion: v2\nname: pleme-lib\ntype: library\nversion: 0.42.0\n",
+        )
+        .unwrap();
+        assert_eq!(chart_version_at(&dir.path().to_string_lossy()).unwrap(), "0.42.0");
+    }
+
+    #[test]
+    fn chart_version_at_errors_when_there_is_no_chart_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(chart_version_at(&dir.path().to_string_lossy()).is_err());
+    }
+
+    /// Immutability is the DEFAULT. If this ever flips, `version:` in a
+    /// HelmRelease silently stops pinning bytes — which is the exact defect
+    /// this pair of changes exists to close.
+    #[test]
+    fn republish_is_off_unless_explicitly_enabled() {
+        // SAFETY: single-threaded scope; restored before returning.
+        let prev = std::env::var("FORGE_HELM_REPUBLISH").ok();
+        unsafe { std::env::remove_var("FORGE_HELM_REPUBLISH") };
+        assert!(!republish_enabled(), "republish must default to OFF");
+
+        unsafe { std::env::set_var("FORGE_HELM_REPUBLISH", "1") };
+        assert!(republish_enabled(), "=1 must enable");
+        unsafe { std::env::set_var("FORGE_HELM_REPUBLISH", "true") };
+        assert!(republish_enabled(), "=true must enable");
+        unsafe { std::env::set_var("FORGE_HELM_REPUBLISH", "0") };
+        assert!(!republish_enabled(), "=0 must NOT enable");
+        unsafe { std::env::set_var("FORGE_HELM_REPUBLISH", "yes") };
+        assert!(!republish_enabled(), "an unrecognised value must NOT enable");
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("FORGE_HELM_REPUBLISH", v) },
+            None => unsafe { std::env::remove_var("FORGE_HELM_REPUBLISH") },
+        }
+    }
+
+    /// `discover_charts` still excludes the library chart from the DEPENDENT
+    /// list — that part was always correct. What was missing is that nothing
+    /// released it separately; `release_all` now does, before the dependents.
+    #[test]
+    fn discover_still_excludes_the_lib_from_dependents() {
+        let dir = tempfile::tempdir().unwrap();
+        for c in ["pleme-lib", "pleme-nats", "pleme-vector"] {
+            let d = dir.path().join(c);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("Chart.yaml"), format!("name: {c}\nversion: 0.1.0\n")).unwrap();
+        }
+        let found = discover_charts(&dir.path().to_string_lossy(), "pleme-lib").unwrap();
+        assert!(!found.contains(&"pleme-lib".to_string()), "lib must not be a dependent");
+        assert_eq!(found.len(), 2);
+    }
+
 }
 
 #[cfg(test)]
@@ -1360,6 +1505,27 @@ pub fn release_all(
 
     let mut failed: Vec<(String, String)> = Vec::new();
     let mut released = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    // ── The library chart ships FIRST, and it ships at all ──────────────
+    // `discover_charts` excludes it by name (correct — dependents get it
+    // copied into their workspace, so it must not be released as one of
+    // them). But nothing released it SEPARATELY either, so the baseline
+    // library was never published: GHCR sat at 0.40.1 while git reached
+    // 0.42.0, and any consumer OUTSIDE this monorepo — which resolves it
+    // over OCI rather than `file://../pleme-lib` — was capped there with no
+    // path forward. That is what drove helmworks-akeyless to vendor a
+    // 0.16.0 fork.
+    //
+    // It goes first because dependents resolve against it.
+    match release_lib_chart(charts_dir, lib_chart_dir, lib_chart_name, registry, output_dir) {
+        Ok(Some(v)) => released.push(format!("{lib_chart_name} (library) {v}")),
+        Ok(None) => skipped.push(format!("{lib_chart_name} (library, already published)")),
+        Err(e) => {
+            println!("FAIL: {lib_chart_name} (library) — {e}");
+            failed.push((lib_chart_name.to_string(), format!("library chart: {e}")));
+        }
+    }
 
     for chart_name in &charts {
         println!();
@@ -1407,8 +1573,22 @@ pub fn release_all(
             }
         };
 
-        // Push
+        // Push — but only if this exact (name, version) is not already up.
+        //
+        // Without this probe `release_all` re-pushed EVERY chart on EVERY
+        // merge, so an unchanged version number silently received new bytes
+        // and `version:` in a HelmRelease pinned nothing. Both workflow
+        // headers already claimed this skip existed; now it does.
         println!("--- Push ---");
+        let version = chart_version_at(&chart_path).unwrap_or_default();
+        if !version.is_empty()
+            && !republish_enabled()
+            && chart_published(registry, chart_name, &version, Duration::from_secs(DEP_TIMEOUT_SECS))
+        {
+            println!("SKIP: {chart_name} {version} already published (immutable)");
+            skipped.push(format!("{chart_name} {version}"));
+            continue;
+        }
         if let Err(e) = push(&tgz, registry) {
             println!("FAIL: {} push — {}", chart_name, e);
             failed.push((chart_name.clone(), format!("push: {e}")));
@@ -1420,7 +1600,12 @@ pub fn release_all(
     }
 
     println!();
-    info!("Released {}/{} charts", released.len(), charts.len());
+    info!("Released {} chart(s); skipped {} already-published", released.len(), skipped.len());
+    // No silent caps: every skip is named, so "nothing shipped" is never
+    // indistinguishable from "everything was already current".
+    if !skipped.is_empty() {
+        info!("Skipped (already published): {}", skipped.join(", "));
+    }
 
     if !failed.is_empty() {
         bail!(
