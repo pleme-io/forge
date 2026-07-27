@@ -1,0 +1,41 @@
+name: auto-release
+
+# Standard AUTO-RELEASE/AUTOBUMP: every merge to main bumps the patch
+# version, tags it, and publishes — no hand-typed version numbers.
+#
+# forge could not use this flow until now. Its crate lives at cli/, not the
+# repo root (there are two standalone crates here: cli/ and
+# provision/forge-provision/), and cargo-bump aborted with "no Cargo.toml at
+# repo root" before doing anything. Fixed by threading crate-path through
+# cargo-auto-release -> cargo-bump -> tatara-script's working-directory
+# (pleme-io/actions 2e30353, substrate cdb2adc) rather than restructuring
+# this repo into a cargo workspace — that would have collapsed both crates
+# onto one root lock and broken the flake's per-crate src.
+#
+# Calls the per-language reusable DIRECTLY. The polymorphic
+# auto-release.yml@main shim is known-broken (startup_failure with 0 jobs)
+# per the org CLAUDE.md AUTO-RELEASE section.
+#
+# The existing release.yml stays: it is tag-triggered and cuts an OFFICIAL
+# semver release. Per the AUTOBUMP doctrine those compose — official versions
+# are cut FROM the autobump stream, not built separately.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump-type:
+        description: "patch | minor | major"
+        required: false
+        default: patch
+
+jobs:
+  release:
+    uses: pleme-io/substrate/.github/workflows/cargo-auto-release.yml@main
+    with:
+      bump-type: ${{ inputs.bump-type || 'patch' }}
+      # The crate is at cli/. source-paths is interpreted relative to this,
+      # so the default "src Cargo.toml Cargo.lock" resolves correctly.
+      crate-path: "cli"
+    secrets: inherit
