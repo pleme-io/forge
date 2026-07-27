@@ -14,10 +14,16 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    devenv = {
-      url = "github:cachix/devenv";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    # Follow substrate's PINNED devenv rather than carrying our own URL.
+    # substrate's flake is explicit that this is the fleet source of truth,
+    # and that recent devenv revs (bc8b216 / c429c11 / c58faa9) EVAL-FAIL on
+    # this nixpkgs pin — a3ebee0 is the known-good rev. Carrying an unpinned
+    # `github:cachix/devenv` floated us straight onto a broken one, which is
+    # why `nix flake check` died with:
+    #   error: Failed assertions:
+    #   - devenv was not able to determine the current directory.
+    # and why forge CI has been red since 2026-07-17.
+    devenv.follows = "substrate/devenv";
 
     substrate = {
       url = "github:pleme-io/substrate";
