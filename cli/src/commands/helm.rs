@@ -979,6 +979,28 @@ fn release_lib_chart(
     if !lib_path.join("Chart.yaml").exists() {
         bail!("library chart not found at {}", lib_path.display());
     }
+    // Per-chart opt-out applies to the LIBRARY chart too.
+    //
+    // Without this, publishing the lib (added in the same change that made
+    // release_all publish it at all) would push ANY chart that happens to sit
+    // at `<charts>/<lib_chart_name>` — including a private VENDORED FORK. That
+    // is not hypothetical: helmworks-akeyless carries a tracked
+    // `charts/pleme-lib` fork at 0.16.0, and a release there would have
+    // injected a bogus `pleme-lib 0.16.0` into the SHARED
+    // oci://ghcr.io/pleme-io/charts, where published versions are immutable and
+    // therefore not cleanly removable.
+    //
+    // A repo whose lib chart is a fork declares
+    // `annotations: { pleme.io/oci-auto-release: "false" }` and is skipped —
+    // the same escape hatch dependents already had.
+    if chart_oci_auto_release_disabled(&lib_path) {
+        info!(
+            "Skipping {} (pleme.io/oci-auto-release: \"false\") — library chart not published",
+            lib_chart_name
+        );
+        return Ok(None);
+    }
+
     let lib_str = lib_path.to_string_lossy().to_string();
     let version = chart_version_at(&lib_str)?;
 
@@ -1185,7 +1207,9 @@ mod file_dep_tests {
 
 #[cfg(test)]
 mod release_publish_tests {
-    use super::{chart_version_at, discover_charts, republish_enabled};
+    use super::{
+        chart_oci_auto_release_disabled, chart_version_at, discover_charts, republish_enabled,
+    };
 
     #[test]
     fn chart_version_at_reads_the_chart_yaml() {
@@ -1232,6 +1256,38 @@ mod release_publish_tests {
     /// `discover_charts` still excludes the library chart from the DEPENDENT
     /// list — that part was always correct. What was missing is that nothing
     /// released it separately; `release_all` now does, before the dependents.
+    /// A forked library chart must NOT be publishable to the shared registry.
+    /// Guards the hazard that publishing the lib at all introduced: a repo
+    /// carrying its own `charts/pleme-lib` fork would otherwise inject a bogus
+    /// version into oci://ghcr.io/pleme-io/charts, where versions are
+    /// immutable and cannot be cleanly withdrawn.
+    #[test]
+    fn a_lib_chart_can_opt_out_of_publishing() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("pleme-lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(
+            lib.join("Chart.yaml"),
+            "apiVersion: v2\nname: pleme-lib\ntype: library\nversion: 0.16.0\n\
+             annotations:\n  pleme.io/oci-auto-release: \"false\"\n",
+        )
+        .unwrap();
+        assert!(
+            chart_oci_auto_release_disabled(&lib),
+            "an opted-out library chart must be detected as such"
+        );
+
+        // And the default (no annotation) must still publish.
+        let lib2 = dir.path().join("pleme-lib2");
+        std::fs::create_dir_all(&lib2).unwrap();
+        std::fs::write(
+            lib2.join("Chart.yaml"),
+            "apiVersion: v2\nname: pleme-lib\ntype: library\nversion: 0.42.0\n",
+        )
+        .unwrap();
+        assert!(!chart_oci_auto_release_disabled(&lib2), "default must publish");
+    }
+
     #[test]
     fn discover_still_excludes_the_lib_from_dependents() {
         let dir = tempfile::tempdir().unwrap();
