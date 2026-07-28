@@ -1,7 +1,13 @@
 use anyhow::Result;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+// `ConnectOptions` is what provides `PgConnectOptions::to_url_lossy`, used
+// below to derive the per-extension database URL. Without it in scope the
+// crate does not compile (E0599) — it went unnoticed because nothing in this
+// repo ever built these two provision crates: they are absent from flake.nix
+// and, until now, from CI.
 use sqlx::postgres::PgPoolOptions;
+use sqlx::ConnectOptions;
 use std::path::PathBuf;
 use tracing::{info, error};
 
@@ -150,10 +156,15 @@ async fn create_database(pool: &sqlx::PgPool, db: &DatabaseConfig) -> Result<()>
 
 async fn enable_extension(pool: &sqlx::PgPool, ext: &ExtensionConfig) -> Result<()> {
     // Connect to specific database
-    let db_url = pool.connect_options().database(&ext.database).to_url_lossy();
+    // `to_url_lossy` yields a `url::Url`; `connect` takes `&str`.
+    // `connect_options()` hands back an `Arc<PgConnectOptions>`, and
+    // `database()` consumes `self`, so the options must be cloned out of the
+    // Arc before they can be reconfigured.
+    let opts = pool.connect_options();
+    let db_url = (*opts).clone().database(&ext.database).to_url_lossy();
     let db_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect(&db_url)
+        .connect(db_url.as_str())
         .await?;
 
     let query = format!("CREATE EXTENSION IF NOT EXISTS {}", ext.name);

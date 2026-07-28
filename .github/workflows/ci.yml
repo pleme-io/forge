@@ -1,3 +1,28 @@
+# FLAKE EVALUATION GATE — NOT a test gate. Read this before trusting it.
+#
+# This delegates to substrate's cargo-ci.yml, which runs `nix flake check`.
+# substrate's header says that "runs whatever `checks.<system>.*` the flake
+# exposes (usually `cargo test` via the substrate baseline)". For this repo
+# BOTH halves of that sentence are false: flake.nix declares no `checks`
+# output, and the named substrate baseline does not exist either
+# (`lib/build/rust/library.nix` returns `{ packages, devShells, apps }`;
+# `lib/build/rust/lockfile-builder.nix` never mentions `runTests`).
+#
+# Consequence, measured on this repo: `nix flake check` reports every output
+# as "(build skipped)" and exits 0 even with `compile_error!` in a test
+# module — and even with literal non-Rust garbage in cli/src. It compiles
+# nothing. It is a pure evaluation check.
+#
+# That is still worth having: flake eval breakage is exactly what kept this
+# workflow red from 2026-07-17 until 3b58cfa, and the comments below record
+# how that was fixed. It is simply not evidence that any code compiles or
+# that any test passes.
+#
+# THE TESTS LIVE IN `.github/workflows/tests.yml` — `cargo test
+# --all-targets --all-features --locked` over 2,950 test attributes, with
+# the red-run receipts that prove it is non-vacuous. Do not read a green
+# `ci` as a green test suite.
+
 name: ci
 on: [push, pull_request]
 jobs:

@@ -1,0 +1,194 @@
+# forge test gate — the workflow that actually compiles and runs the tests.
+#
+# WHY THIS EXISTS (do not "simplify" it into the cargo-ci.yml shim):
+#
+#   `.github/workflows/ci.yml` delegates to
+#   `pleme-io/substrate/.github/workflows/cargo-ci.yml`, which runs
+#   `nix flake check`. That workflow's own header claims it "runs whatever
+#   `checks.<system>.*` the flake exposes (usually `cargo test` via the
+#   substrate baseline)". For this repo that sentence is FALSE in both
+#   halves, and the result was a gate that verified nothing:
+#
+#     * forge's flake.nix exposes NO `checks` output at all
+#       (`grep -c checks flake.nix` → 0), and
+#     * the substrate baseline it names does not exist either —
+#       `lib/build/rust/library.nix` returns `{ packages, devShells, apps }`
+#       with no `checks` key, and `lib/build/rust/lockfile-builder.nix`
+#       (the builder this repo actually uses) contains ZERO occurrences of
+#       `runTests`.
+#
+#   Measured receipt, taken on this repo before this workflow landed:
+#
+#     $ nix flake check --impure          # clean tree
+#     EXIT=0 in 8.66s
+#     ✅ packages.aarch64-darwin.forge-cli (build skipped)
+#
+#     $ # inject `compile_error!(...)` inside a #[cfg(test)] mod tests block
+#     $ nix flake check --impure
+#     EXIT=0                              # ← test code never compiled
+#
+#     $ # replace a function body with literal non-Rust garbage
+#     $ nix flake check --impure
+#     EXIT=0                              # ← the CRATE never compiled either
+#
+#   Every output reports "(build skipped)": `nix flake check` builds only
+#   `checks.<system>.*`, and with none declared it is a pure EVALUATION
+#   check. That is why the last `ci` run went green in 45 seconds while
+#   2,950 `#[test]`/`#[tokio::test]` attributes sat unexecuted.
+#
+#   ci.yml is KEPT — a flake-eval gate is genuinely useful (it is what was
+#   red from 2026-07-17 until 3b58cfa) — but it is not, and never was, a
+#   test gate. Its header has been corrected to say so.
+#
+# WHY NOT FIX IT AT THE FLAKE INSTEAD (the load-bearing fix, and why it is
+# blocked HERE rather than declined):
+#
+#   Making `nix flake check` honest would mean exposing
+#   `checks.<system>.tests` that runs the suite. The crate2nix API for that
+#   is `.override { runTests = true; }`, and it does not reach this repo:
+#
+#     $ nix build --impure --expr '(…forge-cli.override { runTests = true; })'
+#     error: function 'anonymous lambda' called with unexpected argument
+#            'runTests'
+#            at …/build-support/rust/build-rust-crate/default.nix:101:5
+#
+#   `runTests` is a crate2nix-generated-Cargo.nix concept; nixpkgs'
+#   `buildRustCrate` has no such argument, substrate's lockfile-builder
+#   never threads one, and this repo commits no `cli/Cargo.nix` (gen-cargo
+#   delta-only doctrine), so the legacy crate2nix path is unavailable too.
+#   The only way to expose a test-running check purely inside forge would be
+#   to stand up a SECOND, divergent Rust build path
+#   (`rustPlatform.buildRustPackage`) alongside the crate2nix one that
+#   actually ships — duplicating the build of the same crate, which
+#   Operating Principle #1 forbids. So the load-bearing fix belongs in
+#   substrate; see SUBSTRATE FOLLOW-UP at the bottom of this file.
+#
+#   That `checks` is the right lever was verified, not assumed: a temporary
+#   `checks.probe-red = runCommand … "exit 1"` made `nix flake check` exit 1
+#   and print `❌ checks.aarch64-darwin.probe-red`. The mechanism works; the
+#   ingredient to drive it is what is missing.
+#
+# THIS GATE WAS WATCHED FAILING BEFORE IT WAS TRUSTED (Tier ⊥ discipline —
+# a gate never observed to go red may be checking nothing):
+#
+#     compile_error! in a test module  → `cargo test` exit 101
+#     assert_eq!(1, 2) in a test body  → `cargo test` exit 101
+#                                        ("2926 passed; 1 failed")
+#
+#   Both halves matter: the first proves the test target is COMPILED, the
+#   second proves it is EXECUTED. `nix flake check` returned 0 on the very
+#   same inputs.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── The two crates flake.nix actually builds ────────────────────────
+  test:
+    name: cargo test (${{ matrix.crate }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Report BOTH crates' results; a failure in one must not mask the other.
+      fail-fast: false
+      matrix:
+        crate:
+          - cli
+          - provision/forge-provision
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: cargo --version && rustc --version && cmake --version | head -1
+
+      # `--all-targets` is load-bearing, not decoration: it is what forces
+      # every target (incl. the test target) to compile. The fleet precedent
+      # in pangea-forge exists precisely because `cargo build` stayed green
+      # for 59 days while the test target did not compile.
+      #
+      # `--all-features` is load-bearing HERE specifically, and measurably:
+      #   cargo test --all-targets              → 2663 passed
+      #   cargo test --all-targets --all-features → 2926 passed
+      # The 263-test delta is the `attestation` feature (optional `tameshi`
+      # dep), which gates whole modules via #[cfg(feature = "attestation")]
+      # in cli/src/main.rs. Without this flag those tests are as unrun as
+      # they were under `nix flake check`.
+      #
+      # `--locked` keeps CI honest about the committed Cargo.lock instead of
+      # silently resolving a different dependency graph than a release does.
+      # `working-directory` is set per-step rather than via `defaults.run`
+      # deliberately: matrix interpolation is documented as available in
+      # `jobs.<id>.defaults.run`, but it cannot be verified without pushing,
+      # and a step-level `working-directory` is unambiguous. (Either way the
+      # failure mode is loud — a wrong directory means no Cargo.toml and a
+      # red job, never a silent green.)
+      - name: cargo test --all-targets --all-features --locked
+        working-directory: ${{ matrix.crate }}
+        run: cargo test --all-targets --all-features --locked
+
+  # ── The two crates nothing has ever built ───────────────────────────
+  #
+  # provision/postgres and provision/attic are absent from flake.nix and had
+  # no Cargo.lock, so no build path in this repo — nix, CI, or release —
+  # ever compiled them. provision/postgres had accordingly rotted solid: it
+  # failed with THREE stacked errors against its own declared sqlx 0.8
+  # (E0599 missing `ConnectOptions` trait import, then E0308 `&Url` vs
+  # `&str`, then E0507 move-out-of-`Arc`), each one masked by the one before
+  # it. All three are fixed; a Cargo.lock is now committed for both so this
+  # gate pins a dependency graph instead of floating onto whatever crates.io
+  # published today.
+  #
+  # These run `cargo check`, not `cargo test`, for the honest reason that
+  # they contain zero test attributes — a `cargo test` here would be a
+  # vacuous gate of exactly the kind this file exists to remove. If either
+  # crate gains tests, promote it into the `test` matrix above.
+  compile:
+    name: cargo check (${{ matrix.crate }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - provision/postgres
+          - provision/attic
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: cargo --version && rustc --version
+
+      - name: cargo check --all-targets --locked
+        working-directory: ${{ matrix.crate }}
+        run: cargo check --all-targets --locked
+
+# ── SUBSTRATE FOLLOW-UP (the load-bearing fix this repo cannot make) ──
+#
+# Every consumer of `substrate/.github/workflows/cargo-ci.yml` inherits the
+# vacuum documented above, not just forge. Two changes close it at cause:
+#
+#   1. substrate/lib/build/rust/lockfile-builder.nix — thread a `runTests`
+#      argument through `mkProject` to the underlying builder (nixpkgs'
+#      `buildRustCrate` does not accept one, so this needs a real test
+#      derivation, not a passthrough), and surface it as a `checks.tests`
+#      attribute from the rust builders (`library.nix` currently returns
+#      `{ packages, devShells, apps }`; `tool-release.nix` already proves
+#      the shape by exposing `checks.gen-confirm`).
+#
+#   2. substrate/.github/workflows/cargo-ci.yml:14-15 — the header sentence
+#      "runs whatever `checks.<system>.*` the flake exposes (usually
+#      `cargo test` via the substrate baseline)" describes a baseline that
+#      does not exist. Until (1) lands it should say what the workflow
+#      really does: evaluate the flake and build only such `checks` as the
+#      consumer declares itself.
+#
+# A fleet sweep for other consumers with 0 `checks` in their flake will show
+# who else is currently green-on-nothing.
