@@ -2057,6 +2057,111 @@ impl PartialEq<StorePath> for &[u8] {
     }
 }
 
+/// Forward-direction owned byte-vec comparison peer — the byte-frontier
+/// sibling of [`impl PartialEq<String> for StorePath`] (line 1794) that
+/// closes the owned-receiver axis on the byte frontier: the same
+/// forward-direction × owned-receiver corner the owned UTF-8 pair covers
+/// on the UTF-8 frontier, split by frontier so a downstream caller who
+/// holds a [`StorePath`] and an owned [`Vec<u8>`] handle (a captured
+/// process-stdout buffer held by value from a
+/// [`std::process::Output::stdout`] read of `nix-build` / `attic push`
+/// argv confirmation, an owned wire-decode result from a byte-stream
+/// parser that returned a heap-owned buffer, a fixture-side
+/// `assert_eq!(sp, "/nix/store/…-x".to_vec())`) writes `sp == owned_bytes`
+/// at the comparison site without a per-site `sp.as_str().as_bytes() ==
+/// owned_bytes.as_slice()` restatement, without a `[..]` deref to reach
+/// the borrowed `[u8]` receiver peer at line 1925, and without a
+/// [`String::from_utf8`] round trip on the caller's byte buffer to reach
+/// the owned UTF-8-side [`PartialEq<String>`] peer.
+///
+/// Delegates through [`<StorePath as AsRef<[u8]>>::as_ref`] composed with
+/// [`Vec::as_slice`] and the standard-library [`<[u8] as
+/// PartialEq<[u8]>>::eq`], so the "what canonical bytes does a
+/// [`StorePath`] carry?" question stays defined at ONE accessor surface
+/// — the inherent [`StorePath::as_str`] projected onto bytes at the
+/// [`AsRef<[u8]>`] surface — and every byte-slice comparison receiver ×
+/// direction × ownership reads through it. Zero allocation, zero
+/// temporary buffer, zero re-validation of the store-path grammar per
+/// call.
+///
+/// Together with the reverse-direction sibling
+/// [`impl PartialEq<StorePath> for Vec<u8>`] directly below, closes the
+/// 2-impl owned-byte-vec × direction closure at the same one-oracle
+/// discipline the four-impl borrowed byte-slice closure above
+/// (`PartialEq<[u8]>` / `PartialEq<&[u8]>` for [`StorePath`] at lines
+/// 1925 / 1961; `PartialEq<StorePath>` for `[u8]` / `&[u8]` at lines
+/// 2023 / 2054) and the two-impl owned UTF-8 closure at lines 1794 /
+/// 1840 already carry on their own receiver × ownership axes. The four
+/// receiver × direction × ownership corners on the byte frontier —
+/// borrowed forward, borrowed reverse, owned forward, owned reverse —
+/// now match the six corners the UTF-8 frontier carries when the &str
+/// receiver-shape sibling is counted.
+///
+/// THEORY.md §III typed primitives: the forward-direction owned byte-vec
+/// comparison surface is a typed-primitive site on [`StorePath`] itself
+/// (one [`PartialEq<Vec<u8>>`] impl on [`StorePath`] routing through
+/// [`<StorePath as AsRef<[u8]>>::as_ref`] and [`Vec::as_slice`]), not a
+/// per-consumer `<StorePath as AsRef<[u8]>>::as_ref(&sp) ==
+/// owned_bytes.as_slice()` restatement at every downstream site that
+/// asks whether a [`StorePath`] value names the same canonical bytes as
+/// a heap-owned [`Vec<u8>`]. THEORY.md §VI.1 one-oracle: the canonical
+/// view is named at one site ([`StorePath::as_str`], projected onto
+/// bytes through [`str::as_bytes`] at the [`AsRef<[u8]>`] surface), and
+/// every byte-slice comparison surface — borrowed forward × receiver,
+/// borrowed reverse × receiver, and now this owned forward — reads
+/// through the same one-oracle discipline projected onto its own
+/// direction × receiver ownership.
+impl PartialEq<Vec<u8>> for StorePath {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        <Self as AsRef<[u8]>>::as_ref(self) == other.as_slice()
+    }
+}
+
+/// Reverse-direction owned byte-vec comparison peer — the direction
+/// sibling of [`impl PartialEq<Vec<u8>> for StorePath`] directly above,
+/// split by direction so the caller writes `owned_bytes == sp` at the
+/// comparison site (a fixture-side `assert_eq!(vec![…], sp)`, a
+/// wire-echo verifier that reads `captured_bytes == parsed_handle` with
+/// the captured buffer on the left, a generic [`PartialEq`]-bounded
+/// consumer composed on a [`Vec<u8>`] key against a [`StorePath`]
+/// value). Together with the forward-direction sibling this closes the
+/// 2-impl owned-byte-vec × direction closure at the same one-oracle
+/// discipline the four-impl borrowed byte-slice closure already carries.
+///
+/// Delegates through [`Vec::as_slice`] composed with [`<StorePath as
+/// AsRef<[u8]>>::as_ref`] and the standard-library [`<[u8] as
+/// PartialEq<[u8]>>::eq`], so the symmetry axiom
+/// `<Vec<u8> as PartialEq<StorePath>>::eq(&owned_bytes, &sp)
+/// == <StorePath as PartialEq<Vec<u8>>>::eq(&sp, &owned_bytes)` at every
+/// (owned_bytes, sp) pair holds by construction — both directions factor
+/// through the same [`AsRef<[u8]>`] one-oracle projection and the same
+/// standard-library `[u8]` equality. Pinned at
+/// [`tests::test_partial_eq_vec_bytes_store_path_symmetric_with_forward_direction`].
+///
+/// Extends the reverse-direction receiver frontier the borrowed-byte
+/// pair [`impl PartialEq<StorePath> for [u8]`] +
+/// [`impl PartialEq<StorePath> for &[u8]`] opened onto the owned-byte
+/// axis, mirroring the owned-UTF-8 extension the [`impl PartialEq<StorePath>
+/// for String`] peer at line 1840 opened onto the UTF-8 frontier.
+///
+/// THEORY.md §III typed primitives: the reverse-direction owned byte-vec
+/// comparison surface is a typed-primitive site on [`StorePath`] (one
+/// [`PartialEq<StorePath>`] impl on [`Vec<u8>`] routing through
+/// [`Vec::as_slice`] and [`<StorePath as AsRef<[u8]>>::as_ref`]), not a
+/// per-consumer `owned_bytes.as_slice() == <StorePath as
+/// AsRef<[u8]>>::as_ref(&sp)` restatement at every downstream comparison
+/// site. THEORY.md §VI.1 one-oracle: the canonical view is named at one
+/// site ([`StorePath::as_str`], projected onto bytes at the
+/// [`AsRef<[u8]>`] surface), and every byte-slice comparison surface —
+/// borrowed forward × receiver, borrowed reverse × receiver, owned
+/// forward, and this owned reverse — reads through the same one-oracle
+/// discipline projected onto its own direction × receiver ownership.
+impl PartialEq<StorePath> for Vec<u8> {
+    fn eq(&self, other: &StorePath) -> bool {
+        self.as_slice() == <StorePath as AsRef<[u8]>>::as_ref(other)
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -5149,6 +5254,136 @@ mod tests {
                 <&[u8] as PartialEq<StorePath>>::eq(&bytes, &sp),
                 <StorePath as PartialEq<&[u8]>>::eq(&sp, &bytes),
                 "reverse-direction PartialEq<StorePath> for &[u8] must agree with forward-direction PartialEq<&[u8]> for StorePath at {candidate:?}",
+            );
+        }
+    }
+
+    /// `<StorePath as PartialEq<Vec<u8>>>::eq(&sp, &owned_bytes)` must
+    /// agree byte-for-byte with
+    /// `<StorePath as AsRef<[u8]>>::as_ref(&sp) == owned_bytes.as_slice()`
+    /// at every (canonical-view, candidate) pair across the canonical,
+    /// sibling-hash, shorter-name, `.drv`-suffixed, empty, tail-only,
+    /// and invalid-UTF-8 candidate grid. Pins the delegation through the
+    /// [`AsRef<[u8]>`] one-oracle projection on the forward-direction
+    /// owned byte-vec peer, so a future refactor that severed the peer
+    /// from the accessor (a hand-rolled `as_str().as_bytes()` re-read on
+    /// the receiver side, a divergent trimming path, a
+    /// [`String::from_utf8`] detour through the UTF-8-side owned peer) is
+    /// caught here first at the forward-direction owned byte-vec
+    /// comparison frontier — the byte-frontier sibling of
+    /// [`test_partial_eq_string_agrees_with_as_str`] on the owned UTF-8
+    /// forward peer and the owned-receiver sibling of
+    /// [`test_partial_eq_bytes_agrees_with_as_ref_bytes`] on the
+    /// borrowed byte-slice forward peer.
+    #[test]
+    fn test_partial_eq_vec_bytes_agrees_with_as_ref_bytes() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates: [Vec<u8>; 8] = [
+            format!("/nix/store/{H}-hello-2.10").into_bytes(),
+            format!("/nix/store/{H}-hello-2.11").into_bytes(),
+            format!("/nix/store/{H}-x").into_bytes(),
+            format!("/nix/store/{H}-svc-1.2.3.drv").into_bytes(),
+            b"/nix/store/short".to_vec(),
+            Vec::new(),
+            b"hello-2.10".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ];
+        for candidate in &candidates {
+            let via_peer: bool = <StorePath as PartialEq<Vec<u8>>>::eq(&sp, candidate);
+            let via_accessor: bool =
+                <StorePath as AsRef<[u8]>>::as_ref(&sp) == candidate.as_slice();
+            assert_eq!(
+                via_peer, via_accessor,
+                "PartialEq<Vec<u8>> for StorePath must agree with as_ref::<[u8]>() == owned.as_slice() at {candidate:?}",
+            );
+        }
+    }
+
+    /// The reflexive identity
+    /// `<StorePath as PartialEq<Vec<u8>>>::eq(&sp,
+    /// &<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec())` must hold at
+    /// every [`StorePath`] value — a variant compared against a heap-
+    /// owned copy of its own canonical byte view always answers true.
+    /// Pins the accessor's own bytes as a fixed point of the owned-
+    /// receiver forward-direction peer so a future refactor that quietly
+    /// re-encoded the canonical byte view breaks here rather than at
+    /// every downstream `sp == owned_bytes` call site — the byte-frontier
+    /// sibling of [`test_partial_eq_string_reflexive_at_own_canonical_view`]
+    /// on the owned UTF-8 forward peer.
+    #[test]
+    fn test_partial_eq_vec_bytes_reflexive_at_own_canonical_view() {
+        for raw in [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-foo-bar-1.2.3"),
+            format!("/nix/store/{H}-svc-1.2.3.drv"),
+        ] {
+            let sp = StorePath::parse(&raw).unwrap();
+            let owned_bytes: Vec<u8> = <StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec();
+            assert!(
+                <StorePath as PartialEq<Vec<u8>>>::eq(&sp, &owned_bytes),
+                "PartialEq<Vec<u8>> for StorePath must be reflexive at own canonical view for {raw:?}",
+            );
+        }
+    }
+
+    /// The trimming discipline of [`StorePath::parse`] reaches through the
+    /// forward-direction owned byte-vec peer — a value parsed from a
+    /// newline-terminated buffer compares equal to a heap-owned copy of
+    /// the *trimmed* canonical literal on the owned-byte-vec side, not to
+    /// a heap-owned copy of the raw newline-terminated buffer. Pins the
+    /// invariant that the owned-byte-vec peer reads the same canonical
+    /// bytes the [`AsRef<[u8]>`] accessor exposes, at the wire-boundary
+    /// shape the peer exists to serve — the byte-frontier sibling of
+    /// [`test_partial_eq_string_trims_through_peer`] on the owned UTF-8
+    /// pair and the owned-receiver sibling of
+    /// [`test_partial_eq_bytes_trims_through_peer`] on the borrowed
+    /// byte-slice pair.
+    #[test]
+    fn test_partial_eq_vec_bytes_trims_through_peer() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-svc-1.2.3\n")).unwrap();
+        let trimmed: Vec<u8> = format!("/nix/store/{H}-svc-1.2.3").into_bytes();
+        let untrimmed: Vec<u8> = format!("/nix/store/{H}-svc-1.2.3\n").into_bytes();
+        assert!(<StorePath as PartialEq<Vec<u8>>>::eq(&sp, &trimmed));
+        assert!(!<StorePath as PartialEq<Vec<u8>>>::eq(&sp, &untrimmed));
+    }
+
+    /// The reverse-direction and forward-direction owned byte-vec
+    /// comparison surfaces on the [`StorePath`] typed primitive agree
+    /// byte-for-byte at every (owned_bytes, [`StorePath`]) pair — the
+    /// symmetry axiom
+    /// `<Vec<u8> as PartialEq<StorePath>>::eq(&owned_bytes, &sp)
+    /// == <StorePath as PartialEq<Vec<u8>>>::eq(&sp, &owned_bytes)` holds
+    /// across the canonical, sibling-hash, shorter-name, `.drv`-suffixed,
+    /// empty, tail-only, and invalid-UTF-8 candidate grid. Pins the
+    /// 2-impl owned-byte-vec × direction closure so a future refactor
+    /// that diverged one impl from its symmetric peer breaks this pin at
+    /// at least one pair rather than propagating unnoticed through
+    /// downstream generic [`PartialEq`]-bounded consumers that thread a
+    /// [`StorePath`] through either side of a `==` operator against a
+    /// heap-owned [`Vec<u8>`] key. Structural mirror of
+    /// [`test_partial_eq_string_store_path_symmetric_with_forward_direction`]
+    /// on the owned UTF-8 pair and of
+    /// [`test_partial_eq_store_path_bytes_symmetric_with_forward_direction`]
+    /// on the borrowed byte-slice pair.
+    #[test]
+    fn test_partial_eq_vec_bytes_store_path_symmetric_with_forward_direction() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates: [Vec<u8>; 8] = [
+            format!("/nix/store/{H}-hello-2.10").into_bytes(),
+            format!("/nix/store/{H}-hello-2.11").into_bytes(),
+            format!("/nix/store/{H}-x").into_bytes(),
+            format!("/nix/store/{H}-svc-1.2.3.drv").into_bytes(),
+            b"/nix/store/short".to_vec(),
+            Vec::new(),
+            b"hello-2.10".to_vec(),
+            vec![0xffu8, 0xfeu8, 0xfdu8],
+        ];
+        for candidate in &candidates {
+            assert_eq!(
+                <Vec<u8> as PartialEq<StorePath>>::eq(candidate, &sp),
+                <StorePath as PartialEq<Vec<u8>>>::eq(&sp, candidate),
+                "reverse-Vec<u8> and forward-Vec<u8> PartialEq peers must agree at {candidate:?}",
             );
         }
     }
