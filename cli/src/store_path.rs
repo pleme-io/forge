@@ -859,6 +859,95 @@ impl TryFrom<Vec<u8>> for StorePath {
     }
 }
 
+/// Shrunk-owned byte-slice try-conversion peer for [`StorePath::parse`]
+/// via the [`TryFrom<Box<[u8]>>`] trait — the byte-slice counterpart of
+/// the [`TryFrom<Box<str>>`] shrunk-owned UTF-8 peer above, closing the
+/// byte-slice parse frontier at the receiver shape whose caller holds a
+/// capacity-shrunk owned byte buffer (`Box<[u8]>`: `len == capacity`, no
+/// spare `Vec` capacity header) rather than a general-purpose
+/// [`Vec<u8>`].
+///
+/// Delegates through [`Vec::<u8>::from`] on the caller-supplied
+/// [`Box<[u8]>`] — which reuses the same allocation as the returned
+/// [`Vec<u8>`]'s backing storage without a re-allocation (the standard
+/// library documents `Vec::from(Box<[T]>)` as an O(1) header rewrap:
+/// `Box<[T]>` is stored `len == capacity`, so the resulting `Vec` binds
+/// the same pointer, length, and capacity, and no element is moved) —
+/// then routes into `<Self as TryFrom<Vec<u8>>>::try_from`. The
+/// store-path grammar stays defined at ONE construction surface — the
+/// [`std::str::FromStr`] peer, which itself delegates to
+/// [`StorePath::parse`], reached through the [`TryFrom<Vec<u8>>`] impl
+/// that also carries the [`String::from_utf8`] two-stage strictness gate.
+/// A grammar clause added to `parse` lights up at this frontier without a
+/// second edit; the UTF-8 decode gate is the one place non-textual input
+/// is rejected before the grammar oracle is consulted.
+///
+/// # Why the trait peer earns its keep
+///
+/// The [`TryFrom<&[u8]>`] and [`TryFrom<Vec<u8>>`] peers directly above
+/// close the borrowed and by-value general-owned byte-slice frontiers.
+/// [`TryFrom<Box<[u8]>>`] covers the disjoint shrunk-owned byte-slice
+/// receiver shape stdlib and the wider ecosystem key off separately:
+///
+/// - `#[serde(try_from = "Box<[u8]>")]` — the serde container attribute
+///   for the shrunk-owned byte case (a deserializer that hands out
+///   capacity-shrunk owned byte buffers so peers hold the tightest
+///   possible owned allocation without paying the [`Vec<u8>`] capacity
+///   header) keys off [`TryFrom<Box<[u8]>>`], not [`TryFrom<Vec<u8>>`],
+///   [`TryFrom<&[u8]>`], [`TryFrom<Box<str>>`], or [`FromStr`]. A future
+///   serde field wrapping a [`StorePath`] and opting into the
+///   shrunk-owned byte `try_from` grammar reaches the store-path check
+///   through this impl without a shim.
+/// - Generic try-conversion bounds (`fn parse_field<T: TryFrom<Box<[u8]>>>`)
+///   — a validated-input newtype builder or attestation-column reader
+///   whose parse contract is stated at the shrunk-owned byte receiver
+///   layer (a `Vec::<u8>::into_boxed_slice` terminus that hands a
+///   capacity-shrunk owned buffer to a typed parser, a `bytes::Bytes`
+///   round-trip point at the async HTTP-body / registry-response
+///   frontier where the caller has already released the [`Vec<u8>`]'s
+///   spare capacity) can name [`StorePath`] alongside every other
+///   shrunk-owned byte try-conversion primitive without routing through
+///   a `Vec::<u8>::from(boxed)` shim.
+/// - The sibling shrunk-owned UTF-8 peer directly above at
+///   [`TryFrom<Box<str>>`] closes the UTF-8-string counterpart of this
+///   receiver shape; this impl is the byte-slice dual on the same
+///   shrunk-owned axis, so the byte-slice frontier is now closed at all
+///   three of the string family's owned receiver shapes it needs to
+///   match ([`&[u8]`] ↔ [`&str`]; [`Vec<u8>`] ↔ [`String`]; [`Box<[u8]>`]
+///   ↔ [`Box<str>`]) at the store-path axis.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at two frontiers, in order, exactly as at the
+/// [`TryFrom<Vec<u8>>`] peer above (this impl reaches through it):
+///
+/// 1. Non-UTF-8 byte sequences reject at [`String::from_utf8`] with the
+///    typed [`StorePathError::NonUtf8Bytes`] variant carrying the
+///    offending buffer recovered through
+///    [`std::string::FromUtf8Error::into_bytes`] verbatim (no clone),
+///    routed through the [`Vec<u8>`] the `Box<[u8]>` unwrapped into
+///    without re-allocation.
+/// 2. Valid-UTF-8 byte sequences that decode to a non-store-path string
+///    reject at the underlying [`FromStr`] impl with the exact
+///    grammar-clause variant the input violated
+///    (`MissingStorePrefix` / `HasSubpath` / `TooShort` / `InvalidHash`
+///    / `MissingSeparator` / `EmptyName`).
+///
+/// # Error shape
+///
+/// `Self::Error = StorePathError`. The typed grammar-clause enum carries
+/// through — no widening to [`anyhow::Error`] or `Box<dyn Error>` hides
+/// between the shrunk-owned byte-slice try-conversion surface and the
+/// inherent constructor, so a caller can still `match` on the exact
+/// rejection site at the trait entry point.
+impl TryFrom<Box<[u8]>> for StorePath {
+    type Error = StorePathError;
+
+    fn try_from(boxed: Box<[u8]>) -> Result<Self, Self::Error> {
+        <Self as TryFrom<Vec<u8>>>::try_from(Vec::<u8>::from(boxed))
+    }
+}
+
 /// By-reference read-back peer for [`StorePath::as_str`] via the
 /// [`AsRef<str>`] trait — the [`std::fmt::Display`] impl above emits the
 /// full path into a formatter; this peer exposes the same view directly as
@@ -2473,6 +2562,184 @@ mod tests {
         let raw_nl = format!("/nix/store/{H}-x\n");
         let trimmed: StorePath = parse_via_try_from(raw_nl.as_bytes().to_vec())
             .expect("trailing newline must be trimmed at generic TryFrom<Vec<u8>> bound");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// [`TryFrom<Box<[u8]>>`] must accept every input the inherent
+    /// [`StorePath::parse`] accepts and produce a value equal to the
+    /// [`FromStr`] round-trip on the borrowed view of the same buffer,
+    /// AND cross-agree byte-for-byte with the sibling [`TryFrom<Vec<u8>>`]
+    /// and [`TryFrom<&[u8]>`] peers on the same canonical bytes. Pins the
+    /// delegation through `<Self as TryFrom<Vec<u8>>>::try_from(Vec::from(boxed))`:
+    /// a future refactor that severed the trait impl from the shared
+    /// [`Vec<u8>`] entry point (e.g., inlined a `Self::parse` call with a
+    /// stale grammar clause, or cloned the boxed byte buffer into a fresh
+    /// [`String`] and let the two surfaces drift on whitespace handling)
+    /// would fail here first.
+    #[test]
+    fn test_try_from_box_bytes_success_agrees_with_fromstr() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let boxed: Box<[u8]> = raw.as_bytes().to_vec().into_boxed_slice();
+        let via_box = <StorePath as TryFrom<Box<[u8]>>>::try_from(boxed)
+            .expect("valid store-path bytes must parse via TryFrom<Box<[u8]>>");
+        let via_str: StorePath = raw.parse().unwrap();
+        let via_vec = StorePath::try_from(raw.as_bytes().to_vec())
+            .expect("valid store-path bytes must parse via TryFrom<Vec<u8>>");
+        let via_slice = StorePath::try_from(raw.as_bytes())
+            .expect("valid store-path bytes must parse via TryFrom<&[u8]>");
+        assert_eq!(via_box, via_str);
+        assert_eq!(
+            via_box, via_vec,
+            "TryFrom<Box<[u8]>> and TryFrom<Vec<u8>> must agree on canonical bytes"
+        );
+        assert_eq!(
+            via_box, via_slice,
+            "TryFrom<Box<[u8]>> and TryFrom<&[u8]> must agree on canonical bytes"
+        );
+        assert_eq!(via_box.hash(), H);
+        assert_eq!(via_box.name(), "hello-2.10");
+
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let boxed_nl: Box<[u8]> = raw_nl.as_bytes().to_vec().into_boxed_slice();
+        let trimmed = <StorePath as TryFrom<Box<[u8]>>>::try_from(boxed_nl)
+            .expect("trailing newline must be trimmed at TryFrom<Box<[u8]>> surface");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+        let trimmed_vec = StorePath::try_from(raw_nl.as_bytes().to_vec())
+            .expect("trailing newline must be trimmed at TryFrom<Vec<u8>> surface");
+        assert_eq!(
+            trimmed, trimmed_vec,
+            "TryFrom<Box<[u8]>> and TryFrom<Vec<u8>> must agree on trimmed canonical bytes"
+        );
+    }
+
+    /// A non-UTF-8 [`Box<[u8]>`] must reject at the [`String::from_utf8`]
+    /// decode gate reached through the [`TryFrom<Vec<u8>>`] delegation
+    /// with the [`StorePathError::NonUtf8Bytes`] variant BEFORE any
+    /// grammar clause is evaluated. The rejection must be byte-identical
+    /// to the sibling [`TryFrom<Vec<u8>>`] and [`TryFrom<&[u8]>`] peers'
+    /// rejection on the same input, so a caller switching between the
+    /// three byte receiver shapes reads the same typed error variant with
+    /// the same offending-bytes payload — and the source is reachable
+    /// through the [`std::error::Error::source`] chain without re-decoding.
+    #[test]
+    fn test_try_from_box_bytes_rejects_non_utf8_input() {
+        use std::error::Error as _;
+        // 0xFF is never valid as a UTF-8 leading byte; the buffer starts
+        // with a valid store-path prefix so the rejection is proven to
+        // fire at the UTF-8 gate, not at the grammar oracle.
+        let mut buf: Vec<u8> = b"/nix/store/".to_vec();
+        buf.push(0xFF);
+        buf.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x");
+        let expected_bytes = buf.clone();
+        let boxed: Box<[u8]> = buf.into_boxed_slice();
+        let err = <StorePath as TryFrom<Box<[u8]>>>::try_from(boxed)
+            .expect_err("non-UTF-8 bytes must reject at TryFrom<Box<[u8]>>");
+        match &err {
+            StorePathError::NonUtf8Bytes { bytes, source: _ } => {
+                assert_eq!(
+                    bytes.as_slice(),
+                    expected_bytes.as_slice(),
+                    "the offending bytes must survive verbatim on the failure record"
+                );
+            }
+            other => panic!("expected NonUtf8Bytes, got: {other:?}"),
+        }
+        // The underlying std::str::Utf8Error must be reachable through the
+        // Error::source chain — no re-decoding, no display-string parsing.
+        let src = err.source().expect("NonUtf8Bytes must carry a source");
+        assert!(
+            src.downcast_ref::<std::str::Utf8Error>().is_some(),
+            "source must downcast to std::str::Utf8Error, got display: {src}",
+        );
+        // Agreement with the sibling owned-byte and by-reference peers:
+        // the same rejection must fire at all three surfaces so a caller
+        // switching between them reads the same typed error variant with
+        // the same offending-bytes payload.
+        let err_vec = StorePath::try_from(expected_bytes.clone())
+            .expect_err("non-UTF-8 bytes must reject at TryFrom<Vec<u8>>");
+        let err_slice = StorePath::try_from(expected_bytes.as_slice())
+            .expect_err("non-UTF-8 bytes must reject at TryFrom<&[u8]>");
+        assert_eq!(
+            err, err_vec,
+            "TryFrom<Box<[u8]>> and TryFrom<Vec<u8>> must emit byte-identical NonUtf8Bytes rejection"
+        );
+        assert_eq!(
+            err, err_slice,
+            "TryFrom<Box<[u8]>> and TryFrom<&[u8]> must emit byte-identical NonUtf8Bytes rejection"
+        );
+    }
+
+    /// Valid UTF-8 boxed bytes that decode to a non-store-path string
+    /// must reject at the underlying [`FromStr`] impl with the exact
+    /// grammar-clause variant the input violated — the two-stage
+    /// strictness contract: UTF-8 decode gate first, grammar oracle
+    /// second. Pins that the shrunk-owned-byte peer routes rejection
+    /// through the ONE grammar oracle at [`StorePath::parse`] rather
+    /// than a divergent second parse path, and that rejection at
+    /// [`TryFrom<Box<[u8]>>`] tracks rejection at [`TryFrom<Vec<u8>>`]
+    /// and [`TryFrom<&[u8]>`] variant-for-variant at every reject-set
+    /// element once UTF-8 validation clears.
+    #[test]
+    fn test_try_from_box_bytes_rejects_non_canonical_input() {
+        // `/nix/store/short` is valid UTF-8 but too short to hold a 32-
+        // char hash — the exact grammar clause `StorePathError::TooShort`
+        // discriminates.
+        let boxed: Box<[u8]> = b"/nix/store/short".to_vec().into_boxed_slice();
+        let err = <StorePath as TryFrom<Box<[u8]>>>::try_from(boxed)
+            .expect_err("non-canonical UTF-8 bytes must reject at TryFrom<Box<[u8]>>");
+        assert!(
+            matches!(err, StorePathError::TooShort { .. }),
+            "expected TooShort, got: {err:?}"
+        );
+        let err_vec = StorePath::try_from(b"/nix/store/short".to_vec())
+            .expect_err("non-canonical UTF-8 bytes must reject at TryFrom<Vec<u8>>");
+        assert_eq!(
+            err, err_vec,
+            "TryFrom<Box<[u8]>> and TryFrom<Vec<u8>> must agree on grammar-clause rejection"
+        );
+
+        // A relative-path input must fire `MissingStorePrefix`, not
+        // `NonUtf8Bytes` — the UTF-8 gate cleared, so the grammar
+        // oracle owns the rejection.
+        let boxed_rel: Box<[u8]> = b"relative/path".to_vec().into_boxed_slice();
+        let err = <StorePath as TryFrom<Box<[u8]>>>::try_from(boxed_rel)
+            .expect_err("relative-path bytes must reject at TryFrom<Box<[u8]>>");
+        assert!(
+            matches!(err, StorePathError::MissingStorePrefix { .. }),
+            "expected MissingStorePrefix, got: {err:?}"
+        );
+    }
+
+    /// A generic `fn f<T: TryFrom<Box<[u8]>>>` consumer must accept a
+    /// shrunk-owned byte buffer and recover a validated [`StorePath`]
+    /// through the trait bound. Structural witness that [`StorePath`] is
+    /// genuinely usable at [`TryFrom<Box<[u8]>>`] call sites — the surface
+    /// a `#[serde(try_from = "Box<[u8]>")]` container attribute and any
+    /// generic shrunk-owned byte try-conversion helper both key off. If a
+    /// future change narrowed the bound or the error type, this test
+    /// fails at compile time.
+    #[test]
+    fn test_try_from_box_bytes_generic_consumer_recovers_identity() {
+        fn parse_via_try_from<T>(bytes: Box<[u8]>) -> Result<T, T::Error>
+        where
+            T: TryFrom<Box<[u8]>>,
+        {
+            T::try_from(bytes)
+        }
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let boxed: Box<[u8]> = raw.as_bytes().to_vec().into_boxed_slice();
+        let path: StorePath = parse_via_try_from(boxed)
+            .expect("valid store-path bytes must parse via generic TryFrom<Box<[u8]>> bound");
+        assert_eq!(path.name(), "foo-bar-1.2.3");
+        assert_eq!(path.hash(), H);
+        // The trimming discipline reaches through the generic bound too:
+        // a caller consuming a `Vec::into_boxed_slice`-terminated buffer
+        // does not need to pre-trim before handing it to the generic
+        // try-conversion helper — the grammar owns the trim in one place.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let boxed_nl: Box<[u8]> = raw_nl.as_bytes().to_vec().into_boxed_slice();
+        let trimmed: StorePath = parse_via_try_from(boxed_nl)
+            .expect("trailing newline must be trimmed at generic TryFrom<Box<[u8]>> bound");
         assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
     }
 
