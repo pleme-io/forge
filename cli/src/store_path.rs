@@ -824,6 +824,87 @@ impl AsRef<std::ffi::OsStr> for StorePath {
     }
 }
 
+/// By-reference byte-slice read-back peer for [`StorePath::as_str`] via the
+/// [`AsRef<[u8]>`] trait — the sibling of the [`AsRef<str>`],
+/// [`AsRef<std::path::Path>`], and [`AsRef<std::ffi::OsStr>`] peers directly
+/// above at the byte-slice frontier, so a consumer bound by
+/// `impl AsRef<[u8]>` — the input surface every streaming hasher
+/// ([`blake3::Hasher::update`], `sha2::Sha256::update`, `blake2::Blake2b::update`),
+/// [`std::io::Write::write_all`] sink, [`std::collections::HashMap`]`<Box<[u8]>, _>`
+/// key builder, and memchr-driven byte classifier keys off — reads the
+/// canonical byte view directly from a [`StorePath`] value without a
+/// call-site `sp.as_str().as_bytes()` restatement.
+///
+/// Delegates through `<Self as AsRef<str>>::as_ref` composed with
+/// [`str::as_bytes`], so the "what does a [`StorePath`] read back as?"
+/// question stays defined at ONE accessor surface — the inherent
+/// [`StorePath::as_str`] — and the borrowed-view axis routes through it at
+/// every frontier peer without a divergent second accessor. A future change
+/// to the internal representation lands in [`StorePath::as_str`] once and
+/// the [`AsRef<str>`] / [`AsRef<std::path::Path>`] / [`AsRef<std::ffi::OsStr>`]
+/// / this [`AsRef<[u8]>`] peer light up in the same commit.
+///
+/// # Why the trait peer earns its keep
+///
+/// The [`AsRef<str>`] peer closes the UTF-8 string frontier
+/// (`fn f<S: AsRef<str>>` — record writers, attestation-column emitters,
+/// third-party APIs that bind `impl AsRef<str>`). The
+/// [`AsRef<std::path::Path>`] peer closes the filesystem-path frontier the
+/// [`std::fs`] surface keys off. The [`AsRef<std::ffi::OsStr>`] peer closes
+/// the OS-string frontier the [`std::process::Command`] surface binds.
+/// [`AsRef<[u8]>`] closes the disjoint byte-slice frontier that hashing,
+/// byte-sink, and byte-keyed-lookup machinery bind: a validated
+/// [`StorePath`] handed to any of those boundaries reaches the byte frontier
+/// through the typed primitive without a per-site
+/// `sp.as_str().as_bytes()` restatement:
+///
+/// - [`blake3::Hasher::update`] / `sha2::Sha256::update` /
+///   `blake2::Blake2b::update` — a caller that folds a validated store path
+///   into a build / attestation / closure fingerprint reads directly from a
+///   [`StorePath`] value. This is the exact discipline
+///   [`canonical_closure_fingerprint`] applies to the *set* of hashes
+///   extracted by [`parse_closure_paths`]: the byte-slice frontier is where
+///   the hermetic identity of a validated store path meets the hasher, and
+///   the peer that carries the identity to it is `AsRef<[u8]>`.
+/// - [`std::io::Write::write_all`] — an attestation-column emitter that
+///   streams a validated store path to a byte sink (a manifest writer, a
+///   provenance-log appender) binds `impl AsRef<[u8]>` at its intake and
+///   reads through the peer without a two-step `write_all(sp.as_str().as_bytes())`
+///   restatement.
+/// - [`std::collections::HashMap`]`<Box<[u8]>, _>::get` — a caller keying a
+///   dedup / seen-set / interning table on the raw byte view of a store
+///   path (a memchr-shaped byte comparator that outruns UTF-8-aware
+///   comparison at the hot path) reaches the byte-slice frontier through
+///   the typed primitive at one impl.
+/// - Sibling canonical-label typed sums in this crate already carry the
+///   peer at the same byte-slice read-back frontier:
+///   `impl AsRef<[u8]> for BumpLevel` at `version.rs`,
+///   `impl AsRef<[u8]> for PerAttemptRegion` at `retry.rs`,
+///   `impl AsRef<[u8]> for AdmissionTier` at `probe_outcome.rs`;
+///   [`StorePath`] is the store-path primitive counterpart at the same
+///   frontier — the borrowed-view axis of this crate's typed primitives is
+///   now closed across the UTF-8 string frontier ([`AsRef<str>`]), the
+///   filesystem-path frontier ([`AsRef<std::path::Path>`]), the OS-string
+///   frontier ([`AsRef<std::ffi::OsStr>`]), and the byte-slice frontier
+///   (this peer) at the store-path axis.
+///
+/// # Zero-cost
+///
+/// Returns a borrow of the interned [`String`]'s UTF-8 bytes.
+/// [`str::as_bytes`] is a zero-cost view transmute at the borrow-view
+/// boundary — no allocation, no [`Vec<u8>`] copy, no re-validation of the
+/// store-path grammar. The [`&[u8]`] this peer exposes has the same
+/// lifetime as the borrow of the [`StorePath`], so a caller can bind it in
+/// one expression without widening to [`Vec<u8>`]. A store-path payload is
+/// ASCII by construction (base-32 hash from a fixed 32-char alphabet, plus
+/// a name from the store-path name grammar), so [`std::str::from_utf8`]
+/// round-trips the bytes losslessly at every valid [`StorePath`] value.
+impl AsRef<[u8]> for StorePath {
+    fn as_ref(&self) -> &[u8] {
+        <Self as AsRef<str>>::as_ref(self).as_bytes()
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -2042,6 +2123,98 @@ mod tests {
             recorded[0],
             std::ffi::OsStr::new(&format!("/nix/store/{H}-svc-1.2.3")),
             "trimming discipline must reach through the OS-string frontier"
+        );
+    }
+
+    /// The [`AsRef<[u8]>`] peer must expose the same borrowed canonical
+    /// string view the inherent [`StorePath::as_str`] gives, just projected
+    /// onto the byte-slice frontier through [`str::as_bytes`]. Pins the
+    /// delegation so a future refactor that severed the trait impl from the
+    /// inherent accessor (e.g. a copy that re-emitted a stale representation,
+    /// or an intermediate [`String::into_bytes`] path that discarded the
+    /// zero-copy borrow) is caught here. The trimming discipline reaches
+    /// through the peer: a store path parsed from a newline-terminated buffer
+    /// reads back through `AsRef<[u8]>` as the trimmed canonical path bytes.
+    #[test]
+    fn test_asref_bytes_matches_inherent_as_str_as_bytes() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let via_asref: &[u8] = sp.as_ref();
+        assert_eq!(via_asref, sp.as_str().as_bytes());
+        assert_eq!(via_asref, format!("/nix/store/{H}-hello-2.10").as_bytes());
+        // Trimming discipline reaches through the peer.
+        let sp_nl = StorePath::parse(&format!("/nix/store/{H}-x\n")).unwrap();
+        let via_asref_nl: &[u8] = sp_nl.as_ref();
+        assert_eq!(via_asref_nl, format!("/nix/store/{H}-x").as_bytes());
+    }
+
+    /// A generic `fn f<S: AsRef<[u8]>>` consumer must accept a borrowed
+    /// [`StorePath`] and recover the canonical byte view through the trait
+    /// bound. This is the structural witness that [`StorePath`] is genuinely
+    /// usable at streaming-hasher `update`, [`std::io::Write::write_all`],
+    /// and `HashMap<Box<[u8]>, _>::get` call sites — the surface every
+    /// `impl AsRef<[u8]>` boundary keys off — without a call-site
+    /// `sp.as_str().as_bytes()` restatement. If a future change narrowed the
+    /// bound, this test fails at compile time. Also pins that
+    /// [`std::str::from_utf8`] round-trips the byte view back to the
+    /// canonical string view (the store-path payload is ASCII by grammar, so
+    /// the round trip is UTF-8-lossless on every valid [`StorePath`]), so a
+    /// consumer that crosses back to the string frontier through the peer
+    /// sees the same bytes the [`AsRef<str>`] peer would have emitted.
+    #[test]
+    fn test_asref_bytes_generic_consumer_recovers_canonical_view() {
+        fn read_bytes<S: AsRef<[u8]>>(s: &S) -> &[u8] {
+            s.as_ref()
+        }
+        let sp = StorePath::parse(&format!("/nix/store/{H}-foo-bar-1.2.3")).unwrap();
+        let bytes = read_bytes(&sp);
+        assert_eq!(bytes, sp.as_str().as_bytes());
+        // Round-trip through the byte frontier back to the string frontier
+        // recovers the canonical string bytes byte-for-byte.
+        let decoded = std::str::from_utf8(bytes).expect(
+            "StorePath byte view is ASCII by grammar and must round-trip through from_utf8",
+        );
+        assert_eq!(decoded, sp.as_str());
+        assert_eq!(decoded, format!("/nix/store/{H}-foo-bar-1.2.3"));
+    }
+
+    /// The [`AsRef<[u8]>`] peer must survive an actual
+    /// [`blake3::Hasher::update`] consumption without a per-site
+    /// `sp.as_str().as_bytes()` restatement — the exact frontier that
+    /// motivated the peer (folding a validated store path into a build /
+    /// attestation / closure fingerprint). Pins the byte-frontier round trip
+    /// by driving a real [`blake3::Hasher`] over the peer and comparing the
+    /// resulting digest against the same hasher fed the composed
+    /// `sp.as_str().as_bytes()` view: the two digests must match at every
+    /// bit, or the peer is drifting from its documented delegation. If a
+    /// future regression collapsed the peer to a wider bound (e.g., only
+    /// `AsRef<str>`), this test fails at compile time; if the peer dropped
+    /// the trimming discipline, the digest over the trimmed and untrimmed
+    /// inputs would diverge and fail here.
+    #[test]
+    fn test_asref_bytes_flows_through_hasher_without_restatement() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-svc-1.2.3\n")).unwrap();
+        // Fed through the AsRef<[u8]> peer — the frontier the peer serves.
+        let mut via_peer = blake3::Hasher::new();
+        via_peer.update(<StorePath as AsRef<[u8]>>::as_ref(&sp));
+        let digest_via_peer = via_peer.finalize();
+        // Fed through the composed sp.as_str().as_bytes() view — the
+        // per-site restatement the peer exists to retire.
+        let mut via_composition = blake3::Hasher::new();
+        via_composition.update(sp.as_str().as_bytes());
+        let digest_via_composition = via_composition.finalize();
+        assert_eq!(
+            digest_via_peer, digest_via_composition,
+            "hasher fed through AsRef<[u8]> must produce the same digest as the composed sp.as_str().as_bytes() view",
+        );
+        // Trimming discipline reaches through the byte frontier: the
+        // canonical trimmed view is what the hasher sees, not the raw
+        // nix-build-stdout buffer with its trailing newline.
+        let mut via_trimmed_literal = blake3::Hasher::new();
+        via_trimmed_literal.update(format!("/nix/store/{H}-svc-1.2.3").as_bytes());
+        let digest_via_trimmed_literal = via_trimmed_literal.finalize();
+        assert_eq!(
+            digest_via_peer, digest_via_trimmed_literal,
+            "hasher fed through AsRef<[u8]> must see the trimmed canonical bytes, not the raw newline-terminated buffer",
         );
     }
 }
