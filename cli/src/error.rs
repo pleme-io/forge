@@ -240,6 +240,34 @@ pub enum NixBuildError {
     #[error("Nix build for {flake_attr} produced an empty store path")]
     EmptyStorePath { flake_attr: String },
 
+    /// `nix build --print-out-paths` exited zero but printed a string that
+    /// does not parse as a well-formed Nix store object path through the
+    /// canonical [`crate::store_path::StorePath`] grammar oracle. Sibling of
+    /// [`Self::EmptyStorePath`] on the success-path contract-violation
+    /// surface: `EmptyStorePath` fires when the stdout is empty;
+    /// `MalformedStorePath` fires when it is non-empty but not a store
+    /// path. Both surface a nix contract-violation *before* the bad value
+    /// silently propagates to `attic push`, the SLSA provenance gate at
+    /// `commands/attestation.rs::build_slsa_level`, or a closure-scan
+    /// pipeline — where a malformed value would fail with a cryptic remote
+    /// error or drop the attestation via `.unwrap_or(false)`.
+    ///
+    /// `raw` preserves the exact (whitespace-trimmed) stdout so telemetry
+    /// / Phase 1 attestation records (THEORY §V.4) can attach the offending
+    /// string to the failure record without re-running the build.
+    /// `source` carries the exact grammar clause the input violated
+    /// (`MissingStorePrefix` / `HasSubpath` / `TooShort` / `InvalidHash` /
+    /// `MissingSeparator` / `EmptyName`) through the `#[source]` chain so a
+    /// caller can pattern-match on the exact rejection site without
+    /// parsing the display string.
+    #[error("Nix build for {flake_attr} produced a malformed store path {raw:?}: {source}")]
+    MalformedStorePath {
+        flake_attr: String,
+        raw: String,
+        #[source]
+        source: crate::store_path::StorePathError,
+    },
+
     #[error("Failed to spawn nix for {flake_attr}: {message}")]
     ExecFailed { flake_attr: String, message: String },
 
@@ -1103,6 +1131,7 @@ mod tests {
             match e {
                 NixBuildError::BuildFailed { .. } => "build",
                 NixBuildError::EmptyStorePath { .. } => "empty",
+                NixBuildError::MalformedStorePath { .. } => "malformed",
                 NixBuildError::ExecFailed { .. } => "exec",
                 NixBuildError::CargoNixMissing => "cargo_nix",
                 NixBuildError::FlakeNotFound { .. } => "flake",
@@ -1123,12 +1152,52 @@ mod tests {
             "empty"
         );
         assert_eq!(
+            classify(&NixBuildError::MalformedStorePath {
+                flake_attr: ".#pkg".into(),
+                raw: "/nix/store/short".into(),
+                source: crate::store_path::StorePathError::TooShort {
+                    input: "/nix/store/short".into(),
+                },
+            }),
+            "malformed"
+        );
+        assert_eq!(
             classify(&NixBuildError::ExecFailed {
                 flake_attr: ".#pkg".into(),
                 message: "no such file".into(),
             }),
             "exec"
         );
+    }
+
+    /// `MalformedStorePath` must surface the flake_attr, the offending raw
+    /// stdout, and preserve the exact `StorePathError` grammar clause via
+    /// its `#[source]` chain — so a telemetry consumer / Phase 1 attestation
+    /// record (THEORY §V.4) can attach the failure to the exact input
+    /// without re-running the build and without parsing the display string
+    /// to recover the rejection site.
+    #[test]
+    fn test_nix_build_error_malformed_store_path_preserves_source_clause() {
+        use crate::store_path::StorePathError;
+        use std::error::Error as _;
+        let err = NixBuildError::MalformedStorePath {
+            flake_attr: ".#pkg".into(),
+            raw: "/nix/store/not-a-real-store-path".into(),
+            source: StorePathError::TooShort {
+                input: "/nix/store/not-a-real-store-path".into(),
+            },
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(".#pkg"), "flake_attr must appear: {msg}");
+        assert!(
+            msg.contains("/nix/store/not-a-real-store-path"),
+            "raw stdout must appear: {msg}"
+        );
+        let src = err.source().expect("must carry a source");
+        let downcast = src
+            .downcast_ref::<StorePathError>()
+            .expect("source must downcast to StorePathError");
+        assert!(matches!(downcast, StorePathError::TooShort { .. }));
     }
 
     /// `BuildFailed` must surface the flake_attr it was invoked with — never
