@@ -1751,6 +1751,98 @@ impl PartialEq<StorePath> for &str {
     }
 }
 
+/// Forward-direction owned UTF-8 comparison peer — the heap-owned
+/// [`String`]-receiver sibling of the borrowed-receiver [`PartialEq<str>`] +
+/// [`PartialEq<&str>`] pair above, split by receiver ownership so the caller
+/// writes `sp == owned` (a wire-received line captured into a [`String`]
+/// buffer, a serde-decoded field arriving as [`String`], a
+/// [`std::process::Command`] stdout buffer converted via
+/// [`String::from_utf8`]) without an intermediate `sp == owned.as_str()`
+/// restatement and without cloning the [`StorePath`]'s canonical bytes into
+/// a fresh [`String`] to satisfy a hypothetical
+/// [`PartialEq<StorePath> for String`] via the standard library.
+///
+/// Delegates through [`StorePath::as_str`] composed with
+/// [`String::as_str`] and the standard-library
+/// [`<str as PartialEq<str>>::eq`], so the "what canonical bytes does a
+/// [`StorePath`] carry?" question stays defined at ONE accessor surface —
+/// the inherent [`StorePath::as_str`] — and every UTF-8 comparison surface
+/// (forward-str, forward-&str, reverse-str, reverse-&str, forward-String,
+/// reverse-String) reads through it. Zero allocation, zero temporary
+/// [`String`], zero re-validation of the store-path grammar per call.
+///
+/// Mirrors the sibling canonical-label typed sums' owned-receiver comparison
+/// peers at the same one-oracle discipline:
+/// - [`impl PartialEq<String> for PerAttemptRegion`] at `cli/src/retry.rs:8910`,
+/// - [`impl PartialEq<String> for ContentDigest`] at `cli/src/oci_manifest.rs:6300`.
+///
+/// The reverse-direction sibling [`impl PartialEq<StorePath> for String`]
+/// directly below closes the 2-impl owned-receiver closure so the caller
+/// may pick either side of the `==` operator when the comparand is a
+/// heap-owned [`String`], matching the standard-library idiom [`String`]
+/// carries through its own [`PartialEq<String> for str`] +
+/// [`PartialEq<String> for &str`] + [`PartialEq<str> for String`] +
+/// [`PartialEq<&str> for String`] closure.
+///
+/// THEORY.md §III typed primitives: the owned UTF-8 comparison surface is
+/// a typed-primitive site on [`StorePath`] itself, not a per-consumer
+/// `sp.as_str() == owned.as_str()` restatement at every downstream site
+/// that asks whether a [`StorePath`] value names the same canonical bytes
+/// as a heap-owned [`String`]. THEORY.md §VI.1 one-oracle: the canonical
+/// view is named at one site ([`StorePath::as_str`]) and every comparison
+/// receiver × direction × ownership reads through it.
+impl PartialEq<String> for StorePath {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+/// Reverse-direction owned UTF-8 comparison peer — the direction sibling
+/// of [`impl PartialEq<String> for StorePath`] directly above, split by
+/// direction so the caller writes `owned == sp` at the comparison site
+/// (a fixture-side assertion `assert_eq!(String::from("/nix/store/…-x"),
+/// sp)`, a wire-echo verifier that reads
+/// `captured_line == parsed_handle`, a generic [`PartialEq`]-bounded
+/// consumer composed on a [`String`] key against a [`StorePath`] value).
+/// Together with the forward-direction sibling this closes the 2-impl
+/// owned-receiver × direction closure at the same one-oracle discipline
+/// the four-impl borrowed-receiver closure above already carries.
+///
+/// Delegates through [`String::as_str`] composed with [`StorePath::as_str`]
+/// and the standard-library [`<str as PartialEq<str>>::eq`], so the
+/// symmetry axiom
+/// `<String as PartialEq<StorePath>>::eq(&owned, &sp)
+/// == <StorePath as PartialEq<String>>::eq(&sp, &owned)` at every
+/// (owned, sp) pair holds by construction — both directions factor through
+/// the same one-oracle accessor and the same standard-library str
+/// equality. Pinned at
+/// [`tests::test_partial_eq_string_store_path_symmetric_with_forward_direction`].
+///
+/// Extends the reverse-direction receiver frontier the borrowed-receiver
+/// pair [`impl PartialEq<StorePath> for str`] +
+/// [`impl PartialEq<StorePath> for &str`] opened onto the owned-receiver
+/// axis, a closure the sibling canonical-label typed sums
+/// ([`crate::retry::PerAttemptRegion`],
+/// [`crate::oci_manifest::ContentDigest`]) do not yet carry — a natural
+/// candidate to replicate at those ladders in a follow-on commit.
+///
+/// THEORY.md §III typed primitives: the reverse-direction owned UTF-8
+/// comparison surface is a typed-primitive site on [`StorePath`] (one
+/// [`PartialEq<StorePath>`] impl on [`String`] routing through
+/// [`String::as_str`] and [`StorePath::as_str`]), not a per-consumer
+/// `owned.as_str() == sp.as_str()` restatement at every downstream
+/// comparison site. THEORY.md §VI.1 one-oracle: the canonical view is
+/// named at one site ([`StorePath::as_str`]) and every UTF-8 comparison
+/// surface — borrowed-str-forward, borrowed-&str-forward,
+/// borrowed-str-reverse, borrowed-&str-reverse, owned-String-forward, and
+/// this owned-String-reverse — reads through the same one-oracle
+/// discipline projected onto its own direction × receiver ownership.
+impl PartialEq<StorePath> for String {
+    fn eq(&self, other: &StorePath) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -4416,6 +4508,121 @@ mod tests {
                 <&str as PartialEq<StorePath>>::eq(raw_ref, &sp),
                 <StorePath as PartialEq<&str>>::eq(&sp, raw_ref),
                 "reverse-&str and forward-&str PartialEq peers must agree at {candidate:?}",
+            );
+        }
+    }
+
+    /// `<StorePath as PartialEq<String>>::eq(&sp, &owned)` must agree
+    /// byte-for-byte with `sp.as_str() == owned.as_str()` at every
+    /// (candidate, canonical-view) pair across the canonical, sibling-
+    /// hash, shorter-name, malformed-shortcut, empty, and tail-only
+    /// candidate grid. Pins the delegation through the inherent
+    /// [`StorePath::as_str`] oracle on the owned-receiver forward-
+    /// direction peer, so a future refactor that severed the trait
+    /// impl from the accessor (a hand-rolled tag-and-slice re-read,
+    /// a stale representation cache, a `Display`-formatter-buffer
+    /// detour) is caught here first at the owned UTF-8 comparison
+    /// frontier — the owned-receiver sibling of
+    /// [`test_partial_eq_str_agrees_with_as_str`] on the borrowed-str
+    /// forward-direction peer.
+    #[test]
+    fn test_partial_eq_string_agrees_with_as_str() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates = [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-hello-2.11"),
+            format!("/nix/store/{H}-x"),
+            "/nix/store/short".to_string(),
+            String::new(),
+            "hello-2.10".to_string(),
+        ];
+        for candidate in &candidates {
+            let owned: String = candidate.clone();
+            assert_eq!(
+                <StorePath as PartialEq<String>>::eq(&sp, &owned),
+                sp.as_str() == owned.as_str(),
+                "PartialEq<String> for StorePath must agree with sp.as_str() == owned.as_str() at {candidate:?}",
+            );
+        }
+    }
+
+    /// The reflexive identity
+    /// `<StorePath as PartialEq<String>>::eq(&sp, &String::from(sp.as_str()))`
+    /// must hold at every [`StorePath`] value — a variant compared
+    /// against a heap-owned copy of its own canonical-label emission
+    /// always answers true. Pins the accessor's own bytes as a fixed
+    /// point of the owned-receiver forward-direction peer so a future
+    /// refactor that quietly re-encoded the canonical view breaks here
+    /// rather than at every downstream `sp == owned` call site — the
+    /// owned-receiver sibling of
+    /// [`test_partial_eq_str_reflexive_at_own_canonical_view`].
+    #[test]
+    fn test_partial_eq_string_reflexive_at_own_canonical_view() {
+        for raw in [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-foo-bar-1.2.3"),
+            format!("/nix/store/{H}-svc-1.2.3.drv"),
+        ] {
+            let sp = StorePath::parse(&raw).unwrap();
+            let owned: String = String::from(sp.as_str());
+            assert!(
+                <StorePath as PartialEq<String>>::eq(&sp, &owned),
+                "PartialEq<String> for StorePath must be reflexive at own canonical view for {raw:?}",
+            );
+        }
+    }
+
+    /// The trimming discipline of [`StorePath::parse`] reaches through
+    /// the owned-receiver forward-direction peer — a value parsed from
+    /// a newline-terminated buffer compares equal to a heap-owned copy
+    /// of the *trimmed* canonical literal on the owned-receiver side,
+    /// not to a heap-owned copy of the raw newline-terminated buffer.
+    /// Pins the invariant that the owned-receiver peer reads the same
+    /// canonical bytes the accessor exposes, at the wire-boundary
+    /// shape the peer exists to serve.
+    #[test]
+    fn test_partial_eq_string_trims_through_peer() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-svc-1.2.3\n")).unwrap();
+        let trimmed: String = format!("/nix/store/{H}-svc-1.2.3");
+        let untrimmed: String = format!("/nix/store/{H}-svc-1.2.3\n");
+        assert!(<StorePath as PartialEq<String>>::eq(&sp, &trimmed));
+        assert!(!<StorePath as PartialEq<String>>::eq(&sp, &untrimmed));
+    }
+
+    /// The reverse-direction and forward-direction owned UTF-8
+    /// comparison surfaces on the [`StorePath`] typed primitive agree
+    /// byte-for-byte at every (owned, [`StorePath`]) pair — the
+    /// symmetry axiom
+    /// `<String as PartialEq<StorePath>>::eq(&owned, &sp)
+    /// == <StorePath as PartialEq<String>>::eq(&sp, &owned)` holds
+    /// across the canonical × known-bad candidate grid. Pins the
+    /// 2-impl owned-receiver × direction closure so a future refactor
+    /// that diverged one impl from its symmetric peer breaks this pin
+    /// at at least one pair rather than propagating unnoticed through
+    /// downstream generic [`PartialEq`]-bounded consumers that thread
+    /// a [`StorePath`] through either side of a `==` operator against
+    /// a heap-owned [`String`] key. Structural mirror of
+    /// [`test_partial_eq_store_path_symmetric_with_forward_direction`]
+    /// on the borrowed-receiver × direction closure.
+    #[test]
+    fn test_partial_eq_string_store_path_symmetric_with_forward_direction() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates = [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-hello-2.11"),
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-svc-1.2.3.drv"),
+            "/nix/store/short".to_string(),
+            String::new(),
+            "hello-2.10".to_string(),
+        ];
+        for candidate in &candidates {
+            let owned: String = candidate.clone();
+            assert_eq!(
+                <String as PartialEq<StorePath>>::eq(&owned, &sp),
+                <StorePath as PartialEq<String>>::eq(&sp, &owned),
+                "reverse-String and forward-String PartialEq peers must agree at {candidate:?}",
             );
         }
     }
