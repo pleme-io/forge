@@ -544,65 +544,65 @@ pub async fn build_rust_service(
 
         let cache_target = format!("{}:{}", deploy_config.cache_server(), cache_name);
 
-        // Push AMD64 closure recursively
+        // Push AMD64 closure recursively. Enumerates via the canonical
+        // typed primitive `crate::nix::path_info_recursive` — sibling
+        // of `commands/build.rs::execute` (THEORY §VI.1 three-is-a-law:
+        // the ARM64 arm below is the third occurrence). The primitive
+        // owns `NIX_BIN` env resolution, typed-error dispatch
+        // (`NixBuildError::ExecFailed` / `NixBuildError::PathInfoFailed`
+        // carrying the structural-record tuple per THEORY §V.4 Phase 1
+        // attestation records), and `closure_size` derivation — the
+        // three load-bearing properties the pre-lift raw-spawn stanza
+        // bypassed at all three sites.
         println!("   Analyzing AMD64 closure...");
-        let amd64_path_info = Command::new("nix")
-            .args(&["path-info", "--recursive", "result-amd64"])
-            .output()
-            .await
-            .context("Failed to get AMD64 closure info")?;
+        match crate::nix::path_info_recursive("result-amd64").await {
+            Err(e) => eprintln!("   ⚠️  Failed to get AMD64 closure info (non-fatal): {}", e),
+            Ok(info) => {
+                println!(
+                    "   AMD64: Found {} derivations in closure",
+                    info.closure_size
+                );
 
-        if !amd64_path_info.status.success() {
-            eprintln!("   ⚠️  Failed to get AMD64 closure info (non-fatal)");
-        } else {
-            let paths = String::from_utf8_lossy(&amd64_path_info.stdout);
-            let closure_size = paths.lines().count();
-            println!("   AMD64: Found {} derivations in closure", closure_size);
-
-            // Lift onto canonical typed primitive (sibling of
-            // `commands/build.rs::execute`; THEORY §VI.1 three-is-a-law
-            // — ARM64 below is the third occurrence).
-            let attic_client = crate::infrastructure::attic::AtticClient::new(cache_target.clone());
-            match attic_client
-                .push_closure_via_stdin(amd64_path_info.stdout.as_slice())
-                .await
-            {
-                Ok(()) => println!("   {}", "✅ AMD64 closure cached".green()),
-                Err(e) => eprintln!("   ⚠️  AMD64 closure push failed (non-fatal): {}", e),
-            }
-        }
-
-        // Push ARM64 closure recursively (if built)
-        if should_build_arm64 {
-            println!("   Analyzing ARM64 closure...");
-            let arm64_path_info = Command::new("nix")
-                .args(&["path-info", "--recursive", "result-arm64"])
-                .output()
-                .await
-                .context("Failed to get ARM64 closure info")?;
-
-            if !arm64_path_info.status.success() {
-                eprintln!("   ⚠️  Failed to get ARM64 closure info (non-fatal)");
-            } else {
-                let paths = String::from_utf8_lossy(&arm64_path_info.stdout);
-                let closure_size = paths.lines().count();
-                println!("   ARM64: Found {} derivations in closure", closure_size);
-
-                // Lift onto canonical typed primitive (third sibling of
-                // the lifted stanza family — `commands/build.rs::execute`
-                // and the AMD64 arm above are the other two; THEORY §VI.1
-                // three-is-a-law). Typed-error op-failure path carries
-                // (cache, exit_code, stderr) per THEORY §V.4 Phase 1
-                // attestation record shape.
                 let attic_client =
                     crate::infrastructure::attic::AtticClient::new(cache_target.clone());
                 match attic_client
-                    .push_closure_via_stdin(arm64_path_info.stdout.as_slice())
+                    .push_closure_via_stdin(info.stdout.as_slice())
                     .await
                 {
-                    Ok(()) => println!("   {}", "✅ ARM64 closure cached".green()),
-                    Err(e) => {
-                        eprintln!("   ⚠️  ARM64 closure push failed (non-fatal): {}", e)
+                    Ok(()) => println!("   {}", "✅ AMD64 closure cached".green()),
+                    Err(e) => eprintln!("   ⚠️  AMD64 closure push failed (non-fatal): {}", e),
+                }
+            }
+        }
+
+        // Push ARM64 closure recursively (if built). Third sibling of
+        // the lifted stanza family — `commands/build.rs::execute` and
+        // the AMD64 arm above are the other two; THEORY §VI.1
+        // three-is-a-law. Typed-error op-failure path carries (cache,
+        // exit_code, stderr) per THEORY §V.4 Phase 1 attestation
+        // record shape.
+        if should_build_arm64 {
+            println!("   Analyzing ARM64 closure...");
+            match crate::nix::path_info_recursive("result-arm64").await {
+                Err(e) => {
+                    eprintln!("   ⚠️  Failed to get ARM64 closure info (non-fatal): {}", e)
+                }
+                Ok(info) => {
+                    println!(
+                        "   ARM64: Found {} derivations in closure",
+                        info.closure_size
+                    );
+
+                    let attic_client =
+                        crate::infrastructure::attic::AtticClient::new(cache_target.clone());
+                    match attic_client
+                        .push_closure_via_stdin(info.stdout.as_slice())
+                        .await
+                    {
+                        Ok(()) => println!("   {}", "✅ ARM64 closure cached".green()),
+                        Err(e) => {
+                            eprintln!("   ⚠️  ARM64 closure push failed (non-fatal): {}", e)
+                        }
                     }
                 }
             }
