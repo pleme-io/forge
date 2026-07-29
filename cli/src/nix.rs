@@ -11,7 +11,7 @@ use tracing::{debug, info};
 
 use crate::error::NixBuildError;
 use crate::repo::get_tool_path;
-use crate::retry::classify_capture_query;
+use crate::retry::{classify_capture, classify_capture_query};
 use crate::store_path::StorePath;
 
 /// Result of a Nix build operation
@@ -353,6 +353,167 @@ pub async fn run_cargo_update(cargo_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Recursive-closure enumeration for a built Nix output link — the
+/// canonical typed primitive that pairs with
+/// [`crate::infrastructure::attic::AtticClient::push_closure_via_stdin`]
+/// on the "push every derivation in a build closure to Attic" surface.
+///
+/// `stdout` is the raw one-store-path-per-line output of `nix path-info
+/// --recursive <output_link>`, retained verbatim as `Vec<u8>` so a
+/// downstream `AtticClient::push_closure_via_stdin` call can feed it to
+/// `attic push --stdin` byte-for-byte without a UTF-8 round-trip.
+/// `closure_size` is the count of non-empty newline-delimited lines in
+/// `stdout` — the same size the three pre-lift call sites derived via
+/// `String::from_utf8_lossy(&stdout).lines().count()`, computed here
+/// once at the primitive rather than three times at the callers.
+#[derive(Debug)]
+pub struct NixClosureInfo {
+    pub stdout: Vec<u8>,
+    pub closure_size: usize,
+}
+
+/// Enumerate the recursive closure of a built Nix output link via
+/// `nix path-info --recursive <output_link>`, returning the raw
+/// one-store-path-per-line stdout AND the derived closure size in one
+/// typed record.
+///
+/// Lifts the verbatim ~18-line stanza
+/// ```text
+/// let path_info_output = Command::new("nix")
+///     .args(&["path-info", "--recursive", <output_link>])
+///     .output().await
+///     .context("Failed to run nix path-info")?;
+/// if !path_info_output.status.success() {
+///     // warn — non-fatal
+/// } else {
+///     let paths = String::from_utf8_lossy(&path_info_output.stdout);
+///     let closure_size = paths.lines().count();
+///     // log size + push_closure_via_stdin(...stdout)
+/// }
+/// ```
+/// that three command-module sites in forge carry verbatim modulo per-
+/// site output-link literal and per-site log messaging:
+/// - `commands/build.rs::execute` (single closure push after image build)
+/// - `commands/rust_service.rs::push_rust_service` (AMD64 arm)
+/// - `commands/rust_service.rs::push_rust_service` (ARM64 arm)
+///
+/// Three identically-shaped bodies past THEORY §VI.1's three-times
+/// threshold (PRIME DIRECTIVE: duplication budget is zero) consolidate
+/// onto this typed primitive. Three load-bearing properties this
+/// primitive owns that the pre-lift raw-spawn stanzas dropped:
+/// 1. **`NIX_BIN` env override.** Pre-lift each site spelled
+///    `Command::new("nix")`, ignoring the env var every other nix-
+///    invocation site in the workspace honors via
+///    `get_tool_path("NIX_BIN", "nix")` — so a Nix-hermetic runner with
+///    a store-path `nix` binary would fall through to whatever `nix`
+///    was first on PATH at these three sites specifically.
+/// 2. **Typed error dispatch.** Pre-lift a spawn failure landed on the
+///    fatal `?` path via anyhow context; a nonzero exit collapsed into
+///    a bare `warn!("⚠️ Failed to get closure info (non-fatal)")` that
+///    dropped the exit code, the stderr, AND the offending output-link
+///    entirely. Post-lift both surface as typed
+///    [`NixBuildError::ExecFailed`] / [`NixBuildError::PathInfoFailed`]
+///    carrying the structural-record tuple THEORY §V.4 Phase 1
+///    attestation records pattern-match on.
+/// 3. **`closure_size` derivation.** Pre-lift each site re-derived the
+///    line count via `String::from_utf8_lossy(&stdout).lines().count()`;
+///    post-lift the derivation lives at ONE construction surface so a
+///    future refinement (e.g. filter out `.drv` closures, exclude
+///    fixed-output derivations) lands in one place.
+///
+/// # Contract
+///
+/// - `output_link` is the built-artifact identifier `nix path-info
+///   --recursive` reads — a `result*` symlink path (the three call
+///   sites' shape: `"result"`, `"result-amd64"`, `"result-arm64"`, or a
+///   `format!("{}/{}", working_dir, output)` absolute path). Passed
+///   verbatim to `nix path-info --recursive`; no grammar check is
+///   performed here (Nix's own resolver handles the "no such symlink"
+///   case, surfaced through [`NixBuildError::PathInfoFailed`]).
+/// - Returns [`NixBuildError::ExecFailed`] with `flake_attr =
+///   output_link.to_string()` when the resolved `nix` binary cannot be
+///   spawned. Reuses the `flake_attr` field name for cross-call-site
+///   uniformity with [`run_nix_build_typed`]; a future field-rename
+///   (`flake_attr` -> `label`) lands in one place.
+/// - Returns [`NixBuildError::PathInfoFailed`] carrying `(output_link,
+///   exit_code, stderr)` when `nix path-info --recursive` exits
+///   non-zero — the same structural-record tuple THEORY §V.4 Phase 1
+///   attestation records consume, distinct from `BuildFailed` at the
+///   type level so telemetry can tell build-step failures from
+///   closure-enumeration failures without parsing the message.
+///
+/// # Non-fatal composition
+///
+/// The primitive returns a typed `Result`; the three lifted call sites
+/// treat `nix path-info` failure as non-fatal by pattern-matching on
+/// the returned `Result` (each site keeps its site-specific warn
+/// messaging, since the pre-lift text differs per site — "closure
+/// info" vs "AMD64 closure info" vs "ARM64 closure info"). A future
+/// caller that wants the fatal contract composes `?`; a caller that
+/// wants the non-fatal contract composes `.ok()` and its own log.
+pub async fn path_info_recursive(output_link: &str) -> Result<NixClosureInfo, NixBuildError> {
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    path_info_recursive_with_bin(&nix_bin, output_link).await
+}
+
+/// Test-injection sibling of [`path_info_recursive`]: accepts the
+/// resolved `nix_bin` as an explicit argument so unit tests can point
+/// at a hermetic shim without mutating the process-wide `NIX_BIN`
+/// environment variable — same discipline as `run_nix_build_typed` in
+/// this module (a private `nix_bin: &str` helper the public wrapper
+/// delegates to after resolving `get_tool_path`) and
+/// `AtticClient::with_attic_bin` in `infrastructure/attic.rs` (a
+/// `#[cfg(test)]` builder override on the client struct). Splitting
+/// the resolution from the execution keeps the test surface hermetic
+/// AND parallel-safe: `#[tokio::test]` on this module can run
+/// concurrent tests without racing on env-var writes.
+async fn path_info_recursive_with_bin(
+    nix_bin: &str,
+    output_link: &str,
+) -> Result<NixClosureInfo, NixBuildError> {
+    let mut cmd = Command::new(nix_bin);
+    cmd.args(["path-info", "--recursive", output_link])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Spawn-vs-op dispatch flows through the canonical
+    // [`classify_capture`] primitive — same shape as
+    // `run_nix_build_typed`, but returns the raw `Output` (rather than
+    // the trimmed-UTF-8 stdout of `classify_capture_query`) because the
+    // downstream consumer — `push_closure_via_stdin` — needs the raw
+    // bytes verbatim. Spawn failure -> `ExecFailed` carrying the
+    // output-link as the `flake_attr` label (uniform with the
+    // build-step primitive's field name). Non-zero exit -> the new
+    // `PathInfoFailed` variant carrying (output_link, exit_code,
+    // stderr) — the structural-record tuple THEORY §V.4 Phase 1
+    // attestation records consume.
+    let output = classify_capture(
+        cmd.output().await,
+        |e| NixBuildError::ExecFailed {
+            flake_attr: output_link.to_string(),
+            message: e.to_string(),
+        },
+        |cf| NixBuildError::PathInfoFailed {
+            output_link: output_link.to_string(),
+            exit_code: cf.exit_code,
+            stderr: cf.stderr,
+        },
+    )?;
+
+    // Line count via `str::lines()` on the UTF-8-lossy view — same
+    // derivation the three pre-lift call sites drove verbatim. `lines()`
+    // excludes a trailing empty line if stdout ends with `\n` (the
+    // canonical shape `nix path-info` produces), so an N-store-path
+    // closure yields `closure_size == N` — the count the pre-lift
+    // sites' `info!/println!("Found {} derivations in closure", ...)`
+    // log lines reported.
+    let closure_size = String::from_utf8_lossy(&output.stdout).lines().count();
+    Ok(NixClosureInfo {
+        stdout: output.stdout,
+        closure_size,
+    })
+}
+
 /// Check if a Nix flake attribute exists
 ///
 /// # Arguments
@@ -638,5 +799,117 @@ mod tests {
             }
             other => panic!("expected ExecFailed, got: {other:?}"),
         }
+    }
+
+    /// `path_info_recursive_with_bin` on the success path must return
+    /// the raw stdout bytes verbatim AND the derived
+    /// `closure_size = <non-empty newline-delimited line count>`. Pins
+    /// the two load-bearing properties the three pre-lift call sites
+    /// relied on together: `push_closure_via_stdin` needs the raw
+    /// bytes verbatim (no UTF-8 round-trip), and the
+    /// `info!/println!("Found {} derivations in closure", ...)` log
+    /// line needs the same `str::lines().count()` value each site
+    /// re-derived pre-lift.
+    #[tokio::test]
+    async fn test_path_info_recursive_with_bin_success_returns_bytes_and_size() {
+        let (_dir, shim) = make_nix_shim(
+            "#!/bin/sh\necho '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a'\n\
+             echo '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-b'\nexit 0\n",
+        );
+        let info = path_info_recursive_with_bin(&shim, "result-x")
+            .await
+            .expect("success path");
+        assert_eq!(
+            info.closure_size, 2,
+            "two non-empty newline-delimited lines"
+        );
+        assert_eq!(
+            info.stdout,
+            b"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a\n\
+              /nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-b\n"
+                .to_vec(),
+            "raw stdout bytes must flow through unchanged for push_closure_via_stdin"
+        );
+    }
+
+    /// `path_info_recursive_with_bin` on the spawn-failure path (nix
+    /// binary missing) must surface [`NixBuildError::ExecFailed`]
+    /// carrying the output-link as the `flake_attr` label — sibling of
+    /// [`test_run_nix_build_typed_exec_failed_carries_label`] on the
+    /// closure-enumeration surface. Pins the spawn-vs-op split at the
+    /// type level so telemetry can distinguish "nix missing" from "nix
+    /// path-info said no" without parsing strings. Uses an absolute
+    /// path that does not exist, injected directly into the
+    /// `_with_bin` helper, so the test is hermetic and parallel-safe
+    /// (no env-var mutation).
+    #[tokio::test]
+    async fn test_path_info_recursive_with_bin_exec_failed_carries_output_link() {
+        let err = path_info_recursive_with_bin(
+            "/nonexistent/path/to/nix-binary-does-not-exist-for-path-info-test",
+            "result-missing-bin",
+        )
+        .await
+        .expect_err("missing nix binary must fail");
+        match err {
+            NixBuildError::ExecFailed { flake_attr, .. } => {
+                assert_eq!(flake_attr, "result-missing-bin");
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// `path_info_recursive_with_bin` failures must produce
+    /// [`NixBuildError::PathInfoFailed`] carrying the output-link, exit
+    /// code, and captured stderr — never a fused stringly bag and never
+    /// the pre-lift `warn!("⚠️ Failed to get closure info (non-fatal)")`
+    /// line that dropped all three fields. The `PathInfoFailed` shape
+    /// is distinct from `BuildFailed` at the type level so a downstream
+    /// telemetry / Phase 1 attestation record (THEORY §V.4) can tell a
+    /// build-step failure from a closure-enumeration failure without
+    /// parsing the message.
+    #[tokio::test]
+    async fn test_path_info_recursive_with_bin_path_info_failed_carries_structured_fields() {
+        let (_dir, shim) = make_nix_shim(
+            "#!/bin/sh\necho 'error: getting status of ./result-gone: No such file or directory' 1>&2\nexit 1\n",
+        );
+        let err = path_info_recursive_with_bin(&shim, "result-gone")
+            .await
+            .expect_err("nonzero exit must fail");
+        match err {
+            NixBuildError::PathInfoFailed {
+                output_link,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(output_link, "result-gone");
+                assert_eq!(exit_code, Some(1));
+                assert!(
+                    stderr.contains("No such file"),
+                    "stderr must carry the nix stderr verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected PathInfoFailed, got: {other:?}"),
+        }
+    }
+
+    /// Empty stdout on the success path must produce `closure_size = 0`
+    /// — pins that the line-count derivation matches `str::lines()`
+    /// semantics on an empty input (the three pre-lift call sites all
+    /// used `String::from_utf8_lossy(&stdout).lines().count()`, which
+    /// is `0` on an empty stdout). Distinct from
+    /// [`NixBuildError::PathInfoFailed`] at the type level: a nix
+    /// invocation that succeeds and prints nothing is a valid (though
+    /// degenerate) closure-enumeration result, not a failure.
+    #[tokio::test]
+    async fn test_path_info_recursive_with_bin_empty_stdout_yields_zero_closure_size() {
+        let (_dir, shim) = make_nix_shim("#!/bin/sh\nexit 0\n");
+        let info = path_info_recursive_with_bin(&shim, "result-empty")
+            .await
+            .expect("empty-but-successful path");
+        assert_eq!(
+            info.closure_size, 0,
+            "empty stdout must yield closure_size 0"
+        );
+        assert!(info.stdout.is_empty(), "stdout must be empty bytes");
     }
 }

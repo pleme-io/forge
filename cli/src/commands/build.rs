@@ -191,37 +191,59 @@ pub async fn execute(
         let result_path = format!("{}/{}", working_dir, output);
         let cache_ref = format!("{}:{}", attic_server, cache_name);
 
-        // Get all derivations in the closure
-        let path_info_output = Command::new("nix")
-            .args(&["path-info", "--recursive", &result_path])
-            .output()
-            .await
-            .context("Failed to run nix path-info")?;
+        // Enumerate the recursive closure via the canonical typed
+        // primitive `crate::nix::path_info_recursive`. Lifts the
+        // pre-migration raw `Command::new("nix").args(&["path-info",
+        // "--recursive", &result_path]).output()` stanza onto three
+        // load-bearing properties this call previously bypassed:
+        //   1. `NIX_BIN` env override via `get_tool_path` — the
+        //      pre-migration raw-spawn ignored the env var every other
+        //      nix-invocation site in the workspace honors, so a
+        //      Nix-hermetic runner with a store-path `nix` binary fell
+        //      through to whatever `nix` was first on PATH here.
+        //   2. Typed-error dispatch — pre-migration the exit-code +
+        //      stderr fused into a bare `warn!("⚠️ Failed to get
+        //      closure info (non-fatal)")` line that dropped BOTH the
+        //      exit code and the captured stderr entirely. Post-
+        //      migration the failure surfaces as typed
+        //      `NixBuildError::ExecFailed` / `NixBuildError::
+        //      PathInfoFailed` carrying the structural-record tuple
+        //      Phase 1 attestation records (THEORY §V.4) pattern-
+        //      match on.
+        //   3. `closure_size` derivation — pre-migration each of the
+        //      three sites re-derived `.lines().count()`; post-
+        //      migration the derivation lives at ONE construction
+        //      surface (`crate::nix::path_info_recursive`).
+        // The non-fatal contract this site had (closure-enumeration
+        // failure did not abort the build — the built image is still
+        // shippable without the per-derivation Attic cache warm-up) is
+        // preserved by matching on the returned `Result` at this call
+        // site with the site-specific `⚠️ Failed to get closure info`
+        // warning text.
+        match crate::nix::path_info_recursive(&result_path).await {
+            Err(e) => warn!("⚠️  Failed to get closure info (non-fatal): {}", e),
+            Ok(info) => {
+                info!("   Found {} derivations in closure", info.closure_size);
 
-        if !path_info_output.status.success() {
-            warn!("⚠️  Failed to get closure info (non-fatal)");
-        } else {
-            let paths = String::from_utf8_lossy(&path_info_output.stdout);
-            let closure_size = paths.lines().count();
-            info!("   Found {} derivations in closure", closure_size);
-
-            // Push all derivations via stdin onto the canonical typed
-            // primitive (third sibling of the lifted stanza family —
-            // `commands/rust_service.rs::push_rust_service` AMD64+ARM64
-            // are the other two; THEORY §VI.1 three-is-a-law).
-            // Typed-error op-failure path carries (cache, exit_code,
-            // stderr) per THEORY §V.4 Phase 1 attestation record shape.
-            let attic_client = crate::infrastructure::attic::AtticClient::new(cache_ref.clone())
-                .with_token(attic_token.clone());
-            match attic_client
-                .push_closure_via_stdin(path_info_output.stdout.as_slice())
-                .await
-            {
-                Ok(()) => info!(
-                    "✅ All {} derivations cached in Attic (60-80% faster future builds)",
-                    closure_size
-                ),
-                Err(e) => warn!("⚠️  Failed to push closure to Attic (non-fatal): {}", e),
+                // Push all derivations via stdin onto the canonical typed
+                // primitive (third sibling of the lifted stanza family —
+                // `commands/rust_service.rs::push_rust_service` AMD64+ARM64
+                // are the other two; THEORY §VI.1 three-is-a-law).
+                // Typed-error op-failure path carries (cache, exit_code,
+                // stderr) per THEORY §V.4 Phase 1 attestation record shape.
+                let attic_client =
+                    crate::infrastructure::attic::AtticClient::new(cache_ref.clone())
+                        .with_token(attic_token.clone());
+                match attic_client
+                    .push_closure_via_stdin(info.stdout.as_slice())
+                    .await
+                {
+                    Ok(()) => info!(
+                        "✅ All {} derivations cached in Attic (60-80% faster future builds)",
+                        info.closure_size
+                    ),
+                    Err(e) => warn!("⚠️  Failed to push closure to Attic (non-fatal): {}", e),
+                }
             }
         }
     }

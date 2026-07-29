@@ -273,6 +273,25 @@ pub enum NixBuildError {
 
     #[error("Flake not found at {path}")]
     FlakeNotFound { path: String },
+
+    /// `nix path-info --recursive <output_link>` exited non-zero. Sibling
+    /// of [`Self::BuildFailed`] on the query surface: `BuildFailed` fires
+    /// on the build step (`nix build` -> store path); `PathInfoFailed`
+    /// fires on the follow-up closure-enumeration step (`nix path-info
+    /// --recursive` -> one-store-path-per-line stdout, the input to
+    /// `AtticClient::push_closure_via_stdin`). `output_link`,
+    /// `exit_code`, and `stderr` are kept as separate fields — same
+    /// structural-record tuple THEORY §V.4 Phase 1 attestation records
+    /// pattern-match on — so a downstream telemetry / retry consumer can
+    /// tell "the built-artifact symlink is gone" from "nix binary said
+    /// no" from "the closure is malformed" at the type level, without
+    /// re-parsing the message.
+    #[error("nix path-info --recursive {output_link} failed (exit {exit_code:?}): {stderr}")]
+    PathInfoFailed {
+        output_link: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
 }
 
 /// Kubernetes errors
@@ -1135,6 +1154,7 @@ mod tests {
                 NixBuildError::ExecFailed { .. } => "exec",
                 NixBuildError::CargoNixMissing => "cargo_nix",
                 NixBuildError::FlakeNotFound { .. } => "flake",
+                NixBuildError::PathInfoFailed { .. } => "path_info",
             }
         }
         assert_eq!(
