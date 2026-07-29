@@ -74,7 +74,7 @@ pub struct NixBuildResult {
 ///   gate at `commands/attestation.rs::build_slsa_level`, or a
 ///   closure-scan pipeline. Preserves the raw stdout in `raw` and the
 ///   exact `StorePathError` grammar clause under `#[source]`.
-async fn run_nix_build_typed(
+pub(crate) async fn run_nix_build_typed(
     nix_bin: &str,
     args: &[&str],
     label: &str,
