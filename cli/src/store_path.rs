@@ -948,6 +948,119 @@ impl TryFrom<Box<[u8]>> for StorePath {
     }
 }
 
+/// Borrowed-or-owned byte-slice try-conversion peer for [`StorePath::parse`]
+/// via the [`TryFrom<std::borrow::Cow<'_, [u8]>>`] trait — the byte-slice
+/// counterpart of the [`TryFrom<Cow<'_, str>>`] UTF-8 peer above, closing
+/// the byte-slice parse frontier at the receiver shape whose caller does
+/// not know at type-checking time whether the input is a borrowed
+/// [`&[u8]`] view or an owned [`Vec<u8>`] buffer.
+///
+/// Arm-matches to the two sibling byte-slice parse peers this impl reaches
+/// through: [`std::borrow::Cow::Borrowed`] routes through
+/// [`<Self as TryFrom<&[u8]>>::try_from`], and
+/// [`std::borrow::Cow::Owned`] routes through
+/// [`<Self as TryFrom<Vec<u8>>>::try_from`]. Both peers already carry the
+/// [`std::str::from_utf8`] / [`String::from_utf8`] UTF-8 decode gate and
+/// the shared [`StorePath::parse`] grammar oracle, so the store-path
+/// grammar stays defined at ONE construction surface — the
+/// [`std::str::FromStr`] peer, which itself delegates to
+/// [`StorePath::parse`], reached through both arms of the [`Cow`] match.
+/// A grammar clause added to `parse` lights up at both arms of this
+/// frontier without a second edit; the UTF-8 decode gate is the one
+/// place non-textual input is rejected before the grammar oracle is
+/// consulted, whether the caller held a borrowed or owned byte buffer.
+///
+/// The arm-match preserves the caller's ownership discipline on both
+/// arms: the borrowed arm delegates through the by-reference peer that
+/// owns its `bytes.to_vec()` clone on the UTF-8-invalid path (a caller
+/// that only ever holds borrowed bytes never pays for an owned
+/// allocation on the happy path); the owned arm delegates through the
+/// by-value peer that consumes the caller's owned allocation on the
+/// happy path through [`String::from_utf8`] and recovers the offending
+/// bytes verbatim through [`std::string::FromUtf8Error::into_bytes`] on
+/// the UTF-8-invalid path (a caller that already owns the buffer never
+/// pays for a second allocation, and never pays a redundant
+/// [`.to_vec()`] clone on the rejection). Neither arm widens the
+/// receiver-shape decision the caller already made at the input site.
+///
+/// # Why the trait peer earns its keep
+///
+/// The [`TryFrom<&[u8]>`] and [`TryFrom<Vec<u8>>`] peers close the
+/// borrowed and owned byte-slice frontiers as disjoint receiver shapes.
+/// [`TryFrom<Cow<'_, [u8]>>`] covers the borrowed-or-owned frontier
+/// stdlib and the wider ecosystem key off separately:
+///
+/// - `#[serde(try_from = "Cow<'_, [u8]>")]` — the serde container
+///   attribute for the borrowed-or-owned byte case (a `zero-copy`
+///   deserializer that hands out a borrowed byte slice on the fast
+///   path but has to fall back to an owned buffer when the input crosses
+///   a `serde` buffer boundary — a `serde_bytes::ByteBuf` field on a
+///   flexible container, a `rmp-serde` / `bincode` /
+///   `ciborium` decoder whose owned-vs-borrowed choice depends on the
+///   underlying reader's contiguity) keys off
+///   [`TryFrom<Cow<'_, [u8]>>`], not [`TryFrom<&[u8]>`] or
+///   [`TryFrom<Vec<u8>>`]. A future serde field wrapping a
+///   [`StorePath`] and opting into the borrowed-or-owned byte
+///   `try_from` grammar reaches the store-path check through this impl
+///   without a shim.
+/// - Generic try-conversion bounds
+///   (`fn parse_field<'a, T: TryFrom<Cow<'a, [u8]>>>`) — a
+///   validated-input newtype builder or attestation-column reader whose
+///   parse contract is stated at the borrowed-or-owned byte receiver
+///   layer (an `http-body` collection point whose owned-vs-borrowed
+///   discipline depends on whether the frame arrived contiguous, a
+///   `bytes::Bytes` → `Cow<[u8]>` bridge at the async
+///   registry-response frontier, a canonical-representation-with-copy
+///   normaliser that binds its input as `Cow<[u8]>` so the borrowed
+///   fast path stays borrowed) can name [`StorePath`] alongside every
+///   other borrowed-or-owned byte try-conversion primitive without
+///   routing through a per-variant `.into_owned()` shim.
+/// - Sibling canonical-label typed sums in this crate already carry the
+///   peer: [`impl TryFrom<Cow<'_, [u8]>>`] for
+///   [`crate::oci_manifest::DigestAlgorithm`] at
+///   `oci_manifest.rs:1979`; [`StorePath`] is the store-path primitive
+///   counterpart at the same borrowed-or-owned byte try-conversion
+///   frontier.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at two frontiers, in order, on both arms of the
+/// [`Cow`] match (this impl reaches through the arm-matched peers):
+///
+/// 1. Non-UTF-8 byte sequences reject at the UTF-8 decode gate
+///    ([`std::str::from_utf8`] on the borrowed arm,
+///    [`String::from_utf8`] on the owned arm) with the typed
+///    [`StorePathError::NonUtf8Bytes`] variant carrying the offending
+///    buffer verbatim and the underlying [`std::str::Utf8Error`] under
+///    [`std::error::Error::source`]. Rejection is byte-identical across
+///    the two arms on the same input, so a caller pattern-matching on
+///    the rejection site reads the same typed error variant with the
+///    same offending-bytes payload whether the input was borrowed or
+///    owned.
+/// 2. Valid-UTF-8 byte sequences that decode to a non-store-path string
+///    reject at the underlying [`FromStr`] impl with the exact
+///    grammar-clause variant the input violated
+///    (`MissingStorePrefix` / `HasSubpath` / `TooShort` / `InvalidHash`
+///    / `MissingSeparator` / `EmptyName`).
+///
+/// # Error shape
+///
+/// `Self::Error = StorePathError`. The typed grammar-clause enum carries
+/// through — no widening to [`anyhow::Error`] or `Box<dyn Error>` hides
+/// between the borrowed-or-owned byte try-conversion surface and the
+/// inherent constructor, so a caller can still `match` on the exact
+/// rejection site at the trait entry point.
+impl TryFrom<std::borrow::Cow<'_, [u8]>> for StorePath {
+    type Error = StorePathError;
+
+    fn try_from(bytes: std::borrow::Cow<'_, [u8]>) -> Result<Self, Self::Error> {
+        match bytes {
+            std::borrow::Cow::Borrowed(slice) => <Self as TryFrom<&[u8]>>::try_from(slice),
+            std::borrow::Cow::Owned(owned) => <Self as TryFrom<Vec<u8>>>::try_from(owned),
+        }
+    }
+}
+
 /// By-reference read-back peer for [`StorePath::as_str`] via the
 /// [`AsRef<str>`] trait — the [`std::fmt::Display`] impl above emits the
 /// full path into a formatter; this peer exposes the same view directly as
@@ -2741,6 +2854,228 @@ mod tests {
         let trimmed: StorePath = parse_via_try_from(boxed_nl)
             .expect("trailing newline must be trimmed at generic TryFrom<Box<[u8]>> bound");
         assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// [`TryFrom<Cow<'_, [u8]>>`] must accept every input the inherent
+    /// [`StorePath::parse`] accepts through both the borrowed and owned
+    /// arms of the [`std::borrow::Cow`] discriminant, and produce a value
+    /// equal to the [`FromStr`] round-trip on the same buffer AND
+    /// cross-agree byte-for-byte with the sibling [`TryFrom<&[u8]>`] and
+    /// [`TryFrom<Vec<u8>>`] peers on the same canonical bytes. Pins the
+    /// arm-match delegation: a future refactor that fused the two arms
+    /// into a single `.into_owned()` pre-normalisation (widening the
+    /// borrowed fast path onto a redundant owned allocation) or diverged
+    /// the two arms onto a stale grammar would fail here first.
+    #[test]
+    fn test_try_from_cow_bytes_success_agrees_with_fromstr() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let bytes = raw.as_bytes();
+        let via_borrowed = <StorePath as TryFrom<std::borrow::Cow<'_, [u8]>>>::try_from(
+            std::borrow::Cow::Borrowed(bytes),
+        )
+        .expect("valid store-path bytes must parse via TryFrom<Cow::Borrowed>");
+        let via_owned = <StorePath as TryFrom<std::borrow::Cow<'_, [u8]>>>::try_from(
+            std::borrow::Cow::Owned(bytes.to_vec()),
+        )
+        .expect("valid store-path bytes must parse via TryFrom<Cow::Owned>");
+        let via_str: StorePath = raw.parse().unwrap();
+        let via_slice = StorePath::try_from(bytes)
+            .expect("valid store-path bytes must parse via TryFrom<&[u8]>");
+        let via_vec = StorePath::try_from(bytes.to_vec())
+            .expect("valid store-path bytes must parse via TryFrom<Vec<u8>>");
+        assert_eq!(via_borrowed, via_str);
+        assert_eq!(via_owned, via_str);
+        assert_eq!(
+            via_borrowed, via_slice,
+            "TryFrom<Cow::Borrowed> must agree with TryFrom<&[u8]> on canonical bytes"
+        );
+        assert_eq!(
+            via_owned, via_vec,
+            "TryFrom<Cow::Owned> must agree with TryFrom<Vec<u8>> on canonical bytes"
+        );
+        assert_eq!(via_borrowed, via_owned);
+        assert_eq!(via_borrowed.hash(), H);
+        assert_eq!(via_borrowed.name(), "hello-2.10");
+
+        // Trimming discipline reaches through both arms of the peer: a
+        // newline-terminated buffer parses cleanly whether wrapped
+        // borrowed or owned, and both arms produce the trimmed canonical
+        // representation.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let trimmed_borrowed = <StorePath as TryFrom<std::borrow::Cow<'_, [u8]>>>::try_from(
+            std::borrow::Cow::Borrowed(raw_nl.as_bytes()),
+        )
+        .expect("trailing newline must be trimmed at TryFrom<Cow::Borrowed> surface");
+        let trimmed_owned = <StorePath as TryFrom<std::borrow::Cow<'_, [u8]>>>::try_from(
+            std::borrow::Cow::Owned(raw_nl.as_bytes().to_vec()),
+        )
+        .expect("trailing newline must be trimmed at TryFrom<Cow::Owned> surface");
+        assert_eq!(trimmed_borrowed.as_str(), format!("/nix/store/{H}-x"));
+        assert_eq!(
+            trimmed_borrowed, trimmed_owned,
+            "both Cow arms must agree on trimmed canonical bytes"
+        );
+    }
+
+    /// A non-UTF-8 byte sequence must reject at the UTF-8 decode gate
+    /// with the [`StorePathError::NonUtf8Bytes`] variant BEFORE any
+    /// grammar clause is evaluated, on both arms of the [`Cow`] match.
+    /// The rejection must be byte-identical across the borrowed and
+    /// owned arms on the same input, and byte-identical to the sibling
+    /// [`TryFrom<&[u8]>`] and [`TryFrom<Vec<u8>>`] peers' rejection on
+    /// the same input — a caller switching between the four byte
+    /// receiver shapes reads the same typed error variant with the same
+    /// offending-bytes payload.
+    #[test]
+    fn test_try_from_cow_bytes_rejects_non_utf8_input() {
+        use std::error::Error as _;
+        // 0xFF is never valid as a UTF-8 leading byte; the buffer starts
+        // with a valid store-path prefix so the rejection is proven to
+        // fire at the UTF-8 gate, not at the grammar oracle.
+        let mut buf: Vec<u8> = b"/nix/store/".to_vec();
+        buf.push(0xFF);
+        buf.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x");
+        let expected_bytes = buf.clone();
+
+        let err_borrowed = <StorePath as TryFrom<std::borrow::Cow<'_, [u8]>>>::try_from(
+            std::borrow::Cow::Borrowed(buf.as_slice()),
+        )
+        .expect_err("non-UTF-8 bytes must reject at TryFrom<Cow::Borrowed>");
+        let err_owned = <StorePath as TryFrom<std::borrow::Cow<'_, [u8]>>>::try_from(
+            std::borrow::Cow::Owned(buf.clone()),
+        )
+        .expect_err("non-UTF-8 bytes must reject at TryFrom<Cow::Owned>");
+        for err in [&err_borrowed, &err_owned] {
+            match err {
+                StorePathError::NonUtf8Bytes { bytes, source: _ } => {
+                    assert_eq!(
+                        bytes.as_slice(),
+                        expected_bytes.as_slice(),
+                        "the offending bytes must survive verbatim on the failure record"
+                    );
+                }
+                other => panic!("expected NonUtf8Bytes, got: {other:?}"),
+            }
+            // The underlying std::str::Utf8Error must be reachable through
+            // the Error::source chain — no re-decoding, no display-string
+            // parsing.
+            let src = err.source().expect("NonUtf8Bytes must carry a source");
+            assert!(
+                src.downcast_ref::<std::str::Utf8Error>().is_some(),
+                "source must downcast to std::str::Utf8Error, got display: {src}",
+            );
+        }
+        assert_eq!(
+            err_borrowed, err_owned,
+            "both Cow arms must emit byte-identical NonUtf8Bytes rejection on the same input"
+        );
+        // Agreement with the sibling by-reference and owned-byte peers:
+        // the four byte receiver shapes converge on one typed rejection.
+        let err_slice = StorePath::try_from(expected_bytes.as_slice())
+            .expect_err("non-UTF-8 bytes must reject at TryFrom<&[u8]>");
+        let err_vec = StorePath::try_from(expected_bytes.clone())
+            .expect_err("non-UTF-8 bytes must reject at TryFrom<Vec<u8>>");
+        assert_eq!(
+            err_borrowed, err_slice,
+            "TryFrom<Cow::Borrowed> and TryFrom<&[u8]> must emit byte-identical NonUtf8Bytes rejection"
+        );
+        assert_eq!(
+            err_owned, err_vec,
+            "TryFrom<Cow::Owned> and TryFrom<Vec<u8>> must emit byte-identical NonUtf8Bytes rejection"
+        );
+    }
+
+    /// Valid UTF-8 bytes that decode to a non-store-path string must
+    /// reject at the underlying [`FromStr`] impl with the exact
+    /// grammar-clause variant the input violated — the two-stage
+    /// strictness contract: UTF-8 decode gate first, grammar oracle
+    /// second. Pins that both arms of the [`Cow`] peer route rejection
+    /// through the ONE grammar oracle at [`StorePath::parse`] rather
+    /// than divergent second parse paths.
+    #[test]
+    fn test_try_from_cow_bytes_rejects_non_canonical_input() {
+        // `/nix/store/short` is valid UTF-8 but too short to hold a 32-
+        // char hash — the exact grammar clause `StorePathError::TooShort`
+        // discriminates.
+        let short: &[u8] = b"/nix/store/short";
+        let err_borrowed = <StorePath as TryFrom<std::borrow::Cow<'_, [u8]>>>::try_from(
+            std::borrow::Cow::Borrowed(short),
+        )
+        .expect_err("non-canonical UTF-8 bytes must reject at TryFrom<Cow::Borrowed>");
+        let err_owned = <StorePath as TryFrom<std::borrow::Cow<'_, [u8]>>>::try_from(
+            std::borrow::Cow::Owned(short.to_vec()),
+        )
+        .expect_err("non-canonical UTF-8 bytes must reject at TryFrom<Cow::Owned>");
+        for err in [&err_borrowed, &err_owned] {
+            assert!(
+                matches!(err, StorePathError::TooShort { .. }),
+                "expected TooShort, got: {err:?}"
+            );
+        }
+        assert_eq!(
+            err_borrowed, err_owned,
+            "both Cow arms must agree on grammar-clause rejection"
+        );
+        let err_slice = StorePath::try_from(short)
+            .expect_err("non-canonical UTF-8 bytes must reject at TryFrom<&[u8]>");
+        assert_eq!(
+            err_borrowed, err_slice,
+            "TryFrom<Cow::Borrowed> and TryFrom<&[u8]> must agree on grammar-clause rejection"
+        );
+
+        // A relative-path input must fire `MissingStorePrefix`, not
+        // `NonUtf8Bytes` — the UTF-8 gate cleared, so the grammar
+        // oracle owns the rejection.
+        let rel: &[u8] = b"relative/path";
+        let err_rel = <StorePath as TryFrom<std::borrow::Cow<'_, [u8]>>>::try_from(
+            std::borrow::Cow::Borrowed(rel),
+        )
+        .expect_err("relative-path bytes must reject at TryFrom<Cow::Borrowed>");
+        assert!(
+            matches!(err_rel, StorePathError::MissingStorePrefix { .. }),
+            "expected MissingStorePrefix, got: {err_rel:?}"
+        );
+    }
+
+    /// A generic `fn f<'a, T: TryFrom<Cow<'a, [u8]>>>` consumer must
+    /// accept a borrowed-or-owned byte buffer and recover a validated
+    /// [`StorePath`] through the trait bound at both arms. Structural
+    /// witness that [`StorePath`] is genuinely usable at
+    /// [`TryFrom<Cow<'_, [u8]>>`] call sites — the surface a
+    /// `#[serde(try_from = "Cow<'_, [u8]>")]` container attribute and
+    /// any generic borrowed-or-owned byte try-conversion helper both
+    /// key off. If a future change narrowed the bound or the error
+    /// type, this test fails at compile time.
+    #[test]
+    fn test_try_from_cow_bytes_generic_consumer_recovers_identity() {
+        fn parse_via_try_from<'a, T>(bytes: std::borrow::Cow<'a, [u8]>) -> Result<T, T::Error>
+        where
+            T: TryFrom<std::borrow::Cow<'a, [u8]>>,
+        {
+            T::try_from(bytes)
+        }
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let path_b: StorePath = parse_via_try_from(std::borrow::Cow::Borrowed(raw.as_bytes()))
+            .expect("valid store-path bytes must parse via generic TryFrom<Cow::Borrowed>");
+        assert_eq!(path_b.name(), "foo-bar-1.2.3");
+        assert_eq!(path_b.hash(), H);
+        let path_o: StorePath =
+            parse_via_try_from(std::borrow::Cow::Owned(raw.as_bytes().to_vec()))
+                .expect("valid store-path bytes must parse via generic TryFrom<Cow::Owned>");
+        assert_eq!(path_o, path_b);
+        // The trimming discipline reaches through the generic bound on
+        // both arms: a caller feeding a newline-terminated buffer wrapped
+        // in either [`Cow::Borrowed`] or [`Cow::Owned`] does not need to
+        // pre-trim — the grammar owns the trim in one place.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let trimmed_b: StorePath =
+            parse_via_try_from(std::borrow::Cow::Borrowed(raw_nl.as_bytes()))
+                .expect("trailing newline must be trimmed at generic TryFrom<Cow::Borrowed>");
+        let trimmed_o: StorePath =
+            parse_via_try_from(std::borrow::Cow::Owned(raw_nl.as_bytes().to_vec()))
+                .expect("trailing newline must be trimmed at generic TryFrom<Cow::Owned>");
+        assert_eq!(trimmed_b.as_str(), format!("/nix/store/{H}-x"));
+        assert_eq!(trimmed_b, trimmed_o);
     }
 
     #[test]
