@@ -743,6 +743,87 @@ impl AsRef<std::path::Path> for StorePath {
     }
 }
 
+/// By-reference OS-string read-back peer for [`StorePath::as_str`] via the
+/// [`AsRef<std::ffi::OsStr>`] trait — the sibling of the [`AsRef<str>`] and
+/// [`AsRef<std::path::Path>`] peers directly above at the OS-string
+/// frontier, so a consumer bound by `impl AsRef<std::ffi::OsStr>` — the
+/// input surface every [`std::process::Command::arg`] /
+/// [`std::process::Command::args`] / [`std::process::Command::env`] /
+/// [`std::process::Command::current_dir`] slot keys off — reads the
+/// canonical OS-string view directly from a [`StorePath`] value without a
+/// call-site [`std::ffi::OsStr::new`]`(sp.as_str())` restatement.
+///
+/// Delegates through `<Self as AsRef<str>>::as_ref` composed with
+/// [`std::ffi::OsStr::new`], so the "what does a [`StorePath`] read back
+/// as?" question stays defined at ONE accessor surface — the inherent
+/// [`StorePath::as_str`] — and the borrowed-view axis routes through it at
+/// every frontier peer without a divergent second accessor. A future change
+/// to the internal representation lands in [`StorePath::as_str`] once and
+/// the [`AsRef<str>`] / [`AsRef<std::path::Path>`] / this
+/// [`AsRef<std::ffi::OsStr>`] peer light up in the same commit.
+///
+/// # Why the trait peer earns its keep
+///
+/// The [`AsRef<str>`] peer closes the UTF-8 string frontier
+/// (`fn f<S: AsRef<str>>` — record writers, attestation-column emitters,
+/// third-party APIs that bind `impl AsRef<str>`). The
+/// [`AsRef<std::path::Path>`] peer closes the filesystem-path frontier the
+/// [`std::fs`] surface keys off. [`AsRef<std::ffi::OsStr>`] closes the
+/// disjoint OS-string frontier that process-spawn and environment
+/// machinery bind: every argument fed to `attic push /nix/store/...`,
+/// `nix copy /nix/store/...`, `nix path-info /nix/store/...`, `skopeo copy
+/// nix:/nix/store/...`, and every `Command::current_dir(&sp)` slot keys
+/// off `impl AsRef<std::ffi::OsStr>` rather than `AsRef<str>` or
+/// `AsRef<std::path::Path>`. A validated [`StorePath`] handed to any of
+/// those boundaries reaches the process-spawn frontier through the typed
+/// primitive without a per-site `OsStr::new(sp.as_str())` restatement:
+///
+/// - [`std::process::Command::arg`] / [`std::process::Command::args`] — an
+///   `attic push` / `nix copy` / `nix path-info` argument slot over a
+///   validated store object reads directly from a [`StorePath`] value.
+///   These are the exact call sites that motivated the nix-frontier
+///   validation gate at [`crate::nix::run_nix_build_typed`]: a value that
+///   satisfies [`StorePath::parse`] is by construction safe to hand to
+///   the downstream process without a per-consumer re-check.
+/// - [`std::process::Command::env`] / [`std::env::set_var`] — a telemetry
+///   or reproducibility bridge that surfaces a validated store object as
+///   an environment variable value (`FORGE_LAST_BUILD_STORE_PATH=<sp>`)
+///   reads through the OS-string frontier without an [`std::ffi::OsString`]
+///   copy.
+/// - [`std::process::Command::current_dir`] — a caller spawning a
+///   sub-process whose CWD is a validated store object subdirectory (a
+///   `nix-shell`-alike whose environment is anchored at the store object)
+///   reaches the CWD frontier at the OS-string surface every
+///   [`std::process::Command`] method keys off.
+/// - Sibling canonical-label typed sums in this crate already carry the
+///   peer at the same OS-string read-back frontier:
+///   `impl AsRef<std::ffi::OsStr> for BumpLevel` at `version.rs`,
+///   `impl AsRef<std::ffi::OsStr> for PerAttemptRegion` at `retry.rs`,
+///   `impl AsRef<std::ffi::OsStr> for AdmissionTier` at `probe_outcome.rs`;
+///   [`StorePath`] is the store-path primitive counterpart at the same
+///   frontier — the borrowed-view axis of this crate's typed primitives is
+///   now closed across the UTF-8 string frontier ([`AsRef<str>`]), the
+///   filesystem-path frontier ([`AsRef<std::path::Path>`]), and the
+///   OS-string frontier (this peer) at the store-path axis.
+///
+/// # Zero-cost
+///
+/// Returns a borrow of the interned [`String`] wrapped through
+/// [`std::ffi::OsStr::new`], which is a zero-cost view transmute at the
+/// borrow-view boundary — on Unix, [`std::ffi::OsStr`] is a `[u8]` newtype
+/// and every `&str` is a valid `&OsStr`; on Windows, [`std::ffi::OsStr`] is
+/// a WTF-8 slice which is a strict superset of UTF-8, so the ASCII store-
+/// path payload is a valid `&OsStr` on every supported platform. No
+/// allocation, no [`std::ffi::OsString`] copy, no re-validation of the
+/// store-path grammar — the [`&std::ffi::OsStr`] this peer exposes has the
+/// same lifetime as the borrow of the [`StorePath`], so a caller can bind
+/// it in one expression without widening to [`std::ffi::OsString`].
+impl AsRef<std::ffi::OsStr> for StorePath {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        std::ffi::OsStr::new(<Self as AsRef<str>>::as_ref(self))
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -1872,6 +1953,95 @@ mod tests {
         assert_eq!(
             pb.as_path().to_str(),
             Some(format!("/nix/store/{H}-foo-bar-1.2.3").as_str())
+        );
+    }
+
+    /// The [`AsRef<std::ffi::OsStr>`] peer must expose the same borrowed
+    /// canonical string view the inherent [`StorePath::as_str`] gives, just
+    /// projected onto the OS-string frontier through
+    /// [`std::ffi::OsStr::new`]. Pins the delegation so a future refactor
+    /// that severed the trait impl from the inherent accessor (e.g. a copy
+    /// that re-emitted a stale or re-computed representation) is caught
+    /// here. The trimming discipline reaches through the peer: a store path
+    /// parsed from a newline-terminated buffer reads back through
+    /// `AsRef<OsStr>` as the trimmed canonical path.
+    #[test]
+    fn test_asref_osstr_matches_inherent_as_str() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let via_asref: &std::ffi::OsStr = sp.as_ref();
+        assert_eq!(via_asref, std::ffi::OsStr::new(sp.as_str()));
+        assert_eq!(
+            via_asref,
+            std::ffi::OsStr::new(&format!("/nix/store/{H}-hello-2.10"))
+        );
+        // Trimming discipline reaches through the peer.
+        let sp_nl = StorePath::parse(&format!("/nix/store/{H}-x\n")).unwrap();
+        let via_asref_nl: &std::ffi::OsStr = sp_nl.as_ref();
+        assert_eq!(
+            via_asref_nl,
+            std::ffi::OsStr::new(&format!("/nix/store/{H}-x"))
+        );
+    }
+
+    /// A generic `fn f<S: AsRef<std::ffi::OsStr>>` consumer must accept a
+    /// borrowed [`StorePath`] and recover the canonical OS-string view
+    /// through the trait bound. This is the structural witness that
+    /// [`StorePath`] is genuinely usable at [`std::process::Command::arg`] /
+    /// [`std::process::Command::args`] / [`std::process::Command::env`] call
+    /// sites — the surface every `impl AsRef<std::ffi::OsStr>` boundary
+    /// keys off — without a call-site `OsStr::new(sp.as_str())` restatement.
+    /// If a future change narrowed the bound, this test fails at compile
+    /// time. Also pins that [`std::ffi::OsStr::to_str`] recovers the
+    /// canonical string view (the round trip through the OS-string frontier
+    /// is UTF-8-lossless on the store-path ASCII payload), so a consumer
+    /// that crosses back to the string frontier through the peer sees the
+    /// same bytes the [`AsRef<str>`] peer would have emitted.
+    #[test]
+    fn test_asref_osstr_generic_consumer_recovers_canonical_view() {
+        fn borrow_as_osstring<S: AsRef<std::ffi::OsStr>>(s: S) -> std::ffi::OsString {
+            s.as_ref().to_os_string()
+        }
+        let sp = StorePath::parse(&format!("/nix/store/{H}-foo-bar-1.2.3")).unwrap();
+        let os = borrow_as_osstring(&sp);
+        assert_eq!(os, std::ffi::OsString::from(sp.as_str()));
+        // Round-trip through the OS-string frontier back to the string
+        // frontier recovers the canonical string bytes byte-for-byte (a
+        // store path is ASCII by grammar, so `OsStr::to_str` is guaranteed
+        // to yield Some on every supported platform).
+        assert_eq!(
+            os.as_os_str().to_str(),
+            Some(format!("/nix/store/{H}-foo-bar-1.2.3").as_str())
+        );
+    }
+
+    /// The [`AsRef<std::ffi::OsStr>`] peer must survive an actual
+    /// [`std::process::Command::arg`] consumption without a per-site
+    /// `OsStr::new(sp.as_str())` restatement — the exact frontier that
+    /// motivated the peer (an `attic push /nix/store/...` /
+    /// `nix path-info /nix/store/...` / `skopeo copy nix:/nix/store/...`
+    /// argument slot). Pins the OS-string round-trip by driving a real
+    /// [`std::process::Command`] builder and reading back the recorded
+    /// argument list at the [`std::process::Command::get_args`] surface.
+    /// If a future regression collapsed the peer to a wider bound (e.g.
+    /// only `AsRef<str>`), this test fails at compile time; if the peer
+    /// dropped the trimming discipline, the recorded argument would drift
+    /// from the canonical [`StorePath::as_str`] view and fail here.
+    #[test]
+    fn test_asref_osstr_flows_through_command_arg_without_restatement() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-svc-1.2.3\n")).unwrap();
+        let mut cmd = std::process::Command::new("/bin/true");
+        cmd.arg(&sp);
+        let recorded: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        assert_eq!(recorded.len(), 1, "arg count must be 1");
+        assert_eq!(
+            recorded[0],
+            std::ffi::OsStr::new(sp.as_str()),
+            "recorded arg must equal the canonical trimmed store-path view"
+        );
+        assert_eq!(
+            recorded[0],
+            std::ffi::OsStr::new(&format!("/nix/store/{H}-svc-1.2.3")),
+            "trimming discipline must reach through the OS-string frontier"
         );
     }
 }
