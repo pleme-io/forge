@@ -11,6 +11,7 @@ use tracing::{info, warn};
 
 use crate::git;
 use crate::nix::build_flake_attr_in;
+use crate::store_path::StorePath;
 use crate::version;
 
 /// Release a tool: read version, verify clean tree, build targets, tag, push, create GitHub release.
@@ -68,7 +69,9 @@ pub async fn release(
         // Copy binary to temp dir with descriptive name
         let binary_name = format!("{}-{}", name, target);
         let dest = tmp.path().join(&binary_name);
-        let src = Path::new(&store_path).join("bin").join(name);
+        let src = <StorePath as AsRef<Path>>::as_ref(&store_path)
+            .join("bin")
+            .join(name);
 
         if src.exists() {
             std::fs::copy(&src, &dest)

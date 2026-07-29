@@ -159,7 +159,7 @@ async fn build_nix_image(flake_attr: &str, working_dir: &str) -> Result<String> 
     info!("Building .#{}...", flake_attr);
     let result =
         build_flake_attr_in(&format!(".#{}", flake_attr), Some(Path::new(working_dir))).await?;
-    Ok(result.store_path)
+    Ok(result.store_path.into_string())
 }
 
 fn push_image(skopeo: &str, image_path: &str, registry: &str, tag: &str) -> Result<()> {

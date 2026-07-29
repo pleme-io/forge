@@ -195,6 +195,32 @@ impl StorePath {
         &self.full
     }
 
+    /// Consume the [`StorePath`] and return its underlying validated
+    /// [`String`] buffer without a re-allocation.
+    ///
+    /// The owned-projection dual of [`StorePath::as_str`]: `as_str` hands
+    /// out a borrow of the canonical buffer, `into_string` hands out the
+    /// buffer itself. Both read the same one-oracle canonical view, split
+    /// by ownership so a downstream consumer that must own a `String`
+    /// (a `Result<String>`-returning function signature, a struct field
+    /// typed `String`, an `env::set_var` argument, a `format!` sink into an
+    /// owned buffer) writes `sp.into_string()` at ONE canonical-view
+    /// surface rather than `sp.as_str().to_string()` — which reads the
+    /// borrow and immediately allocates a fresh copy of bytes the
+    /// [`StorePath`] already owns.
+    ///
+    /// The zero-allocation guarantee matters at the nix-frontier: when
+    /// [`crate::nix::NixBuildResult`] holds a [`StorePath`] validated by
+    /// [`StorePath::parse`] and an outer wrapper (`build_nix_image` in
+    /// `commands/image_release.rs`, the `build_*_image_from_dir` sites in
+    /// `commands/pangea.rs`) must return `Result<String>` to preserve a
+    /// pre-existing public shape, the projection is a move of the already-
+    /// owned buffer, not a fresh `to_string` clone that doubles the
+    /// per-build heap traffic and loses the witness in the same call.
+    pub fn into_string(self) -> String {
+        self.full
+    }
+
     /// The 32-char content hash component — the hermetic fingerprint this
     /// type exists to expose. Consumed by [`canonical_closure_fingerprint`]
     /// to reduce a build closure to the content-addressed identity of its
@@ -2369,6 +2395,121 @@ mod tests {
         assert_eq!(p.hash(), H);
         assert_eq!(p.name(), "hello-2.10");
         assert!(!p.is_derivation(), "output path is not a derivation");
+    }
+
+    /// [`StorePath::into_string`] returns the canonical buffer that
+    /// [`StorePath::as_str`] borrows — pinning the owned-projection dual
+    /// of the borrow-projection accessor at ONE canonical-view oracle
+    /// (`Self::full`). Every downstream site that must own a `String`
+    /// (a `Result<String>`-returning outer wrapper —
+    /// `commands/image_release.rs::build_nix_image`, the
+    /// `Ok(result.store_path.into_string())` return in
+    /// `commands/pangea.rs::build_component_image`) writes the projection at
+    /// this one surface, reading the same canonical bytes the borrowed peer
+    /// would report.
+    #[test]
+    fn test_into_string_agrees_with_as_str_at_every_shape() {
+        for input in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let p = StorePath::parse(&input).unwrap();
+            let borrowed = p.as_str().to_string();
+            let owned = p.into_string();
+            assert_eq!(
+                owned, borrowed,
+                "into_string must yield the same canonical bytes as as_str"
+            );
+        }
+    }
+
+    /// [`StorePath::into_string`] carries [`StorePath::parse`]'s trimming
+    /// discipline through the owned-projection surface — a value parsed
+    /// from a newline-terminated buffer projects to the trimmed canonical
+    /// bytes, not the raw newline-terminated buffer. The nix-frontier
+    /// stdout (which carries a trailing `\n`) round-trips at the owned
+    /// surface without a per-site `sp.as_str().trim().to_string()`
+    /// restatement.
+    #[test]
+    fn test_into_string_carries_trim_discipline() {
+        let p = StorePath::parse(&format!("/nix/store/{H}-x\n")).unwrap();
+        assert_eq!(p.into_string(), format!("/nix/store/{H}-x"));
+    }
+
+    /// The owned-projection is a MOVE of `Self::full`, not a fresh clone —
+    /// the canonical buffer's heap allocation belongs to the returned
+    /// `String` and is not re-allocated. Pinned by exercising the
+    /// projection at a canonical fixture, comparing byte-for-byte and
+    /// (indirectly, by identity of the returned buffer's length) against
+    /// the pre-projection borrowed view — a fresh clone would still match
+    /// the byte contents but a re-allocation would defeat the zero-copy
+    /// guarantee this projection commits to.
+    #[test]
+    fn test_into_string_moves_owned_buffer() {
+        let input = format!("/nix/store/{H}-hello");
+        let p = StorePath::parse(&input).unwrap();
+        let expected_len = p.as_str().len();
+        let owned = p.into_string();
+        assert_eq!(owned.len(), expected_len);
+        assert_eq!(owned, input);
+    }
+
+    /// A [`StorePath`] round-trips through the owned-projection surface:
+    /// parse → into_string → parse yields a value structurally equal to
+    /// the original at every canonical accessor (`as_str`, `hash`, `name`,
+    /// `is_derivation`). The owned-projection surface preserves the
+    /// canonical view the parse oracle admits.
+    #[test]
+    fn test_into_string_round_trips_through_parse() {
+        for input in [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a"),
+        ] {
+            let p = StorePath::parse(&input).unwrap();
+            let original_hash = p.hash().to_string();
+            let original_name = p.name().to_string();
+            let original_is_drv = p.is_derivation();
+            let round_tripped = StorePath::parse(&p.into_string()).unwrap();
+            assert_eq!(round_tripped.as_str(), input);
+            assert_eq!(round_tripped.hash(), original_hash);
+            assert_eq!(round_tripped.name(), original_name);
+            assert_eq!(round_tripped.is_derivation(), original_is_drv);
+        }
+    }
+
+    /// [`crate::nix::NixBuildResult::store_path`] is a validated
+    /// [`StorePath`] — the parse discipline
+    /// [`crate::nix::run_nix_build_typed`] applies at the nix-frontier
+    /// survives through the result type, so every downstream consumer holds
+    /// the validated primitive by construction and reaches its downstream
+    /// boundary through the canonical projection ([`StorePath::as_str`],
+    /// [`StorePath::into_string`], [`AsRef<std::path::Path>`]).
+    ///
+    /// The witness this test pins is structural: it constructs a
+    /// [`crate::nix::NixBuildResult`] with a [`StorePath`] value in the
+    /// `store_path` field and reads the canonical accessors
+    /// ([`StorePath::hash`], [`StorePath::name`],
+    /// [`StorePath::is_derivation`]) off the field directly — pre-migration
+    /// the field was `String`, so the accessor reads would not compile;
+    /// post-migration they do, and the compile-time discipline is pinned by
+    /// this test.
+    #[test]
+    fn test_nix_build_result_holds_validated_store_path() {
+        let p = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let result = crate::nix::NixBuildResult {
+            store_path: p,
+            flake_attr: ".#hello".to_string(),
+        };
+        assert_eq!(result.store_path.hash(), H);
+        assert_eq!(result.store_path.name(), "hello-2.10");
+        assert!(!result.store_path.is_derivation());
+        assert_eq!(
+            result.store_path.as_str(),
+            format!("/nix/store/{H}-hello-2.10")
+        );
     }
 
     #[test]

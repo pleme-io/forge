@@ -267,7 +267,7 @@ async fn build_component(component: &PangeaComponent) -> Result<String> {
         // External repos use exact flake attr (no -image suffix)
         let result =
             build_docker_image_from_dir(&external_dir, component.flake_attr, Some("")).await?;
-        Ok(result.store_path)
+        Ok(result.store_path.into_string())
     } else if component.has_dedicated_flake {
         // For web/compiler components, use their dedicated flakes
         let component_dir = component.component_dir(&repo_root);
@@ -278,7 +278,7 @@ async fn build_component(component: &PangeaComponent) -> Result<String> {
         // Use exact flake attr (no suffix) - the flake_attr already contains the full name
         let result =
             build_docker_image_from_dir(&component_dir, component.flake_attr, Some("")).await?;
-        Ok(result.store_path)
+        Ok(result.store_path.into_string())
     } else {
         // For operator/cli, use root flake
         info!("Building {} from root flake...", component.name);
@@ -286,7 +286,7 @@ async fn build_component(component: &PangeaComponent) -> Result<String> {
         // Use exact flake attr (no suffix) - the flake_attr already contains the full name
         let result =
             build_docker_image_from_dir(&repo_root, component.flake_attr, Some("")).await?;
-        Ok(result.store_path)
+        Ok(result.store_path.into_string())
     }
 }
 
