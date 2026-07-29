@@ -1843,6 +1843,127 @@ impl PartialEq<StorePath> for String {
     }
 }
 
+/// Forward-direction borrowed byte-slice comparison peer — the byte-frontier
+/// sibling of the [`PartialEq<str>`] / [`PartialEq<&str>`] UTF-8 pair above,
+/// split by frontier so a downstream caller who holds a [`StorePath`] and a
+/// raw `[u8]` handle (a `nom` / `winnow` byte-slice scrutinee, a captured
+/// `Vec<u8>` process-stdout buffer sliced through `[..]`, a
+/// [`std::borrow::Cow::Borrowed`] byte-arm of a wire-decode result) writes
+/// `sp == *raw_bytes` and answers a boolean equality query at the same
+/// borrowed byte-slice frontier the [`AsRef<[u8]>`] read-back peer covers,
+/// without a per-site `sp.as_str().as_bytes() == raw_bytes` restatement and
+/// without a [`std::str::from_utf8`] round trip on the caller's byte handle
+/// to satisfy the UTF-8-side comparison peer.
+///
+/// Delegates through [`<StorePath as AsRef<[u8]>>::as_ref`] (itself
+/// [`StorePath::as_str`] composed with [`str::as_bytes`]) and the
+/// standard-library [`<[u8] as PartialEq<[u8]>>::eq`] on the borrowed
+/// receiver, so the "what canonical bytes does a [`StorePath`] carry?"
+/// question stays defined at ONE accessor surface — the inherent
+/// [`StorePath::as_str`] projected onto bytes at the [`AsRef<[u8]>`]
+/// surface — and every borrowed byte-slice comparison surface reads
+/// through it. Zero allocation, zero temporary buffer, zero re-validation
+/// of the store-path grammar per call.
+///
+/// # Why the trait peer earns its keep
+///
+/// The [`AsRef<[u8]>`] peer (line 1563) closes the *read* frontier
+/// (`fn f<S: AsRef<[u8]>>` — hasher inputs, wire-writer sinks, generic
+/// borrowed-byte-view consumers). [`PartialEq<[u8]>`] closes the disjoint
+/// *comparison* frontier at the same byte-slice-shape layer — the surface
+/// every byte-stream wire-check / cache-index oracle / round-trip
+/// verifier keys off:
+///
+/// - `sp == *captured_bytes` in a stdout-byte-echo verifier that confirms
+///   an `attic push` / `nix copy` argv slot round-tripped the exact bytes
+///   forge handed it, without the caller allocating a fresh [`String`]
+///   from the captured [`Vec<u8>`] to reach the UTF-8-side peer.
+/// - `sp == *cache_key_bytes` in a byte-stream cache-index oracle that
+///   keys on the store-path bytes without per-comparison UTF-8 conversion.
+/// - Generic [`PartialEq`]-bounded consumers
+///   (`fn same_bytes<A, B>(a: A, b: B) -> bool where A: PartialEq<B>`) —
+///   a downstream helper that composes a [`StorePath`] with a borrowed
+///   `[u8]` key can name the bound without a `where` clause naming both
+///   `StorePath: AsRef<[u8]>` and a shim
+///   `<StorePath as AsRef<[u8]>>::as_ref(&sp) == raw_bytes` inline.
+/// - Sibling canonical-label typed sums in this crate already carry the
+///   same forward-direction pair at the borrowed byte-slice comparison
+///   frontier: [`impl PartialEq<[u8]> for BumpLevel`] at
+///   `cli/src/version.rs:9545`, [`impl PartialEq<[u8]> for PerAttemptRegion`]
+///   at `cli/src/retry.rs:8989`, [`impl PartialEq<[u8]> for AdmissionTier`]
+///   at `cli/src/probe_outcome.rs:13382`, [`impl PartialEq<[u8]> for DigestAlgorithm`]
+///   at `cli/src/oci_manifest.rs:3738`. [`StorePath`] is the store-path
+///   primitive counterpart at the same comparison frontier — the
+///   borrowed byte-slice comparison axis of this crate's typed
+///   primitives now spans the ordered label sums AND the validated-path
+///   grammar with ONE canonical-view oracle each.
+///
+/// # Trimming discipline reaches through
+///
+/// A [`StorePath`] parsed from a newline-terminated buffer holds the
+/// *trimmed* canonical bytes ([`StorePath::parse`] applies `trim` before
+/// every grammar clause), so the comparison peer sees the trimmed view —
+/// `sp == *b"/nix/store/…-x"` holds for a value parsed from
+/// `"/nix/store/…-x\n"`. The comparison peer inherits the discipline the
+/// accessor already carries; no per-site
+/// `sp.as_str().trim().as_bytes() == …` restatement.
+///
+/// THEORY.md §III typed primitives: the borrowed byte-slice comparison
+/// surface is a typed-primitive site on [`StorePath`] itself (one
+/// [`PartialEq<[u8]>`] impl on [`StorePath`] routing through
+/// [`<StorePath as AsRef<[u8]>>::as_ref`]), not a per-consumer
+/// `<StorePath as AsRef<[u8]>>::as_ref(&sp) == raw_bytes` restatement at
+/// every downstream site that asks whether a [`StorePath`] value names
+/// the same canonical bytes as an already-borrowed `[u8]` handle.
+/// THEORY.md §VI.1 one-oracle: the canonical view is named at one site
+/// ([`StorePath::as_str`], projected onto bytes through
+/// [`str::as_bytes`] at the [`AsRef<[u8]>`] surface), and every borrowed
+/// byte-slice surface — the [`AsRef<[u8]>`] borrowed-view sibling, this
+/// [`PartialEq<[u8]>`] answering a boolean equality query — reads
+/// through the same one-oracle discipline projected onto its own
+/// intent × frontier.
+impl PartialEq<[u8]> for StorePath {
+    fn eq(&self, other: &[u8]) -> bool {
+        <Self as AsRef<[u8]>>::as_ref(self) == other
+    }
+}
+
+/// Forward-direction borrowed byte-slice comparison peer through a `&[u8]`
+/// argument — the receiver-shape sibling of [`PartialEq<[u8]> for StorePath`]
+/// directly above, split by receiver shape so the caller writes
+/// `sp == &raw_bytes_ref` without the explicit deref at every comparison
+/// site. The pair together closes the forward-direction 1×2
+/// (receiver-shape) surface on the borrowed byte-slice comparison
+/// frontier — the same shape the standard library gives [`Vec<u8>`]
+/// through its own [`PartialEq<[u8]> for Vec<u8>`] +
+/// [`PartialEq<&[u8]> for Vec<u8>`] pair, and the same shape the sibling
+/// canonical-label typed sums already carry
+/// ([`impl PartialEq<&[u8]> for BumpLevel`] at `cli/src/version.rs:9591`,
+/// [`impl PartialEq<&[u8]> for PerAttemptRegion`] at
+/// `cli/src/retry.rs:9033`, [`impl PartialEq<&[u8]> for AdmissionTier`]
+/// at `cli/src/probe_outcome.rs:13425`,
+/// [`impl PartialEq<&[u8]> for DigestAlgorithm`] at
+/// `cli/src/oci_manifest.rs:3809`).
+///
+/// Delegates through [`<StorePath as AsRef<[u8]>>::as_ref`] composed
+/// with the standard-library [`<[u8] as PartialEq<[u8]>>::eq`] on the
+/// dereffed `&[u8]` argument, so the comparison reads the same canonical
+/// bytes as the receiver-shape sibling and the two-impl pair are
+/// structurally indistinguishable at the byte-comparison level.
+///
+/// The reverse-direction pair
+/// (`impl PartialEq<StorePath> for [u8]` +
+/// `impl PartialEq<StorePath> for &[u8]`) is a natural follow-on that
+/// closes the full 2×2 direction × receiver-shape cross-product on this
+/// frontier, matching the closure the sibling canonical-label typed
+/// sums (`BumpLevel`, `PerAttemptRegion`) already carry across
+/// forward × receiver-shape and reverse × receiver-shape.
+impl PartialEq<&[u8]> for StorePath {
+    fn eq(&self, other: &&[u8]) -> bool {
+        <Self as AsRef<[u8]>>::as_ref(self) == *other
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -4625,5 +4746,143 @@ mod tests {
                 "reverse-String and forward-String PartialEq peers must agree at {candidate:?}",
             );
         }
+    }
+
+    /// `<StorePath as PartialEq<[u8]>>::eq(&sp, bytes)` must agree
+    /// byte-for-byte with `<StorePath as AsRef<[u8]>>::as_ref(&sp) == bytes`
+    /// at every (canonical-view, candidate) pair. Pins the delegation
+    /// through the [`AsRef<[u8]>`] one-oracle projection so a future
+    /// refactor that severed the byte-slice comparison peer from the
+    /// borrowed-byte-view accessor (a hand-rolled `as_str().as_bytes()`
+    /// re-read, a divergent trimming path) is caught here first at the
+    /// forward-direction borrowed byte-slice comparison frontier — the
+    /// byte-frontier sibling of
+    /// [`test_partial_eq_str_agrees_with_as_str`] on the UTF-8 forward
+    /// peer.
+    #[test]
+    fn test_partial_eq_bytes_agrees_with_as_ref_bytes() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates: [Vec<u8>; 6] = [
+            format!("/nix/store/{H}-hello-2.10").into_bytes(),
+            format!("/nix/store/{H}-hello-2.11").into_bytes(),
+            format!("/nix/store/{H}-x").into_bytes(),
+            b"/nix/store/short".to_vec(),
+            Vec::new(),
+            b"hello-2.10".to_vec(),
+        ];
+        for candidate in &candidates {
+            let bytes: &[u8] = candidate.as_slice();
+            let via_peer: bool = <StorePath as PartialEq<[u8]>>::eq(&sp, bytes);
+            let via_accessor: bool = <StorePath as AsRef<[u8]>>::as_ref(&sp) == bytes;
+            assert_eq!(
+                via_peer, via_accessor,
+                "PartialEq<[u8]> peer must agree with as_ref::<[u8]>() == bytes at {candidate:?}",
+            );
+        }
+    }
+
+    /// The reflexive identity
+    /// `<StorePath as PartialEq<[u8]>>::eq(&sp, <StorePath as AsRef<[u8]>>::as_ref(&sp))`
+    /// must hold at every [`StorePath`] value. Pins the accessor's own
+    /// bytes as a fixed point of the byte-slice peer so a future
+    /// refactor that quietly re-encoded the canonical byte view breaks
+    /// here rather than at every downstream `sp == raw_bytes` call
+    /// site — the byte-frontier sibling of
+    /// [`test_partial_eq_str_reflexive_at_own_canonical_view`].
+    #[test]
+    fn test_partial_eq_bytes_reflexive_at_own_canonical_view() {
+        for raw in [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-foo-bar-1.2.3"),
+            format!("/nix/store/{H}-svc-1.2.3.drv"),
+        ] {
+            let sp = StorePath::parse(&raw).unwrap();
+            let own: &[u8] = <StorePath as AsRef<[u8]>>::as_ref(&sp);
+            assert!(
+                <StorePath as PartialEq<[u8]>>::eq(&sp, own),
+                "PartialEq<[u8]> for StorePath must be reflexive at own canonical view for {raw:?}",
+            );
+        }
+    }
+
+    /// The trimming discipline of [`StorePath::parse`] reaches through
+    /// the forward-direction [`PartialEq<[u8]>`] peer — a value parsed
+    /// from a newline-terminated buffer compares equal to the *trimmed*
+    /// canonical literal as bytes, not to the raw newline-terminated
+    /// buffer. Pins the invariant that the byte-slice peer reads the
+    /// same canonical bytes the [`AsRef<[u8]>`] accessor exposes, at
+    /// the wire-boundary shape the peer exists to serve. Byte-frontier
+    /// sibling of [`test_partial_eq_str_trims_through_peer`].
+    #[test]
+    fn test_partial_eq_bytes_trims_through_peer() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-svc-1.2.3\n")).unwrap();
+        let trimmed_bytes = format!("/nix/store/{H}-svc-1.2.3").into_bytes();
+        let untrimmed_bytes = format!("/nix/store/{H}-svc-1.2.3\n").into_bytes();
+        assert!(<StorePath as PartialEq<[u8]>>::eq(
+            &sp,
+            trimmed_bytes.as_slice()
+        ));
+        assert!(!<StorePath as PartialEq<[u8]>>::eq(
+            &sp,
+            untrimmed_bytes.as_slice()
+        ));
+    }
+
+    /// `<StorePath as PartialEq<&[u8]>>::eq(&sp, &bytes_ref)` — the
+    /// receiver-shape sibling of the [`PartialEq<[u8]>`] peer — must
+    /// agree byte-for-byte with the receiver-shape sibling at every
+    /// (canonical-view, candidate) pair, so a caller may pick either
+    /// receiver at the comparison site without the two peers diverging.
+    /// Byte-frontier sibling of
+    /// [`test_partial_eq_str_ref_agrees_with_partial_eq_str`].
+    #[test]
+    fn test_partial_eq_bytes_ref_agrees_with_partial_eq_bytes() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates: [Vec<u8>; 4] = [
+            format!("/nix/store/{H}-hello-2.10").into_bytes(),
+            format!("/nix/store/{H}-hello-2.11").into_bytes(),
+            b"/nix/store/short".to_vec(),
+            Vec::new(),
+        ];
+        for candidate in &candidates {
+            let bytes: &[u8] = candidate.as_slice();
+            let via_ref: bool = <StorePath as PartialEq<&[u8]>>::eq(&sp, &bytes);
+            let via_val: bool = <StorePath as PartialEq<[u8]>>::eq(&sp, bytes);
+            assert_eq!(
+                via_ref, via_val,
+                "PartialEq<&[u8]> receiver-shape peer must agree with PartialEq<[u8]> at {candidate:?}",
+            );
+        }
+    }
+
+    /// A generic `fn f<A, B>(a: &A, b: &B) -> bool where A: PartialEq<B>`
+    /// consumer must accept a borrowed [`StorePath`] against a borrowed
+    /// `[u8]` and answer through the trait bound. This is the structural
+    /// witness that [`StorePath`] is usable at every downstream generic
+    /// [`PartialEq`]-bounded byte-slice comparison site — the surface a
+    /// byte-stream wire-echo verifier or a `nom` byte-scrutinee
+    /// comparison helper keys off — without a per-site
+    /// `<StorePath as AsRef<[u8]>>::as_ref(&sp) == raw_bytes` bridge that
+    /// repeats the accessor name.
+    #[test]
+    fn test_partial_eq_bytes_carries_through_generic_consumer() {
+        fn eq_through_bound<A, B: ?Sized>(a: &A, b: &B) -> bool
+        where
+            A: PartialEq<B>,
+        {
+            a == b
+        }
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let match_bytes = format!("/nix/store/{H}-hello-2.10").into_bytes();
+        let miss_bytes = format!("/nix/store/{H}-hello-2.11").into_bytes();
+        assert!(eq_through_bound::<StorePath, [u8]>(
+            &sp,
+            match_bytes.as_slice()
+        ));
+        assert!(!eq_through_bound::<StorePath, [u8]>(
+            &sp,
+            miss_bytes.as_slice()
+        ));
     }
 }
