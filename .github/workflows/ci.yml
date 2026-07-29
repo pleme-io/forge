@@ -37,18 +37,42 @@ jobs:
       #   error: Failed assertions:
       #   - devenv was not able to determine the current directory.
       #
-      # Verified on this repo: pure `nix eval .#devShells.<sys>.default.name`
-      # fails with that assertion; the same eval under --impure yields
-      # "devenv-shell". It is an eval-time property of devenv, not a defect
-      # here, and it is why this CI was red from 2026-07-17 until today.
+      # Still true after the 2026-07-28 devShell split, but the shell it now
+      # applies to is `devShells.devenv`, NOT `default`. `nix flake check`
+      # evaluates EVERY devShell, so one devenv-backed shell anywhere in the
+      # flake keeps this leg impure even though `.#default` is now a plain
+      # substrate `mkRustDevShell` that evaluates purely on all 3 systems
+      # (verified: `nix eval .#devShells.<sys>.default.drvPath`, no --impure,
+      # green for aarch64-darwin / x86_64-linux / aarch64-linux).
       #
       # Scope of the weakening is narrow and worth naming: it applies to the
       # EVALUATION of this repo's flake outputs in CI. The checks themselves
       # are still sandboxed nix builds. It does NOT make other repos impure —
-      # cargo-ci defaults flake-args to "" and the other five consumers are
+      # cargo-ci defaults flake-args to "" and the other callers are
       # unaffected.
-      #
-      # The pure alternative is to stop exposing a devenv devShell (or to
-      # build `checks.<system>.*` explicitly instead of `flake check`). Either
-      # is a larger change than this repo's CI warrants right now.
       flake-args: "--impure"
+
+      # The cargo-test leg needs this, and the reason is structural rather
+      # than stylistic: substrate's default is `--workspace`, which it runs
+      # from the repo ROOT, and forge has NO root Cargo.toml. `cli/` and
+      # `provision/*` are independent crates, not workspace members — so the
+      # default command fails before compiling anything:
+      #   error: could not find `Cargo.toml` in `/…/forge` or any parent
+      #          directory
+      # Measured inside the fixed devShell 2026-07-28. That is a SECOND,
+      # independent blocker from the devShell one — entering `.#default`
+      # successfully is necessary but not sufficient for this leg to pass.
+      #
+      # `--manifest-path cli/Cargo.toml` points it at the crate that is
+      # actually forge; `--all-targets --all-features` mirrors tests.yml,
+      # where both flags are measured, not decorative (`--all-targets` is
+      # what compiles the test target at all; `--all-features` is worth 263
+      # tests gated behind the optional `attestation` feature).
+      #
+      # NOTE this covers `cli` only. `provision/forge-provision` is still
+      # covered by tests.yml's matrix; a single `cargo test` invocation
+      # cannot span two unrelated crate roots. Making that unnecessary means
+      # giving forge a real root workspace, which is a structural change to
+      # the gen-cargo sidecars and deliberately not bundled into a devShell
+      # fix.
+      test-args: "--manifest-path cli/Cargo.toml --all-targets --all-features --no-fail-fast"
