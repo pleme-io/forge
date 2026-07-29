@@ -613,6 +613,62 @@ impl TryFrom<std::rc::Rc<str>> for StorePath {
     }
 }
 
+/// By-reference read-back peer for [`StorePath::as_str`] via the
+/// [`AsRef<str>`] trait — the [`std::fmt::Display`] impl above emits the
+/// full path into a formatter; this peer exposes the same view directly as
+/// a borrowed [`&str`] so consumers can pass a [`StorePath`] anywhere
+/// generic [`AsRef<str>`] is accepted without a call-site `.as_str()`
+/// shim.
+///
+/// Delegates verbatim to [`StorePath::as_str`], so the "what does a
+/// [`StorePath`] read back as?" question stays defined at ONE accessor
+/// surface. A future change to the internal representation (e.g. splitting
+/// `full` into `prefix + hash + name` components) lands in `as_str` once,
+/// and both the inherent accessor and the trait peer light up in the same
+/// commit.
+///
+/// # Why the trait peer earns its keep
+///
+/// The inherent [`StorePath::as_str`] is the direct accessor; the trait
+/// peer opens the same read-back view to every downstream context that
+/// already speaks generic [`AsRef<str>`]:
+///
+/// - `println!("{}", sp.as_ref() as &str)` and any format-argument sink
+///   that binds `impl AsRef<str>` — the [`Display`] impl above covers the
+///   format-argument case, but a caller that wants the borrowed [`&str`]
+///   *value* (to concatenate, slice, or feed to a third-party API that
+///   takes [`AsRef<str>`]) reaches through this peer.
+/// - Generic bounds (`fn write_path<S: AsRef<str>>(s: S)`) — a downstream
+///   record writer or attestation-column emitter that binds its input
+///   contract as [`AsRef<str>`] rather than [`&str`] or `Into<String>`
+///   can name [`StorePath`] alongside every other by-reference read-back
+///   primitive without a shim.
+/// - The [`std::path::Path::new`] constructor, [`std::fs`] operations
+///   ([`std::fs::metadata`], [`std::fs::exists`]), and
+///   [`std::process::Command`] argument builders (`cmd.arg(sp.as_ref())`)
+///   all accept [`AsRef<str>`] or [`AsRef<std::ffi::OsStr>`] at the
+///   boundary — the [`&str`] this peer exposes composes with each
+///   frontier without a per-site [`.as_str()`] rewrite.
+/// - The sibling canonical-label typed sums in this crate already carry
+///   the peer: [`AsRef<str>`] `for PerAttemptRegion` at `retry.rs`
+///   opens the same read-back frontier for the retry-region label
+///   surface; this impl is the store-path primitive counterpart on the
+///   same read-back frontier — the by-reference dual of the [`FromStr`]
+///   / [`TryFrom<&str>`] construction peers directly above.
+///
+/// # Zero-cost
+///
+/// Returns a borrow of the interned [`String`] (`&self.full`) — no
+/// allocation, no re-validation, no shift in the string's identity. The
+/// [`&str`] this peer exposes has the same lifetime as the borrow of the
+/// [`StorePath`], so a caller can bind it in one expression without
+/// widening the return to an owned buffer.
+impl AsRef<str> for StorePath {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -1639,5 +1695,51 @@ mod tests {
             canonical_closure_fingerprint(r#"[{"path":"/nix/store/short"}]"#),
             ""
         );
+    }
+
+    /// The [`AsRef<str>`] peer must expose the same borrowed view the
+    /// inherent [`StorePath::as_str`] gives — pins the delegation so a
+    /// future refactor that severed the trait impl from the inherent
+    /// accessor (e.g. a copy that re-emitted a stale representation) is
+    /// caught here. The trimming discipline reaches through the peer too:
+    /// a store path parsed from a newline-terminated buffer reads back
+    /// through [`AsRef<str>`] as the trimmed canonical string.
+    #[test]
+    fn test_asref_str_matches_inherent_as_str() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let via_asref: &str = sp.as_ref();
+        assert_eq!(via_asref, sp.as_str());
+        assert_eq!(via_asref, format!("/nix/store/{H}-hello-2.10"));
+        // Trimming discipline reaches through the peer: the canonical
+        // representation is the trimmed, validated string, not the raw
+        // nix-build-stdout buffer.
+        let sp_nl = StorePath::parse(&format!("/nix/store/{H}-x\n")).unwrap();
+        let via_asref_nl: &str = sp_nl.as_ref();
+        assert_eq!(via_asref_nl, format!("/nix/store/{H}-x"));
+    }
+
+    /// A generic `fn f<S: AsRef<str>>` consumer must accept a borrowed
+    /// [`StorePath`] and recover the canonical string view through the
+    /// trait bound. This is the structural witness that [`StorePath`] is
+    /// genuinely usable at [`AsRef<str>`] call sites — the surface that
+    /// a downstream record writer, attestation-column emitter, or
+    /// third-party API binding [`impl AsRef<str>`] keys off. If a future
+    /// change narrowed the bound, this test fails at compile time.
+    #[test]
+    fn test_asref_str_generic_consumer_recovers_canonical_view() {
+        fn borrow_as_string<S: AsRef<str>>(s: S) -> String {
+            s.as_ref().to_string()
+        }
+        let sp = StorePath::parse(&format!("/nix/store/{H}-foo-bar-1.2.3")).unwrap();
+        assert_eq!(
+            borrow_as_string(&sp),
+            format!("/nix/store/{H}-foo-bar-1.2.3")
+        );
+        // The generic bound composes with the Display / FromStr /
+        // TryFrom pair: an `AsRef<str>` view of a StorePath re-parses
+        // to a StorePath equal to the original — the read-back /
+        // parse-back round trip closes at the trait surface.
+        let round_tripped: StorePath = borrow_as_string(&sp).parse().unwrap();
+        assert_eq!(round_tripped, sp);
     }
 }
