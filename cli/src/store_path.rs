@@ -1566,6 +1566,104 @@ impl AsRef<[u8]> for StorePath {
     }
 }
 
+/// Forward-direction borrowed UTF-8 comparison peer — the sibling of the
+/// [`AsRef<str>`] read-back peer above, split by intent. A downstream
+/// caller who holds a [`StorePath`] and a raw [`str`] (a captured
+/// wire-received line, an `attic push` argv slot echo, a
+/// nix-build-stdout payload sitting in a `&Cow::Borrowed(s)`) writes
+/// `sp == *raw_str` and answers a boolean equality query at the same
+/// borrowed UTF-8 frontier the read-back peer covers, without a
+/// per-site `sp.as_str() == raw_str` restatement and without an
+/// implicit widening to [`String`] to satisfy the standard-library
+/// [`PartialEq<str> for String`] surface.
+///
+/// Delegates through [`StorePath::as_str`] composed with the
+/// standard-library [`<str as PartialEq<str>>::eq`] on the borrowed
+/// receiver, so the "what canonical bytes does a [`StorePath`] carry?"
+/// question stays defined at ONE accessor surface — the inherent
+/// [`StorePath::as_str`] — and every comparison surface reads through
+/// it. No allocation, no temporary [`String`], no
+/// [`std::fmt::Display`] formatter-buffer round trip per call.
+///
+/// # Why the trait peer earns its keep
+///
+/// The [`AsRef<str>`] peer (line 1327) closes the *read* frontier
+/// (`fn f<S: AsRef<str>>` — record writers, attestation-column
+/// emitters, generic borrowed-view consumers). [`PartialEq<str>`]
+/// closes the disjoint *comparison* frontier — the surface every
+/// wire-check / config-check / round-trip verifier keys off:
+///
+/// - `assert_eq!(sp, "/nix/store/…")` in a fixture / integration test —
+///   reads the canonical bytes of a [`StorePath`] directly against an
+///   inline literal without the `assert_eq!(sp.as_str(), "…")`
+///   restatement that repeats the accessor name at every assertion.
+/// - `wire_line == parsed_store_path` in a stdout-echo verifier that
+///   confirms an `attic push` / `nix copy` argv slot round-tripped
+///   the exact bytes forge handed it — the reverse-direction sibling
+///   below lets the caller pick either receiver at the site.
+/// - Generic [`PartialEq`]-bounded consumers
+///   (`fn same_label<A, B>(a: A, b: B) -> bool where A: PartialEq<B>`)
+///   — a downstream helper that composes a [`StorePath`] with a
+///   borrowed [`str`] key can name the bound without a `where` clause
+///   naming both `StorePath: AsRef<str>` and a shim
+///   `sp.as_str() == raw_str` inline.
+/// - Sibling canonical-label typed sums in this crate already carry
+///   the same forward-direction peer at the borrowed UTF-8 comparison
+///   frontier: `impl PartialEq<str> for BumpLevel` at `version.rs`,
+///   `impl PartialEq<str> for PerAttemptRegion` at `retry.rs`,
+///   `impl PartialEq<str> for AdmissionTier` at `probe_outcome.rs`,
+///   `impl PartialEq<str> for DigestAlgorithm` at `oci_manifest.rs`.
+///   [`StorePath`] is the store-path primitive counterpart at the
+///   same comparison frontier — the borrowed UTF-8 comparison axis
+///   of this crate's typed primitives now spans the ordered label
+///   sums AND the validated-path grammar with ONE canonical-view
+///   oracle each.
+///
+/// # Trimming discipline reaches through
+///
+/// A [`StorePath`] parsed from a newline-terminated buffer holds the
+/// *trimmed* canonical bytes ([`StorePath::parse`] applies `trim`
+/// before every grammar clause), so the comparison peer sees the
+/// trimmed view — `sp == "/nix/store/…-x"` holds for a value parsed
+/// from `"/nix/store/…-x\n"`. The comparison peer inherits the
+/// discipline the accessor already carries; no per-site
+/// `sp.as_str().trim() == …` restatement.
+impl PartialEq<str> for StorePath {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+/// Forward-direction borrowed UTF-8 comparison peer through a `&str`
+/// argument — the receiver-shape sibling of [`PartialEq<str> for StorePath`]
+/// directly above, split by receiver shape so the caller writes
+/// `sp == &raw_str_ref` without the explicit deref at every comparison
+/// site. The pair together closes the forward-direction 1×2
+/// (receiver-shape) surface on the borrowed UTF-8 comparison frontier
+/// — the same shape the standard library gives [`String`] through its
+/// own [`PartialEq<str> for String`] + [`PartialEq<&str> for String`]
+/// pair, and the same shape the sibling canonical-label typed sums
+/// already carry.
+///
+/// Delegates through [`StorePath::as_str`] composed with the standard-
+/// library [`<str as PartialEq<str>>::eq`] on the dereffed `&str`
+/// argument, so the comparison reads the same canonical bytes as the
+/// receiver-shape sibling and the two-impl pair are structurally
+/// indistinguishable at the byte-comparison level.
+///
+/// The reverse-direction pair
+/// (`impl PartialEq<StorePath> for str` +
+/// `impl PartialEq<StorePath> for &str`) is a natural follow-on that
+/// closes the full 2×2 direction × receiver-shape cross-product on
+/// this frontier, matching the closure the sibling canonical-label
+/// typed sums (`BumpLevel`, `PerAttemptRegion`, `AdmissionTier`,
+/// `DigestAlgorithm`) already carry.
+impl PartialEq<&str> for StorePath {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -3972,5 +4070,123 @@ mod tests {
         let trimmed: StorePath = parse_via_try_from(Rc::from(raw_nl.as_bytes()))
             .expect("trailing newline must be trimmed at generic TryFrom<Rc<[u8]>>");
         assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// `<StorePath as PartialEq<str>>::eq(&sp, raw)` must agree
+    /// byte-for-byte with `sp.as_str() == raw` at every
+    /// (canonical-view, candidate) pair. Pins the delegation through
+    /// the inherent [`StorePath::as_str`] oracle so a future refactor
+    /// that severed the trait impl from the accessor (a hand-rolled
+    /// tag-and-slice re-read, a stale representation cache) is caught
+    /// here first at the borrowed UTF-8 comparison frontier.
+    #[test]
+    fn test_partial_eq_str_agrees_with_as_str() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates = [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-hello-2.11"),
+            format!("/nix/store/{H}-x"),
+            "/nix/store/short".to_string(),
+            String::new(),
+            "hello-2.10".to_string(),
+        ];
+        for candidate in &candidates {
+            let via_peer: bool = sp == *candidate.as_str();
+            let via_accessor: bool = sp.as_str() == candidate.as_str();
+            assert_eq!(
+                via_peer, via_accessor,
+                "PartialEq<str> peer must agree with sp.as_str() == candidate at {candidate:?}",
+            );
+        }
+    }
+
+    /// The reflexive identity `sp == sp.as_str()` must hold at every
+    /// [`StorePath`] value. Pins the accessor's own bytes as a fixed
+    /// point of the peer so a future refactor that quietly re-encoded
+    /// the canonical view (a trim-drift, an insertion of a
+    /// normalization step the accessor does not perform) breaks here
+    /// rather than at every downstream comparison site.
+    #[test]
+    fn test_partial_eq_str_reflexive_at_own_canonical_view() {
+        for raw in [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-foo-bar-1.2.3"),
+            format!("/nix/store/{H}-svc-1.2.3.drv"),
+        ] {
+            let sp = StorePath::parse(&raw).unwrap();
+            assert!(
+                sp == *sp.as_str(),
+                "PartialEq<str> must be reflexive at own canonical view for {raw:?}",
+            );
+        }
+    }
+
+    /// The trimming discipline of [`StorePath::parse`] reaches through
+    /// the [`PartialEq<str>`] peer — a value parsed from a
+    /// newline-terminated buffer compares equal to the *trimmed*
+    /// canonical literal, not to the raw newline-terminated buffer.
+    /// Pins the invariant that the peer reads the same canonical
+    /// bytes the accessor exposes, at the wire-boundary shape the
+    /// peer exists to serve.
+    #[test]
+    fn test_partial_eq_str_trims_through_peer() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-svc-1.2.3\n")).unwrap();
+        assert!(sp == *format!("/nix/store/{H}-svc-1.2.3").as_str());
+        assert!(!(sp == *format!("/nix/store/{H}-svc-1.2.3\n").as_str()));
+    }
+
+    /// `<StorePath as PartialEq<&str>>::eq(&sp, &raw_ref)` — the
+    /// receiver-shape sibling of the [`PartialEq<str>`] peer — must
+    /// agree byte-for-byte with the receiver-shape sibling at every
+    /// (canonical-view, candidate) pair, so a caller may pick either
+    /// receiver at the comparison site without the two peers diverging.
+    #[test]
+    fn test_partial_eq_str_ref_agrees_with_partial_eq_str() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates = [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-hello-2.11"),
+            "/nix/store/short".to_string(),
+            String::new(),
+        ];
+        for candidate in &candidates {
+            let raw_ref: &str = candidate.as_str();
+            let via_str_ref: bool = sp == raw_ref;
+            let via_str: bool = sp == *raw_ref;
+            assert_eq!(
+                via_str_ref, via_str,
+                "PartialEq<&str> receiver-shape peer must agree with PartialEq<str> at {candidate:?}",
+            );
+        }
+    }
+
+    /// A generic `fn f<A, B>(a: A, b: B) -> bool where A: PartialEq<B>`
+    /// consumer must accept a borrowed [`StorePath`] against a
+    /// borrowed [`str`] and answer through the trait bound. This is
+    /// the structural witness that [`StorePath`] is usable at every
+    /// downstream generic [`PartialEq`]-bounded comparison site —
+    /// the surface a wire-echo verifier or a fixture-comparison
+    /// helper keys off — without a per-site
+    /// `sp.as_str() == raw` bridge that repeats the accessor name.
+    #[test]
+    fn test_partial_eq_str_carries_through_generic_consumer() {
+        fn eq_through_bound<A, B: ?Sized>(a: &A, b: &B) -> bool
+        where
+            A: PartialEq<B>,
+        {
+            a == b
+        }
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let match_literal = format!("/nix/store/{H}-hello-2.10");
+        let miss_literal = format!("/nix/store/{H}-hello-2.11");
+        assert!(eq_through_bound::<StorePath, str>(
+            &sp,
+            match_literal.as_str()
+        ));
+        assert!(!eq_through_bound::<StorePath, str>(
+            &sp,
+            miss_literal.as_str()
+        ));
     }
 }
