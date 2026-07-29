@@ -1061,6 +1061,108 @@ impl TryFrom<std::borrow::Cow<'_, [u8]>> for StorePath {
     }
 }
 
+/// Cross-thread shared-owned byte-buffer try-conversion peer for
+/// [`StorePath::parse`] via the [`TryFrom<Arc<[u8]>>`] trait — the
+/// atomically refcounted shared-buffer frontier that pairs with the
+/// [`TryFrom<Arc<str>>`] cross-thread shared-owned UTF-8 peer at the
+/// disjoint byte-side receiver layer. Where the UTF-8 sibling assumes the
+/// text gate has already fired, this peer takes an atomically refcounted
+/// buffer whose UTF-8 status is still open — the exact shape carried by a
+/// `bytes::Bytes → Arc<[u8]>` bridge, an rkyv / bincode / MessagePack /
+/// CBOR wire frame shared across worker threads, or a `Arc<[u8]>` intern
+/// table that hands the same buffer to sibling readers without copying.
+///
+/// Delegates through `<Self as TryFrom<&[u8]>>::try_from` on the borrowed
+/// [`[u8]`] view of the caller-supplied [`Arc<[u8]>`] (via
+/// [`<std::sync::Arc<[u8]> as AsRef<[u8]>>::as_ref`], a zero-copy borrow
+/// of the shared allocation's bytes that does NOT touch the atomic
+/// refcount header), so the store-path grammar and the UTF-8 decode gate
+/// stay defined at ONE construction surface — the byte-slice
+/// [`TryFrom<&[u8]>`] peer, which itself composes [`std::str::from_utf8`]
+/// with the [`FromStr`] oracle. No refcount bump, no buffer clone, no
+/// divergent decode gate: the impl body pays the by-reference byte-slice
+/// try-conversion cost at zero allocation on the incoming shared handle.
+///
+/// # Why the trait peer earns its keep
+///
+/// The four byte-side receiver-shape peers directly above
+/// ([`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`], [`TryFrom<Box<[u8]>>`],
+/// [`TryFrom<Cow<'_, [u8]>>`]) close the parse frontier at every
+/// non-shared byte receiver shape. This peer closes the disjoint
+/// cross-thread shared-owned byte frontier that stdlib and the wider
+/// ecosystem key off separately:
+///
+/// - `#[serde(try_from = "Arc<[u8]>")]` — the serde container attribute
+///   for the cross-thread shared-owned byte case (a deserializer that
+///   hands out atomically refcounted byte buffers so peers across worker
+///   threads hold cheap-clone shared ownership without copying, and
+///   without the borrow-lifetime constraint the [`TryFrom<&[u8]>`] peer
+///   imposes) keys off [`TryFrom<Arc<[u8]>>`], not [`TryFrom<Arc<str>>`],
+///   [`TryFrom<Box<[u8]>>`], [`TryFrom<Vec<u8>>`], or
+///   [`TryFrom<&[u8]>`]. A future serde field wrapping a [`StorePath`]
+///   and opting into the cross-thread shared-owned byte `try_from`
+///   grammar reaches the store-path check through this impl without a
+///   shim.
+/// - A `bytes::Bytes` → `Arc<[u8]>` bridge at the async
+///   registry-response or Attic-fetch frontier: an `http-body` or
+///   `hyper::body::Bytes` frame handed across a worker-thread boundary is
+///   commonly re-owned as an [`Arc<[u8]>`] so downstream tasks share the
+///   same allocation without copying and without the refcount bumps a
+///   [`Vec<u8>`] clone would pay. A validated store-path label carried
+///   through that channel reaches the parse frontier through this impl
+///   without an `Arc::as_ref().to_vec()` copy.
+/// - Generic try-conversion bounds
+///   (`fn parse_field<T: TryFrom<Arc<[u8]>>>`) — a validated-input
+///   newtype builder or attestation-column reader whose parse contract is
+///   stated at the cross-thread shared-owned byte receiver layer (an
+///   atomically refcounted byte payload handed cheaply among sibling
+///   readers on different threads through [`std::sync::Arc::clone`]) can
+///   name [`StorePath`] alongside every other cross-thread shared-owned
+///   byte try-conversion primitive without routing through a
+///   [`Vec<u8>`]-first or [`&[u8]`]-first shim.
+/// - A `HashMap<Arc<[u8]>, StorePath>` shared intern table — a
+///   closure-scan or attic-push staging pool that keys a validated store
+///   path off its raw-byte label buffer and hands the same buffer to
+///   sibling readers across worker threads through
+///   [`std::sync::Arc::clone`] — can populate its entries by
+///   `try_from`-ing the raw shared buffer directly through this impl
+///   without an `std::str::from_utf8(&*arc)?.parse::<StorePath>()`
+///   two-step, and without paying a fresh [`Vec<u8>`] allocation per
+///   entry.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at two frontiers, in order, unchanged from the
+/// underlying byte-slice peer:
+///
+/// 1. Non-UTF-8 byte sequences reject at the UTF-8 decode gate
+///    ([`std::str::from_utf8`] inside the delegated [`TryFrom<&[u8]>`]
+///    peer) with the typed [`StorePathError::NonUtf8Bytes`] variant
+///    carrying the offending buffer verbatim and the underlying
+///    [`std::str::Utf8Error`] under [`std::error::Error::source`].
+/// 2. Valid-UTF-8 byte sequences that decode to a non-store-path string
+///    reject at the underlying [`FromStr`] impl with the exact
+///    grammar-clause variant the input violated
+///    (`MissingStorePrefix` / `HasSubpath` / `TooShort` / `InvalidHash` /
+///    `MissingSeparator` / `EmptyName`).
+///
+/// # Error shape
+///
+/// `Self::Error = StorePathError`. The typed grammar-clause enum,
+/// extended with the [`StorePathError::NonUtf8Bytes`] variant for the
+/// UTF-8 decode gate, carries through — no widening to [`anyhow::Error`]
+/// or `Box<dyn Error>` hides between the cross-thread shared-owned byte
+/// try-conversion surface and the inherent constructor, so a caller can
+/// still `match` on the exact rejection site at the trait entry point
+/// even when the caller holds an atomically refcounted byte buffer.
+impl TryFrom<std::sync::Arc<[u8]>> for StorePath {
+    type Error = StorePathError;
+
+    fn try_from(shared: std::sync::Arc<[u8]>) -> Result<Self, Self::Error> {
+        <Self as TryFrom<&[u8]>>::try_from(shared.as_ref())
+    }
+}
+
 /// By-reference read-back peer for [`StorePath::as_str`] via the
 /// [`AsRef<str>`] trait — the [`std::fmt::Display`] impl above emits the
 /// full path into a formatter; this peer exposes the same view directly as
@@ -3372,5 +3474,191 @@ mod tests {
             digest_via_peer, digest_via_trimmed_literal,
             "hasher fed through AsRef<[u8]> must see the trimmed canonical bytes, not the raw newline-terminated buffer",
         );
+    }
+
+    /// [`TryFrom<Arc<[u8]>>`] must accept every input the sibling
+    /// [`TryFrom<&[u8]>`] peer accepts and produce a value equal to the
+    /// [`FromStr`] round-trip on the decoded view of the same buffer.
+    /// Pins the delegation through the byte-slice oracle via
+    /// [`Arc::as_ref`]: a future refactor that severed the trait impl
+    /// from `<Self as TryFrom<&[u8]>>::try_from(shared.as_ref())` (e.g.,
+    /// cloned the shared buffer into a fresh [`Vec<u8>`], routed through
+    /// [`String::from_utf8`] on an already-decodable buffer, or diverged
+    /// the whitespace-trimming discipline from the sibling peer) would
+    /// fail here first.
+    #[test]
+    fn test_try_from_arc_bytes_success_agrees_with_fromstr_and_byte_slice() {
+        use std::sync::Arc;
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let shared: Arc<[u8]> = Arc::from(raw.as_bytes());
+        let via_try_from = <StorePath as TryFrom<Arc<[u8]>>>::try_from(shared.clone())
+            .expect("valid store-path bytes must parse via TryFrom<Arc<[u8]>>");
+        let via_fromstr: StorePath = raw.parse().expect("valid store path parses via FromStr");
+        let via_byte_slice = StorePath::try_from(raw.as_bytes())
+            .expect("valid store-path bytes must parse via TryFrom<&[u8]>");
+        assert_eq!(
+            via_try_from, via_fromstr,
+            "TryFrom<Arc<[u8]>> must yield the same StorePath value as FromStr on the decoded view",
+        );
+        assert_eq!(
+            via_try_from, via_byte_slice,
+            "TryFrom<Arc<[u8]>> must agree byte-for-byte with the sibling TryFrom<&[u8]> peer on canonical bytes",
+        );
+        // Cloning the Arc handle must not perturb the parse — the
+        // atomic-refcount bump lives in Arc, not in the store-path grammar.
+        let cloned = Arc::clone(&shared);
+        let via_cloned = <StorePath as TryFrom<Arc<[u8]>>>::try_from(cloned)
+            .expect("cloned Arc<[u8]> must parse identically to its origin");
+        assert_eq!(via_cloned, via_try_from);
+        // Hyphenated-name case guards against a future refactor that
+        // truncates at the first `-` on the way through the shared peer.
+        let raw2 = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let via_try_from2 = <StorePath as TryFrom<Arc<[u8]>>>::try_from(Arc::from(raw2.as_bytes()))
+            .expect("hyphenated-name store path parses via TryFrom<Arc<[u8]>>");
+        assert_eq!(via_try_from2.name(), "foo-bar-1.2.3");
+        assert_eq!(via_try_from2.hash(), H);
+        // Trimming discipline reaches through the peer: a newline-terminated
+        // buffer parses cleanly and yields the trimmed canonical view.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let trimmed = <StorePath as TryFrom<Arc<[u8]>>>::try_from(Arc::from(raw_nl.as_bytes()))
+            .expect("trailing newline must be trimmed at TryFrom<Arc<[u8]>> surface");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// A non-UTF-8 byte sequence must reject at the UTF-8 decode gate
+    /// with the [`StorePathError::NonUtf8Bytes`] variant BEFORE any
+    /// grammar clause is evaluated, and the rejection must be
+    /// byte-identical to the sibling [`TryFrom<&[u8]>`] peer's rejection
+    /// on the same input — a caller switching between the by-reference
+    /// byte-slice peer and the cross-thread shared-owned byte peer reads
+    /// the same typed error variant with the same offending-bytes
+    /// payload.
+    #[test]
+    fn test_try_from_arc_bytes_rejects_non_utf8_input() {
+        use std::error::Error as _;
+        use std::sync::Arc;
+        // 0xFF is never valid as a UTF-8 leading byte; the buffer starts
+        // with a valid store-path prefix so the rejection is proven to
+        // fire at the UTF-8 gate, not at the grammar oracle.
+        let mut buf: Vec<u8> = b"/nix/store/".to_vec();
+        buf.push(0xFF);
+        buf.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x");
+        let expected_bytes = buf.clone();
+        let shared: Arc<[u8]> = Arc::from(buf.as_slice());
+
+        let err_shared = <StorePath as TryFrom<Arc<[u8]>>>::try_from(shared)
+            .expect_err("non-UTF-8 bytes must reject at TryFrom<Arc<[u8]>>");
+        match &err_shared {
+            StorePathError::NonUtf8Bytes { bytes, source: _ } => {
+                assert_eq!(
+                    bytes.as_slice(),
+                    expected_bytes.as_slice(),
+                    "the offending bytes must survive verbatim on the failure record",
+                );
+            }
+            other => panic!("expected NonUtf8Bytes, got: {other:?}"),
+        }
+        let src = err_shared
+            .source()
+            .expect("NonUtf8Bytes must carry a source");
+        assert!(
+            src.downcast_ref::<std::str::Utf8Error>().is_some(),
+            "source must downcast to std::str::Utf8Error, got display: {src}",
+        );
+
+        // Agreement with the sibling by-reference byte-slice peer: both
+        // shapes converge on one typed rejection.
+        let err_slice = StorePath::try_from(expected_bytes.as_slice())
+            .expect_err("non-UTF-8 bytes must reject at TryFrom<&[u8]>");
+        assert_eq!(
+            err_shared, err_slice,
+            "TryFrom<Arc<[u8]>> and TryFrom<&[u8]> must emit byte-identical NonUtf8Bytes rejection",
+        );
+    }
+
+    /// Valid UTF-8 bytes that decode to a non-store-path string must
+    /// reject at the underlying [`FromStr`] impl with the exact
+    /// grammar-clause variant the input violated — the two-stage
+    /// strictness contract: UTF-8 decode gate first, grammar oracle
+    /// second. Pins that the cross-thread shared-owned byte peer routes
+    /// rejection through the ONE grammar oracle at [`StorePath::parse`]
+    /// rather than a divergent second parse path.
+    #[test]
+    fn test_try_from_arc_bytes_rejects_non_canonical_input() {
+        use std::sync::Arc;
+        // Cover every grammar clause once, and cross-check byte-for-byte
+        // that the shared-owned byte try-conversion surface surfaces the
+        // SAME typed error variant (with the SAME offending input in each
+        // variant) as the by-reference byte-slice peer.
+        type ExpectVariant = fn(&StorePathError) -> bool;
+        let cases: &[(&[u8], ExpectVariant)] = &[
+            (b"", |e| {
+                matches!(e, StorePathError::MissingStorePrefix { .. })
+            }),
+            (b"nix/store/abc-x", |e| {
+                matches!(e, StorePathError::MissingStorePrefix { .. })
+            }),
+            (b"/nix/store/unknown-mysvc.drv", |e| {
+                matches!(e, StorePathError::TooShort { .. })
+            }),
+            (b"/nix/store/eeeeoooouuuutttteeeeoooouuuutttt-x", |e| {
+                matches!(e, StorePathError::InvalidHash { .. })
+            }),
+            (b"/nix/store/0123456789abcdfghijklmnpqrsvwxyzx", |e| {
+                matches!(e, StorePathError::MissingSeparator { .. })
+            }),
+            (b"/nix/store/0123456789abcdfghijklmnpqrsvwxyz-", |e| {
+                matches!(e, StorePathError::EmptyName { .. })
+            }),
+        ];
+        for (bad, is_expected_variant) in cases {
+            let shared: Arc<[u8]> = Arc::from(*bad);
+            let err_shared = <StorePath as TryFrom<Arc<[u8]>>>::try_from(shared)
+                .expect_err("malformed store-path bytes must fail via TryFrom<Arc<[u8]>>");
+            let err_slice = StorePath::try_from(*bad)
+                .expect_err("malformed store-path bytes must fail via TryFrom<&[u8]>");
+            assert_eq!(
+                err_shared, err_slice,
+                "TryFrom<Arc<[u8]>> must surface the same typed error as the sibling byte-slice peer for {bad:?}",
+            );
+            assert!(
+                is_expected_variant(&err_shared),
+                "unexpected error variant for {bad:?}: {err_shared:?}",
+            );
+        }
+    }
+
+    /// A generic `fn f<T: TryFrom<Arc<[u8]>>>` consumer must recover a
+    /// valid [`StorePath`] through the trait bound. This is the
+    /// structural witness that [`StorePath`] is genuinely usable at
+    /// [`TryFrom<Arc<[u8]>>`] call sites — the surface a
+    /// `#[serde(try_from = "Arc<[u8]>")]` container attribute, a
+    /// `HashMap<Arc<[u8]>, StorePath>` shared intern-table populate, and
+    /// a `bytes::Bytes → Arc<[u8]>` async-registry bridge all key off.
+    /// If a future change narrowed the bound (e.g., gated the impl on a
+    /// lifetime or trait shape the generic surface couldn't hit), this
+    /// test fails at compile time.
+    #[test]
+    fn test_try_from_arc_bytes_generic_consumer_recovers_identity() {
+        use std::sync::Arc;
+        fn parse_via_try_from<T>(bytes: Arc<[u8]>) -> Result<T, T::Error>
+        where
+            T: TryFrom<Arc<[u8]>>,
+        {
+            T::try_from(bytes)
+        }
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let path: StorePath = parse_via_try_from(Arc::from(raw.as_bytes()))
+            .expect("valid store-path bytes must parse via generic TryFrom<Arc<[u8]>> bound");
+        assert_eq!(path.name(), "foo-bar-1.2.3");
+        assert_eq!(path.hash(), H);
+        // Trimming discipline reaches through the generic bound: a caller
+        // owning a nix-build-stdout Arc<[u8]> handed across worker threads
+        // does not need to pre-trim before handing it to the generic
+        // try-conversion helper — the grammar owns the trim in one place.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let trimmed: StorePath = parse_via_try_from(Arc::from(raw_nl.as_bytes()))
+            .expect("trailing newline must be trimmed at generic TryFrom<Arc<[u8]>>");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
     }
 }
