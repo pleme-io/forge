@@ -46,6 +46,27 @@
     };
     mk-shell-bin.url = "github:rrbutani/nix-mk-shell-bin";
 
+    # Required BY devenv's own Rust module, for the same reason as the two
+    # above: substrate's `lib/devenv/rust.nix` sets `languages.rust.channel
+    # = "stable"`, and devenv resolves any non-`nixpkgs` channel through
+    # `config.lib.getInput { name = "rust-overlay"; }`, which reads the ROOT
+    # flake's inputs — devenv having its own `rust-overlay` in the lock does
+    # not satisfy it. Without this, instantiating the devenv shell throws
+    # devenv's own instruction:
+    #   error: To use 'languages.rust.channel', Add the following to flake.nix:
+    #   inputs.rust-overlay.url = "github:oxalica/rust-overlay";
+    #
+    # This was invisible because `nix flake check` NEVER FORCES a devShell's
+    # drvPath — it prints "✅ devShells.<sys>.default (build skipped)" while
+    # the shell is un-instantiable. Measured 2026-07-28 on this tree:
+    #   nix flake check --impure                        → ✅ (build skipped)
+    #   nix eval --impure .#devShells.…default.drvPath  → the throw above
+    # A green flake check is not evidence a devShell can be entered.
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     substrate = {
       url = "github:pleme-io/substrate";
       inputs.fenix.follows = "fenix";
@@ -122,17 +143,72 @@
         else null;
 
       in {
-        # ── devenv shell ─────────────────────────────────────────
-        devenv.shells.default = {
+        # ── devShells ────────────────────────────────────────────
+        #
+        # TWO shells, and the split is the whole point.
+        #
+        # `default` is a PLAIN substrate `mkRustDevShell` because the thing
+        # that enters it is CI: substrate's `nix-devshell-cargo-test.yml`
+        # runs `nix develop .#default --command cargo test`, purely and
+        # non-interactively. A devenv shell CANNOT satisfy that, and not for
+        # a fixable reason — devenv's `top-level.nix` asserts
+        # `flakesIntegration -> devenv.root != ""`, and `devenv.root` is
+        # read from the environment, so under pure eval it is `""` and the
+        # shell aborts before anything else is considered:
+        #   error: Failed assertions:
+        #   - devenv was not able to determine the current directory.
+        # That is devenv working as designed (its own flakes guide says use
+        # `--impure`), so no input, pin or option here can make a devenv
+        # `default` enterable by the CI leg. Measured on this tree
+        # 2026-07-28: pure `nix develop .#` hit the assertion above; the
+        # same command with `--impure` got PAST it and then hit the missing
+        # `rust-overlay` input — two independent faults, in that order.
+        #
+        # THE TRADE, stated rather than hidden: `nix develop` with no
+        # argument no longer gives the devenv environment (git-hooks
+        # clippy/rustfmt, `devenv up`, cargo-edit, RUST_LOG=debug). That
+        # environment is NOT removed — it is `nix develop .#devenv --impure`
+        # below, and it is now actually instantiable, which it was not
+        # before this commit in either eval mode.
+        devShells.default = substrateLib.mkRustDevShell {
+          extraPackages = with pkgs; [ cmake perl git openssl ];
+        };
+
+        # The interactive shell, kept in full (MODULARIZE, DON'T DELETE).
+        # Renamed off `default` only so CI stops trying to enter it.
+        # Requires `--impure` — see the assertion above.
+        #
+        # Peeling the pure-eval assertion off this shell exposed a STACK of
+        # faults underneath it, each of which had been masked by the one in
+        # front. In the order they surfaced, 2026-07-28:
+        #   1. pure eval        → the devenv.root assertion (structural)
+        #   2. + --impure       → missing `rust-overlay` input (fixed above)
+        #   3. + rust-overlay   → on DARWIN ONLY, substrate's own
+        #      `lib/devenv/rust.nix` reads `pkgs.darwin.apple_sdk.frameworks`,
+        #      which this nixpkgs has removed:
+        #        error: darwin.apple_sdk_11_0 has been removed as it was a
+        #        legacy compatibility stub
+        #      That is a SUBSTRATE defect, not forge's, and is left for
+        #      substrate to fix rather than forked here (Op-Principle #1).
+        #      The Linux arms are unaffected.
+        #   4. on every system  → the line removed below.
+        #
+        # (4) was ours: this shell used to set `env.RUST_SRC_PATH` itself,
+        # which collides with the definition devenv's own Rust module
+        # already makes, so the module system refused to merge them:
+        #   error: The option `…devenv.shells.<n>.env.RUST_SRC_PATH' has
+        #   conflicting definition values
+        # devenv's value is also the more correct one — it points at the
+        # real `rust-src` component of the toolchain it installed, whereas
+        # ours pointed into `pkgs.fenixRustToolchain or ""` and would have
+        # silently become the string "/lib/rustlib/…" had the overlay ever
+        # been absent. Deleting ours is the fix; there is nothing to keep.
+        devenv.shells.devenv = {
           imports = [ "${substrate}/lib/devenv/rust.nix" ];
 
           packages = with pkgs; [
             cmake perl git
           ];
-
-          env = {
-            RUST_SRC_PATH = "${pkgs.fenixRustToolchain or ""}/lib/rustlib/src/rust/library";
-          };
         };
 
         # ── packages ───────────────────────────────────────────────
