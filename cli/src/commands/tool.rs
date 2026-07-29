@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::git;
 use crate::nix::build_flake_attr_in;
@@ -202,7 +202,10 @@ pub fn check(name: &str, language: &str, working_dir: &str) -> Result<()> {
             run_cmd(dir, "cargo", &["fmt", "--check"])?;
 
             info!("{}: running cargo clippy...", name);
-            run_cmd(dir, "cargo", &["clippy", "--", "-D", "warnings"])?;
+            // Held in a binding: dropping the TempDir deletes the clippy.toml
+            // inside it, so it must outlive the clippy process.
+            let clippy_conf = provide_clippy_conf(dir);
+            run_clippy(dir, clippy_conf.as_ref().map(tempfile::TempDir::path))?;
 
             info!("{}: running cargo test...", name);
             run_cmd(dir, "cargo", &["test"])?;
@@ -339,6 +342,118 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
     Ok(())
 }
 
+/// The fleet's canonical `clippy.toml` payload, embedded so that `forge tool
+/// check` enforces ★★ TYPED EMISSION even for repos whose build path never
+/// hands clippy a configuration.
+///
+/// Mirrors `substrate/lib/build/rust/format-ban.clippy.toml`. substrate
+/// delivers that file via `CLIPPY_CONF_DIR` on the *library* flake path
+/// (`lib/build/rust/library.nix` -> `mkCargoReleaseApps { formatBan = true; }`),
+/// which reaches 16 flakes. The *workspace* path routes its `check-all`
+/// through `release-helpers.nix` into this command instead, and arrived here
+/// with no configuration at all — so the ban silently checked nothing.
+///
+/// ## The `disallowed-macros` line MUST stay on ONE line
+///
+/// A TOML inline table cannot span lines, and clippy does not skip a
+/// configuration it cannot parse — it **aborts the compile** (exit 101). A
+/// malformed payload here would therefore break every consuming build rather
+/// than guard it. `embedded_fleet_clippy_toml_parses_and_bans_std_format` is
+/// the gate that keeps this honest; do not reformat this constant without
+/// keeping it green.
+const FLEET_CLIPPY_TOML: &str = r#"# pleme-io typed-emission enforcement — supplied by `forge tool check`.
+#
+# Canonical: https://github.com/pleme-io/theory/blob/main/TYPED-EMISSION.md
+# Mirrors:   substrate/lib/build/rust/format-ban.clippy.toml
+#
+# `format!()` is banned across pleme-io Rust crates. Use:
+#   - `write!()` / `writeln!()` inside `Display`/`Debug`/`Serialize` impls
+#   - typed logging macros (`tracing::*`)
+#   - typed error macros (`anyhow::anyhow!()` / `anyhow::bail!()`)
+#   - typed AST renderers / value builders
+#
+# MUST STAY ON ONE LINE — see FLEET_CLIPPY_TOML's doc comment in
+# forge/cli/src/commands/tool.rs. A multi-line inline table is invalid TOML and
+# makes clippy abort the compile instead of linting.
+disallowed-macros = [{ path = "std::format", reason = "format!() is banned per pleme-io/theory/TYPED-EMISSION.md. Use write!() inside Display/Debug impls, tracing::* for logs, anyhow::anyhow!()/bail!() for errors, or a typed AST renderer. Free-form string composition is a substrate gap; close it." }]
+"#;
+
+/// Decide what configuration directory clippy should read for `dir`.
+///
+/// Returns the temp directory holding the fleet default when forge supplied
+/// one — the caller MUST keep it alive across the clippy run. `None` means
+/// "inject nothing", which happens in three cases, each deliberate:
+///
+/// 1. **The caller already chose one.** An inherited `CLIPPY_CONF_DIR` wins
+///    outright. This is the de-coupling seam: substrate (or any caller) can
+///    point at its own canonical file without forge changing.
+/// 2. **The repo carries its own.** Mirrors clippy's own upward search, so a
+///    repo-local `clippy.toml` keeps its authority instead of being shadowed
+///    by ours — including repos that deliberately configure extra lints.
+/// 3. **Materializing ours failed.** Then clippy still runs, unconfigured.
+///    A lint that cannot be delivered must not become a build failure.
+fn provide_clippy_conf(dir: &Path) -> Option<tempfile::TempDir> {
+    if std::env::var_os("CLIPPY_CONF_DIR").is_some() {
+        info!("clippy: honoring inherited CLIPPY_CONF_DIR");
+        return None;
+    }
+
+    if repo_supplies_clippy_conf(dir) {
+        info!("clippy: using the repo's own clippy.toml");
+        return None;
+    }
+
+    match write_fleet_clippy_conf() {
+        Ok(conf) => Some(conf),
+        Err(e) => {
+            // Deliberately not fatal — see case 3 above.
+            warn!("clippy: could not supply the fleet clippy.toml ({e:#}); running unconfigured");
+            None
+        }
+    }
+}
+
+/// Whether clippy would find a configuration on its own, starting at `dir`.
+///
+/// Mirrors clippy's `lookup_conf_file`: start at the directory and walk up
+/// through every ancestor, accepting either spelling.
+fn repo_supplies_clippy_conf(dir: &Path) -> bool {
+    let start = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    start
+        .ancestors()
+        .any(|dir| dir.join("clippy.toml").is_file() || dir.join(".clippy.toml").is_file())
+}
+
+/// Materialize [`FLEET_CLIPPY_TOML`] into a fresh temp directory.
+///
+/// Writing it fresh each run is what satisfies the "known-good at the point of
+/// use" requirement: the payload is a compile-time constant that a test parses,
+/// so it can be neither absent nor stale nor edited out from under us.
+fn write_fleet_clippy_conf() -> Result<tempfile::TempDir> {
+    let conf = tempfile::tempdir().context("Failed to create a temp dir for clippy config")?;
+    std::fs::write(conf.path().join("clippy.toml"), FLEET_CLIPPY_TOML)
+        .context("Failed to write the fleet clippy.toml")?;
+    Ok(conf)
+}
+
+/// Run `cargo clippy -- -D warnings`, optionally pointing it at `conf_dir`.
+fn run_clippy(dir: &Path, conf_dir: Option<&Path>) -> Result<()> {
+    let mut cmd = Command::new("cargo");
+    cmd.args(["clippy", "--", "-D", "warnings"])
+        .current_dir(dir);
+
+    if let Some(conf_dir) = conf_dir {
+        cmd.env("CLIPPY_CONF_DIR", conf_dir);
+    }
+
+    let status = cmd.status().context("Failed to run cargo clippy")?;
+    if !status.success() {
+        bail!("cargo clippy -- -D warnings failed");
+    }
+
+    Ok(())
+}
+
 fn run_cmd(dir: &Path, program: &str, args: &[&str]) -> Result<()> {
     let status = Command::new(program)
         .args(args)
@@ -351,4 +466,116 @@ fn run_cmd(dir: &Path, program: &str, args: &[&str]) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ★★ The load-bearing gate.
+    ///
+    /// clippy does not skip a configuration it cannot parse — it aborts the
+    /// compile (exit 101). Since `forge tool check` now hands this payload to
+    /// every Rust repo that has no `clippy.toml` of its own, a malformed
+    /// constant would break those builds instead of guarding them. This test
+    /// is what makes "known-good at the point of use" true rather than hoped.
+    #[test]
+    fn embedded_fleet_clippy_toml_parses_and_bans_std_format() {
+        let parsed: toml::Value =
+            toml::from_str(FLEET_CLIPPY_TOML).expect("FLEET_CLIPPY_TOML must be valid TOML");
+
+        let banned = parsed
+            .get("disallowed-macros")
+            .expect("must set the hyphenated `disallowed-macros` key")
+            .as_array()
+            .expect("`disallowed-macros` must be an array");
+
+        assert!(
+            banned.iter().any(|entry| {
+                entry.get("path").and_then(toml::Value::as_str) == Some("std::format")
+            }),
+            "the fleet config must ban std::format"
+        );
+    }
+
+    /// The underscore spelling is a hard clippy error, not a silent no-op.
+    #[test]
+    fn embedded_fleet_clippy_toml_uses_the_hyphenated_key() {
+        assert!(FLEET_CLIPPY_TOML.contains("disallowed-macros"));
+        assert!(
+            !FLEET_CLIPPY_TOML.contains("disallowed_macros"),
+            "the underscore spelling makes clippy abort the compile"
+        );
+    }
+
+    /// A TOML inline table cannot span lines; keeping the entry on one line is
+    /// the difference between a lint and a broken build.
+    #[test]
+    fn embedded_fleet_clippy_toml_keeps_the_inline_table_on_one_line() {
+        let entry = FLEET_CLIPPY_TOML
+            .lines()
+            .find(|line| line.starts_with("disallowed-macros"))
+            .expect("the ban entry must start a line of its own");
+
+        assert!(
+            entry.trim_end().ends_with(']'),
+            "the inline table must open and close on one line, got: {entry}"
+        );
+    }
+
+    /// What actually reaches disk must parse, not just the constant.
+    #[test]
+    fn written_fleet_clippy_conf_lands_a_parseable_file() {
+        let conf = write_fleet_clippy_conf().expect("should materialize");
+        let written =
+            std::fs::read_to_string(conf.path().join("clippy.toml")).expect("should be readable");
+
+        toml::from_str::<toml::Value>(&written).expect("the written file must be valid TOML");
+        assert_eq!(written, FLEET_CLIPPY_TOML);
+    }
+
+    #[test]
+    fn repo_supplies_clippy_conf_is_false_for_a_bare_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!repo_supplies_clippy_conf(dir.path()));
+    }
+
+    #[test]
+    fn repo_supplies_clippy_conf_finds_a_file_in_the_dir_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("clippy.toml"), "").expect("write");
+        assert!(repo_supplies_clippy_conf(dir.path()));
+    }
+
+    #[test]
+    fn repo_supplies_clippy_conf_accepts_the_dotted_spelling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(".clippy.toml"), "").expect("write");
+        assert!(repo_supplies_clippy_conf(dir.path()));
+    }
+
+    /// Mirrors clippy's upward search, so a workspace member inherits the
+    /// repo-root config rather than being handed ours.
+    #[test]
+    fn repo_supplies_clippy_conf_walks_up_to_an_ancestor() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let member = root.path().join("crates").join("member");
+        std::fs::create_dir_all(&member).expect("mkdir");
+        std::fs::write(root.path().join("clippy.toml"), "").expect("write");
+
+        assert!(repo_supplies_clippy_conf(&member));
+    }
+
+    /// Repo-local authority wins: we must not shadow a config clippy would
+    /// have found on its own.
+    #[test]
+    fn provide_clippy_conf_defers_to_a_repo_local_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("clippy.toml"), "").expect("write");
+
+        assert!(
+            provide_clippy_conf(dir.path()).is_none(),
+            "a repo carrying its own clippy.toml must keep it"
+        );
+    }
 }
