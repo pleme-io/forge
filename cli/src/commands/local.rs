@@ -42,7 +42,7 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
     // Load the image into Docker
     info!("Loading image into Docker...");
     let load_status = Command::new("docker")
-        .args(["load", "-i", &image_path])
+        .args(["load", "-i", image_path.as_str()])
         .status()
         .context("Failed to run docker load")?;
 

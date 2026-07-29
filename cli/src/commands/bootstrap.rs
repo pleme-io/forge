@@ -192,7 +192,7 @@ async fn build_and_push_binary(
     let registry = binary.registry_url();
     for tag in tags {
         push_with_retry(
-            &build_result.store_path,
+            build_result.store_path.as_str(),
             &registry,
             tag,
             ghcr_token,
@@ -255,6 +255,7 @@ pub async fn push_single(
         build_docker_image_from_dir(&bootstrap_dir, binary_def.name, None)
             .await?
             .store_path
+            .into_string()
     };
 
     // Get GHCR token

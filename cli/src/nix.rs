@@ -14,11 +14,33 @@ use crate::repo::get_tool_path;
 use crate::retry::{classify_capture, classify_capture_query};
 use crate::store_path::StorePath;
 
-/// Result of a Nix build operation
+/// Result of a Nix build operation.
+///
+/// `store_path` is a validated [`StorePath`] — the parse discipline
+/// [`run_nix_build_typed`] applies at the nix-frontier survives through the
+/// result, so every downstream consumer (`commands/local.rs::up` handing to
+/// `docker load`, `commands/bootstrap.rs::push_bootstrap_binary` handing to
+/// `push_with_retry`, `commands/image_release.rs::build_nix_image` returning
+/// a `Result<String>`, `commands/pangea.rs::build_component_image` returning
+/// a `Result<String>`, `commands/tool.rs::release` handing to
+/// [`std::path::Path::new`]) holds the validated primitive by construction
+/// and reaches its downstream boundary through the canonical projection
+/// ([`StorePath::as_str`] for `&str`, [`StorePath::into_string`] for
+/// `String`, [`AsRef<std::path::Path>`] for `&Path`), never a raw
+/// unvalidated buffer that could silently smuggle a malformed nix-frontier
+/// echo — a `/nix/store/…` with a subpath, an `unknown-*` sentinel, an
+/// empty stdout — past the boundary the parse just proved.
+///
+/// THEORY.md §V.1 (Types → Invariants → Proofs): the store-path invariant
+/// is proved at the frontier ([`run_nix_build_typed`]) and carried by the
+/// return type, not re-derived per consumer. THEORY.md §VI.1 (one-oracle):
+/// the canonical view is named at [`StorePath::as_str`] and every
+/// downstream projection (borrow, owned-buffer move, `Path`-slot,
+/// `OsStr`-slot, byte-slot) reads through it.
 #[derive(Debug, Clone)]
 pub struct NixBuildResult {
-    /// Path to the built artifact in the Nix store
-    pub store_path: String,
+    /// The built artifact's validated store-object path.
+    pub store_path: StorePath,
     /// The flake attribute that was built
     #[allow(dead_code)]
     pub flake_attr: String,
@@ -57,7 +79,7 @@ async fn run_nix_build_typed(
     args: &[&str],
     label: &str,
     working_dir: Option<&Path>,
-) -> Result<String, NixBuildError> {
+) -> Result<StorePath, NixBuildError> {
     debug!("{} {}", nix_bin, args.join(" "));
 
     let mut cmd = Command::new(nix_bin);
@@ -119,11 +141,17 @@ async fn run_nix_build_typed(
             source,
         })?;
 
-    // Preserve the public shape: callers consume `NixBuildResult.
-    // store_path: String`. `as_str()` is the zero-alloc borrow of the
-    // validated buffer; `.to_string()` matches the pre-migration
-    // return-by-value contract.
-    Ok(parsed.as_str().to_string())
+    // Hand the validated primitive itself to the caller — no `.as_str()
+    // .to_string()` unparse-then-re-own round trip that would allocate a
+    // fresh copy of bytes the [`StorePath`] already owns and drop the
+    // structural witness of the parse in the same call. Every
+    // [`NixBuildResult`] consumer downstream (docker-load, push-with-retry,
+    // path-based tool extraction, image-release return) now holds the
+    // validated primitive by construction and reaches its own boundary
+    // through the canonical projection ([`StorePath::as_str`],
+    // [`StorePath::into_string`], [`AsRef<std::path::Path>`]), never a raw
+    // unvalidated buffer.
+    Ok(parsed)
 }
 
 /// Build a Nix flake attribute and return the store path.
