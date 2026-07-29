@@ -1664,6 +1664,93 @@ impl PartialEq<&str> for StorePath {
     }
 }
 
+/// Reverse-direction borrowed UTF-8 comparison peer — the sibling of the
+/// forward-direction [`PartialEq<str> for StorePath`] pair above, split
+/// by direction so the caller can pick either receiver at the comparison
+/// site. Together with the forward-direction pair, this closes the full
+/// 2×2 (direction × receiver-shape) surface on the borrowed UTF-8
+/// comparison frontier of this primitive, matching the standard-library
+/// idiom [`String`] carries through its own four-impl closure
+/// ([`PartialEq<str> for String`] + [`PartialEq<&str> for String`] +
+/// [`PartialEq<String> for str`] + [`PartialEq<String> for &str`]) and
+/// the closure the sibling canonical-label typed sums already carry:
+///
+/// - `impl PartialEq<BumpLevel> for str` at `cli/src/version.rs:9428`,
+/// - `impl PartialEq<PerAttemptRegion> for str` at `cli/src/retry.rs:8770`,
+/// - `impl PartialEq<AdmissionTier> for str` at `cli/src/probe_outcome.rs:13264`,
+/// - `impl PartialEq<DigestAlgorithm> for str` at `cli/src/oci_manifest.rs:3597`.
+///
+/// A downstream caller holding a raw [`str`] and a [`StorePath`] (a
+/// wire-received line from `nix-build` stdout that the caller wants to
+/// check against a parsed handle, an inline fixture literal in a
+/// caller-side round-trip verifier that writes `"/nix/store/…" == sp`,
+/// a generic [`PartialEq`]-bounded consumer parameterised on a
+/// [`str`]-like key and a [`StorePath`]-like value) answers the boolean
+/// equality query at ONE canonical-view surface — [`StorePath::as_str`]
+/// — without a per-site `raw_str == sp.as_str()` restatement and
+/// without an implicit widening to [`String`] to satisfy the standard-
+/// library [`PartialEq<String> for str`] surface.
+///
+/// Delegates through [`StorePath::as_str`] composed with the standard-
+/// library [`<str as PartialEq<str>>::eq`] on the [`str`] self receiver,
+/// so the "what canonical bytes does a [`StorePath`] carry?" question
+/// stays defined at ONE accessor surface — the inherent
+/// [`StorePath::as_str`] — and every comparison surface (forward-str,
+/// forward-&str, reverse-str, reverse-&str) reads through it. No
+/// allocation, no temporary [`String`], no [`std::fmt::Display`]
+/// formatter-buffer round trip per call.
+///
+/// The symmetry axiom
+/// `<str as PartialEq<StorePath>>::eq(label, &sp)
+/// == <StorePath as PartialEq<str>>::eq(&sp, label)` at every
+/// (candidate, [`StorePath`]) pair holds by construction: both directions
+/// factor through the same `StorePath::as_str` view and the same
+/// standard-library [`<str as PartialEq<str>>::eq`] comparison. Pinned
+/// at
+/// [`tests::test_partial_eq_store_path_symmetric_with_forward_direction`].
+///
+/// THEORY.md §III typed primitives: the reverse-direction borrowed UTF-8
+/// comparison surface is a typed-primitive site on [`StorePath`] itself
+/// (one [`PartialEq<StorePath>`] impl on [`str`] routing through
+/// [`StorePath::as_str`]), not a per-consumer
+/// `label == sp.as_str()` restatement at every downstream site that
+/// asks whether a borrowed UTF-8 handle names the same canonical store-
+/// path bytes as a [`StorePath`] value. THEORY.md §VI.1 one-oracle: the
+/// canonical view is named at one site ([`StorePath::as_str`]), and
+/// every borrowed UTF-8 comparison surface — the forward-direction
+/// pair above and this reverse-direction pair — reads through the same
+/// one-oracle discipline projected onto its own direction × receiver
+/// shape.
+impl PartialEq<StorePath> for str {
+    fn eq(&self, other: &StorePath) -> bool {
+        self == other.as_str()
+    }
+}
+
+/// Reverse-direction borrowed UTF-8 comparison peer through a `&str`
+/// receiver — the receiver-shape sibling of
+/// [`PartialEq<StorePath> for str`] directly above, split by receiver
+/// shape so the caller writes `label_ref == sp` without the explicit
+/// `*` deref at every comparison site. The four [`PartialEq`] impls
+/// together (forward-str, forward-&str, reverse-str, reverse-&str)
+/// close the full 2×2 direction × receiver-shape cross-product on this
+/// frontier.
+///
+/// Delegates through [`StorePath::as_str`] composed with the standard-
+/// library [`<str as PartialEq<str>>::eq`] on the dereffed `&str` self
+/// receiver, so the comparison reads the same canonical bytes as the
+/// receiver-shape sibling and the two-impl pair are structurally
+/// indistinguishable at the byte-comparison level. The symmetry axiom
+/// `<&str as PartialEq<StorePath>>::eq(&label_ref, &sp)
+/// == <StorePath as PartialEq<&str>>::eq(&sp, &label_ref)` holds by
+/// construction at every `(label_ref, sp)` pair, pinned at
+/// [`tests::test_partial_eq_store_path_symmetric_with_forward_direction`].
+impl PartialEq<StorePath> for &str {
+    fn eq(&self, other: &StorePath) -> bool {
+        *self == other.as_str()
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -4188,5 +4275,148 @@ mod tests {
             &sp,
             miss_literal.as_str()
         ));
+    }
+
+    /// `<str as PartialEq<StorePath>>::eq(candidate, &sp)` must agree
+    /// byte-for-byte with `candidate == sp.as_str()` at every
+    /// (candidate, canonical-view) pair. Pins the delegation through
+    /// the inherent [`StorePath::as_str`] oracle on the reverse-
+    /// direction [`str`]-receiver peer so a future refactor that
+    /// severed the trait impl from the accessor (a hand-rolled
+    /// tag-and-slice re-read, a stale representation cache) is caught
+    /// here first at the reverse-direction borrowed UTF-8 comparison
+    /// frontier — the sibling of
+    /// [`test_partial_eq_str_agrees_with_as_str`] on the forward-
+    /// direction peer.
+    #[test]
+    fn test_str_partial_eq_store_path_agrees_with_as_str() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates = [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-hello-2.11"),
+            format!("/nix/store/{H}-x"),
+            "/nix/store/short".to_string(),
+            String::new(),
+            "hello-2.10".to_string(),
+        ];
+        for candidate in &candidates {
+            let via_peer: bool = *candidate.as_str() == sp;
+            let via_accessor: bool = candidate.as_str() == sp.as_str();
+            assert_eq!(
+                via_peer, via_accessor,
+                "PartialEq<StorePath> for str peer must agree with candidate == sp.as_str() at {candidate:?}",
+            );
+        }
+    }
+
+    /// The reflexive identity `sp.as_str() == sp` (through the reverse-
+    /// direction [`str`]-receiver peer) must hold at every
+    /// [`StorePath`] value. Pins the accessor's own bytes as a fixed
+    /// point of the peer so a future refactor that quietly re-encoded
+    /// the canonical view breaks here rather than at every downstream
+    /// comparison site — the reverse-direction sibling of
+    /// [`test_partial_eq_str_reflexive_at_own_canonical_view`].
+    #[test]
+    fn test_str_partial_eq_store_path_reflexive_at_own_canonical_view() {
+        for raw in [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-foo-bar-1.2.3"),
+            format!("/nix/store/{H}-svc-1.2.3.drv"),
+        ] {
+            let sp = StorePath::parse(&raw).unwrap();
+            assert!(
+                *sp.as_str() == sp,
+                "PartialEq<StorePath> for str must be reflexive at own canonical view for {raw:?}",
+            );
+        }
+    }
+
+    /// `<&str as PartialEq<StorePath>>::eq(&raw_ref, &sp)` — the
+    /// receiver-shape sibling of the [`PartialEq<StorePath> for str`]
+    /// peer — must agree byte-for-byte with the receiver-shape sibling
+    /// at every (candidate, canonical-view) pair, so a caller may pick
+    /// either receiver at the comparison site without the two peers
+    /// diverging. Reverse-direction sibling of
+    /// [`test_partial_eq_str_ref_agrees_with_partial_eq_str`].
+    #[test]
+    fn test_str_ref_partial_eq_store_path_agrees_with_partial_eq_store_path() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates = [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-hello-2.11"),
+            "/nix/store/short".to_string(),
+            String::new(),
+        ];
+        for candidate in &candidates {
+            let raw_ref: &str = candidate.as_str();
+            let via_str_ref: bool = raw_ref == sp;
+            let via_str: bool = *raw_ref == sp;
+            assert_eq!(
+                via_str_ref, via_str,
+                "PartialEq<StorePath> for &str receiver-shape peer must agree with PartialEq<StorePath> for str at {candidate:?}",
+            );
+        }
+    }
+
+    /// The trimming discipline of [`StorePath::parse`] reaches through
+    /// the reverse-direction [`PartialEq<StorePath> for str`] peer — a
+    /// value parsed from a newline-terminated buffer compares equal to
+    /// the *trimmed* canonical literal on the reverse-direction side,
+    /// not to the raw newline-terminated buffer. Pins the invariant
+    /// that the reverse-direction peer reads the same canonical bytes
+    /// the accessor exposes, at the wire-boundary shape the peer exists
+    /// to serve. Reverse-direction sibling of
+    /// [`test_partial_eq_str_trims_through_peer`].
+    #[test]
+    fn test_str_partial_eq_store_path_trims_through_peer() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-svc-1.2.3\n")).unwrap();
+        assert!(*format!("/nix/store/{H}-svc-1.2.3").as_str() == sp);
+        assert!(!(*format!("/nix/store/{H}-svc-1.2.3\n").as_str() == sp));
+    }
+
+    /// The reverse-direction and forward-direction borrowed UTF-8
+    /// comparison surfaces on the [`StorePath`] typed primitive agree
+    /// byte-for-byte at every (candidate, [`StorePath`]) pair — the
+    /// symmetry axiom
+    /// `<str as PartialEq<StorePath>>::eq(candidate, &sp)
+    /// == <StorePath as PartialEq<str>>::eq(&sp, candidate)` (and its
+    /// `&str`-receiver peer) holds across the canonical × known-bad
+    /// candidate grid. Pins the full 2×2 receiver × direction cross-
+    /// product closure so a future refactor that diverged one impl
+    /// from its symmetric peer breaks this pin at at least one pair
+    /// rather than propagating unnoticed through downstream generic
+    /// [`PartialEq`]-bounded consumers that thread a [`StorePath`]
+    /// through either side of a `==` operator. Structural mirror of
+    /// [`crate::probe_outcome::tests::test_partial_eq_admission_tier_symmetric_with_forward_direction`]
+    /// (commit c48f819) at the sibling admission-tier label sum and of
+    /// [`crate::retry::tests::test_partial_eq_per_attempt_region_symmetric_with_forward_direction`]
+    /// (commit 203f63b) at the sibling per-attempt-region ladder.
+    #[test]
+    fn test_partial_eq_store_path_symmetric_with_forward_direction() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates = [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-hello-2.11"),
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-svc-1.2.3.drv"),
+            "/nix/store/short".to_string(),
+            String::new(),
+            "hello-2.10".to_string(),
+        ];
+        for candidate in &candidates {
+            let raw: &str = candidate.as_str();
+            assert_eq!(
+                <str as PartialEq<StorePath>>::eq(raw, &sp),
+                <StorePath as PartialEq<str>>::eq(&sp, raw),
+                "reverse-str and forward-str PartialEq peers must agree at {candidate:?}",
+            );
+            let raw_ref: &&str = &raw;
+            assert_eq!(
+                <&str as PartialEq<StorePath>>::eq(raw_ref, &sp),
+                <StorePath as PartialEq<&str>>::eq(&sp, raw_ref),
+                "reverse-&str and forward-&str PartialEq peers must agree at {candidate:?}",
+            );
+        }
     }
 }
