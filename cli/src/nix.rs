@@ -12,6 +12,7 @@ use tracing::{debug, info};
 use crate::error::NixBuildError;
 use crate::repo::get_tool_path;
 use crate::retry::classify_capture_query;
+use crate::store_path::StorePath;
 
 /// Result of a Nix build operation
 #[derive(Debug, Clone)]
@@ -44,6 +45,13 @@ pub struct NixBuildResult {
 /// - [`NixBuildError::EmptyStorePath`] when nix exits zero but prints no
 ///   store path — a contract violation that callers must distinguish
 ///   from a real build failure.
+/// - [`NixBuildError::MalformedStorePath`] when nix exits zero and prints
+///   a non-empty stdout that does not parse through the canonical
+///   [`crate::store_path::StorePath`] grammar. Fires *before* the bad
+///   value can silently propagate to `attic push`, the SLSA provenance
+///   gate at `commands/attestation.rs::build_slsa_level`, or a
+///   closure-scan pipeline. Preserves the raw stdout in `raw` and the
+///   exact `StorePathError` grammar clause under `#[source]`.
 async fn run_nix_build_typed(
     nix_bin: &str,
     args: &[&str],
@@ -88,7 +96,34 @@ async fn run_nix_build_typed(
         });
     }
 
-    Ok(store_path)
+    // Route the trimmed stdout through the canonical StorePath grammar
+    // oracle at the nix-frontier. `nix build --print-out-paths` promises
+    // a well-formed store object path on the success path — a value that
+    // does not parse is a nix contract violation, and every downstream
+    // consumer (attic push, SLSA provenance gate, closure-scan pipeline)
+    // has been reading the raw string unchecked. Surfacing the failure
+    // here — typed, with the raw stdout preserved and the exact grammar
+    // clause under `#[source]` — turns "cryptic remote attic push error"
+    // and "attestation silently dropped via .unwrap_or(false)" into
+    // one legible failure at the boundary. THEORY §V.1 (Types →
+    // Invariants → Proofs): the validated identity is proved at the
+    // frontier, not re-derived per downstream consumer. THEORY §VI.1
+    // (one-oracle / three-times rule): the store-path grammar stays
+    // defined at `StorePath::parse`; this call is the second consumer
+    // (attestation is the first at `commands/attestation.rs::
+    // build_slsa_level`), so a future grammar change lands at one site.
+    let parsed =
+        StorePath::parse(&store_path).map_err(|source| NixBuildError::MalformedStorePath {
+            flake_attr: label.to_string(),
+            raw: store_path.clone(),
+            source,
+        })?;
+
+    // Preserve the public shape: callers consume `NixBuildResult.
+    // store_path: String`. `as_str()` is the zero-alloc borrow of the
+    // validated buffer; `.to_string()` matches the pre-migration
+    // return-by-value contract.
+    Ok(parsed.as_str().to_string())
 }
 
 /// Build a Nix flake attribute and return the store path.
@@ -429,36 +464,102 @@ mod tests {
     }
 
     /// On the success path, `run_nix_build_typed` must return the trimmed
-    /// stdout verbatim as the store path.
+    /// stdout verbatim as the store path — routed through the canonical
+    /// [`StorePath::parse`] grammar oracle at the nix-frontier, so a
+    /// well-formed value survives the round-trip unchanged. The fixture
+    /// is the same canonical valid store path the sibling attestation and
+    /// store-path grammar suites use (`0123…xyz` = the full 32-symbol Nix
+    /// base-32 alphabet), so the grammar-oracle wiring is exercised end-
+    /// to-end here rather than only in the store-path unit tests.
     #[tokio::test]
     async fn test_run_nix_build_typed_success_returns_store_path() {
-        let (_dir, shim) = make_nix_shim("#!/bin/sh\necho '/nix/store/abc123-out'\nexit 0\n");
+        let (_dir, shim) = make_nix_shim(
+            "#!/bin/sh\necho '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-mysvc'\nexit 0\n",
+        );
         let store_path = run_nix_build_typed(&shim, &["build", ".#ok"], ".#ok", None)
             .await
             .expect("success path");
-        assert_eq!(store_path, "/nix/store/abc123-out");
+        assert_eq!(
+            store_path,
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-mysvc"
+        );
+    }
+
+    /// `nix build --print-out-paths` that exits zero and prints a non-empty
+    /// stdout that does not parse as a store object path must surface
+    /// `MalformedStorePath` at the nix-frontier — the failure record must
+    /// carry the flake label, the exact raw stdout, and the exact
+    /// [`crate::store_path::StorePathError`] grammar clause under the
+    /// `#[source]` chain. Pre-migration the raw stdout propagated
+    /// unchecked to `attic push` (cryptic remote error) and the SLSA
+    /// provenance gate (`.unwrap_or(false)` silently drops the
+    /// attestation); the fixture here — `/nix/store/not-a-real-store-path`
+    /// — is short enough to fire `StorePathError::TooShort`, the exact
+    /// clause the frontier check catches.
+    #[tokio::test]
+    async fn test_run_nix_build_typed_malformed_store_path_carries_typed_variant() {
+        use crate::store_path::StorePathError;
+        use std::error::Error as _;
+        let (_dir, shim) =
+            make_nix_shim("#!/bin/sh\necho '/nix/store/not-a-real-store-path'\nexit 0\n");
+        let result = run_nix_build_typed(&shim, &["build", ".#garbled"], ".#garbled", None).await;
+        let err = result.expect_err("malformed nix stdout must fail typed");
+        match &err {
+            NixBuildError::MalformedStorePath {
+                flake_attr,
+                raw,
+                source,
+            } => {
+                assert_eq!(flake_attr, ".#garbled");
+                assert_eq!(raw, "/nix/store/not-a-real-store-path");
+                assert!(
+                    matches!(source, StorePathError::TooShort { .. }),
+                    "expected TooShort grammar clause, got: {source:?}"
+                );
+            }
+            other => panic!("expected MalformedStorePath, got: {other:?}"),
+        }
+        // The `#[source]` chain must expose the exact grammar clause so a
+        // downstream telemetry consumer walking `Error::source` reaches
+        // the rejection site without parsing the display string.
+        let src = err.source().expect("must carry a source");
+        let downcast = src
+            .downcast_ref::<StorePathError>()
+            .expect("source must downcast to StorePathError");
+        assert!(matches!(downcast, StorePathError::TooShort { .. }));
     }
 
     /// `working_dir = Some(dir)` must spawn the nix process inside `dir`.
-    /// Pinned with a shim that prints its current working directory: the
-    /// trimmed stdout is the path the shim observed, which must equal the
-    /// directory the caller passed. Pre-migration, the three command-
-    /// module sites that need a working directory drove `current_dir` on
-    /// `tokio::process::Command` directly inline; post-migration the
-    /// canonical primitive owns the wiring. A future regression that
-    /// silently dropped the `current_dir` setter (e.g. via a refactor
-    /// that moved the builder chain) would leave sub-flake builds
-    /// resolving the wrong `flake.nix` — the canonical "wrong-tree" silent
-    /// failure shape this test pins out.
+    /// Pinned with a shim that records its current working directory to a
+    /// side-channel marker file (`pwd > .observed-cwd`) and prints a
+    /// canonical valid store path on stdout — the stdout must satisfy the
+    /// nix-frontier `StorePath::parse` gate the primitive now enforces,
+    /// while the marker file is what proves `current_dir` was honored.
+    /// Pre-migration, the three command-module sites that need a working
+    /// directory drove `current_dir` on `tokio::process::Command` directly
+    /// inline; post-migration the canonical primitive owns the wiring. A
+    /// future regression that silently dropped the `current_dir` setter
+    /// (e.g. via a refactor that moved the builder chain) would leave
+    /// sub-flake builds resolving the wrong `flake.nix` — the canonical
+    /// "wrong-tree" silent failure shape this test pins out.
     #[tokio::test]
     async fn test_run_nix_build_typed_honors_working_dir() {
-        let (dir, shim) = make_nix_shim("#!/bin/sh\npwd\nexit 0\n");
+        let (dir, shim) = make_nix_shim(
+            "#!/bin/sh\npwd > .observed-cwd\n\
+             echo '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-marker'\nexit 0\n",
+        );
         let work = tempfile::tempdir().expect("temp dir");
         let work_canonical = std::fs::canonicalize(work.path()).expect("canonicalize work");
         let store_path = run_nix_build_typed(&shim, &["build", ".#ok"], ".#ok", Some(work.path()))
             .await
             .expect("success path");
-        let observed = std::fs::canonicalize(&store_path).expect("canonicalize observed");
+        assert_eq!(
+            store_path, "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-marker",
+            "stdout must pass through the nix-frontier grammar oracle unchanged"
+        );
+        let observed_raw = std::fs::read_to_string(work.path().join(".observed-cwd"))
+            .expect("shim must have written .observed-cwd inside the working_dir");
+        let observed = std::fs::canonicalize(observed_raw.trim()).expect("canonicalize observed");
         assert_eq!(
             observed, work_canonical,
             "shim's observed CWD must equal the working_dir passed to run_nix_build_typed"
