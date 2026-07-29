@@ -54,6 +54,22 @@ pub enum StorePathError {
     MissingSeparator { input: String },
     /// The name (the part after `<hash>-`) was empty.
     EmptyName { input: String },
+    /// The input byte sequence was not valid UTF-8, so the store-path
+    /// grammar oracle ([`StorePath::parse`]) could not be reached. Fires at
+    /// the byte-slice parse frontier ([`TryFrom<&[u8]> for StorePath`])
+    /// before any grammar clause is evaluated. Carries the offending byte
+    /// buffer and the [`std::str::Utf8Error`] the decode gate produced so a
+    /// caller can attach both to a Phase 1 attestation / telemetry record
+    /// (THEORY §V.4) without re-decoding to recover the invalid-sequence
+    /// offset. Distinct from the six grammar-clause variants above —
+    /// UTF-8 rejection precedes every clause the grammar names, so a
+    /// caller pattern-matching on the rejection site can discriminate
+    /// "bytes were not text" from "bytes decoded but the text was not a
+    /// store path".
+    NonUtf8Bytes {
+        bytes: Vec<u8>,
+        source: std::str::Utf8Error,
+    },
 }
 
 impl std::fmt::Display for StorePathError {
@@ -82,11 +98,23 @@ impl std::fmt::Display for StorePathError {
             StorePathError::EmptyName { input } => {
                 write!(f, "store path '{input}' has an empty name component")
             }
+            StorePathError::NonUtf8Bytes { bytes, source } => write!(
+                f,
+                "store path bytes '{}' (lossy-decoded) are not valid UTF-8: {source}",
+                String::from_utf8_lossy(bytes)
+            ),
         }
     }
 }
 
-impl std::error::Error for StorePathError {}
+impl std::error::Error for StorePathError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            StorePathError::NonUtf8Bytes { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// A validated Nix store object path: `/nix/store/<hash>-<name>`.
 ///
@@ -610,6 +638,104 @@ impl TryFrom<std::rc::Rc<str>> for StorePath {
 
     fn try_from(shared: std::rc::Rc<str>) -> Result<Self, Self::Error> {
         <Self as std::str::FromStr>::from_str(shared.as_ref())
+    }
+}
+
+/// By-reference byte-slice try-conversion peer for [`StorePath::parse`] via
+/// the [`TryFrom<&[u8]>`] trait — the byte-slice frontier that pairs with
+/// the six UTF-8 try-conversion peers directly above under a receiver shape
+/// whose input has not yet crossed the UTF-8 validation gate.
+///
+/// Delegates through [`std::str::from_utf8`] then
+/// `<Self as std::str::FromStr>::from_str` on the borrowed [`str`] view of
+/// the caller-supplied [`&[u8]`], so the store-path grammar stays defined at
+/// ONE construction surface — the [`std::str::FromStr`] peer, which itself
+/// delegates to [`StorePath::parse`]. A grammar clause added to `parse`
+/// lights up at this frontier without a second edit; the UTF-8 decode gate
+/// is the one place non-textual input is rejected before the grammar oracle
+/// is consulted.
+///
+/// # Why the trait peer earns its keep
+///
+/// The six UTF-8 try-conversion peers directly above
+/// ([`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
+/// [`TryFrom<Box<str>>`], [`TryFrom<Arc<str>>`], [`TryFrom<Rc<str>>`])
+/// close the parse frontier at every UTF-8-side receiver shape. This peer
+/// closes the disjoint byte-slice frontier stdlib and the wider ecosystem
+/// key off separately:
+///
+/// - [`std::process::Command::output`] hands the parent
+///   [`std::process::Output::stdout`] as a [`Vec<u8>`] — the raw
+///   nix-frontier surface where forge captures a candidate store path from
+///   a spawned child. Every one of the six UTF-8 try-conversion peers above
+///   requires the caller to run
+///   `std::str::from_utf8(&output.stdout)?.trim().parse::<StorePath>()`
+///   (or the four-step [`String::from_utf8_lossy`] variant that silently
+///   substitutes replacement characters into a candidate that would then
+///   fail the grammar for the wrong reason) at every capture site. This
+///   peer routes the same call as
+///   `StorePath::try_from(output.stdout.as_slice())` — one composition,
+///   both gates carried, the UTF-8 decode failure typed as its own arm.
+/// - `#[serde(try_from = "&[u8]")]` — the serde container attribute for
+///   the by-reference byte-slice case (a deserializer that borrows a
+///   [`&[u8]`] straight off the wire — a bincode / CBOR / MessagePack
+///   payload, a rkyv archive, a `serde_bytes` field on a borrowed
+///   container) keys off [`TryFrom<&[u8]>`], not [`TryFrom<&str>`],
+///   [`TryFrom<String>`], or [`FromStr`]. A future serde field wrapping a
+///   `StorePath` and opting into the byte-slice `try_from` grammar
+///   reaches the store-path check through this impl without a shim.
+/// - Generic try-conversion bounds
+///   (`fn parse_bytes_field<T: for<'a> TryFrom<&'a [u8]>>`) — a
+///   validated-input newtype builder or attestation-column reader whose
+///   parse contract is stated at the byte-slice receiver layer can name
+///   [`StorePath`] alongside every other by-reference byte-slice
+///   try-conversion primitive without routing through a UTF-8-first shim.
+/// - Sibling canonical-label typed sums in this crate already carry the
+///   peer: `impl TryFrom<&[u8]> for BumpLevel` at `version.rs:7404`,
+///   `impl TryFrom<&[u8]> for PerAttemptRegion` at `retry.rs:3353`,
+///   `impl TryFrom<&[u8]> for AdmissionTier` at `probe_outcome.rs:6720`,
+///   `impl TryFrom<&[u8]> for DigestAlgorithm` at `oci_manifest.rs:1060`;
+///   the byte-slice parse frontier is a four-fold pattern past the
+///   three-times-rule threshold (THEORY §VI.1) and [`StorePath`] is the
+///   store-path primitive counterpart at the same try-conversion frontier.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at two frontiers, in order:
+///
+/// 1. Non-UTF-8 byte sequences reject at [`std::str::from_utf8`] with the
+///    new typed [`StorePathError::NonUtf8Bytes`] variant, which preserves
+///    both the offending byte buffer and the underlying
+///    [`std::str::Utf8Error`] under [`std::error::Error::source`]. A
+///    caller pattern-matching on the rejection site can discriminate
+///    "bytes were not text" from "bytes decoded but the text was not a
+///    store path" without a string-diff hack.
+/// 2. Valid-UTF-8 byte sequences that decode to a non-store-path string
+///    reject at the underlying [`FromStr`] impl with the exact
+///    grammar-clause variant the input violated
+///    (`MissingStorePrefix` / `HasSubpath` / `TooShort` / `InvalidHash` /
+///    `MissingSeparator` / `EmptyName`) — the same canonical-only
+///    strictness the UTF-8 peers already carry, now lifted to the
+///    byte-slice input layer at ONE composition through
+///    [`std::str::from_utf8`].
+///
+/// # Error shape
+///
+/// `Self::Error = StorePathError`. The typed grammar-clause enum, extended
+/// with the new [`StorePathError::NonUtf8Bytes`] variant for the UTF-8
+/// decode gate, carries through — no widening to [`anyhow::Error`] or
+/// `Box<dyn Error>` hides between the byte-slice try-conversion surface
+/// and the inherent constructor, so a caller can still `match` on the
+/// exact rejection site at the trait entry point.
+impl TryFrom<&[u8]> for StorePath {
+    type Error = StorePathError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let s = std::str::from_utf8(bytes).map_err(|source| StorePathError::NonUtf8Bytes {
+            bytes: bytes.to_vec(),
+            source,
+        })?;
+        <Self as std::str::FromStr>::from_str(s)
     }
 }
 
@@ -1919,6 +2045,136 @@ mod tests {
         let raw_nl = format!("/nix/store/{H}-x\n");
         let trimmed: StorePath = parse_via_try_from(Rc::from(raw_nl.as_str()))
             .expect("trailing newline must be trimmed at TryFrom<Rc<str>> surface");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// The [`TryFrom<&[u8]>`] byte-slice parse peer must agree with the
+    /// inherent [`StorePath::parse`] oracle on valid canonical bytes at
+    /// both the plain hyphenated-name case and the newline-terminated
+    /// trimming case — the trimming discipline reaches through the
+    /// byte-slice frontier, so a caller capturing
+    /// [`std::process::Output::stdout`] as [`Vec<u8>`] does not need to
+    /// pre-trim before handing the [`&[u8]`] to the peer.
+    #[test]
+    fn test_try_from_bytes_success_agrees_with_fromstr() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let via_bytes = StorePath::try_from(raw.as_bytes())
+            .expect("valid store-path bytes must parse via TryFrom<&[u8]>");
+        let via_str: StorePath = raw.parse().unwrap();
+        assert_eq!(via_bytes, via_str);
+        assert_eq!(via_bytes.hash(), H);
+        assert_eq!(via_bytes.name(), "hello-2.10");
+
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let trimmed = StorePath::try_from(raw_nl.as_bytes())
+            .expect("trailing newline must be trimmed at TryFrom<&[u8]> surface");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// A non-UTF-8 byte sequence must reject at the UTF-8 decode gate with
+    /// the new [`StorePathError::NonUtf8Bytes`] variant BEFORE any grammar
+    /// clause is evaluated. The variant must preserve the offending bytes
+    /// and the underlying [`std::str::Utf8Error`] under
+    /// [`std::error::Error::source`], so a Phase 1 attestation record
+    /// (THEORY §V.4) can attach both to the failure without re-decoding to
+    /// recover the invalid-sequence offset.
+    #[test]
+    fn test_try_from_bytes_rejects_non_utf8_input() {
+        use std::error::Error as _;
+        // 0xFF is never valid as a UTF-8 leading byte; the buffer starts
+        // with a valid store-path prefix so the rejection is proven to
+        // fire at the UTF-8 gate, not at the grammar oracle.
+        let mut buf: Vec<u8> = b"/nix/store/".to_vec();
+        buf.push(0xFF);
+        buf.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x");
+        let err = StorePath::try_from(buf.as_slice())
+            .expect_err("non-UTF-8 bytes must reject at TryFrom<&[u8]>");
+        match &err {
+            StorePathError::NonUtf8Bytes { bytes, source: _ } => {
+                assert_eq!(
+                    bytes.as_slice(),
+                    buf.as_slice(),
+                    "the offending bytes must survive verbatim on the failure record"
+                );
+            }
+            other => panic!("expected NonUtf8Bytes, got: {other:?}"),
+        }
+        // The underlying std::str::Utf8Error must be reachable through the
+        // Error::source chain — no re-decoding, no display-string parsing.
+        let src = err.source().expect("NonUtf8Bytes must carry a source");
+        assert!(
+            src.downcast_ref::<std::str::Utf8Error>().is_some(),
+            "source must downcast to std::str::Utf8Error, got display: {src}",
+        );
+        // The Display impl must name the source diagnostic without
+        // eliding the offending bytes — the lossy-decoded rendering
+        // preserves the surrounding valid bytes for readability.
+        let display = err.to_string();
+        assert!(
+            display.contains("not valid UTF-8"),
+            "Display must name the UTF-8 rejection: {display}"
+        );
+    }
+
+    /// Valid UTF-8 bytes that decode to a non-store-path string must
+    /// reject at the underlying [`FromStr`] impl with the exact
+    /// grammar-clause variant the input violated — the two-stage
+    /// strictness contract: UTF-8 decode gate first, grammar oracle
+    /// second. Pins that the byte-slice peer routes rejection through
+    /// the one grammar oracle at [`StorePath::parse`] rather than a
+    /// divergent second parse path.
+    #[test]
+    fn test_try_from_bytes_rejects_non_canonical_input() {
+        // `/nix/store/short` is valid UTF-8 but too short to hold a 32-
+        // char hash — the exact grammar clause `StorePathError::TooShort`
+        // discriminates.
+        let err = StorePath::try_from(b"/nix/store/short".as_slice())
+            .expect_err("non-canonical UTF-8 bytes must reject");
+        assert!(
+            matches!(err, StorePathError::TooShort { .. }),
+            "expected TooShort, got: {err:?}"
+        );
+        // A relative-path input must fire `MissingStorePrefix`, not
+        // `NonUtf8Bytes` — the UTF-8 gate cleared, so the grammar
+        // oracle owns the rejection.
+        let err = StorePath::try_from(b"relative/path".as_slice())
+            .expect_err("relative-path bytes must reject");
+        assert!(
+            matches!(err, StorePathError::MissingStorePrefix { .. }),
+            "expected MissingStorePrefix, got: {err:?}"
+        );
+    }
+
+    /// A generic `fn f<T: for<'a> TryFrom<&'a [u8]>>` consumer must
+    /// accept a borrowed byte slice and recover a validated
+    /// [`StorePath`] through the trait bound. This is the structural
+    /// witness that [`StorePath`] is genuinely usable at
+    /// [`TryFrom<&[u8]>`] call sites — the surface a downstream serde
+    /// container attribute (`#[serde(try_from = "&[u8]")]`) or a
+    /// process-output capture pipeline reading
+    /// [`std::process::Output::stdout`] as [`Vec<u8>`] keys off. If a
+    /// future change narrowed the bound or the error type, this test
+    /// fails at compile time.
+    #[test]
+    fn test_try_from_bytes_generic_consumer_recovers_identity() {
+        fn parse_via_try_from<'a, T>(bytes: &'a [u8]) -> Result<T, T::Error>
+        where
+            T: TryFrom<&'a [u8]>,
+        {
+            T::try_from(bytes)
+        }
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let path: StorePath = parse_via_try_from(raw.as_bytes())
+            .expect("valid store-path bytes must parse via generic TryFrom<&[u8]> bound");
+        assert_eq!(path.name(), "foo-bar-1.2.3");
+        assert_eq!(path.hash(), H);
+        // The trimming discipline reaches through the generic bound too:
+        // a caller capturing raw stdout bytes does not need to pre-trim
+        // before handing them to the generic try-conversion helper — the
+        // grammar owns the trim in one place.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let trimmed: StorePath = parse_via_try_from(raw_nl.as_bytes())
+            .expect("trailing newline must be trimmed at generic TryFrom<&[u8]> bound");
         assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
     }
 
