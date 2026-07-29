@@ -669,6 +669,80 @@ impl AsRef<str> for StorePath {
     }
 }
 
+/// By-reference filesystem-path read-back peer for [`StorePath::as_str`] via
+/// the [`AsRef<std::path::Path>`] trait — the sibling of the [`AsRef<str>`]
+/// peer directly above at the filesystem-path frontier, so a consumer bound
+/// by `impl AsRef<std::path::Path>` (a [`std::fs::exists`], [`std::fs::metadata`],
+/// [`std::fs::symlink_metadata`], [`std::fs::read_link`], or
+/// [`std::path::PathBuf::from`] intake site — the boundaries a validated
+/// Nix store object path is meant to reach) reads the canonical path view
+/// directly from a [`StorePath`] value without a call-site
+/// [`std::path::Path::new`]`(sp.as_str())` restatement.
+///
+/// Delegates through `<Self as AsRef<str>>::as_ref` composed with
+/// [`std::path::Path::new`], so the "what does a [`StorePath`] read back as?"
+/// question stays defined at ONE accessor surface — the inherent
+/// [`StorePath::as_str`] — and the borrowed-view axis routes through it at
+/// every frontier peer without a divergent second accessor. A future change
+/// to the internal representation lands in [`StorePath::as_str`] once and
+/// both the [`AsRef<str>`] peer and this [`AsRef<std::path::Path>`] peer
+/// light up in the same commit.
+///
+/// # Why the trait peer earns its keep
+///
+/// The [`AsRef<str>`] peer above closes the UTF-8 string frontier
+/// (`fn f<S: AsRef<str>>` — record writers, attestation-column emitters,
+/// third-party APIs that bind `impl AsRef<str>`). [`AsRef<std::path::Path>`]
+/// closes the disjoint filesystem-path frontier the stdlib
+/// [`std::fs`] surface and every `impl AsRef<std::path::Path>` boundary key
+/// off. A Nix store object path is, by construction, a real path in the
+/// local `/nix/store` filesystem: the very consumers this type exists to
+/// serve — verifying a build output is on disk before pushing it to Attic,
+/// stat-ing a derivation, resolving a symlink from a build result to its
+/// output path — key off `impl AsRef<std::path::Path>` rather than
+/// `AsRef<str>`:
+///
+/// - [`std::fs::exists`] / [`std::fs::metadata`] / [`std::fs::symlink_metadata`]
+///   — a pre-push liveness check (`fs::exists(&sp)`) or a stat-based
+///   size / mtime probe over a validated store object reads directly from a
+///   [`StorePath`] value without a per-site `Path::new(sp.as_str())`
+///   restatement.
+/// - [`std::fs::read_link`] — a `nix-build`-result-follow that reads the
+///   symlink target off a `result` link and validates the target as a
+///   [`StorePath`] (or dereferences a store-object symlink one step) keys
+///   off the filesystem-path frontier at both intake and read-back.
+/// - [`std::path::PathBuf::from`] / [`std::path::PathBuf::push`] /
+///   [`std::path::PathBuf::join`] — a caller building an owned filesystem
+///   path from a validated store object (a downstream tool that composes
+///   `sp` with a known-safe subpath at a *separate* site, not this type's
+///   canonical shape) reaches through the borrowed-view frontier without
+///   the two-step `PathBuf::from(sp.as_str())` restatement.
+/// - Sibling canonical-label typed sums in this crate already carry the
+///   peer at the same filesystem-path read-back frontier:
+///   `impl AsRef<std::path::Path> for BumpLevel` at `version.rs`,
+///   `impl AsRef<std::path::Path> for PerAttemptRegion` at `retry.rs`,
+///   `impl AsRef<std::path::Path> for AdmissionTier` at `probe_outcome.rs`;
+///   [`StorePath`] is the store-path primitive counterpart at the same
+///   frontier — the borrowed-view axis of this crate's typed primitives is
+///   now closed across the UTF-8 string frontier ([`AsRef<str>`]) AND the
+///   filesystem-path frontier (this peer) at the store-path axis.
+///
+/// # Zero-cost
+///
+/// Returns a borrow of the interned [`String`] wrapped through
+/// [`std::path::Path::new`], which is a zero-cost view transmute
+/// ([`std::path::Path`] is an [`std::ffi::OsStr`] newtype and `str: AsRef<OsStr>`
+/// on every supported platform). No allocation, no [`std::path::PathBuf`]
+/// copy, no re-validation of the store-path grammar — the [`&std::path::Path`]
+/// this peer exposes has the same lifetime as the borrow of the [`StorePath`],
+/// so a caller can bind it in one expression without widening to
+/// [`std::path::PathBuf`].
+impl AsRef<std::path::Path> for StorePath {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(<Self as AsRef<str>>::as_ref(self))
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -1741,5 +1815,63 @@ mod tests {
         // parse-back round trip closes at the trait surface.
         let round_tripped: StorePath = borrow_as_string(&sp).parse().unwrap();
         assert_eq!(round_tripped, sp);
+    }
+
+    /// The [`AsRef<std::path::Path>`] peer must expose the same borrowed
+    /// canonical string view the inherent [`StorePath::as_str`] gives, just
+    /// projected onto the filesystem-path frontier through
+    /// [`std::path::Path::new`]. Pins the delegation so a future refactor
+    /// that severed the trait impl from the inherent accessor (e.g. a copy
+    /// that re-emitted a stale or re-computed representation) is caught
+    /// here. The trimming discipline reaches through the peer: a store path
+    /// parsed from a newline-terminated buffer reads back through
+    /// `AsRef<Path>` as the trimmed canonical path.
+    #[test]
+    fn test_asref_path_matches_inherent_as_str() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let via_asref: &std::path::Path = sp.as_ref();
+        assert_eq!(via_asref, std::path::Path::new(sp.as_str()));
+        assert_eq!(
+            via_asref,
+            std::path::Path::new(&format!("/nix/store/{H}-hello-2.10"))
+        );
+        // Trimming discipline reaches through the peer.
+        let sp_nl = StorePath::parse(&format!("/nix/store/{H}-x\n")).unwrap();
+        let via_asref_nl: &std::path::Path = sp_nl.as_ref();
+        assert_eq!(
+            via_asref_nl,
+            std::path::Path::new(&format!("/nix/store/{H}-x"))
+        );
+    }
+
+    /// A generic `fn f<P: AsRef<std::path::Path>>` consumer must accept a
+    /// borrowed [`StorePath`] and recover the canonical filesystem-path
+    /// view through the trait bound. This is the structural witness that
+    /// [`StorePath`] is genuinely usable at [`std::fs::exists`] /
+    /// [`std::fs::metadata`] / [`std::path::PathBuf::from`] call sites —
+    /// the surface every `impl AsRef<std::path::Path>` boundary keys off —
+    /// without a call-site `Path::new(sp.as_str())` restatement. If a
+    /// future change narrowed the bound, this test fails at compile time.
+    /// Also pins that [`std::path::Path::to_str`] recovers the canonical
+    /// string view (the round trip through the filesystem-path frontier is
+    /// UTF-8-lossless on the store-path payload), so a consumer that
+    /// crosses back to the string frontier through the peer sees the same
+    /// bytes the [`AsRef<str>`] peer would have emitted.
+    #[test]
+    fn test_asref_path_generic_consumer_recovers_canonical_view() {
+        fn borrow_as_pathbuf<P: AsRef<std::path::Path>>(p: P) -> std::path::PathBuf {
+            p.as_ref().to_path_buf()
+        }
+        let sp = StorePath::parse(&format!("/nix/store/{H}-foo-bar-1.2.3")).unwrap();
+        let pb = borrow_as_pathbuf(&sp);
+        assert_eq!(pb, std::path::PathBuf::from(sp.as_str()));
+        // Round-trip through the filesystem-path frontier back to the
+        // string frontier recovers the canonical string bytes byte-for-byte
+        // (a store path is ASCII by grammar, so `Path::to_str` is
+        // guaranteed to yield Some on every supported platform).
+        assert_eq!(
+            pb.as_path().to_str(),
+            Some(format!("/nix/store/{H}-foo-bar-1.2.3").as_str())
+        );
     }
 }
