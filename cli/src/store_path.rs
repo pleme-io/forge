@@ -1688,6 +1688,87 @@ impl AsRef<str> for StorePath {
     }
 }
 
+/// [`std::borrow::Borrow<str>`] for [`StorePath`] routes through
+/// [`StorePath::as_str`] so a downstream consumer that keys an
+/// identity container on [`StorePath`] — a
+/// [`std::collections::HashMap<StorePath, V>`] mapping each validated
+/// store object to its per-path cache-hit telemetry / attic-push outcome
+/// / attestation record, a
+/// [`std::collections::HashSet<StorePath>`] seen-set deduplicating the
+/// per-line stdout of `nix path-info --recursive`, a
+/// [`std::collections::BTreeMap<StorePath, V>`] emitting a deterministic
+/// canonical-order closure listing — probes the container by an
+/// incoming `&str` (a raw stdout line, a config-file store-path slot,
+/// a CLI argument, a captured argv token) WITHOUT allocating a fresh
+/// [`StorePath`] key per probe.
+///
+/// The identity-container-lookup peer of the read peer
+/// [`AsRef<str> for StorePath`] directly above — both project the same
+/// canonical view through [`StorePath::as_str`], split by intent:
+/// [`AsRef<str>`] yields the slice for a generic `impl AsRef<str>` read
+/// consumer (a formatter frontier, a hasher [`update`](std::hash::Hasher::write)
+/// sink), this [`Borrow<str>`] answers the identity-container's own
+/// probe contract (`HashMap::get<Q>` / `BTreeMap::get<Q>` /
+/// `HashSet::contains<Q>` where `K: Borrow<Q>`) directly at the
+/// [`StorePath`] key slot without a per-probe
+/// `StorePath::parse(str_key).ok().and_then(|sp| map.get(&sp))`
+/// restatement that pays a parse round trip per lookup AND surfaces
+/// parse failure as probe-inapplicable when the probe intent was
+/// strictly "is this raw string present as a key."
+///
+/// [`Eq`] → [`Hash`] coherence with [`Borrow<str>`] is discharged by
+/// the sibling [`std::hash::Hash for StorePath`] impl (which routes
+/// through `self.full.hash(state)`, and [`String`]'s [`Hash`] delegates
+/// verbatim to [`<str as Hash>::hash`] on its buffer) composed with the
+/// derived [`PartialEq`] / [`Eq`] (which compare the `full: String`
+/// fields, byte-for-byte identical to the [`<str as PartialEq>::eq`]
+/// the borrowed-str probe path invokes on the same bytes). So
+/// `hash(&sp)` and `hash(sp.borrow() as &str)` step through the exact
+/// same [`str::hash`] byte-write trace with any [`std::hash::Hasher`],
+/// discharging the [`Borrow`] contract's
+/// `k.borrow().hash(h) == k.hash(h)` axiom, and the derived
+/// [`PartialEq`] agreement on the same `full` buffer discharges the
+/// `k.borrow() == q` ⇔ `k == StorePath{full: q, …}` axiom.
+///
+/// Structural mirror of [`impl std::borrow::Borrow<str> for
+/// DigestAlgorithm`] and [`impl std::borrow::Borrow<str> for
+/// ContentDigest`] in [`crate::oci_manifest`] — the same identity-
+/// container-lookup lift at the sibling typed primitives that key on a
+/// validated canonical label, projecting the same borrowed UTF-8
+/// canonical-slice frontier through the primitive's own `as_str` read
+/// oracle so the same standard-library `HashMap` / `BTreeMap` /
+/// `HashSet` raw-`&str` probe discipline the [`String`] → [`str`]
+/// projection carries in the stdlib now works against the validated
+/// [`StorePath`] key type — a strictly stronger identity contract than
+/// [`String`] carries (a [`StorePath`] key is provably a well-formed
+/// content-addressed store object path; a [`String`] key is not), at
+/// the same zero-allocation probe cost.
+///
+/// # Zero-cost
+///
+/// The returned `&str` is a borrow of the interned canonical buffer
+/// [`StorePath::as_str`] already exposes — no allocation, no
+/// re-validation, no formatter round-trip. A container probe reads
+/// directly into the [`StorePath`]'s owned buffer.
+///
+/// THEORY.md §III typed primitives — the identity-container-lookup
+/// borrowed UTF-8 projection is a typed-primitive peer on
+/// [`StorePath`] itself (one [`Borrow<str>`] impl routing through
+/// [`StorePath::as_str`]), not a per-consumer
+/// `StorePath::parse(str_key).ok().and_then(|sp| map.get(&sp))`
+/// restatement at every downstream identity-container probe site.
+/// THEORY.md §VI.1 one-oracle — the canonical view is named at one
+/// site ([`StorePath::as_str`]), and every borrowed-view surface —
+/// [`std::fmt::Display`], [`AsRef<str>`] / [`AsRef<[u8]>`] /
+/// [`AsRef<std::path::Path>`] / [`AsRef<std::ffi::OsStr>`], the
+/// identity-container-key [`Hash`] projection, and this identity-
+/// container-probe [`Borrow<str>`] projection — reads through it.
+impl std::borrow::Borrow<str> for StorePath {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// By-reference filesystem-path read-back peer for [`StorePath::as_str`] via
 /// the [`AsRef<std::path::Path>`] trait — the sibling of the [`AsRef<str>`]
 /// peer directly above at the filesystem-path frontier, so a consumer bound
@@ -7989,5 +8070,167 @@ mod tests {
         let (a, b) = key_bound(sp.clone());
         assert_eq!(a, b);
         assert_eq!(a, sp);
+    }
+
+    /// [`std::borrow::Borrow<str>`] for [`StorePath`] must project through
+    /// the canonical [`StorePath::as_str`] view: `sp.borrow()` and
+    /// `sp.as_str()` return byte-for-byte identical slices with the same
+    /// lifetime. Pins the delegation so a future refactor that severed
+    /// the peer from `as_str` (e.g. accidentally borrowed a formatted
+    /// buffer, or returned the raw `full` field via a divergent second
+    /// accessor) is caught structurally.
+    #[test]
+    fn test_borrow_str_reads_through_as_str_canonical_view() {
+        use std::borrow::Borrow;
+
+        for input in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+        ] {
+            let sp = StorePath::parse(&input).expect("valid");
+            let borrowed: &str = Borrow::borrow(&sp);
+            assert_eq!(
+                borrowed,
+                sp.as_str(),
+                "Borrow<str>::borrow must project through as_str"
+            );
+        }
+    }
+
+    /// [`std::hash::Hash`] on [`StorePath`] and [`std::hash::Hash`] on
+    /// its [`std::borrow::Borrow<str>::borrow`] projection must produce
+    /// byte-for-byte identical hasher traces. This is the load-bearing
+    /// coherence axiom the [`Borrow`] contract demands
+    /// (`k.borrow().hash(h) == k.hash(h)`) — without it, a
+    /// [`std::collections::HashMap<StorePath, V>::get::<str>`] probe
+    /// keyed by a raw string would silently return [`None`] for a key
+    /// that IS present.
+    #[test]
+    fn test_hash_coherent_with_borrow_str_projection() {
+        use std::borrow::Borrow;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        for input in [
+            format!("/nix/store/{H}-a"),
+            format!("/nix/store/{H}-hello-2.10"),
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-differenthash".to_string(),
+        ] {
+            let sp = StorePath::parse(&input).expect("valid");
+            let mut h_sp = DefaultHasher::new();
+            Hash::hash(&sp, &mut h_sp);
+            let mut h_str = DefaultHasher::new();
+            let borrowed: &str = Borrow::borrow(&sp);
+            borrowed.hash(&mut h_str);
+            assert_eq!(
+                h_sp.finish(),
+                h_str.finish(),
+                "Hash on StorePath must equal Hash on its Borrow<str> projection"
+            );
+        }
+    }
+
+    /// A [`std::collections::HashSet<StorePath>`] built from validated
+    /// keys must answer `contains::<str>` correctly for the raw string
+    /// slice a key was constructed from AND reject a raw string that
+    /// does not appear as a key. Structural witness that the
+    /// [`Borrow<str>`] peer landed AND that the [`Hash`]/[`Eq`]
+    /// coherence holds end-to-end at a real container probe.
+    /// Pre-migration this test would not compile because
+    /// `StorePath: !Borrow<str>`.
+    #[test]
+    fn test_hash_set_of_store_path_probes_by_raw_str_slice() {
+        use std::collections::HashSet;
+
+        let a = format!("/nix/store/{H}-a");
+        let b = format!("/nix/store/{H}-b");
+        let missing = format!("/nix/store/{H}-missing");
+        let mut set: HashSet<StorePath> = HashSet::new();
+        set.insert(StorePath::parse(&a).expect("valid"));
+        set.insert(StorePath::parse(&b).expect("valid"));
+        assert!(
+            set.contains(a.as_str()),
+            "HashSet<StorePath>::contains(&str) must find a key constructed from that raw string"
+        );
+        assert!(
+            set.contains(b.as_str()),
+            "HashSet<StorePath>::contains(&str) must find every raw-key member"
+        );
+        assert!(
+            !set.contains(missing.as_str()),
+            "HashSet<StorePath>::contains(&str) must reject a raw string not present as a key"
+        );
+    }
+
+    /// A [`std::collections::HashMap<StorePath, V>`] built from
+    /// validated keys must answer `get::<str>` correctly against the
+    /// raw string slice, returning the value bound to that key. The
+    /// zero-allocation probe path this peer exists to open — the
+    /// alternative pre-peer being `map.get(&StorePath::parse(raw)?)`
+    /// which parses per probe and surfaces parse failure as
+    /// probe-inapplicable.
+    #[test]
+    fn test_hash_map_of_store_path_get_by_raw_str_slice() {
+        use std::collections::HashMap;
+
+        let a = format!("/nix/store/{H}-a");
+        let b = format!("/nix/store/{H}-b");
+        let mut map: HashMap<StorePath, u32> = HashMap::new();
+        map.insert(StorePath::parse(&a).expect("valid"), 1);
+        map.insert(StorePath::parse(&b).expect("valid"), 2);
+        assert_eq!(
+            map.get(a.as_str()).copied(),
+            Some(1),
+            "HashMap<StorePath, _>::get(&str) must return the value bound to that raw key"
+        );
+        assert_eq!(
+            map.get(b.as_str()).copied(),
+            Some(2),
+            "HashMap<StorePath, _>::get(&str) must return the value bound to every raw key"
+        );
+        assert_eq!(
+            map.get("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-absent")
+                .copied(),
+            None,
+            "HashMap<StorePath, _>::get(&str) must return None for a raw string not present"
+        );
+    }
+
+    /// A [`std::collections::BTreeMap<StorePath, V>`] built from
+    /// validated keys must answer `get::<str>` correctly against the
+    /// raw string slice — the ordered-map counterpart to the
+    /// [`HashMap`] probe test directly above. The [`Ord`] tree-descent
+    /// walks stored keys by their [`Borrow<str>`] projection and
+    /// compares to the raw probe via [`<str as Ord>::cmp`]; the
+    /// hand-rolled [`Ord`] on [`StorePath`] routes through
+    /// [`self.full.cmp(&other.full)`] which is byte-identical to
+    /// [`<str as Ord>::cmp`] on the same bytes, discharging the tree-
+    /// descent coherence axiom.
+    #[test]
+    fn test_btree_map_of_store_path_get_by_raw_str_slice() {
+        use std::collections::BTreeMap;
+
+        let a = format!("/nix/store/{H}-a");
+        let b = format!("/nix/store/{H}-b");
+        let mut map: BTreeMap<StorePath, u32> = BTreeMap::new();
+        map.insert(StorePath::parse(&a).expect("valid"), 1);
+        map.insert(StorePath::parse(&b).expect("valid"), 2);
+        assert_eq!(
+            map.get(a.as_str()).copied(),
+            Some(1),
+            "BTreeMap<StorePath, _>::get(&str) must return the value bound to that raw key"
+        );
+        assert_eq!(
+            map.get(b.as_str()).copied(),
+            Some(2),
+            "BTreeMap<StorePath, _>::get(&str) must return the value bound to every raw key"
+        );
+        assert_eq!(
+            map.get("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-absent")
+                .copied(),
+            None,
+            "BTreeMap<StorePath, _>::get(&str) must return None for a raw string not present"
+        );
     }
 }
