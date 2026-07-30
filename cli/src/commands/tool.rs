@@ -10,7 +10,8 @@ use std::process::Command;
 use tracing::{info, warn};
 
 use crate::git;
-use crate::nix::build_flake_attr_in;
+use crate::nix::{build_flake_attr_in, run_nix_build_typed};
+use crate::repo::get_tool_path;
 use crate::store_path::StorePath;
 use crate::version;
 
@@ -281,21 +282,7 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
     // Step 1: Build via nix
     // Use --impure for builds requiring system tools (e.g. Xcode for Ghostty)
     info!("[1/3] Building...");
-    let build_output = tokio::process::Command::new("nix")
-        .args(["build", "--print-out-paths", "--impure"])
-        .current_dir(dir)
-        .output()
-        .await
-        .context("nix build failed to execute")?;
-
-    if !build_output.status.success() {
-        let stderr = String::from_utf8_lossy(&build_output.stderr);
-        bail!("nix build failed on {}: {}", platform, stderr.trim());
-    }
-
-    let store_path = String::from_utf8_lossy(&build_output.stdout)
-        .trim()
-        .to_string();
+    let store_path = build_lock_target(dir, platform).await?;
     info!("  -> {}", store_path);
 
     // Step 2: Run tests (language-specific; "nix" = build-only, no test runner)
@@ -332,7 +319,7 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
         "platform": platform,
         "rev": rev,
         "date": date,
-        "store_path": store_path,
+        "store_path": store_path.as_str(),
         "tests": test_result,
     });
 
@@ -343,6 +330,88 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
     info!("{}", serde_json::to_string_pretty(&lock_content)?);
 
     Ok(())
+}
+
+/// Build the flake at `dir` (with `--impure` for sub-flakes that need
+/// system tools — Ghostty needs Xcode, etc.) and return the validated
+/// store path.
+///
+/// Routes through [`run_nix_build_typed`] at the nix-frontier so this
+/// site inherits four load-bearing properties the pre-lift raw-`Command::
+/// new("nix")` stanza dropped:
+///
+/// 1. **`NIX_BIN` env override.** Pre-lift the site spelled
+///    `Command::new("nix")`, ignoring the env var every other nix-
+///    invocation site in forge honors via `get_tool_path("NIX_BIN",
+///    "nix")` — a Nix-hermetic runner with a store-path `nix` binary
+///    silently fell through to whatever `nix` happened to be first on
+///    `PATH` at this site specifically.
+/// 2. **Typed error dispatch.** Pre-lift a spawn failure went through
+///    `.context("nix build failed to execute")?` (fatal anyhow chain
+///    with no typed variant to pattern-match on); a non-zero exit
+///    collapsed into `bail!("nix build failed on {}: {}", platform,
+///    stderr.trim())` — a fused stringly bag that dropped the exit
+///    code and forced downstream telemetry to re-parse the message.
+///    Post-lift both surface as typed [`crate::error::NixBuildError`]
+///    variants (`ExecFailed { flake_attr = platform, .. }` and
+///    `BuildFailed { flake_attr = platform, exit_code, stderr }`)
+///    recoverable across the anyhow boundary via
+///    `err.downcast_ref::<NixBuildError>()`.
+/// 3. **Store-path grammar oracle at the nix-frontier.** Pre-lift the
+///    trimmed stdout flowed unchecked into the lock-file's
+///    `store_path` JSON field via `String::from_utf8_lossy(&stdout)
+///    .trim().to_string()`, so a malformed nix echo (a `/nix/store/…`
+///    with a subpath, an `unknown-*` sentinel, a nix-daemon error
+///    string that happened to escape onto stdout) would silently
+///    persist as the "canonical" store path for `<tool>/<platform>`.
+///    A future consumer reading `locks/<platform>.json` to substitute
+///    the closure would then hit a cryptic remote-substituter error
+///    rather than a legible grammar-violation diagnostic. Post-lift
+///    [`StorePath::parse`] at the frontier rejects any such value as
+///    `NixBuildError::MalformedStorePath { raw, source }`, carrying
+///    the raw stdout and the exact [`crate::store_path::StorePathError`]
+///    grammar clause under `#[source]`.
+/// 4. **`classify_capture_query` spawn/exit unification.** The trim +
+///    UTF-8-lossy decode of a successful stdout lives at ONE
+///    construction surface inside the typed primitive rather than
+///    being re-derived at this call site.
+///
+/// `platform` is the human-readable label attached to any returned
+/// [`crate::error::NixBuildError`] — the same value the lock-file's
+/// `platform` field holds — so a failure record carries the offending
+/// platform by construction. Sibling of `nix_hooks::build_and_get_path`
+/// and `nix::path_info_recursive`: the canonical shape for lifting a
+/// `Command::new("nix")` command-module site onto the typed frontier
+/// primitive.
+async fn build_lock_target(dir: &Path, platform: &str) -> Result<StorePath> {
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    build_lock_target_with_bin(&nix_bin, dir, platform).await
+}
+
+/// Test-injection sibling of [`build_lock_target`]: accepts the resolved
+/// `nix_bin` as an explicit argument so unit tests can point at a
+/// hermetic [`crate::test_support::make_executable_shim`] fixture
+/// without mutating the process-wide `NIX_BIN` environment variable.
+/// Same discipline as
+/// [`crate::nix_hooks::NixHooks::build_and_get_path_with_bin`],
+/// `nix::path_info_recursive_with_bin`, and
+/// `AtticClient::with_attic_bin`. Splitting resolution from execution
+/// keeps the test surface hermetic AND parallel-safe:
+/// `#[tokio::test]` on this module can run concurrent tests without
+/// racing on env-var writes.
+async fn build_lock_target_with_bin(
+    nix_bin: &str,
+    dir: &Path,
+    platform: &str,
+) -> Result<StorePath> {
+    run_nix_build_typed(
+        nix_bin,
+        &["build", "--print-out-paths", "--impure"],
+        platform,
+        Some(dir),
+    )
+    .await
+    .with_context(|| format!("nix build failed on {}", platform))
 }
 
 /// The fleet's canonical `clippy.toml` payload, embedded so that `forge tool
@@ -579,6 +648,226 @@ mod tests {
         assert!(
             provide_clippy_conf(dir.path()).is_none(),
             "a repo carrying its own clippy.toml must keep it"
+        );
+    }
+
+    // --- build_lock_target_with_bin: fail-before-pass-after tests for the
+    // ---   nix-frontier lift on `commands/tool.rs::lock`'s build phase.
+
+    use crate::error::NixBuildError;
+    use crate::test_support::make_executable_shim;
+    use std::error::Error as _;
+
+    /// A `nix build` that exits non-zero must surface as
+    /// [`NixBuildError::BuildFailed`] carrying `flake_attr = platform`,
+    /// the exit code, and the captured stderr — recoverable across the
+    /// anyhow boundary via `err.downcast_ref::<NixBuildError>()`.
+    /// Pre-migration the raw stanza collapsed into
+    /// `bail!("nix build failed on {}: {}", platform, stderr.trim())`
+    /// — a fused stringly bag with no typed variant, so a downstream
+    /// telemetry consumer had to re-parse the message to reach the
+    /// exit code and platform. Fails-before-passes-after: the pre-
+    /// migration `bail!` chain contained no `NixBuildError` in its
+    /// `source()` walk, so the typed-record downcast returned `None`.
+    #[tokio::test]
+    async fn test_build_lock_target_with_bin_surfaces_build_failed_typed_variant() {
+        let (_shim_dir, shim) = make_executable_shim(
+            "nix",
+            "#!/bin/sh\necho 'attr default missing' 1>&2\nexit 5\n",
+        );
+        let work = tempfile::tempdir().expect("work tempdir");
+        let err = build_lock_target_with_bin(&shim, work.path(), "x86_64-linux")
+            .await
+            .expect_err("non-zero exit must fail");
+
+        // Outer anyhow context must carry the platform-labelled narrative.
+        let chain = format!("{:?}", err);
+        assert!(
+            chain.contains("nix build failed on x86_64-linux"),
+            "outer context must name the offending platform, got: {chain}"
+        );
+
+        // Typed variant must be recoverable via the anyhow source walk.
+        let downcast = err
+            .downcast_ref::<NixBuildError>()
+            .expect("must carry a typed NixBuildError under anyhow");
+        match downcast {
+            NixBuildError::BuildFailed {
+                flake_attr,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(
+                    flake_attr, "x86_64-linux",
+                    "BuildFailed.flake_attr must carry the platform label"
+                );
+                assert_eq!(
+                    *exit_code,
+                    Some(5),
+                    "BuildFailed.exit_code must be preserved"
+                );
+                assert!(
+                    stderr.contains("attr default missing"),
+                    "BuildFailed.stderr must capture nix stderr verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected BuildFailed, got: {other:?}"),
+        }
+    }
+
+    /// A missing `nix` binary must surface as [`NixBuildError::ExecFailed`]
+    /// carrying `flake_attr = platform` — pre-migration a spawn failure
+    /// flowed through `.context("nix build failed to execute")?`, which
+    /// dropped both the platform label and the typed spawn-vs-op split.
+    /// Post-migration the typed variant is recoverable via
+    /// `err.downcast_ref::<NixBuildError>()`. Uses an absolute path that
+    /// does not exist so the test is hermetic and parallel-safe (no
+    /// global PATH mutation).
+    #[tokio::test]
+    async fn test_build_lock_target_with_bin_surfaces_exec_failed_typed_variant() {
+        let work = tempfile::tempdir().expect("work tempdir");
+        let err = build_lock_target_with_bin(
+            "/nonexistent/path/nix-binary-for-tool-lock-exec-failed-test",
+            work.path(),
+            "aarch64-darwin",
+        )
+        .await
+        .expect_err("missing nix binary must fail");
+
+        let chain = format!("{:?}", err);
+        assert!(
+            chain.contains("nix build failed on aarch64-darwin"),
+            "outer context must name the offending platform, got: {chain}"
+        );
+
+        let downcast = err
+            .downcast_ref::<NixBuildError>()
+            .expect("must carry a typed NixBuildError under anyhow");
+        match downcast {
+            NixBuildError::ExecFailed { flake_attr, .. } => {
+                assert_eq!(
+                    flake_attr, "aarch64-darwin",
+                    "ExecFailed.flake_attr must carry the platform label"
+                );
+            }
+            other => panic!("expected ExecFailed, got: {other:?}"),
+        }
+    }
+
+    /// A `nix build --print-out-paths` that exits zero and prints a
+    /// non-empty stdout that does NOT parse through
+    /// [`StorePath::parse`] must be rejected at the nix-frontier as
+    /// [`NixBuildError::MalformedStorePath`]. Strict fail-before-pass-
+    /// after: pre-migration the raw stanza did
+    /// `String::from_utf8_lossy(&stdout).trim().to_string()` and returned
+    /// `Ok(String_of_malformed_path)`, silently smuggling a non-store-path
+    /// through the `store_path` field of `locks/<platform>.json` — a
+    /// future consumer would then hit a cryptic remote-substituter error
+    /// rather than a legible grammar diagnostic. Post-migration
+    /// [`StorePath::parse`] catches the missing `/nix/store/` prefix,
+    /// preserves the raw stdout in `.raw`, and exposes the exact
+    /// [`crate::store_path::StorePathError`] grammar clause under
+    /// `#[source]` so a downstream telemetry walker reaches the
+    /// rejection site without parsing the display string.
+    #[tokio::test]
+    async fn test_build_lock_target_with_bin_surfaces_malformed_store_path_typed_variant() {
+        use crate::store_path::StorePathError;
+        let (_shim_dir, shim) = make_executable_shim(
+            "nix",
+            "#!/bin/sh\necho '/nix/store/not-a-real-store-path'\nexit 0\n",
+        );
+        let work = tempfile::tempdir().expect("work tempdir");
+        let err = build_lock_target_with_bin(&shim, work.path(), "x86_64-darwin")
+            .await
+            .expect_err("malformed store-path stdout must fail typed");
+
+        let downcast = err
+            .downcast_ref::<NixBuildError>()
+            .expect("must carry a typed NixBuildError under anyhow");
+        match downcast {
+            NixBuildError::MalformedStorePath {
+                flake_attr,
+                raw,
+                source,
+            } => {
+                assert_eq!(
+                    flake_attr, "x86_64-darwin",
+                    "MalformedStorePath.flake_attr must carry the platform label"
+                );
+                assert_eq!(
+                    raw, "/nix/store/not-a-real-store-path",
+                    "MalformedStorePath.raw must preserve the offending stdout verbatim"
+                );
+                assert!(
+                    matches!(source, StorePathError::TooShort { .. }),
+                    "expected TooShort grammar clause, got: {source:?}"
+                );
+            }
+            other => panic!("expected MalformedStorePath, got: {other:?}"),
+        }
+
+        // The `#[source]` chain must expose the exact grammar clause so a
+        // downstream telemetry consumer walking `Error::source` reaches
+        // the rejection site without parsing the display string.
+        let src = downcast
+            .source()
+            .expect("MalformedStorePath must carry a source");
+        let clause = src
+            .downcast_ref::<StorePathError>()
+            .expect("source must downcast to StorePathError");
+        assert!(matches!(clause, StorePathError::TooShort { .. }));
+    }
+
+    /// A `nix build --print-out-paths` that exits zero with empty stdout
+    /// must surface as [`NixBuildError::EmptyStorePath`] carrying the
+    /// platform label — pre-migration the raw stanza would return
+    /// `Ok(String::new())`, writing an empty `store_path` field into
+    /// `locks/<platform>.json` (a silent contract violation the frontier
+    /// primitive now catches at the type level, distinct from `BuildFailed`
+    /// so telemetry can tell "nix said no" from "nix contract violation").
+    #[tokio::test]
+    async fn test_build_lock_target_with_bin_surfaces_empty_store_path_typed_variant() {
+        let (_shim_dir, shim) = make_executable_shim("nix", "#!/bin/sh\nexit 0\n");
+        let work = tempfile::tempdir().expect("work tempdir");
+        let err = build_lock_target_with_bin(&shim, work.path(), "aarch64-linux")
+            .await
+            .expect_err("empty stdout must fail typed");
+
+        let downcast = err
+            .downcast_ref::<NixBuildError>()
+            .expect("must carry a typed NixBuildError under anyhow");
+        match downcast {
+            NixBuildError::EmptyStorePath { flake_attr } => {
+                assert_eq!(
+                    flake_attr, "aarch64-linux",
+                    "EmptyStorePath.flake_attr must carry the platform label"
+                );
+            }
+            other => panic!("expected EmptyStorePath, got: {other:?}"),
+        }
+    }
+
+    /// Happy-path: a `nix build --print-out-paths` that exits zero and
+    /// prints a well-formed store path must round-trip through the
+    /// nix-frontier grammar oracle and reach the caller as a validated
+    /// [`StorePath`] — the canonical accessor (`.as_str()`) returns the
+    /// trimmed stdout verbatim, so the JSON payload that reads
+    /// `store_path.as_str()` in [`lock`] serializes the same value the
+    /// pre-migration raw-buffer path did (byte-for-byte).
+    #[tokio::test]
+    async fn test_build_lock_target_with_bin_success_returns_validated_store_path() {
+        let (_shim_dir, shim) = make_executable_shim(
+            "nix",
+            "#!/bin/sh\necho '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-mytool'\nexit 0\n",
+        );
+        let work = tempfile::tempdir().expect("work tempdir");
+        let store_path = build_lock_target_with_bin(&shim, work.path(), "x86_64-linux")
+            .await
+            .expect("well-formed stdout must succeed");
+        assert_eq!(
+            store_path.as_str(),
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-mytool",
+            "the canonical StorePath accessor must return the trimmed nix stdout verbatim"
         );
     }
 }
