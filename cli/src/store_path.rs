@@ -3709,6 +3709,141 @@ impl From<StorePath> for std::ffi::OsString {
     }
 }
 
+/// By-value owned-byte-vector emit peer for [`StorePath`] via [`Vec<u8>`] —
+/// the fourth step of the by-value owned-emit frontier opened by
+/// [`From<StorePath> for String`] (line 3462) and extended by
+/// [`From<StorePath> for std::path::PathBuf`] (line 3589) and
+/// [`From<StorePath> for std::ffi::OsString`] (line 3706), chaining
+/// through the same [`StorePath::into_string`] one-oracle discipline
+/// every owned-emit peer in the family routes through.
+///
+/// Delegates through `String::from(sp).into_bytes()`: `String::from(sp)`
+/// moves [`StorePath::full`] out at zero-copy via
+/// [`StorePath::into_string`]; [`String::into_bytes`] then moves the
+/// backing [`Vec<u8>`] straight out of the [`String`] wrapper (the
+/// standard library's [`String`] is a `Vec<u8>` with a UTF-8 invariant,
+/// and [`String::into_bytes`] is a pure ownership transfer — zero
+/// allocation, zero re-encoding). The same validated bytes the
+/// [`StorePath::parse`] oracle proved
+/// `/nix/store/<32-char-base32-hash>-<name>`-shaped now reach the
+/// byte-vector frontier as an owned [`Vec<u8>`] backed by the same
+/// buffer.
+///
+/// # Why the trait peer earns its keep
+///
+/// [`AsRef<[u8]> for StorePath`] (line 2001) covers the borrowed-view
+/// byte-slice frontier — every `&[u8]`-typed consumer (a [`sha2::Sha256`]
+/// `.update(&[u8])` digest, a [`std::io::Write::write_all(&[u8])`] wire
+/// framer, a [`memchr`] byte-scan, a [`bytes::Bytes::copy_from_slice`]
+/// zero-copy wire adapter) reads through it without allocation.
+/// [`From<StorePath> for Vec<u8>`] covers the disjoint by-value
+/// owned-buffer byte-vector frontier the borrow can never reach:
+///
+/// - [`std::collections::HashMap`]`<Vec<u8>, _>::insert` /
+///   [`Vec`]`<Vec<u8>>::push` — an owned-key or owned-entry sink that
+///   pins its contract on [`Vec<u8>`] (a store-path-keyed byte-addressed
+///   fingerprint cache, a captured wire frame accumulator indexed by
+///   store path, a [`serde_bytes`]-serialised owned-bytes field). Pre-
+///   peer the site had to write `Vec::from(sp.as_str().as_bytes())` or
+///   `<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec()` (allocates a
+///   fresh [`Vec<u8>`] cloning the same validated bytes [`StorePath`]
+///   already owns); post-peer `sp.into()` moves the backing buffer
+///   through at zero-copy.
+/// - `struct { payload: Vec<u8> }` field initializers — a
+///   [`bytes::BytesMut`]-fed wire-frame builder, a [`reqwest::Body`]
+///   owned-bytes carrier, a [`serde_bytes`] owned-bytes field on a wire
+///   record that owns its byte-vector field as [`Vec<u8>`] (the stdlib
+///   idiom for an owned byte buffer). Pre-peer the init routed through
+///   `Vec::from(sp.as_str().as_bytes())`; post-peer the [`StorePath`]
+///   value is moved directly into the field at the same zero-copy
+///   discipline.
+/// - `Result<Vec<u8>>`-returning wrappers preserving a pre-existing
+///   public shape — a [`reqwest::Response::bytes`]-mirroring accessor
+///   that types its return as `Result<Vec<u8>>`, a
+///   [`std::fs::read`]-shaped file-payload boundary that pins its API
+///   on [`Vec<u8>`], a serialization frontier that emits owned bytes.
+///   Pre-peer `Ok(Vec::from(result.store_path.into_string().as_bytes()))`
+///   restated the two-step conversion at every site; post-peer
+///   `Ok(result.store_path.into())` reads through this impl.
+/// - Generic sinks bounded by `impl Into<Vec<u8>>` —
+///   [`bytes::Bytes::from<Vec<u8>>`], [`reqwest::Body::from<Vec<u8>>`],
+///   [`std::io::Cursor::new<Vec<u8>>`], every byte-buffer-taking API in
+///   stdlib and third-party wire-framing crates that accepts
+///   `impl Into<Vec<u8>>` when it needs an owned buffer. This impl
+///   reaches every `impl Into<Vec<u8>>` consumer at zero per-site bridge
+///   cost.
+///
+/// The chain-through-`From<StorePath> for String` design is the one-oracle
+/// discipline THEORY §VI.1 demands: the moved-out canonical bytes travel
+/// through the same [`StorePath::into_string`] projection the [`String`],
+/// [`std::path::PathBuf`], and [`std::ffi::OsString`] emit peers already
+/// route through, so a future refinement to the canonical form (a tighter
+/// trim, a `SmartString` handle, a canonicalising projection at the emit
+/// surface) lands at one site and every owned-emit peer inherits it
+/// automatically. A per-impl direct call to `sp.into_string().into_bytes()`
+/// here would work today but would ossify the "String backing" assumption
+/// at every emit surface; the `String::from(sp).into_bytes()` chain reads
+/// through the reference-frontier opening peer so the family stays
+/// composable by construction.
+///
+/// # Symmetric closure with the parse frontier
+///
+/// The symmetric emit-side sibling of [`TryFrom<Vec<u8>> for StorePath`]
+/// (line 981): the two together close the by-value owned-byte-vector
+/// input+output symmetry on the store-path grammar — [`TryFrom<Vec<u8>>`]
+/// parses a canonical `/nix/store/<hash>-<name>` from an owned
+/// [`Vec<u8>`] through the [`StorePath::parse`] oracle (with the
+/// `String::from_utf8` gate at the byte-vector frontier), this
+/// [`From<StorePath>`] emits the canonical `/nix/store/<hash>-<name>`
+/// as an owned [`Vec<u8>`] through the moved backing buffer. A consumer
+/// that receives an owned byte buffer from a wire or file API, parses
+/// it into a [`StorePath`], validates it, and hands it back out as an
+/// owned [`Vec<u8>`] at its own downstream boundary reads through the
+/// same one-oracle discipline the parse peer already carries with zero
+/// per-consumer bridge cost — a full `Vec<u8> → StorePath → Vec<u8>`
+/// round-trip pinned by
+/// [`tests::test_from_store_path_vec_bytes_parse_round_trip`].
+///
+/// # Identity invariants pinned
+///
+/// - `Vec::<u8>::from(sp.clone()) == sp.as_str().as_bytes()` (equality
+///   with the borrowed-view byte-slice projection the borrow-peer sites
+///   use) — pinned by
+///   [`tests::test_from_store_path_vec_bytes_matches_borrowed_projections`].
+/// - `Vec::<u8>::from(sp.clone()) == sp` under the reverse
+///   [`PartialEq<StorePath> for Vec<u8>`] peer (line 2597) — pins that
+///   the by-value emit lands in the same comparison equivalence class
+///   the reverse [`PartialEq`] surface already recognises.
+/// - Trim-discipline preservation: a `\n`-terminated raw input emits a
+///   [`Vec<u8>`] whose bytes are the trimmed canonical bytes — pinned by
+///   [`tests::test_from_store_path_vec_bytes_carries_trim_discipline`].
+/// - Trait-generic composition: an `impl Into<Vec<u8>>` consumer
+///   recovers the same validated bytes a direct
+///   `sp.into_string().into_bytes()` would — pinned by
+///   [`tests::test_from_store_path_vec_bytes_carries_through_generic_consumer`].
+/// - Round-trip fidelity: the emitted [`Vec<u8>`] parses back through
+///   [`TryFrom<Vec<u8>>`] to the same [`StorePath`] — pinned by
+///   [`tests::test_from_store_path_vec_bytes_parse_round_trip`].
+///
+/// THEORY.md §III typed primitives: the by-value owned-byte-vector emit
+/// surface is a typed-primitive peer on [`StorePath`], not a per-consumer
+/// `Vec::from(sp.as_str().as_bytes())` or
+/// `<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec()` restatement at
+/// every downstream site that accepts `impl Into<Vec<u8>>`.
+/// THEORY.md §VI.1 one-oracle: the validated full-path string is named
+/// at one site ([`StorePath::parse`]-guarded [`StorePath::full`]
+/// backing, projected through the [`StorePath::into_string`]
+/// owned-projection accessor, exposed as an owned [`String`] via
+/// [`From<StorePath> for String`]), and this owned-[`Vec<u8>`] emit
+/// surface reads through the same canonical-projection chain — a future
+/// divergence between the emit peer and the borrowed [`AsRef<[u8]>`]
+/// projection would fail the pinning invariance test.
+impl From<StorePath> for Vec<u8> {
+    fn from(sp: StorePath) -> Vec<u8> {
+        String::from(sp).into_bytes()
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -9007,5 +9142,158 @@ mod tests {
         assert_eq!(len_of(sp1), raw.len());
         assert_eq!(to_lossy(sp2), raw);
         assert!(owned_eq(sp3, &OsString::from(&raw)));
+    }
+
+    /// [`From<StorePath> for Vec<u8>`] emits an owned byte-vector whose
+    /// bytes agree with the borrowed-view projections at every canonical
+    /// store-path shape — the byte-slice view [`AsRef<[u8]>`] already
+    /// projects (line 2001), the by-reference [`&str`] view [`as_str`]
+    /// projects onto bytes through [`str::as_bytes`], the chained
+    /// [`String::from(sp).into_bytes()`] projection this impl composes
+    /// through, and — critically — the reverse [`PartialEq<StorePath> for
+    /// Vec<u8>`] peer at line 2597. Pins the "owned-emit peer routes
+    /// through the same one-oracle backing buffer the borrowed-view
+    /// projections read from and the reverse PartialEq surface compares
+    /// against" invariant across every canonical store-path shape — a
+    /// future divergence between the moved-out [`Vec<u8>`] and the
+    /// borrowed [`&[u8]`] view fails this test.
+    #[test]
+    fn test_from_store_path_vec_bytes_matches_borrowed_projections() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let borrowed_as_bytes: Vec<u8> = <StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec();
+            let via_str_as_bytes: Vec<u8> = sp.as_str().as_bytes().to_vec();
+            let via_string_from: Vec<u8> = String::from(sp.clone()).into_bytes();
+            let emitted: Vec<u8> = Vec::<u8>::from(sp.clone());
+            assert_eq!(
+                emitted, borrowed_as_bytes,
+                "From<StorePath> for Vec<u8> must match <StorePath as AsRef<[u8]>>::as_ref"
+            );
+            assert_eq!(
+                emitted, via_str_as_bytes,
+                "From<StorePath> for Vec<u8> must match sp.as_str().as_bytes().to_vec()"
+            );
+            assert_eq!(
+                emitted, via_string_from,
+                "From<StorePath> for Vec<u8> must match String::from(sp).into_bytes()"
+            );
+            assert_eq!(
+                emitted,
+                raw.as_bytes().to_vec(),
+                "From<StorePath> for Vec<u8> on a whitespace-free input must equal raw bytes"
+            );
+            // The reverse PartialEq<StorePath> for Vec<u8> peer at
+            // line 2597 already recognises this equivalence class; the
+            // emit must land in it by construction.
+            let emitted2: Vec<u8> = sp.clone().into();
+            assert_eq!(
+                emitted2, sp,
+                "emitted Vec<u8> must satisfy Vec<u8> == StorePath"
+            );
+        }
+    }
+
+    /// [`From<StorePath> for Vec<u8>`] carries [`StorePath::parse`]'s
+    /// trimming discipline through the by-value owned-byte-vector emit
+    /// surface — a value parsed from a newline-terminated nix-frontier
+    /// stdout buffer emits a [`Vec<u8>`] whose bytes are the trimmed
+    /// canonical bytes, not the raw newline-terminated buffer. Pins the
+    /// same trim discipline
+    /// [`test_from_store_path_string_carries_trim_discipline`],
+    /// [`test_from_store_path_pathbuf_carries_trim_discipline`], and
+    /// [`test_from_store_path_os_string_carries_trim_discipline`] pin on
+    /// the [`String`], [`std::path::PathBuf`], and [`std::ffi::OsString`]
+    /// emit surfaces, now on the [`Vec<u8>`] emit peer so a downstream
+    /// `fn f<T: Into<Vec<u8>>>(sp: T)` sees the canonical byte form with
+    /// no per-site `Vec::from(sp.as_str().trim().as_bytes())`
+    /// restatement.
+    #[test]
+    fn test_from_store_path_vec_bytes_carries_trim_discipline() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-x\n")).expect("valid");
+        let emitted: Vec<u8> = sp.into();
+        let expected = format!("/nix/store/{H}-x").into_bytes();
+        assert_eq!(emitted, expected);
+        assert!(
+            !emitted.ends_with(b"\n"),
+            "trailing newline must be trimmed"
+        );
+        assert!(
+            !emitted.starts_with(b" "),
+            "leading whitespace must be trimmed"
+        );
+    }
+
+    /// The [`From<StorePath> for Vec<u8>`] impl composes with a generic
+    /// owned-byte-vector helper bounded by `impl Into<Vec<u8>>` — the
+    /// compositional motivation for landing the trait separately from
+    /// the borrowed-view [`AsRef<[u8]>`] read peer. Pins the trait-
+    /// generic consumer surface: a downstream site that types its input
+    /// contract as `impl Into<Vec<u8>>` (a
+    /// [`bytes::Bytes::from<Vec<u8>>`] wire-frame builder, a
+    /// [`std::io::Cursor::new<Vec<u8>>`] byte-cursor sink, a
+    /// [`Result<Vec<u8>>`]-returning outer wrapper preserving a
+    /// pre-existing public shape, a config-schema setter that owns its
+    /// store-path byte-vector field) recovers the same validated byte
+    /// buffer a direct `sp.into_string().into_bytes()` call would, at
+    /// zero-copy off the moved backing storage.
+    #[test]
+    fn test_from_store_path_vec_bytes_carries_through_generic_consumer() {
+        fn len_of<T: Into<Vec<u8>>>(t: T) -> usize {
+            let v: Vec<u8> = t.into();
+            v.len()
+        }
+        fn to_utf8<T: Into<Vec<u8>>>(t: T) -> String {
+            let v: Vec<u8> = t.into();
+            String::from_utf8(v).expect("valid utf-8")
+        }
+        fn owned_eq<T: Into<Vec<u8>>>(t: T, expected: &[u8]) -> bool {
+            let v: Vec<u8> = t.into();
+            v == expected
+        }
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp1 = StorePath::parse(&raw).expect("valid");
+        let sp2 = sp1.clone();
+        let sp3 = sp1.clone();
+        assert_eq!(len_of(sp1), raw.len());
+        assert_eq!(to_utf8(sp2), raw);
+        assert!(owned_eq(sp3, raw.as_bytes()));
+    }
+
+    /// Round-trip fidelity across the by-value owned-byte-vector
+    /// input+output symmetry: [`From<StorePath> for Vec<u8>`] emits the
+    /// canonical bytes, and [`TryFrom<Vec<u8>> for StorePath`] (line
+    /// 981) parses them back through the same [`StorePath::parse`]
+    /// one-oracle. Pins the same round-trip fidelity
+    /// [`test_from_store_path_pathbuf_parse_round_trip`] pins on the
+    /// [`std::path::PathBuf`] emit-parse symmetry, now on the [`Vec<u8>`]
+    /// emit-parse symmetry — a consumer that receives an owned byte
+    /// buffer from a wire/file boundary, parses it into a [`StorePath`],
+    /// and hands it back out as an owned [`Vec<u8>`] at its own
+    /// downstream boundary reads through both peers at zero per-consumer
+    /// bridge cost.
+    #[test]
+    fn test_from_store_path_vec_bytes_parse_round_trip() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let original_hash = sp.hash().to_string();
+            let original_name = sp.name().to_string();
+            let original_is_drv = sp.is_derivation();
+            let emitted: Vec<u8> = sp.into();
+            let round_tripped = StorePath::try_from(emitted).expect("round-trip parse");
+            assert_eq!(round_tripped.as_str(), raw);
+            assert_eq!(round_tripped.hash(), original_hash);
+            assert_eq!(round_tripped.name(), original_name);
+            assert_eq!(round_tripped.is_derivation(), original_is_drv);
+        }
     }
 }
