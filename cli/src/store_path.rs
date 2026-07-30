@@ -1300,6 +1300,128 @@ impl TryFrom<std::rc::Rc<[u8]>> for StorePath {
     }
 }
 
+/// By-reference filesystem-path try-conversion peer for
+/// [`StorePath::parse`] via the [`TryFrom<&std::path::Path>`] trait — the
+/// filesystem-path frontier that pairs on the parse side with the
+/// [`AsRef<std::path::Path>`] read-back peer at `store_path.rs:1427`, so a
+/// [`std::path::PathBuf`] handle from a real filesystem operation
+/// ([`std::fs::canonicalize`] over a `result*` build-symlink,
+/// [`std::fs::read_link`] over an Attic-cached derivation, a
+/// [`walkdir::WalkDir`] entry's [`std::fs::DirEntry::path`], a
+/// [`std::env::current_dir`] captured working directory whose caller
+/// needs to prove the CWD is a validated store object) reaches the
+/// store-path grammar oracle through the borrowed [`std::path::Path`]
+/// view directly, without a call-site
+/// `path.to_str().ok_or(…)?.parse::<StorePath>()` two-step. The
+/// borrowed-view axis's parse peer is the missing dual of the
+/// read-back peer directly above at `store_path.rs:1427`.
+///
+/// Delegates through `<Self as TryFrom<&[u8]>>::try_from` on the
+/// OS-native encoded-byte view of the caller-supplied
+/// [`std::path::Path`] (via
+/// [`std::path::Path::as_os_str`] composed with
+/// [`std::ffi::OsStr::as_encoded_bytes`], a zero-copy borrow of the
+/// underlying [`std::ffi::OsStr`] payload), so the store-path grammar
+/// and the UTF-8 decode gate stay defined at ONE construction surface —
+/// the byte-slice [`TryFrom<&[u8]>`] peer, which itself composes
+/// [`std::str::from_utf8`] with the [`FromStr`] oracle. No allocation,
+/// no re-derivation of the grammar clauses at the filesystem-path
+/// receiver layer: a Nix store object path is ASCII by construction, so
+/// the [`std::ffi::OsStr::as_encoded_bytes`] view is byte-identical to
+/// the canonical UTF-8 form on every platform (Unix's raw-byte OsStr and
+/// Windows's WTF-8 encoding agree for the ASCII subset that store paths
+/// live in).
+///
+/// # Why the trait peer earns its keep
+///
+/// The 13 UTF-8 and byte-slice receiver-shape peers directly above close
+/// the parse frontier at every string and byte input surface
+/// ([`&str`] / [`String`] / [`Cow<'_, str>`] / [`Box<str>`] /
+/// [`std::sync::Arc<str>`] / [`std::rc::Rc<str>`] on the UTF-8 axis,
+/// [`&[u8]`] / [`Vec<u8>`] / [`Box<[u8]>`] / [`Cow<'_, [u8]>`] /
+/// [`std::sync::Arc<[u8]>`] / [`std::rc::Rc<[u8]>`] on the byte axis).
+/// This peer closes the disjoint filesystem-path frontier the stdlib
+/// [`std::fs`] surface and every [`impl AsRef<std::path::Path>`]
+/// boundary key off separately:
+///
+/// - [`std::fs::canonicalize`] hands the caller a
+///   [`std::path::PathBuf`] whose borrowed [`std::path::Path`] view is
+///   the resolved absolute path — a canonical shape at the nix-frontier
+///   for a `result*` build symlink whose target the caller wants to
+///   validate as a store object before pushing its closure. Post-peer
+///   the caller writes
+///   `StorePath::try_from(fs::canonicalize(link)?.as_path())` — one
+///   composition, both gates carried, the grammar rejection typed as
+///   the exact clause (`MissingStorePrefix` if the symlink didn't
+///   point at `/nix/store/`, `HasSubpath` if the caller mistakenly
+///   passed a resolved subpath like `.../result/bin/x`, `TooShort` or
+///   `InvalidHash` if the resolved path is a placeholder rather than a
+///   real store object).
+/// - [`std::fs::read_link`] hands the caller a [`std::path::PathBuf`]
+///   whose target is the raw symlink content — the canonical shape for
+///   probing an Attic-cached derivation link without following it
+///   through the filesystem. Post-peer the caller reads the link,
+///   validates the target as a store object, and reports the grammar
+///   clause on rejection without a per-call-site
+///   `.to_str().ok_or_else(…)?.parse()` restatement.
+/// - `#[serde(try_from = "&std::path::Path")]` — the serde container
+///   attribute for the filesystem-path case (a deserializer that
+///   materialises paths from a config document — YAML / TOML / JSON
+///   with a native path type — keeps the borrowed
+///   [`std::path::Path`] view and hands it to the parse gate) keys
+///   off [`TryFrom<&std::path::Path>`], not [`TryFrom<&str>`] or
+///   [`TryFrom<&[u8]>`]. A future serde field wrapping a
+///   [`StorePath`] and opting into the filesystem-path `try_from`
+///   grammar reaches the store-path check through this impl without
+///   a shim.
+/// - Generic try-conversion bounds
+///   (`fn parse_field<T: for<'a> TryFrom<&'a std::path::Path>>`) — a
+///   validated-input newtype builder or filesystem-scan pipeline
+///   terminus whose parse contract is stated at the borrowed
+///   filesystem-path receiver layer can name [`StorePath`] alongside
+///   every other by-reference filesystem-path try-conversion primitive
+///   without routing through a UTF-8-first or byte-slice-first shim.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at two frontiers, in order, unchanged from the
+/// underlying byte-slice peer:
+///
+/// 1. Non-UTF-8 encoded bytes reject at the UTF-8 decode gate
+///    ([`std::str::from_utf8`] inside the delegated [`TryFrom<&[u8]>`]
+///    peer) with the typed [`StorePathError::NonUtf8Bytes`] variant
+///    carrying the offending encoded-byte buffer verbatim and the
+///    underlying [`std::str::Utf8Error`] under
+///    [`std::error::Error::source`]. A filesystem path whose OS-native
+///    encoding is not valid UTF-8 (a raw non-UTF-8 byte sequence on
+///    Unix, an isolated-surrogate WTF-8 sequence on Windows) fails at
+///    the same gate the byte-slice peers key off, without a
+///    `path.to_str().ok_or_else(…)?` boilerplate that discards the
+///    offending bytes.
+/// 2. Valid-UTF-8 encoded bytes that decode to a non-store-path string
+///    reject at the underlying [`FromStr`] impl with the exact
+///    grammar-clause variant the input violated
+///    (`MissingStorePrefix` / `HasSubpath` / `TooShort` /
+///    `InvalidHash` / `MissingSeparator` / `EmptyName`).
+///
+/// # Error shape
+///
+/// `Self::Error = StorePathError`. The typed grammar-clause enum,
+/// extended with the [`StorePathError::NonUtf8Bytes`] variant for the
+/// UTF-8 decode gate, carries through — no widening to [`anyhow::Error`]
+/// or `Box<dyn Error>` hides between the filesystem-path
+/// try-conversion surface and the inherent constructor, so a caller can
+/// still `match` on the exact rejection site at the trait entry point
+/// even when the caller started from a [`std::path::PathBuf`] handle
+/// on a real filesystem.
+impl TryFrom<&std::path::Path> for StorePath {
+    type Error = StorePathError;
+
+    fn try_from(path: &std::path::Path) -> Result<Self, Self::Error> {
+        <Self as TryFrom<&[u8]>>::try_from(path.as_os_str().as_encoded_bytes())
+    }
+}
+
 /// By-reference read-back peer for [`StorePath::as_str`] via the
 /// [`AsRef<str>`] trait — the [`std::fmt::Display`] impl above emits the
 /// full path into a formatter; this peer exposes the same view directly as
@@ -7090,5 +7212,172 @@ mod tests {
                 "reverse-PathBuf and forward-PathBuf PartialEq peers must agree at {candidate:?}",
             );
         }
+    }
+
+    /// The [`TryFrom<&std::path::Path>`] borrowed filesystem-path parse
+    /// peer must agree with the inherent [`StorePath::parse`] oracle AND
+    /// with its byte-slice delegate [`TryFrom<&[u8]>`] on valid canonical
+    /// filesystem-path inputs at both the plain hyphenated-name case and
+    /// the newline-terminated trimming case. The trimming discipline
+    /// reaches through the filesystem-path frontier, so a caller
+    /// resolving a [`std::path::PathBuf`] from a real filesystem
+    /// operation (a [`std::fs::canonicalize`] over a `result*` symlink, a
+    /// [`std::fs::read_link`] over an Attic-cached derivation) does not
+    /// need to pre-trim before handing the borrowed [`std::path::Path`]
+    /// view to the peer. Fail-before-pass-after by construction: the
+    /// test types out
+    /// `<StorePath as TryFrom<&std::path::Path>>::try_from` explicitly,
+    /// so the base compiled without the new impl does not compile.
+    #[test]
+    fn test_try_from_path_success_agrees_with_fromstr_and_byte_slice() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let path = std::path::PathBuf::from(&raw);
+        let via_path = <StorePath as TryFrom<&std::path::Path>>::try_from(path.as_path())
+            .expect("valid store-path filesystem-path must parse via TryFrom<&Path>");
+        let via_str: StorePath = raw.parse().unwrap();
+        let via_slice = <StorePath as TryFrom<&[u8]>>::try_from(raw.as_bytes())
+            .expect("valid store-path bytes must parse via TryFrom<&[u8]>");
+        assert_eq!(via_path, via_str);
+        assert_eq!(
+            via_path, via_slice,
+            "TryFrom<&Path> and TryFrom<&[u8]> must agree on canonical bytes",
+        );
+        assert_eq!(via_path.hash(), H);
+        assert_eq!(via_path.name(), "hello-2.10");
+
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let path_nl = std::path::PathBuf::from(&raw_nl);
+        let trimmed = <StorePath as TryFrom<&std::path::Path>>::try_from(path_nl.as_path())
+            .expect("trailing newline must be trimmed at TryFrom<&Path> surface");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+        let trimmed_slice = <StorePath as TryFrom<&[u8]>>::try_from(raw_nl.as_bytes())
+            .expect("trailing newline must be trimmed at TryFrom<&[u8]> surface");
+        assert_eq!(
+            trimmed, trimmed_slice,
+            "TryFrom<&Path> and TryFrom<&[u8]> must agree on trimmed canonical bytes",
+        );
+    }
+
+    /// A non-UTF-8 encoded-byte filesystem-path input must reject at the
+    /// UTF-8 decode gate with the [`StorePathError::NonUtf8Bytes`]
+    /// variant BEFORE any grammar clause is evaluated. Pins the
+    /// two-stage strictness contract: the UTF-8 decode gate fires first
+    /// via the delegated [`TryFrom<&[u8]>`] peer, so a filesystem path
+    /// whose OS-native encoding is not valid UTF-8 (a raw non-UTF-8 byte
+    /// sequence on Unix — the fixture used here — routed through
+    /// [`std::os::unix::ffi::OsStrExt::from_bytes`]) fails at the same
+    /// gate the byte-slice peers key off, without a
+    /// `path.to_str().ok_or_else(…)?` boilerplate that would discard the
+    /// offending encoded bytes.
+    #[cfg(unix)]
+    #[test]
+    fn test_try_from_path_rejects_non_utf8_input() {
+        use std::error::Error as _;
+        use std::os::unix::ffi::OsStrExt;
+        // 0xFF is never valid as a UTF-8 leading byte; the buffer starts
+        // with a valid store-path prefix so the rejection is proven to
+        // fire at the UTF-8 gate, not at the grammar oracle.
+        let mut buf: Vec<u8> = b"/nix/store/".to_vec();
+        buf.push(0xFF);
+        buf.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x");
+        let os = std::ffi::OsStr::from_bytes(&buf);
+        let path = std::path::Path::new(os);
+        let err = <StorePath as TryFrom<&std::path::Path>>::try_from(path)
+            .expect_err("non-UTF-8 filesystem-path bytes must reject at TryFrom<&Path>");
+        match &err {
+            StorePathError::NonUtf8Bytes { bytes, source: _ } => {
+                assert_eq!(
+                    bytes.as_slice(),
+                    buf.as_slice(),
+                    "the offending encoded bytes must survive verbatim on the failure record",
+                );
+            }
+            other => panic!("expected NonUtf8Bytes, got: {other:?}"),
+        }
+        let src = err.source().expect("NonUtf8Bytes must carry a source");
+        assert!(
+            src.downcast_ref::<std::str::Utf8Error>().is_some(),
+            "source must downcast to std::str::Utf8Error, got display: {src}",
+        );
+    }
+
+    /// Valid-UTF-8 filesystem-path inputs that decode to a non-store-path
+    /// string must reject at the underlying [`FromStr`] impl with the
+    /// exact grammar-clause variant the input violated — the two-stage
+    /// strictness contract: UTF-8 decode gate first, grammar oracle
+    /// second. Pins that the filesystem-path peer routes rejection
+    /// through the one grammar oracle at [`StorePath::parse`] rather
+    /// than a divergent second parse path.
+    #[test]
+    fn test_try_from_path_rejects_non_canonical_input() {
+        // `/nix/store/short` is valid UTF-8 but too short to hold a 32-
+        // char hash — the exact grammar clause `StorePathError::TooShort`
+        // discriminates.
+        let short = std::path::Path::new("/nix/store/short");
+        let err = <StorePath as TryFrom<&std::path::Path>>::try_from(short)
+            .expect_err("non-canonical filesystem-path must reject");
+        assert!(
+            matches!(err, StorePathError::TooShort { .. }),
+            "expected TooShort, got: {err:?}",
+        );
+        // A relative-path input must fire `MissingStorePrefix`, not
+        // `NonUtf8Bytes` — the UTF-8 gate cleared, so the grammar oracle
+        // owns the rejection.
+        let relative = std::path::Path::new("relative/path");
+        let err = <StorePath as TryFrom<&std::path::Path>>::try_from(relative)
+            .expect_err("relative filesystem-path must reject");
+        assert!(
+            matches!(err, StorePathError::MissingStorePrefix { .. }),
+            "expected MissingStorePrefix, got: {err:?}",
+        );
+        // A store-object-with-subpath must fire `HasSubpath`, the exact
+        // grammar clause the store-path oracle discriminates for a
+        // resolved subpath like `.../result/bin/x` a caller might
+        // mistakenly hand the parse gate after canonicalizing a symlink
+        // that pointed inside a store object rather than at its root.
+        let subpath = std::path::PathBuf::from(format!("/nix/store/{H}-svc/bin/x"));
+        let err = <StorePath as TryFrom<&std::path::Path>>::try_from(subpath.as_path())
+            .expect_err("subpath into store object must reject");
+        assert!(
+            matches!(err, StorePathError::HasSubpath { .. }),
+            "expected HasSubpath, got: {err:?}",
+        );
+    }
+
+    /// A generic `fn f<T: for<'a> TryFrom<&'a std::path::Path>>` consumer
+    /// must accept a borrowed [`std::path::Path`] and recover a validated
+    /// [`StorePath`] through the trait bound. This is the structural
+    /// witness that [`StorePath`] is genuinely usable at
+    /// [`TryFrom<&std::path::Path>`] call sites — the surface a
+    /// downstream serde container attribute
+    /// (`#[serde(try_from = "&std::path::Path")]`) or a filesystem-scan
+    /// pipeline terminus feeding [`std::fs::canonicalize`] /
+    /// [`std::fs::read_link`] output into a typed parser keys off. If a
+    /// future change narrowed the bound or the error type, this test
+    /// fails at compile time.
+    #[test]
+    fn test_try_from_path_generic_consumer_recovers_identity() {
+        fn parse_via_try_from<'a, T>(path: &'a std::path::Path) -> Result<T, T::Error>
+        where
+            T: TryFrom<&'a std::path::Path>,
+        {
+            T::try_from(path)
+        }
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let path = std::path::PathBuf::from(&raw);
+        let sp: StorePath = parse_via_try_from(path.as_path())
+            .expect("valid store-path filesystem-path must parse via generic TryFrom<&Path> bound");
+        assert_eq!(sp.name(), "foo-bar-1.2.3");
+        assert_eq!(sp.hash(), H);
+        // The trimming discipline reaches through the generic bound too:
+        // a caller resolving a filesystem-path handle does not need to
+        // pre-trim before handing the borrowed view to the generic
+        // try-conversion helper — the grammar owns the trim in one
+        // place.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let path_nl = std::path::PathBuf::from(&raw_nl);
+        let trimmed: StorePath = parse_via_try_from(path_nl.as_path())
+            .expect("trailing newline must be trimmed at generic TryFrom<&Path> bound");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
     }
 }
