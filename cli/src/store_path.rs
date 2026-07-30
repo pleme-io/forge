@@ -1422,6 +1422,105 @@ impl TryFrom<&std::path::Path> for StorePath {
     }
 }
 
+/// By-value owned filesystem-path try-conversion peer for
+/// [`StorePath::parse`] via the [`TryFrom<std::path::PathBuf>`] trait —
+/// the owned filesystem-path counterpart of the [`TryFrom<&std::path::Path>`]
+/// borrowed peer directly above, matching the [`TryFrom<&str>`] /
+/// [`TryFrom<String>`] and [`TryFrom<&[u8]>`] / [`TryFrom<Vec<u8>>`]
+/// pairs already carried at the UTF-8 and byte-slice frontiers.
+///
+/// Delegates through `<Self as TryFrom<&std::path::Path>>::try_from` on
+/// the borrowed [`std::path::Path`] view of the caller-supplied
+/// [`std::path::PathBuf`] (via [`std::path::PathBuf::as_path`]), which
+/// itself delegates through the byte-slice peer, which itself delegates
+/// through the [`std::str::FromStr`] peer, which itself delegates to
+/// [`StorePath::parse`] — the store-path grammar and the UTF-8 decode
+/// gate both stay defined at ONE construction surface. A grammar clause
+/// added to `parse` lights up at this frontier without a second edit;
+/// the UTF-8 decode gate is the one place non-textual input is rejected
+/// before the grammar oracle is consulted, unchanged from the borrowed
+/// filesystem-path peer that this impl reaches through.
+///
+/// # Why the trait peer earns its keep
+///
+/// The [`TryFrom<&std::path::Path>`] peer directly above closes the
+/// borrowed filesystem-path frontier
+/// (`fn f<T: for<'a> TryFrom<&'a std::path::Path>>` — filesystem-scan
+/// pipeline terminuses feeding a borrowed [`std::path::Path`] view to
+/// the parse gate). [`TryFrom<std::path::PathBuf>`] covers the disjoint
+/// by-value owned filesystem-path receiver shape stdlib and the wider
+/// ecosystem key off separately:
+///
+/// - [`std::fs::canonicalize`], [`std::fs::read_link`], and
+///   [`std::env::current_dir`] all return [`std::path::PathBuf`] by
+///   value — not [`&std::path::Path`] — so a caller resolving a
+///   `result*` build symlink through [`std::fs::canonicalize`] and
+///   handing the resolved handle to the parse gate holds the
+///   [`std::path::PathBuf`] with no borrow to reach for. Post-peer the
+///   caller writes `StorePath::try_from(fs::canonicalize(link)?)` —
+///   one composition consuming the owned handle end-to-end, both
+///   gates carried, the grammar rejection typed as the exact clause
+///   (`MissingStorePrefix` if the symlink didn't point at
+///   `/nix/store/`, `HasSubpath` if the resolved handle is a subpath,
+///   `TooShort` or `InvalidHash` if the resolved path is a placeholder
+///   rather than a real store object) without a per-site
+///   `.as_path()` restatement to reach the borrowed peer.
+/// - `#[serde(try_from = "std::path::PathBuf")]` — the serde container
+///   attribute for the owned filesystem-path case (a deserializer that
+///   materialises paths from a config document as owned
+///   [`std::path::PathBuf`] handles rather than borrowed
+///   [`&std::path::Path`] views — the default shape for path fields in
+///   `serde_json` / `serde_yaml` / `toml` under `#[serde(with =
+///   "serde::…")]` and the `PathBuf: Deserialize` blanket) keys off
+///   [`TryFrom<std::path::PathBuf>`], not [`TryFrom<&std::path::Path>`],
+///   [`TryFrom<String>`], or [`TryFrom<Vec<u8>>`]. A future serde field
+///   wrapping a [`StorePath`] and opting into the owned filesystem-path
+///   `try_from` grammar reaches the store-path check through this impl
+///   without a shim.
+/// - Generic try-conversion bounds
+///   (`fn parse_field<T: TryFrom<std::path::PathBuf>>`) — a
+///   validated-input newtype builder or filesystem-scan pipeline
+///   terminus whose parse contract is stated at the by-value owned
+///   filesystem-path receiver layer (rather than fixed at the borrowed
+///   view or a specific string encoding) can name [`StorePath`]
+///   alongside every other by-value filesystem-path try-conversion
+///   primitive without routing through a `.as_path()` shim.
+///
+/// # Two-stage strictness
+///
+/// The parser is strict at two frontiers, in order, exactly as at the
+/// [`TryFrom<&std::path::Path>`] peer above (this impl reaches through it):
+///
+/// 1. Non-UTF-8 encoded bytes reject at the UTF-8 decode gate
+///    ([`std::str::from_utf8`] inside the delegated [`TryFrom<&[u8]>`]
+///    peer) with the typed [`StorePathError::NonUtf8Bytes`] variant
+///    carrying the offending encoded-byte buffer verbatim and the
+///    underlying [`std::str::Utf8Error`] under
+///    [`std::error::Error::source`].
+/// 2. Valid-UTF-8 encoded bytes that decode to a non-store-path string
+///    reject at the underlying [`FromStr`] impl with the exact
+///    grammar-clause variant the input violated
+///    (`MissingStorePrefix` / `HasSubpath` / `TooShort` /
+///    `InvalidHash` / `MissingSeparator` / `EmptyName`).
+///
+/// # Error shape
+///
+/// `Self::Error = StorePathError`. The typed grammar-clause enum,
+/// extended with the [`StorePathError::NonUtf8Bytes`] variant for the
+/// UTF-8 decode gate, carries through — no widening to
+/// [`anyhow::Error`] or `Box<dyn Error>` hides between the by-value
+/// owned filesystem-path try-conversion surface and the inherent
+/// constructor, so a caller can still `match` on the exact rejection
+/// site at the trait entry point even when the caller started from a
+/// [`std::path::PathBuf`] handle it fully owns.
+impl TryFrom<std::path::PathBuf> for StorePath {
+    type Error = StorePathError;
+
+    fn try_from(path: std::path::PathBuf) -> Result<Self, Self::Error> {
+        <Self as TryFrom<&std::path::Path>>::try_from(path.as_path())
+    }
+}
+
 /// By-reference read-back peer for [`StorePath::as_str`] via the
 /// [`AsRef<str>`] trait — the [`std::fmt::Display`] impl above emits the
 /// full path into a formatter; this peer exposes the same view directly as
@@ -7378,6 +7477,180 @@ mod tests {
         let path_nl = std::path::PathBuf::from(&raw_nl);
         let trimmed: StorePath = parse_via_try_from(path_nl.as_path())
             .expect("trailing newline must be trimmed at generic TryFrom<&Path> bound");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// The [`TryFrom<std::path::PathBuf>`] peer must agree with both the
+    /// borrowed [`TryFrom<&std::path::Path>`] peer above and the
+    /// [`FromStr`] oracle on the plain hyphenated-name case and the
+    /// newline-terminated trimming case. Pins the delegation graph: a
+    /// caller with a by-value [`std::path::PathBuf`] (the shape
+    /// [`std::fs::canonicalize`] / [`std::fs::read_link`] /
+    /// [`std::env::current_dir`] return) reaches the same validated
+    /// identity as one holding a borrowed [`&std::path::Path`] view or a
+    /// raw UTF-8 [`&str`], with the trimming discipline reaching through
+    /// the by-value receiver too. Fail-before-pass-after by construction:
+    /// the test types out
+    /// `<StorePath as TryFrom<std::path::PathBuf>>::try_from` explicitly,
+    /// so the base compiled without the new impl does not compile.
+    #[test]
+    fn test_try_from_pathbuf_success_agrees_with_borrowed_and_fromstr() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let path = std::path::PathBuf::from(&raw);
+        let via_pathbuf = <StorePath as TryFrom<std::path::PathBuf>>::try_from(path.clone())
+            .expect("valid store-path PathBuf must parse via TryFrom<PathBuf>");
+        let via_path = <StorePath as TryFrom<&std::path::Path>>::try_from(path.as_path())
+            .expect("valid store-path &Path must parse via TryFrom<&Path>");
+        let via_str: StorePath = raw.parse().unwrap();
+        assert_eq!(
+            via_pathbuf, via_path,
+            "TryFrom<PathBuf> and TryFrom<&Path> must agree on canonical bytes",
+        );
+        assert_eq!(via_pathbuf, via_str);
+        assert_eq!(via_pathbuf.hash(), H);
+        assert_eq!(via_pathbuf.name(), "hello-2.10");
+
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let path_nl = std::path::PathBuf::from(&raw_nl);
+        let trimmed = <StorePath as TryFrom<std::path::PathBuf>>::try_from(path_nl.clone())
+            .expect("trailing newline must be trimmed at TryFrom<PathBuf> surface");
+        assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+        let trimmed_borrowed =
+            <StorePath as TryFrom<&std::path::Path>>::try_from(path_nl.as_path())
+                .expect("trailing newline must be trimmed at TryFrom<&Path> surface");
+        assert_eq!(
+            trimmed, trimmed_borrowed,
+            "TryFrom<PathBuf> and TryFrom<&Path> must agree on trimmed canonical bytes",
+        );
+    }
+
+    /// A non-UTF-8 encoded-byte [`std::path::PathBuf`] input must reject
+    /// at the UTF-8 decode gate with the [`StorePathError::NonUtf8Bytes`]
+    /// variant BEFORE any grammar clause is evaluated. Pins the
+    /// two-stage strictness contract at the by-value receiver: the
+    /// UTF-8 decode gate fires first via the delegated
+    /// [`TryFrom<&std::path::Path>`] → [`TryFrom<&[u8]>`] chain, so a
+    /// filesystem [`PathBuf`] whose OS-native encoding is not valid
+    /// UTF-8 (a raw non-UTF-8 byte sequence on Unix — the fixture used
+    /// here — routed through
+    /// [`std::os::unix::ffi::OsStringExt::from_vec`]) fails at the same
+    /// gate the byte-slice peers key off, without a
+    /// `path.into_os_string().into_string().map_err(…)?` boilerplate
+    /// that would discard the offending encoded bytes.
+    #[cfg(unix)]
+    #[test]
+    fn test_try_from_pathbuf_rejects_non_utf8_input() {
+        use std::error::Error as _;
+        use std::os::unix::ffi::OsStringExt;
+        // 0xFF is never valid as a UTF-8 leading byte; the buffer starts
+        // with a valid store-path prefix so the rejection is proven to
+        // fire at the UTF-8 gate, not at the grammar oracle.
+        let mut buf: Vec<u8> = b"/nix/store/".to_vec();
+        buf.push(0xFF);
+        buf.extend_from_slice(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x");
+        let os = std::ffi::OsString::from_vec(buf.clone());
+        let path = std::path::PathBuf::from(os);
+        let err = <StorePath as TryFrom<std::path::PathBuf>>::try_from(path)
+            .expect_err("non-UTF-8 PathBuf must reject at TryFrom<PathBuf>");
+        match &err {
+            StorePathError::NonUtf8Bytes { bytes, source: _ } => {
+                assert_eq!(
+                    bytes.as_slice(),
+                    buf.as_slice(),
+                    "the offending encoded bytes must survive verbatim on the failure record",
+                );
+            }
+            other => panic!("expected NonUtf8Bytes, got: {other:?}"),
+        }
+        let src = err.source().expect("NonUtf8Bytes must carry a source");
+        assert!(
+            src.downcast_ref::<std::str::Utf8Error>().is_some(),
+            "source must downcast to std::str::Utf8Error, got display: {src}",
+        );
+    }
+
+    /// Valid-UTF-8 [`std::path::PathBuf`] inputs that decode to a
+    /// non-store-path string must reject at the underlying [`FromStr`]
+    /// impl with the exact grammar-clause variant the input violated —
+    /// the two-stage strictness contract: UTF-8 decode gate first,
+    /// grammar oracle second. Pins that the owned filesystem-path peer
+    /// routes rejection through the one grammar oracle at
+    /// [`StorePath::parse`] rather than a divergent second parse path,
+    /// so `TooShort` / `MissingStorePrefix` / `HasSubpath` clauses fire
+    /// with the same discrimination the borrowed peer surfaces.
+    #[test]
+    fn test_try_from_pathbuf_rejects_non_canonical_input() {
+        // `/nix/store/short` is valid UTF-8 but too short to hold a 32-
+        // char hash — the exact grammar clause `StorePathError::TooShort`
+        // discriminates.
+        let short = std::path::PathBuf::from("/nix/store/short");
+        let err = <StorePath as TryFrom<std::path::PathBuf>>::try_from(short)
+            .expect_err("non-canonical PathBuf must reject");
+        assert!(
+            matches!(err, StorePathError::TooShort { .. }),
+            "expected TooShort, got: {err:?}",
+        );
+        // A relative-path input must fire `MissingStorePrefix`, not
+        // `NonUtf8Bytes` — the UTF-8 gate cleared, so the grammar oracle
+        // owns the rejection.
+        let relative = std::path::PathBuf::from("relative/path");
+        let err = <StorePath as TryFrom<std::path::PathBuf>>::try_from(relative)
+            .expect_err("relative PathBuf must reject");
+        assert!(
+            matches!(err, StorePathError::MissingStorePrefix { .. }),
+            "expected MissingStorePrefix, got: {err:?}",
+        );
+        // A store-object-with-subpath must fire `HasSubpath`, the exact
+        // grammar clause the store-path oracle discriminates for a
+        // resolved subpath like `.../result/bin/x` a caller might
+        // mistakenly hand the parse gate after canonicalizing a symlink
+        // that pointed inside a store object rather than at its root —
+        // the canonical failure shape a
+        // `fs::canonicalize(build_result_link)?` racing against a
+        // partial build might surface at this receiver by value.
+        let subpath = std::path::PathBuf::from(format!("/nix/store/{H}-svc/bin/x"));
+        let err = <StorePath as TryFrom<std::path::PathBuf>>::try_from(subpath)
+            .expect_err("subpath into store object must reject");
+        assert!(
+            matches!(err, StorePathError::HasSubpath { .. }),
+            "expected HasSubpath, got: {err:?}",
+        );
+    }
+
+    /// A generic `fn f<T: TryFrom<std::path::PathBuf>>` consumer must
+    /// accept a by-value [`std::path::PathBuf`] and recover a validated
+    /// [`StorePath`] through the trait bound. This is the structural
+    /// witness that [`StorePath`] is genuinely usable at
+    /// [`TryFrom<std::path::PathBuf>`] call sites — the surface a
+    /// downstream serde container attribute
+    /// (`#[serde(try_from = "std::path::PathBuf")]`) or a
+    /// filesystem-scan pipeline terminus consuming
+    /// [`std::fs::canonicalize`] / [`std::fs::read_link`] output
+    /// end-to-end keys off. If a future change narrowed the bound or
+    /// the error type, this test fails at compile time.
+    #[test]
+    fn test_try_from_pathbuf_generic_consumer_recovers_identity() {
+        fn parse_via_try_from<T>(path: std::path::PathBuf) -> Result<T, T::Error>
+        where
+            T: TryFrom<std::path::PathBuf>,
+        {
+            T::try_from(path)
+        }
+        let raw = format!("/nix/store/{H}-foo-bar-1.2.3");
+        let path = std::path::PathBuf::from(&raw);
+        let sp: StorePath = parse_via_try_from(path)
+            .expect("valid store-path PathBuf must parse via generic TryFrom<PathBuf> bound");
+        assert_eq!(sp.name(), "foo-bar-1.2.3");
+        assert_eq!(sp.hash(), H);
+        // The trimming discipline reaches through the generic bound too:
+        // a caller resolving a filesystem-path handle end-to-end does
+        // not need to pre-trim before handing the owned buffer to the
+        // generic try-conversion helper — the grammar owns the trim in
+        // one place.
+        let raw_nl = format!("/nix/store/{H}-x\n");
+        let path_nl = std::path::PathBuf::from(&raw_nl);
+        let trimmed: StorePath = parse_via_try_from(path_nl)
+            .expect("trailing newline must be trimmed at generic TryFrom<PathBuf> bound");
         assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
     }
 }
