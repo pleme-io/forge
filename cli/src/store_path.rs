@@ -3592,6 +3592,123 @@ impl From<StorePath> for std::path::PathBuf {
     }
 }
 
+/// By-value owned-OS-string emit peer for [`StorePath`] via
+/// [`std::ffi::OsString`] — the third step of the by-value owned-emit
+/// frontier opened by [`From<StorePath> for String`] (line 3462) and
+/// extended by [`From<StorePath> for std::path::PathBuf`] (line 3589),
+/// chaining through the same [`StorePath::into_string`] one-oracle
+/// discipline every owned-emit peer in the family routes through.
+///
+/// Delegates through `std::ffi::OsString::from(String::from(sp))`:
+/// `String::from(sp)` moves [`StorePath::full`] out at zero-copy via
+/// [`StorePath::into_string`]; [`std::ffi::OsString`]'s
+/// [`From<String>`](std::ffi::OsString#impl-From<String>-for-OsString) is a
+/// byte-for-byte reinterpret of the moved buffer on Unix
+/// (`OsString { inner: Buf { inner: s.into_bytes() } }`) and a WTF-8
+/// in-place reinterpret on Windows (WTF-8 is a strict superset of UTF-8, so
+/// an ASCII store-path payload is a valid WTF-8 encoding on every supported
+/// platform). Zero allocation, zero re-encoding — the same validated bytes
+/// the [`StorePath::parse`] oracle proved
+/// `/nix/store/<32-char-base32-hash>-<name>`-shaped now reach the OS-string
+/// frontier as an owned [`std::ffi::OsString`] backed by the same buffer.
+///
+/// # Why the trait peer earns its keep
+///
+/// [`AsRef<std::ffi::OsStr> for StorePath`] (line 1920) covers the
+/// borrowed-view OS-string frontier — every `&OsStr`-typed consumer
+/// ([`std::process::Command::arg`], [`std::process::Command::current_dir`]
+/// via `AsRef<Path>` composed on `AsRef<OsStr>`, [`std::env::set_var`]
+/// keyed on `impl AsRef<OsStr>`) reads through it without allocation.
+/// [`From<StorePath> for std::ffi::OsString`] covers the disjoint by-value
+/// owned-buffer OS-string frontier the borrow can never reach:
+///
+/// - [`std::collections::HashMap`]`<std::ffi::OsString, _>::insert` /
+///   [`Vec`]`<std::ffi::OsString>::push` — an owned-key or owned-entry
+///   sink that pins its contract on [`std::ffi::OsString`] (a store-path-
+///   keyed process-env cache, a per-service argv accumulator, a captured
+///   [`std::env::vars_os`] snapshot indexed by store path). Pre-peer the
+///   site had to write `std::ffi::OsString::from(sp.as_str())` or
+///   `<StorePath as AsRef<std::ffi::OsStr>>::as_ref(&sp).to_os_string()`
+///   (allocates a fresh [`std::ffi::OsString`] cloning the same
+///   validated bytes [`StorePath`] already owns); post-peer `sp.into()`
+///   moves the backing buffer through at zero-copy on Unix.
+/// - `struct { arg: std::ffi::OsString }` field initializers — a
+///   [`std::process::Command`]-builder-shaped accumulator, an env-var
+///   capture record, a parsed-argv container that owns its OS-string
+///   field as [`std::ffi::OsString`] (the stdlib idiom for an owned OS
+///   string). Pre-peer the init routed through
+///   `std::ffi::OsString::from(sp.as_str())`; post-peer the [`StorePath`]
+///   value is moved directly into the field at the same zero-copy
+///   discipline.
+/// - `Result<std::ffi::OsString>`-returning wrappers preserving a
+///   pre-existing public shape — a process-env-capture boundary that
+///   types its return as `Result<std::ffi::OsString>`, an
+///   [`std::env::var_os`]-mirroring accessor, a spawner-crate frontier
+///   that pins its argv API on [`std::ffi::OsString`]. Pre-peer
+///   `Ok(std::ffi::OsString::from(result.store_path.into_string()))`
+///   restated the two-step conversion at every site; post-peer
+///   `Ok(result.store_path.into())` reads through this impl.
+/// - Generic sinks bounded by `impl Into<std::ffi::OsString>` —
+///   [`std::env::set_var`]'s value slot, [`std::process::Command::env`]'s
+///   value slot, every OS-string-taking API in stdlib and third-party
+///   process-spawn crates that accepts `impl Into<std::ffi::OsString>`
+///   when it needs an owned buffer. This impl reaches every
+///   `impl Into<std::ffi::OsString>` consumer at zero per-site bridge
+///   cost.
+///
+/// The chain-through-`From<StorePath> for String` design is the one-oracle
+/// discipline THEORY §VI.1 demands: the moved-out canonical bytes travel
+/// through the same [`StorePath::into_string`] projection the [`String`]
+/// and [`std::path::PathBuf`] emit peers already route through, so a
+/// future refinement to the canonical form (a tighter trim, a
+/// `SmartString` handle, a canonicalising projection at the emit surface)
+/// lands at one site and every owned-emit peer inherits it automatically.
+/// A per-impl direct call to `sp.into_string()` here would work today but
+/// would ossify the "String backing" assumption at every emit surface;
+/// the `std::ffi::OsString::from(String::from(sp))` chain reads through
+/// the reference-frontier opening peer so the family stays composable by
+/// construction.
+///
+/// # Identity invariants pinned
+///
+/// - `std::ffi::OsString::from(sp.clone()) == sp.as_str()` (equality with
+///   the borrowed [`&str`] projection via the standard-library
+///   `<OsString as PartialEq<str>>` surface) — pinned by
+///   [`tests::test_from_store_path_os_string_matches_borrowed_projections`].
+/// - `std::ffi::OsString::from(sp.clone()) == sp` under the reverse
+///   [`PartialEq<StorePath> for std::ffi::OsString`] peer (line 2969) —
+///   pins that the by-value emit lands in the same comparison
+///   equivalence class the reverse [`PartialEq`] surface already
+///   recognises.
+/// - Trim-discipline preservation: a `\n`-terminated raw input emits an
+///   [`std::ffi::OsString`] whose byte view equals the trimmed canonical
+///   bytes — pinned by
+///   [`tests::test_from_store_path_os_string_carries_trim_discipline`].
+/// - Trait-generic composition: an `impl Into<std::ffi::OsString>`
+///   consumer recovers the same validated bytes a direct
+///   `std::ffi::OsString::from(sp.into_string())` would — pinned by
+///   [`tests::test_from_store_path_os_string_carries_through_generic_consumer`].
+///
+/// THEORY.md §III typed primitives: the by-value owned-OS-string emit
+/// surface is a typed-primitive peer on [`StorePath`], not a per-consumer
+/// `std::ffi::OsString::from(sp.as_str())` or
+/// `sp.as_ref::<std::ffi::OsStr>().to_os_string()` restatement at every
+/// downstream site that accepts `impl Into<std::ffi::OsString>`.
+/// THEORY.md §VI.1 one-oracle: the validated full-path string is named at
+/// one site ([`StorePath::parse`]-guarded [`StorePath::full`] backing,
+/// projected through the [`StorePath::into_string`] owned-projection
+/// accessor, exposed as an owned [`String`] via
+/// [`From<StorePath> for String`]), and this owned-[`std::ffi::OsString`]
+/// emit surface reads through the same canonical-projection chain — a
+/// future divergence between the emit peer and the borrowed
+/// [`AsRef<std::ffi::OsStr>`] projection would fail the pinning
+/// invariance test.
+impl From<StorePath> for std::ffi::OsString {
+    fn from(sp: StorePath) -> std::ffi::OsString {
+        std::ffi::OsString::from(String::from(sp))
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -8774,5 +8891,121 @@ mod tests {
             assert_eq!(via_try_from_pathbuf, original);
             assert_eq!(via_try_from_path, original);
         }
+    }
+
+    /// [`From<StorePath> for std::ffi::OsString`] emits an
+    /// [`std::ffi::OsString`] whose bytes match every borrowed-view
+    /// projection [`StorePath`] already carries at the OS-string
+    /// frontier: [`AsRef<std::ffi::OsStr>`], [`std::ffi::OsStr::new(sp.as_str())`],
+    /// and — critically — the reverse
+    /// [`PartialEq<StorePath> for std::ffi::OsString`] peer at line 2969.
+    /// Pins the "owned-emit peer routes through the same one-oracle
+    /// backing buffer the borrowed-view projections read from and the
+    /// reverse PartialEq surface compares against" invariant across every
+    /// canonical store-path shape — a future divergence between the
+    /// moved-out [`std::ffi::OsString`] and the borrowed
+    /// [`&std::ffi::OsStr`] view fails this test.
+    #[test]
+    fn test_from_store_path_os_string_matches_borrowed_projections() {
+        use std::ffi::{OsStr, OsString};
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let borrowed_as_os: OsString = <StorePath as AsRef<OsStr>>::as_ref(&sp).to_os_string();
+            let via_new_os = OsString::from(OsStr::new(sp.as_str()));
+            let via_string_from = OsString::from(String::from(sp.clone()));
+            let emitted: OsString = OsString::from(sp.clone());
+            assert_eq!(
+                emitted, borrowed_as_os,
+                "From<StorePath> for OsString must match <StorePath as AsRef<OsStr>>::as_ref"
+            );
+            assert_eq!(
+                emitted, via_new_os,
+                "From<StorePath> for OsString must match OsString::from(OsStr::new(sp.as_str()))"
+            );
+            assert_eq!(
+                emitted, via_string_from,
+                "From<StorePath> for OsString must match the chain OsString::from(String::from(sp))"
+            );
+            assert_eq!(
+                emitted,
+                OsString::from(&raw),
+                "From<StorePath> for OsString on a whitespace-free input must equal OsString::from(raw)"
+            );
+            // The reverse PartialEq<StorePath> for OsString peer at
+            // line 2969 already recognises this equivalence class; the
+            // emit must land in it by construction.
+            let emitted2: OsString = sp.clone().into();
+            assert_eq!(
+                emitted2, sp,
+                "emitted OsString must satisfy OsString == StorePath"
+            );
+        }
+    }
+
+    /// [`From<StorePath> for std::ffi::OsString`] carries
+    /// [`StorePath::parse`]'s trimming discipline through the by-value
+    /// owned-OS-string emit surface — a value parsed from a newline-
+    /// terminated nix-frontier stdout buffer emits an
+    /// [`std::ffi::OsString`] whose bytes are the trimmed canonical bytes,
+    /// not the raw newline-terminated buffer. Pins the same trim
+    /// discipline [`test_from_store_path_string_carries_trim_discipline`]
+    /// and [`test_from_store_path_pathbuf_carries_trim_discipline`] pin on
+    /// the [`String`] and [`std::path::PathBuf`] emit surfaces, now on
+    /// the [`std::ffi::OsString`] emit peer so a downstream
+    /// `fn f<T: Into<std::ffi::OsString>>(sp: T)` sees the canonical
+    /// OS-string form with no per-site
+    /// `std::ffi::OsString::from(sp.as_str().trim())` restatement.
+    #[test]
+    fn test_from_store_path_os_string_carries_trim_discipline() {
+        use std::ffi::OsString;
+        let sp = StorePath::parse(&format!("/nix/store/{H}-x\n")).expect("valid");
+        let emitted: OsString = sp.into();
+        let expected = OsString::from(format!("/nix/store/{H}-x"));
+        assert_eq!(emitted, expected);
+        let s = emitted.to_string_lossy();
+        assert!(!s.ends_with('\n'), "trailing newline must be trimmed");
+        assert!(!s.starts_with(' '), "leading whitespace must be trimmed");
+    }
+
+    /// The [`From<StorePath> for std::ffi::OsString`] impl composes with a
+    /// generic owned-OS-string helper bounded by
+    /// `impl Into<std::ffi::OsString>` — the compositional motivation for
+    /// landing the trait separately from the borrowed-view
+    /// [`AsRef<std::ffi::OsStr>`] read peer. Pins the trait-generic
+    /// consumer surface: a downstream site that types its input contract
+    /// as `impl Into<std::ffi::OsString>` (a
+    /// [`std::process::Command::env`] / [`std::env::set_var`] value slot,
+    /// a `Result<std::ffi::OsString>`-returning outer wrapper preserving
+    /// a pre-existing public shape, a config-schema setter that owns its
+    /// store-path OS-string field) recovers the same validated OS-string
+    /// buffer a direct `std::ffi::OsString::from(sp.into_string())` call
+    /// would, at zero-copy off the moved backing storage.
+    #[test]
+    fn test_from_store_path_os_string_carries_through_generic_consumer() {
+        use std::ffi::OsString;
+        fn len_of<T: Into<OsString>>(t: T) -> usize {
+            let o: OsString = t.into();
+            o.len()
+        }
+        fn to_lossy<T: Into<OsString>>(t: T) -> String {
+            let o: OsString = t.into();
+            o.to_string_lossy().into_owned()
+        }
+        fn owned_eq<T: Into<OsString>>(t: T, expected: &OsString) -> bool {
+            let o: OsString = t.into();
+            &o == expected
+        }
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp1 = StorePath::parse(&raw).expect("valid");
+        let sp2 = sp1.clone();
+        let sp3 = sp1.clone();
+        assert_eq!(len_of(sp1), raw.len());
+        assert_eq!(to_lossy(sp2), raw);
+        assert!(owned_eq(sp3, &OsString::from(&raw)));
     }
 }
