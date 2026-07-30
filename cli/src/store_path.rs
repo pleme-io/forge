@@ -4430,6 +4430,175 @@ impl From<StorePath> for std::rc::Rc<str> {
     }
 }
 
+/// By-value shrunk-owned-byte-vector emit peer for [`StorePath`] via
+/// [`Box<[u8]>`] — the ninth step of the by-value owned-emit frontier
+/// opened by [`From<StorePath> for String`] (line 3461) and extended by
+/// [`From<StorePath> for std::path::PathBuf`] (line 3589),
+/// [`From<StorePath> for std::ffi::OsString`] (line 3706),
+/// [`From<StorePath> for Vec<u8>`] (line 3841),
+/// [`From<StorePath> for Box<str>`] (line 3970),
+/// [`From<StorePath> for std::borrow::Cow<'static, str>`] (line 4106),
+/// [`From<StorePath> for std::sync::Arc<str>`] (line 4261), and
+/// [`From<StorePath> for std::rc::Rc<str>`] (line 4427), chaining
+/// through the same [`StorePath::into_string`] one-oracle discipline
+/// every owned-emit peer in the family routes through.
+///
+/// Delegates through `Vec::<u8>::from(sp).into_boxed_slice()`:
+/// [`Vec::<u8>::from(sp)`] chains through the owned-byte-vector emit
+/// peer (line 3841) which itself moves [`StorePath::full`] out via
+/// [`StorePath::into_string`] then [`String::into_bytes`] into the
+/// backing [`Vec<u8>`] at zero-copy; [`Vec::into_boxed_slice`] then
+/// hands that owned buffer over to a [`Box<[u8]>`], shedding the
+/// growth-header capacity word so only the pointer and payload
+/// length remain. On a value produced by the canonical parse path —
+/// [`StorePath::parse`] populates `full` via [`str::to_string`], which
+/// allocates exactly `len` bytes — the shrink is a no-op and the
+/// backing buffer is handed straight through; on a value produced from
+/// a caller's own [`String`] with slack capacity ([`TryFrom<String>`]
+/// at line 506 preserves the caller's buffer), the shrink may
+/// reallocate to hand back a payload-sized buffer. Either way the emit
+/// is one owned buffer reuse or one shrink allocation, never a
+/// per-consumer clone of the validated bytes.
+///
+/// # Why the trait peer earns its keep
+///
+/// [`AsRef<[u8]> for StorePath`] (line 2001) covers the borrowed-view
+/// byte-slice frontier at zero allocation.
+/// [`From<StorePath> for Vec<u8>`] (line 3841) covers the by-value
+/// owned-byte-vector frontier that keeps the [`Vec<u8>`] capacity
+/// header — the shape a `HashMap<Vec<u8>, _>::insert` sink, an
+/// `impl Into<Vec<u8>>` argument slot, or a `Result<Vec<u8>>` return
+/// type requires. [`From<StorePath> for Box<[u8]>`] covers the
+/// disjoint by-value shrunk-owned byte-slice frontier the [`Vec<u8>`]
+/// emit can never reach without a per-site `.into_boxed_slice()`
+/// re-statement:
+///
+/// - [`std::collections::HashMap`]`<Box<[u8]>, _>::insert` /
+///   [`Vec`]`<Box<[u8]>>::push` — an owned-key or owned-entry sink
+///   that pins its contract on [`Box<[u8]>`] specifically (a
+///   store-path-keyed byte-addressed intern table sized to keep the
+///   long-lived label bytes at exactly `len` with no capacity slack, a
+///   canonical-form byte-serialised deduplication set whose entries
+///   never grow so the [`Vec<u8>`] capacity header is pure overhead).
+///   Pre-peer the site had to write
+///   `sp.into_string().into_bytes().into_boxed_slice()` (three-step
+///   conversion restated at every site); post-peer `sp.into()` reads
+///   through this impl.
+/// - `struct { payload: Box<[u8]> }` field initializers — a
+///   [`serde_bytes`]-derived record with a [`Box<[u8]>`] field (the
+///   crate idiom for an owned raw-byte payload with no capacity
+///   slack), a long-lived config-snapshot record that owns its
+///   store-path bytes as [`Box<[u8]>`] to shave the 8-byte capacity
+///   word off the per-record footprint at scale, a wire-frame record
+///   whose canonical byte-slice payload contract is stated as
+///   [`Box<[u8]>`] to shed the growth-header word before the field
+///   commit. Pre-peer the init routed through
+///   `Vec::from(sp.as_str().as_bytes()).into_boxed_slice()`; post-peer
+///   the [`StorePath`] value is moved directly into the field.
+/// - `Result<Box<[u8]>>`-returning wrappers preserving a pre-existing
+///   public shape — a canonical-byte-slice extractor that types its
+///   return as `Result<Box<[u8]>>`, a builder-crate frontier that pins
+///   its API on [`Box<[u8]>`]. Pre-peer
+///   `Ok(result.store_path.into_string().into_bytes().into_boxed_slice())`
+///   restated the three-step conversion at every site; post-peer
+///   `Ok(result.store_path.into())` reads through this impl.
+/// - Generic sinks bounded by `impl Into<Box<[u8]>>` — any
+///   [`bytes::Bytes::from<Vec<u8>>`]-adjacent shrunk-owned wire-frame
+///   builder, any content-addressed byte-payload sink that accepts
+///   `impl Into<Box<[u8]>>` when it wants a payload-sized owned
+///   buffer. This impl reaches every `impl Into<Box<[u8]>>` consumer
+///   at zero per-site bridge cost.
+///
+/// The chain-through-[`From<StorePath> for Vec<u8>`] design is the
+/// one-oracle discipline THEORY §VI.1 demands: the moved-out canonical
+/// bytes travel through the same [`StorePath::into_string`] projection
+/// every owned-emit peer routes through — [`Vec<u8>`] moves the
+/// backing buffer out of the [`String`] wrapper, this
+/// [`Box<[u8]>`] peer then shrinks the [`Vec<u8>`] into a
+/// payload-sized boxed slice — so a future refinement to the
+/// canonical form (a tighter trim, a `SmartString` handle, a
+/// canonicalising projection at the emit surface) lands at one site
+/// and every owned-emit peer inherits it automatically. A per-impl
+/// direct call to `sp.into_string().into_bytes().into_boxed_slice()`
+/// here would work today but would ossify the "String backing"
+/// assumption at every emit surface; the
+/// `Vec::<u8>::from(sp).into_boxed_slice()` chain reads through the
+/// owned-byte-vector emit peer, which itself reads through the
+/// reference-frontier opening peer, so the family stays composable by
+/// construction.
+///
+/// # Symmetric closure with the parse frontier
+///
+/// The symmetric emit-side sibling of [`TryFrom<Box<[u8]>> for
+/// StorePath`] (line 1079): the two together close the by-value
+/// shrunk-owned-byte-slice input+output symmetry on the store-path
+/// grammar — [`TryFrom<Box<[u8]>>`] parses a canonical
+/// `/nix/store/<hash>-<name>` from a shrunk-owned [`Box<[u8]>`]
+/// through the [`StorePath::parse`] oracle (with the `Vec::from`
+/// unbox at the byte-slice frontier), this [`From<StorePath>`] emits
+/// the canonical `/nix/store/<hash>-<name>` as a shrunk-owned
+/// [`Box<[u8]>`] through the moved-and-shrunk backing buffer. A
+/// consumer that receives a shrunk-owned raw-byte buffer from an
+/// intern pool or a [`serde_bytes`] field, parses it into a
+/// [`StorePath`], validates it, and hands it back out as a
+/// [`Box<[u8]>`] at its own downstream boundary reads through the
+/// same one-oracle discipline the parse peer already carries with zero
+/// per-consumer bridge cost — a full
+/// `Box<[u8]> → StorePath → Box<[u8]>` round-trip pinned by
+/// [`tests::test_from_store_path_box_bytes_parse_round_trip`].
+///
+/// Also the byte-slice sibling of [`From<StorePath> for Box<str>`]
+/// (line 3970): the two together close the shrunk-owned emit frontier
+/// on both the UTF-8-string axis and the raw-byte-slice axis of the
+/// reference-grammar family, so a downstream site that types both its
+/// UTF-8-payload and its raw-byte-payload boundary as shrunk-owned
+/// (a serde container that opts into `#[serde(into = "Box<str>")]` on
+/// one field AND `#[serde(into = "Box<[u8]>")]` on another, a
+/// validated-output emitter whose canonical text-facing AND
+/// byte-facing sinks are both stated as shrunk-owned) reaches both
+/// through the same primitive without a per-consumer restatement of
+/// either shrink discipline.
+///
+/// # Identity invariants pinned
+///
+/// - `Box::<[u8]>::from(sp.clone()) == sp.as_str().as_bytes()`
+///   (equality with the borrowed-view byte-slice projection the
+///   borrow-peer sites use) — pinned by
+///   [`tests::test_from_store_path_box_bytes_matches_borrowed_projections`].
+/// - Trim-discipline preservation: a `\n`-terminated raw input emits a
+///   [`Box<[u8]>`] whose bytes are the trimmed canonical bytes —
+///   pinned by
+///   [`tests::test_from_store_path_box_bytes_carries_trim_discipline`].
+/// - Trait-generic composition: an `impl Into<Box<[u8]>>` consumer
+///   recovers the same validated bytes a direct
+///   `sp.into_string().into_bytes().into_boxed_slice()` would — pinned
+///   by
+///   [`tests::test_from_store_path_box_bytes_carries_through_generic_consumer`].
+/// - Round-trip fidelity: the emitted [`Box<[u8]>`] parses back
+///   through [`TryFrom<Box<[u8]>>`] to the same [`StorePath`] — pinned
+///   by [`tests::test_from_store_path_box_bytes_parse_round_trip`].
+///
+/// THEORY.md §III typed primitives: the by-value shrunk-owned-byte-slice
+/// emit surface is a typed-primitive peer on [`StorePath`], not a
+/// per-consumer `sp.into_string().into_bytes().into_boxed_slice()` or
+/// `<StorePath as AsRef<[u8]>>::as_ref(&sp).into()` restatement at
+/// every downstream site that accepts `impl Into<Box<[u8]>>`.
+/// THEORY.md §VI.1 one-oracle: the validated full-path string is named
+/// at one site ([`StorePath::parse`]-guarded [`StorePath::full`]
+/// backing, projected through the [`StorePath::into_string`]
+/// owned-projection accessor, exposed as an owned [`String`] via
+/// [`From<StorePath> for String`], moved into an owned [`Vec<u8>`] via
+/// [`From<StorePath> for Vec<u8>`]), and this
+/// shrunk-owned-[`Box<[u8]>`] emit surface reads through the same
+/// canonical-projection chain — a future divergence between the emit
+/// peer and the borrowed [`AsRef<[u8]>`] projection would fail the
+/// pinning invariance test.
+impl From<StorePath> for Box<[u8]> {
+    fn from(sp: StorePath) -> Box<[u8]> {
+        Vec::<u8>::from(sp).into_boxed_slice()
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -10556,6 +10725,169 @@ mod tests {
             let original_name = sp.name().to_string();
             let original_is_drv = sp.is_derivation();
             let emitted: std::rc::Rc<str> = sp.into();
+            let round_tripped = StorePath::try_from(emitted).expect("round-trip parse");
+            assert_eq!(round_tripped.as_str(), raw);
+            assert_eq!(round_tripped.hash(), original_hash);
+            assert_eq!(round_tripped.name(), original_name);
+            assert_eq!(round_tripped.is_derivation(), original_is_drv);
+        }
+    }
+
+    /// [`From<StorePath> for Box<[u8]>`] emits a [`Box<[u8]>`] whose
+    /// bytes match every borrowed-view byte-slice projection
+    /// [`StorePath`] already carries: [`AsRef<[u8]>`],
+    /// [`StorePath::as_str`]`.as_bytes()`, the [`From<StorePath> for
+    /// Vec<u8>`] emit's inner buffer, and the sibling
+    /// [`From<StorePath> for Box<str>`] (line 3970) emit projected
+    /// through [`Box::<str>::into_boxed_bytes`]. Pins the "shrunk-owned
+    /// byte-slice emit peer routes through the same one-oracle backing
+    /// bytes the read peers project and the sibling shrunk-owned UTF-8
+    /// peer emits" invariant across every canonical store-path shape —
+    /// a future divergence between the moved-then-shrunk [`Box<[u8]>`]
+    /// and the borrowed `&[u8]` view fails this test. The shrunk-owned
+    /// discipline pin (`emitted.len() == raw.len()`) confirms no
+    /// capacity slack is visible through the deref surface at every
+    /// canonical shape.
+    #[test]
+    fn test_from_store_path_box_bytes_matches_borrowed_projections() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let borrowed_as_bytes: Box<[u8]> = <StorePath as AsRef<[u8]>>::as_ref(&sp).into();
+            let via_str_as_bytes: Box<[u8]> = sp.as_str().as_bytes().into();
+            let via_vec_from: Box<[u8]> = Vec::<u8>::from(sp.clone()).into_boxed_slice();
+            let via_string_from: Box<[u8]> =
+                String::from(sp.clone()).into_bytes().into_boxed_slice();
+            let via_box_str: Box<[u8]> = Box::<str>::from(sp.clone()).into_boxed_bytes();
+            let emitted: Box<[u8]> = Box::<[u8]>::from(sp.clone());
+            assert_eq!(
+                emitted, borrowed_as_bytes,
+                "From<StorePath> for Box<[u8]> must match <StorePath as AsRef<[u8]>>::as_ref"
+            );
+            assert_eq!(
+                emitted, via_str_as_bytes,
+                "From<StorePath> for Box<[u8]> must match sp.as_str().as_bytes().into()"
+            );
+            assert_eq!(
+                emitted, via_vec_from,
+                "From<StorePath> for Box<[u8]> must match Vec::<u8>::from(sp).into_boxed_slice()"
+            );
+            assert_eq!(
+                emitted, via_string_from,
+                "From<StorePath> for Box<[u8]> must match String::from(sp).into_bytes().into_boxed_slice()"
+            );
+            assert_eq!(
+                emitted, via_box_str,
+                "From<StorePath> for Box<[u8]> must match Box::<str>::from(sp).into_boxed_bytes()"
+            );
+            assert_eq!(
+                &*emitted,
+                raw.as_bytes(),
+                "From<StorePath> for Box<[u8]> on a whitespace-free input must equal raw bytes"
+            );
+            // Shrunk-owned discipline: the emitted Box<[u8]> length
+            // equals the payload byte count (no capacity slack visible
+            // through the deref), so a `<Box<[u8]> as AsRef<[u8]>>`
+            // sink sees the canonical form byte-for-byte.
+            assert_eq!(emitted.len(), raw.len());
+        }
+    }
+
+    /// [`From<StorePath> for Box<[u8]>`] carries [`StorePath::parse`]'s
+    /// trimming discipline through the by-value shrunk-owned-byte-slice
+    /// emit surface — a value parsed from a newline-terminated
+    /// nix-frontier stdout buffer emits a [`Box<[u8]>`] whose bytes are
+    /// the trimmed canonical bytes, not the raw newline-terminated
+    /// buffer. Pins the same trim discipline the [`String`],
+    /// [`std::path::PathBuf`], [`std::ffi::OsString`], [`Vec<u8>`], and
+    /// [`Box<str>`] emit peers already carry, now on the [`Box<[u8]>`]
+    /// emit peer so a downstream `fn f<T: Into<Box<[u8]>>>(sp: T)` sees
+    /// the canonical byte form with no per-site
+    /// `Vec::from(sp.as_str().trim().as_bytes()).into_boxed_slice()`
+    /// restatement.
+    #[test]
+    fn test_from_store_path_box_bytes_carries_trim_discipline() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-x\n")).expect("valid");
+        let emitted: Box<[u8]> = sp.into();
+        let expected = format!("/nix/store/{H}-x").into_bytes();
+        assert_eq!(&*emitted, expected.as_slice());
+        assert!(
+            !emitted.ends_with(b"\n"),
+            "trailing newline must be trimmed"
+        );
+        assert!(
+            !emitted.starts_with(b" "),
+            "leading whitespace must be trimmed"
+        );
+    }
+
+    /// The [`From<StorePath> for Box<[u8]>`] impl composes with a
+    /// generic shrunk-owned-byte-slice helper bounded by
+    /// `impl Into<Box<[u8]>>` — the compositional motivation for
+    /// landing the trait separately from the borrowed-view
+    /// [`AsRef<[u8]>`] read peer and the [`From<StorePath> for Vec<u8>`]
+    /// owned emit peer. Pins the trait-generic consumer surface: a
+    /// downstream site that types its input contract as
+    /// `impl Into<Box<[u8]>>` (a `HashMap<Box<[u8]>, _>::insert` key,
+    /// a shrunk-owned-byte-slice intern-pool sink, a
+    /// `Result<Box<[u8]>>`-returning outer wrapper preserving a
+    /// pre-existing public shape, a wire-record field that owns its
+    /// store-path bytes as a payload-sized boxed slice) recovers the
+    /// same validated bytes a direct
+    /// `sp.into_string().into_bytes().into_boxed_slice()` call would.
+    #[test]
+    fn test_from_store_path_box_bytes_carries_through_generic_consumer() {
+        fn len_of<T: Into<Box<[u8]>>>(t: T) -> usize {
+            let s: Box<[u8]> = t.into();
+            s.len()
+        }
+        fn to_utf8<T: Into<Box<[u8]>>>(t: T) -> String {
+            let s: Box<[u8]> = t.into();
+            String::from_utf8(s.into_vec()).expect("valid utf-8")
+        }
+        fn owned_eq<T: Into<Box<[u8]>>>(t: T, expected: &[u8]) -> bool {
+            let s: Box<[u8]> = t.into();
+            &*s == expected
+        }
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp1 = StorePath::parse(&raw).expect("valid");
+        let sp2 = sp1.clone();
+        let sp3 = sp1.clone();
+        assert_eq!(len_of(sp1), raw.len());
+        assert_eq!(to_utf8(sp2), raw);
+        assert!(owned_eq(sp3, raw.as_bytes()));
+    }
+
+    /// Round-trip fidelity across the by-value shrunk-owned-byte-slice
+    /// input+output symmetry: [`From<StorePath> for Box<[u8]>`] emits
+    /// the canonical bytes, and [`TryFrom<Box<[u8]>> for StorePath`]
+    /// (line 1079) parses them back through the same
+    /// [`StorePath::parse`] one-oracle. Pins the same round-trip
+    /// fidelity [`test_from_store_path_vec_bytes_parse_round_trip`] and
+    /// [`test_from_store_path_box_str_parse_round_trip`] pin on their
+    /// respective emit-parse symmetries, now on the [`Box<[u8]>`]
+    /// emit-parse symmetry — a consumer that receives a shrunk-owned
+    /// raw-byte buffer from an intern pool or a [`serde_bytes`] field,
+    /// parses it into a [`StorePath`], and hands it back out as a
+    /// [`Box<[u8]>`] at its own downstream boundary reads through both
+    /// peers at zero per-consumer bridge cost.
+    #[test]
+    fn test_from_store_path_box_bytes_parse_round_trip() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let original_hash = sp.hash().to_string();
+            let original_name = sp.name().to_string();
+            let original_is_drv = sp.is_derivation();
+            let emitted: Box<[u8]> = sp.into();
             let round_tripped = StorePath::try_from(emitted).expect("round-trip parse");
             assert_eq!(round_tripped.as_str(), raw);
             assert_eq!(round_tripped.hash(), original_hash);
