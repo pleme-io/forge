@@ -2782,6 +2782,146 @@ impl PartialEq<StorePath> for &std::path::Path {
     }
 }
 
+/// Forward-direction owned filesystem-path comparison peer — the
+/// [`std::path::PathBuf`]-argument sibling of the borrowed filesystem-path
+/// forward pair at lines 2648 / 2679, split by owned receiver so the
+/// caller writes `sp == owned_path` at the comparison site (a
+/// [`std::fs::canonicalize`] result compared against a validated store
+/// handle, an [`std::env::current_dir`] cross-check keying a heap-owned
+/// [`std::path::PathBuf`] against a store-path build output, an owned
+/// GC-root target compared to the parsed store object) without a per-site
+/// `<StorePath as AsRef<std::path::Path>>::as_ref(&sp) == owned_path.as_path()`
+/// restatement.
+///
+/// Delegates through [`<StorePath as AsRef<std::path::Path>>::as_ref`]
+/// composed with [`std::path::PathBuf::as_path`] and the standard-
+/// library [`<std::path::Path as PartialEq<std::path::Path>>::eq`], so
+/// the "what canonical filesystem path does a [`StorePath`] read back
+/// as?" question stays defined at ONE accessor surface — the inherent
+/// [`StorePath::as_str`] projected onto [`std::path::Path`] via
+/// [`std::path::Path::new`] at the [`AsRef<std::path::Path>`] frontier —
+/// and every filesystem-path comparison surface (borrowed forward ×
+/// receiver, borrowed reverse × receiver, owned forward, owned reverse)
+/// reads through it. Zero allocation, zero temporary [`std::path::PathBuf`],
+/// zero re-validation of the store-path grammar per call.
+///
+/// Mirrors the owned-receiver comparison peers the sibling frontiers on
+/// this typed primitive already carry:
+/// - [`impl PartialEq<String> for StorePath`] on the owned UTF-8 axis
+///   (line 1820),
+/// - [`impl PartialEq<Vec<u8>> for StorePath`] on the owned byte-vec
+///   axis (line 2140),
+/// - [`impl PartialEq<std::ffi::OsString> for StorePath`] on the owned
+///   OS-string axis (line 2494).
+///
+/// The reverse-direction sibling
+/// [`impl PartialEq<StorePath> for std::path::PathBuf`] directly below
+/// closes the 2-impl owned-receiver × direction closure so the caller
+/// may pick either side of the `==` operator when the comparand is a
+/// heap-owned [`std::path::PathBuf`], matching the standard-library
+/// idiom [`std::path::PathBuf`] carries through its own
+/// [`PartialEq<std::path::Path> for std::path::PathBuf`] +
+/// [`PartialEq<std::path::PathBuf> for std::path::Path`] closure.
+///
+/// # Platform semantics
+///
+/// A store-path payload is ASCII by construction (base-32 hash from a
+/// fixed 32-char alphabet, plus a name from the store-path name
+/// grammar), so on Unix and Windows alike [`std::path::Path::new`] is a
+/// zero-cost view transmute at the borrow-view boundary and filesystem-
+/// path equality is byte-identical to str equality on the canonical
+/// view. The owned-receiver filesystem-path peer therefore answers the
+/// same boolean the owned UTF-8 peer answers at every valid
+/// [`StorePath`] value with an ASCII candidate.
+///
+/// THEORY.md §III typed primitives: the owned filesystem-path comparison
+/// surface is a typed-primitive site on [`StorePath`] itself (one
+/// [`PartialEq<std::path::PathBuf>`] impl on [`StorePath`] routing
+/// through [`<StorePath as AsRef<std::path::Path>>::as_ref`] and
+/// [`std::path::PathBuf::as_path`]), not a per-consumer
+/// `<StorePath as AsRef<std::path::Path>>::as_ref(&sp) ==
+/// owned_path.as_path()` restatement at every downstream site that asks
+/// whether a [`StorePath`] value names the same canonical filesystem
+/// path as a heap-owned [`std::path::PathBuf`]. THEORY.md §VI.1
+/// one-oracle: the canonical view is named at one site
+/// ([`StorePath::as_str`], projected onto [`std::path::Path`] at the
+/// [`AsRef<std::path::Path>`] surface), and every filesystem-path
+/// comparison surface — borrowed forward × receiver, borrowed reverse ×
+/// receiver, and now this owned forward — reads through the same
+/// one-oracle discipline projected onto its own direction × receiver
+/// ownership.
+impl PartialEq<std::path::PathBuf> for StorePath {
+    fn eq(&self, other: &std::path::PathBuf) -> bool {
+        <Self as AsRef<std::path::Path>>::as_ref(self) == other.as_path()
+    }
+}
+
+/// Reverse-direction owned filesystem-path comparison peer — the
+/// direction sibling of [`impl PartialEq<std::path::PathBuf> for StorePath`]
+/// directly above, split by direction so the caller writes
+/// `owned_path == sp` at the comparison site (a fixture-side
+/// `assert_eq!(std::path::PathBuf::from("/nix/store/…-x"), sp)`, an
+/// [`std::env::current_dir`] walker that keys `cwd_owned == parsed_handle`
+/// with the captured [`std::path::PathBuf`] slot on the left, a generic
+/// [`PartialEq`]-bounded consumer composed on a [`std::path::PathBuf`]
+/// key against a [`StorePath`] value). Together with the forward-
+/// direction sibling this closes the 2-impl owned-receiver × direction
+/// closure at the same one-oracle discipline the four-impl borrowed
+/// filesystem-path closure at lines 2648 / 2679 / 2751 / 2779 already
+/// carries, matching the closure the owned UTF-8 pair
+/// ([`impl PartialEq<String> for StorePath`] +
+/// [`impl PartialEq<StorePath> for String`]), the owned byte-vec pair
+/// ([`impl PartialEq<Vec<u8>> for StorePath`] +
+/// [`impl PartialEq<StorePath> for Vec<u8>`]), and the owned OS-string
+/// pair ([`impl PartialEq<std::ffi::OsString> for StorePath`] +
+/// [`impl PartialEq<StorePath> for std::ffi::OsString`]) already carry
+/// on their respective owned-receiver × direction axes.
+///
+/// Delegates through [`std::path::PathBuf::as_path`] composed with
+/// [`<StorePath as AsRef<std::path::Path>>::as_ref`] and the standard-
+/// library [`<std::path::Path as PartialEq<std::path::Path>>::eq`], so
+/// the symmetry axiom
+/// `<std::path::PathBuf as PartialEq<StorePath>>::eq(&owned_path, &sp)
+/// == <StorePath as PartialEq<std::path::PathBuf>>::eq(&sp, &owned_path)`
+/// at every (owned_path, sp) pair holds by construction — both directions
+/// factor through the same [`AsRef<std::path::Path>`] one-oracle
+/// projection and the same standard-library filesystem-path equality.
+/// Pinned at
+/// [`tests::test_partial_eq_path_buf_store_path_symmetric_with_forward_direction`].
+///
+/// Extends the reverse-direction receiver frontier the borrowed
+/// filesystem-path pair
+/// [`impl PartialEq<StorePath> for std::path::Path`] +
+/// [`impl PartialEq<StorePath> for &std::path::Path`] opened onto the
+/// owned-receiver axis, mirroring the owned-UTF-8 extension the
+/// [`impl PartialEq<StorePath> for String`] peer opened onto the UTF-8
+/// frontier, the owned-byte-vec extension the
+/// [`impl PartialEq<StorePath> for Vec<u8>`] peer opened onto the byte
+/// frontier, and the owned-OS-string extension the
+/// [`impl PartialEq<StorePath> for std::ffi::OsString`] peer opened onto
+/// the OS-string frontier.
+///
+/// THEORY.md §III typed primitives: the reverse-direction owned
+/// filesystem-path comparison surface is a typed-primitive site on
+/// [`StorePath`] (one [`PartialEq<StorePath>`] impl on
+/// [`std::path::PathBuf`] routing through
+/// [`std::path::PathBuf::as_path`] and
+/// [`<StorePath as AsRef<std::path::Path>>::as_ref`]), not a per-
+/// consumer `owned_path.as_path() ==
+/// <StorePath as AsRef<std::path::Path>>::as_ref(&sp)` restatement at
+/// every downstream comparison site. THEORY.md §VI.1 one-oracle: the
+/// canonical view is named at one site ([`StorePath::as_str`], projected
+/// onto [`std::path::Path`] at the [`AsRef<std::path::Path>`] surface),
+/// and every filesystem-path comparison surface — borrowed forward ×
+/// receiver, borrowed reverse × receiver, owned forward, and this owned
+/// reverse — reads through the same one-oracle discipline projected
+/// onto its own direction × receiver ownership.
+impl PartialEq<StorePath> for std::path::PathBuf {
+    fn eq(&self, other: &StorePath) -> bool {
+        self.as_path() == <StorePath as AsRef<std::path::Path>>::as_ref(other)
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -6805,6 +6945,149 @@ mod tests {
                 <&std::path::Path as PartialEq<StorePath>>::eq(path_ref, &sp),
                 <StorePath as PartialEq<&std::path::Path>>::eq(&sp, path_ref),
                 "reverse-&Path and forward-&Path PartialEq peers must agree at {candidate:?}",
+            );
+        }
+    }
+
+    /// The forward-direction [`PartialEq<std::path::PathBuf>`] peer must
+    /// agree byte-for-byte with
+    /// `<StorePath as AsRef<std::path::Path>>::as_ref(&sp) == owned_path.as_path()`
+    /// across the canonical, sibling-hash, shorter-name, `.drv`-suffixed,
+    /// short-shortcut, empty, and unrelated-tail candidate grid. Pins the
+    /// delegation through the [`AsRef<std::path::Path>`] one-oracle
+    /// projection on the forward-direction owned filesystem-path peer, so
+    /// a future refactor that severed the peer from the accessor (a hand-
+    /// rolled [`std::path::PathBuf::from`] re-read, a divergent trimming
+    /// path, a routing through an unrelated
+    /// [`std::path::PathBuf::canonicalize`] step) is caught here first at
+    /// the owned-filesystem-path comparison frontier — the owned-receiver
+    /// sibling of [`test_partial_eq_path_agrees_with_as_ref_path`] on the
+    /// borrowed filesystem-path peer and the filesystem-path-frontier
+    /// sibling of [`test_partial_eq_os_string_agrees_with_as_ref_os_str`]
+    /// on the owned OS-string pair.
+    #[test]
+    fn test_partial_eq_path_buf_agrees_with_as_ref_path() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates: [std::path::PathBuf; 7] = [
+            std::path::PathBuf::from(format!("/nix/store/{H}-hello-2.10")),
+            std::path::PathBuf::from(format!("/nix/store/{H}-hello-2.11")),
+            std::path::PathBuf::from(format!("/nix/store/{H}-x")),
+            std::path::PathBuf::from(format!("/nix/store/{H}-svc-1.2.3.drv")),
+            std::path::PathBuf::from("/nix/store/short"),
+            std::path::PathBuf::new(),
+            std::path::PathBuf::from("hello-2.10"),
+        ];
+        for candidate in &candidates {
+            let via_peer: bool = <StorePath as PartialEq<std::path::PathBuf>>::eq(&sp, candidate);
+            let via_accessor: bool =
+                <StorePath as AsRef<std::path::Path>>::as_ref(&sp) == candidate.as_path();
+            assert_eq!(
+                via_peer, via_accessor,
+                "PartialEq<PathBuf> for StorePath must agree with as_ref::<Path>() == owned_path.as_path() at {candidate:?}",
+            );
+        }
+    }
+
+    /// The reflexive identity
+    /// `<StorePath as PartialEq<std::path::PathBuf>>::eq(&sp,
+    /// &<StorePath as AsRef<std::path::Path>>::as_ref(&sp).to_path_buf())`
+    /// must hold at every [`StorePath`] value — a variant compared
+    /// against a heap-owned [`std::path::PathBuf`] copy of its own
+    /// canonical filesystem-path view always answers true. Pins the
+    /// accessor's own filesystem-path as a fixed point of the owned-
+    /// receiver forward-direction peer so a future refactor that quietly
+    /// re-encoded the canonical filesystem-path view breaks here rather
+    /// than at every downstream `sp == owned_path` call site — the
+    /// owned-receiver sibling of
+    /// [`test_partial_eq_path_reflexive_at_own_canonical_view`] on the
+    /// borrowed filesystem-path peer and the filesystem-path-frontier
+    /// sibling of
+    /// [`test_partial_eq_os_string_reflexive_at_own_canonical_view`] on
+    /// the owned OS-string pair.
+    #[test]
+    fn test_partial_eq_path_buf_reflexive_at_own_canonical_view() {
+        for raw in [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-foo-bar-1.2.3"),
+            format!("/nix/store/{H}-svc-1.2.3.drv"),
+        ] {
+            let sp = StorePath::parse(&raw).unwrap();
+            let owned_path: std::path::PathBuf =
+                <StorePath as AsRef<std::path::Path>>::as_ref(&sp).to_path_buf();
+            assert!(
+                <StorePath as PartialEq<std::path::PathBuf>>::eq(&sp, &owned_path),
+                "PartialEq<PathBuf> for StorePath must be reflexive at own canonical view for {raw:?}",
+            );
+        }
+    }
+
+    /// The trimming discipline of [`StorePath::parse`] reaches through
+    /// the forward-direction owned filesystem-path peer — a value parsed
+    /// from a newline-terminated buffer compares equal to a heap-owned
+    /// [`std::path::PathBuf`] copy of the *trimmed* canonical literal on
+    /// the owned-filesystem-path side, not to a heap-owned
+    /// [`std::path::PathBuf`] copy of the raw newline-terminated buffer.
+    /// Pins the invariant that the owned-filesystem-path peer reads the
+    /// same canonical bytes the [`AsRef<std::path::Path>`] accessor
+    /// exposes — the owned-receiver sibling of
+    /// [`test_partial_eq_path_trims_through_peer`] on the borrowed
+    /// filesystem-path peer and the filesystem-path-frontier sibling of
+    /// [`test_partial_eq_os_string_trims_through_peer`] on the owned
+    /// OS-string pair.
+    #[test]
+    fn test_partial_eq_path_buf_trims_through_peer() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-svc-1.2.3\n")).unwrap();
+        let trimmed: std::path::PathBuf =
+            std::path::PathBuf::from(format!("/nix/store/{H}-svc-1.2.3"));
+        let untrimmed: std::path::PathBuf =
+            std::path::PathBuf::from(format!("/nix/store/{H}-svc-1.2.3\n"));
+        assert!(<StorePath as PartialEq<std::path::PathBuf>>::eq(
+            &sp, &trimmed
+        ));
+        assert!(!<StorePath as PartialEq<std::path::PathBuf>>::eq(
+            &sp, &untrimmed
+        ));
+    }
+
+    /// The reverse-direction and forward-direction owned filesystem-path
+    /// comparison surfaces on the [`StorePath`] typed primitive agree
+    /// byte-for-byte at every (owned_path, [`StorePath`]) pair — the
+    /// symmetry axiom
+    /// `<std::path::PathBuf as PartialEq<StorePath>>::eq(&owned_path, &sp)
+    /// == <StorePath as PartialEq<std::path::PathBuf>>::eq(&sp, &owned_path)`
+    /// holds across the canonical, sibling-hash, shorter-name, `.drv`-
+    /// suffixed, short-shortcut, empty, and unrelated-tail candidate
+    /// grid. Pins the 2-impl owned-filesystem-path × direction closure
+    /// so a future refactor that diverged one impl from its symmetric
+    /// peer breaks this pin at at least one pair rather than propagating
+    /// unnoticed through downstream generic [`PartialEq`]-bounded
+    /// consumers that thread a [`StorePath`] through either side of a
+    /// `==` operator against a heap-owned [`std::path::PathBuf`] key.
+    /// Structural mirror of
+    /// [`test_partial_eq_os_string_store_path_symmetric_with_forward_direction`]
+    /// on the owned OS-string pair,
+    /// [`test_partial_eq_vec_bytes_store_path_symmetric_with_forward_direction`]
+    /// on the owned byte-vec pair, and
+    /// [`test_partial_eq_string_store_path_symmetric_with_forward_direction`]
+    /// on the owned UTF-8 pair.
+    #[test]
+    fn test_partial_eq_path_buf_store_path_symmetric_with_forward_direction() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates: [std::path::PathBuf; 7] = [
+            std::path::PathBuf::from(format!("/nix/store/{H}-hello-2.10")),
+            std::path::PathBuf::from(format!("/nix/store/{H}-hello-2.11")),
+            std::path::PathBuf::from(format!("/nix/store/{H}-x")),
+            std::path::PathBuf::from(format!("/nix/store/{H}-svc-1.2.3.drv")),
+            std::path::PathBuf::from("/nix/store/short"),
+            std::path::PathBuf::new(),
+            std::path::PathBuf::from("hello-2.10"),
+        ];
+        for candidate in &candidates {
+            assert_eq!(
+                <std::path::PathBuf as PartialEq<StorePath>>::eq(candidate, &sp),
+                <StorePath as PartialEq<std::path::PathBuf>>::eq(&sp, candidate),
+                "reverse-PathBuf and forward-PathBuf PartialEq peers must agree at {candidate:?}",
             );
         }
     }
