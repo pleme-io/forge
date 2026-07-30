@@ -3465,6 +3465,134 @@ impl From<StorePath> for String {
     }
 }
 
+/// By-value owned-filesystem-path emit peer for [`StorePath`] via
+/// [`std::path::PathBuf`] — the second step of the by-value owned-emit
+/// frontier opened by [`From<StorePath> for String`] (line 3462),
+/// chaining through the same [`StorePath::into_string`] one-oracle
+/// discipline the [`String`] peer moves the validated
+/// [`StorePath::full`] backing buffer out through.
+///
+/// Delegates through `PathBuf::from(String::from(sp))`: `String::from(sp)`
+/// moves [`StorePath::full`] out at zero-copy via [`StorePath::into_string`];
+/// [`std::path::PathBuf::from<String>`] wraps the moved [`String`] in a
+/// [`std::ffi::OsString`] which on Unix is a byte-for-byte reinterpret of
+/// the owned buffer (`OsString { inner: Buf::from_string(s) }` where
+/// `Buf::from_string(s) = Slice::new(s.into_vec())`), and on Windows uses
+/// the WTF-8 in-place reinterpret. Zero allocation, zero re-encoding — the
+/// same validated bytes the [`StorePath::parse`] oracle proved
+/// `/nix/store/<32-char-base32-hash>-<name>`-shaped now reach the
+/// filesystem-path frontier as an owned [`PathBuf`] backed by the same
+/// buffer.
+///
+/// # Why the trait peer earns its keep
+///
+/// [`AsRef<std::path::Path> for StorePath`] (line 1840) covers the
+/// borrowed-view filesystem-path frontier — every `&Path`-typed consumer
+/// (`Path::new` string-slice bridges, `Command::current_dir(&Path)`,
+/// `std::fs::read_dir(&Path)`, `std::fs::canonicalize(&Path)`) reads
+/// through it without allocation. [`From<StorePath> for PathBuf`] covers
+/// the disjoint by-value owned-buffer filesystem-path frontier the
+/// borrow can never reach:
+///
+/// - `HashMap<PathBuf, _>::insert` / `Vec<PathBuf>::push` — an owned-key
+///   or owned-entry sink that pins its contract on [`PathBuf`] (a store-
+///   path-keyed cache-hit telemetry map, a per-service closure listing,
+///   a sorted derivation manifest). Pre-peer the site had to write
+///   `PathBuf::from(sp.as_str())` or `sp.as_ref::<Path>().to_path_buf()`
+///   (allocates a fresh [`PathBuf`] cloning the same validated bytes
+///   [`StorePath`] already owns); post-peer `sp.into()` moves the backing
+///   buffer through at zero-copy on Unix.
+/// - `struct { path: PathBuf }` field initializers — a config record, a
+///   [`crate::nix_hooks`]-style discovery-result carrier, a
+///   [`std::process::Command`]-builder's `current_dir` capture — that
+///   owns its filesystem-path field as [`PathBuf`] (the stdlib idiom for
+///   an owned path). Pre-peer the init routed through
+///   `PathBuf::from(sp.as_str())`; post-peer the [`StorePath`] value is
+///   moved directly into the field at the same zero-copy discipline.
+/// - `Result<PathBuf>`-returning wrappers preserving a pre-existing
+///   public shape — a `nix_hooks`-style hook-directory-discovery boundary
+///   that types its return as `Result<PathBuf>`, a builder-crate frontier
+///   that pins its API on [`PathBuf`]. Pre-peer `Ok(PathBuf::from(
+///   result.store_path.into_string()))` restated the two-step conversion
+///   at every site; post-peer `Ok(result.store_path.into())` reads
+///   through this impl.
+/// - Generic sinks bounded by `impl Into<PathBuf>` — [`std::fs::create_dir_all`],
+///   [`std::fs::File::open`], [`std::fs::remove_dir_all`], every
+///   filesystem-path API in stdlib accepts the trait-generic
+///   `impl AsRef<Path>` OR `impl Into<PathBuf>` depending on whether it
+///   needs an owned buffer. This impl reaches every `impl Into<PathBuf>`
+///   consumer at zero per-site bridge cost.
+///
+/// The chain-through-`From<StorePath> for String` design is the one-
+/// oracle discipline THEORY §VI.1 demands: the moved-out canonical bytes
+/// travel through the same [`StorePath::into_string`] projection the
+/// [`String`] emit already routes through, so a future refinement to the
+/// canonical form (a tighter trim, a `SmartString` handle, a
+/// canonicalising projection at the emit surface) lands at one site and
+/// every downstream owned-emit peer — [`String`], [`PathBuf`], and every
+/// future peer in the family — inherits it automatically. A per-impl
+/// direct call to `sp.into_string()` here would work today but would
+/// ossify the "String backing" assumption at every emit surface; the
+/// `PathBuf::from(String::from(sp))` chain reads through the reference-
+/// frontier opening peer so the family stays composable by construction.
+///
+/// # Symmetric closure with the parse frontier
+///
+/// The symmetric emit-side sibling of [`TryFrom<PathBuf> for StorePath`]
+/// (line 1627): the two together close the by-value owned-filesystem-path
+/// input+output symmetry on the store-path grammar — [`TryFrom<PathBuf>`]
+/// parses a canonical `/nix/store/<hash>-<name>` from an owned
+/// [`PathBuf`] through the [`StorePath::parse`] oracle (with a
+/// `NonUtf8Path` gate at the filesystem-path frontier), this
+/// [`From<StorePath>`] emits the canonical `/nix/store/<hash>-<name>`
+/// as an owned [`PathBuf`] through the moved backing buffer. A consumer
+/// that receives an owned filesystem-path buffer from an OS API, parses
+/// it into a [`StorePath`], validates it, and hands it back out as an
+/// owned [`PathBuf`] at its own downstream boundary reads through the
+/// same one-oracle discipline the parse peer already carries with zero
+/// per-consumer bridge cost — a full `PathBuf → StorePath → PathBuf`
+/// round-trip pinned by [`tests::test_from_store_path_pathbuf_parse_round_trip`].
+///
+/// # Identity invariants pinned
+///
+/// - `PathBuf::from(sp.clone()) == PathBuf::from(sp.as_str())`
+///   (post-emit equality with the borrowed-view construction the borrow-
+///   peer sites use) — pinned by
+///   [`tests::test_from_store_path_pathbuf_matches_borrowed_projections`].
+/// - `PathBuf::from(sp.clone()) == sp` under the reverse
+///   [`PartialEq<StorePath> for PathBuf`] peer (line 3332) — pins that
+///   the by-value emit lands in the same comparison equivalence class
+///   the reverse [`PartialEq`] surface already recognises.
+/// - Trim-discipline preservation: a `\n`-terminated raw input emits a
+///   [`PathBuf`] whose `as_os_str()` equals the trimmed canonical bytes
+///   — pinned by [`tests::test_from_store_path_pathbuf_carries_trim_discipline`].
+/// - Trait-generic composition: an `impl Into<PathBuf>` consumer
+///   recovers the same validated bytes a direct
+///   `PathBuf::from(sp.into_string())` would — pinned by
+///   [`tests::test_from_store_path_pathbuf_carries_through_generic_consumer`].
+/// - Round-trip fidelity: the emitted [`PathBuf`] parses back through
+///   [`TryFrom<PathBuf>`] to the same [`StorePath`] — pinned by
+///   [`tests::test_from_store_path_pathbuf_parse_round_trip`].
+///
+/// THEORY.md §III typed primitives: the by-value owned-filesystem-path
+/// emit surface is a typed-primitive peer on [`StorePath`], not a
+/// per-consumer `PathBuf::from(sp.as_str())` or
+/// `sp.as_ref::<Path>().to_path_buf()` restatement at every downstream
+/// site that accepts `impl Into<PathBuf>`. THEORY.md §VI.1 one-oracle:
+/// the validated full-path string is named at one site
+/// ([`StorePath::parse`]-guarded [`StorePath::full`] backing, projected
+/// through the [`StorePath::into_string`] owned-projection accessor,
+/// exposed as an owned [`String`] via [`From<StorePath> for String`]),
+/// and this owned-[`PathBuf`] emit surface reads through the same
+/// canonical-projection chain — a future divergence between the emit
+/// peer and the borrowed [`AsRef<std::path::Path>`] projection would
+/// fail the pinning invariance test.
+impl From<StorePath> for std::path::PathBuf {
+    fn from(sp: StorePath) -> std::path::PathBuf {
+        std::path::PathBuf::from(String::from(sp))
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -8500,6 +8628,152 @@ mod tests {
             assert_eq!(via_from_str, original);
             assert_eq!(via_try_from_string, original);
             assert_eq!(via_try_from_cow, original);
+        }
+    }
+
+    /// [`From<StorePath> for PathBuf`] emits a [`std::path::PathBuf`]
+    /// whose bytes match every borrowed-view filesystem-path projection
+    /// [`StorePath`] already carries: [`AsRef<std::path::Path>`],
+    /// [`Path::new(sp.as_str())`], and — critically — the reverse
+    /// [`PartialEq<StorePath> for PathBuf`] peer at line 3332. Pins the
+    /// "owned-emit peer routes through the same one-oracle backing
+    /// buffer the borrowed-view projections read from and the reverse
+    /// PartialEq surface compares against" invariant across every
+    /// canonical store-path shape — a future divergence between the
+    /// moved-out [`PathBuf`] and the borrowed [`&Path`] view fails this
+    /// test.
+    #[test]
+    fn test_from_store_path_pathbuf_matches_borrowed_projections() {
+        use std::path::{Path, PathBuf};
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let borrowed_as_path: PathBuf = <StorePath as AsRef<Path>>::as_ref(&sp).to_path_buf();
+            let via_new_path = PathBuf::from(Path::new(sp.as_str()));
+            let via_string_from = PathBuf::from(String::from(sp.clone()));
+            let emitted: PathBuf = PathBuf::from(sp.clone());
+            assert_eq!(
+                emitted, borrowed_as_path,
+                "From<StorePath> for PathBuf must match <StorePath as AsRef<Path>>::as_ref"
+            );
+            assert_eq!(
+                emitted, via_new_path,
+                "From<StorePath> for PathBuf must match PathBuf::from(Path::new(sp.as_str()))"
+            );
+            assert_eq!(
+                emitted, via_string_from,
+                "From<StorePath> for PathBuf must match the chain PathBuf::from(String::from(sp))"
+            );
+            assert_eq!(
+                emitted,
+                PathBuf::from(&raw),
+                "From<StorePath> for PathBuf on a whitespace-free input must equal PathBuf::from(raw)"
+            );
+            // The reverse PartialEq<StorePath> for PathBuf peer at
+            // line 3332 already recognises this equivalence class; the
+            // emit must land in it by construction.
+            let emitted2: PathBuf = sp.clone().into();
+            assert_eq!(
+                emitted2, sp,
+                "emitted PathBuf must satisfy PathBuf == StorePath"
+            );
+        }
+    }
+
+    /// [`From<StorePath> for PathBuf`] carries [`StorePath::parse`]'s
+    /// trimming discipline through the by-value owned-filesystem-path
+    /// emit surface — a value parsed from a newline-terminated
+    /// nix-frontier stdout buffer emits a [`PathBuf`] whose bytes are
+    /// the trimmed canonical bytes, not the raw newline-terminated
+    /// buffer. Pins the same trim discipline
+    /// [`test_from_store_path_string_carries_trim_discipline`] pins on
+    /// the [`String`] emit surface, now on the [`PathBuf`] emit peer so
+    /// a downstream `fn f<T: Into<PathBuf>>(sp: T)` sees the canonical
+    /// filesystem-path form with no per-site
+    /// `PathBuf::from(sp.as_str().trim())` restatement.
+    #[test]
+    fn test_from_store_path_pathbuf_carries_trim_discipline() {
+        use std::path::PathBuf;
+        let sp = StorePath::parse(&format!("/nix/store/{H}-x\n")).expect("valid");
+        let emitted: PathBuf = sp.into();
+        let expected = PathBuf::from(format!("/nix/store/{H}-x"));
+        assert_eq!(emitted, expected);
+        let s = emitted.to_string_lossy();
+        assert!(!s.ends_with('\n'), "trailing newline must be trimmed");
+        assert!(!s.starts_with(' '), "leading whitespace must be trimmed");
+    }
+
+    /// The [`From<StorePath> for PathBuf`] impl composes with a generic
+    /// owned-filesystem-path helper bounded by `impl Into<PathBuf>` —
+    /// the compositional motivation for landing the trait separately
+    /// from the borrowed-view [`AsRef<std::path::Path>`] read peer.
+    /// Pins the trait-generic consumer surface: a downstream site that
+    /// types its input contract as `impl Into<PathBuf>` (a
+    /// [`std::fs::create_dir_all`] / [`std::fs::File::open`] argument,
+    /// a `Result<PathBuf>`-returning outer wrapper preserving a
+    /// pre-existing public shape, a config-schema setter that owns its
+    /// store-path filesystem field) recovers the same validated
+    /// filesystem-path buffer a direct
+    /// `PathBuf::from(sp.into_string())` call would, at zero-copy off
+    /// the moved backing storage.
+    #[test]
+    fn test_from_store_path_pathbuf_carries_through_generic_consumer() {
+        use std::path::PathBuf;
+        fn is_absolute<T: Into<PathBuf>>(t: T) -> bool {
+            let p: PathBuf = t.into();
+            p.is_absolute()
+        }
+        fn parent_of<T: Into<PathBuf>>(t: T) -> PathBuf {
+            let p: PathBuf = t.into();
+            p.parent().map(PathBuf::from).unwrap_or_default()
+        }
+        fn owned_eq<T: Into<PathBuf>>(t: T, expected: &PathBuf) -> bool {
+            let p: PathBuf = t.into();
+            &p == expected
+        }
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp1 = StorePath::parse(&raw).expect("valid");
+        let sp2 = sp1.clone();
+        let sp3 = sp1.clone();
+        assert!(is_absolute(sp1), "store paths are always absolute");
+        assert_eq!(
+            parent_of(sp2),
+            PathBuf::from("/nix/store"),
+            "the parent of a store object path is always /nix/store"
+        );
+        assert!(owned_eq(sp3, &PathBuf::from(&raw)));
+    }
+
+    /// A validated store path's [`From<StorePath> for PathBuf`] output
+    /// round-trips through the sibling by-value owned-filesystem-path
+    /// parse peer [`TryFrom<PathBuf>`] (line 1627) back to the same
+    /// validated [`StorePath`] value — closing the by-value owned-
+    /// filesystem-path input+output symmetry on the store-path grammar.
+    /// Pins the "emit surface projects exactly the canonical form the
+    /// filesystem-path parse peer accepts" invariant so a future
+    /// canonicalising refinement to the backing buffer that broke the
+    /// [`PathBuf` → `StorePath` → `PathBuf`] round-trip fails this test.
+    #[test]
+    fn test_from_store_path_pathbuf_parse_round_trip() {
+        use std::path::PathBuf;
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let original = StorePath::parse(&raw).expect("valid");
+            let emitted: PathBuf = PathBuf::from(original.clone());
+            let via_try_from_pathbuf = StorePath::try_from(emitted.clone())
+                .expect("emitted PathBuf parses via TryFrom<PathBuf>");
+            let via_try_from_path = StorePath::try_from(emitted.as_path())
+                .expect("emitted PathBuf parses via TryFrom<&Path>");
+            assert_eq!(via_try_from_pathbuf, original);
+            assert_eq!(via_try_from_path, original);
         }
     }
 }
