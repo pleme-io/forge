@@ -250,6 +250,117 @@ impl std::fmt::Display for StorePath {
     }
 }
 
+/// Canonical hash peer via [`std::hash::Hash`] — projects through the
+/// one-oracle canonical view [`StorePath::as_str`] so two [`StorePath`]s
+/// that compare equal hash to the same value by construction.
+///
+/// The struct carries two fields (`full` and the derived byte offset
+/// `name_start`), but `name_start` is a pure function of `full` — the
+/// invariant [`StorePath::parse`] establishes. Hashing both fields would
+/// mix redundant bytes into the digest; hashing `full` alone reads
+/// through the canonical view every other read-back peer already
+/// projects onto ([`AsRef<str>`] / [`AsRef<[u8]>`] / [`AsRef<std::path::Path>`]
+/// / [`AsRef<std::ffi::OsStr>`]) and preserves the `Hash`/`Eq`
+/// coherence contract the standard library demands for
+/// [`std::collections::HashMap`] / [`std::collections::HashSet`] keys.
+///
+/// # Why the trait peer earns its keep
+///
+/// The [`StorePath`] typed primitive keys every store-object identity
+/// forge threads through the build/push/attest pipeline. Standard-library
+/// hash-based collections are the natural home for the "unique set of
+/// store paths in this closure" / "map store path → cache-hit
+/// telemetry" / "seen-set for deduplicating stdout lines from `nix
+/// path-info --recursive`" concerns [`crate::nix::NixClosureInfo`] and
+/// [`crate::infrastructure::attic::AtticClient::push_closure_via_stdin`]
+/// already carry as raw bytes. Pre-derive those consumers had to key
+/// off `sp.as_str()` (bounces the lookup through the borrowed accessor
+/// at every site) or `sp.clone().into_string()` (allocates a fresh
+/// [`String`] per lookup); post-derive `HashSet<StorePath>` /
+/// `HashMap<StorePath, T>` is the canonical shape and the borrow /
+/// allocation both disappear.
+///
+/// The one-oracle discipline matters here: a future refactor of the
+/// canonical view (`self.full` → an interned handle, a `Box<str>`, a
+/// `SmartString`) lands in one place and the hash surface follows
+/// automatically. A derived `#[derive(Hash)]` would ossify the two-field
+/// hash shape into the surface.
+///
+/// THEORY.md §III typed primitives — the hash surface is a typed-
+/// primitive peer on [`StorePath`], not a per-consumer
+/// `<StorePath as AsRef<str>>::as_ref(&sp).hash(state)` restatement.
+/// THEORY.md §VI.1 one-oracle — the canonical view is named at
+/// [`StorePath::as_str`], and every read-back peer (borrow, byte-slice,
+/// filesystem-path, OS-string, and now hash) reads through the same
+/// one-oracle discipline projected onto its own downstream shape.
+impl std::hash::Hash for StorePath {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.full.hash(state);
+    }
+}
+
+/// Canonical total-order peer via [`std::cmp::Ord`] — projects through
+/// the one-oracle canonical view [`StorePath::as_str`] so the comparison
+/// answers the same question the borrowed accessor already exposes,
+/// without dragging the derived `name_start` byte offset into the
+/// ordering algebra.
+///
+/// A store-path total order is well-defined by construction: the
+/// canonical view is a validated UTF-8 string, so lexicographic byte
+/// comparison ([`std::string::String::cmp`]) is the natural total order
+/// every downstream sort / dedup / range-lookup consumer expects.
+/// Delegating through `self.full.cmp(&other.full)` (rather than a
+/// two-field `derive(Ord)` that compares `(full, name_start)`) reads
+/// through the one-oracle canonical view and matches the semantics the
+/// borrow-projected peers ([`PartialEq<str>`], [`PartialEq<&str>`], and
+/// their receiver-shape siblings) already carry.
+///
+/// # Why the trait peer earns its keep
+///
+/// Every collection surface that needs a stable, reproducible order over
+/// store paths keys off this trait:
+///
+/// - [`std::collections::BTreeSet<StorePath>`] and
+///   [`std::collections::BTreeMap<StorePath, T>`] — the canonical
+///   ordered-set / ordered-map shapes for a closure fingerprint, a
+///   sorted derivation manifest, or a range-lookup by hash-prefix.
+/// - `Vec<StorePath>::sort()` — produces a stable, reproducible closure
+///   listing that a downstream reproducibility check (THEORY §VI.1)
+///   can compare byte-for-byte across runs. Pre-derive the sort had to
+///   route through `paths.sort_by_key(|p| p.as_str().to_string())`
+///   (allocates a fresh [`String`] per comparison) or
+///   `paths.sort_by(|a, b| a.as_str().cmp(b.as_str()))` (correct but
+///   restated at every site).
+/// - `Vec<StorePath>::dedup()` (after `sort()`) — dedupe the closure
+///   listing to a canonical unique-set shape without threading a
+///   `HashSet<String>` sidecar.
+/// - Binary-search / range-lookup on a sorted `Vec<StorePath>` — the
+///   `slice::binary_search` API needs [`Ord`] to bisect.
+///
+/// The canonical-closure-fingerprint at
+/// [`canonical_closure_fingerprint`] currently sidesteps the missing
+/// [`Ord`] impl by keying a [`std::collections::BTreeSet<&str>`] off
+/// [`StorePath::hash`] borrows; a future refactor that keyed off a
+/// [`std::collections::BTreeSet<StorePath>`] instead now compiles at
+/// the trait bound.
+///
+/// THEORY.md §III typed primitives — the total-order surface is a
+/// typed-primitive peer on [`StorePath`]. THEORY.md §VI.1 one-oracle —
+/// the canonical view is named at [`StorePath::as_str`] and the
+/// ordering reads through the same view every other peer projects
+/// onto.
+impl std::cmp::PartialOrd for StorePath {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::cmp::Ord for StorePath {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.full.cmp(&other.full)
+    }
+}
+
 /// Canonical parse-peer for [`StorePath::parse`] via the [`std::str::FromStr`]
 /// trait — the Rust idiom for "this type reads back from a string".
 ///
@@ -7652,5 +7763,231 @@ mod tests {
         let trimmed: StorePath = parse_via_try_from(path_nl)
             .expect("trailing newline must be trimmed at generic TryFrom<PathBuf> bound");
         assert_eq!(trimmed.as_str(), format!("/nix/store/{H}-x"));
+    }
+
+    /// [`std::hash::Hash`] for [`StorePath`] must respect the standard-
+    /// library `Hash`/`Eq` coherence contract: two values that compare
+    /// equal must hash to the same value. Pinned across the canonical
+    /// fixture axis (plain output, `.drv`, hyphenated name) and the
+    /// trimming discipline (a newline-terminated buffer must hash the
+    /// same as its trimmed literal, because both parse to the same
+    /// canonical view). A future regression that hashed a two-field
+    /// `(full, name_start)` tuple would still satisfy this coherence
+    /// contract (since `name_start` is a pure function of `full`), but a
+    /// regression that keyed the hash off a divergent view (a lossy
+    /// [`String::from_utf8_lossy`] round-trip, an interned handle whose
+    /// pointer identity differs across parses of the same literal)
+    /// would fire here.
+    #[test]
+    fn test_hash_agrees_with_partial_eq_at_every_shape() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of(sp: &StorePath) -> u64 {
+            let mut h = DefaultHasher::new();
+            Hash::hash(sp, &mut h);
+            h.finish()
+        }
+
+        for input in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let a = StorePath::parse(&input).expect("valid store path");
+            let b = StorePath::parse(&input).expect("valid store path");
+            assert_eq!(a, b, "two parses of the same input must compare equal");
+            assert_eq!(
+                hash_of(&a),
+                hash_of(&b),
+                "PartialEq-equal values must hash equal for input {input}"
+            );
+            // Trimming discipline: a newline-terminated buffer parses to
+            // the same canonical view as the trimmed literal, so both
+            // must hash to the same value.
+            let trimmed = StorePath::parse(&format!("{input}\n")).expect("trailing NL must trim");
+            assert_eq!(a, trimmed, "trim must produce equal StorePath");
+            assert_eq!(
+                hash_of(&a),
+                hash_of(&trimmed),
+                "trim-equal values must hash equal for input {input}"
+            );
+        }
+    }
+
+    /// [`std::hash::Hash`] must project through the one-oracle canonical
+    /// view: a [`StorePath`]'s hash must equal the hash of its
+    /// [`StorePath::as_str`] byte contents (via the same
+    /// [`std::hash::Hasher`] instance). Pins the delegation so a future
+    /// refactor that severed the peer from `self.full.hash(state)` (e.g.
+    /// dropped into a `#[derive(Hash)]` two-field shape, or accidentally
+    /// hashed the raw pointer) is caught structurally.
+    #[test]
+    fn test_hash_reads_through_as_str_canonical_view() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let sp = StorePath::parse(&format!("/nix/store/{H}-canonical")).expect("valid");
+        let mut h_sp = DefaultHasher::new();
+        Hash::hash(&sp, &mut h_sp);
+        let mut h_str = DefaultHasher::new();
+        sp.as_str().hash(&mut h_str);
+        assert_eq!(
+            h_sp.finish(),
+            h_str.finish(),
+            "StorePath::hash must read through as_str canonical view"
+        );
+    }
+
+    /// [`std::collections::HashSet<StorePath>`] must accept the typed
+    /// primitive as a key by the trait bound and dedupe insertions of
+    /// equal values. Structural witness that the trait peer landed:
+    /// pre-migration this test would not compile because `StorePath: !Hash`.
+    #[test]
+    fn test_hash_set_of_store_path_dedupes_equal_insertions() {
+        use std::collections::HashSet;
+
+        let a = StorePath::parse(&format!("/nix/store/{H}-a")).expect("valid");
+        let a_dup = StorePath::parse(&format!("/nix/store/{H}-a")).expect("valid");
+        let b = StorePath::parse("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-b").expect("valid");
+        let mut set: HashSet<StorePath> = HashSet::new();
+        set.insert(a.clone());
+        set.insert(a_dup);
+        set.insert(b.clone());
+        assert_eq!(set.len(), 2, "duplicate inserts must dedupe");
+        assert!(set.contains(&a));
+        assert!(set.contains(&b));
+    }
+
+    /// [`std::cmp::Ord`] and [`std::cmp::PartialOrd`] for [`StorePath`]
+    /// must agree with each other (`PartialOrd` returns
+    /// `Some(Self::cmp(&self, &other))`) AND with the underlying
+    /// [`str::cmp`] on the canonical view. Pinned across the same
+    /// candidate grid the sort / dedup / BTreeSet tests exercise.
+    #[test]
+    fn test_ord_agrees_with_partial_ord_and_as_str() {
+        let inputs = [
+            format!("/nix/store/{H}-a"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-zzz"),
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-differenthash".to_string(),
+        ];
+        let paths: Vec<StorePath> = inputs
+            .iter()
+            .map(|s| StorePath::parse(s).expect("valid"))
+            .collect();
+        for a in &paths {
+            for b in &paths {
+                assert_eq!(
+                    a.cmp(b),
+                    a.as_str().cmp(b.as_str()),
+                    "Ord::cmp must agree with as_str.cmp for {a} vs {b}"
+                );
+                assert_eq!(
+                    a.partial_cmp(b),
+                    Some(a.cmp(b)),
+                    "PartialOrd must delegate through Ord for {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    /// `Vec<StorePath>::sort()` must produce the same order the
+    /// underlying byte-string comparison produces. Pinned so a caller
+    /// building a canonical closure listing (a sorted, reproducible
+    /// derivation manifest — THEORY §VI.1) can rely on the
+    /// [`Ord`]-derived order matching the lexicographic order every
+    /// downstream `.eq`-based reproducibility check assumes.
+    #[test]
+    fn test_vec_of_store_path_sort_matches_as_str_order() {
+        let inputs = [
+            format!("/nix/store/{H}-zzz"),
+            format!("/nix/store/{H}-aaa"),
+            format!("/nix/store/{H}-mmm"),
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-differenthash".to_string(),
+        ];
+        let mut typed: Vec<StorePath> = inputs
+            .iter()
+            .map(|s| StorePath::parse(s).expect("valid"))
+            .collect();
+        let mut raw: Vec<&str> = inputs.iter().map(|s| s.as_str()).collect();
+        typed.sort();
+        raw.sort();
+        let typed_str: Vec<&str> = typed.iter().map(StorePath::as_str).collect();
+        assert_eq!(
+            typed_str, raw,
+            "sorted Vec<StorePath> must match sorted Vec<&str> on the canonical view"
+        );
+    }
+
+    /// `Vec<StorePath>::dedup()` after `sort()` must reduce to a unique
+    /// set of paths. Pinned so a caller reducing a `nix path-info
+    /// --recursive` stdout (which can carry the same store object
+    /// multiple times if a closure references it through multiple
+    /// upstream derivations) to a unique manifest gets the standard
+    /// [`Vec::dedup`] contract by the trait bound.
+    #[test]
+    fn test_vec_of_store_path_sort_then_dedup_yields_unique_set() {
+        let a = format!("/nix/store/{H}-a");
+        let b = format!("/nix/store/{H}-b");
+        let mut paths: Vec<StorePath> = vec![
+            StorePath::parse(&a).expect("valid"),
+            StorePath::parse(&b).expect("valid"),
+            StorePath::parse(&a).expect("valid"),
+            StorePath::parse(&b).expect("valid"),
+            StorePath::parse(&a).expect("valid"),
+        ];
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), 2, "sort+dedup must reduce to unique set");
+        assert_eq!(paths[0].as_str(), a);
+        assert_eq!(paths[1].as_str(), b);
+    }
+
+    /// [`std::collections::BTreeSet<StorePath>`] must accept the typed
+    /// primitive as a key by the [`Ord`] trait bound, dedupe equal
+    /// insertions, and yield an in-order iterator that matches the
+    /// underlying byte-string sort. Structural witness that both
+    /// [`Ord`] and [`PartialOrd`] landed: pre-migration this test would
+    /// not compile because `StorePath: !Ord`.
+    #[test]
+    fn test_btree_set_of_store_path_orders_by_as_str() {
+        use std::collections::BTreeSet;
+
+        let inputs = [
+            format!("/nix/store/{H}-zzz"),
+            format!("/nix/store/{H}-aaa"),
+            format!("/nix/store/{H}-mmm"),
+        ];
+        let set: BTreeSet<StorePath> = inputs
+            .iter()
+            .map(|s| StorePath::parse(s).expect("valid"))
+            .collect();
+        let ordered: Vec<&str> = set.iter().map(StorePath::as_str).collect();
+        let mut expected: Vec<&str> = inputs.iter().map(|s| s.as_str()).collect();
+        expected.sort();
+        assert_eq!(
+            ordered, expected,
+            "BTreeSet<StorePath> iteration must match sorted underlying view"
+        );
+    }
+
+    /// A generic `fn f<T: std::hash::Hash + std::cmp::Ord>` consumer
+    /// must accept a [`StorePath`] by the two trait bounds. This is the
+    /// structural witness that the two peers are genuinely usable at
+    /// the surfaces every standard-library ordered/hash-based
+    /// collection is bounded on. If a future change dropped either
+    /// impl, this test fails at compile time.
+    #[test]
+    fn test_generic_consumer_accepts_store_path_at_hash_and_ord_bounds() {
+        fn key_bound<T: std::hash::Hash + std::cmp::Ord + Clone>(v: T) -> (T, T) {
+            (v.clone(), v)
+        }
+        let sp = StorePath::parse(&format!("/nix/store/{H}-generic")).expect("valid");
+        let (a, b) = key_bound(sp.clone());
+        assert_eq!(a, b);
+        assert_eq!(a, sp);
     }
 }
