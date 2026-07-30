@@ -188,8 +188,7 @@ impl StorePath {
     /// read-back accessor for the named next consumer — passing a validated
     /// path to `attic push` — so the round-trip through this type carries no
     /// silent re-stringification. `allow(dead_code)`: part of the primitive
-    /// surface, as with `nix::NixBuildResult::flake_attr` and
-    /// `nix::flake_attr_exists`.
+    /// surface, as with `nix::NixBuildResult::flake_attr`.
     #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         &self.full

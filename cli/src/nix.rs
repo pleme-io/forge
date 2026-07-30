@@ -542,27 +542,6 @@ async fn path_info_recursive_with_bin(
     })
 }
 
-/// Check if a Nix flake attribute exists
-///
-/// # Arguments
-///
-/// * `flake_attr` - The flake attribute to check
-///
-/// # Returns
-///
-/// `true` if the attribute exists, `false` otherwise.
-#[allow(dead_code)]
-pub async fn flake_attr_exists(flake_attr: &str) -> bool {
-    let result = Command::new("nix")
-        .args(["eval", "--json", flake_attr])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
-
-    matches!(result, Ok(status) if status.success())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
