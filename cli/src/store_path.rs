@@ -4264,6 +4264,172 @@ impl From<StorePath> for std::sync::Arc<str> {
     }
 }
 
+/// By-value thread-local shared-owned-UTF-8 emit peer for [`StorePath`] via
+/// [`std::rc::Rc<str>`] — the eighth step of the by-value owned-emit
+/// frontier opened by [`From<StorePath> for String`] (line 3461) and extended
+/// by [`From<StorePath> for std::path::PathBuf`] (line 3589),
+/// [`From<StorePath> for std::ffi::OsString`] (line 3706),
+/// [`From<StorePath> for Vec<u8>`] (line 3841),
+/// [`From<StorePath> for Box<str>`] (line 3970),
+/// [`From<StorePath> for Cow<'static, str>`] (line 4106), and
+/// [`From<StorePath> for Arc<str>`] (line 4261), chaining through the same
+/// [`StorePath::into_string`] one-oracle discipline every owned-emit peer in
+/// the family routes through.
+///
+/// Delegates through `std::rc::Rc::<str>::from(String::from(sp))`:
+/// `String::from(sp)` moves [`StorePath::full`] out at zero-copy via
+/// [`StorePath::into_string`]; the stdlib [`std::rc::Rc`]`::<str>::from`
+/// impl then constructs a single fresh allocation carrying the non-atomic
+/// refcount header alongside the moved UTF-8 payload bytes. The moved
+/// [`String`] backing is dropped after the payload copy, but the copy is
+/// unavoidable: [`std::rc::Rc<str>`] and [`String`] have different memory
+/// layouts (an [`Rc<str>`] allocation prefixes the payload with a
+/// plain [`usize`] strong-count header and a plain [`usize`] weak-count
+/// header — non-atomic because [`Rc`] is `!Send` and cannot cross threads —
+/// while a [`String`] carries a `(ptr, len, cap)` triple pointing at a
+/// header-less heap-allocated buffer). No re-encoding: the moved bytes are
+/// the same bytes [`From<StorePath> for String`] emits, projected through
+/// [`std::rc::Rc<str>`]'s allocation shape one time and shared cheaply
+/// across every subsequent [`std::rc::Rc::clone`] recipient at zero
+/// buffer-clone cost per downstream consumer within the owning thread.
+///
+/// # Why the trait peer earns its keep
+///
+/// [`AsRef<str> for StorePath`] (line 1684) covers the borrowed-view UTF-8
+/// frontier at zero allocation. [`From<StorePath> for String`] (line 3461)
+/// covers the by-value owned-UTF-8 frontier when the sink pins its contract
+/// on the [`String`] shape. [`From<StorePath> for Box<str>`] (line 3970)
+/// covers the shrunk-owned UTF-8 frontier when the sink pins its contract
+/// on the payload-sized [`Box<str>`] shape.
+/// [`From<StorePath> for Cow<'static, str>`] (line 4106) covers the
+/// borrowed-or-owned UTF-8 frontier. [`From<StorePath> for Arc<str>`]
+/// (line 4261) covers the cross-thread shared-owned UTF-8 frontier.
+/// [`From<StorePath> for Rc<str>`] covers the disjoint thread-local
+/// shared-owned UTF-8 frontier the [`String`], [`Box<str>`], [`Cow`], and
+/// [`Arc<str>`] emits can never reach without a per-site
+/// `Rc::<str>::from(...)` re-statement — and which pays a real cost when
+/// substituted with [`Arc<str>`] on a strictly single-threaded fan-out,
+/// since every atomic refcount touch on the [`Arc<str>`] path serialises
+/// across CPU cores through a hardware memory-order fence that [`Rc<str>`]
+/// avoids at construction and at every subsequent clone/drop:
+///
+/// - `struct { canonical: Rc<str> }` field initializers on a single-thread
+///   record — a single-thread fan-out payload whose validated store-path
+///   label is handed across `!Send` consumers through [`std::rc::Rc::clone`]
+///   at zero buffer-clone cost per recipient and without paying the atomic
+///   refcount cost [`std::sync::Arc::clone`] carries, a per-thread cache
+///   entry that ships a canonical label into every dependent computation
+///   staying on the same thread without allocating per lookup, a
+///   channel-per-thread closure descriptor that fans a single validated
+///   allocation out to N receivers within the owning thread. Pre-peer the
+///   init site had to write `std::rc::Rc::<str>::from(sp.into_string())`
+///   (the [`Rc<str>`] projection restated at every field-init site);
+///   post-peer the [`StorePath`] value is moved directly into the field.
+/// - `#[serde(into = "Rc<str>")]` — the serde container attribute for the
+///   thread-local shared-owned emit case (a serializer that writes a
+///   non-atomically refcounted UTF-8 label buffer into a per-thread wire
+///   form so downstream deserializers can hold cheap-clone shared ownership
+///   on the same thread rather than each allocating a copy) keys off
+///   [`From<StorePath> for Rc<str>`], not [`From<StorePath> for Box<str>`],
+///   [`From<StorePath> for String`], [`From<StorePath> for Cow<'static, str>`],
+///   or [`From<StorePath> for Arc<str>`]. A future serde field wrapping a
+///   [`StorePath`] and opting into the thread-local shared-owned `into`
+///   grammar reaches this emit peer without a shim.
+/// - `Result<Rc<str>>`-returning wrappers preserving a pre-existing public
+///   shape — a canonical-label extractor that types its return as
+///   `Result<Rc<str>>` so every fan-out branch downstream within the owning
+///   thread shares the same heap allocation through refcount bumps rather
+///   than buffer clones. Pre-peer
+///   `Ok(std::rc::Rc::<str>::from(result.store_path.into_string()))` restated
+///   the [`Rc`] wrap at every site; post-peer `Ok(result.store_path.into())`
+///   reads through this impl.
+/// - `HashMap<Rc<str>, _>::insert` intern tables scoped to a single thread
+///   — a per-thread closure-scan or per-thread attic-push staging pool that
+///   keys entries off canonically-projected store-path labels shared cheaply
+///   across single-thread consumers through [`std::rc::Rc::clone`] instead
+///   of buffer-cloned. Sibling peer to the parse-side
+///   [`TryFrom<Rc<str>> for StorePath`] at line 772 — an intern table
+///   populated by parsing raw labels through the parse peer and re-emitting
+///   canonical labels through this emit peer routes through both peers at
+///   zero per-consumer bridge cost.
+/// - Generic sinks bounded by `impl Into<Rc<str>>` — any single-thread
+///   wire-frame builder, any per-thread structured-logging attribute setter,
+///   any `!Send` closure-argument slot that accepts `impl Into<Rc<str>>`
+///   when it wants a thread-local shared-owned buffer. This impl reaches
+///   every `impl Into<Rc<str>>` consumer at zero per-site bridge cost.
+///
+/// The chain-through-`From<StorePath> for String` design is the one-oracle
+/// discipline THEORY §VI.1 demands: the moved-out canonical bytes travel
+/// through the same [`StorePath::into_string`] projection the [`String`],
+/// [`std::path::PathBuf`], [`std::ffi::OsString`], [`Vec<u8>`], [`Box<str>`],
+/// [`Cow<'static, str>`], and [`Arc<str>`] emit peers already route through,
+/// so a future refinement to the canonical form (a tighter trim, a
+/// `SmartString` handle, a canonicalising projection at the emit surface)
+/// lands at one site and every owned-emit peer inherits it automatically. A
+/// per-impl direct call to `std::rc::Rc::<str>::from(sp.into_string())` here
+/// would work today but would ossify the "String backing" assumption at
+/// every emit surface; the `std::rc::Rc::<str>::from(String::from(sp))`
+/// chain reads through the reference-frontier opening peer so the family
+/// stays composable by construction.
+///
+/// # Symmetric closure with the parse frontier
+///
+/// The symmetric emit-side sibling of [`TryFrom<Rc<str>> for StorePath`]
+/// (line 772): the two together close the by-value thread-local
+/// shared-owned-UTF-8 input+output symmetry on the store-path grammar —
+/// [`TryFrom<Rc<str>>`] parses a canonical `/nix/store/<hash>-<name>` from
+/// a non-atomically refcounted [`Rc<str>`] through the [`StorePath::parse`]
+/// oracle (via [`<Rc<str> as AsRef<str>>::as_ref`] + [`FromStr::from_str`]
+/// at line 402), this [`From<StorePath>`] emits the canonical
+/// `/nix/store/<hash>-<name>` as a non-atomically refcounted [`Rc<str>`]
+/// through one fresh allocation whose contents are the moved-out canonical
+/// bytes. A consumer that receives a thread-local shared-owned UTF-8 buffer
+/// from a per-thread cache or a `!Send` channel receiver, parses it into a
+/// [`StorePath`], validates it, and hands it back out as an [`Rc<str>`] at
+/// its own downstream fan-out reads through the same one-oracle discipline
+/// the parse peer already carries with zero per-consumer bridge cost — a
+/// full `Rc<str> → StorePath → Rc<str>` round-trip pinned by
+/// [`tests::test_from_store_path_rc_str_parse_round_trip`].
+///
+/// # Identity invariants pinned
+///
+/// - `<std::rc::Rc<str>>::from(sp.clone()) == sp.as_str().into()`
+///   (equality with the borrowed-view UTF-8 projection routed through the
+///   same [`Rc<str>`] shape) — pinned by
+///   [`tests::test_from_store_path_rc_str_matches_borrowed_projections`].
+/// - Trim-discipline preservation: a `\n`-terminated raw input emits an
+///   [`Rc<str>`] whose bytes are the trimmed canonical bytes — pinned by
+///   [`tests::test_from_store_path_rc_str_carries_trim_discipline`].
+/// - Trait-generic composition: an `impl Into<Rc<str>>` consumer recovers
+///   the same validated bytes a direct
+///   `std::rc::Rc::<str>::from(sp.into_string())` would — pinned by
+///   [`tests::test_from_store_path_rc_str_carries_through_generic_consumer`].
+/// - Round-trip fidelity: the emitted [`Rc<str>`] parses back through
+///   [`TryFrom<Rc<str>>`] to the same [`StorePath`] — pinned by
+///   [`tests::test_from_store_path_rc_str_parse_round_trip`].
+///
+/// THEORY.md §III typed primitives: the by-value thread-local
+/// shared-owned-UTF-8 emit surface is a typed-primitive peer on
+/// [`StorePath`], not a per-consumer
+/// `std::rc::Rc::<str>::from(sp.into_string())` or
+/// `std::rc::Rc::<str>::from(<StorePath as AsRef<str>>::as_ref(&sp))`
+/// restatement at every downstream site that accepts
+/// `impl Into<Rc<str>>`.
+/// THEORY.md §VI.1 one-oracle: the validated full-path string is named at
+/// one site ([`StorePath::parse`]-guarded [`StorePath::full`] backing,
+/// projected through the [`StorePath::into_string`] owned-projection
+/// accessor, exposed as an owned [`String`] via
+/// [`From<StorePath> for String`]), and this thread-local
+/// shared-owned-[`Rc<str>`] emit surface reads through the same
+/// canonical-projection chain — a future divergence between the emit peer
+/// and the borrowed [`AsRef<str>`] projection would fail the pinning
+/// invariance test.
+impl From<StorePath> for std::rc::Rc<str> {
+    fn from(sp: StorePath) -> std::rc::Rc<str> {
+        std::rc::Rc::<str>::from(String::from(sp))
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -10212,6 +10378,184 @@ mod tests {
             let original_name = sp.name().to_string();
             let original_is_drv = sp.is_derivation();
             let emitted: std::sync::Arc<str> = sp.into();
+            let round_tripped = StorePath::try_from(emitted).expect("round-trip parse");
+            assert_eq!(round_tripped.as_str(), raw);
+            assert_eq!(round_tripped.hash(), original_hash);
+            assert_eq!(round_tripped.name(), original_name);
+            assert_eq!(round_tripped.is_derivation(), original_is_drv);
+        }
+    }
+
+    /// [`From<StorePath> for Rc<str>`] projects the canonical store-path
+    /// bytes through the by-value thread-local shared-owned-UTF-8 emit peer
+    /// symmetric to the borrowed-view [`AsRef<str>`], the by-value owned
+    /// [`String`], the shrunk-owned [`Box<str>`], the borrowed-or-owned
+    /// [`Cow<'static, str>`], and the cross-thread shared-owned [`Arc<str>`]
+    /// read/emit peers. Reads through the same one-oracle backing string
+    /// [`StorePath::full`] the read-peer siblings project ([`AsRef<str>`],
+    /// [`Display`]) and the inherent [`StorePath::into_string`] owned
+    /// projection moves out, chained via [`String::from`] into
+    /// [`std::rc::Rc<str>::from`]. Pins the "thread-local shared-owned
+    /// emit peer routes through the same one-oracle backing string the
+    /// read peers project and the inherent owned-projection moves"
+    /// invariant across every canonical store-path shape — a future
+    /// divergence between the moved-then-rc [`Rc<str>`] and the borrowed
+    /// `&str` view fails this test.
+    #[test]
+    fn test_from_store_path_rc_str_matches_borrowed_projections() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let borrowed_as_str: std::rc::Rc<str> = sp.as_str().into();
+            let borrowed_as_ref: std::rc::Rc<str> = <StorePath as AsRef<str>>::as_ref(&sp).into();
+            let via_display: std::rc::Rc<str> = std::rc::Rc::<str>::from(format!("{sp}"));
+            let via_into_string: std::rc::Rc<str> =
+                std::rc::Rc::<str>::from(sp.clone().into_string());
+            let via_string_from: std::rc::Rc<str> =
+                std::rc::Rc::<str>::from(String::from(sp.clone()));
+            let emitted: std::rc::Rc<str> = std::rc::Rc::<str>::from(sp.clone());
+            assert_eq!(
+                &*emitted, &*borrowed_as_str,
+                "From<StorePath> for Rc<str> must match sp.as_str().into()"
+            );
+            assert_eq!(
+                &*emitted, &*borrowed_as_ref,
+                "From<StorePath> for Rc<str> must match <StorePath as AsRef<str>>::as_ref"
+            );
+            assert_eq!(
+                &*emitted, &*via_display,
+                "From<StorePath> for Rc<str> must match <StorePath as Display>::fmt"
+            );
+            assert_eq!(
+                &*emitted, &*via_into_string,
+                "From<StorePath> for Rc<str> must match Rc::<str>::from(sp.into_string())"
+            );
+            assert_eq!(
+                &*emitted, &*via_string_from,
+                "From<StorePath> for Rc<str> must match Rc::<str>::from(String::from(sp))"
+            );
+            assert_eq!(
+                &*emitted,
+                raw.as_str(),
+                "From<StorePath> for Rc<str> on a whitespace-free input must equal the raw input"
+            );
+            // Thread-local shared-owned discipline: the emitted Rc<str>'s
+            // deref length equals the payload byte count, so an
+            // `<Rc<str> as AsRef<str>>` sink sees the canonical form
+            // byte-for-byte with no capacity slack visible through the
+            // shared allocation.
+            assert_eq!(emitted.len(), raw.len());
+            // Cheap-clone discipline: an Rc::clone bumps the non-atomic
+            // refcount without touching the payload buffer — the clone and
+            // the original point at the same allocation. `Rc::ptr_eq`
+            // witnesses that invariant on the emitted value itself.
+            let shared = emitted.clone();
+            assert!(
+                std::rc::Rc::ptr_eq(&emitted, &shared),
+                "Rc::clone must share the emit peer's allocation, not copy the payload"
+            );
+        }
+    }
+
+    /// [`From<StorePath> for Rc<str>`] carries [`StorePath::parse`]'s
+    /// trimming discipline through the by-value thread-local
+    /// shared-owned-UTF-8 emit surface — a value parsed from a
+    /// newline-terminated nix-frontier stdout buffer emits an [`Rc<str>`]
+    /// whose bytes are the trimmed canonical bytes, not the raw
+    /// newline-terminated buffer. Pins the same trim discipline the
+    /// [`String`], [`std::path::PathBuf`], [`std::ffi::OsString`],
+    /// [`Vec<u8>`], [`Box<str>`], [`Cow<'static, str>`], and [`Arc<str>`]
+    /// emit peers already carry, now on the [`Rc<str>`] emit peer so a
+    /// downstream `fn f<T: Into<Rc<str>>>(sp: T)` sees the canonical form
+    /// with no per-site `Rc::<str>::from(sp.as_str().trim())` restatement.
+    #[test]
+    fn test_from_store_path_rc_str_carries_trim_discipline() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-x\n")).expect("valid");
+        let emitted: std::rc::Rc<str> = sp.into();
+        let expected = format!("/nix/store/{H}-x");
+        assert_eq!(&*emitted, expected.as_str());
+        assert!(!emitted.ends_with('\n'), "trailing newline must be trimmed");
+        assert!(
+            !emitted.starts_with(' '),
+            "leading whitespace must be trimmed"
+        );
+    }
+
+    /// The [`From<StorePath> for Rc<str>`] impl composes with a generic
+    /// thread-local shared-owned-string helper bounded by
+    /// `impl Into<Rc<str>>` — the compositional motivation for landing the
+    /// trait separately from the borrowed-view [`AsRef<str>`] read peer,
+    /// the [`From<StorePath> for String`] owned emit peer, the
+    /// [`From<StorePath> for Box<str>`] shrunk-owned emit peer, the
+    /// [`From<StorePath> for Cow<'static, str>`] borrowed-or-owned emit
+    /// peer, and the [`From<StorePath> for Arc<str>`] cross-thread
+    /// shared-owned emit peer. Pins the trait-generic consumer surface: a
+    /// downstream site that types its input contract as `impl Into<Rc<str>>`
+    /// (a [`std::collections::HashMap`]`<Rc<str>, _>::insert` key that hands
+    /// the same canonical-label allocation across single-thread consumers
+    /// through [`std::rc::Rc::clone`], a `Result<Rc<str>>`-returning outer
+    /// wrapper preserving a pre-existing public shape, a `!Send`
+    /// closure-argument slot on a per-thread fan-out that ships a canonical
+    /// label into every dependent computation staying on the same thread
+    /// without allocating per lookup) recovers the same validated bytes a
+    /// direct `std::rc::Rc::<str>::from(sp.into_string())` call would.
+    #[test]
+    fn test_from_store_path_rc_str_carries_through_generic_consumer() {
+        fn first_char_of<T: Into<std::rc::Rc<str>>>(t: T) -> char {
+            let s: std::rc::Rc<str> = t.into();
+            s.chars().next().unwrap()
+        }
+        fn length_of<T: Into<std::rc::Rc<str>>>(t: T) -> usize {
+            let s: std::rc::Rc<str> = t.into();
+            s.len()
+        }
+        fn owned_eq<T: Into<std::rc::Rc<str>>>(t: T, expected: &str) -> bool {
+            let s: std::rc::Rc<str> = t.into();
+            &*s == expected
+        }
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp1 = StorePath::parse(&raw).expect("valid");
+        let sp2 = sp1.clone();
+        let sp3 = sp1.clone();
+        assert_eq!(first_char_of(sp1), '/');
+        assert_eq!(length_of(sp2), raw.len());
+        assert!(owned_eq(sp3, &raw));
+    }
+
+    /// Round-trip fidelity across the by-value thread-local
+    /// shared-owned-UTF-8 input+output symmetry:
+    /// [`From<StorePath> for Rc<str>`] emits the canonical bytes, and
+    /// [`TryFrom<Rc<str>> for StorePath`] (line 772) parses them back
+    /// through the same [`StorePath::parse`] one-oracle. Pins the same
+    /// round-trip fidelity
+    /// [`test_from_store_path_string_parse_round_trip`],
+    /// [`test_from_store_path_vec_bytes_parse_round_trip`],
+    /// [`test_from_store_path_box_str_parse_round_trip`],
+    /// [`test_from_store_path_cow_str_parse_round_trip`], and
+    /// [`test_from_store_path_arc_str_parse_round_trip`] pin on their
+    /// respective emit-parse symmetries, now on the [`Rc<str>`]
+    /// emit-parse symmetry — a consumer that receives a thread-local
+    /// shared-owned UTF-8 buffer from a per-thread cache or a `!Send`
+    /// channel receiver, parses it into a [`StorePath`], and hands it back
+    /// out as an [`Rc<str>`] at its own downstream fan-out reads through
+    /// both peers at zero per-consumer bridge cost.
+    #[test]
+    fn test_from_store_path_rc_str_parse_round_trip() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let original_hash = sp.hash().to_string();
+            let original_name = sp.name().to_string();
+            let original_is_drv = sp.is_derivation();
+            let emitted: std::rc::Rc<str> = sp.into();
             let round_tripped = StorePath::try_from(emitted).expect("round-trip parse");
             assert_eq!(round_tripped.as_str(), raw);
             assert_eq!(round_tripped.hash(), original_hash);
