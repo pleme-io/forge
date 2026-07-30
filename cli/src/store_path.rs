@@ -3335,6 +3335,136 @@ impl PartialEq<StorePath> for std::path::PathBuf {
     }
 }
 
+/// [`From<StorePath>`] for [`String`] moves the validated
+/// `/nix/store/<hash>-<name>` backing buffer out of the consumed
+/// [`StorePath`] value at zero-copy — the impl delegates through
+/// [`StorePath::into_string`] (which moves [`StorePath::full`] out at
+/// zero-copy), so no allocation, no clone, no `sp.as_str().to_owned()`
+/// bridge, no [`std::fmt::Display`] format-buffer round-trip. A
+/// downstream consumer that owns a [`StorePath`] and needs to hand it
+/// off as an owned [`String`] to an owned-input sink (a
+/// [`std::collections::HashMap<String, _>`] key insertion, a
+/// [`Vec<String>`] entry, a [`serde_json::Value::String`] payload, a
+/// `Result<String>`-returning outer wrapper preserving a pre-existing
+/// public shape at [`crate::commands::image_release::build_nix_image`]
+/// / the `build_*_image_from_dir` sites in `commands/pangea.rs`, a
+/// [`std::env::set_var`] value argument, a generic sink bounded by
+/// `impl Into<String>`) is a one-line `String::from(sp)` /
+/// `sp.into()` call, not a per-site `sp.as_str().to_owned()` or
+/// `sp.to_string()` bridge that pays a redundant allocation.
+///
+/// The by-value owned-UTF-8 emit peer of the by-reference borrowed-
+/// view read peers [`AsRef<str> for StorePath`] (line 1685) +
+/// [`std::fmt::Display for StorePath`] (line 247) +
+/// [`StorePath::as_str`] inherent (line 194): all four surfaces read
+/// the same underlying validated full-path buffer, three exposing it
+/// borrowed at the UTF-8 frontier (`&str`) through the same
+/// [`StorePath::as_str`] one-oracle projection, and this fourth peer
+/// emitting it owned at the [`String`] frontier that owned-input
+/// consumers pin their contract on. The symmetric emit-side sibling
+/// of [`TryFrom<String> for StorePath`] (line 507): the two together
+/// close the by-value owned-UTF-8 input+output symmetry on the
+/// store-path grammar — [`TryFrom<String>`] parses a canonical
+/// `/nix/store/<hash>-<name>` from an owned [`String`] through the
+/// [`StorePath::parse`] oracle, this [`From<StorePath>`] emits the
+/// canonical `/nix/store/<hash>-<name>` as an owned [`String`]
+/// through the moved backing buffer — so a consumer that receives an
+/// owned store-path string, parses it into a [`StorePath`], validates
+/// it, and hands it back out as an owned [`String`] at its own
+/// downstream boundary reads through the same one-oracle discipline
+/// the parse peer already carries with zero per-consumer bridge cost.
+///
+/// Structural mirror of [`impl From<crate::oci_manifest::ContentDigest>
+/// for String`] (commit 83313fd): the same by-value owned-UTF-8 emit
+/// lift at the sibling typed primitive that owns a per-value
+/// `full: String` backing buffer, routing through the primitive's own
+/// canonical-view oracle (there `ContentDigest::full` moved out via
+/// the [`From<ContentDigest>`] impl direct, here [`StorePath::full`]
+/// moved out via the [`StorePath::into_string`] inherent) so the same
+/// zero-copy move-out discipline the digest emit peer carries now
+/// works for the store-path grammar. Strictly cheaper than the
+/// label-axis sibling emit peers `From<PerAttemptRegion> for String`
+/// / `From<AdmissionTier> for String` / `From<BumpLevel> for String`
+/// which must allocate a fresh [`String`] from a `'static` label
+/// slice; the store-path family's backing buffer is a per-value owned
+/// [`String`] the impl can move directly.
+///
+/// This impl opens the by-value owned emit frontier on [`StorePath`] —
+/// the peer traits above cover the *borrowed-view* frontier
+/// (`AsRef<str>`, `AsRef<[u8]>`, `AsRef<std::path::Path>`,
+/// `AsRef<std::ffi::OsStr>`, `Borrow<str>`, [`std::fmt::Display`]) and
+/// the *comparison* frontier (`PartialEq<{str, [u8], OsStr, Path,
+/// String, Vec<u8>, OsString, PathBuf}>` × direction × receiver
+/// ownership); the owned-emit frontier
+/// (`From<StorePath> for {String, PathBuf, OsString, Vec<u8>,
+/// Box<str>, Cow<'static, str>, Arc<str>, Rc<str>, Box<[u8]>, …}`)
+/// has been unopened until this commit. `From<StorePath> for String`
+/// is the reference-frontier opening: [`String`] is the exact type
+/// [`StorePath::full`] holds and [`StorePath::into_string`] returns,
+/// so the delegation is a pure move with zero re-encoding, and every
+/// future by-value owned emit peer (`From<StorePath> for Vec<u8>` via
+/// [`String::into_bytes`], `From<StorePath> for PathBuf` via
+/// [`std::path::PathBuf::from`] on the moved [`String`],
+/// `From<StorePath> for OsString` via [`std::ffi::OsString::from`],
+/// `From<StorePath> for Box<str>` via [`String::into_boxed_str`],
+/// `From<StorePath> for Cow<'static, str>` via
+/// [`std::borrow::Cow::Owned`]) can chain through this one impl so
+/// the whole owned-emit family reads through the same
+/// [`StorePath::into_string`] one-oracle discipline.
+///
+/// Zero-copy by construction: the returned [`String`] is the
+/// consumed [`StorePath`] value's [`StorePath::full`] backing string
+/// moved out through [`StorePath::into_string`] — no allocation, no
+/// clone, no per-consumer buffer growth. The identity
+/// `String::from(sp.clone()) == sp.as_str()` at every validated
+/// [`StorePath`] value is pinned by
+/// [`tests::test_from_store_path_string_matches_as_str_and_into_string`];
+/// the trim discipline carrying through the emit surface (a
+/// `\n`-terminated raw input projects to the trimmed canonical bytes,
+/// not the caller's stray-whitespace buffer) is pinned by
+/// [`tests::test_from_store_path_string_carries_trim_discipline`];
+/// the identity carrying through a generic `impl Into<String>`
+/// consumer is pinned by
+/// [`tests::test_from_store_path_string_carries_through_generic_consumer`];
+/// the parse-round-trip identity through the owned-UTF-8 emit surface
+/// (parsing the emitted [`String`] back through every canonical parse
+/// surface — inherent [`StorePath::parse`], [`TryFrom<&str>`],
+/// [`FromStr`](std::str::FromStr), [`TryFrom<String>`],
+/// [`TryFrom<Cow<'_, str>>`]) is pinned by
+/// [`tests::test_from_store_path_string_parse_round_trip`].
+///
+/// A future refinement to the inherent [`StorePath::parse`] grammar
+/// (a tighter trim, a canonicalising projection at the owned-UTF-8
+/// frontier) is a one-site edit at the inherent oracle; every
+/// consumer bound by `impl Into<String>` inherits the refined
+/// canonical form off the moved backing string automatically with no
+/// downstream retyping.
+///
+/// THEORY.md §III typed primitives: the by-value owned-UTF-8 emit
+/// surface is a typed-primitive site on [`StorePath`] itself (one
+/// [`From<StorePath>`] impl delegating to [`StorePath::into_string`]
+/// which moves the [`StorePath::parse`]-validated backing string out
+/// at zero-copy), not a per-consumer `sp.as_str().to_owned()` or
+/// `sp.to_string()` restatement at every downstream site that
+/// accepts `impl Into<String>`. THEORY.md §VI.1 one-oracle: the
+/// validated full-path string is named at one site
+/// ([`StorePath::parse`]-guarded [`StorePath::full`] backing,
+/// projected through the [`StorePath::into_string`] owned-projection
+/// accessor), and every emit surface — the borrowed-view read peers
+/// [`StorePath::as_str`], [`std::fmt::Display`], [`AsRef<str>`],
+/// [`AsRef<[u8]>`], [`AsRef<std::path::Path>`],
+/// [`AsRef<std::ffi::OsStr>`], and this by-value owned-UTF-8 peer
+/// [`From<StorePath> for String`] — reads through the same backing
+/// storage. A future divergence between the moved-out [`String`] and
+/// the borrowed `&str` view would fail the new
+/// `test_from_store_path_string_matches_as_str_and_into_string`
+/// invariance test.
+impl From<StorePath> for String {
+    fn from(sp: StorePath) -> String {
+        sp.into_string()
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -8232,5 +8362,144 @@ mod tests {
             None,
             "BTreeMap<StorePath, _>::get(&str) must return None for a raw string not present"
         );
+    }
+
+    /// The by-value owned-UTF-8 emit surface
+    /// [`From<StorePath> for String`] moves the same validated full-path
+    /// bytes that the borrowed-view surfaces [`StorePath::as_str`],
+    /// [`std::fmt::Display`], [`AsRef<str>`] read AND that the owned-
+    /// projection inherent [`StorePath::into_string`] moves out. Pins
+    /// the "emit peer routes through the same one-oracle backing string
+    /// the read peers project and the inherent owned-projection moves"
+    /// invariant across every canonical store-path shape — a future
+    /// divergence between the moved-out [`String`] and the borrowed
+    /// `&str` view (or between the trait emit peer and the inherent
+    /// owned projection) fails this test.
+    #[test]
+    fn test_from_store_path_string_matches_as_str_and_into_string() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let borrowed_as_str = sp.as_str().to_owned();
+            let borrowed_as_ref: String = <StorePath as AsRef<str>>::as_ref(&sp).to_owned();
+            let via_display = format!("{sp}");
+            let via_into_string = sp.clone().into_string();
+            let emitted: String = String::from(sp);
+            assert_eq!(
+                emitted, borrowed_as_str,
+                "From<StorePath> for String must match StorePath::as_str"
+            );
+            assert_eq!(
+                emitted, borrowed_as_ref,
+                "From<StorePath> for String must match <StorePath as AsRef<str>>::as_ref"
+            );
+            assert_eq!(
+                emitted, via_display,
+                "From<StorePath> for String must match <StorePath as Display>::fmt"
+            );
+            assert_eq!(
+                emitted, via_into_string,
+                "From<StorePath> for String must match StorePath::into_string"
+            );
+            assert_eq!(
+                emitted, raw,
+                "From<StorePath> for String on a whitespace-free input must equal the raw input"
+            );
+        }
+    }
+
+    /// [`From<StorePath> for String`] carries [`StorePath::parse`]'s
+    /// trimming discipline through the by-value owned-UTF-8 emit
+    /// surface — a value parsed from a newline-terminated nix-frontier
+    /// stdout buffer emits the trimmed canonical bytes, not the raw
+    /// newline-terminated buffer. Pins the same trim discipline
+    /// [`StorePath::into_string`] carries (line-item test
+    /// `test_into_string_carries_trim_discipline`), now on the trait
+    /// emit surface so a downstream generic
+    /// `fn f<T: Into<String>>(sp: T)` sees the canonical form with no
+    /// per-site `sp.as_str().trim().to_string()` restatement.
+    #[test]
+    fn test_from_store_path_string_carries_trim_discipline() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-x\n")).expect("valid");
+        let emitted: String = sp.into();
+        let expected = format!("/nix/store/{H}-x");
+        assert_eq!(emitted, expected);
+        assert!(!emitted.ends_with('\n'));
+        assert!(!emitted.starts_with(' '));
+    }
+
+    /// The [`From<StorePath> for String`] impl composes with a generic
+    /// owned-string helper bounded by `impl Into<String>` — the
+    /// compositional motivation for landing the trait separately from
+    /// the borrowed-view [`AsRef<str>`] read peer and the inherent
+    /// [`StorePath::into_string`] projection. Pins the trait-generic
+    /// consumer surface: a downstream site that types its input
+    /// contract as `impl Into<String>` (a `HashMap<String, _>::insert`
+    /// key, a `Result<String>`-returning outer wrapper preserving a
+    /// pre-existing public shape, a config-schema setter that owns its
+    /// store-path text) recovers the same validated full-path
+    /// [`String`] a direct `sp.into_string()` call would, at zero-copy
+    /// off the moved backing storage.
+    #[test]
+    fn test_from_store_path_string_carries_through_generic_consumer() {
+        fn first_char_of<T: Into<String>>(t: T) -> char {
+            let s: String = t.into();
+            s.chars().next().unwrap()
+        }
+        fn length_of<T: Into<String>>(t: T) -> usize {
+            let s: String = t.into();
+            s.len()
+        }
+        fn owned_eq<T: Into<String>>(t: T, expected: &str) -> bool {
+            let s: String = t.into();
+            s == expected
+        }
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp1 = StorePath::parse(&raw).expect("valid");
+        let sp2 = sp1.clone();
+        let sp3 = sp1.clone();
+        assert_eq!(first_char_of(sp1), '/');
+        assert_eq!(length_of(sp2), raw.len());
+        assert!(owned_eq(sp3, &raw));
+    }
+
+    /// A validated store path's [`From<StorePath> for String`] output
+    /// round-trips through the full parse-surface set — inherent
+    /// [`StorePath::parse`], [`TryFrom<&str>`],
+    /// [`FromStr`](std::str::FromStr), [`TryFrom<String>`],
+    /// [`TryFrom<Cow<'_, str>>`] — back to the same validated
+    /// [`StorePath`] value. Pins the "emit surface projects exactly
+    /// the canonical form every parse surface accepts" invariant so a
+    /// future canonicalising refinement to the backing string that
+    /// broke round-trip via the owned-UTF-8 emit peer fails this test.
+    #[test]
+    fn test_from_store_path_string_parse_round_trip() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let original = StorePath::parse(&raw).expect("valid");
+            let emitted: String = String::from(original.clone());
+            let via_parse = StorePath::parse(&emitted).expect("emitted parses via inherent");
+            let via_try_from_str =
+                StorePath::try_from(emitted.as_str()).expect("emitted parses via TryFrom<&str>");
+            let via_from_str: StorePath = emitted.parse().expect("emitted parses via FromStr");
+            let via_try_from_string =
+                StorePath::try_from(emitted.clone()).expect("emitted parses via TryFrom<String>");
+            let via_try_from_cow =
+                StorePath::try_from(std::borrow::Cow::<'_, str>::Owned(emitted.clone()))
+                    .expect("emitted parses via TryFrom<Cow<str>>");
+            assert_eq!(via_parse, original);
+            assert_eq!(via_try_from_str, original);
+            assert_eq!(via_from_str, original);
+            assert_eq!(via_try_from_string, original);
+            assert_eq!(via_try_from_cow, original);
+        }
     }
 }
