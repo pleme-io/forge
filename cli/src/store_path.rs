@@ -4109,6 +4109,161 @@ impl From<StorePath> for std::borrow::Cow<'static, str> {
     }
 }
 
+/// By-value cross-thread shared-owned-UTF-8 emit peer for [`StorePath`] via
+/// [`std::sync::Arc<str>`] — the seventh step of the by-value owned-emit
+/// frontier opened by [`From<StorePath> for String`] (line 3461) and extended
+/// by [`From<StorePath> for std::path::PathBuf`] (line 3589),
+/// [`From<StorePath> for std::ffi::OsString`] (line 3706),
+/// [`From<StorePath> for Vec<u8>`] (line 3841),
+/// [`From<StorePath> for Box<str>`] (line 3970), and
+/// [`From<StorePath> for Cow<'static, str>`] (line 4106), chaining through
+/// the same [`StorePath::into_string`] one-oracle discipline every owned-emit
+/// peer in the family routes through.
+///
+/// Delegates through `std::sync::Arc::<str>::from(String::from(sp))`:
+/// `String::from(sp)` moves [`StorePath::full`] out at zero-copy via
+/// [`StorePath::into_string`]; the stdlib [`std::sync::Arc`]`::<str>::from`
+/// impl then constructs a single fresh allocation carrying the atomic
+/// refcount header alongside the moved UTF-8 payload bytes. The moved
+/// [`String`] backing is dropped after the payload copy, but the copy is
+/// unavoidable: [`std::sync::Arc<str>`] and [`String`] have different memory
+/// layouts (an [`Arc<str>`] allocation prefixes the payload with a
+/// [`std::sync::atomic::AtomicUsize`] strong-count header and an
+/// [`std::sync::atomic::AtomicUsize`] weak-count header, while a [`String`]
+/// carries a `(ptr, len, cap)` triple pointing at a header-less
+/// heap-allocated buffer). No re-encoding: the moved bytes are the same
+/// bytes [`From<StorePath> for String`] emits, projected through
+/// [`std::sync::Arc<str>`]'s allocation shape one time and shared cheaply
+/// across every subsequent [`std::sync::Arc::clone`] recipient at zero
+/// buffer-clone cost per downstream consumer.
+///
+/// # Why the trait peer earns its keep
+///
+/// [`AsRef<str> for StorePath`] (line 1684) covers the borrowed-view UTF-8
+/// frontier at zero allocation. [`From<StorePath> for String`] (line 3461)
+/// covers the by-value owned-UTF-8 frontier when the sink pins its contract
+/// on the [`String`] shape. [`From<StorePath> for Box<str>`] (line 3970)
+/// covers the shrunk-owned UTF-8 frontier when the sink pins its contract
+/// on the payload-sized [`Box<str>`] shape.
+/// [`From<StorePath> for Cow<'static, str>`] (line 4106) covers the
+/// borrowed-or-owned UTF-8 frontier.
+/// [`From<StorePath> for Arc<str>`] covers the disjoint cross-thread
+/// shared-owned UTF-8 frontier the [`String`], [`Box<str>`], and [`Cow`]
+/// emits can never reach without a per-site `Arc::<str>::from(...)`
+/// re-statement:
+///
+/// - `struct { canonical: Arc<str> }` field initializers on a message-passing
+///   record — a worker-pool payload whose validated store-path label is
+///   handed across worker threads through [`std::sync::Arc::clone`] at zero
+///   buffer-clone cost per recipient, a Tokio-task pool that ships a
+///   canonical label into every spawned worker without allocating per task,
+///   a channel-carried closure descriptor that fans a single validated
+///   allocation out to N receivers. Pre-peer the init site had to write
+///   `std::sync::Arc::<str>::from(sp.into_string())` (the [`Arc<str>`]
+///   projection restated at every field-init site); post-peer the
+///   [`StorePath`] value is moved directly into the field.
+/// - `#[serde(into = "Arc<str>")]` — the serde container attribute for the
+///   cross-thread shared-owned emit case (a serializer that writes an
+///   atomically refcounted UTF-8 label buffer into the wire form so
+///   downstream deserializers can hold cheap-clone shared ownership rather
+///   than each allocating a copy) keys off [`From<StorePath> for Arc<str>`],
+///   not [`From<StorePath> for Box<str>`], [`From<StorePath> for String`],
+///   or [`From<StorePath> for Cow<'static, str>`]. A future serde field
+///   wrapping a [`StorePath`] and opting into the cross-thread shared-owned
+///   `into` grammar reaches this emit peer without a shim.
+/// - `Result<Arc<str>>`-returning wrappers preserving a pre-existing public
+///   shape — a canonical-label extractor that types its return as
+///   `Result<Arc<str>>` so every fan-out branch downstream shares the same
+///   heap allocation through refcount bumps rather than buffer clones.
+///   Pre-peer `Ok(std::sync::Arc::<str>::from(result.store_path.into_string()))`
+///   restated the [`Arc`] wrap at every site; post-peer
+///   `Ok(result.store_path.into())` reads through this impl.
+/// - `HashMap<Arc<str>, _>::insert` intern tables — a closure-scan or
+///   attic-push staging pool that keys entries off canonically-projected
+///   store-path labels shared cheaply across worker threads through
+///   [`std::sync::Arc::clone`] instead of buffer-cloned. Sibling peer to
+///   the parse-side [`TryFrom<Arc<str>> for StorePath`] at line 699 — an
+///   intern table populated by parsing raw labels through the parse peer
+///   and re-emitting canonical labels through this emit peer routes
+///   through both peers at zero per-consumer bridge cost.
+/// - Generic sinks bounded by `impl Into<Arc<str>>` — any wire-frame
+///   builder, any tracing-crate span-attribute setter, any Tokio-task
+///   spawn-argument slot that accepts `impl Into<Arc<str>>` when it wants
+///   a cross-thread shared-owned buffer. This impl reaches every
+///   `impl Into<Arc<str>>` consumer at zero per-site bridge cost.
+///
+/// The chain-through-`From<StorePath> for String` design is the one-oracle
+/// discipline THEORY §VI.1 demands: the moved-out canonical bytes travel
+/// through the same [`StorePath::into_string`] projection the [`String`],
+/// [`std::path::PathBuf`], [`std::ffi::OsString`], [`Vec<u8>`], [`Box<str>`],
+/// and [`Cow<'static, str>`] emit peers already route through, so a future
+/// refinement to the canonical form (a tighter trim, a `SmartString` handle,
+/// a canonicalising projection at the emit surface) lands at one site and
+/// every owned-emit peer inherits it automatically. A per-impl direct call
+/// to `std::sync::Arc::<str>::from(sp.into_string())` here would work today
+/// but would ossify the "String backing" assumption at every emit surface;
+/// the `std::sync::Arc::<str>::from(String::from(sp))` chain reads through
+/// the reference-frontier opening peer so the family stays composable by
+/// construction.
+///
+/// # Symmetric closure with the parse frontier
+///
+/// The symmetric emit-side sibling of [`TryFrom<Arc<str>> for StorePath`]
+/// (line 699): the two together close the by-value cross-thread
+/// shared-owned-UTF-8 input+output symmetry on the store-path grammar —
+/// [`TryFrom<Arc<str>>`] parses a canonical `/nix/store/<hash>-<name>` from
+/// an atomically refcounted [`Arc<str>`] through the [`StorePath::parse`]
+/// oracle (via [`<Arc<str> as AsRef<str>>::as_ref`] + [`FromStr::from_str`]
+/// at line 402), this [`From<StorePath>`] emits the canonical
+/// `/nix/store/<hash>-<name>` as an atomically refcounted [`Arc<str>`]
+/// through one fresh allocation whose contents are the moved-out canonical
+/// bytes. A consumer that receives a cross-thread shared-owned UTF-8 buffer
+/// from a Tokio-task boundary or a channel receiver, parses it into a
+/// [`StorePath`], validates it, and hands it back out as an [`Arc<str>`] at
+/// its own downstream fan-out reads through the same one-oracle discipline
+/// the parse peer already carries with zero per-consumer bridge cost — a
+/// full `Arc<str> → StorePath → Arc<str>` round-trip pinned by
+/// [`tests::test_from_store_path_arc_str_parse_round_trip`].
+///
+/// # Identity invariants pinned
+///
+/// - `<std::sync::Arc<str>>::from(sp.clone()) == sp.as_str().into()`
+///   (equality with the borrowed-view UTF-8 projection routed through the
+///   same [`Arc<str>`] shape) — pinned by
+///   [`tests::test_from_store_path_arc_str_matches_borrowed_projections`].
+/// - Trim-discipline preservation: a `\n`-terminated raw input emits an
+///   [`Arc<str>`] whose bytes are the trimmed canonical bytes — pinned by
+///   [`tests::test_from_store_path_arc_str_carries_trim_discipline`].
+/// - Trait-generic composition: an `impl Into<Arc<str>>` consumer recovers
+///   the same validated bytes a direct
+///   `std::sync::Arc::<str>::from(sp.into_string())` would — pinned by
+///   [`tests::test_from_store_path_arc_str_carries_through_generic_consumer`].
+/// - Round-trip fidelity: the emitted [`Arc<str>`] parses back through
+///   [`TryFrom<Arc<str>>`] to the same [`StorePath`] — pinned by
+///   [`tests::test_from_store_path_arc_str_parse_round_trip`].
+///
+/// THEORY.md §III typed primitives: the by-value cross-thread
+/// shared-owned-UTF-8 emit surface is a typed-primitive peer on
+/// [`StorePath`], not a per-consumer
+/// `std::sync::Arc::<str>::from(sp.into_string())` or
+/// `std::sync::Arc::<str>::from(<StorePath as AsRef<str>>::as_ref(&sp))`
+/// restatement at every downstream site that accepts
+/// `impl Into<Arc<str>>`.
+/// THEORY.md §VI.1 one-oracle: the validated full-path string is named at
+/// one site ([`StorePath::parse`]-guarded [`StorePath::full`] backing,
+/// projected through the [`StorePath::into_string`] owned-projection
+/// accessor, exposed as an owned [`String`] via
+/// [`From<StorePath> for String`]), and this cross-thread
+/// shared-owned-[`Arc<str>`] emit surface reads through the same
+/// canonical-projection chain — a future divergence between the emit peer
+/// and the borrowed [`AsRef<str>`] projection would fail the pinning
+/// invariance test.
+impl From<StorePath> for std::sync::Arc<str> {
+    fn from(sp: StorePath) -> std::sync::Arc<str> {
+        std::sync::Arc::<str>::from(String::from(sp))
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -9881,6 +10036,182 @@ mod tests {
             let original_name = sp.name().to_string();
             let original_is_drv = sp.is_derivation();
             let emitted: std::borrow::Cow<'static, str> = sp.into();
+            let round_tripped = StorePath::try_from(emitted).expect("round-trip parse");
+            assert_eq!(round_tripped.as_str(), raw);
+            assert_eq!(round_tripped.hash(), original_hash);
+            assert_eq!(round_tripped.name(), original_name);
+            assert_eq!(round_tripped.is_derivation(), original_is_drv);
+        }
+    }
+
+    /// [`From<StorePath> for Arc<str>`] agrees with every borrowed-view
+    /// UTF-8 projection [`StorePath`] already carries — the borrowed-view
+    /// [`StorePath::as_str`] fed into [`std::sync::Arc<str>::from`], the
+    /// [`AsRef<str>`] projection fed into the same, the
+    /// [`std::fmt::Display`] format fed into
+    /// [`std::sync::Arc<str>::from`], the inherent
+    /// [`StorePath::into_string`] fed into
+    /// [`std::sync::Arc<str>::from`], and the [`String::from`] emit fed
+    /// into [`std::sync::Arc<str>::from`]. Pins the "cross-thread
+    /// shared-owned emit peer routes through the same one-oracle backing
+    /// string the read peers project and the inherent owned-projection
+    /// moves" invariant across every canonical store-path shape — a
+    /// future divergence between the moved-then-arc [`Arc<str>`] and the
+    /// borrowed `&str` view fails this test.
+    #[test]
+    fn test_from_store_path_arc_str_matches_borrowed_projections() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let borrowed_as_str: std::sync::Arc<str> = sp.as_str().into();
+            let borrowed_as_ref: std::sync::Arc<str> =
+                <StorePath as AsRef<str>>::as_ref(&sp).into();
+            let via_display: std::sync::Arc<str> = std::sync::Arc::<str>::from(format!("{sp}"));
+            let via_into_string: std::sync::Arc<str> =
+                std::sync::Arc::<str>::from(sp.clone().into_string());
+            let via_string_from: std::sync::Arc<str> =
+                std::sync::Arc::<str>::from(String::from(sp.clone()));
+            let emitted: std::sync::Arc<str> = std::sync::Arc::<str>::from(sp.clone());
+            assert_eq!(
+                &*emitted, &*borrowed_as_str,
+                "From<StorePath> for Arc<str> must match sp.as_str().into()"
+            );
+            assert_eq!(
+                &*emitted, &*borrowed_as_ref,
+                "From<StorePath> for Arc<str> must match <StorePath as AsRef<str>>::as_ref"
+            );
+            assert_eq!(
+                &*emitted, &*via_display,
+                "From<StorePath> for Arc<str> must match <StorePath as Display>::fmt"
+            );
+            assert_eq!(
+                &*emitted, &*via_into_string,
+                "From<StorePath> for Arc<str> must match Arc::<str>::from(sp.into_string())"
+            );
+            assert_eq!(
+                &*emitted, &*via_string_from,
+                "From<StorePath> for Arc<str> must match Arc::<str>::from(String::from(sp))"
+            );
+            assert_eq!(
+                &*emitted,
+                raw.as_str(),
+                "From<StorePath> for Arc<str> on a whitespace-free input must equal the raw input"
+            );
+            // Cross-thread shared-owned discipline: the emitted Arc<str>'s
+            // deref length equals the payload byte count, so an
+            // `<Arc<str> as AsRef<str>>` sink sees the canonical form
+            // byte-for-byte with no capacity slack visible through the
+            // shared allocation.
+            assert_eq!(emitted.len(), raw.len());
+            // Cheap-clone discipline: an Arc::clone bumps the atomic
+            // refcount without touching the payload buffer — the clone and
+            // the original point at the same allocation. `Arc::ptr_eq`
+            // witnesses that invariant on the emitted value itself.
+            let shared = emitted.clone();
+            assert!(
+                std::sync::Arc::ptr_eq(&emitted, &shared),
+                "Arc::clone must share the emit peer's allocation, not copy the payload"
+            );
+        }
+    }
+
+    /// [`From<StorePath> for Arc<str>`] carries [`StorePath::parse`]'s
+    /// trimming discipline through the by-value cross-thread
+    /// shared-owned-UTF-8 emit surface — a value parsed from a
+    /// newline-terminated nix-frontier stdout buffer emits an [`Arc<str>`]
+    /// whose bytes are the trimmed canonical bytes, not the raw
+    /// newline-terminated buffer. Pins the same trim discipline the
+    /// [`String`], [`std::path::PathBuf`], [`std::ffi::OsString`],
+    /// [`Vec<u8>`], [`Box<str>`], and [`Cow<'static, str>`] emit peers
+    /// already carry, now on the [`Arc<str>`] emit peer so a downstream
+    /// `fn f<T: Into<Arc<str>>>(sp: T)` sees the canonical form with no
+    /// per-site `Arc::<str>::from(sp.as_str().trim())` restatement.
+    #[test]
+    fn test_from_store_path_arc_str_carries_trim_discipline() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-x\n")).expect("valid");
+        let emitted: std::sync::Arc<str> = sp.into();
+        let expected = format!("/nix/store/{H}-x");
+        assert_eq!(&*emitted, expected.as_str());
+        assert!(!emitted.ends_with('\n'), "trailing newline must be trimmed");
+        assert!(
+            !emitted.starts_with(' '),
+            "leading whitespace must be trimmed"
+        );
+    }
+
+    /// The [`From<StorePath> for Arc<str>`] impl composes with a generic
+    /// cross-thread shared-owned-string helper bounded by
+    /// `impl Into<Arc<str>>` — the compositional motivation for landing the
+    /// trait separately from the borrowed-view [`AsRef<str>`] read peer,
+    /// the [`From<StorePath> for String`] owned emit peer, the
+    /// [`From<StorePath> for Box<str>`] shrunk-owned emit peer, and the
+    /// [`From<StorePath> for Cow<'static, str>`] borrowed-or-owned emit
+    /// peer. Pins the trait-generic consumer surface: a downstream site
+    /// that types its input contract as `impl Into<Arc<str>>` (a
+    /// [`std::collections::HashMap`]`<Arc<str>, _>::insert` key that hands
+    /// the same canonical-label allocation across worker threads through
+    /// [`std::sync::Arc::clone`], a `Result<Arc<str>>`-returning outer
+    /// wrapper preserving a pre-existing public shape, a task-spawn
+    /// argument slot on a Tokio-worker pool that ships a canonical label
+    /// into every spawned worker without allocating per task) recovers the
+    /// same validated bytes a direct
+    /// `std::sync::Arc::<str>::from(sp.into_string())` call would.
+    #[test]
+    fn test_from_store_path_arc_str_carries_through_generic_consumer() {
+        fn first_char_of<T: Into<std::sync::Arc<str>>>(t: T) -> char {
+            let s: std::sync::Arc<str> = t.into();
+            s.chars().next().unwrap()
+        }
+        fn length_of<T: Into<std::sync::Arc<str>>>(t: T) -> usize {
+            let s: std::sync::Arc<str> = t.into();
+            s.len()
+        }
+        fn owned_eq<T: Into<std::sync::Arc<str>>>(t: T, expected: &str) -> bool {
+            let s: std::sync::Arc<str> = t.into();
+            &*s == expected
+        }
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp1 = StorePath::parse(&raw).expect("valid");
+        let sp2 = sp1.clone();
+        let sp3 = sp1.clone();
+        assert_eq!(first_char_of(sp1), '/');
+        assert_eq!(length_of(sp2), raw.len());
+        assert!(owned_eq(sp3, &raw));
+    }
+
+    /// Round-trip fidelity across the by-value cross-thread
+    /// shared-owned-UTF-8 input+output symmetry:
+    /// [`From<StorePath> for Arc<str>`] emits the canonical bytes, and
+    /// [`TryFrom<Arc<str>> for StorePath`] (line 699) parses them back
+    /// through the same [`StorePath::parse`] one-oracle. Pins the same
+    /// round-trip fidelity
+    /// [`test_from_store_path_string_parse_round_trip`],
+    /// [`test_from_store_path_vec_bytes_parse_round_trip`],
+    /// [`test_from_store_path_box_str_parse_round_trip`], and
+    /// [`test_from_store_path_cow_str_parse_round_trip`] pin on their
+    /// respective emit-parse symmetries, now on the [`Arc<str>`]
+    /// emit-parse symmetry — a consumer that receives a cross-thread
+    /// shared-owned UTF-8 buffer from a Tokio-task boundary or a channel
+    /// receiver, parses it into a [`StorePath`], and hands it back out as
+    /// an [`Arc<str>`] at its own downstream fan-out reads through both
+    /// peers at zero per-consumer bridge cost.
+    #[test]
+    fn test_from_store_path_arc_str_parse_round_trip() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let original_hash = sp.hash().to_string();
+            let original_name = sp.name().to_string();
+            let original_is_drv = sp.is_derivation();
+            let emitted: std::sync::Arc<str> = sp.into();
             let round_tripped = StorePath::try_from(emitted).expect("round-trip parse");
             assert_eq!(round_tripped.as_str(), raw);
             assert_eq!(round_tripped.hash(), original_hash);
