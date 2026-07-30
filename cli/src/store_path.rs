@@ -2423,6 +2423,143 @@ impl PartialEq<StorePath> for &std::ffi::OsStr {
     }
 }
 
+/// Forward-direction owned OS-string comparison peer — the heap-owned
+/// [`std::ffi::OsString`]-receiver sibling of the borrowed-receiver
+/// [`PartialEq<std::ffi::OsStr>`] + [`PartialEq<&std::ffi::OsStr>`] pair
+/// above, split by receiver ownership so the caller writes `sp == owned_os`
+/// (a captured [`std::process::Command::get_args`] slot cloned into a
+/// [`std::ffi::OsString`] buffer, an [`std::env::args_os`] item pulled
+/// through [`Iterator::collect`] into an owned OS-string bucket, a
+/// [`std::ffi::OsString::from`] wire-decode of a captured argv byte-stream
+/// on Unix) without an intermediate `sp == owned_os.as_os_str()`
+/// restatement and without cloning the [`StorePath`]'s canonical bytes
+/// into a fresh [`std::ffi::OsString`] to satisfy a hypothetical
+/// [`PartialEq<StorePath> for std::ffi::OsString`] via the standard
+/// library.
+///
+/// Delegates through [`<StorePath as AsRef<std::ffi::OsStr>>::as_ref`]
+/// composed with [`std::ffi::OsString::as_os_str`] and the standard-
+/// library [`<std::ffi::OsStr as PartialEq<std::ffi::OsStr>>::eq`], so
+/// the "what canonical OS-string does a [`StorePath`] read back as?"
+/// question stays defined at ONE accessor surface — the inherent
+/// [`StorePath::as_str`] projected onto [`std::ffi::OsStr`] via
+/// [`std::ffi::OsStr::new`] at the [`AsRef<std::ffi::OsStr>`] frontier —
+/// and every OS-string comparison surface (borrowed forward × receiver,
+/// borrowed reverse × receiver, owned forward, owned reverse) reads
+/// through it. Zero allocation, zero temporary [`std::ffi::OsString`],
+/// zero re-validation of the store-path grammar per call.
+///
+/// Mirrors the owned-receiver comparison peers the sibling frontiers
+/// on this typed primitive already carry:
+/// - [`impl PartialEq<String> for StorePath`] on the owned UTF-8 axis
+///   (line 1820),
+/// - [`impl PartialEq<Vec<u8>> for StorePath`] on the owned byte-vec
+///   axis (line 2140).
+///
+/// The reverse-direction sibling
+/// [`impl PartialEq<StorePath> for std::ffi::OsString`] directly below
+/// closes the 2-impl owned-receiver × direction closure so the caller
+/// may pick either side of the `==` operator when the comparand is a
+/// heap-owned [`std::ffi::OsString`], matching the standard-library
+/// idiom [`std::ffi::OsString`] carries through its own
+/// [`PartialEq<std::ffi::OsStr> for std::ffi::OsString`] +
+/// [`PartialEq<std::ffi::OsString> for std::ffi::OsStr`] closure.
+///
+/// # Platform semantics
+///
+/// A store-path payload is ASCII by construction (base-32 hash from a
+/// fixed 32-char alphabet, plus a name from the store-path name
+/// grammar), so on Unix ([`std::ffi::OsStr`] is a `[u8]` newtype) and
+/// on Windows ([`std::ffi::OsStr`] is a WTF-8 encoded byte sequence)
+/// the owned OS-string peer answers the same boolean the owned UTF-8
+/// peer answers at every valid [`StorePath`] value — the canonical view
+/// projected onto [`std::ffi::OsStr`] and the canonical view projected
+/// onto [`str`] are byte-identical on ASCII.
+///
+/// THEORY.md §III typed primitives: the owned OS-string comparison
+/// surface is a typed-primitive site on [`StorePath`] itself (one
+/// [`PartialEq<std::ffi::OsString>`] impl on [`StorePath`] routing
+/// through [`<StorePath as AsRef<std::ffi::OsStr>>::as_ref`] and
+/// [`std::ffi::OsString::as_os_str`]), not a per-consumer
+/// `<StorePath as AsRef<std::ffi::OsStr>>::as_ref(&sp) ==
+/// owned_os.as_os_str()` restatement at every downstream site that
+/// asks whether a [`StorePath`] value names the same canonical
+/// OS-string as a heap-owned [`std::ffi::OsString`]. THEORY.md §VI.1
+/// one-oracle: the canonical view is named at one site
+/// ([`StorePath::as_str`], projected onto [`std::ffi::OsStr`] at the
+/// [`AsRef<std::ffi::OsStr>`] surface), and every OS-string comparison
+/// surface — borrowed forward × receiver, borrowed reverse × receiver,
+/// and now this owned forward — reads through the same one-oracle
+/// discipline projected onto its own direction × receiver ownership.
+impl PartialEq<std::ffi::OsString> for StorePath {
+    fn eq(&self, other: &std::ffi::OsString) -> bool {
+        <Self as AsRef<std::ffi::OsStr>>::as_ref(self) == other.as_os_str()
+    }
+}
+
+/// Reverse-direction owned OS-string comparison peer — the direction
+/// sibling of [`impl PartialEq<std::ffi::OsString> for StorePath`]
+/// directly above, split by direction so the caller writes
+/// `owned_os == sp` at the comparison site (a fixture-side
+/// `assert_eq!(std::ffi::OsString::from("/nix/store/…-x"), sp)`, an
+/// [`std::env::args_os`] walker that keys `os_arg_owned == parsed_handle`
+/// with the captured [`std::ffi::OsString`] slot on the left, a generic
+/// [`PartialEq`]-bounded consumer composed on a
+/// [`std::ffi::OsString`] key against a [`StorePath`] value). Together
+/// with the forward-direction sibling this closes the 2-impl
+/// owned-receiver × direction closure at the same one-oracle discipline
+/// the four-impl borrowed OS-string closure at lines 2294 / 2325 /
+/// 2392 / 2420 already carries, matching the closure the owned UTF-8
+/// pair ([`impl PartialEq<String> for StorePath`] +
+/// [`impl PartialEq<StorePath> for String`]) and the owned byte-vec
+/// pair ([`impl PartialEq<Vec<u8>> for StorePath`] +
+/// [`impl PartialEq<StorePath> for Vec<u8>`]) already carry on their
+/// respective owned-receiver × direction axes.
+///
+/// Delegates through [`std::ffi::OsString::as_os_str`] composed with
+/// [`<StorePath as AsRef<std::ffi::OsStr>>::as_ref`] and the standard-
+/// library [`<std::ffi::OsStr as PartialEq<std::ffi::OsStr>>::eq`], so
+/// the symmetry axiom
+/// `<std::ffi::OsString as PartialEq<StorePath>>::eq(&owned_os, &sp)
+/// == <StorePath as PartialEq<std::ffi::OsString>>::eq(&sp, &owned_os)`
+/// at every (owned_os, sp) pair holds by construction — both directions
+/// factor through the same [`AsRef<std::ffi::OsStr>`] one-oracle
+/// projection and the same standard-library [`std::ffi::OsStr`]
+/// equality. Pinned at
+/// [`tests::test_partial_eq_os_string_store_path_symmetric_with_forward_direction`].
+///
+/// Extends the reverse-direction receiver frontier the borrowed
+/// OS-string pair
+/// [`impl PartialEq<StorePath> for std::ffi::OsStr`] +
+/// [`impl PartialEq<StorePath> for &std::ffi::OsStr`] opened onto the
+/// owned-receiver axis, mirroring the owned-UTF-8 extension the
+/// [`impl PartialEq<StorePath> for String`] peer opened onto the UTF-8
+/// frontier and the owned-byte-vec extension the
+/// [`impl PartialEq<StorePath> for Vec<u8>`] peer opened onto the byte
+/// frontier.
+///
+/// THEORY.md §III typed primitives: the reverse-direction owned
+/// OS-string comparison surface is a typed-primitive site on
+/// [`StorePath`] (one [`PartialEq<StorePath>`] impl on
+/// [`std::ffi::OsString`] routing through
+/// [`std::ffi::OsString::as_os_str`] and
+/// [`<StorePath as AsRef<std::ffi::OsStr>>::as_ref`]), not a per-
+/// consumer `owned_os.as_os_str() == <StorePath as
+/// AsRef<std::ffi::OsStr>>::as_ref(&sp)` restatement at every
+/// downstream comparison site. THEORY.md §VI.1 one-oracle: the
+/// canonical view is named at one site ([`StorePath::as_str`],
+/// projected onto [`std::ffi::OsStr`] at the
+/// [`AsRef<std::ffi::OsStr>`] surface), and every OS-string comparison
+/// surface — borrowed forward × receiver, borrowed reverse × receiver,
+/// owned forward, and this owned reverse — reads through the same
+/// one-oracle discipline projected onto its own direction × receiver
+/// ownership.
+impl PartialEq<StorePath> for std::ffi::OsString {
+    fn eq(&self, other: &StorePath) -> bool {
+        self.as_os_str() == <StorePath as AsRef<std::ffi::OsStr>>::as_ref(other)
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -6113,6 +6250,146 @@ mod tests {
                 <&std::ffi::OsStr as PartialEq<StorePath>>::eq(os_ref, &sp),
                 <StorePath as PartialEq<&std::ffi::OsStr>>::eq(&sp, os_ref),
                 "reverse-&OsStr and forward-&OsStr PartialEq peers must agree at {candidate:?}",
+            );
+        }
+    }
+
+    /// `<StorePath as PartialEq<std::ffi::OsString>>::eq(&sp, &owned_os)`
+    /// must agree byte-for-byte with
+    /// `<StorePath as AsRef<std::ffi::OsStr>>::as_ref(&sp)
+    /// == owned_os.as_os_str()` at every (canonical-view, candidate) pair
+    /// across the canonical, sibling-hash, shorter-name, `.drv`-suffixed,
+    /// short-shortcut, empty, and unrelated-tail candidate grid. Pins the
+    /// delegation through the [`AsRef<std::ffi::OsStr>`] one-oracle
+    /// projection on the forward-direction owned OS-string peer, so a
+    /// future refactor that severed the peer from the accessor (a hand-
+    /// rolled [`std::ffi::OsString::from`] re-read, a divergent trimming
+    /// path, a routing through an unrelated `to_string_lossy` step) is
+    /// caught here first at the process-spawn comparison frontier — the
+    /// owned-receiver sibling of
+    /// [`test_partial_eq_os_str_agrees_with_as_ref_os_str`] on the
+    /// borrowed OS-string peer and the OS-string-frontier sibling of
+    /// [`test_partial_eq_string_agrees_with_as_str`] on the owned UTF-8
+    /// pair.
+    #[test]
+    fn test_partial_eq_os_string_agrees_with_as_ref_os_str() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates: [std::ffi::OsString; 7] = [
+            std::ffi::OsString::from(format!("/nix/store/{H}-hello-2.10")),
+            std::ffi::OsString::from(format!("/nix/store/{H}-hello-2.11")),
+            std::ffi::OsString::from(format!("/nix/store/{H}-x")),
+            std::ffi::OsString::from(format!("/nix/store/{H}-svc-1.2.3.drv")),
+            std::ffi::OsString::from("/nix/store/short"),
+            std::ffi::OsString::new(),
+            std::ffi::OsString::from("hello-2.10"),
+        ];
+        for candidate in &candidates {
+            let via_peer: bool = <StorePath as PartialEq<std::ffi::OsString>>::eq(&sp, candidate);
+            let via_accessor: bool =
+                <StorePath as AsRef<std::ffi::OsStr>>::as_ref(&sp) == candidate.as_os_str();
+            assert_eq!(
+                via_peer, via_accessor,
+                "PartialEq<OsString> for StorePath must agree with as_ref::<OsStr>() == owned_os.as_os_str() at {candidate:?}",
+            );
+        }
+    }
+
+    /// The reflexive identity
+    /// `<StorePath as PartialEq<std::ffi::OsString>>::eq(&sp,
+    /// &<StorePath as AsRef<std::ffi::OsStr>>::as_ref(&sp).to_os_string())`
+    /// must hold at every [`StorePath`] value — a variant compared
+    /// against a heap-owned [`std::ffi::OsString`] copy of its own
+    /// canonical OS-string view always answers true. Pins the accessor's
+    /// own OS-string as a fixed point of the owned-receiver forward-
+    /// direction peer so a future refactor that quietly re-encoded the
+    /// canonical OS-string view breaks here rather than at every
+    /// downstream `sp == owned_os` call site — the OS-string-frontier
+    /// sibling of [`test_partial_eq_vec_bytes_reflexive_at_own_canonical_view`]
+    /// on the owned byte-vec peer and of
+    /// [`test_partial_eq_string_reflexive_at_own_canonical_view`] on the
+    /// owned UTF-8 peer.
+    #[test]
+    fn test_partial_eq_os_string_reflexive_at_own_canonical_view() {
+        for raw in [
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-foo-bar-1.2.3"),
+            format!("/nix/store/{H}-svc-1.2.3.drv"),
+        ] {
+            let sp = StorePath::parse(&raw).unwrap();
+            let owned_os: std::ffi::OsString =
+                <StorePath as AsRef<std::ffi::OsStr>>::as_ref(&sp).to_os_string();
+            assert!(
+                <StorePath as PartialEq<std::ffi::OsString>>::eq(&sp, &owned_os),
+                "PartialEq<OsString> for StorePath must be reflexive at own canonical view for {raw:?}",
+            );
+        }
+    }
+
+    /// The trimming discipline of [`StorePath::parse`] reaches through
+    /// the forward-direction owned OS-string peer — a value parsed from
+    /// a newline-terminated buffer compares equal to a heap-owned
+    /// [`std::ffi::OsString`] copy of the *trimmed* canonical literal on
+    /// the owned-OS-string side, not to a heap-owned
+    /// [`std::ffi::OsString`] copy of the raw newline-terminated buffer.
+    /// Pins the invariant that the owned-OS-string peer reads the same
+    /// canonical OS-string the [`AsRef<std::ffi::OsStr>`] accessor
+    /// exposes, at the process-spawn boundary the peer exists to serve
+    /// — the OS-string-frontier sibling of
+    /// [`test_partial_eq_vec_bytes_trims_through_peer`] on the owned
+    /// byte-vec pair and of [`test_partial_eq_string_trims_through_peer`]
+    /// on the owned UTF-8 pair.
+    #[test]
+    fn test_partial_eq_os_string_trims_through_peer() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-svc-1.2.3\n")).unwrap();
+        let trimmed: std::ffi::OsString =
+            std::ffi::OsString::from(format!("/nix/store/{H}-svc-1.2.3"));
+        let untrimmed: std::ffi::OsString =
+            std::ffi::OsString::from(format!("/nix/store/{H}-svc-1.2.3\n"));
+        assert!(<StorePath as PartialEq<std::ffi::OsString>>::eq(
+            &sp, &trimmed
+        ));
+        assert!(!<StorePath as PartialEq<std::ffi::OsString>>::eq(
+            &sp, &untrimmed
+        ));
+    }
+
+    /// The reverse-direction and forward-direction owned OS-string
+    /// comparison surfaces on the [`StorePath`] typed primitive agree
+    /// byte-for-byte at every (owned_os, [`StorePath`]) pair — the
+    /// symmetry axiom
+    /// `<std::ffi::OsString as PartialEq<StorePath>>::eq(&owned_os, &sp)
+    /// == <StorePath as PartialEq<std::ffi::OsString>>::eq(&sp, &owned_os)`
+    /// holds across the canonical, sibling-hash, shorter-name, `.drv`-
+    /// suffixed, short-shortcut, empty, and unrelated-tail candidate
+    /// grid. Pins the 2-impl owned-OS-string × direction closure so a
+    /// future refactor that diverged one impl from its symmetric peer
+    /// breaks this pin at at least one pair rather than propagating
+    /// unnoticed through downstream generic [`PartialEq`]-bounded
+    /// consumers that thread a [`StorePath`] through either side of a
+    /// `==` operator against a heap-owned [`std::ffi::OsString`] key.
+    /// Structural mirror of
+    /// [`test_partial_eq_vec_bytes_store_path_symmetric_with_forward_direction`]
+    /// on the owned byte-vec pair and of
+    /// [`test_partial_eq_string_store_path_symmetric_with_forward_direction`]
+    /// on the owned UTF-8 pair.
+    #[test]
+    fn test_partial_eq_os_string_store_path_symmetric_with_forward_direction() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-hello-2.10")).unwrap();
+        let candidates: [std::ffi::OsString; 7] = [
+            std::ffi::OsString::from(format!("/nix/store/{H}-hello-2.10")),
+            std::ffi::OsString::from(format!("/nix/store/{H}-hello-2.11")),
+            std::ffi::OsString::from(format!("/nix/store/{H}-x")),
+            std::ffi::OsString::from(format!("/nix/store/{H}-svc-1.2.3.drv")),
+            std::ffi::OsString::from("/nix/store/short"),
+            std::ffi::OsString::new(),
+            std::ffi::OsString::from("hello-2.10"),
+        ];
+        for candidate in &candidates {
+            assert_eq!(
+                <std::ffi::OsString as PartialEq<StorePath>>::eq(candidate, &sp),
+                <StorePath as PartialEq<std::ffi::OsString>>::eq(&sp, candidate),
+                "reverse-OsString and forward-OsString PartialEq peers must agree at {candidate:?}",
             );
         }
     }
