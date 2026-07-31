@@ -5387,6 +5387,119 @@ impl From<&StorePath> for Vec<u8> {
     }
 }
 
+/// By-reference shrunk-owned-UTF-8 emit peer for [`StorePath`] via
+/// [`Box<str>`] — the third step of the by-reference owned-emit frontier
+/// opened by [`From<&StorePath> for String`] (line 5265) and extended by
+/// [`From<&StorePath> for Vec<u8>`] (line 5384), chaining through the same
+/// by-reference [`String::from`] one-oracle discipline every by-reference
+/// string-side emit peer in the family routes through, mirroring how the
+/// by-value [`From<StorePath> for Box<str>`] (line 3970) chained through
+/// the by-value [`String::from`] one-oracle every by-value string-side emit
+/// peer routes through.
+///
+/// Delegates through `String::from(sp).into_boxed_str()`:
+/// [`From<&StorePath> for String`] copies the borrowed
+/// [`StorePath::as_str`] view into a fresh [`String`] at one allocation
+/// without consuming the source; [`String::into_boxed_str`] then converts
+/// the [`String`] wrapper into a [`Box<str>`], dropping the capacity header
+/// so only the pointer and UTF-8 payload length remain. The
+/// [`String::from(&sp)`] step allocates exactly `sp.as_str().len()` bytes
+/// (a fresh copy of the trimmed canonical form), so the [`into_boxed_str`]
+/// shrink is a no-op on the buffer and the payload-sized [`Box<str>`] is
+/// handed straight through — one allocation per emit, no per-consumer clone
+/// of the validated bytes, source [`StorePath`] left available for further
+/// reads.
+///
+/// # Frontier-blanket calculus — why Box<str> is not blanketed
+///
+/// The [`From<&StorePath> for Vec<u8>`] impl doc records that stdlib
+/// blanket `impl<T: AsRef<OsStr> + ?Sized> From<&T> for {PathBuf, OsString}`
+/// fires for `T = StorePath` through this crate's [`AsRef<OsStr>`] peer
+/// (line 1920) and forbids a custom by-reference peer at those two shapes
+/// (E0119). [`Box<str>`] carries no such stdlib blanket: stdlib provides
+/// `impl<'a> From<&'a str> for Box<str>` (line 3970's by-value peer routes
+/// downstream sites through it via `.as_str().into()` in pre-peer
+/// call sites), but the `&'a str` receiver is a concrete type, not a
+/// generic bound, so it does not fire for `T = &StorePath` (which is not
+/// `&str`-shaped and cannot be deref-coerced through [`From`]). The
+/// by-reference [`Box<str>`] peer therefore opens a frontier the stdlib
+/// blanket doesn't reach and does so at the same one-oracle discipline the
+/// by-reference [`String`] and [`Vec<u8>`] frontier openers established.
+///
+/// # Why the trait peer earns its keep
+///
+/// The by-value [`From<StorePath> for Box<str>`] (line 3970) covers the
+/// by-value shrunk-owned UTF-8 emit frontier. But a large family of
+/// downstream sites hold a [`&StorePath`], not an owned [`StorePath`], and
+/// must not consume the source:
+///
+/// - Iteration over a `[StorePath]` / `Vec<StorePath>` / `&[StorePath]`
+///   collection (a closure listing from
+///   [`crate::store_path::parse_closure_paths`], a derivation-input
+///   manifest, an attestation-adjacent per-input path list) where each
+///   element must project into a shrunk-owned [`Box<str>`] for downstream
+///   [`std::collections::HashMap<Box<str>, _>`] insertion, a
+///   [`Vec<Box<str>>`] intern-pool accumulation, or a `serde`-derived
+///   record with a [`Box<str>`] field — the by-value peer's move consumes
+///   the element, which iteration cannot afford. Pre-peer the site had to
+///   write `sp.as_str().to_owned().into_boxed_str()` or
+///   `String::from(&sp).into_boxed_str()` at every consumer; post-peer
+///   `Box::<str>::from(sp)` or `sp.into()` reads through this impl.
+/// - `&StorePath`-typed method receivers or function arguments (a
+///   pipeline-step primitive inspecting a store path without ownership, an
+///   attestation record builder borrowing its inputs, a canonical-label
+///   extractor accepting a borrow) projecting into an
+///   `impl Into<Box<str>>` sink at their downstream boundary — the
+///   by-value peer requires a `sp.clone().into()` at the boundary if the
+///   caller still needs the value; the by-reference peer avoids the clone.
+/// - Trait objects and generic bounds that admit `&T` conversions through
+///   the standard `impl<T> From<&T> for T::Owned`
+///   [`ToOwned`](std::borrow::ToOwned) family — the by-reference peer
+///   completes the [`From<&StorePath>`] symmetry the by-value
+///   [`From<StorePath>`] emit peer requires to compose in trait-generic
+///   contexts (an intern-table populator receiving `&StorePath` and
+///   handing it into an `impl Into<Box<str>>` key slot, a
+///   `serde`-derive-adjacent field emitter typed on
+///   `impl Into<Box<str>>`).
+///
+/// The chain-through-`From<&StorePath> for String` design is the one-oracle
+/// discipline THEORY §VI.1 demands: the emitted canonical bytes travel
+/// through the same by-reference [`String::from`] projection every
+/// by-reference string-side emit peer routes through (and, transitively,
+/// the same borrowed-view [`AsRef<str>`] peer the by-value emit peers'
+/// [`StorePath::into_string`] backing surfaces), so a future canonical-form
+/// refinement to the backing string (a tighter trim, a `SmartString`
+/// handle, a canonicalising projection at the read surface) lands at one
+/// site (the [`AsRef<str>`] impl at line 1684, which the by-reference
+/// [`String::from`] peer reads through) and every by-reference owned-emit
+/// peer in the family inherits it automatically. A per-impl direct call to
+/// `sp.as_str().to_owned().into_boxed_str()` here would work today but
+/// would ossify the "AsRef<str> to_owned" two-step at the by-reference emit
+/// surface; the `String::from(&sp).into_boxed_str()` chain reads through
+/// the by-reference [`String`] frontier-opener so the family stays
+/// composable by construction.
+///
+/// # Identity invariants pinned
+///
+/// - `Box::<str>::from(&sp) == Box::<str>::from(sp.clone())` (matches the
+///   by-value peer's projection byte-for-byte) — pinned by
+///   [`tests::test_from_store_path_ref_box_str_matches_by_value_peer`].
+/// - Trim-discipline preservation: a `\n`-terminated raw input emits a
+///   [`Box<str>`] whose bytes equal the trimmed canonical form — pinned
+///   by
+///   [`tests::test_from_store_path_ref_box_str_carries_trim_discipline`].
+/// - Trait-generic composition: an `impl Into<Box<str>>` consumer holding
+///   a [`&StorePath`] projects the same canonical bytes — pinned by
+///   [`tests::test_from_store_path_ref_box_str_carries_through_generic_consumer`].
+/// - Source-preservation: the source [`StorePath`] remains usable after
+///   the emit (the by-reference peer does not consume) — pinned by
+///   [`tests::test_from_store_path_ref_box_str_preserves_source`].
+impl From<&StorePath> for Box<str> {
+    fn from(sp: &StorePath) -> Box<str> {
+        String::from(sp).into_boxed_str()
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -12466,6 +12579,131 @@ mod tests {
         assert_eq!(first, expected);
         assert_eq!(second, expected);
         assert_eq!(third, expected);
+        assert_eq!(sp.as_str(), raw);
+        assert_eq!(sp.hash(), &raw["/nix/store/".len()..][..32]);
+    }
+
+    /// [`From<&StorePath> for Box<str>`] projects the same canonical
+    /// bytes the by-value [`From<StorePath> for Box<str>`] peer emits and
+    /// every borrowed-view UTF-8 projection surfaces — pins the
+    /// "by-reference emit peer routes through the same one-oracle
+    /// backing every projection reads from" invariant across every
+    /// canonical store-path shape.
+    #[test]
+    fn test_from_store_path_ref_box_str_matches_by_value_peer() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let by_ref_emit: Box<str> = Box::<str>::from(&sp);
+            let by_ref_into: Box<str> = (&sp).into();
+            let by_val_emit: Box<str> = Box::<str>::from(sp.clone());
+            let via_as_str: Box<str> = sp.as_str().into();
+            let via_as_ref: Box<str> = <StorePath as AsRef<str>>::as_ref(&sp)
+                .to_owned()
+                .into_boxed_str();
+            let via_ref_string: Box<str> = String::from(&sp).into_boxed_str();
+            assert_eq!(
+                by_ref_emit, by_val_emit,
+                "From<&StorePath> for Box<str> must match From<StorePath> for Box<str> byte-for-byte"
+            );
+            assert_eq!(by_ref_emit, by_ref_into, "From vs Into consistency");
+            assert_eq!(by_ref_emit, via_as_str, "must match sp.as_str().into()");
+            assert_eq!(
+                by_ref_emit, via_as_ref,
+                "must match <StorePath as AsRef<str>>::as_ref(&sp).to_owned().into_boxed_str()"
+            );
+            assert_eq!(
+                by_ref_emit, via_ref_string,
+                "must match String::from(&sp).into_boxed_str()"
+            );
+            assert_eq!(
+                by_ref_emit.as_ref(),
+                raw.as_str(),
+                "on whitespace-free input must equal raw as &str"
+            );
+            // Payload-sized shrunk-owned discipline: Box<str>::len equals
+            // the canonical byte-length with no capacity slack visible
+            // through the borrow (the shape sinks that pin their contract
+            // on Box<str> specifically expect).
+            assert_eq!(by_ref_emit.len(), sp.as_str().len());
+        }
+    }
+
+    /// [`From<&StorePath> for Box<str>`] carries [`StorePath::parse`]'s
+    /// trim discipline through the by-reference shrunk-owned UTF-8 emit
+    /// surface — a value parsed from a newline-terminated nix-frontier
+    /// stdout buffer emits a [`Box<str>`] whose bytes are the trimmed
+    /// canonical form with no per-site
+    /// `sp.as_str().trim().to_owned().into_boxed_str()` restatement.
+    #[test]
+    fn test_from_store_path_ref_box_str_carries_trim_discipline() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-x\n")).expect("valid");
+        let emitted: Box<str> = Box::<str>::from(&sp);
+        let expected = format!("/nix/store/{H}-x");
+        assert_eq!(emitted.as_ref(), expected.as_str());
+        assert!(!emitted.ends_with('\n'));
+        assert!(!emitted.starts_with(' '));
+        // Payload-sized shrunk-owned discipline reaffirmed on the
+        // trim-carrying path: the shrink lands at the trimmed length, not
+        // the raw input length (a `\n`-off-the-end sink that pins on
+        // Box<str>::len would otherwise see 1 byte of ghost capacity slack).
+        assert_eq!(emitted.len(), sp.as_str().len());
+    }
+
+    /// The [`From<&StorePath> for Box<str>`] impl composes with a generic
+    /// shrunk-owned-UTF-8 helper bounded by `impl Into<Box<str>>`
+    /// receiving a [`&StorePath`] — the compositional motivation for
+    /// landing the by-reference peer separately from the by-value
+    /// [`From<StorePath> for Box<str>`] emit peer. Pins the trait-generic
+    /// consumer surface: a downstream site holding a [`&StorePath`] (an
+    /// iteration over a `[StorePath]` slice, an attestation record
+    /// builder borrowing its inputs, an intern-table populator
+    /// `&self`-receiver method) that types its input contract as
+    /// `impl Into<Box<str>>` recovers the same validated bytes a direct
+    /// `sp.as_str().to_owned().into_boxed_str()` call would.
+    #[test]
+    fn test_from_store_path_ref_box_str_carries_through_generic_consumer() {
+        fn first_char_of<T: Into<Box<str>>>(t: T) -> char {
+            let s: Box<str> = t.into();
+            s.chars().next().unwrap()
+        }
+        fn length_of<T: Into<Box<str>>>(t: T) -> usize {
+            let s: Box<str> = t.into();
+            s.len()
+        }
+        fn bytes_eq<T: Into<Box<str>>>(t: T, expected: &str) -> bool {
+            let s: Box<str> = t.into();
+            s.as_ref() == expected
+        }
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp = StorePath::parse(&raw).expect("valid");
+        assert_eq!(first_char_of(&sp), '/');
+        assert_eq!(length_of(&sp), raw.len());
+        assert!(bytes_eq(&sp, &raw));
+    }
+
+    /// [`From<&StorePath> for Box<str>`] does NOT consume the source
+    /// [`StorePath`] — the borrowed emit surface must leave the value
+    /// available for further reads. Pins the load-bearing distinction
+    /// from the by-value [`From<StorePath> for Box<str>`] peer: an
+    /// iteration over a `[StorePath]` slice or a `&StorePath`-receiver
+    /// method that emits an owned [`Box<str>`] must retain the source
+    /// for downstream consumers on the same expression, which the
+    /// by-value peer's move discipline forbids.
+    #[test]
+    fn test_from_store_path_ref_box_str_preserves_source() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp = StorePath::parse(&raw).expect("valid");
+        let first: Box<str> = Box::<str>::from(&sp);
+        let second: Box<str> = Box::<str>::from(&sp);
+        let third: Box<str> = (&sp).into();
+        assert_eq!(first.as_ref(), raw.as_str());
+        assert_eq!(second.as_ref(), raw.as_str());
+        assert_eq!(third.as_ref(), raw.as_str());
         assert_eq!(sp.as_str(), raw);
         assert_eq!(sp.hash(), &raw["/nix/store/".len()..][..32]);
     }
