@@ -313,7 +313,7 @@ pub async fn execute(
         let ghcr_token = crate::infrastructure::registry::RegistryCredentials::discover_token(None)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        info!("📤 Pushing to GHCR with skopeo...");
+        info!("📤 Pushing to GHCR with doca...");
 
         let pb = ProgressBar::new(2);
         pb.set_style(
@@ -717,8 +717,8 @@ async fn push_with_retry(
 
     // Pre-loop: doca must be available. Same structural precondition.
     debug!("Checking if doca is available at: {}", doca);
-    let skopeo_check = Command::new(&doca).arg("--version").output().await;
-    match skopeo_check {
+    let doca_check = Command::new(&doca).arg("--version").output().await;
+    match doca_check {
         Ok(output) if output.status.success() => {
             debug!(
                 "Found doca: {}",
@@ -726,11 +726,18 @@ async fn push_with_retry(
             );
         }
         _ => {
+            // NAMES THE BINARY THAT IS ACTUALLY MISSING. This message used to
+            // say "install skopeo" and list brew/apt/yum recipes for it — which,
+            // after the doca conversion, sent the operator to install a tool
+            // this code path no longer invokes while the real missing binary
+            // went unnamed. A diagnostic that points at the wrong thing costs
+            // more than no diagnostic.
             anyhow::bail!(
-                "skopeo command not found (checked SKOPEO_BIN env var and PATH). Please install skopeo:\n\
-                 - macOS: brew install skopeo\n\
-                 - Linux: apt-get install skopeo or yum install skopeo\n\
-                 - Nix: nix-shell -p skopeo"
+                "doca (oci-push) not found — checked the DOCA_BIN env var and PATH.\n\
+                 doca is the pleme-io container tool that replaced skopeo here; it is\n\
+                 built from substrate and normally baked into the runner image:\n\
+                 - Nix:  nix run github:pleme-io/substrate#oci-push -- --version\n\
+                 - or set DOCA_BIN to an existing oci-push binary"
             );
         }
     }
@@ -808,7 +815,7 @@ async fn push_with_retry(
                 if out.status.success() {
                     debug!("Push successful for {}:{}", registry, tag);
                 } else {
-                    debug_log_capture_streams(out, "skopeo");
+                    debug_log_capture_streams(out, "doca");
                 }
             }
             log_retry_attempt(outcome, &op, attempt, &policy)
