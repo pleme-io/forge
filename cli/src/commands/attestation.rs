@@ -673,18 +673,49 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     // closes; see the module docs on `crate::oci_architecture` for the
     // five operational worlds it preserves (Single / Multi / EmbeddedInConfig
     // / Absent, plus the v1 explicit case).
-    let full_ref = format!("docker://{}:{}", image_ref, tag);
+    // doca replaces `skopeo inspect --raw`. SAFE FOR THE ATTESTATION HASH, and
+    // that is measured rather than assumed: canonical_manifest_fingerprint
+    // PARSES the JSON and emits only the digest strings, sorted into a
+    // BTreeSet. It is therefore formatting-insensitive — whitespace, key order
+    // and pretty-printing cannot change the fingerprint, so doca's pretty
+    // output and skopeo's raw bytes fingerprint identically. (This is why the
+    // conversion was deferred one tick: the claim needed checking, not
+    // assuming.) doca takes a bare reference; the `docker://` scheme was
+    // skopeo's transport syntax, not part of the reference.
+    let full_ref = format!("{}:{}", image_ref, tag);
     let (manifest_hash, architecture) = match run_command_output(
         Path::new("."),
-        "skopeo",
-        &["inspect", "--raw", &full_ref],
+        "oci-push",
+        &["inspect", "--ref", &full_ref],
     )
     .await
     {
         Ok(json) => {
-            let hash = Blake3Hash::digest(
-                crate::oci_manifest::canonical_manifest_fingerprint(&json).as_bytes(),
-            );
+            // ── AN EMPTY FINGERPRINT IS NOT A HASH, IT IS A FAILURE. ────────
+            // canonical_manifest_fingerprint returns "" for THREE unrelated
+            // cases — payload does not parse, parses with no digests (`{}`), or
+            // is a registry error object served with a 200 — and hashing that
+            // yields a valid-looking BLAKE3 that is IDENTICAL for every one of
+            // them. Unguarded, an attestation claims to pin a manifest while
+            // pinning nothing, and two different images attest to the same
+            // manifest_hash. Pinned by
+            // oci_manifest::tests::empty_fingerprint_is_indistinguishable_across_unrelated_failures.
+            //
+            // The Err arm below already used a distinguishable sentinel
+            // (b"no-manifest") for a failed command; this gives the
+            // command-succeeded-but-unusable-payload case its own, so the three
+            // outcomes stay three.
+            let fingerprint = crate::oci_manifest::canonical_manifest_fingerprint(&json);
+            let hash = if fingerprint.is_empty() {
+                tracing::warn!(
+                    image = %full_ref,
+                    "manifest inspect succeeded but yielded no digests — recording an \
+                     unfingerprintable-manifest sentinel rather than a hash of nothing"
+                );
+                Blake3Hash::digest(b"unfingerprintable-manifest")
+            } else {
+                Blake3Hash::digest(fingerprint.as_bytes())
+            };
             let arch =
                 crate::oci_architecture::parse_manifest_architectures(&json).to_attestation_arch();
             (hash, arch)
@@ -1931,6 +1962,42 @@ async fn run_command_output(cwd: &Path, cmd: &str, args: &[&str]) -> Result<Stri
 
 #[cfg(test)]
 mod tests {
+    /// ★ THE THREE MANIFEST OUTCOMES MUST STAY THREE DISTINCT HASHES.
+    ///
+    /// manifest_hash can be produced by three genuinely different situations:
+    ///   1. the inspect command FAILED            -> b"no-manifest"
+    ///   2. it succeeded but the payload yielded
+    ///      no digests (unparseable, `{}`, or a
+    ///      registry error object served 200)     -> b"unfingerprintable-manifest"
+    ///   3. a real manifest                       -> BLAKE3 of its digest set
+    ///
+    /// Before the guard, case 2 hashed the EMPTY STRING — a valid-looking
+    /// BLAKE3 identical for every such image, so an attestation pinned nothing
+    /// while looking exactly like one that pinned something, and two unrelated
+    /// images produced the same manifest_hash. This test fails if any two of
+    /// the three ever collapse again, including by someone "simplifying" the
+    /// guard back to hashing the empty fingerprint.
+    #[test]
+    fn manifest_hash_sentinels_are_mutually_distinct() {
+        use tameshi::hash::Blake3Hash;
+
+        let failed = Blake3Hash::digest(b"no-manifest");
+        let unusable = Blake3Hash::digest(b"unfingerprintable-manifest");
+        let hash_of_nothing = Blake3Hash::digest(b"");
+        let real = Blake3Hash::digest(
+            crate::oci_manifest::canonical_manifest_fingerprint(
+                r#"{"config":{"digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333"}}"#,
+            )
+            .as_bytes(),
+        );
+
+        assert_ne!(failed, unusable, "command-failed vs payload-unusable");
+        assert_ne!(unusable, hash_of_nothing, "the guard must not hash \"\"");
+        assert_ne!(failed, hash_of_nothing);
+        assert_ne!(real, unusable, "a real manifest vs the sentinel");
+        assert_ne!(real, hash_of_nothing);
+    }
+
     use super::*;
     use crate::test_support::make_executable_shim;
 
