@@ -246,17 +246,32 @@
                 GHCR_TOKEN=$(cat ~/.config/gh/token 2>/dev/null || true)
               fi
 
+              # doca replaces skopeo, and CREDENTIALS MOVE OFF ARGV.
+              # `--dest-creds="$REGISTRY_USER:$GHCR_TOKEN"` placed the GHCR
+              # token in skopeo's command line, and /proc/<pid>/cmdline is
+              # world-readable — any process on the host could read it for the
+              # duration of the push. doca reads INPUT_DEST_USER /
+              # INPUT_DEST_PASS from the environment, which is not.
+              #
+              # doca takes --registry/--image separately where skopeo took one
+              # composed reference; $IMAGE was "$REGISTRY/forge-utilities", so
+              # the two halves are passed directly rather than re-split.
+              export INPUT_DEST_USER="$REGISTRY_USER"
+              export INPUT_DEST_PASS="$GHCR_TOKEN"
+
               echo "==> Pushing $IMAGE:$ARCH_TAG-$SHORT_SHA"
-              ${pkgs.skopeo}/bin/skopeo copy \
-                --dest-creds="$REGISTRY_USER:$GHCR_TOKEN" \
-                docker-archive:${forgeProvisionImage} \
-                "docker://$IMAGE:$ARCH_TAG-$SHORT_SHA"
+              ${substrate.packages.${system}.oci-push}/bin/oci-push push \
+                --tarball ${forgeProvisionImage} \
+                --registry "$REGISTRY" \
+                --image forge-utilities \
+                --tag "$ARCH_TAG-$SHORT_SHA"
 
               echo "==> Pushing $IMAGE:$ARCH_TAG-latest"
-              ${pkgs.skopeo}/bin/skopeo copy \
-                --dest-creds="$REGISTRY_USER:$GHCR_TOKEN" \
-                docker-archive:${forgeProvisionImage} \
-                "docker://$IMAGE:$ARCH_TAG-latest"
+              ${substrate.packages.${system}.oci-push}/bin/oci-push push \
+                --tarball ${forgeProvisionImage} \
+                --registry "$REGISTRY" \
+                --image forge-utilities \
+                --tag "$ARCH_TAG-latest"
 
               echo "==> Done: $IMAGE"
             '');
