@@ -1,7 +1,7 @@
 //! Multi-arch OCI image release
 //!
 //! Replaces image-release.nix::mkImageReleaseApp.
-//! Builds (or uses pre-built) images for amd64/arm64, pushes via skopeo,
+//! Builds (or uses pre-built) images for amd64/arm64, pushes via doca,
 //! and creates a multi-arch manifest index.
 
 use anyhow::{bail, Context, Result};
@@ -36,7 +36,9 @@ pub async fn execute(
     verify_elf: bool,
 ) -> Result<()> {
     let sha = git::get_short_sha()?;
-    let skopeo = get_tool_path("skopeo");
+    // doca replaces skopeo here. Resolved the same way (DOCA_BIN env, else the
+    // binary name on PATH); the nix closure that ships forge bakes it in.
+    let doca = get_tool_path(crate::tools::tools::DOCA);
 
     // Resolve amd64 image path
     let amd64_path = match (amd64_image, amd64_attr) {
@@ -55,23 +57,23 @@ pub async fn execute(
     // Push amd64 — gate the loader before the push (default on).
     if verify_elf {
         info!("Verifying {} (amd64) image loader before push...", name);
-        verify_image_arch(&skopeo, &amd64_path, "amd64")?;
+        verify_image_arch(&doca, &amd64_path, "amd64")?;
     }
     let amd64_tag = format!("amd64-{}", sha);
     info!("Pushing {} (amd64) as {}:{}...", name, registry, amd64_tag);
-    push_image(&skopeo, &amd64_path, registry, &amd64_tag)?;
-    push_image(&skopeo, &amd64_path, registry, "amd64-latest")?;
+    push_image(&doca, &amd64_path, registry, &amd64_tag)?;
+    push_image(&doca, &amd64_path, registry, "amd64-latest")?;
 
     // Push arm64 if available
     if let Some(ref arm64) = arm64_path {
         if verify_elf {
             info!("Verifying {} (arm64) image loader before push...", name);
-            verify_image_arch(&skopeo, arm64, "arm64")?;
+            verify_image_arch(&doca, arm64, "arm64")?;
         }
         let arm64_tag = format!("arm64-{}", sha);
         info!("Pushing {} (arm64) as {}:{}...", name, registry, arm64_tag);
-        push_image(&skopeo, arm64, registry, &arm64_tag)?;
-        push_image(&skopeo, arm64, registry, "arm64-latest")?;
+        push_image(&doca, arm64, registry, &arm64_tag)?;
+        push_image(&doca, arm64, registry, "arm64-latest")?;
     }
 
     // Create multi-arch manifest index if both architectures are present.
@@ -162,19 +164,41 @@ async fn build_nix_image(flake_attr: &str, working_dir: &str) -> Result<String> 
     Ok(result.store_path.into_string())
 }
 
-fn push_image(skopeo: &str, image_path: &str, registry: &str, tag: &str) -> Result<()> {
-    let status = Command::new(skopeo)
+/// Push a docker-archive to `<registry>:<tag>` via doca.
+///
+/// Reading a Nix-produced docker-archive IS doca's primary job, so this is a
+/// one-for-one replacement of `skopeo copy docker-archive: docker://`, not an
+/// approximation. AUTH IS UNCHANGED: doca resolves credentials from the ambient
+/// docker config (bare host, both schemed spellings, docker-hub's legacy index
+/// key), exactly as skopeo did — no login step, and no caller changes.
+///
+/// The one shape difference: skopeo took ONE composed reference; doca wants
+/// `--registry` and `--image` separately. `registry` here is already the
+/// composed `<host>/<path...>` base, so it splits on the FIRST '/' — a wrong
+/// split would push to the wrong repository rather than failing, which is why
+/// the missing-'/' case bails instead of guessing.
+fn push_image(doca: &str, image_path: &str, registry: &str, tag: &str) -> Result<()> {
+    let (host, image) = registry
+        .split_once('/')
+        .with_context(|| format!("registry {registry:?} has no '/', cannot split host from image"))?;
+
+    let status = Command::new(doca)
         .args([
-            "copy",
-            "--insecure-policy",
-            &format!("docker-archive:{}", image_path),
-            &format!("docker://{}:{}", registry, tag),
+            "push",
+            "--tarball",
+            image_path,
+            "--registry",
+            host,
+            "--image",
+            image,
+            "--tag",
+            tag,
         ])
         .status()
         .with_context(|| format!("Failed to push {}:{}", registry, tag))?;
 
     if !status.success() {
-        bail!("skopeo copy failed for {}:{}", registry, tag);
+        bail!("doca push failed for {}:{}", registry, tag);
     }
 
     Ok(())
@@ -249,7 +273,7 @@ impl fmt::Display for LoaderError {
             ),
             LoaderError::MissingArchitecture => write!(
                 f,
-                "`skopeo inspect` returned no Architecture field — not a usable single-arch OCI image"
+                "`doca inspect --tarball` returned no Architecture field — not a usable single-arch OCI image"
             ),
             LoaderError::BinaryArchMismatch {
                 path,
@@ -316,15 +340,19 @@ fn check_inspect_arch(inspect_json: &[u8], expected_arch: &str) -> Result<(), Lo
 ///      wrong-binary-content class metadata alone can't see).
 /// Bails with the typed [`LoaderError`] so a bad image is refused at the gate
 /// instead of shipped to crashloop.
-fn verify_image_arch(skopeo: &str, image_path: &str, expected_arch: &str) -> Result<()> {
-    let output = Command::new(skopeo)
-        .args(["inspect", &format!("docker-archive:{}", image_path)])
+fn verify_image_arch(doca: &str, image_path: &str, expected_arch: &str) -> Result<()> {
+    // `doca inspect --tarball` reads the LOCAL archive and emits skopeo's field
+    // casing (`Architecture`/`Os`), so `check_inspect_arch` below is unchanged.
+    // doca gained this path specifically to retire the last skopeo call site in
+    // forge; before it, inspect took only a registry --ref.
+    let output = Command::new(doca)
+        .args(["inspect", "--tarball", image_path])
         .output()
-        .with_context(|| format!("Failed to run skopeo inspect on {}", image_path))?;
+        .with_context(|| format!("Failed to run doca inspect on {}", image_path))?;
 
     if !output.status.success() {
         bail!(
-            "skopeo inspect failed for {}: {}",
+            "doca inspect failed for {}: {}",
             image_path,
             String::from_utf8_lossy(&output.stderr)
         );

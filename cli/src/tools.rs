@@ -133,6 +133,13 @@ pub fn get_tool_path_custom(tool: &str, env_var: &str) -> String {
 /// This module doesn't enforce these names - you can pass any string to `get_tool_path`.
 /// These constants are provided for convenience and discoverability.
 pub mod tools {
+    /// doca — the one fleet container tool (substrate#oci-push). Replaces
+    /// SKOPEO below. Resolved via `DOCA_BIN`, falling back to `oci-push` on
+    /// PATH; the nix closure that ships forge bakes it in.
+    pub const DOCA: &str = "oci-push";
+    /// RETIRED in favour of [`DOCA`]. Kept per MODULARIZE-DON'T-DELETE — the
+    /// constant still resolves so any out-of-tree caller keeps building — but
+    /// no forge code path invokes skopeo any more.
     pub const SKOPEO: &str = "skopeo";
     pub const ATTIC: &str = "attic";
     pub const KUBECTL: &str = "kubectl";
