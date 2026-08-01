@@ -646,19 +646,20 @@ async fn verify_image_in_registry(registry: &str, full_tag_suffix: &str) -> Resu
 
     println!("   🔍 Verifying image in registry: {}", full_tag.dimmed());
 
-    let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-    let output = Command::new(&skopeo)
-        .args(&[
-            "inspect",
-            "--creds",
-            &format!("{}:{}", organization, github_token),
-            "--format",
-            "{{.Digest}}",
-            &format!("docker://{}", full_tag),
-        ])
+    let doca = get_tool_path("DOCA_BIN", "oci-push");
+    // CREDENTIALS BY ENV, NEVER ARGV: `--creds <org>:<token>` put the token in
+    // /proc/<pid>/cmdline, readable by any co-tenant process on a shared runner
+    // for as long as the command ran. doca reads INPUT_USER / INPUT_PASS.
+    //
+    // `--digest-only` replaces `--format {{.Digest}}` — both emit the OCI
+    // manifest digest (`sha256:…`) and nothing else, so parsing is unchanged.
+    let output = Command::new(&doca)
+        .args(["inspect", "--ref", &full_tag, "--digest-only"])
+        .env("INPUT_USER", organization)
+        .env("INPUT_PASS", &github_token)
         .output()
         .await
-        .context("Failed to run skopeo inspect")?;
+        .context("Failed to run doca inspect")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

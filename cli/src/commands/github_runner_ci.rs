@@ -713,15 +713,15 @@ async fn push_with_retry(
         Err(e) => anyhow::bail!("Image file not found at {}: {}", image_path, e),
     }
 
-    let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
+    let doca = get_tool_path("DOCA_BIN", "oci-push");
 
-    // Pre-loop: skopeo must be available. Same structural precondition.
-    debug!("Checking if skopeo is available at: {}", skopeo);
-    let skopeo_check = Command::new(&skopeo).arg("--version").output().await;
+    // Pre-loop: doca must be available. Same structural precondition.
+    debug!("Checking if doca is available at: {}", doca);
+    let skopeo_check = Command::new(&doca).arg("--version").output().await;
     match skopeo_check {
         Ok(output) if output.status.success() => {
             debug!(
-                "Found skopeo: {}",
+                "Found doca: {}",
                 String::from_utf8_lossy(&output.stdout).trim()
             );
         }
@@ -755,22 +755,42 @@ async fn push_with_retry(
     let policy = RetryPolicy::network_or_immediate(safe_mode);
     let op = format!("push {}:{}", registry, tag);
 
+    // doca takes --registry/--image separately; a base with no '/' is refused
+    // rather than guessed, since a wrong split pushes to the wrong repository.
+    let (host, image) = registry
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("registry {registry:?} has no '/', cannot split host from image"))?;
+    let host = host.to_string();
+    let image = image.to_string();
+
     let result = retry_command(&policy, &op, |attempt| {
-        let skopeo = skopeo.clone();
+        let doca = doca.clone();
         let organization = organization.clone();
         let op = op.clone();
         let policy = policy.clone();
+        let host = host.clone();
+        let image = image.clone();
         async move {
             debug!("Pushing {}:{} (attempt {})", registry, tag, attempt);
-            let outcome = Command::new(&skopeo)
+            // CREDENTIALS BY ENV, NEVER ARGV: `--dest-creds=<org>:<token>` put
+            // the token in /proc/<pid>/cmdline, world-readable on a shared
+            // runner. `--retry-times` dropped as a redundant inner retry loop —
+            // doca's push_with_retry backs off and distinguishes transient from
+            // permanent failures.
+            let outcome = Command::new(&doca)
                 .args([
-                    "copy",
-                    "--insecure-policy",
-                    &format!("--retry-times={}", retries),
-                    &format!("--dest-creds={}:{}", organization, token),
-                    &format!("docker-archive:{}", image_path),
-                    &format!("docker://{}:{}", registry, tag),
+                    "push",
+                    "--tarball",
+                    image_path,
+                    "--registry",
+                    &host,
+                    "--image",
+                    &image,
+                    "--tag",
+                    tag,
                 ])
+                .env("INPUT_DEST_USER", &organization)
+                .env("INPUT_DEST_PASS", token)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .output()

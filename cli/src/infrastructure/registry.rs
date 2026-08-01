@@ -215,23 +215,51 @@ impl RegistryClient {
         let policy = RetryPolicy::network_with_max_attempts(retries);
         let op = format!("push {}:{}", registry, tag);
 
+        // doca wants --registry/--image separately where skopeo took one
+        // composed reference. Split on the FIRST '/' and REFUSE a base with no
+        // '/': a wrong split pushes to the wrong repository rather than
+        // failing, so guessing here would be worse than erroring.
+        let (host, image) = registry.split_once('/').ok_or_else(|| {
+            RegistryError::LocalImageNotFound {
+                path: format!("registry {registry:?} has no '/', cannot split host from image"),
+            }
+        })?;
+        let host = host.to_string();
+        let image = image.to_string();
+
         let result = retry_command(&policy, &op, |attempt| {
             let op = op.clone();
             let policy = policy.clone();
+            let host = host.clone();
+            let image = image.clone();
             async move {
-                let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-                let outcome = Command::new(&skopeo)
+                let doca = get_tool_path("DOCA_BIN", "oci-push");
+                // ── CREDENTIALS BY ENV, NEVER ARGV. ─────────────────────────
+                // This previously passed `--dest-creds=<org>:<token>` on the
+                // command line. /proc/<pid>/cmdline is world-readable, so on a
+                // shared runner any co-tenant process could read the GHCR token
+                // for as long as the push ran. doca reads INPUT_DEST_USER /
+                // INPUT_DEST_PASS from the environment, which is not.
+                //
+                // skopeo's `--retry-times` is dropped deliberately, not lost:
+                // it was a second retry loop nested inside forge's own
+                // retry_command above, and doca's push_with_retry already backs
+                // off exponentially while distinguishing transient failures
+                // from permanent ones (a 401 does not burn the budget).
+                let outcome = Command::new(&doca)
                     .args([
-                        "copy",
-                        "--insecure-policy",
-                        &format!("--retry-times={}", retries),
-                        &format!(
-                            "--dest-creds={}:{}",
-                            self.credentials.organization, self.credentials.token
-                        ),
-                        &format!("docker-archive:{}", image_path),
-                        &format!("docker://{}:{}", registry, tag),
+                        "push",
+                        "--tarball",
+                        image_path,
+                        "--registry",
+                        &host,
+                        "--image",
+                        &image,
+                        "--tag",
+                        tag,
                     ])
+                    .env("INPUT_DEST_USER", &self.credentials.organization)
+                    .env("INPUT_DEST_PASS", &self.credentials.token)
                     .stdout(Stdio::null())
                     .stderr(Stdio::piped())
                     .output()
@@ -268,18 +296,24 @@ impl RegistryClient {
         registry: &str,
         tag: &str,
     ) -> Result<String, RegistryError> {
-        let skopeo = get_tool_path("SKOPEO_BIN", "skopeo");
-        let captured = Command::new(&skopeo)
+        let doca = get_tool_path("DOCA_BIN", "oci-push");
+        // CREDENTIALS BY ENV, NEVER ARGV — `--creds=<org>:<token>` put the
+        // token in /proc/<pid>/cmdline, readable by any co-tenant process on a
+        // shared runner. doca reads INPUT_USER / INPUT_PASS from the
+        // environment instead.
+        //
+        // `--digest-only` replaces skopeo's `--format {{.Digest}}`: both print
+        // the OCI manifest digest (`sha256:…`) and nothing else, so the caller's
+        // parsing is unchanged.
+        let captured = Command::new(&doca)
             .args([
                 "inspect",
-                &format!(
-                    "--creds={}:{}",
-                    self.credentials.organization, self.credentials.token
-                ),
-                "--format",
-                "{{.Digest}}",
-                &format!("docker://{}:{}", registry, tag),
+                "--ref",
+                &format!("{}:{}", registry, tag),
+                "--digest-only",
             ])
+            .env("INPUT_USER", &self.credentials.organization)
+            .env("INPUT_PASS", &self.credentials.token)
             .output()
             .await;
 
