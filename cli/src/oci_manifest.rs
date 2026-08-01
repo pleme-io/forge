@@ -9335,6 +9335,44 @@ pub fn image_reference(repository: &str, tag: &str) -> String {
 mod tests {
     use super::*;
 
+    /// ★ THE EMPTY FINGERPRINT COLLAPSES TWO DISTINCT FAILURES INTO ONE VALUE
+    /// THAT LOOKS LIKE A REAL ANSWER.
+    ///
+    /// `canonical_manifest_fingerprint` returns `String::new()` both when the
+    /// input does not parse at all AND when it parses but carries no digests
+    /// (`{}`, or a registry error object served with a 200). Callers then
+    /// BLAKE3 that empty string, producing a valid-looking hash that is
+    /// IDENTICAL for every such image — so an attestation can claim to pin a
+    /// manifest while pinning nothing, and two different images attest to the
+    /// same manifest_hash.
+    ///
+    /// This test pins the collapse so the guard at the call site cannot be
+    /// removed without something going red.
+    #[test]
+    fn empty_fingerprint_is_indistinguishable_across_unrelated_failures() {
+        let unparseable = canonical_manifest_fingerprint("this is not json at all");
+        let parses_no_digests = canonical_manifest_fingerprint("{}");
+        let registry_error_object =
+            canonical_manifest_fingerprint(r#"{"errors":[{"code":"MANIFEST_UNKNOWN"}]}"#);
+
+        assert_eq!(unparseable, "");
+        assert_eq!(parses_no_digests, "");
+        assert_eq!(registry_error_object, "");
+        // Three unrelated failures, one value. Any caller that hashes this
+        // without checking is recording a receipt about nothing.
+        assert_eq!(unparseable, registry_error_object);
+
+        // POSITIVE CONTROL: a real manifest must NOT fingerprint empty, or the
+        // assertions above would hold for a trivial reason (the function
+        // always returning "").
+        let real = canonical_manifest_fingerprint(
+            r#"{"config":{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+                "layers":[{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}"#,
+        );
+        assert!(!real.is_empty(), "a well-formed manifest must fingerprint");
+        assert_ne!(real, unparseable);
+    }
+
     /// A realistic 64-char lowercase-hex SHA-256 digest body fixture.
     const D1: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     /// A second distinct SHA-256 digest body so order / dedup tests can show
