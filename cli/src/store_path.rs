@@ -6332,6 +6332,161 @@ impl From<&StorePath> for std::rc::Rc<[u8]> {
     }
 }
 
+/// By-reference borrowed-or-owned-byte-slice emit peer for [`StorePath`] via
+/// [`std::borrow::Cow<'static, [u8]>`] — the tenth and closing step of the
+/// by-reference owned-emit frontier opened by
+/// [`From<&StorePath> for String`] (line 5265) and extended by
+/// [`From<&StorePath> for Vec<u8>`] (line 5384),
+/// [`From<&StorePath> for Box<str>`] (line 5497),
+/// [`From<&StorePath> for Cow<'static, str>`] (line 5620),
+/// [`From<&StorePath> for Arc<str>`] (line 5746),
+/// [`From<&StorePath> for Rc<str>`] (line 5883),
+/// [`From<&StorePath> for Box<[u8]>`] (line 6025),
+/// [`From<&StorePath> for Arc<[u8]>`] (line 6177), and
+/// [`From<&StorePath> for Rc<[u8]>`] (line 6329), chaining through the same
+/// by-reference [`Vec<u8>`] one-oracle discipline every by-reference
+/// byte-side emit peer in the family routes through, mirroring how the
+/// by-value [`From<StorePath> for Cow<'static, [u8]>`] (line 5185) chained
+/// through the by-value [`Vec<u8>`] one-oracle every by-value byte-side emit
+/// peer routes through.
+///
+/// Delegates through `std::borrow::Cow::Owned(Vec::<u8>::from(sp))`:
+/// [`From<&StorePath> for Vec<u8>`] copies the borrowed
+/// [`StorePath::as_str`] view's byte projection into a fresh [`Vec<u8>`] at
+/// one allocation without consuming the source; the stdlib
+/// [`std::borrow::Cow::Owned`] arm then wraps that fresh [`Vec<u8>`] as-is —
+/// no fresh allocation, no buffer copy, no refcount header. A by-reference
+/// emit cannot land in the [`std::borrow::Cow::Borrowed`] arm without
+/// fabricating a `'static` reference from a runtime buffer, so the owned
+/// arm is the only valid landing site: pinned by the
+/// [`std::borrow::Cow::is_owned`] discipline in
+/// [`tests::test_from_store_path_ref_cow_bytes_matches_by_value_peer`].
+/// Source [`StorePath`] left available for further reads.
+///
+/// # Frontier-blanket calculus — closing the by-reference frontier
+///
+/// The [`From<&StorePath> for Vec<u8>`] impl doc records that stdlib blanket
+/// `impl<T: AsRef<OsStr> + ?Sized> From<&T> for {PathBuf, OsString}` fires
+/// for `T = StorePath` through this crate's [`AsRef<OsStr>`] peer (line
+/// 1920) and forbids a custom by-reference peer at those two shapes
+/// (E0119). [`Cow<'static, [u8]>`] carries no such stdlib blanket: stdlib
+/// provides `impl<'a> From<&'a [u8]> for Cow<'a, [u8]>` (which the by-value
+/// peer's downstream sites reach through `.as_ref().into()` in pre-peer
+/// call sites at the borrowed-arm lifetime), but the `&'a [u8]` receiver
+/// is a concrete type at a specific lifetime, not a generic bound, so it
+/// does not fire for `T = &StorePath` (which is not `&[u8]`-shaped and
+/// cannot be deref-coerced through [`From`]). The by-reference
+/// [`Cow<'static, [u8]>`] peer therefore opens the frontier the stdlib
+/// blanket doesn't reach and does so at the same one-oracle discipline the
+/// preceding nine by-reference frontier peers established.
+///
+/// This is the closing peer of the by-reference owned-emit frontier: with
+/// this landing, every non-blanketed owned shape on both the UTF-8-string
+/// axis and the raw-byte-slice axis — `{String, Vec<u8>, Box<str>,
+/// Cow<'static, str>, Arc<str>, Rc<str>, Box<[u8]>, Arc<[u8]>, Rc<[u8]>,
+/// Cow<'static, [u8]>}` — has a by-reference emit peer symmetric to its
+/// by-value sibling, and the two frontier axes close in symmetric shape
+/// (five UTF-8-string peers, five raw-byte-slice peers). The
+/// remaining by-value-only shapes ([`PathBuf`], [`std::ffi::OsString`]) are
+/// stdlib-blanketed at the by-reference frontier and do not admit a
+/// custom impl.
+///
+/// # Why the trait peer earns its keep
+///
+/// The by-value [`From<StorePath> for Cow<'static, [u8]>`] (line 5185)
+/// covers the by-value borrowed-or-owned byte-slice emit frontier. But a
+/// large family of downstream sites hold a [`&StorePath`], not an owned
+/// [`StorePath`], and must not consume the source:
+///
+/// - Iteration over a `[StorePath]` / `Vec<StorePath>` / `&[StorePath]`
+///   collection (a closure listing from
+///   [`crate::store_path::parse_closure_paths`], a derivation-input
+///   manifest, an attestation-adjacent per-input path list) where each
+///   element must project into a [`Cow<'static, [u8]>`] for downstream
+///   `serde_bytes`-derived record insertion, a `Vec<Cow<'static, [u8]>>`
+///   intern-pool accumulation, or a
+///   `HashMap<Cow<'static, [u8]>, _>` key slot — the by-value peer's move
+///   consumes the element, which iteration cannot afford. Pre-peer the
+///   site had to write
+///   `Cow::Owned(<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec())` or
+///   `Cow::Owned(String::from(&sp).into_bytes())` at every consumer;
+///   post-peer `Cow::<[u8]>::from(sp)` or `sp.into()` reads through this
+///   impl.
+/// - `&StorePath`-typed method receivers or function arguments (a
+///   pipeline-step primitive inspecting a store path without ownership, an
+///   attestation record builder borrowing its inputs, a canonical-byte-label
+///   extractor accepting a borrow) projecting into an
+///   `impl Into<Cow<'static, [u8]>>` sink at their downstream boundary —
+///   the by-value peer requires a `sp.clone().into()` at the boundary if
+///   the caller still needs the value; the by-reference peer avoids the
+///   clone.
+/// - Trait objects and generic bounds that admit `&T` conversions through
+///   the standard `impl<T> From<&T> for T::Owned`
+///   [`ToOwned`](std::borrow::ToOwned) family — the by-reference peer
+///   completes the [`From<&StorePath>`] symmetry the by-value
+///   [`From<StorePath>`] emit peer requires to compose in trait-generic
+///   contexts (a wire-frame builder receiving `&StorePath` and handing it
+///   into an `impl Into<Cow<'static, [u8]>>` payload slot, a
+///   `#[serde(into = "Cow<'static, [u8]>")]`-decorated field emitter, a
+///   content-addressed byte-payload sink typed on
+///   `impl Into<Cow<'static, [u8]>>` from a borrowed iteration).
+///
+/// The chain-through-`From<&StorePath> for Vec<u8>` design is the
+/// one-oracle discipline THEORY §VI.1 demands: the emitted canonical bytes
+/// travel through the same by-reference [`Vec<u8>`] projection every
+/// by-reference byte-side emit peer routes through (and, transitively, the
+/// same borrowed-view [`AsRef<[u8]>`] peer the by-value emit peers'
+/// [`StorePath::into_string`] backing surfaces), so a future canonical-form
+/// refinement to the backing string (a tighter trim, a `SmartString`
+/// handle, a canonicalising projection at the read surface) lands at one
+/// site (the [`AsRef<str>`] impl at line 1684, which the [`AsRef<[u8]>`]
+/// impl reads through) and every by-reference owned-emit peer in the
+/// family inherits it automatically. A per-impl direct call to
+/// `Cow::Owned(sp.as_str().as_bytes().to_vec())` here would work today but
+/// would ossify the "as_str -> as_bytes -> to_vec" three-step at the
+/// by-reference emit surface; the `Cow::Owned(Vec::<u8>::from(sp))` chain
+/// reads through the by-reference [`Vec<u8>`] frontier-opener so the
+/// family stays composable by construction.
+///
+/// # Symmetric closure with the parse frontier
+///
+/// The symmetric by-reference emit-side sibling of the by-value
+/// [`TryFrom<Cow<'_, [u8]>> for StorePath`] (line 1189): a consumer that
+/// receives a borrowed-or-owned byte-slice buffer from a
+/// [`serde_bytes`]-adjacent field or a helper argument, parses it into a
+/// [`StorePath`], validates it, and hands the *validated* value back out
+/// as a [`Cow<'static, [u8]>`] at its own downstream boundary without
+/// consuming the source (a common pattern where the validated value is
+/// also cached for follow-up projections) reads through this peer without
+/// a `sp.clone().into()` bridge.
+///
+/// # Identity invariants pinned
+///
+/// - `Cow::<[u8]>::from(&sp) == Cow::<[u8]>::from(sp.clone())` (matches
+///   the by-value peer's projection byte-for-byte) — pinned by
+///   [`tests::test_from_store_path_ref_cow_bytes_matches_by_value_peer`].
+/// - Trim-discipline preservation: a `\n`-terminated raw input emits a
+///   [`Cow<'static, [u8]>`] whose bytes equal the trimmed canonical form —
+///   pinned by
+///   [`tests::test_from_store_path_ref_cow_bytes_carries_trim_discipline`].
+/// - Trait-generic composition: an `impl Into<Cow<'static, [u8]>>`
+///   consumer holding a [`&StorePath`] projects the same canonical bytes —
+///   pinned by
+///   [`tests::test_from_store_path_ref_cow_bytes_carries_through_generic_consumer`].
+/// - Owned-arm discipline: the emitted [`Cow`] is
+///   [`std::borrow::Cow::Owned`] (a by-reference emit that allocated a
+///   fresh [`Vec<u8>`] cannot land in the borrowed arm without fabricating
+///   a `'static` reference from a runtime buffer) — pinned by
+///   [`tests::test_from_store_path_ref_cow_bytes_matches_by_value_peer`].
+/// - Source-preservation: the source [`StorePath`] remains usable after
+///   the emit (the by-reference peer does not consume) — pinned by
+///   [`tests::test_from_store_path_ref_cow_bytes_preserves_source`].
+impl From<&StorePath> for std::borrow::Cow<'static, [u8]> {
+    fn from(sp: &StorePath) -> std::borrow::Cow<'static, [u8]> {
+        std::borrow::Cow::Owned(Vec::<u8>::from(sp))
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -14352,6 +14507,170 @@ mod tests {
         assert_eq!(&*first, expected);
         assert_eq!(&*second, expected);
         assert_eq!(&*third, expected);
+        assert_eq!(sp.as_str(), raw);
+        assert_eq!(sp.hash(), &raw["/nix/store/".len()..][..32]);
+    }
+
+    /// [`From<&StorePath> for std::borrow::Cow<'static, [u8]>`] projects
+    /// the same canonical bytes the by-value
+    /// [`From<StorePath> for std::borrow::Cow<'static, [u8]>`] peer emits
+    /// and every by-reference byte-side projection surfaces — pins the
+    /// "by-reference emit peer routes through the same one-oracle backing
+    /// every projection reads from" invariant across every canonical
+    /// store-path shape. Owned-arm discipline: a by-reference emit that
+    /// allocated a fresh [`Vec<u8>`] via the by-reference [`Vec<u8>`]
+    /// peer cannot land in the [`std::borrow::Cow::Borrowed`] arm without
+    /// fabricating a `'static` reference from a runtime buffer, so the
+    /// [`std::borrow::Cow::is_owned`] gate must hold at every shape.
+    #[test]
+    fn test_from_store_path_ref_cow_bytes_matches_by_value_peer() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let by_ref_emit: std::borrow::Cow<'static, [u8]> =
+                <std::borrow::Cow<'static, [u8]> as From<&StorePath>>::from(&sp);
+            let by_ref_into: std::borrow::Cow<'static, [u8]> = (&sp).into();
+            let by_val_emit: std::borrow::Cow<'static, [u8]> =
+                <std::borrow::Cow<'static, [u8]> as From<StorePath>>::from(sp.clone());
+            let via_as_ref: std::borrow::Cow<'static, [u8]> =
+                std::borrow::Cow::Owned(<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec());
+            let via_as_str_bytes: std::borrow::Cow<'static, [u8]> =
+                std::borrow::Cow::Owned(sp.as_str().as_bytes().to_vec());
+            let via_ref_vec: std::borrow::Cow<'static, [u8]> =
+                std::borrow::Cow::Owned(Vec::<u8>::from(&sp));
+            let via_ref_string_bytes: std::borrow::Cow<'static, [u8]> =
+                std::borrow::Cow::Owned(String::from(&sp).into_bytes());
+            assert_eq!(
+                by_ref_emit, by_val_emit,
+                "From<&StorePath> for Cow<'static, [u8]> must match From<StorePath> for Cow<'static, [u8]> byte-for-byte"
+            );
+            assert_eq!(by_ref_emit, by_ref_into, "From vs Into consistency");
+            assert_eq!(
+                by_ref_emit, via_as_ref,
+                "must match Cow::Owned(<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec())"
+            );
+            assert_eq!(
+                by_ref_emit, via_as_str_bytes,
+                "must match Cow::Owned(sp.as_str().as_bytes().to_vec())"
+            );
+            assert_eq!(
+                by_ref_emit, via_ref_vec,
+                "must match Cow::Owned(Vec::<u8>::from(&sp))"
+            );
+            assert_eq!(
+                by_ref_emit, via_ref_string_bytes,
+                "must match Cow::Owned(String::from(&sp).into_bytes())"
+            );
+            assert_eq!(
+                by_ref_emit.as_ref(),
+                raw.as_bytes(),
+                "on whitespace-free input must equal raw.as_bytes()"
+            );
+            assert!(
+                matches!(&by_ref_emit, std::borrow::Cow::Owned(_)),
+                "From<&StorePath> for Cow<'static, [u8]> must land in the Owned arm (a by-reference emit cannot forge a 'static borrow from a runtime buffer)"
+            );
+            // Payload-preserving discipline: the emitted Cow's deref
+            // length equals the payload byte count, so a `<Cow<'_, [u8]>
+            // as AsRef<[u8]>>` sink sees the canonical form byte-for-byte
+            // with no capacity slack visible through the Cow surface.
+            assert_eq!(by_ref_emit.as_ref().len(), raw.len());
+        }
+    }
+
+    /// [`From<&StorePath> for std::borrow::Cow<'static, [u8]>`] carries
+    /// [`StorePath::parse`]'s trim discipline through the by-reference
+    /// borrowed-or-owned byte-slice emit surface — a value parsed from a
+    /// newline-terminated nix-frontier stdout buffer emits a
+    /// [`Cow<'static, [u8]>`] whose bytes are the trimmed canonical form
+    /// with no per-site
+    /// `Cow::Owned(sp.as_str().trim().as_bytes().to_vec())`
+    /// restatement.
+    #[test]
+    fn test_from_store_path_ref_cow_bytes_carries_trim_discipline() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-x\n")).expect("valid");
+        let emitted: std::borrow::Cow<'static, [u8]> =
+            <std::borrow::Cow<'static, [u8]> as From<&StorePath>>::from(&sp);
+        let expected = format!("/nix/store/{H}-x").into_bytes();
+        assert_eq!(emitted.as_ref(), expected.as_slice());
+        assert!(
+            !emitted.as_ref().ends_with(b"\n"),
+            "trailing newline must be trimmed"
+        );
+        assert!(
+            !emitted.as_ref().starts_with(b" "),
+            "leading whitespace must be trimmed"
+        );
+        // Payload matches the trimmed canonical bytes exactly.
+        assert_eq!(emitted.as_ref().len(), sp.as_str().len());
+        assert!(
+            matches!(&emitted, std::borrow::Cow::Owned(_)),
+            "trim-carrying emit still lands in the Owned arm"
+        );
+    }
+
+    /// The [`From<&StorePath> for std::borrow::Cow<'static, [u8]>`] impl
+    /// composes with a generic borrowed-or-owned-byte-slice helper bounded
+    /// by `impl Into<std::borrow::Cow<'static, [u8]>>` receiving a
+    /// [`&StorePath`] — the compositional motivation for landing the
+    /// by-reference peer separately from the by-value
+    /// [`From<StorePath> for std::borrow::Cow<'static, [u8]>`] emit peer.
+    /// Pins the trait-generic consumer surface: a downstream site holding
+    /// a [`&StorePath`] (an iteration over a `[StorePath]` slice, an
+    /// attestation record builder borrowing its inputs, a wire-frame
+    /// builder `&self`-receiver method that types its input contract as
+    /// `impl Into<Cow<'static, [u8]>>`, a `#[serde(into = "Cow<'static,
+    /// [u8]>")]`-decorated field emitter) recovers the same validated
+    /// bytes a direct
+    /// `Cow::Owned(<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec())`
+    /// call would.
+    #[test]
+    fn test_from_store_path_ref_cow_bytes_carries_through_generic_consumer() {
+        fn len_of<T: Into<std::borrow::Cow<'static, [u8]>>>(t: T) -> usize {
+            let s: std::borrow::Cow<'static, [u8]> = t.into();
+            s.len()
+        }
+        fn to_utf8<T: Into<std::borrow::Cow<'static, [u8]>>>(t: T) -> String {
+            let s: std::borrow::Cow<'static, [u8]> = t.into();
+            std::str::from_utf8(&s).expect("valid utf-8").to_owned()
+        }
+        fn owned_eq<T: Into<std::borrow::Cow<'static, [u8]>>>(t: T, expected: &[u8]) -> bool {
+            let s: std::borrow::Cow<'static, [u8]> = t.into();
+            s.as_ref() == expected
+        }
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp = StorePath::parse(&raw).expect("valid");
+        assert_eq!(len_of(&sp), raw.len());
+        assert_eq!(to_utf8(&sp), raw);
+        assert!(owned_eq(&sp, raw.as_bytes()));
+    }
+
+    /// [`From<&StorePath> for std::borrow::Cow<'static, [u8]>`] does NOT
+    /// consume the source [`StorePath`] — the borrowed emit surface must
+    /// leave the value available for further reads. Pins the load-bearing
+    /// distinction from the by-value
+    /// [`From<StorePath> for std::borrow::Cow<'static, [u8]>`] peer: an
+    /// iteration over a `[StorePath]` slice or a `&StorePath`-receiver
+    /// method that emits an owned [`Cow<'static, [u8]>`] must retain the
+    /// source for downstream consumers on the same expression, which the
+    /// by-value peer's move discipline forbids.
+    #[test]
+    fn test_from_store_path_ref_cow_bytes_preserves_source() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp = StorePath::parse(&raw).expect("valid");
+        let first: std::borrow::Cow<'static, [u8]> =
+            <std::borrow::Cow<'static, [u8]> as From<&StorePath>>::from(&sp);
+        let second: std::borrow::Cow<'static, [u8]> =
+            <std::borrow::Cow<'static, [u8]> as From<&StorePath>>::from(&sp);
+        let third: std::borrow::Cow<'static, [u8]> = (&sp).into();
+        let expected = raw.as_bytes();
+        assert_eq!(first.as_ref(), expected);
+        assert_eq!(second.as_ref(), expected);
+        assert_eq!(third.as_ref(), expected);
         assert_eq!(sp.as_str(), raw);
         assert_eq!(sp.hash(), &raw["/nix/store/".len()..][..32]);
     }
