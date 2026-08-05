@@ -8,8 +8,8 @@ use tokio::time::sleep;
 
 use crate::config::DeployConfig;
 use crate::flux_get::{
-    get_kustomization_scoped, list_kustomizations_all_namespaces, FluxGetKustomizationsError,
-    KustomizationRow,
+    get_kustomization_scoped, list_kustomizations_all_namespaces, list_kustomizations_in_namespace,
+    FluxGetKustomizationsError, KustomizationRow,
 };
 
 /// FluxCD health check before and after deployments.
@@ -875,21 +875,35 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
         }
     }
 
-    // 8. Flux kustomization status for namespace
-    if let Ok(output) = Command::new("flux")
-        .args(["get", "kustomizations", "-n", "flux-system"])
-        .output()
-        .await
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let relevant: Vec<&str> = stdout
-            .lines()
-            .filter(|l| l.contains(namespace) || l.starts_with("NAME"))
+    // 8. Flux kustomization status for namespace — route through the
+    //    canonical `flux_get::list_kustomizations_in_namespace` primitive
+    //    (the last raw `Command::new("flux")` stanza in forge, redeemed
+    //    here) so this site honors `FLUX_BIN` (via `get_tool_path("flux")`),
+    //    reads `is_ready` through the one-oracle boundary
+    //    `KustomizationRow` owns, and yields typed
+    //    `FluxGetKustomizationsError` on failure. Best-effort diagnostic:
+    //    if the primitive errors, we silently omit this subsection —
+    //    matching the pre-lift `if let Ok(output) = ...` arm.
+    if let Ok(rows) = list_kustomizations_in_namespace("flux-system").await {
+        // Preserve the pre-lift substring semantic: the raw filter was
+        // `l.contains(namespace)` on the whole tabular line, which matched
+        // rows whose NAME encoded the namespace by convention (e.g.
+        // `alpha-init`, `alpha-app`) AND rows whose MESSAGE mentioned the
+        // namespace (e.g. `dependency 'flux-system/alpha' is not ready`).
+        // Post-lift, we filter typed rows by the same two fields to keep
+        // the operator-visible diagnostic scope unchanged.
+        let relevant: Vec<&KustomizationRow> = rows
+            .iter()
+            .filter(|r| r.name.contains(namespace) || r.message.contains(namespace))
             .collect();
-        if relevant.len() > 1 {
+        if !relevant.is_empty() {
             diag.push_str("\n  Flux Kustomizations:\n");
-            for line in &relevant {
-                diag.push_str(&format!("    {}\n", line));
+            diag.push_str("    NAME  REVISION  SUSPENDED  READY  MESSAGE\n");
+            for row in &relevant {
+                diag.push_str(&format!(
+                    "    {}  {}  {}  {}  {}\n",
+                    row.name, row.revision, row.suspended, row.ready, row.message
+                ));
             }
         }
     }
