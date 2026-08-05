@@ -483,6 +483,35 @@ pub fn git_command_async() -> tokio::process::Command {
     tokio::process::Command::new(get_tool_path(tools::GIT))
 }
 
+/// Sync sibling of [`git_command_async`]: returns a
+/// [`std::process::Command`] whose program is the `GIT_BIN`-resolved
+/// path to `git`, ready for `.args(...)` + `.status()` /
+/// `.output()` on blocking (non-tokio) code paths.
+///
+/// Companion to `git_command_async` for the sync half of the
+/// free-function surface. Async consumers (`commands/push.rs` /
+/// `commands/rollback.rs` / `commands/codegen_validation.rs` /
+/// `commands/federation.rs`) route through `git_command_async`;
+/// blocking consumers such as `commands/helm.rs::deploy` — invoked
+/// from `main.rs` outside any tokio runtime — route through this
+/// sibling so both halves honor the `GIT_BIN` env override the
+/// tools-registry idiom names as the hermetic-runner contract for
+/// [`tools::GIT`].
+///
+/// Names the discipline once so future blocking-git sites (e.g. the
+/// remaining `Command::new("git")` sites in `commands/helm.rs::bump`,
+/// `commands/e2e.rs::resolve_repo_root`, `config/mod.rs::
+/// resolve_k8s_repo_root`, `commands/rust_service.rs`, and
+/// `commands/product_release.rs` / `commands/release_commit.rs`) lift
+/// through the same constructor rather than each re-spelling the
+/// literal `"git"` — the exact class of bug the async
+/// `git_command_async` migration redeemed for the async half of the
+/// surface at 818ed9a / badcdf4 / 8653403 / f6be190 / 81d7486 /
+/// 8a1958e.
+pub fn git_command_sync() -> Command {
+    Command::new(get_tool_path(tools::GIT))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1149,6 +1178,65 @@ mod tests {
             msg.contains("git diff"),
             "run_inherited_status must surface the op label via the \
              anyhow message; got: {msg:?}"
+        );
+    }
+
+    /// [`git_command_sync`] MUST resolve the `git` binary through
+    /// [`crate::tools::get_tool_path`] on the canonical `tools::GIT`
+    /// name — i.e. it honors the `GIT_BIN` env override the
+    /// tools-registry idiom names as the hermetic-runner contract,
+    /// and never hardcodes the literal `"git"` on the spawn path.
+    ///
+    /// Two-arm pin, mirroring the sibling
+    /// [`test_git_command_async_routes_through_git_bin_env_var`].
+    /// The static arm reads the returned Command's program directly
+    /// (`Command::get_program()`) and asserts it equals the resolved
+    /// shim path verbatim — proves the constructor resolves through
+    /// `get_tool_path(tools::GIT)` without ever spawning. The
+    /// end-to-end arm spawns the same Command through the blocking
+    /// `.status()` shape every sync consumer (`commands/helm.rs::deploy`
+    /// and future `helm::bump` / `e2e::resolve_repo_root` /
+    /// `config/mod::resolve_k8s_repo_root` migrations) drives and
+    /// asserts the shim's exit code rides through verbatim — proves
+    /// the resolution isn't just stringly-equal but actually spawns
+    /// the shim end-to-end. A regression that "tidies"
+    /// `git_command_sync` back to `Command::new("git")` fails the
+    /// program-name assertion.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[test]
+    fn test_git_command_sync_routes_through_git_bin_env_var() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let (_shim_dir, shim) = make_git_shim(
+            "#!/bin/sh\necho 'SIGIL_ROUTED_VIA_GIT_COMMAND_SYNC_4a1c8e' 1>&2\nexit 63\n",
+        );
+        let _scope = GitBinScope::set(&shim);
+
+        // Static arm: the returned Command's program is the
+        // GIT_BIN-resolved path, not the literal "git".
+        let cmd = git_command_sync();
+        assert_eq!(
+            cmd.get_program(),
+            std::ffi::OsStr::new(&shim),
+            "git_command_sync() must resolve through GIT_BIN, not hardcode \"git\""
+        );
+
+        // End-to-end arm: spawning through the blocking `.status()`
+        // shape (the consumer surface for helm::deploy) surfaces the
+        // shim's exit code verbatim.
+        let status = git_command_sync()
+            .args(["diff", "--staged", "--quiet"])
+            .status()
+            .expect("shim must spawn");
+        assert_eq!(
+            status.code(),
+            Some(63),
+            "git_command_sync().status() must surface the shim's exit code \
+             verbatim — proves the sync constructor spawns the GIT_BIN \
+             shim end-to-end, not a PATH-resolved `git`"
         );
     }
 }

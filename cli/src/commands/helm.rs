@@ -725,18 +725,30 @@ pub fn deploy(
 
     if commit {
         info!("Committing changes...");
-        let _ = Command::new("git")
+        // Binary resolution rides `crate::git::git_command_sync()` so a
+        // Nix-hermetic runner's `GIT_BIN` override wins over ambient `PATH`
+        // — same discipline the sibling async `commands/push.rs` /
+        // `commands/rollback.rs` / `commands/codegen_validation.rs` /
+        // `commands/federation.rs` git-mutation sites honor and the same
+        // class of bug the free-function-`git` / `GitClient` migrations
+        // at 818ed9a / badcdf4 / 8653403 / f6be190 / 81d7486 / 8a1958e
+        // redeemed on the async half. Retains the pre-migration `let _ =
+        // ….status()` best-effort shape — the deploy path's commit +
+        // push are advisory (invoked with `--commit`), and the operator
+        // sees the failure via inherited stderr; changing that shape
+        // belongs in a separate lift, not in this GIT_BIN-routing pass.
+        let _ = crate::git::git_command_sync()
             .args(["add", kustomization_path])
             .current_dir(k8s_repo)
             .status();
 
         let commit_msg = format!("deploy: update {} to {}", service, image_tag);
-        let _ = Command::new("git")
+        let _ = crate::git::git_command_sync()
             .args(["commit", "-m", &commit_msg])
             .current_dir(k8s_repo)
             .status();
 
-        let _ = Command::new("git")
+        let _ = crate::git::git_command_sync()
             .args(["push"])
             .current_dir(k8s_repo)
             .status();
@@ -1800,6 +1812,80 @@ mod bump_routing_tests {
             err.to_string()
                 .contains("Invalid bump level 'xyz' — use patch, minor, or major"),
             "got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod deploy_git_bin_routing_tests {
+    /// Regression-shield: every `git`-spawning site in
+    /// `commands/helm.rs::deploy` MUST resolve the binary through
+    /// [`crate::git::git_command_sync`] rather than the pre-lift
+    /// `Command::new("git")` literal. Pre-migration three sites
+    /// (add / commit / push at lines 728 / 734 / 739) bypassed the
+    /// `GIT_BIN` env override the `tools::get_tool_path(tools::GIT)`
+    /// idiom (cli/src/tools.rs:102-105) resolves — the same class
+    /// of bug the sibling async `flux` / `cargo` / `doca` /
+    /// free-function-`git` / `GitClient` / `commands/federation.rs` /
+    /// `commands/push.rs` / `commands/codegen_validation.rs` /
+    /// `commands/rollback.rs` migrations redeemed at 621f827 /
+    /// f0dfa12 / d3dd199 / 685642f / d6f6bc7 / dd5a212 / 673e4be /
+    /// b02d4eb / 54a9985 / 139b37a / 818ed9a / badcdf4 / 8653403 /
+    /// f6be190 / 81d7486 / 8a1958e. Sync half of the same routing
+    /// discipline — the async migrations closed every
+    /// `git_command_async` surface, this shield closes the first sync
+    /// consumer (`helm::deploy`, invoked outside any tokio runtime
+    /// from `main.rs:952`).
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("git")` string does not
+    /// reappear in `deploy` while the delegation to
+    /// `git_command_sync` does. A future regression that re-fuses the
+    /// raw-spawn body fails here, not silently in production where a
+    /// Nix-hermetic runner's `GIT_BIN`-provided `git` would lose to
+    /// whatever `git` is first on `PATH` at deploy-commit-and-push
+    /// time.
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — the end-to-end
+    /// `GIT_BIN`-routing invariant is already pinned by
+    /// [`crate::git::tests::test_git_command_sync_routes_through_git_bin_env_var`]
+    /// on the primitive itself; this shield only certifies that every
+    /// `helm::deploy` git spawn reads through that primitive. Mirrors
+    /// the sibling shields on `commands/rollback.rs` /
+    /// `commands/push.rs` / `commands/codegen_validation.rs` for the
+    /// async half of the surface.
+    #[test]
+    fn test_deploy_routes_git_through_git_command_sync_not_raw_command() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        // Bound the scan to `deploy` — the three git spawn sites all
+        // live inside it. The rest of the file (`bump`, tests) uses
+        // `Command::new("git")` legitimately for now.
+        let fn_marker = "pub fn deploy(";
+        let start = SOURCE
+            .find(fn_marker)
+            .expect("helm.rs must contain `pub fn deploy(` — module invariant");
+        let after_fn = &SOURCE[start..];
+        // Bound at the next top-level `pub fn` in source order
+        // (`release`), which follows `deploy`.
+        let end_relative = after_fn
+            .find("\npub fn release(")
+            .expect("helm.rs must contain `pub fn release(` after `deploy`");
+        let fn_body = &after_fn[..end_relative];
+
+        assert!(
+            !fn_body.contains("Command::new(\"git\")"),
+            "deploy() must NOT spawn `git` directly — route through \
+             `crate::git::git_command_sync()` so `GIT_BIN` overrides \
+             land at the shared primitive. Found the pre-migration \
+             spawn body in deploy()."
+        );
+        assert!(
+            fn_body.contains("crate::git::git_command_sync()"),
+            "deploy() must delegate every git spawn to \
+             `crate::git::git_command_sync()` — the delegation string \
+             was not found in deploy()."
         );
     }
 }
