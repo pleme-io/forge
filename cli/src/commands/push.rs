@@ -163,7 +163,14 @@ pub async fn update_kustomization(
         // closes the chain at the staging boundary so a failed `git add`
         // cannot silently proceed to the `git commit` + `git push` steps
         // downstream against an unstaged kustomization.yaml.
-        let mut add_cmd = Command::new("git");
+        //
+        // Binary resolution rides `crate::git::git_command_async()` so a
+        // Nix-hermetic runner's `GIT_BIN` override wins over ambient `PATH`
+        // — same discipline the sibling `commands/federation.rs` /
+        // `commands/codegen_validation.rs` git-mutation sites honor and
+        // the same class of bug the free-function-`git` / `GitClient`
+        // migrations at 818ed9a / badcdf4 / 8653403 redeemed.
+        let mut add_cmd = crate::git::git_command_async();
         add_cmd.args(["add", kustomization_path]);
         crate::retry::run_inherited_status(add_cmd, "git add")
             .await
@@ -183,7 +190,7 @@ pub async fn update_kustomization(
         // this site to `run_inherited_status` would change semantics — it
         // would bail, breaking idempotent re-runs.
         let commit_msg = format!("deploy: update {} to {}", service_name, new_tag);
-        let commit_status = Command::new("git")
+        let commit_status = crate::git::git_command_async()
             .args(&["commit", "-m", &commit_msg])
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -200,7 +207,7 @@ pub async fn update_kustomization(
         // the structural record rather than silently returning Ok and
         // letting the caller proceed to "Kustomization committed and
         // pushed" against an unpushed branch.
-        let mut push_cmd = Command::new("git");
+        let mut push_cmd = crate::git::git_command_async();
         push_cmd.args(["push", "origin", "main"]);
         crate::retry::run_inherited_status(push_cmd, "git push")
             .await
@@ -445,6 +452,69 @@ mod tests {
              non-fatal-on-failure contract while inheriting the retry \
              policy, env resolution, and typed error dispatch — the \
              call string was not found in execute()."
+        );
+    }
+
+    /// Regression-shield: every `git`-spawning site in
+    /// `commands/push.rs::update_kustomization` MUST resolve the binary
+    /// through [`crate::git::git_command_async`] rather than the pre-lift
+    /// `Command::new("git")` literal. Pre-migration three sites (add /
+    /// commit / push at lines 166 / 186 / 203) bypassed the `GIT_BIN`
+    /// env override the `tools::get_tool_path(tools::GIT)` idiom
+    /// (cli/src/tools.rs:102-105) resolves — the same class of bug the
+    /// sibling `flux` / `cargo` / `doca` / free-function-`git` /
+    /// `GitClient` / `commands/federation.rs` migrations redeemed at
+    /// 621f827 / f0dfa12 / d3dd199 / 685642f / d6f6bc7 / dd5a212 /
+    /// 673e4be / b02d4eb / 54a9985 / 139b37a / 818ed9a / badcdf4 /
+    /// 8653403.
+    ///
+    /// This test reads this module's own source via [`include_str!`] and
+    /// asserts the raw `Command::new("git")` string does not reappear in
+    /// `update_kustomization` while the delegation to `git_command_async`
+    /// does. A future regression that re-fuses the raw-spawn body fails
+    /// here, not silently in production where a Nix-hermetic runner's
+    /// `GIT_BIN`-provided `git` would lose to whatever `git` is first on
+    /// `PATH` at deploy time.
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — the end-to-end `GIT_BIN`-routing
+    /// invariant is already pinned by
+    /// [`crate::git::tests::test_git_command_async_routes_through_git_bin_env_var`]
+    /// on the primitive itself; this shield only certifies that every
+    /// `update_kustomization` git spawn reads through that primitive.
+    /// Mirrors the sibling attic-scan shield above.
+    #[test]
+    fn test_update_kustomization_routes_git_through_git_command_async_not_raw_command() {
+        const SOURCE: &str = include_str!("push.rs");
+
+        // Bound the scan to `update_kustomization` — the three git spawn
+        // sites all live inside it. The wrapping `execute(` and the tests
+        // module below reference the pre-migration string legitimately;
+        // the docstring on this test itself does too.
+        let fn_marker = "pub async fn update_kustomization(";
+        let start = SOURCE
+            .find(fn_marker)
+            .expect("push.rs must contain `pub async fn update_kustomization(` — module invariant");
+        let after_fn = &SOURCE[start..];
+        // Bound at the next top-level `pub async fn` in the file
+        // (`execute`), which follows `update_kustomization` in source order.
+        let end_relative = after_fn
+            .find("\npub async fn execute(")
+            .expect("push.rs must contain `pub async fn execute(` after `update_kustomization`");
+        let fn_body = &after_fn[..end_relative];
+
+        assert!(
+            !fn_body.contains("Command::new(\"git\")"),
+            "update_kustomization() must NOT spawn `git` directly — route \
+             through `crate::git::git_command_async()` so `GIT_BIN` \
+             overrides land at the shared primitive. Found the \
+             pre-migration spawn body in update_kustomization()."
+        );
+        assert!(
+            fn_body.contains("crate::git::git_command_async()"),
+            "update_kustomization() must delegate every git spawn to \
+             `crate::git::git_command_async()` — the delegation string \
+             was not found in update_kustomization()."
         );
     }
 }
