@@ -444,7 +444,7 @@ pub async fn update_federation(
         bail!("Federation directory not found at: {}", federation_path);
     }
 
-    let mut git_add_cmd = Command::new("git");
+    let mut git_add_cmd = crate::git::git_command_async();
     git_add_cmd.args(&["add", &federation_path]);
     run_inherited_status(git_add_cmd, "git add")
         .await
@@ -456,7 +456,7 @@ pub async fn update_federation(
     }
 
     // Also stage the hive-router supergraph copy
-    let mut git_add_router_cmd = Command::new("git");
+    let mut git_add_router_cmd = crate::git::git_command_async();
     git_add_router_cmd.args(&["add", &hive_router_path]);
     run_inherited_status(git_add_router_cmd, "git add")
         .await
@@ -470,7 +470,7 @@ pub async fn update_federation(
     // Also stage the hive-router deployment (contains updated supergraph hash annotation)
     let router_deployment_rel_path = paths.to_relative_string(&router_deployment_path);
 
-    let mut git_add_deployment_cmd = Command::new("git");
+    let mut git_add_deployment_cmd = crate::git::git_command_async();
     git_add_deployment_cmd.args(&["add", &router_deployment_rel_path]);
     run_inherited_status(git_add_deployment_cmd, "git add")
         .await
@@ -482,7 +482,7 @@ pub async fn update_federation(
         })?;
 
     // Check if there are changes to commit
-    let status = Command::new("git")
+    let status = crate::git::git_command_async()
         .args(&["diff", "--staged", "--quiet"])
         .status()
         .await?;
@@ -494,14 +494,14 @@ pub async fn update_federation(
             deploy_config.product.name, service
         );
 
-        let mut commit_cmd = Command::new("git");
+        let mut commit_cmd = crate::git::git_command_async();
         commit_cmd.args(&["commit", "-m", &commit_msg]);
         run_inherited_status(commit_cmd, "git commit")
             .await
             .context("Git commit failed for supergraph changes")?;
 
         println!("📤 Pushing to remote...");
-        let mut push_cmd = Command::new("git");
+        let mut push_cmd = crate::git::git_command_async();
         push_cmd.args(&["push", "origin", "main"]);
         run_inherited_status(push_cmd, "git push origin main")
             .await
