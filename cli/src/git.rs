@@ -458,46 +458,7 @@ mod tests {
     use super::*;
     use crate::error::GitError;
 
-    use crate::test_support::make_executable_shim;
-
-    /// Serial-safe guard for tests that either mutate `GIT_BIN` or
-    /// invoke the no-bin production entry points ([`git_capture`],
-    /// [`git_capture_async`], [`git_capture_remote`]) which resolve
-    /// the git binary through `get_tool_path(tools::GIT)`. Env-var
-    /// writes are process-global; without a serial guard a concurrent
-    /// production-path test could pick up the wrong shim from a
-    /// mid-flight env-var mutation. Same discipline as
-    /// `serial_test::serial` but without the extra dependency.
-    static GIT_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// RAII scope-guard that sets `GIT_BIN=value` on construction and
-    /// restores the pre-scope state (either the original value or
-    /// unset) on drop — panic-safe by construction. Snapshots via
-    /// `std::env::var` so a set-to-empty original round-trips
-    /// verbatim. Every caller MUST hold [`GIT_BIN_ENV_LOCK`] for the
-    /// duration of the scope; the guard does not lock the mutex
-    /// itself, so the two disciplines compose without accidental
-    /// re-entrancy.
-    struct GitBinScope {
-        prior: std::result::Result<String, std::env::VarError>,
-    }
-
-    impl GitBinScope {
-        fn set(value: &str) -> Self {
-            let prior = std::env::var("GIT_BIN");
-            std::env::set_var("GIT_BIN", value);
-            Self { prior }
-        }
-    }
-
-    impl Drop for GitBinScope {
-        fn drop(&mut self) {
-            match &self.prior {
-                Ok(v) => std::env::set_var("GIT_BIN", v),
-                Err(_) => std::env::remove_var("GIT_BIN"),
-            }
-        }
-    }
+    use crate::test_support::{make_executable_shim, GitBinScope, GIT_BIN_ENV_LOCK};
 
     /// Write an executable shim that pretends to be `git`. Delegates to
     /// the shared `crate::test_support::make_executable_shim` so the
