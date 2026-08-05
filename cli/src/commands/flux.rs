@@ -1,6 +1,6 @@
 //! FluxCD operations for GitOps deployments.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::process::Stdio;
 use std::time::Duration;
@@ -374,23 +374,36 @@ async fn reconcile_product_chain(namespace: &str) -> Result<()> {
                 let phase_label = if phase.is_empty() { "app" } else { phase };
                 println!("      ⏳ Reconciling {}...", phase_label);
 
-                let status = Command::new("flux")
-                    .args(["reconcile", "kustomization", &ks_name, "-n", "flux-system"])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .status()
+                // Route through the canonical `flux_reconcile` primitive so this
+                // site honors `FLUX_BIN` (via `get_tool_path("flux")`) and yields
+                // the typed `(kustomization, namespace, with_source, exit_code,
+                // stderr)` failure record on non-zero exit — best-effort warn
+                // preserved by matching on the typed variant.
+                match crate::flux_reconcile::reconcile_kustomization(&ks_name, "flux-system", false)
                     .await
-                    .context(format!("Failed to reconcile kustomization {}", ks_name))?;
-
-                if status.success() {
-                    println!("      ✓ {}", phase_label.green());
-                } else {
-                    // Non-fatal: the kustomization might have a dependency not yet ready.
-                    // The verify_deployment_image step will catch this downstream.
-                    println!(
-                        "      ⚠ {} (reconcile returned non-zero, may need dependency)",
-                        phase_label.yellow()
-                    );
+                {
+                    Ok(()) => println!("      ✓ {}", phase_label.green()),
+                    Err(e @ crate::flux_reconcile::FluxReconcileError::SpawnFailed { .. }) => {
+                        return Err(anyhow::Error::new(e)
+                            .context(format!("Failed to reconcile kustomization {}", ks_name)));
+                    }
+                    Err(crate::flux_reconcile::FluxReconcileError::Failed {
+                        exit_code,
+                        stderr,
+                        ..
+                    }) => {
+                        // Non-fatal: the kustomization might have a dependency not yet
+                        // ready. The verify_deployment_image step will catch this
+                        // downstream. Surface exit code + trimmed stderr so the operator
+                        // has a real hint instead of a bare "returned non-zero".
+                        println!(
+                            "      ⚠ {} (reconcile returned non-zero, may need dependency; \
+                             exit={:?}): {}",
+                            phase_label.yellow(),
+                            exit_code,
+                            stderr.trim()
+                        );
+                    }
                 }
             }
             _ => {
@@ -408,15 +421,13 @@ async fn reconcile_product_chain(namespace: &str) -> Result<()> {
 async fn reconcile_kustomization() -> Result<()> {
     println!("   🔄 Reconciling kustomization...");
 
-    let mut cmd = Command::new("flux");
-    cmd.args([
-        "reconcile",
-        "kustomization",
-        "flux-system",
-        "-n",
-        "flux-system",
-    ]);
-    crate::retry::run_inherited_status(cmd, "flux reconcile kustomization flux-system")
+    // Route through the canonical `flux_reconcile` primitive so this site honors
+    // `FLUX_BIN` (via `get_tool_path("flux")`) and — on failure — surfaces the
+    // typed `(kustomization, namespace, with_source, exit_code, stderr)` record.
+    // Pre-lift `run_inherited_status` streamed flux's live progress to the
+    // operator; post-lift the primitive captures stderr and embeds it in the
+    // failure message, which is what the outer anyhow context ultimately needs.
+    crate::flux_reconcile::reconcile_kustomization("flux-system", "flux-system", false)
         .await
         .context("Failed to reconcile root FluxCD kustomization")?;
 

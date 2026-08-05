@@ -430,4 +430,117 @@ mod tests {
             );
         }
     }
+
+    /// `FluxReconcileError::Failed`'s `Display` must render BOTH the
+    /// numeric `exit_code` AND the captured `stderr` verbatim. The
+    /// migrated `commands/flux.rs::reconcile_product_chain` best-effort
+    /// site collapses the stderr field explicitly in a `println!`, but
+    /// the fatal `commands/flux.rs::reconcile_kustomization` site (and
+    /// any future call site that folds the typed error into an
+    /// `anyhow::Context` chain via `?`) relies on `Display` to surface
+    /// both fields at the operator log — a regression that dropped
+    /// either from the `#[error(...)]` attribute would silently degrade
+    /// the operator prose at every stringly-downstream site AND leave
+    /// operators without the exit-code / stderr signal Phase 1
+    /// attestation records depend on (THEORY §V.4).
+    #[test]
+    fn failed_display_carries_exit_code_and_stderr() {
+        let err = FluxReconcileError::Failed {
+            kustomization: "svc-alpha".to_string(),
+            namespace: "team-beta".to_string(),
+            with_source: false,
+            exit_code: Some(42),
+            stderr: "Error: no Kustomization found in \"team-beta\" namespace".to_string(),
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("42"),
+            "Failed display must render exit_code verbatim; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Error: no Kustomization found in \"team-beta\" namespace"),
+            "Failed display must render stderr verbatim; got: {rendered}"
+        );
+
+        // The signal-terminated shape (`exit_code: None`) must ALSO carry
+        // stderr so a killed-flux failure still surfaces its exit output.
+        let killed = FluxReconcileError::Failed {
+            kustomization: "svc-alpha".to_string(),
+            namespace: "team-beta".to_string(),
+            with_source: false,
+            exit_code: None,
+            stderr: "signal 9 while reconciling".to_string(),
+        };
+        let rendered_killed = killed.to_string();
+        assert!(
+            rendered_killed.contains("signal 9 while reconciling"),
+            "signal-killed Failed display must render stderr verbatim; got: {rendered_killed}"
+        );
+    }
+
+    /// A caller that wraps `FluxReconcileError` via `anyhow::Error::new(e)`
+    /// (both migrated `commands/flux.rs` sites do this on the fatal arm)
+    /// must be able to recover the typed variant across the anyhow
+    /// boundary via `downcast_ref::<FluxReconcileError>()`. Pins the
+    /// programmatic-recovery promise the previous commit body claimed —
+    /// "recoverable via err.downcast_ref::<FluxReconcileError>() across
+    /// the anyhow boundary" — WITHOUT which downstream telemetry would
+    /// be forced to regex-parse the display string to partition failures
+    /// by kustomization/namespace/exit_code. A regression that swapped
+    /// the typed error for a `String` (or dropped the `#[derive(Error,
+    /// Debug)]`) would break every consumer that expects to
+    /// pattern-match on the structural tuple; that break would surface
+    /// here rather than as a silent downgrade to stringly-typed telemetry.
+    #[test]
+    fn anyhow_boundary_preserves_typed_downcast() {
+        let typed = FluxReconcileError::Failed {
+            kustomization: "svc-alpha".to_string(),
+            namespace: "team-beta".to_string(),
+            with_source: true,
+            exit_code: Some(7),
+            stderr: "context deadline exceeded".to_string(),
+        };
+        let wrapped: anyhow::Error =
+            anyhow::Error::new(typed).context("Failed to reconcile kustomization svc-alpha");
+        let recovered = wrapped
+            .downcast_ref::<FluxReconcileError>()
+            .expect("typed FluxReconcileError must survive anyhow wrapping");
+        match recovered {
+            FluxReconcileError::Failed {
+                kustomization,
+                namespace,
+                with_source,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(kustomization, "svc-alpha");
+                assert_eq!(namespace, "team-beta");
+                assert!(*with_source, "with_source axis must survive anyhow wrap");
+                assert_eq!(*exit_code, Some(7));
+                assert_eq!(stderr, "context deadline exceeded");
+            }
+            other => panic!("expected Failed, got: {other:?}"),
+        }
+
+        // The SpawnFailed arm — the shape both migrated `commands/flux.rs`
+        // sites re-anyhow on the fatal path — must survive the same
+        // boundary. Without this the `Err(e).context(...)?` re-anyhow in
+        // `reconcile_product_chain` would silently opaque the missing-flux
+        // signal to a stringly-typed operator log.
+        let spawn_typed = FluxReconcileError::SpawnFailed {
+            kustomization: "svc-alpha".to_string(),
+            namespace: "team-beta".to_string(),
+            with_source: false,
+            message: "No such file or directory (os error 2)".to_string(),
+        };
+        let spawn_wrapped: anyhow::Error =
+            anyhow::Error::new(spawn_typed).context("Failed to reconcile kustomization svc-alpha");
+        let spawn_recovered = spawn_wrapped
+            .downcast_ref::<FluxReconcileError>()
+            .expect("typed SpawnFailed must survive anyhow wrapping");
+        assert!(
+            matches!(spawn_recovered, FluxReconcileError::SpawnFailed { .. }),
+            "recovered variant must be SpawnFailed, got: {spawn_recovered:?}"
+        );
+    }
 }
