@@ -14,7 +14,10 @@ use tracing::info;
 
 use crate::git;
 use crate::nix::build_flake_attr_in;
-use crate::tools::get_tool_path;
+// Both, deliberately: `regctl` below is a tool whose NAME and binary string are
+// identical, so the deriving lookup is correct for it. `oci-push` is not — see
+// the note at the DOCA resolution.
+use crate::tools::{get_tool_path, get_tool_path_custom};
 
 /// Release a multi-arch OCI image.
 ///
@@ -36,9 +39,28 @@ pub async fn execute(
     verify_elf: bool,
 ) -> Result<()> {
     let sha = git::get_short_sha()?;
-    // doca replaces skopeo here. Resolved the same way (DOCA_BIN env, else the
-    // binary name on PATH); the nix closure that ships forge bakes it in.
-    let doca = get_tool_path(crate::tools::tools::DOCA);
+    // doca replaces skopeo here. Resolved from DOCA_BIN, else the binary name on
+    // PATH; the nix closure that ships forge bakes it in.
+    //
+    // get_tool_path_custom, NOT get_tool_path — and the distinction is the whole
+    // bug this line used to have. get_tool_path DERIVES its env var from the tool
+    // STRING, and tools::DOCA's string is "oci-push", so it read OCI_PUSH_BIN.
+    // Nothing in the fleet has ever exported that: substrate's mkImageReleaseApp
+    // exports DOCA_BIN (lib/service/image-release.nix), and the sibling push path
+    // reads DOCA_BIN explicitly (commands/push.rs, via repo::get_tool_path, a
+    // DIFFERENT two-argument function that takes the env var name). So the two
+    // push paths silently disagreed, and only the image-release one was broken.
+    //
+    // It failed at a distance: with OCI_PUSH_BIN unset this fell back to a bare
+    // `oci-push`, which is a pleme-io binary ambient NOWHERE, so every consumer of
+    // nix-image-auto-release.yml built cleanly and died at push time. Seven repos
+    // consume that workflow (hardened-images, helmworks-akeyless, pangea-operator,
+    // pitr-reclaimer, pitr-tools, rabbitmq-definitions-loader, substrate).
+    //
+    // The comments on BOTH sides asserted DOCA_BIN, which is why it survived
+    // review: the constant is NAMED DOCA and everyone reasoned about the name,
+    // while the lookup used the value.
+    let doca = get_tool_path_custom(crate::tools::tools::DOCA, "DOCA_BIN");
 
     // Resolve amd64 image path
     let amd64_path = match (amd64_image, amd64_attr) {
