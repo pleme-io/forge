@@ -175,6 +175,50 @@ mod tests {
         env::remove_var("CUSTOM_VAR");
     }
 
+    /// DOCA resolves from DOCA_BIN, and the DERIVING lookup cannot supply it.
+    ///
+    /// This pins a bug that shipped and stayed hidden for a release cycle.
+    /// `tools::DOCA` is NAMED for doca but its VALUE is "oci-push", and
+    /// `get_tool_path` derives its env var from the value — so it read
+    /// `OCI_PUSH_BIN`, which nothing in the fleet has ever exported. substrate's
+    /// mkImageReleaseApp exports `DOCA_BIN`; the sibling push path
+    /// (commands/push.rs, via the two-argument repo::get_tool_path) reads
+    /// `DOCA_BIN`. Only commands/image_release.rs used the deriving form, so the
+    /// two push paths silently disagreed and only image-release was broken.
+    ///
+    /// It failed at a distance rather than loudly: unset, the lookup falls back
+    /// to a bare `oci-push`, a pleme-io binary ambient NOWHERE, so all seven
+    /// consumers of nix-image-auto-release.yml built clean and died at push.
+    ///
+    /// The comments on BOTH sides asserted DOCA_BIN, which is exactly why review
+    /// never caught it — everyone reasoned about the constant's NAME while the
+    /// code used its VALUE. So this test asserts the divergence itself, not just
+    /// the happy path: if someone "tidies" image_release.rs back to the
+    /// one-argument form, the second assertion is what fails.
+    #[test]
+    fn doca_resolves_from_doca_bin_and_the_deriving_lookup_does_not() {
+        env::remove_var("OCI_PUSH_BIN");
+        env::set_var("DOCA_BIN", "/nix/store/xyz/bin/oci-push");
+
+        // What image_release.rs does — correct.
+        assert_eq!(
+            get_tool_path_custom(tools::DOCA, "DOCA_BIN"),
+            "/nix/store/xyz/bin/oci-push",
+            "DOCA must resolve from DOCA_BIN, the var substrate actually exports"
+        );
+
+        // What it used to do — silently falls through to a bare binary name.
+        assert_eq!(
+            get_tool_path(tools::DOCA),
+            "oci-push",
+            "the deriving lookup reads OCI_PUSH_BIN, which nothing exports; if this \
+             ever returns a store path the derivation changed and image_release.rs \
+             should be revisited"
+        );
+
+        env::remove_var("DOCA_BIN");
+    }
+
     #[test]
     fn test_uppercase_conversion() {
         env::set_var("SKOPEO_BIN", "/nix/store/abc/bin/skopeo");
