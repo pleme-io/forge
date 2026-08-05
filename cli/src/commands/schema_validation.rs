@@ -9,9 +9,9 @@ use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::process::Command;
 
 use crate::config::{DeployConfig, ServiceFederationConfig};
+use crate::graphql_schema::{extract_graphql_schema_named, SchemaExtractionError};
 
 /// Result of schema extraction
 pub struct SchemaExtractionResult {
@@ -76,39 +76,65 @@ pub async fn extract_and_validate_schema(
     // Get service directory to run cargo from the correct location
     let service_dir =
         std::env::var("SERVICE_DIR").context("SERVICE_DIR environment variable not set")?;
+    let service_dir_path = PathBuf::from(&service_dir);
 
-    // Run schema extraction from service directory
-    // NOTE: All services must use pure Rust dependencies (e.g., rustls instead of OpenSSL)
-    // to ensure schema extraction works without system library dependencies
-    let output = Command::new("cargo")
-        .args(&["run", "--bin", &graphql_config.schema_extractor, "--quiet"])
-        .current_dir(&service_dir)
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to run schema extraction binary '{}' for service '{}' from directory '{}'",
-                graphql_config.schema_extractor, service_name, service_dir
-            )
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "Schema extraction failed for service '{}':\n{}",
+    // Route through the canonical `extract_graphql_schema_named`
+    // primitive — the one-oracle owner of the "run cargo run --bin
+    // <name> --quiet in a backend dir, expect non-empty stdout bytes,
+    // fail typed on every failure shape" surface (THEORY §V.1, §VI.1).
+    // Pre-lift the four sibling sites in codegen* had already been
+    // absorbed by the primitive's fixed-bin-name entry (673e4be); this
+    // fifth site is the one that survived because it reads a runtime-
+    // configured bin name (`graphql_config.schema_extractor`) off the
+    // deploy config. The `_named` entry serves it. Load-bearing
+    // properties recovered here:
+    //
+    //   - `CARGO` env override honored (pre-lift `Command::new("cargo")`
+    //     bypassed the env-var discipline `commands/bootstrap.rs` uses).
+    //   - `bin_name` carried in every failure record (pre-lift, the
+    //     `bail!` interpolated it into free-form prose).
+    //   - `service_dir` carried in every failure record (pre-lift, only
+    //     the spawn-failure `with_context` had it; the two `bail!`s
+    //     dropped it).
+    //
+    // NOTE: All services must use pure Rust dependencies (e.g., rustls
+    // instead of OpenSSL) to ensure schema extraction works without
+    // system library dependencies.
+    let output_stdout =
+        match extract_graphql_schema_named(&service_dir_path, &graphql_config.schema_extractor)
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(SchemaExtractionError::SpawnFailed {
+                backend_dir,
+                bin_name,
+                message,
+            }) => bail!(
+            "Failed to run schema extraction binary '{}' for service '{}' from directory '{}': {}",
+            bin_name,
             service_name,
-            stderr
-        );
-    }
-
-    // Validate extraction produced output
-    if output.stdout.is_empty() {
-        bail!(
-            "Schema extraction produced no output for service '{}'. \
-             Check that extract-schema binary prints schema to stdout.",
-            service_name
-        );
-    }
+            backend_dir.display(),
+            message,
+        ),
+            Err(SchemaExtractionError::Failed {
+                bin_name,
+                exit_code,
+                stderr,
+                ..
+            }) => bail!(
+                "Schema extraction failed for service '{}' (bin '{}', exit {:?}):\n{}",
+                service_name,
+                bin_name,
+                exit_code,
+                stderr,
+            ),
+            Err(SchemaExtractionError::EmptyOutput { bin_name, .. }) => bail!(
+                "Schema extraction produced no output for service '{}'. \
+                 Check that '{}' binary prints schema to stdout.",
+                service_name,
+                bin_name,
+            ),
+        };
 
     // Get subgraph schema path from config
     let schema_path = deploy_config
@@ -122,7 +148,7 @@ pub async fn extract_and_validate_schema(
         })?;
     }
 
-    fs::write(&schema_path, &output.stdout)
+    fs::write(&schema_path, &output_stdout)
         .await
         .with_context(|| {
             format!(
@@ -134,7 +160,7 @@ pub async fn extract_and_validate_schema(
     println!("   ✅ Schema written: {}", schema_path.display());
 
     // Validate schema
-    let validation_result = validate_schema_content(&output.stdout, graphql_config, service_name)?;
+    let validation_result = validate_schema_content(&output_stdout, graphql_config, service_name)?;
 
     println!("   📊 Schema size: {} bytes", validation_result.schema_size);
     println!("   📊 Types found: {}", validation_result.type_count);
