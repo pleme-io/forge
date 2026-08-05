@@ -1,6 +1,6 @@
 //! Typed primitive for extracting a GraphQL schema from a Rust backend.
 //!
-//! Five command-module sites in forge drive the same three-step incantation
+//! Six command-module sites in forge drive the same three-step incantation
 //! against a `cargo run --bin <name> --quiet` schema extractor:
 //! ```text
 //! let output = Command::new("cargo")
@@ -18,15 +18,16 @@
 //! ```
 //! carried verbatim modulo per-site failure envelope (anyhow `bail!` vs. an
 //! `Ok(ValidationResult { error: Some(_), … })` field) and per-site
-//! `<bin_name>` selection (four sites hard-code `"extract-schema"`; the
-//! fifth reads a runtime-configured `graphql_config.schema_extractor` off
-//! the deploy config). Five identically-shaped bodies past THEORY §VI.1's
+//! `<bin_name>` selection (five sites hard-code `"extract-schema"`; the
+//! sixth reads a runtime-configured `graphql_config.schema_extractor` off
+//! the deploy config). Six identically-shaped bodies past THEORY §VI.1's
 //! three-times threshold (PRIME DIRECTIVE: duplication budget is zero):
 //!
 //! - `commands/codegen.rs::execute`
 //! - `commands/codegen.rs::export_schema_only`
 //! - `commands/codegen_validation.rs::execute`
 //! - `commands/codegen_validation.rs::validate_schema_export`
+//! - `commands/sync.rs::execute_drift_check`
 //! - `commands/schema_validation.rs::extract_and_validate_schema`
 //!   (configurable bin — served by [`extract_graphql_schema_named`])
 //!
@@ -137,13 +138,14 @@ pub const DEFAULT_SCHEMA_EXTRACTOR_BIN: &str = "extract-schema";
 /// returning the captured stdout bytes verbatim.
 ///
 /// Thin wrapper over [`extract_graphql_schema_named`] pinned to the
-/// canonical [`DEFAULT_SCHEMA_EXTRACTOR_BIN`] bin name. Four consumer
+/// canonical [`DEFAULT_SCHEMA_EXTRACTOR_BIN`] bin name. Five consumer
 /// sites (`commands/codegen.rs::execute`,
 /// `commands/codegen.rs::export_schema_only`,
 /// `commands/codegen_validation.rs::execute`,
-/// `commands/codegen_validation.rs::validate_schema_export`) hard-code
-/// the extractor's name and read through here; a fifth site that reads
-/// a runtime-configured bin name off deploy config uses
+/// `commands/codegen_validation.rs::validate_schema_export`,
+/// `commands/sync.rs::execute_drift_check`) hard-code the extractor's
+/// name and read through here; a sixth site that reads a
+/// runtime-configured bin name off deploy config uses
 /// [`extract_graphql_schema_named`] directly.
 pub async fn extract_graphql_schema(backend_dir: &Path) -> Result<Vec<u8>, SchemaExtractionError> {
     extract_graphql_schema_named(backend_dir, DEFAULT_SCHEMA_EXTRACTOR_BIN).await
@@ -439,6 +441,52 @@ mod tests {
             expected,
             "stdout bytes must survive the primitive round-trip byte-for-byte"
         );
+    }
+
+    /// Every failure variant's `Display` must render both `bin_name`
+    /// AND `backend_dir` verbatim. A caller that collapses the typed
+    /// error into a stringly downstream error field
+    /// (`commands/sync.rs::execute_drift_check` returns
+    /// `DriftCheckResult { error: Some(format!("Schema extraction
+    /// failed: {}", err)) }`; `commands/codegen_validation.rs` does
+    /// the analogous thing) surfaces this `Display` output to the
+    /// operator as-is — so a regression that dropped either field
+    /// from the `#[error(...)]` attribute would silently degrade the
+    /// operator prose at every stringly-downstream site (six today).
+    /// Pins the Display contract; the structural `match`-arm tests
+    /// above pin the fields the arms can dispatch on.
+    #[test]
+    fn display_carries_bin_name_and_backend_dir_on_every_variant() {
+        let backend_dir = PathBuf::from("/tmp/svc-omega/backend");
+        let bin_name = String::from("svc-omega-extract-schema");
+        let variants = [
+            SchemaExtractionError::SpawnFailed {
+                backend_dir: backend_dir.clone(),
+                bin_name: bin_name.clone(),
+                message: "No such file or directory (os error 2)".to_string(),
+            },
+            SchemaExtractionError::Failed {
+                backend_dir: backend_dir.clone(),
+                bin_name: bin_name.clone(),
+                exit_code: Some(101),
+                stderr: "error[E0432]: unresolved import".to_string(),
+            },
+            SchemaExtractionError::EmptyOutput {
+                backend_dir: backend_dir.clone(),
+                bin_name: bin_name.clone(),
+            },
+        ];
+        for v in &variants {
+            let rendered = v.to_string();
+            assert!(
+                rendered.contains(&bin_name),
+                "variant {v:?} must render bin_name verbatim; got: {rendered}"
+            );
+            assert!(
+                rendered.contains(&backend_dir.display().to_string()),
+                "variant {v:?} must render backend_dir verbatim; got: {rendered}"
+            );
+        }
     }
 
     /// `extract_graphql_schema_with_bin` must spawn the cargo process
