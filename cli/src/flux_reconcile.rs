@@ -1,4 +1,16 @@
-//! Typed primitive for reconciling a FluxCD kustomization.
+//! Typed primitives for reconciling FluxCD kustomizations and sources.
+//!
+//! This module owns two sibling shapes of the `flux reconcile ...` frontier:
+//!
+//! - [`reconcile_kustomization`] — `flux reconcile kustomization <ks> -n
+//!   <ns> [--with-source]`, driven by four command-module sites (see below).
+//! - [`reconcile_source_git`] — `flux reconcile source git <name> -n <ns>`,
+//!   driven by `commands/flux.rs::reconcile_source` (the sole pre-lift raw-
+//!   spawn `flux reconcile source git` site in forge). The typed
+//!   [`FluxSourceGitReconcileError`] carries the same
+//!   `(source_name, namespace, exit_code, stderr)` structural record
+//!   [`FluxReconcileError`] does — Phase 1 attestation records (THEORY §V.4)
+//!   pattern-match on both without re-parsing the display string.
 //!
 //! Four command-module sites in forge drive the same invocation shape
 //! against `flux reconcile kustomization <name> -n <namespace>`:
@@ -177,6 +189,114 @@ async fn reconcile_kustomization_with_bin(
             kustomization: kustomization.to_string(),
             namespace: namespace.to_string(),
             with_source,
+            exit_code: cf.exit_code,
+            stderr: cf.stderr,
+        },
+    )?;
+    Ok(())
+}
+
+/// Why a `flux reconcile source git <source_name> -n <namespace>`
+/// invocation failed to drive the source reconcile to success. Carries
+/// the offending `source_name` AND `namespace` on every variant so a
+/// caller can attach both to a failure record — a Phase 1 attestation, a
+/// telemetry event, a structured log line — without re-parsing the
+/// display string. Sibling of [`FluxReconcileError`] for the source-git
+/// shape (no `--with-source` axis: reconciling a source directly is the
+/// operation, not an axis on it).
+#[derive(Error, Debug)]
+pub enum FluxSourceGitReconcileError {
+    /// The `flux` binary could not be spawned. Fires when the resolved
+    /// tool path (from `get_tool_path("flux")`) is missing / non-
+    /// executable — distinct by construction from `Failed`, which
+    /// represents a spawn that succeeded but the child exited non-zero.
+    #[error(
+        "Failed to spawn flux for reconcile source git {source_name} -n {namespace}: {message}"
+    )]
+    SpawnFailed {
+        source_name: String,
+        namespace: String,
+        message: String,
+    },
+
+    /// `flux reconcile source git <source_name> -n <namespace>` exited
+    /// non-zero. Carries the exit code and the captured stderr as
+    /// separate fields — same structural-record shape as
+    /// `FluxReconcileError::Failed` — so downstream telemetry can
+    /// pattern-match on the failure shape without re-parsing the
+    /// message.
+    #[error(
+        "flux reconcile source git {source_name} -n {namespace} failed (exit {exit_code:?}): {stderr}"
+    )]
+    Failed {
+        source_name: String,
+        namespace: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+}
+
+/// Reconcile a FluxCD `GitRepository` source by running
+/// `flux reconcile source git <source_name> -n <namespace>` and
+/// returning `Ok(())` on success.
+///
+/// # `FLUX_BIN` env override
+///
+/// The `flux` binary resolves via `tools::get_tool_path("flux")` —
+/// same discipline every Nix-derivation-provided tool in forge honors.
+/// Pre-lift the sole consumer site (`commands/flux.rs::reconcile_source`)
+/// spelled `Command::new("flux")` bypassing the override, so a Nix-
+/// hermetic runner with a store-path `flux` would fall through to
+/// whatever `flux` was first on `PATH`.
+///
+/// # Errors
+///
+/// - [`FluxSourceGitReconcileError::SpawnFailed`] — the resolved flux
+///   binary could not be spawned. Carries `source_name`, `namespace`,
+///   and the underlying io error message.
+/// - [`FluxSourceGitReconcileError::Failed`] — flux exited non-zero.
+///   Carries `source_name`, `namespace`, `exit_code`, and the trimmed
+///   UTF-8-lossy stderr.
+pub async fn reconcile_source_git(
+    source_name: &str,
+    namespace: &str,
+) -> Result<(), FluxSourceGitReconcileError> {
+    let flux = get_tool_path("flux");
+    reconcile_source_git_with_bin(&flux, source_name, namespace).await
+}
+
+/// Test-injection sibling of [`reconcile_source_git`]: accepts the
+/// resolved `flux_bin` as an explicit argument so unit tests can point
+/// at a hermetic shim without mutating the process-wide `FLUX_BIN`
+/// environment variable — same discipline as
+/// [`reconcile_kustomization_with_bin`],
+/// `graphql_schema::extract_graphql_schema_with_bin`, and
+/// `AtticClient::with_attic_bin`.
+///
+/// `source_name` and `namespace` are spliced verbatim into flux's argv
+/// (no escaping / no shell interpretation — `Command::args` owns
+/// argv-vector delivery so a user-controlled name cannot inject
+/// additional flux args).
+async fn reconcile_source_git_with_bin(
+    flux_bin: &str,
+    source_name: &str,
+    namespace: &str,
+) -> Result<(), FluxSourceGitReconcileError> {
+    let captured = Command::new(flux_bin)
+        .args(["reconcile", "source", "git", source_name, "-n", namespace])
+        .output()
+        .await;
+
+    classify_capture(
+        captured,
+        |e| FluxSourceGitReconcileError::SpawnFailed {
+            source_name: source_name.to_string(),
+            namespace: namespace.to_string(),
+            message: e.to_string(),
+        },
+        |cf| FluxSourceGitReconcileError::Failed {
+            source_name: source_name.to_string(),
+            namespace: namespace.to_string(),
             exit_code: cf.exit_code,
             stderr: cf.stderr,
         },
@@ -540,6 +660,259 @@ mod tests {
             .expect("typed SpawnFailed must survive anyhow wrapping");
         assert!(
             matches!(spawn_recovered, FluxReconcileError::SpawnFailed { .. }),
+            "recovered variant must be SpawnFailed, got: {spawn_recovered:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // source-git sibling: mirrors the kustomization invariants against
+    // the `flux reconcile source git <name> -n <ns>` shape.
+    // ------------------------------------------------------------------
+
+    /// When the resolved flux binary cannot be spawned,
+    /// `reconcile_source_git_with_bin` must surface `SpawnFailed`
+    /// carrying the offending `source_name` AND `namespace` — never a
+    /// fused warn-string bag. Pins the typed split so telemetry can
+    /// distinguish "flux missing" from "flux said no" AND partition
+    /// source-git failures by source_name / namespace axis. Uses an
+    /// absolute path that does not exist so Command::spawn fails
+    /// deterministically without touching global PATH state.
+    #[tokio::test]
+    async fn source_git_spawn_failed_carries_source_name_and_namespace() {
+        let result = reconcile_source_git_with_bin(
+            "/nonexistent/path/to/flux-binary-that-does-not-exist",
+            "flux-system",
+            "flux-system",
+        )
+        .await;
+        let err = result.expect_err("missing flux binary must fail");
+        match err {
+            FluxSourceGitReconcileError::SpawnFailed {
+                source_name,
+                namespace,
+                message,
+            } => {
+                assert_eq!(source_name, "flux-system");
+                assert_eq!(namespace, "flux-system");
+                assert!(
+                    !message.is_empty(),
+                    "spawn-failure message must not be empty"
+                );
+            }
+            other => panic!("expected SpawnFailed, got: {other:?}"),
+        }
+    }
+
+    /// A `flux reconcile source git` invocation that exits non-zero must
+    /// produce `Failed` carrying the source_name, namespace, exit code,
+    /// and captured stderr — never a fused stringly bag. Uses a shim
+    /// invoked by absolute path so the test is hermetic and parallel-
+    /// safe against PATH.
+    #[tokio::test]
+    async fn source_git_failed_carries_structured_fields() {
+        let (_shim_dir, shim) = make_executable_shim(
+            "flux",
+            "#!/bin/sh\necho 'GitRepository not found' 1>&2\nexit 1\n",
+        );
+        let result = reconcile_source_git_with_bin(&shim, "flux-system", "flux-system").await;
+        let err = result.expect_err("nonzero exit must fail");
+        match err {
+            FluxSourceGitReconcileError::Failed {
+                source_name,
+                namespace,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(source_name, "flux-system");
+                assert_eq!(namespace, "flux-system");
+                assert_eq!(exit_code, Some(1));
+                assert!(
+                    stderr.contains("GitRepository not found"),
+                    "stderr field must capture the flux stderr verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected Failed, got: {other:?}"),
+        }
+    }
+
+    /// On the success path, `reconcile_source_git_with_bin` must return
+    /// `Ok(())` — no residual output leaked into the result.
+    #[tokio::test]
+    async fn source_git_succeeds_when_flux_exits_zero() {
+        let (_shim_dir, shim) = make_executable_shim("flux", "#!/bin/sh\nexit 0\n");
+        let outcome = reconcile_source_git_with_bin(&shim, "flux-system", "flux-system").await;
+        assert!(
+            outcome.is_ok(),
+            "success path must return Ok(()), got: {outcome:?}"
+        );
+    }
+
+    /// `reconcile_source_git_with_bin` must splice the caller-supplied
+    /// `source_name` and `namespace` into flux's argv verbatim,
+    /// unshelled, unquoted, in the canonical
+    /// `["reconcile", "source", "git", <name>, "-n", <ns>]` order.
+    /// Pinned with a shim that copies its full argv to a marker file so
+    /// the test can prove the argv-vector reached flux exactly as
+    /// expected. A future regression that silently reordered args
+    /// (or spliced through a shell interpolation that changed an arg
+    /// boundary) would surface here rather than as a Flux "unknown
+    /// argument" or "reconciled the wrong source" downstream.
+    ///
+    /// The shim uses `printf '%s\n'` (not `echo "$a"`) because POSIX
+    /// `sh`'s `echo` treats a leading `-n` argument as a
+    /// suppress-trailing-newline flag rather than as the literal
+    /// two-character argument — a shim that used `echo` would silently
+    /// drop the `-n` from the observed argv and mask an argv-shape
+    /// regression.
+    #[tokio::test]
+    async fn source_git_honors_source_name_and_namespace_in_argv() {
+        let observed = tempfile::tempdir().expect("observed tempdir");
+        let observed_path = observed.path().join("observed-argv");
+        let shim_body = format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\nexit 0\n",
+            observed_path.display()
+        );
+        let (_shim_dir, shim) = make_executable_shim("flux", &shim_body);
+        reconcile_source_git_with_bin(&shim, "svc-omega-source", "team-omega")
+            .await
+            .expect("success path");
+        let raw = std::fs::read_to_string(&observed_path).expect("shim must have written argv");
+        let args: Vec<&str> = raw.lines().collect();
+        assert_eq!(
+            args,
+            vec![
+                "reconcile",
+                "source",
+                "git",
+                "svc-omega-source",
+                "-n",
+                "team-omega",
+            ],
+            "flux argv must be exactly [reconcile, source, git, <name>, -n, <ns>]"
+        );
+    }
+
+    /// Every `FluxSourceGitReconcileError` variant's `Display` must
+    /// render both `source_name` AND `namespace` verbatim so a caller
+    /// that collapses the typed error into a stringly-downstream
+    /// `warn!("{}", err)` or `anyhow::Context` chain surfaces the
+    /// offending tuple to the operator as-is. A regression that dropped
+    /// either field from the `#[error(...)]` attribute would silently
+    /// degrade the operator prose at every stringly-downstream site.
+    /// `Failed`'s `Display` must ALSO render `exit_code` and `stderr`
+    /// verbatim — the migrated `commands/flux.rs::reconcile_source` site
+    /// folds the typed error into an `anyhow::Context` chain via `?`,
+    /// and any Phase 1 attestation record (THEORY §V.4) reading through
+    /// the display string relies on those fields.
+    #[test]
+    fn source_git_display_carries_every_field() {
+        let source_name = String::from("svc-omega-source");
+        let namespace = String::from("team-omega");
+        let spawn = FluxSourceGitReconcileError::SpawnFailed {
+            source_name: source_name.clone(),
+            namespace: namespace.clone(),
+            message: "No such file or directory (os error 2)".to_string(),
+        };
+        let failed = FluxSourceGitReconcileError::Failed {
+            source_name: source_name.clone(),
+            namespace: namespace.clone(),
+            exit_code: Some(42),
+            stderr: "Error: no GitRepository found in \"team-omega\" namespace".to_string(),
+        };
+        for v in [&spawn, &failed] {
+            let rendered = v.to_string();
+            assert!(
+                rendered.contains(&source_name),
+                "variant {v:?} must render source_name verbatim; got: {rendered}"
+            );
+            assert!(
+                rendered.contains(&namespace),
+                "variant {v:?} must render namespace verbatim; got: {rendered}"
+            );
+        }
+        let rendered_failed = failed.to_string();
+        assert!(
+            rendered_failed.contains("42"),
+            "Failed display must render exit_code verbatim; got: {rendered_failed}"
+        );
+        assert!(
+            rendered_failed.contains("Error: no GitRepository found in \"team-omega\" namespace"),
+            "Failed display must render stderr verbatim; got: {rendered_failed}"
+        );
+
+        // The signal-terminated shape (`exit_code: None`) must ALSO
+        // carry stderr so a killed-flux failure still surfaces its exit
+        // output.
+        let killed = FluxSourceGitReconcileError::Failed {
+            source_name: source_name.clone(),
+            namespace,
+            exit_code: None,
+            stderr: "signal 9 while reconciling source".to_string(),
+        };
+        let rendered_killed = killed.to_string();
+        assert!(
+            rendered_killed.contains("signal 9 while reconciling source"),
+            "signal-killed Failed display must render stderr verbatim; got: {rendered_killed}"
+        );
+    }
+
+    /// A caller that wraps `FluxSourceGitReconcileError` via
+    /// `anyhow::Error::new(e).context(...)` (the migrated
+    /// `commands/flux.rs::reconcile_source` site does exactly this on
+    /// the fatal arm) must be able to recover the typed variant across
+    /// the anyhow boundary via
+    /// `downcast_ref::<FluxSourceGitReconcileError>()`. Pins the
+    /// programmatic-recovery promise — WITHOUT which downstream
+    /// telemetry would be forced to regex-parse the display string to
+    /// partition failures by source_name / namespace / exit_code. A
+    /// regression that swapped the typed error for a `String` (or
+    /// dropped the `#[derive(Error, Debug)]`) would break every
+    /// consumer that expects to pattern-match on the structural tuple;
+    /// that break would surface here rather than as a silent downgrade
+    /// to stringly-typed telemetry.
+    #[test]
+    fn source_git_anyhow_boundary_preserves_typed_downcast() {
+        let typed = FluxSourceGitReconcileError::Failed {
+            source_name: "flux-system".to_string(),
+            namespace: "flux-system".to_string(),
+            exit_code: Some(7),
+            stderr: "context deadline exceeded".to_string(),
+        };
+        let wrapped: anyhow::Error =
+            anyhow::Error::new(typed).context("Failed to reconcile FluxCD git source");
+        let recovered = wrapped
+            .downcast_ref::<FluxSourceGitReconcileError>()
+            .expect("typed FluxSourceGitReconcileError must survive anyhow wrapping");
+        match recovered {
+            FluxSourceGitReconcileError::Failed {
+                source_name,
+                namespace,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(source_name, "flux-system");
+                assert_eq!(namespace, "flux-system");
+                assert_eq!(*exit_code, Some(7));
+                assert_eq!(stderr, "context deadline exceeded");
+            }
+            other => panic!("expected Failed, got: {other:?}"),
+        }
+
+        let spawn_typed = FluxSourceGitReconcileError::SpawnFailed {
+            source_name: "flux-system".to_string(),
+            namespace: "flux-system".to_string(),
+            message: "No such file or directory (os error 2)".to_string(),
+        };
+        let spawn_wrapped: anyhow::Error =
+            anyhow::Error::new(spawn_typed).context("Failed to reconcile FluxCD git source");
+        let spawn_recovered = spawn_wrapped
+            .downcast_ref::<FluxSourceGitReconcileError>()
+            .expect("typed SpawnFailed must survive anyhow wrapping");
+        assert!(
+            matches!(
+                spawn_recovered,
+                FluxSourceGitReconcileError::SpawnFailed { .. }
+            ),
             "recovered variant must be SpawnFailed, got: {spawn_recovered:?}"
         );
     }

@@ -292,16 +292,15 @@ pub async fn reconcile(namespace: String) -> Result<()> {
 async fn reconcile_source() -> Result<()> {
     println!("   🔄 Reconciling git source...");
 
-    let mut cmd = Command::new("flux");
-    cmd.args([
-        "reconcile",
-        "source",
-        "git",
-        "flux-system",
-        "-n",
-        "flux-system",
-    ]);
-    crate::retry::run_inherited_status(cmd, "flux reconcile source git")
+    // Route through the canonical `flux_reconcile::reconcile_source_git`
+    // primitive so this site honors `FLUX_BIN` (via
+    // `get_tool_path("flux")`) and — on failure — surfaces the typed
+    // `(source_name, namespace, exit_code, stderr)` record. Pre-lift
+    // `run_inherited_status` streamed flux's live progress to the
+    // operator; post-lift the primitive captures stderr and embeds it
+    // in the failure message, which is what the outer anyhow context
+    // ultimately needs.
+    crate::flux_reconcile::reconcile_source_git("flux-system", "flux-system")
         .await
         .context("Failed to reconcile FluxCD git source")?;
 
