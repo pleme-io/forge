@@ -30,6 +30,7 @@ mod duration;
 mod flux_source_verification;
 #[cfg(feature = "attestation")]
 mod git_signature;
+mod graphql_schema;
 #[cfg(feature = "attestation")]
 mod helm_lint;
 mod helm_provenance;

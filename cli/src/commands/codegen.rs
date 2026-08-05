@@ -57,23 +57,14 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     println!("{}", "Step 1: Exporting GraphQL schema...".bold());
     let schema_start = Instant::now();
 
-    let schema_output = Command::new("cargo")
-        .args(["run", "--bin", "extract-schema", "--quiet"])
-        .current_dir(backend_dir)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run extract-schema in {}", backend_dir.display()))?;
-
-    if !schema_output.status.success() {
-        let stderr = String::from_utf8_lossy(&schema_output.stderr);
-        anyhow::bail!("Schema extraction failed:\n{}", stderr);
-    }
-
-    if schema_output.stdout.is_empty() {
-        anyhow::bail!("Schema extraction produced no output. Check extract-schema binary.");
-    }
-
-    let schema_size = schema_output.stdout.len();
+    // Route through the canonical `extract_graphql_schema` primitive —
+    // the one-oracle owner of the "run cargo run --bin extract-schema
+    // --quiet in a backend dir, expect non-empty stdout bytes, fail typed
+    // on every failure shape" surface (THEORY §V.1, §VI.1). The typed
+    // `SchemaExtractionError` is preserved across the anyhow boundary and
+    // can be recovered with `err.downcast_ref::<SchemaExtractionError>()`.
+    let schema_bytes = crate::graphql_schema::extract_graphql_schema(backend_dir).await?;
+    let schema_size = schema_bytes.len();
     println!(
         "   {} Schema extracted ({} bytes, {:.1}s)",
         "✓".green(),
@@ -83,7 +74,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
 
     // Step 2: Write schema to web directory
     let schema_path = web_dir.join("schema.graphql");
-    fs::write(&schema_path, &schema_output.stdout)
+    fs::write(&schema_path, &schema_bytes)
         .await
         .with_context(|| format!("Failed to write schema to {}", schema_path.display()))?;
 
@@ -177,25 +168,14 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
 pub async fn export_schema_only(backend_dir: &Path, output_path: &Path) -> Result<usize> {
     println!("{}", "Exporting GraphQL schema...".bold());
 
-    let output = Command::new("cargo")
-        .args(["run", "--bin", "extract-schema", "--quiet"])
-        .current_dir(backend_dir)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run extract-schema in {}", backend_dir.display()))?;
+    // One-oracle read-through: same typed primitive `execute` above uses,
+    // so a future refinement of the extract-schema invocation shape
+    // (CARGO env override, typed error variants, byte-preservation)
+    // lands at one site (THEORY §VI.1).
+    let schema_bytes = crate::graphql_schema::extract_graphql_schema(backend_dir).await?;
+    let schema_size = schema_bytes.len();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Schema extraction failed:\n{}", stderr);
-    }
-
-    if output.stdout.is_empty() {
-        anyhow::bail!("Schema extraction produced no output");
-    }
-
-    let schema_size = output.stdout.len();
-
-    fs::write(output_path, &output.stdout)
+    fs::write(output_path, &schema_bytes)
         .await
         .with_context(|| format!("Failed to write schema to {}", output_path.display()))?;
 
