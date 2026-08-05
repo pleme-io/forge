@@ -6028,6 +6028,158 @@ impl From<&StorePath> for Box<[u8]> {
     }
 }
 
+/// By-reference cross-thread shared-owned-byte-slice emit peer for
+/// [`StorePath`] via [`std::sync::Arc<[u8]>`] — the eighth step of the
+/// by-reference owned-emit frontier opened by
+/// [`From<&StorePath> for String`] (line 5265) and extended by
+/// [`From<&StorePath> for Vec<u8>`] (line 5384),
+/// [`From<&StorePath> for Box<str>`] (line 5497),
+/// [`From<&StorePath> for Cow<'static, str>`] (line 5620),
+/// [`From<&StorePath> for Arc<str>`] (line 5746),
+/// [`From<&StorePath> for Rc<str>`] (line 5883), and
+/// [`From<&StorePath> for Box<[u8]>`] (line 6025), and the second step of
+/// the by-reference byte-side sub-frontier chaining through the
+/// by-reference [`Vec<u8>`] one-oracle. Mirrors how the by-value
+/// [`From<StorePath> for Arc<[u8]>`] (line 4789) chained through the
+/// by-value [`From<StorePath> for Vec<u8>`] (line 3841) — the byte-side
+/// sub-family's analog of how [`From<&StorePath> for Arc<str>`] chains
+/// through [`From<&StorePath> for String`] on the UTF-8-string sub-family.
+///
+/// Delegates through `std::sync::Arc::<[u8]>::from(Vec::<u8>::from(sp))`:
+/// [`From<&StorePath> for Vec<u8>`] copies the borrowed [`AsRef<[u8]>`]
+/// byte-view into a fresh [`Vec<u8>`] at one allocation without consuming
+/// the source; the stdlib
+/// [`std::sync::Arc`]`::<[u8]>::from(Vec<u8>)` impl then constructs a
+/// single fresh allocation carrying the atomic refcount header alongside
+/// the moved byte payload. The moved [`Vec<u8>`] backing is dropped after
+/// the payload copy, but the copy is unavoidable: [`std::sync::Arc<[u8]>`]
+/// and [`Vec<u8>`] have different memory layouts (an [`Arc<[u8]>`]
+/// allocation prefixes the payload with atomic strong/weak count headers
+/// so clones may cross threads, while a [`Vec<u8>`] carries a
+/// `(ptr, len, cap)` triple pointing at a header-less heap-allocated
+/// buffer). No re-encoding — the emitted bytes are the same bytes
+/// [`From<&StorePath> for Vec<u8>`] copies out, projected through
+/// [`std::sync::Arc<[u8]>`]'s allocation shape one time and shared cheaply
+/// across every subsequent [`std::sync::Arc::clone`] recipient at zero
+/// buffer-clone cost per downstream consumer, and the source [`StorePath`]
+/// is left available for further reads.
+///
+/// # Frontier-blanket calculus — why Arc<[u8]> is not blanketed
+///
+/// The [`From<&StorePath> for Vec<u8>`] impl doc records that stdlib
+/// blanket `impl<T: AsRef<OsStr> + ?Sized> From<&T> for {PathBuf,
+/// OsString}` fires for `T = StorePath` through this crate's
+/// [`AsRef<OsStr>`] peer (line 1920) and forbids a custom by-reference
+/// peer at those two shapes (E0119). [`std::sync::Arc<[u8]>`] carries no
+/// such stdlib blanket: stdlib provides
+/// `impl From<&[u8]> for Arc<[u8]>` (via
+/// `impl<T: Clone> From<&[T]> for Arc<[T]>`, which line 4789's by-value
+/// peer composes on the byte view produced by an upstream [`Vec::from`]),
+/// but the `&[u8]` receiver is a concrete slice type, not a generic
+/// `T: AsRef<[u8]>` bound, so it does not fire for `T = &StorePath`
+/// (which is not `&[u8]`-shaped and cannot be deref-coerced through
+/// [`From`]). The by-reference [`Arc<[u8]>`] peer therefore opens a
+/// frontier the stdlib blanket doesn't reach and does so at the same
+/// one-oracle discipline the by-reference [`String`], [`Vec<u8>`],
+/// [`Box<str>`], [`Cow<'static, str>`], [`Arc<str>`], [`Rc<str>`], and
+/// [`Box<[u8]>`] frontier openers established.
+///
+/// # Why the trait peer earns its keep — Arc<[u8]> distinct from Box<[u8]>
+///
+/// The by-value [`From<StorePath> for Arc<[u8]>`] (line 4789) covers the
+/// by-value cross-thread shared-owned byte-slice emit frontier. But a
+/// large family of downstream sites hold a [`&StorePath`], not an owned
+/// [`StorePath`], and must not consume the source:
+///
+/// - Iteration over a `[StorePath]` / `Vec<StorePath>` / `&[StorePath]`
+///   collection (a closure listing from
+///   [`crate::store_path::parse_closure_paths`], a derivation-input
+///   manifest, an attestation-adjacent per-input path list) where each
+///   element must project into a cross-thread shared-owned
+///   [`std::sync::Arc<[u8]>`] for downstream fan-out to `Send + Sync`
+///   consumers — a `Vec<Arc<[u8]>>` payload list handed into a
+///   [`tokio::spawn`]-per-element attestation-signer pool, a
+///   `Vec<Arc<[u8]>>` accumulation shared across a
+///   `rayon::par_iter().map(...)` verifier fan-out, a
+///   `serde_bytes`-tagged serialize-side field of shape `Vec<Arc<[u8]>>`
+///   whose entries downstream reach `Send + Sync` recipients through
+///   `Arc::clone` — the by-value peer's move consumes the element, which
+///   iteration cannot afford. Pre-peer the site had to write
+///   `std::sync::Arc::<[u8]>::from(sp.as_str().as_bytes().to_vec())` or
+///   `std::sync::Arc::<[u8]>::from(<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec())`
+///   at every consumer; post-peer `Arc::<[u8]>::from(sp)` or
+///   `sp.into()` reads through this impl.
+/// - `&StorePath`-typed method receivers or function arguments (a
+///   pipeline-step primitive inspecting a store path without ownership, an
+///   attestation record builder borrowing its inputs, a canonical-byte
+///   digest-input accessor accepting a borrow) projecting into an
+///   `impl Into<Arc<[u8]>>` sink at their downstream boundary — the
+///   by-value peer requires a `sp.clone().into()` at the boundary if the
+///   caller still needs the value; the by-reference peer avoids the clone.
+/// - Trait objects and generic bounds that admit `&T` conversions through
+///   the standard `impl<T> From<&T> for T::Owned`
+///   [`ToOwned`](std::borrow::ToOwned) family — the by-reference peer
+///   completes the [`From<&StorePath>`] symmetry the by-value
+///   [`From<StorePath>`] emit peer requires to compose in trait-generic
+///   contexts (an intern-table populator receiving `&StorePath` and
+///   handing it into an `impl Into<Arc<[u8]>>` key slot, a
+///   [`std::sync::Arc<[u8]>`]-keyed cross-thread cache populator typed on
+///   `impl Into<Arc<[u8]>>` from a borrowed iteration).
+///
+/// [`std::sync::Arc<[u8]>`] is disjoint from [`Box<[u8]>`] (line 6025) at
+/// the type level even though the two carry the same bytes: [`Arc<[u8]>`]
+/// prefixes its payload with atomic strong/weak count headers so clones
+/// share the same allocation across threads, while [`Box<[u8]>`] is a
+/// payload-sized `(ptr, len)` fat pointer that owns its buffer with no
+/// refcount slot at all. A downstream site that pins its handle type on
+/// [`Arc<[u8]>`] specifically (a byte-payload fan-out that must clone
+/// cheaply across `Send + Sync` recipients, a
+/// `#[serde(into = "Arc<[u8]>")]` container attribute that opts into the
+/// cross-thread shared-owned serialize grammar) cannot substitute
+/// [`Box<[u8]>`] — the payload-sized shape cannot be cloned without a full
+/// buffer copy, which is exactly the cost the cross-thread shared-owned
+/// contract is asked to avoid. This peer covers exactly that shape at the
+/// by-reference frontier.
+///
+/// The chain-through-`From<&StorePath> for Vec<u8>` design is the
+/// one-oracle discipline THEORY §VI.1 demands: the emitted canonical bytes
+/// travel through the same by-reference [`Vec::<u8>::from`] projection the
+/// by-reference byte-side sub-family routes through (and, transitively,
+/// the same borrowed-view [`AsRef<[u8]>`] peer the by-reference
+/// [`Vec<u8>`] peer reads through), so a future canonical-form refinement
+/// to the backing bytes (a tighter trim, a canonicalising projection at
+/// the read surface) lands at one site (the [`AsRef<[u8]>`] impl at
+/// line 2001, which the by-reference [`Vec::<u8>::from`] peer reads
+/// through) and every by-reference byte-side emit peer in the family
+/// inherits it automatically. A per-impl direct call to
+/// `std::sync::Arc::<[u8]>::from(sp.as_str().as_bytes())` here would work
+/// today but would ossify the "AsRef<[u8]> to_arc" two-step at the
+/// by-reference emit surface AND materialise a fresh [`&[u8]`] slice the
+/// intermediate [`Vec<u8>`] peer already surfaces; the
+/// `std::sync::Arc::<[u8]>::from(Vec::<u8>::from(sp))` chain reads through
+/// the by-reference [`Vec<u8>`] frontier-opener so the family stays
+/// composable by construction.
+///
+/// # Identity invariants pinned
+///
+/// - `<Arc<[u8]>>::from(&sp) == <Arc<[u8]>>::from(sp.clone())` (matches
+///   the by-value peer's projection byte-for-byte) — pinned by
+///   [`tests::test_from_store_path_ref_arc_bytes_matches_by_value_peer`].
+/// - Trim-discipline preservation: a `\n`-terminated raw input emits an
+///   [`Arc<[u8]>`] whose bytes equal the trimmed canonical form — pinned
+///   by [`tests::test_from_store_path_ref_arc_bytes_carries_trim_discipline`].
+/// - Trait-generic composition: an `impl Into<Arc<[u8]>>` consumer holding
+///   a [`&StorePath`] projects the same canonical bytes — pinned by
+///   [`tests::test_from_store_path_ref_arc_bytes_carries_through_generic_consumer`].
+/// - Source-preservation: the source [`StorePath`] remains usable after
+///   the emit (the by-reference peer does not consume) — pinned by
+///   [`tests::test_from_store_path_ref_arc_bytes_preserves_source`].
+impl From<&StorePath> for std::sync::Arc<[u8]> {
+    fn from(sp: &StorePath) -> std::sync::Arc<[u8]> {
+        std::sync::Arc::<[u8]>::from(Vec::<u8>::from(sp))
+    }
+}
+
 /// Extract the validated Nix store paths from a `nix path-info --recursive
 /// --json` closure document, in document order.
 ///
@@ -13755,6 +13907,149 @@ mod tests {
         let first: Box<[u8]> = Box::<[u8]>::from(&sp);
         let second: Box<[u8]> = Box::<[u8]>::from(&sp);
         let third: Box<[u8]> = (&sp).into();
+        let expected = raw.as_bytes();
+        assert_eq!(&*first, expected);
+        assert_eq!(&*second, expected);
+        assert_eq!(&*third, expected);
+        assert_eq!(sp.as_str(), raw);
+        assert_eq!(sp.hash(), &raw["/nix/store/".len()..][..32]);
+    }
+
+    /// [`From<&StorePath> for std::sync::Arc<[u8]>`] agrees byte-for-byte
+    /// with the by-value [`From<StorePath> for std::sync::Arc<[u8]>`] peer
+    /// AND with every existing byte-surface projection: the
+    /// [`AsRef<[u8]>`] borrowed view, `as_str().as_bytes()`, and the
+    /// by-reference [`Vec::<u8>::from`] emit peer this by-ref
+    /// [`Arc<[u8]>`] impl chains through. Also asserts `From` vs `Into`
+    /// consistency — reaching the impl through the trait's dual grammar
+    /// projects the same bytes. Exercised across representative payload
+    /// shapes (single-char name, hyphen-rich name, `.drv` derivation,
+    /// deep-hyphen name) so the invariance holds at every parse-admitted
+    /// canonical shape.
+    #[test]
+    fn test_from_store_path_ref_arc_bytes_matches_by_value_peer() {
+        for raw in [
+            format!("/nix/store/{H}-x"),
+            format!("/nix/store/{H}-hello-2.10"),
+            format!("/nix/store/{H}-mysvc.drv"),
+            format!("/nix/store/{H}-a-b-c-d-e"),
+        ] {
+            let sp = StorePath::parse(&raw).expect("valid store path");
+            let by_ref_emit: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(&sp);
+            let by_ref_into: std::sync::Arc<[u8]> = (&sp).into();
+            let by_val_emit: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(sp.clone());
+            let via_as_ref: std::sync::Arc<[u8]> =
+                std::sync::Arc::<[u8]>::from(<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec());
+            let via_as_str_bytes: std::sync::Arc<[u8]> =
+                std::sync::Arc::<[u8]>::from(sp.as_str().as_bytes().to_vec());
+            let via_ref_vec: std::sync::Arc<[u8]> =
+                std::sync::Arc::<[u8]>::from(Vec::<u8>::from(&sp));
+            assert_eq!(
+                by_ref_emit, by_val_emit,
+                "From<&StorePath> for Arc<[u8]> must match From<StorePath> for Arc<[u8]> byte-for-byte"
+            );
+            assert_eq!(by_ref_emit, by_ref_into, "From vs Into consistency");
+            assert_eq!(
+                by_ref_emit, via_as_ref,
+                "must match Arc::<[u8]>::from(<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec())"
+            );
+            assert_eq!(
+                by_ref_emit, via_as_str_bytes,
+                "must match Arc::<[u8]>::from(sp.as_str().as_bytes().to_vec())"
+            );
+            assert_eq!(
+                by_ref_emit, via_ref_vec,
+                "must match Arc::<[u8]>::from(Vec::<u8>::from(&sp))"
+            );
+            assert_eq!(
+                &*by_ref_emit,
+                raw.as_bytes(),
+                "on whitespace-free input must equal raw.as_bytes()"
+            );
+            // Cross-thread shared-owned discipline: Arc<[u8]>::len equals
+            // the payload byte count (no capacity slack), and cheap-clone
+            // sharing through Arc::clone must observe the same bytes.
+            assert_eq!(by_ref_emit.len(), raw.len());
+            let cloned = std::sync::Arc::clone(&by_ref_emit);
+            assert_eq!(&*cloned, raw.as_bytes());
+            assert!(
+                std::sync::Arc::ptr_eq(&by_ref_emit, &cloned),
+                "Arc::clone must share allocation, not deep-copy the byte payload"
+            );
+        }
+    }
+
+    /// [`From<&StorePath> for std::sync::Arc<[u8]>`] carries
+    /// [`StorePath::parse`]'s trim discipline through the by-reference
+    /// cross-thread shared-owned-byte-slice emit surface — a value parsed
+    /// from a newline-terminated nix-frontier stdout buffer emits an
+    /// [`Arc<[u8]>`] whose bytes are the trimmed canonical form with no
+    /// per-site
+    /// `std::sync::Arc::<[u8]>::from(sp.as_str().trim().as_bytes().to_vec())`
+    /// restatement.
+    #[test]
+    fn test_from_store_path_ref_arc_bytes_carries_trim_discipline() {
+        let sp = StorePath::parse(&format!("/nix/store/{H}-x\n")).expect("valid");
+        let emitted: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(&sp);
+        let expected = format!("/nix/store/{H}-x").into_bytes();
+        assert_eq!(&*emitted, expected.as_slice());
+        assert!(!emitted.ends_with(b"\n"));
+        assert!(!emitted.starts_with(b" "));
+        // Payload matches the trimmed canonical bytes exactly.
+        assert_eq!(emitted.len(), sp.as_str().len());
+    }
+
+    /// The [`From<&StorePath> for std::sync::Arc<[u8]>`] impl composes with
+    /// a generic cross-thread shared-owned-byte-slice helper bounded by
+    /// `impl Into<std::sync::Arc<[u8]>>` receiving a [`&StorePath`] — the
+    /// compositional motivation for landing the by-reference peer
+    /// separately from the by-value
+    /// [`From<StorePath> for std::sync::Arc<[u8]>`] emit peer. Pins the
+    /// trait-generic consumer surface: a downstream site holding a
+    /// [`&StorePath`] (an iteration over a `[StorePath]` slice, an
+    /// attestation record builder borrowing its inputs, a
+    /// `Send + Sync`-fan-out byte-payload sink `&self`-receiver method)
+    /// that types its input contract as
+    /// `impl Into<std::sync::Arc<[u8]>>` recovers the same validated bytes
+    /// a direct
+    /// `std::sync::Arc::<[u8]>::from(<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec())`
+    /// call would.
+    #[test]
+    fn test_from_store_path_ref_arc_bytes_carries_through_generic_consumer() {
+        fn first_byte_of<T: Into<std::sync::Arc<[u8]>>>(t: T) -> u8 {
+            let s: std::sync::Arc<[u8]> = t.into();
+            s[0]
+        }
+        fn length_of<T: Into<std::sync::Arc<[u8]>>>(t: T) -> usize {
+            let s: std::sync::Arc<[u8]> = t.into();
+            s.len()
+        }
+        fn bytes_eq<T: Into<std::sync::Arc<[u8]>>>(t: T, expected: &[u8]) -> bool {
+            let s: std::sync::Arc<[u8]> = t.into();
+            &*s == expected
+        }
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp = StorePath::parse(&raw).expect("valid");
+        assert_eq!(first_byte_of(&sp), b'/');
+        assert_eq!(length_of(&sp), raw.len());
+        assert!(bytes_eq(&sp, raw.as_bytes()));
+    }
+
+    /// [`From<&StorePath> for std::sync::Arc<[u8]>`] does NOT consume the
+    /// source [`StorePath`] — the borrowed emit surface must leave the
+    /// value available for further reads. Pins the load-bearing distinction
+    /// from the by-value [`From<StorePath> for std::sync::Arc<[u8]>`]
+    /// peer: an iteration over a `[StorePath]` slice or a
+    /// `&StorePath`-receiver method that emits an owned [`Arc<[u8]>`] must
+    /// retain the source for downstream consumers on the same expression,
+    /// which the by-value peer's move discipline forbids.
+    #[test]
+    fn test_from_store_path_ref_arc_bytes_preserves_source() {
+        let raw = format!("/nix/store/{H}-hello-2.10");
+        let sp = StorePath::parse(&raw).expect("valid");
+        let first: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(&sp);
+        let second: std::sync::Arc<[u8]> = std::sync::Arc::<[u8]>::from(&sp);
+        let third: std::sync::Arc<[u8]> = (&sp).into();
         let expected = raw.as_bytes();
         assert_eq!(&*first, expected);
         assert_eq!(&*second, expected);
