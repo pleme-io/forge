@@ -19,6 +19,7 @@ use std::path::Path;
 use tokio::process::Command;
 
 use crate::repo::get_tool_path;
+use crate::tools::{get_tool_path as get_tool_path_derived, tools};
 
 /// Result of codegen validation
 #[derive(Debug)]
@@ -265,7 +266,15 @@ async fn auto_commit_codegen_changes(web_dir: &Path) -> Result<bool> {
     // Check if there are any changes to codegen files
     println!("   Checking for codegen changes...");
 
-    let status_output = Command::new("git")
+    // Resolve `git` via `crate::tools::get_tool_path(tools::GIT)` — reads
+    // the `GIT_BIN` derivation-provided env var and falls through to bare
+    // `"git"` on PATH only when unset. Same three-site status/add/commit
+    // shape a Nix-hermetic runner needs so its store-path `git` wins over
+    // whatever `git` is first on PATH; without the lift the shell-emitted
+    // `GIT_BIN` silently drops on the codegen-autocommit surface.
+    let git = get_tool_path_derived(tools::GIT);
+
+    let status_output = Command::new(&git)
         .args(["status", "--porcelain", "--"])
         .args(&codegen_paths)
         .current_dir(web_dir)
@@ -290,7 +299,7 @@ async fn auto_commit_codegen_changes(web_dir: &Path) -> Result<bool> {
         "→".yellow()
     );
 
-    let add_output = Command::new("git")
+    let add_output = Command::new(&git)
         .args(["add", "--"])
         .args(&codegen_paths)
         .current_dir(web_dir)
@@ -313,7 +322,7 @@ async fn auto_commit_codegen_changes(web_dir: &Path) -> Result<bool> {
         Auto-committed by release pipeline to ensure deployed code\n\
         matches the regenerated types from backend schema.";
 
-    let commit_output = Command::new("git")
+    let commit_output = Command::new(&git)
         .args(["commit", "-m", commit_message])
         .current_dir(web_dir)
         .output()
@@ -410,5 +419,76 @@ mod tests {
         assert!(!result.is_valid);
         assert!(!result.changes_committed);
         assert!(result.error.is_some());
+    }
+
+    /// Regression-shield: every `git`-spawning site in
+    /// `auto_commit_codegen_changes` MUST resolve the binary through
+    /// [`crate::tools::get_tool_path`] rather than the pre-lift
+    /// `Command::new("git")` literal. Pre-migration three sites
+    /// (status / add / commit) bypassed the `GIT_BIN` env override the
+    /// `tools::get_tool_path(tools::GIT)` idiom (cli/src/tools.rs:102-105)
+    /// resolves — the same class of bug the sibling `flux` / `cargo` /
+    /// `doca` / free-function-`git` / `GitClient` / `commands/push.rs` /
+    /// `commands/federation.rs` migrations redeemed at 621f827 /
+    /// f0dfa12 / d3dd199 / 685642f / d6f6bc7 / dd5a212 / 673e4be /
+    /// b02d4eb / 54a9985 / 139b37a / 818ed9a / badcdf4 / 8653403 /
+    /// f6be190.
+    ///
+    /// The check reads this module's own source via [`include_str!`] and
+    /// asserts the raw `Command::new("git")` string does not appear in
+    /// `auto_commit_codegen_changes` while a `Command::new(&git)` site
+    /// (fed by `get_tool_path_derived(tools::GIT)`) does. A regression
+    /// that "tidies" any of the three back to the pre-lift literal
+    /// surfaces here rather than as a silent-`PATH`-fallback bug at
+    /// release-pipeline autocommit time — where a Nix-hermetic runner's
+    /// `GIT_BIN`-provided `git` would lose to whatever `git` is first on
+    /// `PATH`.
+    ///
+    /// Bounded to the `auto_commit_codegen_changes` body — from
+    /// `async fn auto_commit_codegen_changes(` to the next top-level
+    /// `#[cfg(test)]` marker — so future non-codegen sites in this
+    /// module (or unrelated fixtures in the test module itself) do not
+    /// perturb the scan. The end-to-end `GIT_BIN`-routing invariant is
+    /// pinned once at `crate::tools::get_tool_path`'s own tests
+    /// (`test_get_tool_path_from_env` / `test_uppercase_conversion`);
+    /// this shield only certifies that every autocommit git spawn reads
+    /// through that primitive.
+    #[test]
+    fn test_auto_commit_codegen_changes_routes_git_through_get_tool_path_not_raw_command() {
+        const SOURCE: &str = include_str!("codegen_validation.rs");
+
+        let body_start = SOURCE
+            .find("async fn auto_commit_codegen_changes(")
+            .expect("auto_commit_codegen_changes function must exist");
+        let body_end = SOURCE[body_start..]
+            .find("\n#[cfg(test)]")
+            .map(|off| body_start + off)
+            .unwrap_or(SOURCE.len());
+        let body = &SOURCE[body_start..body_end];
+
+        assert!(
+            !body.contains("Command::new(\"git\")"),
+            "auto_commit_codegen_changes must not spawn `git` via the raw \
+             `Command::new(\"git\")` literal — that bypasses the `GIT_BIN` \
+             env override `crate::tools::get_tool_path(tools::GIT)` \
+             resolves. Route the spawn through the primitive so a \
+             Nix-hermetic runner's derivation-provided `git` wins over \
+             ambient PATH."
+        );
+        assert!(
+            body.contains("get_tool_path_derived(tools::GIT)"),
+            "auto_commit_codegen_changes must resolve `git` via \
+             `get_tool_path_derived(tools::GIT)` (aliased from \
+             `crate::tools::get_tool_path`) so the `GIT_BIN` env override \
+             is honored — the pre-lift call string was not found in the \
+             function body."
+        );
+        assert!(
+            body.contains("Command::new(&git)"),
+            "auto_commit_codegen_changes must spawn `git` via \
+             `Command::new(&git)` (bound to the `get_tool_path_derived` \
+             result) at each of the three sites — the expected spawn \
+             string was not found in the function body."
+        );
     }
 }
