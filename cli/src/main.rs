@@ -26,6 +26,7 @@ mod cosign;
 #[cfg(feature = "attestation")]
 mod deployment_manifest;
 mod duration;
+mod flux_get;
 mod flux_reconcile;
 #[cfg(feature = "attestation")]
 mod flux_source_verification;

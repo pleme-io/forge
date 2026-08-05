@@ -8,6 +8,9 @@ use tokio::process::Command;
 use tokio::time::sleep;
 
 use crate::config::DeployConfig;
+use crate::flux_get::{
+    list_kustomizations_all_namespaces, FluxGetKustomizationsError, KustomizationRow,
+};
 
 /// FluxCD health check before and after deployments.
 ///
@@ -19,54 +22,21 @@ pub async fn health_check(context: &str) -> Result<()> {
         format!("FluxCD health check ({})...", context).bold()
     );
 
-    // Get all kustomizations status
-    let output = Command::new("flux")
-        .args(["get", "kustomizations", "--all-namespaces"])
-        .output()
+    // Route through the canonical `flux_get::list_kustomizations_all_namespaces`
+    // primitive so this site honors `FLUX_BIN` (via `get_tool_path("flux")`)
+    // and — on failure — surfaces the typed `(exit_code, stderr)` record. The
+    // outer `.context("Failed to run flux get kustomizations")?` wraps the
+    // typed error, so a telemetry consumer can still recover the typed
+    // variant across the anyhow boundary via
+    // `err.downcast_ref::<FluxGetKustomizationsError>()`.
+    let rows = list_kustomizations_all_namespaces()
         .await
         .context("Failed to run flux get kustomizations")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to get FluxCD status: {}", stderr);
-    }
+    let (ready_count, failures) = partition_ready(&rows);
+    let total = rows.len();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse the output and check for any non-Ready kustomizations
-    let mut failures = Vec::new();
-    let mut total = 0;
-    let mut ready = 0;
-
-    for line in stdout.lines().skip(1) {
-        // Skip header
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        total += 1;
-        let columns: Vec<&str> = line.split_whitespace().collect();
-
-        // Format: NAMESPACE NAME REVISION SUSPENDED READY MESSAGE
-        // We need to check the READY column (index 4)
-        if columns.len() >= 5 {
-            let name = columns[1];
-            let ready_status = columns[4];
-
-            if ready_status == "True" {
-                ready += 1;
-            } else {
-                // Capture the full message (everything after READY column)
-                let message = columns.get(5..).map(|s| s.join(" ")).unwrap_or_default();
-                failures.push(format!(
-                    "  • {} - Status: {} - {}",
-                    name, ready_status, message
-                ));
-            }
-        }
-    }
-
-    println!("   Kustomizations: {}/{} ready", ready, total);
+    println!("   Kustomizations: {}/{} ready", ready_count, total);
 
     if !failures.is_empty() {
         println!();
@@ -196,56 +166,50 @@ pub async fn health_check_with_retry(
     }
 }
 
+/// Partition parsed kustomization rows into `(ready_count, failure_lines)`.
+///
+/// The `ready` counter and the `failure_lines` vector are the two outputs
+/// both `health_check` and `check_health_status` re-derived from the raw
+/// parsed rows verbatim before this lift. Naming the partition here means
+/// the two sites share the exact counting-and-rendering discipline: a
+/// future prose refresh on the failure line (owned by
+/// [`KustomizationRow::render_failure_line`]) or a future refinement of
+/// the ready predicate (owned by [`KustomizationRow::is_ready`]) lands
+/// at one method and reaches both sites without drift.
+fn partition_ready(rows: &[KustomizationRow]) -> (usize, Vec<String>) {
+    let mut ready = 0usize;
+    let mut failures = Vec::new();
+    for row in rows {
+        if row.is_ready() {
+            ready += 1;
+        } else {
+            failures.push(row.render_failure_line());
+        }
+    }
+    (ready, failures)
+}
+
 /// Check Flux health status without failing immediately
 ///
 /// Returns Ok((ready_count, total_count)) if all healthy,
 /// Err((ready_count, total_count, failures)) if any unhealthy
 async fn check_health_status() -> Result<(usize, usize), (usize, usize, Vec<String>)> {
-    // Get all kustomizations status
-    let output = Command::new("flux")
-        .args(["get", "kustomizations", "--all-namespaces"])
-        .output()
+    // Route through the canonical `flux_get::list_kustomizations_all_namespaces`
+    // primitive so this site honors `FLUX_BIN` (via `get_tool_path("flux")`)
+    // and — on failure — collapses the typed `(exit_code, stderr)` record
+    // into the pre-lift `(0, 0, vec![message])` tuple by rendering the
+    // typed error via `Display`. That preserves the pre-lift caller
+    // contract bit-for-bit while gaining the operator-visible exit code
+    // and stderr in the collapsed failure line: pre-lift both spawn-
+    // failure and op-failure surfaced as bare "Failed to run flux command"
+    // / "Failed to get FluxCD status" strings that dropped the stderr and
+    // the exit code.
+    let rows = list_kustomizations_all_namespaces()
         .await
-        .map_err(|_| (0, 0, vec!["Failed to run flux command".to_string()]))?;
+        .map_err(|e: FluxGetKustomizationsError| (0usize, 0usize, vec![e.to_string()]))?;
 
-    if !output.status.success() {
-        return Err((0, 0, vec!["Failed to get FluxCD status".to_string()]));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse the output and check for any non-Ready kustomizations
-    let mut failures = Vec::new();
-    let mut total = 0;
-    let mut ready = 0;
-
-    for line in stdout.lines().skip(1) {
-        // Skip header
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        total += 1;
-        let columns: Vec<&str> = line.split_whitespace().collect();
-
-        // Format: NAMESPACE NAME REVISION SUSPENDED READY MESSAGE
-        // We need to check the READY column (index 4)
-        if columns.len() >= 5 {
-            let name = columns[1];
-            let ready_status = columns[4];
-
-            if ready_status == "True" {
-                ready += 1;
-            } else {
-                // Capture the full message (everything after READY column)
-                let message = columns.get(5..).map(|s| s.join(" ")).unwrap_or_default();
-                failures.push(format!(
-                    "  • {} - Status: {} - {}",
-                    name, ready_status, message
-                ));
-            }
-        }
-    }
+    let (ready, failures) = partition_ready(&rows);
+    let total = rows.len();
 
     if failures.is_empty() {
         Ok((ready, total))
