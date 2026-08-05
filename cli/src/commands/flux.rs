@@ -1,15 +1,15 @@
 //! FluxCD operations for GitOps deployments.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use colored::Colorize;
-use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::sleep;
 
 use crate::config::DeployConfig;
 use crate::flux_get::{
-    list_kustomizations_all_namespaces, FluxGetKustomizationsError, KustomizationRow,
+    get_kustomization_scoped, list_kustomizations_all_namespaces, FluxGetKustomizationsError,
+    KustomizationRow,
 };
 
 /// FluxCD health check before and after deployments.
@@ -306,72 +306,58 @@ async fn reconcile_product_chain(namespace: &str) -> Result<()> {
             format!("{}-{}", namespace, phase)
         };
 
-        // Check if this kustomization exists before trying to reconcile
-        let check = Command::new("flux")
-            .args([
-                "get",
-                "kustomization",
-                &ks_name,
-                "-n",
-                "flux-system",
-                "--no-header",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
+        // Route through the canonical `flux_get::get_kustomization_scoped`
+        // primitive so this site honors `FLUX_BIN` (via
+        // `get_tool_path("flux")`), reads the ready-boundary through
+        // `KustomizationRow::is_ready` (one-oracle for the `== "True"`
+        // comparison this site pre-lift duplicated against the
+        // `--all-namespaces` sibling), and carries the typed
+        // `FluxGetKustomizationError` at the API boundary. Pre-lift the
+        // site fused spawn-failure and non-zero-exit into a single
+        // `_ => continue` arm; the primitive splits them structurally
+        // — `Ok(None)` for "kustomization doesn't exist" (silently
+        // skip, matching pre-lift), `Err(_)` for spawn-failure — and
+        // we preserve the pre-lift silent-skip on both by collapsing
+        // them at the `let-else` here so this commit's blast radius
+        // stays a pure refactor.
+        let Ok(Some(row)) = get_kustomization_scoped(&ks_name, "flux-system").await else {
+            continue;
+        };
 
-        match check {
-            Ok(output) if output.status.success() => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // Check if already ready (contains "True" in the READY column)
-                let columns: Vec<&str> = stdout.split_whitespace().collect();
-                let is_ready = columns.get(3).map(|s| *s == "True").unwrap_or(false);
+        if row.is_ready() {
+            let phase_label = if phase.is_empty() { "app" } else { phase };
+            println!("      ✓ {} (already ready)", phase_label.dimmed());
+            continue;
+        }
 
-                if is_ready {
-                    let phase_label = if phase.is_empty() { "app" } else { phase };
-                    println!("      ✓ {} (already ready)", phase_label.dimmed());
-                    continue;
-                }
+        let phase_label = if phase.is_empty() { "app" } else { phase };
+        println!("      ⏳ Reconciling {}...", phase_label);
 
-                let phase_label = if phase.is_empty() { "app" } else { phase };
-                println!("      ⏳ Reconciling {}...", phase_label);
-
-                // Route through the canonical `flux_reconcile` primitive so this
-                // site honors `FLUX_BIN` (via `get_tool_path("flux")`) and yields
-                // the typed `(kustomization, namespace, with_source, exit_code,
-                // stderr)` failure record on non-zero exit — best-effort warn
-                // preserved by matching on the typed variant.
-                match crate::flux_reconcile::reconcile_kustomization(&ks_name, "flux-system", false)
-                    .await
-                {
-                    Ok(()) => println!("      ✓ {}", phase_label.green()),
-                    Err(e @ crate::flux_reconcile::FluxReconcileError::SpawnFailed { .. }) => {
-                        return Err(anyhow::Error::new(e)
-                            .context(format!("Failed to reconcile kustomization {}", ks_name)));
-                    }
-                    Err(crate::flux_reconcile::FluxReconcileError::Failed {
-                        exit_code,
-                        stderr,
-                        ..
-                    }) => {
-                        // Non-fatal: the kustomization might have a dependency not yet
-                        // ready. The verify_deployment_image step will catch this
-                        // downstream. Surface exit code + trimmed stderr so the operator
-                        // has a real hint instead of a bare "returned non-zero".
-                        println!(
-                            "      ⚠ {} (reconcile returned non-zero, may need dependency; \
-                             exit={:?}): {}",
-                            phase_label.yellow(),
-                            exit_code,
-                            stderr.trim()
-                        );
-                    }
-                }
+        // Route through the canonical `flux_reconcile` primitive so this
+        // site honors `FLUX_BIN` (via `get_tool_path("flux")`) and yields
+        // the typed `(kustomization, namespace, with_source, exit_code,
+        // stderr)` failure record on non-zero exit — best-effort warn
+        // preserved by matching on the typed variant.
+        match crate::flux_reconcile::reconcile_kustomization(&ks_name, "flux-system", false).await {
+            Ok(()) => println!("      ✓ {}", phase_label.green()),
+            Err(e @ crate::flux_reconcile::FluxReconcileError::SpawnFailed { .. }) => {
+                return Err(anyhow::Error::new(e)
+                    .context(format!("Failed to reconcile kustomization {}", ks_name)));
             }
-            _ => {
-                // Kustomization doesn't exist, skip silently
-                continue;
+            Err(crate::flux_reconcile::FluxReconcileError::Failed {
+                exit_code, stderr, ..
+            }) => {
+                // Non-fatal: the kustomization might have a dependency not yet
+                // ready. The verify_deployment_image step will catch this
+                // downstream. Surface exit code + trimmed stderr so the operator
+                // has a real hint instead of a bare "returned non-zero".
+                println!(
+                    "      ⚠ {} (reconcile returned non-zero, may need dependency; \
+                     exit={:?}): {}",
+                    phase_label.yellow(),
+                    exit_code,
+                    stderr.trim()
+                );
             }
         }
     }
