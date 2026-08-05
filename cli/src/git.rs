@@ -4,17 +4,55 @@ use std::process::Command;
 
 use crate::error::GitError;
 use crate::retry::classify_capture;
+use crate::tools::{get_tool_path, tools};
 
 /// Run `git <args>` (resolved against `workdir` if any) and return its
-/// captured stdout, or a typed `GitError`.
+/// captured stdout, or a typed `GitError`. Production entrypoint —
+/// resolves the `git` binary once through
+/// [`crate::tools::get_tool_path`] so every consumer honors the
+/// `GIT_BIN` env override the tools-registry idiom names as the
+/// hermetic-runner contract for [`tools::GIT`], then delegates the
+/// spawn-plus-classify to [`git_capture_with_bin`]. Same production /
+/// test split as `flux_reconcile::reconcile_kustomization` +
+/// `reconcile_kustomization_with_bin`,
+/// `graphql_schema::extract_graphql_schema` +
+/// `extract_graphql_schema_with_bin`, and `nix::run_nix_build_typed` +
+/// `run_nix_build_typed_with_bin` — production reads through
+/// `get_tool_path`, tests point at an absolute-path shim without
+/// racing on the process-wide env var.
+///
+/// # `GIT_BIN` env override
+///
+/// The `git` binary resolves via `tools::get_tool_path(tools::GIT)` —
+/// same discipline every Nix-derivation-provided tool in forge honors.
+/// Pre-this-lift every production call site here spelled the literal
+/// `"git"` as the first argument to `git_capture`, ignoring the env
+/// var the `tools::get_tool_path("git")` idiom (§tools.rs) resolves. A
+/// Nix-hermetic runner with a store-path `git` would fall through to
+/// whatever `git` was first on `PATH` — the exact class of bug the
+/// `CARGO`-bypass at the pre-lift extract-schema sites carried
+/// (redeemed at 673e4be / b02d4eb / 54a9985), the `FLUX`-bypass at
+/// the pre-lift `flux reconcile` sites carried (redeemed at
+/// f0dfa12 / 621f827 / d3dd199), and the `FLUX`-bypass at the
+/// pre-lift `flux get` sites carried (redeemed at 685642f / d6f6bc7 /
+/// dd5a212).
+fn git_capture(args: &[&str], workdir: Option<&Path>, op: &str) -> Result<Vec<u8>, GitError> {
+    git_capture_with_bin(&get_tool_path(tools::GIT), args, workdir, op)
+}
+
+/// Test-injection sibling of [`git_capture`]: accepts the resolved
+/// `bin` as an explicit argument so unit tests can point at a
+/// hermetic shim without mutating the process-wide `GIT_BIN` env var
+/// — same discipline as `flux_reconcile::reconcile_kustomization_with_bin`,
+/// `graphql_schema::extract_graphql_schema_with_bin`, and
+/// `AtticClient::with_attic_bin`. Splitting the resolution from the
+/// execution keeps the test surface hermetic AND parallel-safe:
+/// `#[test]` on this module can run concurrent tests without racing on
+/// env-var writes.
 ///
 /// `op` is the human-readable label attached to any returned error and
 /// is what discriminates "git couldn't spawn" (`GitError::ExecFailed`)
 /// from "git ran but exited non-zero" (`GitError::OpFailed`).
-/// `bin` defaults to `"git"` for production callers; tests pass an
-/// absolute shim path so they don't mutate global PATH and remain
-/// parallel-safe — same hermetic-test discipline as `nix.rs`'s
-/// `run_nix_build_typed` and `attic.rs`'s `run_attic_capture`.
 ///
 /// Spawn-vs-op dispatch flows through the canonical
 /// [`GitError::from_capture`] primitive: spawn failures
@@ -26,7 +64,7 @@ use crate::retry::classify_capture;
 /// sites (`infrastructure/git.rs::GitClient::is_clean`,
 /// `GitClient::has_staged_changes`) that carried the verbatim same
 /// shape.
-fn git_capture(
+fn git_capture_with_bin(
     bin: &str,
     args: &[&str],
     workdir: Option<&Path>,
@@ -45,14 +83,38 @@ fn git_capture(
 /// `git push origin <branch>`, `git pull origin <branch>` — and surface
 /// failures as `GitError::RemoteOpFailed` so callers can recover the
 /// exact endpoint from the typed record without parsing the bail!
-/// string. Mirror of `git_capture` for the network half of the surface.
+/// string. Mirror of [`git_capture`] for the network half of the
+/// surface: production entrypoint that resolves the `git` binary
+/// through [`crate::tools::get_tool_path`] once so every network op
+/// honors the `GIT_BIN` env override, then delegates to
+/// [`git_capture_remote_with_bin`].
+fn git_capture_remote(
+    args: &[&str],
+    workdir: Option<&Path>,
+    op: &str,
+    remote: &str,
+    branch: &str,
+) -> Result<Vec<u8>, GitError> {
+    git_capture_remote_with_bin(
+        &get_tool_path(tools::GIT),
+        args,
+        workdir,
+        op,
+        remote,
+        branch,
+    )
+}
+
+/// Test-injection sibling of [`git_capture_remote`]: accepts the
+/// resolved `bin` as an explicit argument for the same reasons
+/// [`git_capture_with_bin`] does.
 ///
 /// Spawn-vs-op dispatch flows through the canonical
 /// [`crate::retry::classify_capture`] primitive — same shape as
-/// [`git_capture`], with the op-failure arm producing
+/// [`git_capture_with_bin`], with the op-failure arm producing
 /// `GitError::RemoteOpFailed` (carrying `(remote, branch, exit_code,
 /// stderr)`) instead of `GitError::OpFailed`.
-fn git_capture_remote(
+fn git_capture_remote_with_bin(
     bin: &str,
     args: &[&str],
     workdir: Option<&Path>,
@@ -103,36 +165,46 @@ pub fn get_repo_root() -> Result<PathBuf> {
     }
 
     // Fall back to git command
-    let stdout = git_capture("git", &["rev-parse", "--show-toplevel"], None, "rev-parse")?;
+    let stdout = git_capture(&["rev-parse", "--show-toplevel"], None, "rev-parse")?;
     Ok(PathBuf::from(stdout_string(stdout)?))
 }
 
 /// Get full git SHA (40 characters)
 pub fn get_full_sha() -> Result<String> {
-    let stdout = git_capture("git", &["rev-parse", "HEAD"], None, "rev-parse")?;
+    let stdout = git_capture(&["rev-parse", "HEAD"], None, "rev-parse")?;
     stdout_string(stdout)
 }
 
 /// Get short git SHA (7 characters)
 pub fn get_short_sha() -> Result<String> {
-    let stdout = git_capture(
-        "git",
-        &["rev-parse", "--short=7", "HEAD"],
-        None,
-        "rev-parse",
-    )?;
+    let stdout = git_capture(&["rev-parse", "--short=7", "HEAD"], None, "rev-parse")?;
     stdout_string(stdout)
 }
 
-/// Async sibling of [`git_capture`] — same `(bin, args, workdir, op)`
+/// Async sibling of [`git_capture`] — same `(args, workdir, op)`
 /// shape, but spawns through [`tokio::process::Command`] so it composes
-/// with `async fn` callers without a `block_on` bridge. Routes through
-/// the same [`GitError::from_capture`] typed-error producer the sync
-/// sibling uses, so spawn-vs-op dispatch and the
-/// `(op, exit_code, stderr)` failure tuple [`crate::retry::CapturedFailure`]
-/// extracts at the sync surface are preserved by construction on the
-/// async surface.
+/// with `async fn` callers without a `block_on` bridge. Production
+/// entrypoint that resolves the `git` binary through
+/// [`crate::tools::get_tool_path`] once so every async caller honors
+/// the `GIT_BIN` env override, then delegates to
+/// [`git_capture_async_with_bin`].
 async fn git_capture_async(
+    args: &[&str],
+    workdir: Option<&Path>,
+    op: &str,
+) -> Result<Vec<u8>, GitError> {
+    git_capture_async_with_bin(&get_tool_path(tools::GIT), args, workdir, op).await
+}
+
+/// Test-injection sibling of [`git_capture_async`]: accepts the
+/// resolved `bin` as an explicit argument for the same reasons
+/// [`git_capture_with_bin`] does. Routes through the same
+/// [`GitError::from_capture`] typed-error producer the sync sibling
+/// uses, so spawn-vs-op dispatch and the
+/// `(op, exit_code, stderr)` failure tuple
+/// [`crate::retry::CapturedFailure`] extracts at the sync surface are
+/// preserved by construction on the async surface.
+async fn git_capture_async_with_bin(
     bin: &str,
     args: &[&str],
     workdir: Option<&Path>,
@@ -154,13 +226,7 @@ async fn git_capture_async(
 /// `{arch}-<7-char-sha>` rendering across hosts whose
 /// `git config core.abbrev` differs from the default.
 pub async fn get_short_sha_async() -> Result<String> {
-    let stdout = git_capture_async(
-        "git",
-        &["rev-parse", "--short=7", "HEAD"],
-        None,
-        "rev-parse",
-    )
-    .await?;
+    let stdout = git_capture_async(&["rev-parse", "--short=7", "HEAD"], None, "rev-parse").await?;
     stdout_string(stdout)
 }
 
@@ -170,7 +236,6 @@ pub async fn get_short_sha_async() -> Result<String> {
 /// directory than the current process's CWD).
 pub async fn get_short_sha_async_in(workdir: &Path) -> Result<String> {
     let stdout = git_capture_async(
-        "git",
         &["rev-parse", "--short=7", "HEAD"],
         Some(workdir),
         "rev-parse",
@@ -291,7 +356,6 @@ pub fn commit_and_push_in(
 ) -> Result<()> {
     // Pull from origin first to avoid conflicts
     git_capture_remote(
-        "git",
         &["pull", "origin", branch],
         Some(workdir),
         "pull",
@@ -303,15 +367,14 @@ pub fn commit_and_push_in(
     for file in files {
         let relative_path = file.strip_prefix(workdir).unwrap_or(file);
         let rel = relative_path.to_str().unwrap();
-        git_capture("git", &["add", rel], Some(workdir), "add")?;
+        git_capture(&["add", rel], Some(workdir), "add")?;
     }
 
     // Create commit
-    git_capture("git", &["commit", "-m", message], Some(workdir), "commit")?;
+    git_capture(&["commit", "-m", message], Some(workdir), "commit")?;
 
     // Push
     git_capture_remote(
-        "git",
         &["push", "origin", branch],
         Some(workdir),
         "push",
@@ -324,27 +387,27 @@ pub fn commit_and_push_in(
 
 /// Check if the git working tree is clean (no uncommitted changes).
 pub fn is_working_tree_clean() -> Result<bool> {
-    let stdout = git_capture("git", &["status", "--porcelain"], None, "status")?;
+    let stdout = git_capture(&["status", "--porcelain"], None, "status")?;
     let s = String::from_utf8_lossy(&stdout);
     Ok(s.trim().is_empty())
 }
 
 /// Check if a git tag exists locally.
 pub fn tag_exists(tag: &str) -> Result<bool> {
-    let stdout = git_capture("git", &["tag", "--list", tag], None, "tag --list")?;
+    let stdout = git_capture(&["tag", "--list", tag], None, "tag --list")?;
     let s = String::from_utf8_lossy(&stdout);
     Ok(!s.trim().is_empty())
 }
 
 /// Create an annotated git tag.
 pub fn create_tag(tag: &str, message: &str) -> Result<()> {
-    git_capture("git", &["tag", "-a", tag, "-m", message], None, "tag -a")?;
+    git_capture(&["tag", "-a", tag, "-m", message], None, "tag -a")?;
     Ok(())
 }
 
 /// Push a git tag to the remote.
 pub fn push_tag(tag: &str) -> Result<()> {
-    git_capture_remote("git", &["push", "origin", tag], None, "push", "origin", tag)?;
+    git_capture_remote(&["push", "origin", tag], None, "push", "origin", tag)?;
     Ok(())
 }
 
@@ -397,6 +460,45 @@ mod tests {
 
     use crate::test_support::make_executable_shim;
 
+    /// Serial-safe guard for tests that either mutate `GIT_BIN` or
+    /// invoke the no-bin production entry points ([`git_capture`],
+    /// [`git_capture_async`], [`git_capture_remote`]) which resolve
+    /// the git binary through `get_tool_path(tools::GIT)`. Env-var
+    /// writes are process-global; without a serial guard a concurrent
+    /// production-path test could pick up the wrong shim from a
+    /// mid-flight env-var mutation. Same discipline as
+    /// `serial_test::serial` but without the extra dependency.
+    static GIT_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII scope-guard that sets `GIT_BIN=value` on construction and
+    /// restores the pre-scope state (either the original value or
+    /// unset) on drop — panic-safe by construction. Snapshots via
+    /// `std::env::var` so a set-to-empty original round-trips
+    /// verbatim. Every caller MUST hold [`GIT_BIN_ENV_LOCK`] for the
+    /// duration of the scope; the guard does not lock the mutex
+    /// itself, so the two disciplines compose without accidental
+    /// re-entrancy.
+    struct GitBinScope {
+        prior: std::result::Result<String, std::env::VarError>,
+    }
+
+    impl GitBinScope {
+        fn set(value: &str) -> Self {
+            let prior = std::env::var("GIT_BIN");
+            std::env::set_var("GIT_BIN", value);
+            Self { prior }
+        }
+    }
+
+    impl Drop for GitBinScope {
+        fn drop(&mut self) {
+            match &self.prior {
+                Ok(v) => std::env::set_var("GIT_BIN", v),
+                Err(_) => std::env::remove_var("GIT_BIN"),
+            }
+        }
+    }
+
     /// Write an executable shim that pretends to be `git`. Delegates to
     /// the shared `crate::test_support::make_executable_shim` so the
     /// shim discipline (absolute-path invocation, 0o755 chmod, tempdir
@@ -406,13 +508,14 @@ mod tests {
         make_executable_shim("git", body)
     }
 
-    /// When the resolved git binary cannot be spawned, `git_capture` must
-    /// surface `ExecFailed` carrying the offending op label — never a
-    /// stringly anyhow `Failed to execute git`. Pins the typed split so
-    /// telemetry can distinguish "git missing" from "git said no".
+    /// When the resolved git binary cannot be spawned,
+    /// `git_capture_with_bin` must surface `ExecFailed` carrying the
+    /// offending op label — never a stringly anyhow
+    /// `Failed to execute git`. Pins the typed split so telemetry can
+    /// distinguish "git missing" from "git said no".
     #[test]
     fn test_git_capture_exec_failed_carries_op() {
-        let result = git_capture(
+        let result = git_capture_with_bin(
             "/nonexistent/path/to/git-binary-that-does-not-exist",
             &["rev-parse", "HEAD"],
             None,
@@ -434,7 +537,7 @@ mod tests {
     #[test]
     fn test_git_capture_op_failed_carries_structured_fields() {
         let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'fatal: bad object' 1>&2\nexit 128\n");
-        let result = git_capture(&shim, &["rev-parse", "HEAD"], None, "rev-parse");
+        let result = git_capture_with_bin(&shim, &["rev-parse", "HEAD"], None, "rev-parse");
         let err = result.expect_err("nonzero exit must fail");
         match err {
             GitError::OpFailed {
@@ -453,12 +556,13 @@ mod tests {
         }
     }
 
-    /// Success path: `git_capture` returns the trimmed stdout verbatim.
+    /// Success path: `git_capture_with_bin` returns the trimmed stdout
+    /// verbatim.
     #[test]
     fn test_git_capture_success_returns_stdout() {
         let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'deadbeef'\nexit 0\n");
-        let stdout =
-            git_capture(&shim, &["rev-parse", "HEAD"], None, "rev-parse").expect("must succeed");
+        let stdout = git_capture_with_bin(&shim, &["rev-parse", "HEAD"], None, "rev-parse")
+            .expect("must succeed");
         assert_eq!(String::from_utf8_lossy(&stdout).trim(), "deadbeef");
     }
 
@@ -469,7 +573,7 @@ mod tests {
     #[test]
     fn test_git_capture_remote_failed_carries_endpoint() {
         let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'remote: rejected' 1>&2\nexit 1\n");
-        let result = git_capture_remote(
+        let result = git_capture_remote_with_bin(
             &shim,
             &["push", "origin", "main"],
             None,
@@ -496,13 +600,13 @@ mod tests {
         }
     }
 
-    /// `git_capture_remote` must surface an exec-time failure as
-    /// `ExecFailed`, not as `RemoteOpFailed` — the typed split keeps
-    /// "couldn't spawn git" structurally distinct from "git rejected
-    /// the network operation."
+    /// `git_capture_remote_with_bin` must surface an exec-time failure
+    /// as `ExecFailed`, not as `RemoteOpFailed` — the typed split
+    /// keeps "couldn't spawn git" structurally distinct from "git
+    /// rejected the network operation."
     #[test]
     fn test_git_capture_remote_exec_failed_is_distinct() {
-        let result = git_capture_remote(
+        let result = git_capture_remote_with_bin(
             "/nonexistent/path/to/git",
             &["push", "origin", "main"],
             None,
@@ -517,12 +621,12 @@ mod tests {
         }
     }
 
-    /// Success path on the network side: `git_capture_remote` returns
-    /// the trimmed stdout verbatim.
+    /// Success path on the network side: `git_capture_remote_with_bin`
+    /// returns the trimmed stdout verbatim.
     #[test]
     fn test_git_capture_remote_success_returns_stdout() {
         let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'Everything up-to-date'\nexit 0\n");
-        let stdout = git_capture_remote(
+        let stdout = git_capture_remote_with_bin(
             &shim,
             &["push", "origin", "main"],
             None,
@@ -536,6 +640,13 @@ mod tests {
 
     #[test]
     fn test_git_client_sha() {
+        // Guard against races with tests that mutate `GIT_BIN`
+        // ([`test_no_bin_entry_points_route_through_git_bin_env_var`]):
+        // this test invokes `get_short_sha` → `git_capture` (no-bin) →
+        // resolves through `get_tool_path(tools::GIT)`, so a concurrent
+        // env-var write could redirect the spawn to a shim and blow up
+        // the length invariant.
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // This test only works in a git repo
         if let Ok(sha) = get_short_sha() {
             assert!(!sha.is_empty());
@@ -561,7 +672,7 @@ mod tests {
     /// envelope verbatim.
     #[tokio::test]
     async fn test_git_capture_async_exec_failed_carries_op() {
-        let result = git_capture_async(
+        let result = git_capture_async_with_bin(
             "/nonexistent/path/to/git-binary-that-does-not-exist",
             &["rev-parse", "HEAD"],
             None,
@@ -585,7 +696,8 @@ mod tests {
     #[tokio::test]
     async fn test_git_capture_async_op_failed_carries_structured_fields() {
         let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'fatal: bad object' 1>&2\nexit 128\n");
-        let result = git_capture_async(&shim, &["rev-parse", "HEAD"], None, "rev-parse").await;
+        let result =
+            git_capture_async_with_bin(&shim, &["rev-parse", "HEAD"], None, "rev-parse").await;
         let err = result.expect_err("nonzero exit must fail");
         match err {
             GitError::OpFailed {
@@ -604,12 +716,12 @@ mod tests {
         }
     }
 
-    /// Async happy path: `git_capture_async` returns the trimmed stdout
-    /// verbatim.
+    /// Async happy path: `git_capture_async_with_bin` returns the
+    /// trimmed stdout verbatim.
     #[tokio::test]
     async fn test_git_capture_async_success_returns_stdout() {
         let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'deadbeef'\nexit 0\n");
-        let stdout = git_capture_async(&shim, &["rev-parse", "HEAD"], None, "rev-parse")
+        let stdout = git_capture_async_with_bin(&shim, &["rev-parse", "HEAD"], None, "rev-parse")
             .await
             .expect("must succeed");
         assert_eq!(String::from_utf8_lossy(&stdout).trim(), "deadbeef");
@@ -633,10 +745,14 @@ mod tests {
         );
         let (_shim_dir, shim) = make_git_shim(&body);
 
-        let stdout =
-            git_capture_async(&shim, &["rev-parse", "HEAD"], Some(dir.path()), "rev-parse")
-                .await
-                .expect("must succeed");
+        let stdout = git_capture_async_with_bin(
+            &shim,
+            &["rev-parse", "HEAD"],
+            Some(dir.path()),
+            "rev-parse",
+        )
+        .await
+        .expect("must succeed");
 
         assert_eq!(String::from_utf8_lossy(&stdout).trim(), "deadbeef");
         let recorded = std::fs::read_to_string(&probe).expect("read cwd.log");
@@ -659,6 +775,11 @@ mod tests {
     /// federation) all consume.
     #[tokio::test]
     async fn test_get_short_sha_async_in_returns_seven_char_sha() {
+        // See [`test_git_client_sha`] rationale — this test invokes the
+        // async no-bin production entry point and would blow up if a
+        // concurrent env-var-mutating test redirected the spawn to a
+        // shim mid-flight.
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (_parent, _bare, work) = make_bare_origin_with_work();
         let sha = get_short_sha_async_in(&work)
             .await
@@ -735,6 +856,10 @@ mod tests {
     /// actual production spawn sequence rather than a shim.
     #[test]
     fn test_commit_and_push_in_lands_commit_on_origin() {
+        // `commit_and_push_in` invokes `git_capture` / `git_capture_remote`
+        // — the no-bin production entry points that resolve through
+        // `GIT_BIN`. Serialize against the env-mutating test.
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (parent, bare, work) = make_bare_origin_with_work();
 
         let manifest = work.join("kustomization.yaml");
@@ -774,6 +899,8 @@ mod tests {
     /// single-repo deploy path; this pin catches it.
     #[test]
     fn test_commit_and_push_in_stages_every_file_in_slice() {
+        // Same env-var race guard as the single-file sibling above.
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (parent, bare, work) = make_bare_origin_with_work();
 
         let manifest = work.join("kustomization.yaml");
@@ -813,5 +940,160 @@ mod tests {
             files.contains("svc-config.yaml"),
             "configmap must appear in HEAD commit, got: {files:?}"
         );
+    }
+
+    /// The three no-bin production entry points ([`git_capture`],
+    /// [`git_capture_async`], [`git_capture_remote`]) MUST resolve the
+    /// `git` binary through [`crate::tools::get_tool_path`] on the
+    /// canonical `tools::GIT` name — i.e. every one honors the
+    /// `GIT_BIN` env override the tools-registry idiom names as the
+    /// hermetic-runner contract, and none silently hardcodes the
+    /// literal `"git"` on the spawn path.
+    ///
+    /// A regression that "tidies" any of the three production
+    /// entrypoints back to `Command::new("git")` (the pre-lift shape,
+    /// the exact class of bug the `flux`/`cargo`/`DOCA` bypasses
+    /// carried at f0dfa12 / 621f827 / d3dd199 / 685642f / d6f6bc7 /
+    /// dd5a212 / 673e4be / b02d4eb / 54a9985 / 139b37a) fails this
+    /// test rather than silently degrade to whatever `git` is first on
+    /// `PATH` at a Nix-hermetic runner.
+    ///
+    /// The pin is exercised via `GIT_BIN` set to a hermetic shim whose
+    /// stderr carries a distinctive sigil. The typed `GitError::OpFailed`
+    /// variant surfaces the shim's stderr verbatim, so seeing the sigil
+    /// on every one of the three entry points is proof the resolution
+    /// went through the shim, not through PATH.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[tokio::test]
+    async fn test_no_bin_entry_points_route_through_git_bin_env_var() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let sigil = "SIGIL_ROUTED_VIA_GIT_BIN_5f3a1c";
+        let (_shim_dir, shim) = make_git_shim(&format!(
+            "#!/bin/sh\necho '{sigil}' 1>&2\nexit 42\n",
+            sigil = sigil,
+        ));
+        let _scope = GitBinScope::set(&shim);
+
+        // Sync: git_capture(args, workdir, op) must delegate to
+        // git_capture_with_bin(get_tool_path(tools::GIT), ...). With
+        // GIT_BIN=shim, that resolves to `shim` and its stderr carries
+        // the sigil.
+        let sync_err =
+            git_capture(&["rev-parse", "HEAD"], None, "rev-parse").expect_err("shim exits 42");
+        match sync_err {
+            GitError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "rev-parse");
+                assert_eq!(exit_code, Some(42), "shim's exit code must ride through");
+                assert!(
+                    stderr.contains(sigil),
+                    "git_capture stderr must carry the shim's sigil — proves the \
+                     no-bin entry point routed through GIT_BIN, not a hardcoded \"git\". \
+                     Got stderr={stderr:?}"
+                );
+            }
+            other => panic!("expected OpFailed from shim exit 42, got: {other:?}"),
+        }
+
+        // Async: git_capture_async(args, workdir, op) must delegate to
+        // git_capture_async_with_bin(get_tool_path(tools::GIT), ...).
+        let async_err = git_capture_async(&["rev-parse", "HEAD"], None, "rev-parse")
+            .await
+            .expect_err("shim exits 42");
+        match async_err {
+            GitError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "rev-parse");
+                assert_eq!(exit_code, Some(42));
+                assert!(
+                    stderr.contains(sigil),
+                    "git_capture_async stderr must carry the shim's sigil — proves the \
+                     async no-bin entry point routed through GIT_BIN. Got stderr={stderr:?}"
+                );
+            }
+            other => panic!("expected OpFailed from shim exit 42, got: {other:?}"),
+        }
+
+        // Remote: git_capture_remote(args, workdir, op, remote, branch)
+        // must delegate to git_capture_remote_with_bin(
+        //   get_tool_path(tools::GIT), ...). Same shim; RemoteOpFailed
+        // instead of OpFailed on the network-side arm.
+        let remote_err =
+            git_capture_remote(&["push", "origin", "main"], None, "push", "origin", "main")
+                .expect_err("shim exits 42");
+        match remote_err {
+            GitError::RemoteOpFailed {
+                op,
+                remote,
+                branch,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "push");
+                assert_eq!(remote, "origin");
+                assert_eq!(branch, "main");
+                assert_eq!(exit_code, Some(42));
+                assert!(
+                    stderr.contains(sigil),
+                    "git_capture_remote stderr must carry the shim's sigil — proves the \
+                     remote no-bin entry point routed through GIT_BIN. Got stderr={stderr:?}"
+                );
+            }
+            other => panic!("expected RemoteOpFailed from shim exit 42, got: {other:?}"),
+        }
+    }
+
+    /// [`GitBinScope`] MUST restore the pre-scope state on drop — the
+    /// exact discipline that keeps [`test_no_bin_entry_points_route_through_git_bin_env_var`]
+    /// from leaking `GIT_BIN=<shim>` to any test that runs after it,
+    /// which would otherwise redirect every subsequent git spawn under
+    /// the same lock to the (dropped-tempdir) shim. Pins the restore
+    /// contract on both directions: originally-unset stays unset,
+    /// originally-set restores the original value verbatim.
+    #[test]
+    fn test_git_bin_scope_restores_pre_scope_state_on_drop() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Direction 1: originally-unset must stay unset after drop.
+        std::env::remove_var("GIT_BIN");
+        {
+            let _scope = GitBinScope::set("/tmp/does-not-exist-shim");
+            assert_eq!(
+                std::env::var("GIT_BIN").ok().as_deref(),
+                Some("/tmp/does-not-exist-shim"),
+                "in-scope value must be visible"
+            );
+        }
+        assert!(
+            std::env::var("GIT_BIN").is_err(),
+            "originally-unset GIT_BIN must be unset again after drop"
+        );
+
+        // Direction 2: originally-set must restore the original value.
+        std::env::set_var("GIT_BIN", "/original/value/pre/scope");
+        {
+            let _scope = GitBinScope::set("/tmp/mid-scope-override");
+            assert_eq!(
+                std::env::var("GIT_BIN").ok().as_deref(),
+                Some("/tmp/mid-scope-override"),
+                "in-scope value must override"
+            );
+        }
+        assert_eq!(
+            std::env::var("GIT_BIN").ok().as_deref(),
+            Some("/original/value/pre/scope"),
+            "originally-set GIT_BIN must be restored verbatim after drop"
+        );
+        std::env::remove_var("GIT_BIN");
     }
 }
