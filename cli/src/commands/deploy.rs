@@ -2,10 +2,9 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
-use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::{cloudflare, commands, config::DeployConfig, git};
+use crate::{cloudflare, commands, config::DeployConfig, flux_reconcile, git};
 
 pub async fn execute(
     manifest: String,
@@ -144,27 +143,12 @@ pub async fn execute(
     // Trigger FluxCD reconciliation
     // Note: Single-source architecture means infrastructure is applied directly by flux-system
     info!("🔄 Triggering FluxCD reconciliation...");
-    let flux_result = Command::new("flux")
-        .args(&[
-            "reconcile",
-            "kustomization",
-            "flux-system",
-            "-n",
-            "flux-system",
-        ])
-        .output()
-        .await;
-
-    match flux_result {
-        Ok(output) if output.status.success() => {
+    match flux_reconcile::reconcile_kustomization("flux-system", "flux-system", false).await {
+        Ok(()) => {
             info!("✅ FluxCD reconciliation triggered");
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("⚠️  FluxCD reconcile failed (non-fatal): {}", stderr);
-        }
         Err(e) => {
-            warn!("⚠️  Could not execute flux command (non-fatal): {}", e);
+            warn!("⚠️  FluxCD reconcile failed (non-fatal): {}", e);
         }
     }
 

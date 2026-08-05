@@ -4,6 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
+use crate::flux_reconcile;
 use crate::git;
 use crate::repo::get_tool_path;
 use crate::retry::{debug_log_capture_streams, log_retry_attempt, retry_command, RetryPolicy};
@@ -402,28 +403,12 @@ pub async fn execute(
     info!("🔄 Triggering FluxCD reconciliation...");
 
     // Reconcile the flux-system to pull latest git changes and apply them
-    let flux_system_result = Command::new("flux")
-        .args(&[
-            "reconcile",
-            "kustomization",
-            "flux-system",
-            "-n",
-            "flux-system",
-            "--with-source",
-        ])
-        .output()
-        .await;
-
-    match flux_system_result {
-        Ok(output) if output.status.success() => {
+    match flux_reconcile::reconcile_kustomization("flux-system", "flux-system", true).await {
+        Ok(()) => {
             info!("✅ FluxCD reconciliation complete");
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("⚠️  FluxCD reconcile failed (non-fatal): {}", stderr);
-        }
         Err(e) => {
-            warn!("⚠️  Could not execute flux command (non-fatal): {}", e);
+            warn!("⚠️  FluxCD reconcile failed (non-fatal): {}", e);
         }
     }
 
