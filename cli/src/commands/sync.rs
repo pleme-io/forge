@@ -18,8 +18,8 @@ use std::time::Instant;
 use tokio::fs;
 use tokio::process::Command;
 
-use crate::repo::get_tool_path;
 use super::codegen;
+use crate::repo::get_tool_path;
 
 /// Configuration for sync operation
 #[derive(Debug, Clone)]
@@ -145,26 +145,38 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
 
     println!("Extracting schema...");
 
-    // Extract schema to temp file
-    let temp_schema = config.working_dir.join("schema.graphql.tmp");
-    let schema_output = Command::new("cargo")
-        .args(["run", "--bin", "extract-schema", "--quiet"])
-        .current_dir(&config.backend_dir)
-        .output()
-        .await
-        .context("Failed to run extract-schema")?;
-
-    if !schema_output.status.success() {
-        let stderr = String::from_utf8_lossy(&schema_output.stderr);
-        return Ok(DriftCheckResult {
-            schema_drift: false,
-            codegen_drift: false,
-            error: Some(format!("Schema extraction failed: {}", stderr)),
-        });
-    }
+    // Route through the canonical `extract_graphql_schema` primitive
+    // (THEORY §V.1, §VI.1): pre-lift this site was the sixth raw-spawn
+    // stanza the 673e4be / b02d4eb sweeps did not catch. Post-lift the
+    // three failure shapes (`SpawnFailed` / `Failed` / `EmptyOutput`)
+    // are structurally distinct in the primitive AND collapse into the
+    // `error: Some(String)` field this DriftCheckResult already
+    // surfaces. Two load-bearing bugs the raw stanza carried and this
+    // lift redeems: (1) it spelled `Command::new("cargo")` bypassing
+    // the `CARGO` env override honored by `commands/bootstrap.rs` via
+    // `get_tool_path("CARGO", "cargo")` — so a Nix-hermetic runner
+    // with a store-path cargo would fall through to whatever `cargo`
+    // was first on PATH; (2) it had no empty-stdout guard — an
+    // extractor that exited zero with empty stdout would hash to
+    // `md5("")` = `d41d8cd98f00b204e9800998ecf8427e` and either
+    // report false-positive "drift detected" (against a non-empty
+    // stored schema) or, if the stored schema file was also missing/
+    // empty, silently report "in sync" — a caught-nowhere corruption
+    // of the drift-check contract.
+    let schema_bytes =
+        match crate::graphql_schema::extract_graphql_schema(&config.backend_dir).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return Ok(DriftCheckResult {
+                    schema_drift: false,
+                    codegen_drift: false,
+                    error: Some(format!("Schema extraction failed: {}", err)),
+                });
+            }
+        };
 
     // Check schema drift
-    let new_schema_hash = format!("{:x}", md5::compute(&schema_output.stdout));
+    let new_schema_hash = format!("{:x}", md5::compute(&schema_bytes));
     let schema_drift = !old_schema_hash.is_empty() && old_schema_hash != new_schema_hash;
 
     if schema_drift {
@@ -234,9 +246,6 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
         });
     }
     println!("   {} Codegen in sync", "✓".green());
-
-    // Clean up temp file if exists
-    let _ = fs::remove_file(&temp_schema).await;
 
     println!();
     println!(
