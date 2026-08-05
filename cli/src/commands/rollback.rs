@@ -10,7 +10,6 @@
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::io::Write;
-use tokio::process::Command;
 
 use crate::config::DeployConfig;
 use crate::infrastructure::registry::{extract_organization, RegistryClient};
@@ -321,13 +320,34 @@ pub async fn execute(
     }
 
     // ─── Git commit + push ──────────────────────────────────────────────────
+    //
+    // Every git spawn in this block resolves the binary through
+    // `crate::git::git_command_async()` so a Nix-hermetic runner's
+    // `GIT_BIN` override wins over ambient `PATH` — same discipline the
+    // sibling `commands/push.rs::update_kustomization` /
+    // `commands/federation.rs` / `commands/codegen_validation.rs`
+    // git-mutation sites honor, redeemed at f6be190 / 8653403 / 81d7486
+    // and enforced by the source-scan shield at the bottom of this
+    // module.
+    //
+    // Failure-dispatch shape mirrors the sibling `update_kustomization`
+    // lift (f6be190): `git add` and `git push` bail on non-zero exit
+    // via `crate::retry::run_inherited_status` — the pre-lift bare
+    // `.status().await.context(...)?` shape here silently accepted a
+    // non-zero exit because `?` only propagated exec failure, so a
+    // denied `push` (auth, branch protection, conflict) let the caller
+    // fall through to the "Rollback tags committed and pushed" success
+    // print against an unpushed branch. `git commit` retains the bare
+    // `.status()` + warn-on-non-zero shape because the sibling
+    // update-kustomization commit path documents the same idempotent
+    // "commit with nothing to commit returns non-zero" no-op.
     if !modified_files.is_empty() {
         for file in &modified_files {
-            Command::new("git")
-                .args(["add", file])
-                .status()
+            let mut add_cmd = crate::git::git_command_async();
+            add_cmd.args(["add", file]);
+            crate::retry::run_inherited_status(add_cmd, "git add")
                 .await
-                .context("Failed to git add")?;
+                .context("Failed to stage rollback artifact.json")?;
         }
 
         let rolled_back_to: Vec<String> = entries
@@ -336,17 +356,24 @@ pub async fn execute(
             .collect();
 
         let commit_msg = format!("chore: rollback {} ({})", product, rolled_back_to.join(", "));
-        Command::new("git")
+        let commit_status = crate::git::git_command_async()
             .args(["commit", "-m", &commit_msg])
             .status()
             .await
-            .context("Failed to git commit rollback tags")?;
+            .context("Failed to commit rollback tags")?;
 
-        Command::new("git")
-            .args(["push", "origin", "main"])
-            .status()
+        if !commit_status.success() {
+            eprintln!(
+                "{}",
+                "Warning: git commit returned non-zero (may be no changes)".yellow()
+            );
+        }
+
+        let mut push_cmd = crate::git::git_command_async();
+        push_cmd.args(["push", "origin", "main"]);
+        crate::retry::run_inherited_status(push_cmd, "git push")
             .await
-            .context("Failed to git push rollback tags")?;
+            .context("Failed to push rollback tags")?;
 
         println!("   {} Rollback tags committed and pushed", "OK".green());
     }
@@ -365,3 +392,79 @@ pub async fn execute(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    /// Regression-shield: every `git`-spawning site in
+    /// `commands/rollback.rs::execute` MUST resolve the binary through
+    /// [`crate::git::git_command_async`] rather than the pre-lift
+    /// `Command::new("git")` literal. Pre-migration three sites
+    /// (add / commit / push at lines 326 / 339 / 345) bypassed the
+    /// `GIT_BIN` env override the `tools::get_tool_path(tools::GIT)`
+    /// idiom (cli/src/tools.rs:102-105) resolves — the same class of
+    /// bug the sibling `flux` / `cargo` / `doca` / free-function-`git` /
+    /// `GitClient` / `commands/federation.rs` / `commands/push.rs` /
+    /// `commands/codegen_validation.rs` migrations redeemed at
+    /// 621f827 / f0dfa12 / d3dd199 / 685642f / d6f6bc7 / dd5a212 /
+    /// 673e4be / b02d4eb / 54a9985 / 139b37a / 818ed9a / badcdf4 /
+    /// 8653403 / f6be190 / 81d7486.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("git")` string does not
+    /// reappear in `execute` while the delegation to
+    /// `git_command_async` does. A future regression that re-fuses the
+    /// raw-spawn body fails here, not silently in production where a
+    /// Nix-hermetic runner's `GIT_BIN`-provided `git` would lose to
+    /// whatever `git` is first on `PATH` at rollback-commit-and-push
+    /// time.
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — the end-to-end `GIT_BIN`-routing
+    /// invariant is already pinned by
+    /// [`crate::git::tests::test_git_command_async_routes_through_git_bin_env_var`]
+    /// on the primitive itself; this shield only certifies that every
+    /// `rollback::execute` git spawn reads through that primitive.
+    /// Mirrors the sibling shields on `commands/push.rs` /
+    /// `commands/codegen_validation.rs`.
+    #[test]
+    fn test_execute_routes_git_through_git_command_async_not_raw_command() {
+        const SOURCE: &str = include_str!("rollback.rs");
+
+        // Bound the scan to `execute` — the three git spawn sites all
+        // live inside it. The `#[cfg(test)] mod tests` module below
+        // references the pre-migration string legitimately in this
+        // docstring; the bound stops before it.
+        let fn_marker = "pub async fn execute(";
+        let start = SOURCE
+            .find(fn_marker)
+            .expect("rollback.rs must contain `pub async fn execute(` — module invariant");
+        let after_fn = &SOURCE[start..];
+        // Bound at the `#[cfg(test)]` marker, which follows `execute`
+        // in source order and contains a legitimate mention of the
+        // pre-migration literal in this docstring.
+        let end_relative = after_fn
+            .find("\n#[cfg(test)]")
+            .expect("rollback.rs must contain `#[cfg(test)]` after `execute`");
+        let fn_body = &after_fn[..end_relative];
+
+        assert!(
+            !fn_body.contains("Command::new(\"git\")"),
+            "execute() must NOT spawn `git` directly — route through \
+             `crate::git::git_command_async()` so `GIT_BIN` overrides \
+             land at the shared primitive. Found the pre-migration \
+             spawn body in execute()."
+        );
+        assert!(
+            fn_body.contains("crate::git::git_command_async()"),
+            "execute() must delegate every git spawn to \
+             `crate::git::git_command_async()` — the delegation string \
+             was not found in execute()."
+        );
+        assert!(
+            fn_body.contains("crate::retry::run_inherited_status"),
+            "execute() must dispatch `git add` / `git push` through \
+             `crate::retry::run_inherited_status` so a non-zero exit \
+             bails with the structural `(op, exit_code)` record — the \
+             delegation string was not found in execute()."
+        );
+    }
+}
