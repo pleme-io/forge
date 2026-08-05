@@ -83,6 +83,64 @@ pub fn make_executable_shim(name: &str, body: &str) -> (tempfile::TempDir, Strin
     (dir, path)
 }
 
+/// Serial-safe guard for tests that either mutate `GIT_BIN` or invoke
+/// any production entry point that resolves the `git` binary through
+/// `tools::get_tool_path(tools::GIT)` — i.e. the no-bin surface on
+/// [`crate::git`] (`git_capture` / `git_capture_async` /
+/// `git_capture_remote`) and the no-bin surface on
+/// [`crate::infrastructure::git::GitClient`] (`is_clean` / `add` /
+/// `commit` / `push` / `push_to` / `has_staged_changes` when no
+/// `with_git_bin` override was set).
+///
+/// Env-var writes are process-global; without a serial guard a
+/// concurrent production-path test could pick up the wrong shim from a
+/// mid-flight env-var mutation. Same discipline as `serial_test::serial`
+/// but without the extra dependency.
+///
+/// Consumers acquire the lock at the top of the test body via
+/// `let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());`.
+/// The `unwrap_or_else(|p| p.into_inner())` shape is load-bearing: a
+/// prior panicking test that poisoned the mutex must not chain-fail
+/// every subsequent test that shares the lock — the inner-lock recovery
+/// keeps the fleet moving.
+pub static GIT_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII scope-guard that sets `GIT_BIN=value` on construction and
+/// restores the pre-scope state (either the original value or unset) on
+/// drop — panic-safe by construction. Snapshots via `std::env::var` so
+/// a set-to-empty original round-trips verbatim. Every caller MUST hold
+/// [`GIT_BIN_ENV_LOCK`] for the duration of the scope; the guard does
+/// not lock the mutex itself, so the two disciplines compose without
+/// accidental re-entrancy.
+///
+/// Centralized here (rather than a private per-file copy) because two
+/// modules — `git.rs` and `infrastructure::git` — each carry their own
+/// `GIT_BIN`-resolving surface and each need to pin the same
+/// env-var-routes-through discipline in tests. Two occurrences already
+/// past THEORY §VI.1's three-times threshold in intent (a duplicate
+/// would drift the restore-on-drop contract silently); this lift is the
+/// law-anticipating consolidation.
+pub struct GitBinScope {
+    prior: std::result::Result<String, std::env::VarError>,
+}
+
+impl GitBinScope {
+    pub fn set(value: &str) -> Self {
+        let prior = std::env::var("GIT_BIN");
+        std::env::set_var("GIT_BIN", value);
+        Self { prior }
+    }
+}
+
+impl Drop for GitBinScope {
+    fn drop(&mut self) {
+        match &self.prior {
+            Ok(v) => std::env::set_var("GIT_BIN", v),
+            Err(_) => std::env::remove_var("GIT_BIN"),
+        }
+    }
+}
+
 /// Initialize a hermetic git repo with one committed file under `dir`.
 ///
 /// Runs `git init -q -b main`, configures a stable identity

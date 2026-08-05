@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use tokio::process::Command;
 
 use crate::error::GitError;
+use crate::tools::{get_tool_path, tools};
 
 /// Outcome of [`GitClient::stage_commit_push_release`].
 ///
@@ -47,6 +48,24 @@ pub enum CommitPushOutcome {
 pub struct GitClient {
     /// Working directory for git commands
     working_dir: Option<String>,
+    /// Override for the `git` binary path.
+    ///
+    /// `None` in every production caller: [`Self::resolve_git_bin`]
+    /// then resolves the binary through `get_tool_path(tools::GIT)`,
+    /// which reads the `GIT_BIN` env var and falls back to the string
+    /// `"git"` (PATH lookup) if unset — same idiom every other
+    /// Nix-derivation-provided tool in forge honors
+    /// (`SKOPEO_BIN` / `KUBECTL_BIN` / `ATTIC_BIN` / `NIX_BIN` /
+    /// `FLUX_BIN` / `DOCA_BIN`, and the sibling `git`-free-function
+    /// surface's own migration at commit 818ed9a).
+    ///
+    /// `Some(bin)` only from `#[cfg(test)]` via [`Self::with_git_bin`]:
+    /// tests bind an absolute-path shim so the resolved binary is
+    /// hermetic and parallel-safe (no `GIT_BIN` env mutation, no
+    /// `PATH` mutation). Same shape as
+    /// `AtticClient::with_attic_bin` on the sibling `attic` client
+    /// (cli/src/infrastructure/attic.rs:129).
+    git_bin: Option<String>,
 }
 
 impl Default for GitClient {
@@ -58,14 +77,45 @@ impl Default for GitClient {
 impl GitClient {
     /// Create a new git client for current directory
     pub fn new() -> Self {
-        Self { working_dir: None }
+        Self {
+            working_dir: None,
+            git_bin: None,
+        }
     }
 
     /// Create a git client for a specific directory
     pub fn in_dir(path: impl Into<String>) -> Self {
         Self {
             working_dir: Some(path.into()),
+            git_bin: None,
         }
+    }
+
+    /// Override the path to the `git` binary. Used by tests to point at
+    /// a hermetic shim; production code leaves this unset and lets
+    /// [`Self::resolve_git_bin`] resolve it from `GIT_BIN` (or PATH).
+    ///
+    /// Mirror of `AtticClient::with_attic_bin` on the sibling attic
+    /// client — same test-injection discipline, same builder shape.
+    #[cfg(test)]
+    pub fn with_git_bin(mut self, bin: impl Into<String>) -> Self {
+        self.git_bin = Some(bin.into());
+        self
+    }
+
+    /// Resolve the `git` binary path for the next spawn.
+    ///
+    /// Test override (`with_git_bin`) wins; otherwise
+    /// `get_tool_path(tools::GIT)` — reads `GIT_BIN` env var, falls
+    /// back to `"git"` (PATH). Every spawn path in this module reads
+    /// through here so a future drift that hardcodes `"git"` at any
+    /// site surfaces at
+    /// `test_git_client_no_bin_surface_routes_through_git_bin_env_var`
+    /// instead of as a silent-PATH-fallback bug at deploy time.
+    fn resolve_git_bin(&self) -> String {
+        self.git_bin
+            .clone()
+            .unwrap_or_else(|| get_tool_path(tools::GIT))
     }
 
     /// Check if working tree is clean.
@@ -92,7 +142,7 @@ impl GitClient {
     /// surfaces the typed error verbatim instead of folding it into a
     /// silent skip.
     pub async fn is_clean(&self) -> Result<bool, GitError> {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(self.resolve_git_bin());
         cmd.args(["status", "--porcelain"]);
 
         if let Some(ref dir) = self.working_dir {
@@ -114,7 +164,7 @@ impl GitClient {
     /// record), carrying the exit code that the pre-migration
     /// `bail!("git add failed")` dropped.
     pub async fn add(&self, paths: &[&str]) -> Result<()> {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(self.resolve_git_bin());
         cmd.arg("add");
         cmd.args(paths);
 
@@ -136,7 +186,7 @@ impl GitClient {
     /// `commands/push.rs:194-204` which keeps warn-on-failure because its
     /// caller does NOT pre-check is_clean).
     pub async fn commit(&self, message: &str) -> Result<()> {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(self.resolve_git_bin());
         cmd.args(["commit", "-m", message]);
 
         if let Some(ref dir) = self.working_dir {
@@ -156,7 +206,7 @@ impl GitClient {
     /// with the sibling GitOps publish path migrated in fe3b1bc
     /// (`commands/push.rs::update_kustomization`).
     pub async fn push(&self) -> Result<()> {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(self.resolve_git_bin());
         cmd.arg("push");
 
         if let Some(ref dir) = self.working_dir {
@@ -179,7 +229,7 @@ impl GitClient {
     /// failure record carries the exit code that the pre-migration
     /// `bail!("Failed to push release to git")` sites dropped.
     pub async fn push_to(&self, remote: &str, branch: &str) -> Result<()> {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(self.resolve_git_bin());
         cmd.args(["push", remote, branch]);
 
         if let Some(ref dir) = self.working_dir {
@@ -213,7 +263,7 @@ impl GitClient {
     /// `Ok(false)` the way a pre-migration body that ignored
     /// `output.status` would have done.
     pub async fn has_staged_changes(&self) -> Result<bool, GitError> {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(self.resolve_git_bin());
         cmd.args(["diff", "--cached", "--name-only"]);
 
         if let Some(ref dir) = self.working_dir {
@@ -278,8 +328,31 @@ impl GitClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{add_bare_origin, init_repo_with_one_commit};
+    use crate::test_support::{
+        add_bare_origin, init_repo_with_one_commit, make_executable_shim, GitBinScope,
+        GIT_BIN_ENV_LOCK,
+    };
     use std::process::Command as SyncCommand;
+
+    /// Test-binding helper: build a `GitClient` in `dir` whose spawn
+    /// path is pinned to the string literal `"git"` (PATH lookup) via
+    /// [`GitClient::with_git_bin`]. Every existing test in this module
+    /// used the pre-migration `Command::new("git")` shape verbatim; the
+    /// post-migration [`GitClient::resolve_git_bin`] reads `GIT_BIN` on
+    /// every call, so a concurrent test that mutates `GIT_BIN` to a
+    /// hermetic shim (as
+    /// [`test_git_client_no_bin_surface_routes_through_git_bin_env_var`]
+    /// below does) would race into these tests' spawn paths and
+    /// silently redirect them to the shim.
+    ///
+    /// Binding `git_bin = Some("git")` here dodges the race by making
+    /// each existing test's spawn path independent of `GIT_BIN`
+    /// entirely — the resolved binary is the string `"git"` regardless
+    /// of what env var is set — which is the exact same PATH-lookup
+    /// shape they had pre-migration.
+    fn git_client_in_dir_path_git(dir: &std::path::Path) -> GitClient {
+        GitClient::in_dir(dir.to_string_lossy().to_string()).with_git_bin("git")
+    }
 
     /// On a freshly-seeded repo with no `git add` since the last
     /// commit, the index is byte-identical to `HEAD` and
@@ -290,7 +363,7 @@ mod tests {
     async fn test_has_staged_changes_returns_false_on_clean_index() {
         let dir = tempfile::tempdir().expect("tempdir");
         init_repo_with_one_commit(dir.path());
-        let client = GitClient::in_dir(dir.path().to_string_lossy().to_string());
+        let client = git_client_in_dir_path_git(dir.path());
         let staged = client
             .has_staged_changes()
             .await
@@ -316,7 +389,7 @@ mod tests {
             .status()
             .expect("git add");
         assert!(add.success());
-        let client = GitClient::in_dir(dir.path().to_string_lossy().to_string());
+        let client = git_client_in_dir_path_git(dir.path());
         let staged = client
             .has_staged_changes()
             .await
@@ -345,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn test_has_staged_changes_non_zero_exit_surfaces_typed_op_failed() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let client = GitClient::in_dir(dir.path().to_string_lossy().to_string());
+        let client = git_client_in_dir_path_git(dir.path());
         let err = client
             .has_staged_changes()
             .await
@@ -389,7 +462,7 @@ mod tests {
     async fn test_stage_commit_push_release_skips_on_clean_index() {
         let dir = tempfile::tempdir().expect("tempdir");
         init_repo_with_one_commit(dir.path());
-        let client = GitClient::in_dir(dir.path().to_string_lossy().to_string());
+        let client = git_client_in_dir_path_git(dir.path());
         let outcome = client
             .stage_commit_push_release(&["seed.txt"], "should-not-commit", "main")
             .await
@@ -413,7 +486,7 @@ mod tests {
         init_repo_with_one_commit(work.path());
         add_bare_origin(work.path(), bare.path());
         std::fs::write(work.path().join("change.txt"), "delta\n").unwrap();
-        let client = GitClient::in_dir(work.path().to_string_lossy().to_string());
+        let client = git_client_in_dir_path_git(work.path());
         let outcome = client
             .stage_commit_push_release(&["change.txt"], "test: release", "main")
             .await
@@ -472,7 +545,7 @@ mod tests {
         // the canonical bug scenario the pre-migration body papered
         // over — empty stdout + non-zero exit + non-empty stderr.
         let dir = tempfile::tempdir().expect("tempdir");
-        let client = GitClient::in_dir(dir.path().to_string_lossy().to_string());
+        let client = git_client_in_dir_path_git(dir.path());
         let err = client.is_clean().await.expect_err(
             "is_clean against a non-git directory must surface a typed error, \
              never the silent Ok(true) the pre-migration body produced",
@@ -496,6 +569,146 @@ mod tests {
             }
             other => {
                 panic!("expected GitError::OpFailed carrying (exit_code, stderr), got: {other:?}")
+            }
+        }
+    }
+
+    /// Every no-`with_git_bin`-override entry point on `GitClient`
+    /// MUST resolve the `git` binary through `get_tool_path(tools::GIT)`
+    /// — i.e. read the `GIT_BIN` env var — never spawn the bare string
+    /// literal `"git"`. Pre-migration all six sites (`is_clean`, `add`,
+    /// `commit`, `push`, `push_to`, `has_staged_changes`) spelled
+    /// `Command::new("git")` verbatim and every one bypassed `GIT_BIN`,
+    /// silently degrading to whatever `git` was first on `PATH` at
+    /// spawn time — the same class of bug the sibling `flux` /
+    /// `cargo` / `doca` / free-function-`git` surface migrations
+    /// redeemed (flake commits 621f827 / f0dfa12 / d3dd199 / 685642f /
+    /// d6f6bc7 / dd5a212, 673e4be / b02d4eb / 54a9985, 139b37a,
+    /// 818ed9a).
+    ///
+    /// The pin exercises `GIT_BIN` set to a hermetic shim whose stderr
+    /// carries a distinctive sigil. Each of the six sites produces a
+    /// typed failure carrying the shim's stderr verbatim, so seeing the
+    /// sigil on every one is proof the resolution went through the
+    /// shim, not through PATH. A regression that "tidies" any of the
+    /// six back to `Command::new("git")` surfaces as a failed sigil
+    /// assertion here rather than as a silent-`PATH`-fallback bug at
+    /// deploy time.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test in the crate that either mutates `GIT_BIN` or invokes a
+    /// no-bin production entry point that reads it — same discipline
+    /// as `git.rs::test_no_bin_entry_points_route_through_git_bin_env_var`.
+    /// The [`GitBinScope`] guard restores the pre-scope state on drop
+    /// so this test cannot leak `GIT_BIN=<dropped-shim>` to the next
+    /// lock-holder.
+    #[tokio::test]
+    async fn test_git_client_no_bin_surface_routes_through_git_bin_env_var() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let sigil = "SIGIL_INFRA_GIT_CLIENT_ROUTED_c9d4e0";
+        let (_shim_dir, shim) =
+            make_executable_shim("git", &format!("#!/bin/sh\necho '{sigil}' 1>&2\nexit 77\n"));
+        let _scope = GitBinScope::set(&shim);
+
+        // A tempdir working directory keeps the shim spawn hermetic —
+        // no ambient .git ancestor can confuse the fixture.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workdir = dir.path().to_string_lossy().to_string();
+        // Default GitClient (no `with_git_bin` override) — the
+        // production shape. Every method reads `GIT_BIN` at spawn.
+        let client = GitClient::in_dir(&workdir);
+
+        // ---- Capture-arm sites: is_clean, has_staged_changes ----
+        // These return `Result<bool, GitError>` and route non-zero
+        // exits through `GitError::from_capture` → `OpFailed` carrying
+        // structural `(op, exit_code, stderr)`. The shim's stderr sigil
+        // and exit code 77 must ride through verbatim.
+        match client
+            .is_clean()
+            .await
+            .expect_err("shim exits 77; is_clean must surface a typed error")
+        {
+            GitError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "status --porcelain");
+                assert_eq!(exit_code, Some(77), "shim exit code must ride through");
+                assert!(
+                    stderr.contains(sigil),
+                    "is_clean stderr must carry shim sigil — proves the \
+                     no-override spawn routed through GIT_BIN, not literal \"git\". \
+                     Got stderr={stderr:?}"
+                );
+            }
+            other => panic!("expected OpFailed on is_clean, got: {other:?}"),
+        }
+
+        match client
+            .has_staged_changes()
+            .await
+            .expect_err("shim exits 77; has_staged_changes must surface a typed error")
+        {
+            GitError::OpFailed {
+                op,
+                exit_code,
+                stderr,
+            } => {
+                assert_eq!(op, "diff --cached --name-only");
+                assert_eq!(exit_code, Some(77));
+                assert!(
+                    stderr.contains(sigil),
+                    "has_staged_changes stderr must carry shim sigil. Got stderr={stderr:?}"
+                );
+            }
+            other => panic!("expected OpFailed on has_staged_changes, got: {other:?}"),
+        }
+
+        // ---- Inherited-stdio sites: add, commit, push, push_to ----
+        // These return `anyhow::Result<()>` from
+        // `retry::run_inherited_status`. Non-zero exit produces a
+        // two-layer anyhow chain: outer caller-narrative + inner
+        // `git <op> failed (exit N)`. The shim's exit code 77 must
+        // ride through the inner chain. (The shim's stderr sigil is
+        // printed on inherited stderr and is NOT captured into the
+        // anyhow error chain — the exit-code carrying is the
+        // structural pin for these four sites; PATH-hardcoded
+        // spellings that bypassed GIT_BIN would surface a DIFFERENT
+        // exit code — the ambient git's exit for the same args —
+        // rather than the shim's 77.)
+        for (label, err) in [
+            ("add", client.add(&["nonexistent"]).await),
+            ("commit", client.commit("msg").await),
+            ("push", client.push().await),
+            ("push_to", client.push_to("origin", "main").await),
+        ] {
+            let err = err.unwrap_err_or_else_pinned(label);
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains("exit 77"),
+                "{label} must carry shim exit 77 through the anyhow chain — \
+                 proves the no-override spawn routed through GIT_BIN, not \
+                 literal \"git\". Got chain={chain}"
+            );
+        }
+    }
+
+    /// `unwrap_err` with a per-label panic message. A tiny local
+    /// helper — the loop above needs a labeled panic for each of the
+    /// four inherited-stdio sites, and `expect_err(&format!(...))`
+    /// costs a String allocation on every iteration even in the
+    /// happy path.
+    trait UnwrapErrOrElsePinned<T, E: std::fmt::Debug> {
+        fn unwrap_err_or_else_pinned(self, label: &str) -> E;
+    }
+
+    impl<T: std::fmt::Debug, E: std::fmt::Debug> UnwrapErrOrElsePinned<T, E> for Result<T, E> {
+        fn unwrap_err_or_else_pinned(self, label: &str) -> E {
+            match self {
+                Ok(v) => panic!("{label}: expected shim-exit-77 failure, got Ok({v:?})"),
+                Err(e) => e,
             }
         }
     }
