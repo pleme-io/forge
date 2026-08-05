@@ -66,43 +66,36 @@ pub async fn validate_codegen_with_autocommit(
     // Step 1: Export schema from backend
     println!("   Exporting schema from backend...");
 
-    let schema_output = Command::new("cargo")
-        .args(["run", "--bin", "extract-schema", "--quiet"])
-        .current_dir(backend_dir)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run extract-schema in {}", backend_dir.display()))?;
-
-    if !schema_output.status.success() {
-        let stderr = String::from_utf8_lossy(&schema_output.stderr);
-        return Ok(CodegenValidationResult {
-            is_valid: false,
-            schema_exported: false,
-            codegen_succeeded: false,
-            changes_committed: false,
-            error: Some(format!("Schema extraction failed:\n{}", stderr)),
-        });
-    }
-
-    if schema_output.stdout.is_empty() {
-        return Ok(CodegenValidationResult {
-            is_valid: false,
-            schema_exported: false,
-            codegen_succeeded: false,
-            changes_committed: false,
-            error: Some("Schema extraction produced no output".to_string()),
-        });
-    }
+    // Route through the canonical `extract_graphql_schema` primitive
+    // (THEORY §V.1, §VI.1). The typed `SchemaExtractionError` variants
+    // (`SpawnFailed` / `Failed` / `EmptyOutput`) are collapsed into the
+    // `error: Some(String)` field this ValidationResult surfaces — same
+    // three failure shapes the pre-lift stanza carried, now discriminable
+    // at the type level for a future caller that wants to distinguish
+    // "cargo missing" from "extract-schema said no" from "extract-schema
+    // produced no output" without parsing the message.
+    let schema_bytes = match crate::graphql_schema::extract_graphql_schema(backend_dir).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return Ok(CodegenValidationResult {
+                is_valid: false,
+                schema_exported: false,
+                codegen_succeeded: false,
+                changes_committed: false,
+                error: Some(err.to_string()),
+            });
+        }
+    };
 
     println!(
         "   {} Schema exported ({} bytes)",
         "✓".green(),
-        schema_output.stdout.len()
+        schema_bytes.len()
     );
 
     // Write schema to web directory
     let schema_path = web_dir.join("schema.graphql");
-    tokio::fs::write(&schema_path, &schema_output.stdout)
+    tokio::fs::write(&schema_path, &schema_bytes)
         .await
         .with_context(|| format!("Failed to write schema to {}", schema_path.display()))?;
 
@@ -206,27 +199,23 @@ pub async fn validate_codegen_with_autocommit(
 pub async fn validate_schema_export(backend_dir: &Path) -> Result<bool> {
     println!("{}", "Validating schema export...".bold());
 
-    let output = Command::new("cargo")
-        .args(["run", "--bin", "extract-schema", "--quiet"])
-        .current_dir(backend_dir)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run extract-schema in {}", backend_dir.display()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        println!("   {} Schema export failed", "❌".red());
-        println!("   {}", stderr);
-        return Ok(false);
-    }
-
-    if output.stdout.is_empty() {
-        println!("   {} Schema export produced no output", "❌".red());
-        return Ok(false);
-    }
+    // One-oracle read-through of the canonical `extract_graphql_schema`
+    // primitive (THEORY §V.1, §VI.1). The typed
+    // `SchemaExtractionError::{SpawnFailed, Failed, EmptyOutput}` variants
+    // both surface as a `Ok(false)` return here — same pre-lift shape —
+    // but the failure display text now carries the offending backend_dir
+    // and exit code that the pre-lift `bail!` string dropped.
+    let schema_bytes = match crate::graphql_schema::extract_graphql_schema(backend_dir).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            println!("   {} Schema export failed", "❌".red());
+            println!("   {}", err);
+            return Ok(false);
+        }
+    };
 
     // Parse schema to count types
-    let schema = String::from_utf8_lossy(&output.stdout);
+    let schema = String::from_utf8_lossy(&schema_bytes);
     let type_count = schema.matches("type ").count()
         + schema.matches("input ").count()
         + schema.matches("enum ").count();
@@ -234,7 +223,7 @@ pub async fn validate_schema_export(backend_dir: &Path) -> Result<bool> {
     println!(
         "   {} Schema export succeeded ({} bytes, ~{} types)",
         "✅".green(),
-        output.stdout.len(),
+        schema_bytes.len(),
         type_count
     );
 
