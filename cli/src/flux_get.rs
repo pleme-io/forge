@@ -371,6 +371,120 @@ pub fn parse_kustomization_row_no_header_scoped(
     None
 }
 
+/// Parse the tabular stdout of `flux get kustomizations -n <namespace>`
+/// (with header, WITHOUT `--all-namespaces`, WITHOUT `--no-header`) into
+/// a vector of [`KustomizationRow`]. The invocation targets every
+/// kustomization in one namespace, so zero or more rows are emitted.
+///
+/// Because `-n <namespace>` scopes the query, the emitted columns match
+/// the single-row scoped shape exactly:
+///
+/// ```text
+/// NAME  REVISION  SUSPENDED  READY  MESSAGE
+/// ```
+///
+/// Five columns without a NAMESPACE prefix. The caller already knows
+/// the namespace it queried, so the parser accepts it as an argument
+/// and stamps it onto every returned row — [`KustomizationRow`]'s
+/// `namespace` field stays populated across all three producers
+/// (`--all-namespaces`, `-n <ns>` with header, `-n <ns> --no-header`
+/// scoped-to-one), and downstream policy
+/// ([`KustomizationRow::is_ready`], [`KustomizationRow::render_failure_line`])
+/// reads the exact same record type from any producer.
+///
+/// The parse discipline mirrors [`parse_kustomization_rows`] (header
+/// skip, blank skip, short-row skip) modulo the column count — the
+/// short-row guard uses [`NO_HEADER_MIN_COLUMNS`] (four tokens) rather
+/// than the 5-column `--all-namespaces` guard, matching
+/// [`parse_kustomization_row_no_header_scoped`] verbatim so a row that
+/// clears one scoped parser clears the other.
+///
+/// Exposed as a pure function (no async, no I/O) so the parse contract
+/// is testable without spinning up a shim — same discipline as
+/// [`parse_kustomization_rows`] and
+/// [`parse_kustomization_row_no_header_scoped`].
+pub fn parse_kustomization_rows_in_namespace(
+    namespace: &str,
+    stdout: &str,
+) -> Vec<KustomizationRow> {
+    let mut rows = Vec::new();
+    for line in stdout.lines().skip(1) {
+        if let Some(row) = parse_kustomization_row_no_header_scoped(namespace, line) {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// List every FluxCD kustomization in one namespace by running
+/// `flux get kustomizations -n <namespace>` and parsing the tabular
+/// stdout into a vector of [`KustomizationRow`]. Positioned between the
+/// fleet-wide sibling [`list_kustomizations_all_namespaces`] and the
+/// single-row sibling [`get_kustomization_scoped`]: same
+/// invocation-plus-parse discipline, same `FLUX_BIN` env override, same
+/// typed failure envelope ([`FluxGetKustomizationsError`]), scoped to
+/// one namespace and returning every row it emits.
+///
+/// # `FLUX_BIN` env override
+///
+/// The `flux` binary resolves via `tools::get_tool_path("flux")` —
+/// same discipline every Nix-derivation-provided tool in forge honors,
+/// and the same discipline the two sibling primitives observe. Pre-lift
+/// the `commands/flux.rs::gather_deployment_diagnostics` site — the
+/// last raw `Command::new("flux")` stanza in forge — spelled the
+/// literal so a Nix-hermetic runner with a store-path `flux` would fall
+/// through to whatever `flux` was first on `PATH`.
+///
+/// # Errors
+///
+/// Same shape as [`list_kustomizations_all_namespaces`]: `SpawnFailed`
+/// carries the underlying io error message, `Failed` carries
+/// `(exit_code, stderr)`. Reused envelope (rather than a scoped
+/// per-namespace variant) because the failure signal is structurally
+/// identical — flux either ran or it didn't, and if it ran either it
+/// exited zero or it didn't — and adding a per-scoped-namespace tuple
+/// would just double the enum's cardinality for a record the caller
+/// already threads through argv.
+pub async fn list_kustomizations_in_namespace(
+    namespace: &str,
+) -> Result<Vec<KustomizationRow>, FluxGetKustomizationsError> {
+    let flux = get_tool_path("flux");
+    list_kustomizations_in_namespace_with_bin(&flux, namespace).await
+}
+
+/// Test-injection sibling of [`list_kustomizations_in_namespace`]:
+/// accepts the resolved `flux_bin` as an explicit argument so unit
+/// tests can point at a hermetic shim without mutating the process-
+/// wide `FLUX_BIN` environment variable — same discipline as
+/// [`list_kustomizations_all_namespaces_with_bin`] and
+/// [`get_kustomization_scoped_with_bin`].
+///
+/// `namespace` is spliced verbatim into flux's argv (no escaping / no
+/// shell interpretation — `Command::args` owns argv-vector delivery).
+async fn list_kustomizations_in_namespace_with_bin(
+    flux_bin: &str,
+    namespace: &str,
+) -> Result<Vec<KustomizationRow>, FluxGetKustomizationsError> {
+    let captured = Command::new(flux_bin)
+        .args(["get", "kustomizations", "-n", namespace])
+        .output()
+        .await;
+
+    let output = classify_capture(
+        captured,
+        |e| FluxGetKustomizationsError::SpawnFailed {
+            message: e.to_string(),
+        },
+        |cf| FluxGetKustomizationsError::Failed {
+            exit_code: cf.exit_code,
+            stderr: cf.stderr,
+        },
+    )?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_kustomization_rows_in_namespace(namespace, &stdout))
+}
+
 /// Look up a single FluxCD kustomization by name and namespace by
 /// running `flux get kustomization <kustomization> -n <namespace>
 /// --no-header` and parsing the tabular stdout into an optional
@@ -1046,6 +1160,203 @@ exit 0\n",
         assert!(
             rendered.contains("No such file or directory (os error 2)"),
             "SpawnFailed display must render io error message; got: {rendered}"
+        );
+    }
+
+    // ─── namespace-scoped listing (`list_kustomizations_in_namespace`) ───
+
+    /// The canonical `flux get kustomizations -n <namespace>` output
+    /// parses to one [`KustomizationRow`] per non-header, non-blank
+    /// line, with the argument-provided `namespace` stamped on every
+    /// row. Pins the row-for-row translation the
+    /// `gather_deployment_diagnostics` consumer depends on. A
+    /// regression that failed to skip the header would silently emit a
+    /// phantom row named `"NAME"` with `ready == "READY"` — which
+    /// [`KustomizationRow::is_ready`] would (correctly) partition as
+    /// not-ready, then render into the diagnostic table as a phantom
+    /// unready kustomization.
+    #[test]
+    fn parse_in_namespace_canonical_output_yields_typed_rows() {
+        let stdout = "\
+NAME           REVISION       SUSPENDED  READY  MESSAGE
+svc-alpha      main@sha1:abc  False      True   Applied revision: main@sha1:abc
+svc-beta       main@sha1:def  False      False  dependency 'flux-system/init' is not ready
+";
+        let rows = parse_kustomization_rows_in_namespace("flux-system", stdout);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            KustomizationRow {
+                namespace: "flux-system".to_string(),
+                name: "svc-alpha".to_string(),
+                revision: "main@sha1:abc".to_string(),
+                suspended: "False".to_string(),
+                ready: "True".to_string(),
+                message: "Applied revision: main@sha1:abc".to_string(),
+            }
+        );
+        assert_eq!(
+            rows[1].name, "svc-beta",
+            "second data row must parse to typed record"
+        );
+        assert_eq!(
+            rows[1].namespace, "flux-system",
+            "namespace must be stamped from arg on every row"
+        );
+        assert!(!rows[1].is_ready());
+    }
+
+    /// `parse_kustomization_rows_in_namespace` skips the header line
+    /// unconditionally, skips blank lines, and drops any row that
+    /// produces fewer than [`NO_HEADER_MIN_COLUMNS`] tokens. Pins the
+    /// three defensive guards inherited from
+    /// [`parse_kustomization_row_no_header_scoped`] — a regression that
+    /// dropped the header skip would silently emit a `"NAME"`-named
+    /// phantom row.
+    #[test]
+    fn parse_in_namespace_skips_header_blanks_and_short_rows() {
+        let stdout = "\
+NAME REVISION SUSPENDED READY MESSAGE
+
+svc-alpha main@sha1 False True
+
+only two cols
+
+svc-beta main@sha1 False False bad message here
+";
+        let rows = parse_kustomization_rows_in_namespace("flux-system", stdout);
+        assert_eq!(
+            rows.len(),
+            2,
+            "header, blanks, and the 2-column malformed row must all be skipped"
+        );
+        assert_eq!(rows[0].name, "svc-alpha");
+        assert_eq!(
+            rows[0].message, "",
+            "row with exactly NO_HEADER_MIN_COLUMNS parses to empty message"
+        );
+        assert_eq!(rows[1].name, "svc-beta");
+        assert_eq!(rows[1].message, "bad message here");
+    }
+
+    /// Empty stdout parses to an empty vector — no header to skip,
+    /// no rows to emit, no panic. Pins the vacuous-case shape the
+    /// consumer relies on for its "no kustomizations in this
+    /// namespace" arm (which suppresses the diagnostic subsection).
+    #[test]
+    fn parse_in_namespace_empty_stdout_is_empty_vec() {
+        assert!(parse_kustomization_rows_in_namespace("flux-system", "").is_empty());
+        assert!(parse_kustomization_rows_in_namespace("flux-system", "\n\n\n").is_empty());
+    }
+
+    /// When the resolved flux binary cannot be spawned,
+    /// `list_kustomizations_in_namespace_with_bin` must surface
+    /// `SpawnFailed` carrying the underlying io error message — never
+    /// a bare empty vec that collapses spawn-failure into "no
+    /// kustomizations in namespace". Uses an absolute path that does
+    /// not exist so `Command::spawn` fails deterministically without
+    /// touching global PATH state.
+    #[tokio::test]
+    async fn in_namespace_spawn_failed_carries_io_error_message() {
+        let result = list_kustomizations_in_namespace_with_bin(
+            "/nonexistent/path/to/flux-binary-that-does-not-exist",
+            "flux-system",
+        )
+        .await;
+        let err = result.expect_err("missing flux binary must fail");
+        match err {
+            FluxGetKustomizationsError::SpawnFailed { message } => {
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected SpawnFailed, got: {other:?}"),
+        }
+    }
+
+    /// A flux invocation that exits non-zero must produce `Failed`
+    /// carrying the exit code and captured stderr — never a fused
+    /// stringly bag. Distinguishes this primitive from the sibling
+    /// `get_kustomization_scoped`, whose non-zero-exit contract is
+    /// `Ok(None)` (silent skip for "kustomization doesn't exist");
+    /// here non-zero exit is a real failure because a whole-namespace
+    /// listing that fails is structurally different from a single-
+    /// kustomization lookup that yields no rows.
+    #[tokio::test]
+    async fn in_namespace_failed_carries_structured_exit_code_and_stderr() {
+        let (_shim_dir, shim) = make_executable_shim(
+            "flux",
+            "#!/bin/sh\necho 'no flux controller' 1>&2\nexit 3\n",
+        );
+        let result = list_kustomizations_in_namespace_with_bin(&shim, "flux-system").await;
+        let err = result.expect_err("nonzero exit must fail");
+        match err {
+            FluxGetKustomizationsError::Failed { exit_code, stderr } => {
+                assert_eq!(exit_code, Some(3));
+                assert!(
+                    stderr.contains("no flux controller"),
+                    "stderr must capture flux stderr verbatim, got: {stderr:?}"
+                );
+            }
+            other => panic!("expected Failed, got: {other:?}"),
+        }
+    }
+
+    /// On the success path, `list_kustomizations_in_namespace_with_bin`
+    /// must return the parsed rows the shim's stdout describes, with
+    /// every row's `namespace` stamped from the argument. Pins the
+    /// end-to-end capture-and-parse round-trip.
+    #[tokio::test]
+    async fn in_namespace_success_returns_parsed_rows_with_stamped_namespace() {
+        let (_shim_dir, shim) = make_executable_shim(
+            "flux",
+            "#!/bin/sh\ncat <<'EOF'\n\
+NAME       REVISION       SUSPENDED  READY  MESSAGE\n\
+svc-alpha  main@sha1:abc  False      True   Applied revision: main@sha1:abc\n\
+svc-beta   main@sha1:def  False      False  reconciliation in progress\n\
+EOF\n\
+exit 0\n",
+        );
+        let rows = list_kustomizations_in_namespace_with_bin(&shim, "flux-system")
+            .await
+            .expect("success path");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].namespace, "flux-system",
+            "namespace must be stamped from arg"
+        );
+        assert_eq!(rows[0].name, "svc-alpha");
+        assert!(rows[0].is_ready());
+        assert_eq!(rows[1].name, "svc-beta");
+        assert!(!rows[1].is_ready());
+        assert_eq!(rows[1].message, "reconciliation in progress");
+    }
+
+    /// `list_kustomizations_in_namespace_with_bin` must splice the
+    /// canonical argv `["get", "kustomizations", "-n", <namespace>]`
+    /// verbatim, unshelled, unquoted. Pinned with a shim that copies
+    /// its full argv to a marker file so a future regression that
+    /// silently swapped in `--all-namespaces` (which would return the
+    /// whole fleet rather than the one namespace, and would surface
+    /// downstream as a 6-column parse against a 5-column expectation)
+    /// surfaces here rather than as a "diagnostic table showed all of
+    /// flux-system" surprise.
+    #[tokio::test]
+    async fn in_namespace_honors_canonical_argv() {
+        let observed = tempfile::tempdir().expect("observed tempdir");
+        let observed_path = observed.path().join("observed-argv");
+        let shim_body = format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\nexit 0\n",
+            observed_path.display()
+        );
+        let (_shim_dir, shim) = make_executable_shim("flux", &shim_body);
+        list_kustomizations_in_namespace_with_bin(&shim, "flux-system")
+            .await
+            .expect("success path");
+        let raw = std::fs::read_to_string(&observed_path).expect("shim must have written argv");
+        let args: Vec<&str> = raw.lines().collect();
+        assert_eq!(
+            args,
+            vec!["get", "kustomizations", "-n", "flux-system"],
+            "flux argv must be exactly [get, kustomizations, -n, <namespace>]"
         );
     }
 
