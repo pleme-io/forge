@@ -453,6 +453,36 @@ pub fn commit_and_push(manifest_path: &Path, old_tag: &str, new_tag: &str) -> Re
     commit_and_push_in(&workdir, &files, &message, "main")
 }
 
+/// Async `git` spawn constructor honoring `GIT_BIN`. Resolves the
+/// `git` binary through [`crate::tools::get_tool_path`] on the
+/// canonical `tools::GIT` name once and returns a
+/// [`tokio::process::Command`] ready for `.args(...)` +
+/// [`crate::retry::run_inherited_status`] (inherited-stdio,
+/// status-only semantics — no stdout capture).
+///
+/// Companion to [`git_capture_async`] on the same free-function
+/// surface. `git_capture_async` targets consumers that want the
+/// stdout-capturing typed-error dispatch (`GitError::OpFailed` /
+/// `ExecFailed`); `git_command_async` targets consumers that want to
+/// inherit git's stdout/stderr and dispatch only on the exit code —
+/// the shape every `commands/federation.rs` / `commands/push.rs` /
+/// `commands/codegen_validation.rs` git-mutation site drives via
+/// `Command::new("git").args([...])` + `run_inherited_status`.
+///
+/// Names the "spawn `git` via `GIT_BIN`" discipline once at the
+/// constructor so every consumer honors the env override the
+/// tools-registry idiom resolves. Pre-lift each consumer spelled the
+/// bare literal `Command::new("git")` — the exact class of bug the
+/// `flux` / `cargo` / `doca` / free-function-`git`-capture / `GitClient`
+/// migrations redeemed at 621f827 / f0dfa12 / d3dd199 / 685642f /
+/// d6f6bc7 / dd5a212 / 673e4be / b02d4eb / 54a9985 / 139b37a /
+/// 818ed9a / badcdf4. This constructor closes the last remaining
+/// free-function `Command::new("git")`-plus-`run_inherited_status`
+/// surface a Nix-hermetic runner could bypass through PATH.
+pub fn git_command_async() -> tokio::process::Command {
+    tokio::process::Command::new(get_tool_path(tools::GIT))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1056,5 +1086,69 @@ mod tests {
             "originally-set GIT_BIN must be restored verbatim after drop"
         );
         std::env::remove_var("GIT_BIN");
+    }
+
+    /// [`git_command_async`] MUST resolve the `git` binary through
+    /// [`crate::tools::get_tool_path`] on the canonical `tools::GIT`
+    /// name — i.e. it honors the `GIT_BIN` env override the
+    /// tools-registry idiom names as the hermetic-runner contract,
+    /// and never hardcodes the literal `"git"` on the spawn path.
+    ///
+    /// Two-arm pin. The static arm reads the returned Command's
+    /// program directly (`Command::as_std().get_program()`) and
+    /// asserts it equals the resolved shim path verbatim — proves the
+    /// constructor resolves through `get_tool_path(tools::GIT)`
+    /// without ever spawning. The end-to-end arm spawns the same
+    /// Command through the exact `retry::run_inherited_status` shape
+    /// every consumer (`commands/federation.rs` / `commands/push.rs` /
+    /// `commands/codegen_validation.rs`) drives and asserts the
+    /// shim's exit code rides through the returned anyhow chain —
+    /// proves the resolution isn't just stringly-equal but actually
+    /// spawns the shim end-to-end. A regression that "tidies"
+    /// `git_command_async` back to `Command::new("git")` fails the
+    /// program-name assertion; a regression that ignores the
+    /// resolved bin at the retry layer fails the exit-code
+    /// assertion.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[tokio::test]
+    async fn test_git_command_async_routes_through_git_bin_env_var() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let (_shim_dir, shim) = make_git_shim(
+            "#!/bin/sh\necho 'SIGIL_ROUTED_VIA_GIT_COMMAND_ASYNC_9d2b7f' 1>&2\nexit 77\n",
+        );
+        let _scope = GitBinScope::set(&shim);
+
+        // Static arm: the returned Command's program is the
+        // GIT_BIN-resolved path, not the literal "git".
+        let cmd = git_command_async();
+        assert_eq!(
+            cmd.as_std().get_program(),
+            std::ffi::OsStr::new(&shim),
+            "git_command_async() must resolve through GIT_BIN, not hardcode \"git\""
+        );
+
+        // End-to-end arm: spawning through the consumer shape
+        // (retry::run_inherited_status) surfaces the shim's exit
+        // code via the returned anyhow chain.
+        let mut cmd = git_command_async();
+        cmd.args(["diff", "--staged", "--quiet"]);
+        let err = crate::retry::run_inherited_status(cmd, "git diff")
+            .await
+            .expect_err("shim exits 77");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("exit 77"),
+            "run_inherited_status must surface the shim's exit code via \
+             the anyhow message; got: {msg:?}"
+        );
+        assert!(
+            msg.contains("git diff"),
+            "run_inherited_status must surface the op label via the \
+             anyhow message; got: {msg:?}"
+        );
     }
 }
