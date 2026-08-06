@@ -26,7 +26,41 @@
 //!   `classify_capture_query_anyhow` primitive (see commit 9637380);
 //!   harmonizing the two surfaces is a future-commit concern.
 
-use crate::tools::get_tool_path;
+use crate::tools::{get_tool_path, tools};
+
+/// Async `kubectl` spawn constructor honoring `KUBECTL_BIN`. Resolves
+/// the `kubectl` binary through [`crate::tools::get_tool_path`] on the
+/// canonical `tools::KUBECTL` name once and returns a
+/// [`tokio::process::Command`] ready for `.args(...)` +
+/// `.status()` / `.output()`.
+///
+/// Companion to [`find_first_pod_name_async`] on the same
+/// `infrastructure::kubectl` surface: `find_first_pod_name_async` is a
+/// domain-shaped primitive (canonical argv + Option-typed classifier)
+/// for the discovery shape three sites share; `kubectl_command_async`
+/// is the free-form constructor for one-off argvs whose shape has no
+/// three-times-rule reuse yet. Names the "spawn `kubectl` via
+/// `KUBECTL_BIN`" discipline once at the constructor so every consumer
+/// honors the env override the tools-registry idiom
+/// (`crate::tools::get_tool_path("kubectl")`, cli/src/tools.rs:102-105)
+/// resolves.
+///
+/// Pre-lift consumers in `commands/product_release.rs::run_health_check`
+/// / `commands/github_runner_ci.rs` / `services/migration_service.rs`
+/// each spelled the bare literal `Command::new("kubectl")` — the exact
+/// class of bug the `flux` / `cargo` / `doca` / `git` free-function
+/// migrations redeemed at 621f827 / f0dfa12 / d3dd199 / 685642f /
+/// d6f6bc7 / dd5a212 / 673e4be / b02d4eb / 54a9985 / 139b37a /
+/// 818ed9a / badcdf4 / 8653403 / 81d7486 / f6be190 / 8a1958e / 0d922f6
+/// / 0a36ba0 / 447cad1 / 82376e1 / 34661e3. A Nix-hermetic runner
+/// whose `KUBECTL_BIN` points at a specific store-path `kubectl`
+/// (substrate's `mkRuntimeToolsEnv`) would lose to whatever `kubectl`
+/// is first on `PATH` at every pre-lift site. This constructor opens
+/// the `KUBECTL_BIN`-routing frontier the migration will drive across
+/// consumers, starting with `product_release.rs::run_health_check`.
+pub fn kubectl_command_async() -> tokio::process::Command {
+    tokio::process::Command::new(get_tool_path(tools::KUBECTL))
+}
 
 /// Fetch a base64-encoded value from a Kubernetes Secret via
 /// `kubectl get secret -o jsonpath={.data.<key>}` and decode it to
@@ -535,6 +569,110 @@ mod tests {
                 "jsonpath={.items[0].metadata.name}",
             ],
             "kubectl argv must match the canonical first-pod-name shape"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // kubectl_command_async — the free-form kubectl spawn constructor.
+    // The pin below asserts the returned Command's program is the
+    // KUBECTL_BIN-resolved path, never the literal "kubectl".
+    // ---------------------------------------------------------------
+
+    /// RAII scope-guard that sets `KUBECTL_BIN=value` on construction
+    /// and restores the pre-scope state (either the original value or
+    /// unset) on drop — panic-safe by construction. Mirrors the
+    /// discipline of [`crate::test_support::GitBinScope`] without
+    /// pulling that scope into `test_support.rs` while there is only
+    /// one kubectl-env-touching test in the fleet; a second test
+    /// would trigger the lift to `test_support.rs`, same rule as
+    /// [`crate::test_support::make_executable_shim`] applied at the
+    /// three-times threshold.
+    struct KubectlBinScope {
+        prior: std::result::Result<String, std::env::VarError>,
+    }
+
+    impl KubectlBinScope {
+        fn set(value: &str) -> Self {
+            let prior = std::env::var("KUBECTL_BIN");
+            std::env::set_var("KUBECTL_BIN", value);
+            Self { prior }
+        }
+    }
+
+    impl Drop for KubectlBinScope {
+        fn drop(&mut self) {
+            match &self.prior {
+                Ok(v) => std::env::set_var("KUBECTL_BIN", v),
+                Err(_) => std::env::remove_var("KUBECTL_BIN"),
+            }
+        }
+    }
+
+    /// Serial-safe guard for tests that mutate `KUBECTL_BIN` or read
+    /// a production entry point that resolves `kubectl` through
+    /// `tools::get_tool_path(tools::KUBECTL)`. Same rationale as
+    /// [`crate::test_support::GIT_BIN_ENV_LOCK`]: env-var writes are
+    /// process-global; without a serial guard a concurrent
+    /// production-path test could pick up the wrong shim from a
+    /// mid-flight env-var mutation. `unwrap_or_else(|p|
+    /// p.into_inner())` keeps a panicking prior test from chain-
+    /// failing every subsequent test that shares the lock.
+    static KUBECTL_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// [`kubectl_command_async`] MUST resolve the `kubectl` binary
+    /// through [`crate::tools::get_tool_path`] on the canonical
+    /// `tools::KUBECTL` name — i.e. it honors the `KUBECTL_BIN` env
+    /// override the tools-registry idiom names as the hermetic-runner
+    /// contract, and never hardcodes the literal `"kubectl"` on the
+    /// spawn path.
+    ///
+    /// Two-arm pin, mirroring the sibling
+    /// [`crate::git::tests::test_git_command_async_routes_through_git_bin_env_var`].
+    /// The static arm reads the returned Command's program directly
+    /// (`Command::as_std().get_program()`) and asserts it equals the
+    /// resolved shim path verbatim — proves the constructor resolves
+    /// through `get_tool_path(tools::KUBECTL)` without ever spawning.
+    /// The end-to-end arm spawns the same Command through the exact
+    /// `.output().await` shape every consumer
+    /// (`commands/product_release.rs::run_health_check` — the first
+    /// consumer this migration lifts) drives and asserts the shim's
+    /// exit code rides through verbatim. A regression that "tidies"
+    /// `kubectl_command_async` back to `Command::new("kubectl")`
+    /// fails the program-name assertion.
+    #[tokio::test]
+    async fn test_kubectl_command_async_routes_through_kubectl_bin_env_var() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        let (_shim_dir, shim) = make_executable_shim(
+            "kubectl",
+            "#!/bin/sh\necho 'SIGIL_ROUTED_VIA_KUBECTL_COMMAND_ASYNC_7c4e2a' 1>&2\nexit 91\n",
+        );
+        let _scope = KubectlBinScope::set(&shim);
+
+        // Static arm: the returned Command's program is the
+        // KUBECTL_BIN-resolved path, not the literal "kubectl".
+        let cmd = kubectl_command_async();
+        assert_eq!(
+            cmd.as_std().get_program(),
+            std::ffi::OsStr::new(&shim),
+            "kubectl_command_async() must resolve through KUBECTL_BIN, not hardcode \"kubectl\""
+        );
+
+        // End-to-end arm: spawning through the consumer shape
+        // (`.output().await`) surfaces the shim's exit code verbatim.
+        let out = kubectl_command_async()
+            .args(["rollout", "status", "deployment/x", "-n", "ns"])
+            .output()
+            .await
+            .expect("shim must spawn");
+        assert_eq!(
+            out.status.code(),
+            Some(91),
+            "kubectl_command_async().output() must surface the shim's exit \
+             code verbatim — proves the async constructor spawns the \
+             KUBECTL_BIN shim end-to-end, not a PATH-resolved `kubectl`"
         );
     }
 }
