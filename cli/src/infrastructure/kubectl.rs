@@ -45,19 +45,27 @@ use crate::tools::{get_tool_path, tools};
 /// (`crate::tools::get_tool_path("kubectl")`, cli/src/tools.rs:102-105)
 /// resolves.
 ///
-/// Pre-lift consumers in `commands/product_release.rs::run_health_check`
-/// / `commands/github_runner_ci.rs` / `services/migration_service.rs`
-/// each spelled the bare literal `Command::new("kubectl")` — the exact
-/// class of bug the `flux` / `cargo` / `doca` / `git` free-function
-/// migrations redeemed at 621f827 / f0dfa12 / d3dd199 / 685642f /
-/// d6f6bc7 / dd5a212 / 673e4be / b02d4eb / 54a9985 / 139b37a /
-/// 818ed9a / badcdf4 / 8653403 / 81d7486 / f6be190 / 8a1958e / 0d922f6
-/// / 0a36ba0 / 447cad1 / 82376e1 / 34661e3. A Nix-hermetic runner
-/// whose `KUBECTL_BIN` points at a specific store-path `kubectl`
-/// (substrate's `mkRuntimeToolsEnv`) would lose to whatever `kubectl`
-/// is first on `PATH` at every pre-lift site. This constructor opens
-/// the `KUBECTL_BIN`-routing frontier the migration will drive across
-/// consumers, starting with `product_release.rs::run_health_check`.
+/// Landed consumers (per commit at which each site migrated):
+/// - `commands/product_release.rs::run_health_check` — two sites
+///   (rollout-status + pod-phase probe), migrated at 5bb7cff.
+/// - `commands/github_runner_ci.rs::execute` — three sites (rollout
+///   pod-status probe, per-pod crash-log fetch, deployed-image
+///   verification), migrated at this commit.
+///
+/// Pre-lift each of these sites spelled the bare literal
+/// `Command::new("kubectl")` — the exact class of bug the `flux` /
+/// `cargo` / `doca` / `git` free-function migrations redeemed at
+/// 621f827 / f0dfa12 / d3dd199 / 685642f / d6f6bc7 / dd5a212 /
+/// 673e4be / b02d4eb / 54a9985 / 139b37a / 818ed9a / badcdf4 /
+/// 8653403 / 81d7486 / f6be190 / 8a1958e / 0d922f6 / 0a36ba0 /
+/// 447cad1 / 82376e1 / 34661e3. A Nix-hermetic runner whose
+/// `KUBECTL_BIN` points at a specific store-path `kubectl`
+/// (substrate's `mkRuntimeToolsEnv`) would lose to whatever
+/// `kubectl` is first on `PATH` at every pre-lift site. Remaining
+/// pending consumers on the `KUBECTL_BIN`-routing frontier:
+/// `services/migration_service.rs` (five sites) plus the various
+/// `commands/*.rs` sites the grep in the shield tests' docstrings
+/// enumerates.
 pub fn kubectl_command_async() -> tokio::process::Command {
     tokio::process::Command::new(get_tool_path(tools::KUBECTL))
 }

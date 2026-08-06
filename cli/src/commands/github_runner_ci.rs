@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::flux_reconcile;
 use crate::git;
+use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::repo::get_tool_path;
 use crate::retry::{debug_log_capture_streams, log_retry_attempt, retry_command, RetryPolicy};
 
@@ -436,7 +437,7 @@ pub async fn execute(
             }
 
             // Get pod status
-            let pod_status_result = Command::new("kubectl")
+            let pod_status_result = kubectl_command_async()
                 .args(&[
                     "get",
                     "pods",
@@ -555,7 +556,7 @@ pub async fn execute(
 
                                     // Fetch logs from the failed container
                                     info!("📋 Fetching logs from {}...", pod_name);
-                                    let log_result = Command::new("kubectl")
+                                    let log_result = kubectl_command_async()
                                         .args(&[
                                             "logs",
                                             pod_name,
@@ -622,7 +623,7 @@ pub async fn execute(
         // Verify the new image is deployed
         println!();
         info!("🔍 Verifying deployment...");
-        let verify_result = Command::new("kubectl")
+        let verify_result = kubectl_command_async()
             .args(&[
                 "get",
                 &format!("statefulset/{}", name),
@@ -1119,6 +1120,88 @@ mod tests {
             "execute() must delegate the login step to \
              `AtticClient::login_with_retries` — the \
              `login_with_retries` method call was not found in execute()."
+        );
+    }
+
+    /// Regression shield: every `kubectl`-spawning site in
+    /// `commands/github_runner_ci.rs::execute` MUST resolve the
+    /// binary through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`]
+    /// rather than the pre-lift `Command::new("kubectl")` literal.
+    /// Pre-migration three sites (rollout pod-status probe, per-pod
+    /// crash-log fetch, deployed-image verification) each spelled
+    /// the bare `Command::new("kubectl")` shape verbatim and thereby
+    /// bypassed the `KUBECTL_BIN` env override the tools-registry
+    /// idiom (`crate::tools::get_tool_path(tools::KUBECTL)`,
+    /// cli/src/tools.rs:102-105) resolves — the same class of bug
+    /// the sibling `flux` / `cargo` / `doca` / free-function-`git` /
+    /// `GitClient` / `commands/federation.rs` /
+    /// `commands/push.rs` / `commands/rollback.rs` /
+    /// `commands/helm.rs` / `commands/product_release.rs::run_health_check`
+    /// migrations redeemed at 621f827 / f0dfa12 / d3dd199 / 685642f /
+    /// d6f6bc7 / dd5a212 / 673e4be / b02d4eb / 54a9985 / 139b37a /
+    /// 818ed9a / badcdf4 / 8653403 / f6be190 / 8a1958e / 81d7486 /
+    /// 0d922f6 / 82376e1 / 34661e3 / 5bb7cff.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("kubectl")` string does not
+    /// reappear in `execute()` while the delegation to
+    /// `kubectl_command_async()` does. A future regression that
+    /// re-fuses the raw-spawn body fails here, not silently in
+    /// production where a Nix-hermetic runner's
+    /// `KUBECTL_BIN`-provided `kubectl` would lose to whatever
+    /// `kubectl` is first on `PATH` at
+    /// `forge github-runner-ci --watch` invocation time.
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — the end-to-end
+    /// `KUBECTL_BIN`-routing invariant is already pinned by
+    /// [`crate::infrastructure::kubectl::tests::test_kubectl_command_async_routes_through_kubectl_bin_env_var`]
+    /// on the primitive itself; this shield only certifies that
+    /// every `execute()` kubectl spawn reads through that primitive.
+    ///
+    /// The scan is bounded strictly to `execute()`'s body — from
+    /// `pub async fn execute(` to the next top-level marker
+    /// `\nasync fn push_with_retry(` — so this shield's own
+    /// docstring mention of `Command::new("kubectl")` stays out of
+    /// scope. Mirrors the sibling shield on
+    /// `commands/product_release.rs::run_health_check` for the
+    /// second consumer of the `kubectl_command_async` primitive.
+    #[test]
+    fn test_execute_routes_kubectl_through_kubectl_command_async_not_raw_command() {
+        let source = include_str!("github_runner_ci.rs");
+        let execute_start = source
+            .find("pub async fn execute(")
+            .expect("execute() must be present in this module's source");
+        // Bound at the next top-level function marker in source order.
+        // `push_with_retry` follows `execute`; the tests-module
+        // `#[cfg(test)]` marker follows `push_with_retry`. Using the
+        // fn-boundary keeps the shield scoped strictly to `execute()`
+        // so a future kubectl-spawning helper landing between the two
+        // functions cannot silently ride along without its own shield.
+        let helper_marker = "\nasync fn push_with_retry(";
+        let execute_end = source[execute_start..]
+            .find(helper_marker)
+            .map(|i| execute_start + i)
+            .expect(
+                "the `async fn push_with_retry(` marker must follow \
+                 `execute()` — the shield's slice boundary relies on \
+                 this module ordering",
+            );
+        let execute_body = &source[execute_start..execute_end];
+
+        assert!(
+            !execute_body.contains("Command::new(\"kubectl\")"),
+            "execute() must NOT spawn `kubectl` directly — route \
+             through `crate::infrastructure::kubectl::kubectl_command_async()` \
+             so `KUBECTL_BIN` overrides land at the shared primitive. \
+             Found the pre-migration spawn body in execute()."
+        );
+        assert!(
+            execute_body.contains("kubectl_command_async()"),
+            "execute() must delegate every kubectl spawn to \
+             `kubectl_command_async()` — the delegation string was not \
+             found in execute()."
         );
     }
 }
