@@ -500,15 +500,15 @@ pub fn git_command_async() -> tokio::process::Command {
 ///
 /// Names the discipline once so future blocking-git sites (e.g. the
 /// remaining `Command::new("git")` sites in `commands/helm.rs::bump`,
-/// `commands/e2e.rs::resolve_repo_root`,
 /// `commands/rust_service.rs`, and
 /// `commands/product_release.rs` / `commands/release_commit.rs`) lift
 /// through the same constructor rather than each re-spelling the
 /// literal `"git"` — the exact class of bug the async
 /// `git_command_async` migration redeemed for the async half of the
 /// surface at 818ed9a / badcdf4 / 8653403 / f6be190 / 81d7486 /
-/// 8a1958e, and the sync `config/mod::resolve_k8s_repo_root`
-/// migration redeemed on the second sync consumer.
+/// 8a1958e, and the sync `config/mod::resolve_k8s_repo_root` +
+/// `commands/e2e.rs::resolve_repo_root` migrations redeemed on the
+/// second and third sync consumers.
 pub fn git_command_sync() -> Command {
     Command::new(get_tool_path(tools::GIT))
 }
@@ -1196,8 +1196,8 @@ mod tests {
     /// `get_tool_path(tools::GIT)` without ever spawning. The
     /// end-to-end arm spawns the same Command through the blocking
     /// `.status()` shape every sync consumer (`commands/helm.rs::deploy`,
-    /// `config/mod::resolve_k8s_repo_root`, and future `helm::bump` /
-    /// `e2e::resolve_repo_root` migrations) drives and
+    /// `config/mod::resolve_k8s_repo_root`, `commands/e2e.rs::resolve_repo_root`,
+    /// and future `helm::bump` migrations) drives and
     /// asserts the shim's exit code rides through verbatim — proves
     /// the resolution isn't just stringly-equal but actually spawns
     /// the shim end-to-end. A regression that "tidies"
