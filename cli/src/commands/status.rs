@@ -6,8 +6,9 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 use tracing::debug;
+
+use crate::infrastructure::kubectl::kubectl_command_async;
 
 /// Raw deploy.yaml structure for parsing kubernetes config directly
 /// (Supports both web and rust service formats)
@@ -341,7 +342,7 @@ async fn fetch_service_status(
 }
 
 async fn fetch_deployment(namespace: &str, deployment_name: &str) -> Result<DeploymentInfo> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args([
             "get",
             "deployment",
@@ -486,7 +487,7 @@ fn extract_conditions(deployment: &serde_json::Value) -> Vec<ConditionStatus> {
 }
 
 async fn fetch_pods_json(namespace: &str, deployment_name: &str) -> Result<serde_json::Value> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args([
             "get",
             "pods",
@@ -675,7 +676,7 @@ async fn fetch_related_services(namespace: &str, deployment_name: &str) -> Resul
 }
 
 async fn fetch_statefulset(namespace: &str, name: &str) -> Result<StatefulSetInfo> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args(["get", "statefulset", name, "-n", namespace, "-o", "json"])
         .output()
         .await?;
@@ -719,7 +720,7 @@ async fn fetch_statefulset(namespace: &str, name: &str) -> Result<StatefulSetInf
 }
 
 async fn fetch_redis(namespace: &str, name: &str) -> Result<ResourceInfo> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args(["get", "deployment", name, "-n", namespace, "-o", "json"])
         .output()
         .await?;
@@ -756,7 +757,7 @@ async fn fetch_redis(namespace: &str, name: &str) -> Result<ResourceInfo> {
 }
 
 async fn fetch_redis_statefulset(namespace: &str, name: &str) -> Result<ResourceInfo> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args(["get", "statefulset", name, "-n", namespace, "-o", "json"])
         .output()
         .await?;
@@ -793,7 +794,7 @@ async fn fetch_redis_statefulset(namespace: &str, name: &str) -> Result<Resource
 }
 
 async fn fetch_configmap(namespace: &str, name: &str) -> Result<ConfigMapInfo> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args(["get", "configmap", name, "-n", namespace, "-o", "json"])
         .output()
         .await?;
@@ -818,7 +819,7 @@ async fn fetch_configmap(namespace: &str, name: &str) -> Result<ConfigMapInfo> {
 }
 
 async fn fetch_secrets(namespace: &str, deployment_name: &str) -> Result<Vec<String>> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args(["get", "secrets", "-n", namespace, "-o", "json"])
         .output()
         .await?;
@@ -843,7 +844,7 @@ async fn fetch_secrets(namespace: &str, deployment_name: &str) -> Result<Vec<Str
 }
 
 async fn fetch_k8s_services(namespace: &str, deployment_name: &str) -> Result<Vec<ServiceInfo>> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args([
             "get",
             "services",
@@ -909,7 +910,7 @@ async fn fetch_k8s_services(namespace: &str, deployment_name: &str) -> Result<Ve
 }
 
 async fn fetch_migrations(namespace: &str, deployment_name: &str) -> Result<Vec<MigrationInfo>> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args([
             "get",
             "jobs",
@@ -988,7 +989,7 @@ async fn fetch_migrations(namespace: &str, deployment_name: &str) -> Result<Vec<
 }
 
 async fn fetch_events(namespace: &str, deployment_name: &str) -> Result<Vec<EventInfo>> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args([
             "get",
             "events",
@@ -1470,5 +1471,73 @@ mod tests {
         assert_eq!(OutputFormat::from_str(""), OutputFormat::Text);
         assert_eq!(OutputFormat::from_str("yaml"), OutputFormat::Text);
         assert_eq!(OutputFormat::from_str("anything"), OutputFormat::Text);
+    }
+
+    /// Regression shield: every `kubectl`-spawning site in
+    /// `commands/status.rs`'s ten top-level async fetch helpers
+    /// (`fetch_deployment`, `fetch_pods_json`, `fetch_statefulset`,
+    /// `fetch_redis`, `fetch_redis_statefulset`, `fetch_configmap`,
+    /// `fetch_secrets`, `fetch_k8s_services`, `fetch_migrations`,
+    /// `fetch_events`) MUST resolve the binary through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`]
+    /// rather than the pre-lift `Command::new("kubectl")` literal.
+    /// Pre-migration ten sites each spelled the bare
+    /// `Command::new("kubectl")` shape verbatim and thereby
+    /// bypassed the `KUBECTL_BIN` env override the tools-registry
+    /// idiom (`crate::tools::get_tool_path(tools::KUBECTL)`,
+    /// cli/src/tools.rs:102-105) resolves — the same class of bug
+    /// the sibling `commands/supergraph_verification.rs` /
+    /// `commands/product_release.rs::run_health_check` /
+    /// `commands/github_runner_ci.rs::execute` /
+    /// `services/migration_service.rs::MigrationService`
+    /// migrations redeemed at 65283fb / 5bb7cff / 5566415 / 5986a10.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("kubectl")` string does not
+    /// reappear anywhere in the module's non-test body while the
+    /// delegation to `kubectl_command_async()` does. A future
+    /// regression that re-fuses the raw-spawn body fails here, not
+    /// silently in production where a Nix-hermetic runner's
+    /// `KUBECTL_BIN`-provided `kubectl` would lose to whatever
+    /// `kubectl` is first on `PATH` at `forge status` invocation
+    /// time.
+    ///
+    /// The scan is bounded strictly to the module's non-test body
+    /// — from the file start to the `#[cfg(test)]` marker — so
+    /// this shield's own docstring mention of
+    /// `Command::new("kubectl")` (which lives inside the sibling
+    /// `#[cfg(test)] mod tests` block below) stays out of scope
+    /// AND every current or future kubectl-spawning helper landing
+    /// anywhere in the top-level module body (i.e., in any of the
+    /// ten migrated fetch helpers or any as-yet unadded sibling)
+    /// cannot silently ride along without going through the
+    /// primitive. Mirrors the whole-module boundary discipline the
+    /// sibling `commands/supergraph_verification.rs` shield
+    /// (65283fb) pioneered on the multi-function consumer surface.
+    #[test]
+    fn test_status_routes_kubectl_through_kubectl_command_async_not_raw_command() {
+        let source = include_str!("status.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+                 the module body — the shield's slice boundary relies \
+                 on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        assert!(
+            !module_body.contains("Command::new(\"kubectl\")"),
+            "status.rs must NOT spawn `kubectl` directly — route \
+             through \
+             `crate::infrastructure::kubectl::kubectl_command_async()` \
+             so `KUBECTL_BIN` overrides land at the shared primitive. \
+             Found the pre-migration spawn body in the module."
+        );
+        assert!(
+            module_body.contains("kubectl_command_async()"),
+            "status.rs must delegate every kubectl spawn to \
+             `kubectl_command_async()` — the delegation string was \
+             not found in the module body."
+        );
     }
 }
