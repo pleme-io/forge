@@ -4,6 +4,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tokio::process::Command;
 use tracing::{info, warn};
 
+use crate::repo::get_tool_path;
+
 pub async fn execute(
     flake_attr: String,
     working_dir: String,
@@ -137,7 +139,17 @@ pub async fn execute(
 
     // Use relative .# to avoid git+file:// protocol issues
     let flake_ref = format!(".#{}", flake_attr);
-    let mut cmd = Command::new("nix");
+    // Route the `nix build` spawn through `NIX_BIN` so a Nix-hermetic
+    // runner's store-path `nix` wins over whichever `nix` was first on
+    // PATH at this spawn site. Mirrors every other nix-invocation site
+    // in forge (`commands/tool.rs::build_lock_target`,
+    // `nix.rs::build_flake_attr_in`, `nix.rs::build_docker_image_from_dir`,
+    // `nix.rs::path_info_recursive`, `nix_hooks.rs::build_and_get_path`,
+    // `commands/developer_tools.rs::rust_{update_cargo_nix,regenerate,
+    // cargo_update}`); the `test_execute_routes_nix_through_nix_bin_not_raw_command`
+    // shield below pins the invariant on the whole module body.
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let mut cmd = Command::new(&nix_bin);
     cmd.current_dir(&working_dir)
         .env("GIT_SHA", &git_sha) // Pass GIT_SHA for version embedding
         .args(&[
@@ -193,9 +205,9 @@ pub async fn execute(
 
         // Enumerate the recursive closure via the canonical typed
         // primitive `crate::nix::path_info_recursive`. Lifts the
-        // pre-migration raw `Command::new("nix").args(&["path-info",
-        // "--recursive", &result_path]).output()` stanza onto three
-        // load-bearing properties this call previously bypassed:
+        // pre-migration raw `nix path-info --recursive <result>` spawn
+        // stanza (the bare `Command::new` at literal `"nix"` shape) onto
+        // three load-bearing properties this call previously bypassed:
         //   1. `NIX_BIN` env override via `get_tool_path` — the
         //      pre-migration raw-spawn ignored the env var every other
         //      nix-invocation site in the workspace honors, so a
@@ -414,6 +426,64 @@ mod tests {
             "execute() must call `use_cache(...)` to route the cache-selection \
              step through the typed primitive — the call string was not found \
              in execute()."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("nix")` may live in
+    /// this module's non-test body. Every `nix` spawn in
+    /// `commands/build.rs` must first resolve `NIX_BIN` via
+    /// [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// every other nix-invocation site in forge honors
+    /// (`commands/tool.rs::build_lock_target`,
+    /// `nix.rs::build_flake_attr_in`,
+    /// `nix.rs::build_docker_image_from_dir`,
+    /// `nix.rs::path_info_recursive`,
+    /// `nix_hooks.rs::NixHooks::build_and_get_path`,
+    /// `commands/developer_tools.rs::rust_update_cargo_nix` and
+    /// siblings).
+    ///
+    /// Pre-lift `execute()`'s primary `nix build .#<flake_attr>` site
+    /// spelled `Command::new("nix")` verbatim, ignoring `NIX_BIN` at
+    /// exactly the moment hermetic-runner consistency matters most —
+    /// `forge build` is THE build-platform entrypoint. A Nix-hermetic
+    /// runner with a store-path `nix` binary silently fell through to
+    /// whatever `nix` was first on PATH at this specific site,
+    /// diverging from every other nix-invocation surface in forge and
+    /// from the sibling KUBECTL_BIN / GIT_BIN frontier's uniform
+    /// discipline (5bb7cff / 818ed9a).
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the `\n#[cfg(test)]\nmod tests {` marker below) so
+    /// this shield's own docstring mentions of `Command::new("nix")`
+    /// (which live inside this `#[cfg(test)] mod tests` block) stay
+    /// out of scope AND every current or future nix-spawning helper
+    /// landing anywhere in the top-level module body cannot silently
+    /// ride along without going through `NIX_BIN`. Mirrors the
+    /// sibling whole-module shield on
+    /// `commands/developer_tools.rs::test_developer_tools_routes_nix_through_nix_bin_not_raw_command`
+    /// (4dfb2b3) and matches the whole-module-boundary scan discipline
+    /// pioneered on `commands/supergraph_verification.rs` (65283fb).
+    #[test]
+    fn test_execute_routes_nix_through_nix_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("build.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
+            "build.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"nix\")"),
+            "commands/build.rs must not spawn `nix` via the bare literal — \
+             every `nix` spawn must resolve `NIX_BIN` via \
+             `crate::repo::get_tool_path(\"NIX_BIN\", \"nix\")` first. \
+             A raw `Command::new(\"nix\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"NIX_BIN\", \"nix\")"),
+            "commands/build.rs must resolve the nix binary via \
+             `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical \
+             lookup was not found in the module body."
         );
     }
 }
