@@ -21,6 +21,7 @@ use crate::commands::attestation;
 use crate::config::DeployConfig;
 use crate::infrastructure::git::{CommitPushOutcome, GitClient};
 use crate::infrastructure::kubectl::kubectl_command_async;
+use crate::repo::get_tool_path;
 
 /// Run a forge subcommand by re-invoking the current binary.
 pub(crate) async fn run_forge_subcommand(args: &[&str]) -> Result<()> {
@@ -63,7 +64,8 @@ async fn run_nix_release_app(
 
     println!("   {} nix {}", ">>".dimmed(), args.join(" ").dimmed());
 
-    let status = Command::new("nix")
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let status = Command::new(&nix_bin)
         .args(args)
         .status()
         .await
@@ -1043,6 +1045,73 @@ mod tests {
             "run_health_check() must delegate every kubectl spawn to \
              `kubectl_command_async()` — the delegation string was not \
              found in run_health_check()."
+        );
+    }
+
+    /// Regression-shield: the sole `nix`-spawning site in
+    /// `commands/product_release.rs::run_nix_release_app` MUST resolve
+    /// the binary through
+    /// [`crate::repo::get_tool_path`]`("NIX_BIN", "nix")` rather than
+    /// the pre-lift `Command::new("nix")` literal. Pre-migration the
+    /// Phase-1 `nix run .#release:{product}:{service}` app spawn
+    /// bypassed the `NIX_BIN` env override every other nix-invocation
+    /// surface in forge honors (`commands/build.rs::execute` at
+    /// d8ef0d5, `commands/tool.rs::build_lock_target`,
+    /// `commands/developer_tools.rs::rust_update_cargo_nix` /
+    /// `rust_regenerate` / `rust_cargo_update` at 4dfb2b3,
+    /// `commands/rust_service.rs`'s three sites at 7c34e57,
+    /// `nix.rs::build_flake_attr_in` /
+    /// `nix.rs::build_docker_image_from_dir` /
+    /// `nix.rs::path_info_recursive`, and
+    /// `nix_hooks.rs::NixHooks::build_and_get_path`). A Nix-hermetic
+    /// runner with a store-path `nix` binary silently fell through to
+    /// whatever `nix` was first on PATH at exactly the moment
+    /// release-orchestration consistency matters most — the release
+    /// app's tag is what deploy.yaml pins.
+    ///
+    /// The scan bounds to `run_nix_release_app`'s function body
+    /// (from the fn header to the next top-level `async fn` in source
+    /// order, `run_health_check`) so the sibling `Command::new(exe)`
+    /// self-exec in `run_forge_subcommand` above, the two legitimate
+    /// `Command::new("docker")` sites in `push_prebuilt_image` below,
+    /// and this shield's own docstring mentions of
+    /// `Command::new("nix")` stay out of scope. Mirrors the sibling
+    /// scoped shield on `run_health_check` above and matches the
+    /// bounded-fn-body scan discipline used across
+    /// `commands/product_release.rs`.
+    #[test]
+    fn test_run_nix_release_app_routes_nix_through_nix_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("product_release.rs");
+
+        let fn_marker = "async fn run_nix_release_app(";
+        let start = SOURCE.find(fn_marker).expect(
+            "product_release.rs must contain `async fn run_nix_release_app(` \
+             — module invariant",
+        );
+        let after_fn = &SOURCE[start..];
+        // Bound at the next top-level fn marker in source order.
+        // `run_health_check` follows `run_nix_release_app`.
+        let end_relative = after_fn
+            .find("\n/// Run a kubectl health check for a deployment.")
+            .expect(
+                "product_release.rs must contain the `run_health_check` doc-comment \
+                 after `run_nix_release_app`",
+            );
+        let fn_body = &after_fn[..end_relative];
+
+        assert!(
+            !fn_body.contains("Command::new(\"nix\")"),
+            "run_nix_release_app() must NOT spawn `nix` directly — resolve \
+             `NIX_BIN` via `crate::repo::get_tool_path(\"NIX_BIN\", \"nix\")` \
+             first so the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports land at every spawn site. Found the \
+             pre-migration spawn body in run_nix_release_app()."
+        );
+        assert!(
+            fn_body.contains("get_tool_path(\"NIX_BIN\", \"nix\")"),
+            "run_nix_release_app() must resolve the nix binary via \
+             `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical lookup \
+             was not found in run_nix_release_app()."
         );
     }
 }
