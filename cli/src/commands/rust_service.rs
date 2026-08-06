@@ -1876,20 +1876,27 @@ pub async fn deploy_rust_service_with_tag(
         // with the structural `(op, exit_code)` record — symmetric with
         // the multi-repo `git::commit_and_push_in` path's bail-on-
         // non-zero semantics (which the prior shape silently dropped).
-        let mut add_cmd = Command::new("git");
+        //
+        // Binary resolution rides `crate::git::git_command_async()` so a
+        // Nix-hermetic runner's `GIT_BIN` override wins over ambient
+        // `PATH` — same discipline the sibling async `commands/push.rs`
+        // (f6be190), `commands/rollback.rs` (8a1958e),
+        // `commands/codegen_validation.rs` (81d7486), and
+        // `commands/federation.rs` (8653403) git-mutation sites honor.
+        let mut add_cmd = crate::git::git_command_async();
         add_cmd.args(["add", &manifest]);
         crate::retry::run_inherited_status(add_cmd, "git add")
             .await
             .context("Failed to stage manifest")?;
 
         let commit_msg = format!("Deploy {} {}", service, tag_suffix);
-        let mut commit_cmd = Command::new("git");
+        let mut commit_cmd = crate::git::git_command_async();
         commit_cmd.args(["commit", "-m", &commit_msg]);
         crate::retry::run_inherited_status(commit_cmd, "git commit")
             .await
             .context("Failed to commit manifest")?;
 
-        let mut push_cmd = Command::new("git");
+        let mut push_cmd = crate::git::git_command_async();
         push_cmd.args(["push", "origin", git_branch]);
         crate::retry::run_inherited_status(push_cmd, "git push")
             .await
@@ -2718,4 +2725,80 @@ async fn update_service_federation_tests_tag(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod deploy_rust_service_with_tag_git_bin_routing_tests {
+    /// Regression-shield: every `git`-spawning site in
+    /// `commands/rust_service.rs::deploy_rust_service_with_tag`'s
+    /// single-repo branch MUST resolve the binary through
+    /// [`crate::git::git_command_async`] rather than the pre-lift
+    /// `Command::new("git")` literal. Pre-migration three sites
+    /// (add / commit / push) bypassed the `GIT_BIN` env override the
+    /// `tools::get_tool_path(tools::GIT)` idiom (cli/src/tools.rs:102-105)
+    /// resolves — the same class of bug the sibling async
+    /// `commands/push.rs::update_kustomization` (f6be190),
+    /// `commands/rollback.rs` (8a1958e),
+    /// `commands/codegen_validation.rs` (81d7486), and
+    /// `commands/federation.rs` (8653403) git-mutation sites redeemed
+    /// on the async half of the routing surface, and the sync
+    /// `commands/helm.rs::deploy` (0d922f6),
+    /// `config/mod::resolve_k8s_repo_root` (0a36ba0),
+    /// `commands/e2e.rs::resolve_repo_root` (447cad1), and
+    /// `commands/helm.rs::bump` (82376e1) migrations redeemed on the
+    /// sync half.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("git")` string does not
+    /// reappear in `deploy_rust_service_with_tag` while the delegation
+    /// to `git_command_async` does. A future regression that re-fuses
+    /// the raw-spawn body fails here, not silently in production where
+    /// a Nix-hermetic runner's `GIT_BIN`-provided `git` would lose to
+    /// whatever `git` is first on `PATH` at
+    /// `forge rust-service deploy` time.
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — the end-to-end
+    /// `GIT_BIN`-routing invariant is already pinned by
+    /// [`crate::git::tests::test_git_command_async_routes_through_git_bin_env_var`]
+    /// on the primitive itself; this shield only certifies that every
+    /// `deploy_rust_service_with_tag` git spawn reads through that
+    /// primitive. Mirrors the sibling shield on
+    /// `commands/push.rs::update_kustomization` for the async half of
+    /// the surface.
+    #[test]
+    fn test_deploy_rust_service_with_tag_routes_git_through_git_command_async_not_raw_command() {
+        const SOURCE: &str = include_str!("rust_service.rs");
+
+        // Bound the scan to `deploy_rust_service_with_tag` — the three
+        // git spawn sites live in its single-repo `else` branch. The
+        // shield's own docstring above legitimately mentions
+        // `Command::new("git")` and lives outside this bound.
+        let fn_marker = "pub async fn deploy_rust_service_with_tag(";
+        let start = SOURCE
+            .find(fn_marker)
+            .expect("rust_service.rs must contain `pub async fn deploy_rust_service_with_tag(` — module invariant");
+        let after_fn = &SOURCE[start..];
+        // Bound at the next top-level `fn` in source order
+        // (`print_deployment_report`), which follows
+        // `deploy_rust_service_with_tag`.
+        let end_relative = after_fn
+            .find("\nasync fn print_deployment_report(")
+            .expect("rust_service.rs must contain `async fn print_deployment_report(` after `deploy_rust_service_with_tag`");
+        let fn_body = &after_fn[..end_relative];
+
+        assert!(
+            !fn_body.contains("Command::new(\"git\")"),
+            "deploy_rust_service_with_tag() must NOT spawn `git` directly \
+             — route through `crate::git::git_command_async()` so \
+             `GIT_BIN` overrides land at the shared primitive. Found the \
+             pre-migration spawn body in deploy_rust_service_with_tag()."
+        );
+        assert!(
+            fn_body.contains("crate::git::git_command_async()"),
+            "deploy_rust_service_with_tag() must delegate every git \
+             spawn to `crate::git::git_command_async()` — the delegation \
+             string was not found in deploy_rust_service_with_tag()."
+        );
+    }
 }
