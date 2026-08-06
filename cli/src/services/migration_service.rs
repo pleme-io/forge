@@ -107,7 +107,7 @@ impl MigrationService {
     }
 
     async fn delete_existing_job(&self, name: &str, namespace: &str) -> Result<()> {
-        let output = tokio::process::Command::new("kubectl")
+        let output = crate::infrastructure::kubectl::kubectl_command_async()
             .args(["delete", "job", name, "-n", namespace, "--ignore-not-found"])
             .output()
             .await
@@ -171,7 +171,7 @@ spec:
             config.resources.cpu_limit,
         );
 
-        let mut child = tokio::process::Command::new("kubectl")
+        let mut child = crate::infrastructure::kubectl::kubectl_command_async()
             .args(["apply", "-f", "-"])
             .stdin(std::process::Stdio::piped())
             .spawn()
@@ -202,7 +202,7 @@ spec:
                 anyhow::bail!("Timeout waiting for migration job");
             }
 
-            let output = tokio::process::Command::new("kubectl")
+            let output = crate::infrastructure::kubectl::kubectl_command_async()
                 .args([
                     "get",
                     "job",
@@ -223,7 +223,7 @@ spec:
             }
 
             // Check for failure
-            let output = tokio::process::Command::new("kubectl")
+            let output = crate::infrastructure::kubectl::kubectl_command_async()
                 .args([
                     "get",
                     "job",
@@ -246,7 +246,7 @@ spec:
     }
 
     async fn get_job_logs(&self, name: &str, namespace: &str) -> Result<String> {
-        let output = tokio::process::Command::new("kubectl")
+        let output = crate::infrastructure::kubectl::kubectl_command_async()
             .args(["logs", &format!("job/{}", name), "-n", namespace])
             .output()
             .await
@@ -276,5 +276,88 @@ mod tests {
     fn test_migration_service_with_timeout() {
         let service = MigrationService::with_timeout(Duration::from_secs(600));
         assert_eq!(service.timeout, Duration::from_secs(600));
+    }
+
+    /// Shield: every `kubectl` spawn inside `impl MigrationService`
+    /// routes through `kubectl_command_async()` rather than the
+    /// pre-lift `Command::new("kubectl")` literal. Pre-migration five
+    /// sites (delete-existing-job, apply-job manifest, wait-for-job
+    /// Complete probe, wait-for-job Failed probe, get-job-logs) each
+    /// spelled the bare `Command::new("kubectl")` shape verbatim and
+    /// thereby bypassed the `KUBECTL_BIN` env override the tools-
+    /// registry idiom (`crate::tools::get_tool_path(tools::KUBECTL)`,
+    /// cli/src/tools.rs:102-105) resolves — the same class of bug the
+    /// sibling `flux` / `cargo` / `doca` / free-function-`git` /
+    /// `GitClient` / `commands/federation.rs` / `commands/push.rs` /
+    /// `commands/rollback.rs` / `commands/helm.rs` /
+    /// `commands/product_release.rs::run_health_check` /
+    /// `commands/github_runner_ci.rs::execute` migrations redeemed at
+    /// 621f827 / f0dfa12 / d3dd199 / 685642f / d6f6bc7 / dd5a212 /
+    /// 673e4be / b02d4eb / 54a9985 / 139b37a / 818ed9a / badcdf4 /
+    /// 8653403 / f6be190 / 8a1958e / 81d7486 / 0d922f6 / 82376e1 /
+    /// 34661e3 / 5bb7cff / 5566415.
+    ///
+    /// This test reads the module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("kubectl")` string does not
+    /// reappear inside the `impl MigrationService` block while the
+    /// delegation to `kubectl_command_async()` does. A future
+    /// regression that re-fuses the raw-spawn body fails here, not
+    /// silently in production where a Nix-hermetic runner's
+    /// `KUBECTL_BIN`-provided `kubectl` would lose to whatever
+    /// `kubectl` is first on `PATH` at migration-job invocation time.
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — the end-to-end
+    /// `KUBECTL_BIN`-routing invariant is already pinned by
+    /// [`crate::infrastructure::kubectl::tests::test_kubectl_command_async_routes_through_kubectl_bin_env_var`]
+    /// on the primitive itself; this shield only certifies that
+    /// every `MigrationService` method reads through that primitive.
+    ///
+    /// The scan is bounded strictly to the `impl MigrationService`
+    /// block — from `impl MigrationService {` through its closing
+    /// `\n}\n` — so this shield's own docstring mention of
+    /// `Command::new("kubectl")` (which lives inside the sibling
+    /// `#[cfg(test)] mod tests` block) stays out of scope. Mirrors
+    /// the sibling shields on
+    /// `commands/product_release.rs::run_health_check` (5bb7cff) and
+    /// `commands/github_runner_ci.rs::execute` (5566415).
+    #[test]
+    fn test_migration_service_routes_kubectl_through_kubectl_command_async_not_raw_command() {
+        let source = include_str!("migration_service.rs");
+        let impl_marker = "impl MigrationService {";
+        let impl_start = source
+            .find(impl_marker)
+            .expect("`impl MigrationService {` must be present in this module's source");
+        // Bound at the closing brace of the impl block. Using the
+        // `\n}\n\nimpl Default for MigrationService` marker keeps the
+        // slice strictly to the primary impl block, so a future
+        // kubectl-spawning helper landing in the `impl Default` block
+        // or the `#[cfg(test)] mod tests` block cannot silently ride
+        // along without its own shield.
+        let end_marker = "\n}\n\nimpl Default for MigrationService";
+        let impl_end = source[impl_start..]
+            .find(end_marker)
+            .map(|i| impl_start + i)
+            .expect(
+                "the `\\n}\\n\\nimpl Default for MigrationService` marker \
+                 must follow the primary impl block — the shield's slice \
+                 boundary relies on this module ordering",
+            );
+        let impl_body = &source[impl_start..impl_end];
+
+        assert!(
+            !impl_body.contains("Command::new(\"kubectl\")"),
+            "MigrationService methods must NOT spawn `kubectl` directly \
+             — route through \
+             `crate::infrastructure::kubectl::kubectl_command_async()` \
+             so `KUBECTL_BIN` overrides land at the shared primitive. \
+             Found the pre-migration spawn body inside impl MigrationService."
+        );
+        assert!(
+            impl_body.contains("kubectl_command_async()"),
+            "MigrationService methods must delegate every kubectl spawn \
+             to `kubectl_command_async()` — the delegation string was \
+             not found in impl MigrationService."
+        );
     }
 }
