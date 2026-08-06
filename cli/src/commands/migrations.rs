@@ -18,19 +18,18 @@
 //!
 //! Static migration YAMLs in k8s manifests are TEMPLATES ONLY.
 
+use crate::commands::service_config::{DatabaseType, ServiceConfig};
+use crate::config::DeployConfig;
+use crate::infrastructure::kubectl::kubectl_command_async;
+use crate::observability::{
+    emit_event, EventMetadata, MigrationTracker, ReleaseEvent, ShinkaMigrationCompletedEvent,
+    ShinkaMigrationFailedEvent,
+};
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use serde::Deserialize;
 use std::process::Stdio;
 use std::time::Instant;
-use tokio::process::Command;
-
-use crate::commands::service_config::{DatabaseType, ServiceConfig};
-use crate::config::DeployConfig;
-use crate::observability::{
-    emit_event, EventMetadata, MigrationTracker, ReleaseEvent, ShinkaMigrationCompletedEvent,
-    ShinkaMigrationFailedEvent,
-};
 
 // =============================================================================
 // Shinka CRD Status Types (for rich JSON parsing)
@@ -76,7 +75,7 @@ struct MigratorResultView {
 
 /// Check if a secret exists in the given namespace
 async fn check_secret_exists(namespace: &str, secret_name: &str) -> bool {
-    Command::new("kubectl")
+    kubectl_command_async()
         .args(&[
             "get",
             "secret",
@@ -119,7 +118,7 @@ async fn get_kustomize_resource_name(
 
     let name_prefix = format!("{}-{}", resource_base_name, suffix);
 
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args(&[
             "get",
             resource_type,
@@ -406,7 +405,7 @@ spec:
 
     // Apply the job
     println!("📄 Applying {} migration job: {}", db_label, job_name);
-    let mut apply_cmd = Command::new("kubectl");
+    let mut apply_cmd = kubectl_command_async();
     apply_cmd.args(["apply", "-f", &temp_file]);
     crate::retry::run_inherited_status(apply_cmd, "kubectl apply")
         .await
@@ -422,7 +421,7 @@ spec:
         config.migration_timeout_secs()
     );
     let timeout_str = format!("{}s", config.migration_timeout_secs());
-    let wait_result = Command::new("kubectl")
+    let wait_result = kubectl_command_async()
         .args(&[
             "wait",
             "--for=condition=complete",
@@ -443,7 +442,7 @@ spec:
     } else {
         // Wait timed out or failed - check actual job status
         // Job might have completed but kubectl wait missed it
-        let status_output = Command::new("kubectl")
+        let status_output = kubectl_command_async()
             .args(&[
                 "get",
                 "job",
@@ -484,7 +483,7 @@ spec:
         let mut logs_tail = None;
         if let Some(pod) = pod_name.as_deref() {
             // Get logs for display
-            Command::new("kubectl")
+            kubectl_command_async()
                 .args(&["logs", pod, "-n", &namespace, "--tail=100"])
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
@@ -492,7 +491,7 @@ spec:
                 .await?;
 
             // Also capture logs for event
-            let logs_output = Command::new("kubectl")
+            let logs_output = kubectl_command_async()
                 .args(&["logs", pod, "-n", &namespace, "--tail=50"])
                 .output()
                 .await
@@ -504,7 +503,7 @@ spec:
 
         // Clean up failed job to prevent cluster pollution
         println!("🧹 Cleaning up failed migration job...");
-        let _ = Command::new("kubectl")
+        let _ = kubectl_command_async()
             .args(&[
                 "delete",
                 "job",
@@ -598,7 +597,7 @@ pub async fn check_and_reset_shinka_migration(
     let migration_name = format!("{}-{}", product, service);
 
     // Check if DatabaseMigration exists
-    let check = Command::new("kubectl")
+    let check = kubectl_command_async()
         .args(&[
             "get",
             "databasemigration",
@@ -658,7 +657,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     );
 
     // Check if DatabaseMigration exists
-    let check = Command::new("kubectl")
+    let check = kubectl_command_async()
         .args(&[
             "get",
             "databasemigration",
@@ -685,7 +684,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     println!("   Current phase: {}", current_phase.trim());
 
     // Reset the status to Pending with retry count 0
-    let patch_result = Command::new("kubectl")
+    let patch_result = kubectl_command_async()
         .args(&[
             "patch",
             "databasemigration",
@@ -713,7 +712,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
 
     // First, find and delete any migration jobs for this service
     // This is critical because Shinka will fail with "already exists" if old jobs remain
-    let list_jobs = Command::new("kubectl")
+    let list_jobs = kubectl_command_async()
         .args(&[
             "get",
             "jobs",
@@ -738,7 +737,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
         println!("   ℹ️  No existing migration jobs to clean up");
     } else {
         for job in &jobs {
-            let delete = Command::new("kubectl")
+            let delete = kubectl_command_async()
                 .args(&["delete", "job", job, "-n", namespace, "--ignore-not-found"])
                 .output()
                 .await
@@ -754,7 +753,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     if cleanup_jobs {
         println!("🧹 Cleaning up orphaned migration pods...");
 
-        let cleanup_pods = Command::new("kubectl")
+        let cleanup_pods = kubectl_command_async()
             .args(&[
                 "delete",
                 "pods",
@@ -778,7 +777,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     }
 
     // Verify new status
-    let mut verify_cmd = Command::new("kubectl");
+    let mut verify_cmd = kubectl_command_async();
     verify_cmd.args([
         "get",
         "databasemigration",
@@ -839,7 +838,7 @@ pub async fn wait_for_shinka_migration(
     );
 
     // Pre-check: verify the DatabaseMigration CRD exists
-    let check = Command::new("kubectl")
+    let check = kubectl_command_async()
         .args([
             "get",
             "databasemigration",
@@ -877,11 +876,7 @@ pub async fn wait_for_shinka_migration(
 
         // Query full CRD status as JSON for rich status display
         let status = fetch_shinka_status(&migration_name, namespace).await;
-        let phase = status
-            .status
-            .phase
-            .as_deref()
-            .unwrap_or("Unknown");
+        let phase = status.status.phase.as_deref().unwrap_or("Unknown");
         let image_tag = status
             .status
             .last_migration
@@ -902,7 +897,10 @@ pub async fn wait_for_shinka_migration(
 
             // Show current job info
             if let Some(ref job) = status.status.current_job {
-                let migrator_info = match (&status.status.current_migrator_name, status.status.total_migrators) {
+                let migrator_info = match (
+                    &status.status.current_migrator_name,
+                    status.status.total_migrators,
+                ) {
                     (Some(name), Some(total)) => {
                         let idx = status.status.current_migrator_index.unwrap_or(0);
                         format!(" (migrator: {} [{}/{}])", name, idx + 1, total)
@@ -917,10 +915,7 @@ pub async fn wait_for_shinka_migration(
                 for r in results {
                     let status_icon = if r.success { "✅" } else { "❌" };
                     let duration_str = r.duration.as_deref().unwrap_or("?");
-                    println!(
-                        "            {} {} ({})",
-                        status_icon, r.name, duration_str
-                    );
+                    println!("            {} {} ({})", status_icon, r.name, duration_str);
                     if let Some(ref err) = r.error {
                         let truncated = if err.len() > 120 {
                             format!("{}...", &err[..117])
@@ -1019,7 +1014,10 @@ pub async fn wait_for_shinka_migration(
 
                 // Print migrator results on failure
                 if let Some(ref results) = status.status.migrator_results {
-                    println!("   {} Migrator results:", "❌ Migration failed.".red().bold());
+                    println!(
+                        "   {} Migrator results:",
+                        "❌ Migration failed.".red().bold()
+                    );
                     for r in results {
                         let icon = if r.success { "✅" } else { "❌" };
                         println!(
@@ -1058,7 +1056,7 @@ pub async fn wait_for_shinka_migration(
 
 /// Fetch full Shinka DatabaseMigration status as parsed JSON
 async fn fetch_shinka_status(migration_name: &str, namespace: &str) -> ShinkaCrdStatus {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args([
             "get",
             "databasemigration",
@@ -1072,9 +1070,7 @@ async fn fetch_shinka_status(migration_name: &str, namespace: &str) -> ShinkaCrd
         .await;
 
     match output {
-        Ok(o) if o.status.success() => {
-            serde_json::from_slice(&o.stdout).unwrap_or_default()
-        }
+        Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or_default(),
         _ => ShinkaCrdStatus::default(),
     }
 }
@@ -1086,7 +1082,7 @@ async fn fetch_shinka_status(migration_name: &str, namespace: &str) -> ShinkaCrd
 /// migration completion — the K8s layer handles that via init containers.
 pub async fn set_expected_tag_if_exists(migration_name: &str, namespace: &str, expected_tag: &str) {
     // Check if DatabaseMigration CRD exists
-    let check = Command::new("kubectl")
+    let check = kubectl_command_async()
         .args([
             "get",
             "databasemigration",
@@ -1120,7 +1116,7 @@ async fn set_expected_tag_annotation(migration_name: &str, namespace: &str, expe
     let annotation = format!("release.shinka.pleme.io/expected-tag={}", expected_tag);
     println!("   📌 Setting expected-tag annotation: {}", expected_tag);
 
-    let result = Command::new("kubectl")
+    let result = kubectl_command_async()
         .args([
             "annotate",
             "databasemigration",
@@ -1161,7 +1157,14 @@ fn format_timeout_diagnostic(
 ) -> String {
     let mut lines = Vec::new();
 
-    lines.push(format!("Last phase: {}", if last_phase.is_empty() { "unknown" } else { last_phase }));
+    lines.push(format!(
+        "Last phase: {}",
+        if last_phase.is_empty() {
+            "unknown"
+        } else {
+            last_phase
+        }
+    ));
     lines.push(format!("Expected tag: {}", expected_tag));
 
     if let Some(ref lm) = status.status.last_migration {
@@ -1201,4 +1204,83 @@ fn format_timeout_diagnostic(
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regression shield: every `kubectl`-spawning site in
+    /// `commands/migrations.rs`'s nineteen top-level async helpers
+    /// (`check_secret_exists`, `get_kustomize_resource_name`,
+    /// `run_migration_job` apply/wait/status/logs-inherit/logs-capture/
+    /// cleanup, `run_databend_migrations` gate, `run_elasticsearch_migrations`
+    /// gate, `patch_shinka_migration_status` patch,
+    /// `list_shinka_migration_jobs` get, `delete_shinka_migration_jobs`
+    /// delete + cleanup-pods, `reset_shinka_migration` verify,
+    /// `show_shinka_migration_status` get, `wait_for_shinka_migration_ready`
+    /// get + get + annotate) MUST resolve the binary through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`] rather
+    /// than the pre-lift `Command::new("kubectl")` literal. Pre-migration
+    /// nineteen sites each spelled the bare `Command::new("kubectl")`
+    /// shape verbatim and thereby bypassed the `KUBECTL_BIN` env override
+    /// the tools-registry idiom (`crate::tools::get_tool_path(tools::KUBECTL)`,
+    /// cli/src/tools.rs:102-105) resolves — the same class of bug the
+    /// sibling `commands/status.rs` (c2760df), `commands/flux.rs` (f8da719),
+    /// `commands/supergraph_verification.rs` (65283fb),
+    /// `commands/product_release.rs::run_health_check` (5bb7cff),
+    /// `commands/github_runner_ci.rs::execute` (5566415),
+    /// `services/migration_service.rs::MigrationService` (5986a10)
+    /// migrations redeemed. This module is the last un-lifted
+    /// double-digit-`kubectl`-spawn command-module surface on the
+    /// `commands/` tree and the surface that actually applies the
+    /// Kubernetes Job every deploy step trusts to materialize a schema
+    /// migration.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("kubectl")` string does not
+    /// reappear anywhere in the module's non-test body while the
+    /// delegation to `kubectl_command_async()` does. A future
+    /// regression that re-fuses the raw-spawn body fails here, not
+    /// silently in production where a Nix-hermetic runner's
+    /// `KUBECTL_BIN`-provided `kubectl` would lose to whatever
+    /// `kubectl` is first on `PATH` at `forge deploy` migration-apply
+    /// invocation time.
+    ///
+    /// The scan is bounded strictly to the module's non-test body
+    /// — from the file start to the `#[cfg(test)]` marker — so this
+    /// shield's own docstring mention of `Command::new("kubectl")`
+    /// (which lives inside this `#[cfg(test)] mod tests` block below
+    /// that marker) stays out of scope AND every current or future
+    /// kubectl-spawning helper landing anywhere in the top-level
+    /// module body (i.e., in any of the nineteen migrated sites or
+    /// any as-yet unadded sibling) cannot silently ride along without
+    /// going through the primitive. Mirrors the whole-module boundary
+    /// discipline the sibling `commands/status.rs` shield (c2760df) and
+    /// `commands/supergraph_verification.rs` shield (65283fb) pioneered
+    /// on the multi-function consumer surface.
+    #[test]
+    fn test_migrations_routes_kubectl_through_kubectl_command_async_not_raw_command() {
+        let source = include_str!("migrations.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        assert!(
+            !module_body.contains("Command::new(\"kubectl\")"),
+            "migrations.rs must NOT spawn `kubectl` directly — route \
+             through \
+             `crate::infrastructure::kubectl::kubectl_command_async()` \
+             so `KUBECTL_BIN` overrides land at the shared primitive. \
+             Found the pre-migration spawn body in the module."
+        );
+        assert!(
+            module_body.contains("kubectl_command_async()"),
+            "migrations.rs must delegate every kubectl spawn to \
+             `kubectl_command_async()` — the delegation string was \
+             not found in the module body."
+        );
+    }
 }
