@@ -134,7 +134,18 @@ pub fn resolve_k8s_repo_root(product_config: &ProductConfig, product_repo_root: 
         if let Some(repo_url) = &k8s.repo {
             let clone_dir = std::env::temp_dir().join(format!("forge-k8s-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)));
             println!("📦 Cloning k8s repo: {} → {}", repo_url, clone_dir.display());
-            let status = std::process::Command::new("git")
+            // Binary resolution rides `crate::git::git_command_sync()` so a
+            // Nix-hermetic runner's `GIT_BIN` override wins over ambient
+            // `PATH` at k8s-repo clone time — same discipline the sync
+            // sibling `commands/helm.rs::deploy` git-mutation sites honor
+            // (0d922f6) and the async `commands/push.rs` /
+            // `commands/rollback.rs` / `commands/codegen_validation.rs` /
+            // `commands/federation.rs` sites drive through
+            // `git_command_async`. Retains the pre-migration best-effort
+            // `.status()` shape — the auto-clone is advisory, and callers
+            // fall back to the local path on any failure via the
+            // `Ok(s) if s.success()` gate below.
+            let status = crate::git::git_command_sync()
                 .args(["clone", "--depth", "1", "--branch", &k8s.branch, repo_url, &clone_dir.to_string_lossy()])
                 .status();
             match status {
@@ -1162,6 +1173,78 @@ mod tests {
         assert_eq!(
             config.get_deployment_environments("production-b"),
             vec!["production-b"]
+        );
+    }
+
+    /// Regression-shield: the auto-clone spawn in
+    /// [`resolve_k8s_repo_root`] MUST resolve `git` through
+    /// [`crate::git::git_command_sync`] rather than the pre-lift
+    /// `std::process::Command::new("git")` literal. Pre-migration the
+    /// single site bypassed the `GIT_BIN` env override the
+    /// `tools::get_tool_path(tools::GIT)` idiom
+    /// (cli/src/tools.rs:102-105) resolves — the same class of bug
+    /// the sibling `flux` / `cargo` / `doca` / free-function-`git` /
+    /// `GitClient` / `commands/federation.rs` / `commands/push.rs` /
+    /// `commands/codegen_validation.rs` / `commands/rollback.rs` /
+    /// `commands/helm.rs::deploy` migrations redeemed at 621f827 /
+    /// f0dfa12 / d3dd199 / 685642f / d6f6bc7 / dd5a212 / 673e4be /
+    /// b02d4eb / 54a9985 / 139b37a / 818ed9a / badcdf4 / 8653403 /
+    /// f6be190 / 81d7486 / 8a1958e / 0d922f6. Lifts the sync half of
+    /// the routing discipline into the second consumer of
+    /// `git_command_sync` — the first sync consumer landed on
+    /// `helm::deploy` at 0d922f6.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("git")` string does not
+    /// reappear in `resolve_k8s_repo_root` while the delegation to
+    /// `git_command_sync` does. A future regression that re-fuses
+    /// the raw-spawn body fails here, not silently in production
+    /// where a Nix-hermetic runner's `GIT_BIN`-provided `git` would
+    /// lose to whatever `git` is first on `PATH` at k8s-repo clone
+    /// time.
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — the end-to-end `GIT_BIN`-
+    /// routing invariant is already pinned by
+    /// [`crate::git::tests::test_git_command_sync_routes_through_git_bin_env_var`]
+    /// on the primitive itself; this shield only certifies that the
+    /// `resolve_k8s_repo_root` git spawn reads through that
+    /// primitive. Mirrors the sibling shield on
+    /// `commands/helm.rs::deploy` for the sync half of the surface.
+    #[test]
+    fn test_resolve_k8s_repo_root_routes_git_through_git_command_sync_not_raw_command() {
+        const SOURCE: &str = include_str!("mod.rs");
+
+        // Bound the scan to `resolve_k8s_repo_root` — the single git
+        // spawn site lives inside it. Docstrings on the primitive and
+        // sibling functions in this module legitimately reference the
+        // pre-migration literal, so scoping the check to the target
+        // function's body avoids false positives.
+        let fn_marker = "pub fn resolve_k8s_repo_root(";
+        let start = SOURCE.find(fn_marker).expect(
+            "config/mod.rs must contain `pub fn resolve_k8s_repo_root(` — module invariant",
+        );
+        let after_fn = &SOURCE[start..];
+        // Bound at the next top-level `pub fn` in source order
+        // (`resolve_deploy_yaml_path`), which follows
+        // `resolve_k8s_repo_root`.
+        let end_relative = after_fn
+            .find("\npub fn resolve_deploy_yaml_path(")
+            .expect("config/mod.rs must contain `pub fn resolve_deploy_yaml_path(` after `resolve_k8s_repo_root`");
+        let fn_body = &after_fn[..end_relative];
+
+        assert!(
+            !fn_body.contains("Command::new(\"git\")"),
+            "resolve_k8s_repo_root() must NOT spawn `git` directly — \
+             route through `crate::git::git_command_sync()` so \
+             `GIT_BIN` overrides land at the shared primitive. Found \
+             the pre-migration spawn body in resolve_k8s_repo_root()."
+        );
+        assert!(
+            fn_body.contains("crate::git::git_command_sync()"),
+            "resolve_k8s_repo_root() must delegate the git spawn to \
+             `crate::git::git_command_sync()` — the delegation string \
+             was not found in resolve_k8s_repo_root()."
         );
     }
 }
