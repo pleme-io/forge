@@ -10,6 +10,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use colored::Colorize;
 use tokio::process::Command;
 
+use crate::repo::get_tool_path;
+
 /// Run Rust unit tests
 pub async fn rust_test(service: String) -> Result<()> {
     println!("🧪 Running unit tests for {}...", service.cyan());
@@ -94,7 +96,8 @@ pub async fn rust_update_cargo_nix(service: String) -> Result<()> {
     // Generate Cargo.nix
     println!();
     println!("Generating Cargo.nix...");
-    let mut cmd = Command::new("nix");
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let mut cmd = Command::new(&nix_bin);
     cmd.args(&["run", "nixpkgs#crate2nix", "--", "generate"]);
     crate::retry::run_inherited_status(cmd, "crate2nix generate")
         .await
@@ -214,7 +217,8 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         "Generating Cargo.nix".bold(),
         "(crate2nix generate)".dimmed()
     );
-    let mut cmd = Command::new("nix");
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let mut cmd = Command::new(&nix_bin);
     cmd.args(&[
         "run",
         "nixpkgs#crate2nix",
@@ -302,7 +306,8 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         "Generating Cargo.nix".bold(),
         "(crate2nix generate)".dimmed()
     );
-    let mut cmd = Command::new("nix");
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let mut cmd = Command::new(&nix_bin);
     cmd.args(&[
         "run",
         "nixpkgs#crate2nix",
@@ -660,4 +665,52 @@ async fn detect_binary_name(service_path: &Path, service_name: &str) -> Result<S
 
     // Fall back to service name (with underscores replaced by hyphens and vice versa)
     Ok(service_name.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw `Command::new("nix")` may live in
+    /// this module's non-test body. Every `nix` spawn in
+    /// `commands/developer_tools.rs` must first resolve `NIX_BIN` via
+    /// [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// every other nix-invocation site in forge honors
+    /// (`commands/tool.rs::build_lock_target`, `nix.rs::build_flake_attr_in`,
+    /// `nix_hooks.rs::NixHooks::build_and_get_path`).
+    ///
+    /// Pre-lift the three `rust_update_cargo_nix` / `rust_regenerate` /
+    /// `rust_cargo_update` sites each spelled `Command::new("nix")`
+    /// verbatim, ignoring `NIX_BIN` at every one. A Nix-hermetic runner
+    /// with a store-path `nix` binary silently fell through to whatever
+    /// `nix` was first on PATH at these three sites specifically — the
+    /// same silent-PATH-fallback bug class the KUBECTL_BIN / GIT_BIN
+    /// migrations at 5bb7cff / 818ed9a closed on their respective
+    /// spawn surfaces.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the `\n#[cfg(test)]\nmod tests {` marker below) so this
+    /// shield's own docstring mention of `Command::new("nix")` (which
+    /// lives inside this `#[cfg(test)] mod tests` block) stays out of
+    /// scope AND every current or future nix-spawning helper landing
+    /// anywhere in the top-level module body cannot silently ride along
+    /// without going through `NIX_BIN`. Mirrors the sibling shield on
+    /// `commands/supergraph_verification.rs::test_supergraph_verification_routes_kubectl_through_kubectl_command_async_not_raw_command`
+    /// (65283fb) which pioneered the whole-module-boundary scan
+    /// discipline for a multi-function consumer.
+    #[test]
+    fn test_developer_tools_routes_nix_through_nix_bin_not_raw_command() {
+        let source = include_str!("developer_tools.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "developer_tools.rs must have a `#[cfg(test)] mod tests {` marker \
+                     — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"nix\")"),
+            "commands/developer_tools.rs must not spawn `nix` via the bare literal — \
+             every `nix` spawn must resolve `NIX_BIN` via \
+             `crate::repo::get_tool_path(\"NIX_BIN\", \"nix\")` first. \
+             A raw `Command::new(\"nix\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+    }
 }
