@@ -148,6 +148,7 @@ pub mod tools {
     pub const FLUX: &str = "flux";
     pub const DOCKER: &str = "docker";
     pub const CRATE2NIX: &str = "crate2nix";
+    pub const HELM: &str = "helm";
 }
 
 #[cfg(test)]
