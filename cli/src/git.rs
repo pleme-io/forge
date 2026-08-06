@@ -466,8 +466,10 @@ pub fn commit_and_push(manifest_path: &Path, old_tag: &str, new_tag: &str) -> Re
 /// `ExecFailed`); `git_command_async` targets consumers that want to
 /// inherit git's stdout/stderr and dispatch only on the exit code —
 /// the shape every `commands/federation.rs` / `commands/push.rs` /
-/// `commands/codegen_validation.rs` git-mutation site drives via
-/// `Command::new("git").args([...])` + `run_inherited_status`.
+/// `commands/codegen_validation.rs` / `commands/rollback.rs` /
+/// `commands/rust_service.rs::deploy_rust_service_with_tag`
+/// git-mutation site drives via `Command::new("git").args([...])` +
+/// `run_inherited_status`.
 ///
 /// Names the "spawn `git` via `GIT_BIN`" discipline once at the
 /// constructor so every consumer honors the env override the
@@ -500,14 +502,18 @@ pub fn git_command_async() -> tokio::process::Command {
 ///
 /// Names the discipline once so future blocking-git sites (e.g. the
 /// remaining `Command::new("git")` sites in
-/// `commands/rust_service.rs::commit_and_push_in`,
-/// `commands/product_release.rs::commit_artifact_tags`, and
+/// `commands/product_release.rs::commit_artifact_tags` and
 /// `commands/release_commit.rs`'s test-side spawn sites) lift
 /// through the same constructor rather than each re-spelling the
 /// literal `"git"` — the exact class of bug the async
 /// `git_command_async` migration redeemed for the async half of the
 /// surface at 818ed9a / badcdf4 / 8653403 / f6be190 / 81d7486 /
-/// 8a1958e, and the sync `config/mod::resolve_k8s_repo_root` +
+/// 8a1958e (plus `rust_service::deploy_rust_service_with_tag`'s
+/// three-site single-repo branch that misnamed itself
+/// `commit_and_push_in` in the prior primitive docstring and lifts
+/// through `git_command_async` since its consumers `.await` through
+/// `retry::run_inherited_status`), and the sync
+/// `config/mod::resolve_k8s_repo_root` +
 /// `commands/e2e.rs::resolve_repo_root` + `commands/helm.rs::bump`
 /// migrations redeemed on the second, third, and fourth sync
 /// consumers.
