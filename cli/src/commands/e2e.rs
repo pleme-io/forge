@@ -169,7 +169,10 @@ fn run_backend_unit_tests(backend_dir: &str, filter: Option<&str>) -> Result<()>
     let status = cmd.status().context("Failed to run cargo test")?;
     let elapsed = start.elapsed();
 
-    ui::print_info(&format!("Backend unit tests completed in {:.1}s", elapsed.as_secs_f64()));
+    ui::print_info(&format!(
+        "Backend unit tests completed in {:.1}s",
+        elapsed.as_secs_f64()
+    ));
 
     if !status.success() {
         bail!("Backend unit tests failed (exit code: {:?})", status.code());
@@ -220,7 +223,10 @@ fn run_frontend_unit_tests(
         let elapsed = start.elapsed();
 
         println!();
-        ui::print_info(&format!("Frontend tests completed in {:.1}s", elapsed.as_secs_f64()));
+        ui::print_info(&format!(
+            "Frontend tests completed in {:.1}s",
+            elapsed.as_secs_f64()
+        ));
         ui::print_info(&format!("JSON report: {}", output_file));
 
         if !status.success() {
@@ -245,10 +251,16 @@ fn run_frontend_unit_tests(
         let status = cmd.status().context("Failed to run bun test")?;
         let elapsed = start.elapsed();
 
-        ui::print_info(&format!("Frontend unit tests completed in {:.1}s", elapsed.as_secs_f64()));
+        ui::print_info(&format!(
+            "Frontend unit tests completed in {:.1}s",
+            elapsed.as_secs_f64()
+        ));
 
         if !status.success() {
-            bail!("Frontend unit tests failed (exit code: {:?})", status.code());
+            bail!(
+                "Frontend unit tests failed (exit code: {:?})",
+                status.code()
+            );
         }
     }
 
@@ -258,7 +270,11 @@ fn run_frontend_unit_tests(
 /// Run backend integration tests
 fn run_backend_integration_tests(backend_dir: &str, filter: Option<&str>) -> Result<()> {
     let mut args = vec![
-        "test", "--test", "integration_tests", "--features", "integration-tests",
+        "test",
+        "--test",
+        "integration_tests",
+        "--features",
+        "integration-tests",
     ];
     if let Some(f) = filter {
         args.push("--");
@@ -275,10 +291,16 @@ fn run_backend_integration_tests(backend_dir: &str, filter: Option<&str>) -> Res
         .context("Failed to run integration tests")?;
     let elapsed = start.elapsed();
 
-    ui::print_info(&format!("Integration tests completed in {:.1}s", elapsed.as_secs_f64()));
+    ui::print_info(&format!(
+        "Integration tests completed in {:.1}s",
+        elapsed.as_secs_f64()
+    ));
 
     if !status.success() {
-        bail!("Backend integration tests failed (exit code: {:?})", status.code());
+        bail!(
+            "Backend integration tests failed (exit code: {:?})",
+            status.code()
+        );
     }
 
     Ok(())
@@ -415,7 +437,10 @@ pub fn run_e2e_tests(
     }
 
     println!();
-    ui::print_info(&format!("E2E tests completed in {:.1}s", elapsed.as_secs_f64()));
+    ui::print_info(&format!(
+        "E2E tests completed in {:.1}s",
+        elapsed.as_secs_f64()
+    ));
 
     if !status.success() {
         print_failure_diagnostics();
@@ -442,11 +467,7 @@ pub fn cleanup_testcontainers() -> Result<()> {
         .context("Failed to list testcontainers")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let container_ids: Vec<&str> = stdout
-        .trim()
-        .lines()
-        .filter(|l| !l.is_empty())
-        .collect();
+    let container_ids: Vec<&str> = stdout.trim().lines().filter(|l| !l.is_empty()).collect();
 
     let tc_count = container_ids.len();
 
@@ -518,7 +539,13 @@ pub fn cleanup_e2e_images() -> Result<()> {
 
     // Prune dangling images from testcontainers
     let _ = Command::new("docker")
-        .args(["image", "prune", "-f", "--filter", "label=org.testcontainers=true"])
+        .args([
+            "image",
+            "prune",
+            "-f",
+            "--filter",
+            "label=org.testcontainers=true",
+        ])
         .output();
 
     if removed > 0 {
@@ -549,8 +576,18 @@ fn resolve_repo_root(repo_root: Option<String>) -> Result<String> {
         return Ok(root);
     }
 
-    // Try to get from git
-    let output = Command::new("git")
+    // Binary resolution rides `crate::git::git_command_sync()` so a
+    // Nix-hermetic runner's `GIT_BIN` override wins over ambient
+    // `PATH` at repo-root discovery time — same discipline the
+    // sibling `commands/helm.rs::deploy` (0d922f6) and
+    // `config::resolve_k8s_repo_root` (0a36ba0) sync sites honor and
+    // the async `commands/push.rs` / `commands/rollback.rs` /
+    // `commands/codegen_validation.rs` / `commands/federation.rs`
+    // sites drive through `git_command_async`. Retains the
+    // pre-migration `.output()`-then-`current_dir` fallback shape:
+    // this discovery path is advisory and callers fall back to the
+    // current directory on any non-success exit.
+    let output = crate::git::git_command_sync()
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .context("Failed to run git rev-parse")?;
@@ -688,11 +725,7 @@ fn print_failure_diagnostics() {
     // Docker container status
     eprintln!("\nDocker containers (running):");
     if let Ok(output) = Command::new("docker")
-        .args([
-            "ps",
-            "--format",
-            "  {{.Names}}\t{{.Status}}\t{{.Ports}}",
-        ])
+        .args(["ps", "--format", "  {{.Names}}\t{{.Status}}\t{{.Ports}}"])
         .output()
     {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -749,7 +782,12 @@ fn print_failure_diagnostics() {
     if let Ok(entries) = std::fs::read_dir(screenshot_dir) {
         let screenshots: Vec<_> = entries
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext == "png").unwrap_or(false))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "png")
+                    .unwrap_or(false)
+            })
             .collect();
         if !screenshots.is_empty() {
             eprintln!("\nScreenshots captured:");
@@ -932,4 +970,80 @@ pub fn ensure_docker_running() -> Result<()> {
     }
 
     bail!("Docker daemon is not running. Please start Docker first.");
+}
+
+#[cfg(test)]
+mod resolve_repo_root_git_bin_routing_tests {
+    /// Regression-shield: the git-discovery spawn in
+    /// [`super::resolve_repo_root`] MUST resolve `git` through
+    /// [`crate::git::git_command_sync`] rather than the pre-lift
+    /// `std::process::Command::new("git")` literal. Pre-migration the
+    /// single site bypassed the `GIT_BIN` env override the
+    /// `tools::get_tool_path(tools::GIT)` idiom
+    /// (cli/src/tools.rs:102-105) resolves — the same class of bug
+    /// the sibling `flux` / `cargo` / `doca` / free-function-`git` /
+    /// `GitClient` / `commands/federation.rs` / `commands/push.rs` /
+    /// `commands/codegen_validation.rs` / `commands/rollback.rs` /
+    /// `commands/helm.rs::deploy` / `config::resolve_k8s_repo_root`
+    /// migrations redeemed at 621f827 / f0dfa12 / d3dd199 / 685642f /
+    /// d6f6bc7 / dd5a212 / 673e4be / b02d4eb / 54a9985 / 139b37a /
+    /// 818ed9a / badcdf4 / 8653403 / f6be190 / 81d7486 / 8a1958e /
+    /// 0d922f6 / 0a36ba0. Lifts the sync half of the routing
+    /// discipline onto the third sync consumer of
+    /// `git_command_sync` — first was `helm::deploy` at 0d922f6,
+    /// second was `config::resolve_k8s_repo_root` at 0a36ba0.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("git")` string does not
+    /// reappear in `resolve_repo_root` while the delegation to
+    /// `git_command_sync` does. A future regression that re-fuses
+    /// the raw-spawn body fails here, not silently in production
+    /// where a Nix-hermetic runner's `GIT_BIN`-provided `git` would
+    /// lose to whatever `git` is first on `PATH` at repo-root
+    /// discovery time.
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — the end-to-end `GIT_BIN`-
+    /// routing invariant is already pinned by
+    /// [`crate::git::tests::test_git_command_sync_routes_through_git_bin_env_var`]
+    /// on the primitive itself; this shield only certifies that the
+    /// `resolve_repo_root` git spawn reads through that primitive.
+    /// Mirrors the sibling shield on `config::resolve_k8s_repo_root`
+    /// and `commands/helm.rs::deploy` for the sync half of the
+    /// surface.
+    #[test]
+    fn test_resolve_repo_root_routes_git_through_git_command_sync_not_raw_command() {
+        const SOURCE: &str = include_str!("e2e.rs");
+
+        // Bound the scan to `resolve_repo_root` — the single git
+        // spawn site lives inside it. Docstrings and sibling
+        // functions in this module legitimately reference the
+        // pre-migration literal, so scoping the check to the target
+        // function's body avoids false positives.
+        let fn_marker = "fn resolve_repo_root(";
+        let start = SOURCE
+            .find(fn_marker)
+            .expect("commands/e2e.rs must contain `fn resolve_repo_root(` — module invariant");
+        let after_fn = &SOURCE[start..];
+        // Bound at the next top-level `fn verify_docker(` in source
+        // order, which follows `resolve_repo_root`.
+        let end_relative = after_fn
+            .find("\nfn verify_docker(")
+            .expect("commands/e2e.rs must contain `fn verify_docker(` after `resolve_repo_root`");
+        let fn_body = &after_fn[..end_relative];
+
+        assert!(
+            !fn_body.contains("Command::new(\"git\")"),
+            "resolve_repo_root() must NOT spawn `git` directly — \
+             route through `crate::git::git_command_sync()` so \
+             `GIT_BIN` overrides land at the shared primitive. Found \
+             the pre-migration spawn body in resolve_repo_root()."
+        );
+        assert!(
+            fn_body.contains("crate::git::git_command_sync()"),
+            "resolve_repo_root() must delegate the git spawn to \
+             `crate::git::git_command_sync()` — the delegation string \
+             was not found in resolve_repo_root()."
+        );
+    }
 }
