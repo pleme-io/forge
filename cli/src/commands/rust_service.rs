@@ -208,7 +208,8 @@ fn check_cross_compilation_available() -> bool {
     }
 
     // Check for aarch64-linux in Nix remote builders
-    if let Ok(output) = std::process::Command::new("nix")
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    if let Ok(output) = std::process::Command::new(&nix_bin)
         .args(&["show-config"])
         .output()
     {
@@ -335,7 +336,8 @@ pub async fn build_rust_service(
 
     // Root flake pattern: Simple nix build from repo root
     // No --override-input needed, no service flake complexity
-    let mut cmd = Command::new("nix");
+    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let mut cmd = Command::new(&nix_bin);
     cmd.args(&[
         "build",
         &package_attr, // e.g., .#myapp-auth
@@ -443,7 +445,8 @@ pub async fn build_rust_service(
         /*
         let package_attr_arm64 = format!(".#{}-{}-arm64", deploy_config.product.name, service);
 
-        let mut arm64_cmd = Command::new("nix");
+        let nix_bin = get_tool_path("NIX_BIN", "nix");
+        let mut arm64_cmd = Command::new(&nix_bin);
         arm64_cmd.args(&[
             "build",
             &package_attr_arm64,
@@ -2511,7 +2514,8 @@ pub async fn release_rust_service(
         println!("   📁 Federation tests: {}", federation_tests_dir.display());
 
         // Run nix run .#release from the federation-tests directory
-        let status = std::process::Command::new("nix")
+        let nix_bin = get_tool_path("NIX_BIN", "nix");
+        let status = std::process::Command::new(&nix_bin)
             .args(&["run", ".#release"])
             .current_dir(&federation_tests_dir)
             .status()
@@ -2799,6 +2803,79 @@ mod deploy_rust_service_with_tag_git_bin_routing_tests {
             "deploy_rust_service_with_tag() must delegate every git \
              spawn to `crate::git::git_command_async()` — the delegation \
              string was not found in deploy_rust_service_with_tag()."
+        );
+    }
+}
+
+#[cfg(test)]
+mod nix_bin_routing_tests {
+    /// Whole-module shield: no raw `Command::new("nix")` may live in
+    /// `commands/rust_service.rs`'s non-test body. Every `nix` spawn
+    /// in this module must first resolve `NIX_BIN` via
+    /// [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// every other nix-invocation site in forge honors
+    /// (`commands/build.rs::execute` d8ef0d5,
+    /// `commands/tool.rs::build_lock_target`,
+    /// `nix.rs::build_flake_attr_in`,
+    /// `nix.rs::build_docker_image_from_dir`,
+    /// `nix.rs::path_info_recursive`,
+    /// `nix_hooks.rs::NixHooks::build_and_get_path`,
+    /// `commands/developer_tools.rs::rust_update_cargo_nix` and
+    /// siblings 4dfb2b3).
+    ///
+    /// Pre-lift this module carried three real `nix` spawn sites plus
+    /// one dead-code sibling in a TODO block comment: the
+    /// `check_cross_compilation_available` `show-config` probe at
+    /// line 211, `build_rust_service`'s primary `nix build .#<pkg>`
+    /// AMD64 site at line 338, `release_rust_service`'s
+    /// `nix run .#release` federation-tests site at line 2514, and
+    /// the ARM64 build stanza inside the `/* ... */` block at line
+    /// 446. Each real spawn spelled `Command::new("nix")` verbatim,
+    /// ignoring `NIX_BIN` at exactly the moment hermetic-runner
+    /// consistency matters most — `forge rust-service build` and
+    /// `forge rust-service release` are the highest-traffic
+    /// nix-invocation surfaces on the Rust-service pipeline. A
+    /// Nix-hermetic runner with a store-path `nix` binary silently
+    /// fell through to whatever `nix` was first on `PATH` at these
+    /// three sites, diverging from every other nix-invocation
+    /// surface in forge and from the sibling KUBECTL_BIN / GIT_BIN
+    /// frontier's uniform discipline (5bb7cff / 818ed9a).
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the first `\n#[cfg(test)]\n` marker, which delimits
+    /// both this shield and the earlier
+    /// `deploy_rust_service_with_tag_git_bin_routing_tests` block
+    /// above) so shield docstring mentions of `Command::new("nix")`
+    /// stay out of scope AND every current or future nix-spawning
+    /// helper landing anywhere in the top-level module body cannot
+    /// silently ride along without going through `NIX_BIN`. Mirrors
+    /// the sibling whole-module shields on
+    /// `commands/build.rs::test_execute_routes_nix_through_nix_bin_not_raw_command`
+    /// (d8ef0d5) and
+    /// `commands/developer_tools.rs::test_developer_tools_routes_nix_through_nix_bin_not_raw_command`
+    /// (4dfb2b3) — the whole-module-boundary scan discipline
+    /// pioneered on `commands/supergraph_verification.rs` (65283fb).
+    #[test]
+    fn test_rust_service_routes_nix_through_nix_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("rust_service.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "rust_service.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"nix\")"),
+            "commands/rust_service.rs must not spawn `nix` via the bare \
+             literal — every `nix` spawn must resolve `NIX_BIN` via \
+             `crate::repo::get_tool_path(\"NIX_BIN\", \"nix\")` first. \
+             A raw `Command::new(\"nix\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"NIX_BIN\", \"nix\")"),
+            "commands/rust_service.rs must resolve the nix binary via \
+             `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical \
+             lookup was not found in the module body."
         );
     }
 }
