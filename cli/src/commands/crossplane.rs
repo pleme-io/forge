@@ -16,6 +16,8 @@ use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
+use crate::repo::get_tool_path;
+
 /// Build a Crossplane Function package (xpkg) from a Nix-built runtime image and
 /// a `package/` root, then push it to `package_ref:tag`.
 ///
@@ -52,7 +54,8 @@ pub fn function_release(
         runtime_image,
         out.display()
     );
-    let build = Command::new("crossplane")
+    let crossplane = get_tool_path("CROSSPLANE_BIN", "crossplane");
+    let build = Command::new(&crossplane)
         .args([
             "xpkg",
             "build",
@@ -76,7 +79,7 @@ pub fn function_release(
     // `xpkg push <package> -f <files>`: the tag is the positional <package>; the
     // file flag's long form is `--package-files` (plural — verified against the
     // crossplane CLI, NOT the singular `--package-file` that `build` uses).
-    let push = Command::new("crossplane")
+    let push = Command::new(&crossplane)
         .args(["xpkg", "push", "--package-files"])
         .arg(&out)
         .arg(&dest)
@@ -101,7 +104,8 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
     let out = std::env::temp_dir().join(".xpkg-config.xpkg");
     let examples = Path::new(package_root).join("examples");
     info!("crossplane xpkg build (configuration): {} → {}", package_root, out.display());
-    let build = Command::new("crossplane")
+    let crossplane = get_tool_path("CROSSPLANE_BIN", "crossplane");
+    let build = Command::new(&crossplane)
         .args(["xpkg", "build", "--package-root", package_root, "--package-file"])
         .arg(&out)
         .arg("--examples-root")
@@ -113,7 +117,7 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
     }
     let dest = crate::oci_manifest::image_reference(package_ref.trim_end_matches('/'), tag);
     info!("crossplane xpkg push → {}", dest);
-    let push = Command::new("crossplane")
+    let push = Command::new(&crossplane)
         .args(["xpkg", "push", "--package-files"])
         .arg(&out)
         .arg(&dest)
@@ -156,7 +160,8 @@ pub fn render(
         args.push("--observed-resources");
         args.push(o);
     }
-    let status = Command::new("crossplane")
+    let crossplane = get_tool_path("CROSSPLANE_BIN", "crossplane");
+    let status = Command::new(&crossplane)
         .args(&args)
         .status()
         .context("failed to run `crossplane render`")?;
@@ -174,7 +179,8 @@ pub fn validate(extensions: &str, resources: &str) -> Result<()> {
             bail!("crossplane validate: {} path not found: {}", label, path);
         }
     }
-    let status = Command::new("crossplane")
+    let crossplane = get_tool_path("CROSSPLANE_BIN", "crossplane");
+    let status = Command::new(&crossplane)
         .args(["beta", "validate", extensions, resources])
         .status()
         .context("failed to run `crossplane beta validate`")?;
@@ -182,4 +188,66 @@ pub fn validate(extensions: &str, resources: &str) -> Result<()> {
         bail!("crossplane validate failed");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw `Command::new("crossplane")` may live
+    /// in the top-level body of `commands/crossplane.rs`. Every spawn
+    /// site must resolve `CROSSPLANE_BIN` first via
+    /// `crate::repo::get_tool_path("CROSSPLANE_BIN", "crossplane")` so
+    /// the hermetic-runner contract substrate's `mkRuntimeToolsEnv`
+    /// exports actually binds on the crossplane surface (parity with
+    /// the sibling `NIX_BIN` / `KUBECTL_BIN` / `HELM_BIN` /
+    /// `DOCKER_BIN` / `GIT_BIN` / `CARGO` / `DOCA_BIN` / `ATTIC_BIN` /
+    /// `FLUX` / `BUN_BIN` frontiers).
+    ///
+    /// Pre-lift six sites (`function_release`'s xpkg build +
+    /// xpkg push; `configuration_release`'s xpkg build + xpkg push;
+    /// `render`'s crossplane render; `validate`'s crossplane beta
+    /// validate) each spelled `Command::new("crossplane")` verbatim,
+    /// bypassing `CROSSPLANE_BIN` at exactly the moment the
+    /// hermetic-runner contract matters — every one of these six
+    /// spawns is the tier that materializes or seals the Crossplane
+    /// Function / Configuration package that FluxCD-managed
+    /// XRDs+Compositions bind against.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\n` marker in source order,
+    /// which lands at this test module's opener) so this shield's own
+    /// docstring mentions of `Command::new("crossplane")` — living in
+    /// a `#[cfg(test)]` block below that first marker — stay out of
+    /// scope AND every current or future crossplane-spawning helper
+    /// landing anywhere in the top-level module body cannot silently
+    /// ride along without going through `CROSSPLANE_BIN`. Mirrors the
+    /// whole-module-boundary scan discipline pioneered on
+    /// `commands/supergraph_verification.rs` (65283fb) and reused on
+    /// `commands/build.rs` (d8ef0d5), `commands/developer_tools.rs`
+    /// (4dfb2b3), `commands/rust_service.rs` (7c34e57),
+    /// `commands/nix_builder.rs` (d930a5d), `commands/e2e.rs`
+    /// (5cd137f), and `commands/github_runner_ci.rs` (59a213c).
+    #[test]
+    fn test_crossplane_routes_through_crossplane_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("crossplane.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "crossplane.rs must have a `#[cfg(test)]` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"crossplane\")"),
+            "commands/crossplane.rs must not spawn `crossplane` via the \
+             bare literal — every `crossplane` spawn must resolve \
+             `CROSSPLANE_BIN` via \
+             `crate::repo::get_tool_path(\"CROSSPLANE_BIN\", \"crossplane\")` \
+             first. A raw `Command::new(\"crossplane\")` bypasses the \
+             hermetic-runner contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"CROSSPLANE_BIN\", \"crossplane\")"),
+            "commands/crossplane.rs must resolve the crossplane binary via \
+             `get_tool_path(\"CROSSPLANE_BIN\", \"crossplane\")` — the \
+             canonical lookup was not found in the module body."
+        );
+    }
 }
