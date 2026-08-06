@@ -15,7 +15,8 @@ use crate::repo::get_tool_path;
 /// Run Rust unit tests
 pub async fn rust_test(service: String) -> Result<()> {
     println!("🧪 Running unit tests for {}...", service.cyan());
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.args(&["test", "--lib", "--bins"]);
     crate::retry::run_inherited_status(cmd, "cargo test").await
 }
@@ -23,7 +24,8 @@ pub async fn rust_test(service: String) -> Result<()> {
 /// Run Rust clippy linter
 pub async fn rust_lint(service: String) -> Result<()> {
     println!("🔍 Running clippy linter for {}...", service.cyan());
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.args(&[
         "clippy",
         "--all-targets",
@@ -38,7 +40,8 @@ pub async fn rust_lint(service: String) -> Result<()> {
 /// Format Rust code with rustfmt
 pub async fn rust_fmt(service: String) -> Result<()> {
     println!("✨ Formatting code for {}...", service.cyan());
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.args(&["fmt", "--all"]);
     crate::retry::run_inherited_status(cmd, "cargo fmt").await
 }
@@ -46,7 +49,8 @@ pub async fn rust_fmt(service: String) -> Result<()> {
 /// Check Rust code formatting
 pub async fn rust_fmt_check(service: String) -> Result<()> {
     println!("🔍 Checking code formatting for {}...", service.cyan());
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.args(&["fmt", "--all", "--", "--check"]);
     crate::retry::run_inherited_status(cmd, "cargo fmt --check").await
 }
@@ -62,7 +66,8 @@ pub async fn rust_extract_schema(service: String) -> Result<()> {
     for bin_name in &bin_names {
         let bin_path = format!("src/bin/{}.rs", bin_name);
         if Path::new(&bin_path).exists() {
-            let mut cmd = Command::new("cargo");
+            let cargo = get_tool_path("CARGO", "cargo");
+            let mut cmd = Command::new(&cargo);
             cmd.args(&["run", "--bin", bin_name]);
             crate::retry::run_inherited_status(cmd, &format!("cargo run --bin {}", bin_name))
                 .await?;
@@ -87,7 +92,8 @@ pub async fn rust_update_cargo_nix(service: String) -> Result<()> {
 
     // Update Cargo.lock
     println!("Updating Cargo.lock...");
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.arg("update");
     crate::retry::run_inherited_status(cmd, "cargo update")
         .await
@@ -203,7 +209,8 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         "Generating new Cargo.lock".bold(),
         "(cargo generate-lockfile)".dimmed()
     );
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.arg("generate-lockfile");
     crate::retry::run_inherited_status(cmd, "cargo generate-lockfile")
         .await
@@ -292,7 +299,8 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         "Updating dependencies".bold(),
         "(cargo update)".dimmed()
     );
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.arg("update");
     crate::retry::run_inherited_status(cmd, "cargo update")
         .await
@@ -513,7 +521,8 @@ pub async fn rust_dev(
     );
     println!();
 
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.arg("run");
 
     if !bin_name.is_empty() {
@@ -710,6 +719,54 @@ mod tests {
              every `nix` spawn must resolve `NIX_BIN` via \
              `crate::repo::get_tool_path(\"NIX_BIN\", \"nix\")` first. \
              A raw `Command::new(\"nix\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("cargo")` may live in
+    /// this module's non-test body. Every `cargo` spawn in
+    /// `commands/developer_tools.rs` must first resolve `CARGO` via
+    /// [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// every other cargo-invocation site in forge honors
+    /// (`commands/bootstrap.rs:639`, `commands/pangea.rs:473`,
+    /// `graphql_schema.rs:193`; the doc-comment idiom lives at
+    /// `repo.rs:92`).
+    ///
+    /// Pre-lift the nine consumer sites — `rust_test`, `rust_lint`,
+    /// `rust_fmt`, `rust_fmt_check`, `rust_extract_schema`,
+    /// `rust_update_cargo_nix`, `rust_regenerate`, `rust_cargo_update`,
+    /// `rust_dev` — each spelled `Command::new("cargo")` verbatim,
+    /// ignoring `CARGO` at every one. A Nix-hermetic runner with a
+    /// store-path `cargo` binary silently fell through to whatever
+    /// `cargo` was first on PATH at these nine sites specifically —
+    /// the same silent-PATH-fallback bug class the NIX_BIN /
+    /// KUBECTL_BIN / GIT_BIN migrations at 4dfb2b3 / 5bb7cff / 818ed9a
+    /// closed on their respective spawn surfaces.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the `\n#[cfg(test)]\nmod tests {` marker above) so this
+    /// shield's own docstring mention of `Command::new("cargo")` (which
+    /// lives inside this `#[cfg(test)] mod tests` block) stays out of
+    /// scope AND every current or future cargo-spawning helper landing
+    /// anywhere in the top-level module body cannot silently ride along
+    /// without going through `CARGO`. Mirrors the sibling `NIX_BIN`
+    /// shield above (4dfb2b3) and the whole-module-boundary scan
+    /// discipline pioneered on `commands/supergraph_verification.rs`
+    /// (65283fb).
+    #[test]
+    fn test_developer_tools_routes_cargo_through_cargo_env_not_raw_command() {
+        let source = include_str!("developer_tools.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "developer_tools.rs must have a `#[cfg(test)] mod tests {` marker \
+                     — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"cargo\")"),
+            "commands/developer_tools.rs must not spawn `cargo` via the bare literal — \
+             every `cargo` spawn must resolve `CARGO` via \
+             `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
+             A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
              contract substrate's mkRuntimeToolsEnv exports."
         );
     }
