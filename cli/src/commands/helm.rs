@@ -60,9 +60,26 @@ fn run_program_timed(program: &str, args: &[&str], timeout: Duration) -> Result<
     }
 }
 
+/// Resolve the `helm` binary path via `HELM_BIN`, falling back to `helm`
+/// on `PATH`. Wired through [`crate::tools::get_tool_path`] so a
+/// Nix-hermetic runner's substrate-derived `HELM_BIN` lands at every
+/// helm-spawning site in this module. Mirrors the sibling
+/// `git_command_sync` / `kubectl_command_async` / `flux_bin` /
+/// `nix_bin` / `attic_bin` primitives — the one bridge between the
+/// forge helm surface and the substrate-`mkRuntimeToolsEnv`-exported
+/// binary path. The pre-lift shape spelled `"helm"` bare at every call
+/// site (5 `Command::new` spawns + 4 `run_program_timed` spawns +
+/// `run_helm_timed`'s own body); each bypassed the env override, so a
+/// Nix-hermetic runner's `HELM_BIN` lost to whatever `helm` was first
+/// on PATH.
+fn helm_bin() -> String {
+    crate::tools::get_tool_path(crate::tools::tools::HELM)
+}
+
 /// Run `helm <args>` with a hard wall-clock timeout (see [`run_program_timed`]).
+/// Resolves the binary via [`helm_bin`] so `HELM_BIN` overrides land.
 fn run_helm_timed(args: &[&str], timeout: Duration) -> Result<bool> {
-    run_program_timed("helm", args, timeout)
+    run_program_timed(&helm_bin(), args, timeout)
 }
 
 /// Print a captured [`std::process::Command::output`] result to this
@@ -244,7 +261,7 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     // helm lint
     let mut lint_args: Vec<String> = vec!["lint".into(), chart_dir.into()];
     lint_args.extend(value_args.iter().cloned());
-    let lint_output = Command::new("helm")
+    let lint_output = Command::new(helm_bin())
         .args(&lint_args)
         .output()
         .context("Failed to run helm lint")?;
@@ -275,7 +292,7 @@ pub fn lint(chart_dir: &str) -> Result<()> {
         // would otherwise sit in memory for no reason. stderr is piped so a
         // failure still gets a real, specific reason attached to the typed
         // error instead of forcing a reader back into the full CI log.
-        let template_output = Command::new("helm")
+        let template_output = Command::new(helm_bin())
             .args(&tmpl_args)
             .stdout(std::process::Stdio::null())
             .output()
@@ -383,7 +400,7 @@ pub fn package(chart_dir: &str, output: &str, version: Option<&str>) -> Result<S
         args.push(&version_str);
     }
 
-    let pkg_output = Command::new("helm")
+    let pkg_output = Command::new(helm_bin())
         .args(&args)
         .output()
         .context("Failed to run helm package")?;
@@ -424,7 +441,7 @@ pub fn push(chart: &str, registry: &str) -> Result<()> {
 
     info!("Pushing {} → {}", chart, registry);
 
-    let output = Command::new("helm")
+    let output = Command::new(helm_bin())
         .args(["push", chart, registry])
         .output()
         .context("Failed to run helm push")?;
@@ -592,10 +609,9 @@ fn mirror_one(
     // repos take it via --repo.
     let pulled = if upstream.starts_with("oci://") {
         let r = format!("{}/{}", upstream.trim_end_matches('/'), name);
-        run_program_timed("helm", &["pull", &r, "--version", version, "-d", &tmps], timeout)?
+        run_helm_timed(&["pull", &r, "--version", version, "-d", &tmps], timeout)?
     } else {
-        run_program_timed(
-            "helm",
+        run_helm_timed(
             &["pull", name, "--repo", upstream, "--version", version, "-d", &tmps],
             timeout,
         )?
@@ -612,7 +628,7 @@ fn mirror_one(
         .find(|p| p.extension().is_some_and(|x| x == "tgz"))
         .with_context(|| format!("no .tgz pulled for {name} {version}"))?;
 
-    if !run_program_timed("helm", &["push", &tgz.to_string_lossy(), registry], timeout)? {
+    if !run_helm_timed(&["push", &tgz.to_string_lossy(), registry], timeout)? {
         bail!("helm push failed for {name} {version} → {registry}");
     }
     info!("Mirrored {name}:{version} ({upstream}) → {registry}");
@@ -801,7 +817,7 @@ pub fn template(chart_dir: &str, values: Option<&str>, set_values: &[String]) ->
         args.push("image.repository=test".to_string());
     }
 
-    let status = Command::new("helm")
+    let status = Command::new(helm_bin())
         .args(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
         .status()
         .context("Failed to run helm template")?;
@@ -1065,7 +1081,7 @@ fn release_lib_chart(
 /// docs describing a second, imaginary one.
 fn chart_published(reg: &str, name: &str, version: &str, timeout: Duration) -> bool {
     let oci_ref = format!("{reg}/{name}");
-    run_program_timed("helm", &["show", "chart", &oci_ref, "--version", version], timeout)
+    run_helm_timed(&["show", "chart", &oci_ref, "--version", version], timeout)
         .unwrap_or(false)
 }
 
@@ -1976,6 +1992,100 @@ mod bump_git_bin_routing_tests {
             "bump() must delegate every git spawn to \
              `crate::git::git_command_sync()` — the delegation \
              string was not found in bump()."
+        );
+    }
+}
+
+#[cfg(test)]
+mod helm_bin_routing_tests {
+    /// Regression-shield: every `helm`-spawning site in this module
+    /// MUST resolve the binary through [`super::helm_bin`] rather
+    /// than a bare `"helm"` literal. Pre-migration nine sites — five
+    /// `.output()`/`.status()` spawns in `lint` / `package` / `push` /
+    /// `template` plus four bounded spawns in `mirror_one` / the
+    /// `chart_published` probe plus `run_helm_timed`'s own body —
+    /// bypassed the `HELM_BIN` env override the tools-registry idiom
+    /// (`crate::tools::get_tool_path(tools::HELM)`, cli/src/tools.rs:
+    /// 102-105) resolves — the same class of bug the sibling
+    /// `flux` / `cargo` / `doca` / free-function-`git` / `GitClient` /
+    /// `commands/federation.rs` / `commands/push.rs` /
+    /// `commands/codegen_validation.rs` / `commands/rollback.rs` /
+    /// `commands/helm.rs::deploy` / `commands/helm.rs::bump` /
+    /// `commands/product_release.rs::run_health_check` /
+    /// `commands/github_runner_ci.rs::execute` /
+    /// `services/migration_service.rs` /
+    /// `commands/supergraph_verification.rs` /
+    /// `commands/developer_tools.rs` / `commands/status.rs` /
+    /// `commands/flux.rs` / `commands/build.rs` /
+    /// `commands/rust_service.rs` migrations redeemed at 621f827 /
+    /// f0dfa12 / d3dd199 / 685642f / d6f6bc7 / dd5a212 / 673e4be /
+    /// b02d4eb / 54a9985 / 139b37a / 818ed9a / badcdf4 / 8653403 /
+    /// f6be190 / 81d7486 / 8a1958e / 0d922f6 / 82376e1 / 5bb7cff /
+    /// 5566415 / 5986a10 / 65283fb / 4dfb2b3 / 8687093 / c2760df /
+    /// f8da719 / d8ef0d5 / 7c34e57.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `"helm"` bare literal does not reappear
+    /// at either spawn shape (the direct `Command::new(<literal>)`
+    /// form or the bounded `run_program_timed(<literal>, …)` form)
+    /// while the `helm_bin()` sigil is defined and delegates to
+    /// `get_tool_path(tools::HELM)`. A future regression that
+    /// re-fuses either raw-spawn body fails here, not silently in
+    /// production where a Nix-hermetic runner's `HELM_BIN`-provided
+    /// `helm` would lose to whatever `helm` is first on `PATH` at
+    /// chart-lint / chart-push / chart-mirror / release-idempotence
+    /// time.
+    ///
+    /// The forbidden literals are constructed at test time via
+    /// [`format!`] so this shield's own source text does not
+    /// false-match itself — the whole-module scan therefore covers
+    /// both the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block (any of which could otherwise silently
+    /// re-introduce a raw literal). The end-to-end `HELM_BIN`-routing
+    /// invariant of the underlying primitive is pinned separately by
+    /// [`crate::tools::tests::test_get_tool_path_from_env`] and
+    /// [`crate::tools::tests::test_uppercase_conversion`]; this
+    /// shield only certifies that every helm-spawning site in this
+    /// module reads through `helm_bin()`.
+    #[test]
+    fn test_helm_spawns_route_through_helm_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        // Reconstruct the two forbidden shapes at test time — the
+        // format string here contains the shape frame (`{}("{}"...)`)
+        // but never the fused literal, so this file's source text
+        // does not match itself when this shield scans below.
+        let bare = "helm";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+        let raw_bounded = format!("run_program_timed(\"{}\",", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/helm.rs must not spawn `helm` via the bare \
+             literal — every helm spawn must resolve `HELM_BIN` via \
+             `helm_bin()` first. A raw literal at `Command::new` \
+             bypasses the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bounded),
+            "commands/helm.rs must not spawn `helm` via the bare \
+             literal — every bounded helm spawn must route through \
+             `run_helm_timed()` (which resolves via `helm_bin()`). A \
+             raw literal at `run_program_timed` bypasses \
+             `HELM_BIN`."
+        );
+        assert!(
+            SOURCE.contains("fn helm_bin()"),
+            "commands/helm.rs must define `helm_bin()` — the sigil \
+             function that resolves the tools-registry `HELM_BIN` \
+             override for every helm spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::tools::get_tool_path(crate::tools::tools::HELM)"),
+            "`helm_bin()` must delegate to \
+             `crate::tools::get_tool_path(crate::tools::tools::HELM)` \
+             — the canonical lookup was not found in the module."
         );
     }
 }
