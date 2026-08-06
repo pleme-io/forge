@@ -63,7 +63,7 @@ use crate::tools::{get_tool_path, tools};
 ///   (`verify_router_schema`'s router-pod `exec` health probe,
 ///   `annotate_configmap_with_hash`'s ConfigMap `annotate
 ///   --overwrite`, `verify_configmap_hash`'s ConfigMap `get -o
-///   jsonpath=...` annotation read-back), migrated at this commit.
+///   jsonpath=...` annotation read-back), migrated at 65283fb.
 ///   First multi-function consumer whose shield bounds the
 ///   include_str! scan to the top-level module body (file start to
 ///   the `\n#[cfg(test)]\nmod tests {` marker) rather than a
@@ -72,6 +72,16 @@ use crate::tools::{get_tool_path, tools};
 ///   body (across the three migrated entry points or any as-yet
 ///   unadded sibling) is covered by the same shield without a
 ///   per-function narrowing.
+/// - `commands/status.rs` — ten sites across the ten async
+///   fetch helpers (`fetch_deployment`, `fetch_pods_json`,
+///   `fetch_statefulset`, `fetch_redis`, `fetch_redis_statefulset`,
+///   `fetch_configmap`, `fetch_secrets`, `fetch_k8s_services`,
+///   `fetch_migrations`, `fetch_events`), migrated at this commit.
+///   Largest single-module consumer to date — ten free-function
+///   `.output().await` sites all sharing the same argv shape past
+///   the primitive's constructor call — covered by a single
+///   whole-module include_str! shield that follows the
+///   `commands/supergraph_verification.rs` (65283fb) discipline.
 ///
 /// Pre-lift each of these sites spelled the bare literal
 /// `Command::new("kubectl")` — the exact class of bug the `flux` /
@@ -87,12 +97,11 @@ use crate::tools::{get_tool_path, tools};
 /// various `commands/*.rs` sites the grep in the shield tests'
 /// docstrings enumerates (`flux.rs`, `migrations.rs`,
 /// `federation_tests.rs`, `integration_tests.rs`, `rollout.rs`,
-/// `status.rs`, `search_sync.rs`, `rust_service.rs`,
-/// `attestation.rs`, `seed.rs`) plus the raw
-/// `Command::new("kubectl")` sites still living in pin-only
-/// production paths (`pod_health.rs`, `pod_listing.rs`,
-/// `network_policy_admission.rs`, `flux_source_verification.rs`,
-/// `helm_release_signature.rs`).
+/// `search_sync.rs`, `rust_service.rs`, `attestation.rs`,
+/// `seed.rs`) plus the raw `Command::new("kubectl")` sites still
+/// living in pin-only production paths (`pod_health.rs`,
+/// `pod_listing.rs`, `network_policy_admission.rs`,
+/// `flux_source_verification.rs`, `helm_release_signature.rs`).
 pub fn kubectl_command_async() -> tokio::process::Command {
     tokio::process::Command::new(get_tool_path(tools::KUBECTL))
 }
