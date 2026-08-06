@@ -909,8 +909,19 @@ pub fn bump(
 
     if commit {
         info!("Committing changes...");
+        // Binary resolution rides `crate::git::git_command_sync()` so a
+        // Nix-hermetic runner's `GIT_BIN` override wins over ambient
+        // `PATH` — same discipline the sibling sync
+        // `commands/helm.rs::deploy` / `config/mod::resolve_k8s_repo_root`
+        // / `commands/e2e.rs::resolve_repo_root` sites honor and the
+        // same class of bug the async free-function-`git` / `GitClient`
+        // / `commands/federation.rs` / `commands/push.rs` /
+        // `commands/codegen_validation.rs` / `commands/rollback.rs`
+        // migrations at 818ed9a / badcdf4 / 8653403 / f6be190 /
+        // 81d7486 / 8a1958e redeemed on the async half. Retains the
+        // pre-migration `.status()` / `bail!`-on-failure shape verbatim.
         // Find repo root
-        let repo_root = Command::new("git")
+        let repo_root = crate::git::git_command_sync()
             .args(["rev-parse", "--show-toplevel"])
             .output()
             .context("Failed to run git rev-parse")?;
@@ -919,7 +930,7 @@ pub fn bump(
             .trim()
             .to_string();
 
-        let status = Command::new("git")
+        let status = crate::git::git_command_sync()
             .args(["add", &format!("{}/*/Chart.yaml", charts_dir)])
             .current_dir(&repo_root)
             .status()
@@ -927,14 +938,14 @@ pub fn bump(
 
         if !status.success() {
             // Fallback: add individual files
-            let _ = Command::new("git")
+            let _ = crate::git::git_command_sync()
                 .args(["add", "-A", charts_dir])
                 .current_dir(&repo_root)
                 .status();
         }
 
         let commit_msg = format!("release: {} v{}", lib_chart_name, new_version);
-        let status = Command::new("git")
+        let status = crate::git::git_command_sync()
             .args(["commit", "-m", &commit_msg])
             .current_dir(&repo_root)
             .status()
@@ -945,7 +956,7 @@ pub fn bump(
         }
 
         let tag = format!("v{}", new_version);
-        let status = Command::new("git")
+        let status = crate::git::git_command_sync()
             .args(["tag", &tag])
             .current_dir(&repo_root)
             .status()
@@ -1860,8 +1871,10 @@ mod deploy_git_bin_routing_tests {
         const SOURCE: &str = include_str!("helm.rs");
 
         // Bound the scan to `deploy` — the three git spawn sites all
-        // live inside it. The rest of the file (`bump`, tests) uses
-        // `Command::new("git")` legitimately for now.
+        // live inside it. Post-`bump` migration, only the sibling
+        // `bump_git_bin_routing_tests` shield's own literal spellings
+        // of `Command::new("git")` remain in this file, and those are
+        // out of scope of this bound.
         let fn_marker = "pub fn deploy(";
         let start = SOURCE
             .find(fn_marker)
@@ -1886,6 +1899,83 @@ mod deploy_git_bin_routing_tests {
             "deploy() must delegate every git spawn to \
              `crate::git::git_command_sync()` — the delegation string \
              was not found in deploy()."
+        );
+    }
+}
+
+#[cfg(test)]
+mod bump_git_bin_routing_tests {
+    /// Regression-shield: every `git`-spawning site in
+    /// `commands/helm.rs::bump` MUST resolve the binary through
+    /// [`crate::git::git_command_sync`] rather than the pre-lift
+    /// `Command::new("git")` literal. Pre-migration five sites
+    /// (`rev-parse --show-toplevel` / `add <charts>/*/Chart.yaml` /
+    /// fallback `add -A <charts>` / `commit -m` / `tag <v>`) bypassed
+    /// the `GIT_BIN` env override the
+    /// `tools::get_tool_path(tools::GIT)` idiom (cli/src/tools.rs:102-105)
+    /// resolves — the same class of bug the sibling sync
+    /// `commands/helm.rs::deploy` (0d922f6),
+    /// `config/mod::resolve_k8s_repo_root` (0a36ba0), and
+    /// `commands/e2e.rs::resolve_repo_root` (447cad1) migrations
+    /// redeemed on the first three sync consumers, and the async
+    /// `flux` / `cargo` / `doca` / free-function-`git` / `GitClient` /
+    /// `commands/federation.rs` / `commands/push.rs` /
+    /// `commands/codegen_validation.rs` / `commands/rollback.rs`
+    /// migrations redeemed at 621f827 / f0dfa12 / d3dd199 / 685642f /
+    /// d6f6bc7 / dd5a212 / 673e4be / b02d4eb / 54a9985 / 139b37a /
+    /// 818ed9a / badcdf4 / 8653403 / f6be190 / 81d7486 / 8a1958e.
+    /// Fourth sync consumer on the same routing discipline.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("git")` string does not
+    /// reappear in `bump` while the delegation to
+    /// `git_command_sync` does. A future regression that re-fuses
+    /// the raw-spawn body fails here, not silently in production
+    /// where a Nix-hermetic runner's `GIT_BIN`-provided `git` would
+    /// lose to whatever `git` is first on `PATH` at
+    /// `helm bump --commit` time (`forge helm bump` is invoked
+    /// outside any tokio runtime from `main.rs`, same blocking
+    /// entrypoint as the sibling `deploy` sync consumer at 0d922f6).
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — the end-to-end
+    /// `GIT_BIN`-routing invariant is already pinned by
+    /// [`crate::git::tests::test_git_command_sync_routes_through_git_bin_env_var`]
+    /// on the primitive itself; this shield only certifies that
+    /// every `helm::bump` git spawn reads through that primitive.
+    /// Mirrors the sibling shields on `commands/helm.rs::deploy` /
+    /// `config/mod::resolve_k8s_repo_root` /
+    /// `commands/e2e.rs::resolve_repo_root` for the sync half of the
+    /// surface.
+    #[test]
+    fn test_bump_routes_git_through_git_command_sync_not_raw_command() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        // Bound the scan to `bump` — the five git spawn sites all
+        // live inside it. Bounds at the next top-level `fn` in source
+        // order (`chart_version_at`) which follows `bump`.
+        let fn_marker = "pub fn bump(";
+        let start = SOURCE
+            .find(fn_marker)
+            .expect("helm.rs must contain `pub fn bump(` — module invariant");
+        let after_fn = &SOURCE[start..];
+        let end_relative = after_fn
+            .find("\nfn chart_version_at(")
+            .expect("helm.rs must contain `fn chart_version_at(` after `bump`");
+        let fn_body = &after_fn[..end_relative];
+
+        assert!(
+            !fn_body.contains("Command::new(\"git\")"),
+            "bump() must NOT spawn `git` directly — route through \
+             `crate::git::git_command_sync()` so `GIT_BIN` overrides \
+             land at the shared primitive. Found the pre-migration \
+             spawn body in bump()."
+        );
+        assert!(
+            fn_body.contains("crate::git::git_command_sync()"),
+            "bump() must delegate every git spawn to \
+             `crate::git::git_command_sync()` — the delegation \
+             string was not found in bump()."
         );
     }
 }
