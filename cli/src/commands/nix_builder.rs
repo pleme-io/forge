@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 use crate::commands::push;
 use crate::commands::release_commit::commit_cluster_overlay_release;
+use crate::repo::get_tool_path;
 
 /// Verify nix-builder service is accessible
 pub async fn verify(
@@ -85,7 +86,7 @@ pub async fn test(hostname: String, port: u16, ssh_key: String, package: String)
         hostname, port
     );
 
-    let nix_build = Command::new("nix")
+    let nix_build = Command::new(get_tool_path("NIX_BIN", "nix"))
         .args(&[
             "build",
             &format!("nixpkgs#{}", package),
@@ -485,4 +486,76 @@ async fn update_builder_pool_builder_image(
 
     info!("   ✅ Builder pool updated");
     Ok(())
+}
+
+#[cfg(test)]
+mod nix_bin_routing_tests {
+    /// Whole-module shield: no raw `Command::new(get_tool_path("NIX_BIN", "nix"))` may live in
+    /// `commands/nix_builder.rs`'s non-test body. Every `nix` spawn in
+    /// this module must first resolve `NIX_BIN` via
+    /// [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// every other nix-invocation site in forge honors
+    /// (`commands/build.rs::execute` d8ef0d5,
+    /// `commands/tool.rs::build_lock_target`,
+    /// `commands/developer_tools.rs::rust_update_cargo_nix` and
+    /// siblings 4dfb2b3, `commands/rust_service.rs`'s three
+    /// nix spawn sites 7c34e57,
+    /// `commands/product_release.rs::run_nix_release_app` d0cd622,
+    /// `nix.rs::build_flake_attr_in` / `build_docker_image_from_dir`
+    /// / `path_info_recursive`, and
+    /// `nix_hooks.rs::NixHooks::build_and_get_path`).
+    ///
+    /// Pre-lift this module carried one real `nix` spawn site:
+    /// `test`'s remote-build probe at line 88
+    /// (`nix build nixpkgs#<pkg> --system x86_64-linux
+    /// --no-link --print-out-paths` under `NIX_SSHOPTS`, the
+    /// `forge nix-builder test` command whose exit-code decides
+    /// whether the remote AMD64 builder is declared healthy for
+    /// Mac→Linux cross-compilation). The spawn spelled
+    /// `Command::new(get_tool_path("NIX_BIN", "nix"))` verbatim, ignoring `NIX_BIN` at
+    /// exactly the moment hermetic-runner consistency matters most —
+    /// the test that decides whether the remote builder is trusted
+    /// to build the very same forge CLI. A Nix-hermetic runner with
+    /// a store-path `nix` binary silently fell through to whatever
+    /// `nix` was first on `PATH` at this site, diverging from every
+    /// other nix-invocation surface in forge and from the sibling
+    /// KUBECTL_BIN / GIT_BIN / CARGO frontier's uniform discipline.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the first `\n#[cfg(test)]\n` marker, which delimits
+    /// this shield) so shield docstring mentions of
+    /// `Command::new(get_tool_path("NIX_BIN", "nix"))` stay out of scope AND every current or
+    /// future nix-spawning helper landing anywhere in the top-level
+    /// module body cannot silently ride along without going through
+    /// `NIX_BIN`. Mirrors the sibling whole-module shields on
+    /// `commands/build.rs::test_execute_routes_nix_through_nix_bin_not_raw_command`
+    /// (d8ef0d5),
+    /// `commands/developer_tools.rs::test_developer_tools_routes_nix_through_nix_bin_not_raw_command`
+    /// (4dfb2b3), and
+    /// `commands/rust_service.rs::test_rust_service_routes_nix_through_nix_bin_not_raw_command`
+    /// (7c34e57) — the whole-module-boundary scan discipline
+    /// pioneered on `commands/supergraph_verification.rs` (65283fb).
+    #[test]
+    fn test_nix_builder_routes_nix_through_nix_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("nix_builder.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "nix_builder.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"nix\")"),
+            "commands/nix_builder.rs must not spawn `nix` via the bare \
+             literal — every `nix` spawn must resolve `NIX_BIN` via \
+             `crate::repo::get_tool_path(\"NIX_BIN\", \"nix\")` first. \
+             A raw `Command::new(\"nix\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"NIX_BIN\", \"nix\")"),
+            "commands/nix_builder.rs must resolve the nix binary via \
+             `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical \
+             lookup was not found in the module body."
+        );
+    }
 }
