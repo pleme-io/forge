@@ -50,7 +50,15 @@ use crate::tools::{get_tool_path, tools};
 ///   (rollout-status + pod-phase probe), migrated at 5bb7cff.
 /// - `commands/github_runner_ci.rs::execute` — three sites (rollout
 ///   pod-status probe, per-pod crash-log fetch, deployed-image
-///   verification), migrated at this commit.
+///   verification), migrated at 5566415.
+/// - `services/migration_service.rs::MigrationService` — five
+///   sites (delete-existing-job, apply-job manifest via stdin,
+///   wait-for-job Complete probe, wait-for-job Failed probe,
+///   get-job-logs), migrated at this commit. First non-`commands/*`
+///   consumer of the primitive; the shield sits in
+///   `impl MigrationService`'s sibling `#[cfg(test)]` block and
+///   bounds the include_str! scan to the primary impl block by
+///   the `\n}\n\nimpl Default for MigrationService` marker.
 ///
 /// Pre-lift each of these sites spelled the bare literal
 /// `Command::new("kubectl")` — the exact class of bug the `flux` /
@@ -62,10 +70,16 @@ use crate::tools::{get_tool_path, tools};
 /// `KUBECTL_BIN` points at a specific store-path `kubectl`
 /// (substrate's `mkRuntimeToolsEnv`) would lose to whatever
 /// `kubectl` is first on `PATH` at every pre-lift site. Remaining
-/// pending consumers on the `KUBECTL_BIN`-routing frontier:
-/// `services/migration_service.rs` (five sites) plus the various
-/// `commands/*.rs` sites the grep in the shield tests' docstrings
-/// enumerates.
+/// pending consumers on the `KUBECTL_BIN`-routing frontier: the
+/// various `commands/*.rs` sites the grep in the shield tests'
+/// docstrings enumerates (`flux.rs`, `migrations.rs`,
+/// `supergraph_verification.rs`, `federation_tests.rs`,
+/// `integration_tests.rs`, `rollout.rs`, `status.rs`,
+/// `search_sync.rs`, `rust_service.rs`, `attestation.rs`, `seed.rs`)
+/// plus the raw `Command::new("kubectl")` sites still living in
+/// pin-only production paths (`pod_health.rs`, `pod_listing.rs`,
+/// `network_policy_admission.rs`, `flux_source_verification.rs`,
+/// `helm_release_signature.rs`).
 pub fn kubectl_command_async() -> tokio::process::Command {
     tokio::process::Command::new(get_tool_path(tools::KUBECTL))
 }
