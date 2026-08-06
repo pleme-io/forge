@@ -3,7 +3,6 @@
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::time::Duration;
-use tokio::process::Command;
 use tokio::time::sleep;
 
 use crate::config::DeployConfig;
@@ -11,6 +10,7 @@ use crate::flux_get::{
     get_kustomization_scoped, list_kustomizations_all_namespaces, list_kustomizations_in_namespace,
     FluxGetKustomizationsError, KustomizationRow,
 };
+use crate::infrastructure::kubectl::kubectl_command_async;
 
 /// FluxCD health check before and after deployments.
 ///
@@ -600,7 +600,7 @@ struct PodStatus {
 /// Get comprehensive pod status for a deployment (image, phase, readiness, waiting reasons).
 async fn get_pod_status_full(namespace: &str, deployment_name: &str) -> Result<PodStatus> {
     // Single kubectl call using JSON for all fields
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args([
             "get",
             "pods",
@@ -694,7 +694,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     diag.push_str(&format!("{}\n", "━".repeat(72)));
 
     // 1. Deployment status (replicas, conditions)
-    if let Ok(output) = Command::new("kubectl")
+    if let Ok(output) = kubectl_command_async()
         .args([
             "get",
             "deployment",
@@ -721,7 +721,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 2. Deployment conditions
-    if let Ok(output) = Command::new("kubectl")
+    if let Ok(output) = kubectl_command_async()
         .args([
             "get",
             "deployment",
@@ -744,7 +744,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 3. All pods for this deployment (not just first)
-    if let Ok(output) = Command::new("kubectl")
+    if let Ok(output) = kubectl_command_async()
         .args([
             "get",
             "pods",
@@ -768,7 +768,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 4. Container status details (waiting reasons like ImagePullBackOff, CrashLoopBackOff)
-    if let Ok(output) = Command::new("kubectl")
+    if let Ok(output) = kubectl_command_async()
         .args([
             "get",
             "pods",
@@ -792,7 +792,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 5. Waiting/terminated reasons (the most useful for debugging)
-    if let Ok(output) = Command::new("kubectl")
+    if let Ok(output) = kubectl_command_async()
         .args([
             "get",
             "pods",
@@ -820,7 +820,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 6. Recent events for this namespace (last 20, sorted by time)
-    if let Ok(output) = Command::new("kubectl")
+    if let Ok(output) = kubectl_command_async()
         .args([
             "get",
             "events",
@@ -846,7 +846,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 7. Pod events (scheduling, image pull, etc.)
-    if let Ok(output) = Command::new("kubectl")
+    if let Ok(output) = kubectl_command_async()
         .args([
             "get",
             "events",
@@ -924,4 +924,75 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     diag.push_str(&format!("{}\n", "━".repeat(72)));
 
     diag
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regression shield: every `kubectl`-spawning site in
+    /// `commands/flux.rs`'s two async diagnostic helpers
+    /// (`get_pod_status_full`, `gather_deployment_diagnostics`) MUST
+    /// resolve the binary through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`]
+    /// rather than the pre-lift `Command::new("kubectl")` literal.
+    /// Pre-migration eight sites each spelled the bare
+    /// `Command::new("kubectl")` shape verbatim and thereby
+    /// bypassed the `KUBECTL_BIN` env override the tools-registry
+    /// idiom (`crate::tools::get_tool_path(tools::KUBECTL)`,
+    /// cli/src/tools.rs:102-105) resolves — the same class of bug
+    /// the sibling `commands/status.rs` /
+    /// `commands/supergraph_verification.rs` /
+    /// `commands/product_release.rs::run_health_check` /
+    /// `commands/github_runner_ci.rs::execute` /
+    /// `services/migration_service.rs::MigrationService`
+    /// migrations redeemed at c2760df / 65283fb / 5bb7cff / 5566415
+    /// / 5986a10.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("kubectl")` string does not
+    /// reappear anywhere in the module's non-test body while the
+    /// delegation to `kubectl_command_async()` does. A future
+    /// regression that re-fuses the raw-spawn body fails here, not
+    /// silently in production where a Nix-hermetic runner's
+    /// `KUBECTL_BIN`-provided `kubectl` would lose to whatever
+    /// `kubectl` is first on `PATH` at `forge deploy` diagnostic
+    /// invocation time (the diagnostics helper is the operator-facing
+    /// failure-triage surface for every deployment that goes red).
+    ///
+    /// The scan is bounded strictly to the module's non-test body
+    /// — from the file start to the `#[cfg(test)]` marker — so
+    /// this shield's own docstring mention of
+    /// `Command::new("kubectl")` (which lives inside this
+    /// `#[cfg(test)] mod tests` block) stays out of scope AND every
+    /// current or future kubectl-spawning helper landing anywhere
+    /// in the top-level module body cannot silently ride along
+    /// without going through the primitive. Mirrors the
+    /// whole-module boundary discipline `commands/status.rs`
+    /// (c2760df) and `commands/supergraph_verification.rs`
+    /// (65283fb) hold on the multi-function consumer surface.
+    #[test]
+    fn test_flux_routes_kubectl_through_kubectl_command_async_not_raw_command() {
+        let source = include_str!("flux.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+                 the module body — the shield's slice boundary relies \
+                 on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        assert!(
+            !module_body.contains("Command::new(\"kubectl\")"),
+            "flux.rs must NOT spawn `kubectl` directly — route \
+             through \
+             `crate::infrastructure::kubectl::kubectl_command_async()` \
+             so `KUBECTL_BIN` overrides land at the shared primitive. \
+             Found the pre-migration spawn body in the module."
+        );
+        assert!(
+            module_body.contains("kubectl_command_async()"),
+            "flux.rs must delegate every kubectl spawn to \
+             `kubectl_command_async()` — the delegation string was \
+             not found in the module body."
+        );
+    }
 }

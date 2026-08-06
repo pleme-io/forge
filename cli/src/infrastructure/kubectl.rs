@@ -76,12 +76,27 @@ use crate::tools::{get_tool_path, tools};
 ///   fetch helpers (`fetch_deployment`, `fetch_pods_json`,
 ///   `fetch_statefulset`, `fetch_redis`, `fetch_redis_statefulset`,
 ///   `fetch_configmap`, `fetch_secrets`, `fetch_k8s_services`,
-///   `fetch_migrations`, `fetch_events`), migrated at this commit.
-///   Largest single-module consumer to date — ten free-function
-///   `.output().await` sites all sharing the same argv shape past
-///   the primitive's constructor call — covered by a single
-///   whole-module include_str! shield that follows the
-///   `commands/supergraph_verification.rs` (65283fb) discipline.
+///   `fetch_migrations`, `fetch_events`), migrated at c2760df.
+///   Largest single-module consumer through that commit — ten
+///   free-function `.output().await` sites all sharing the same
+///   argv shape past the primitive's constructor call — covered
+///   by a single whole-module include_str! shield that follows
+///   the `commands/supergraph_verification.rs` (65283fb)
+///   discipline.
+/// - `commands/flux.rs` — eight sites across the two async
+///   diagnostic helpers (`get_pod_status_full`'s pod-image /
+///   phase / readiness / waiting-reason probe, and
+///   `gather_deployment_diagnostics`'s seven deployment /
+///   pod / container / event probes: replicas jsonpath,
+///   conditions jsonpath, `-o wide` pod listing, container-state
+///   jsonpath, waiting/terminated-reason jsonpath, deployment-
+///   scoped events, namespace-wide pod events), migrated at
+///   this commit. First lift onto a module that had no prior
+///   `#[cfg(test)]` block; the shield adds the block itself
+///   and bounds the include_str! scan by the same
+///   `\n#[cfg(test)]\nmod tests {` marker discipline the
+///   status.rs (c2760df) and supergraph_verification.rs
+///   (65283fb) shields hold.
 ///
 /// Pre-lift each of these sites spelled the bare literal
 /// `Command::new("kubectl")` — the exact class of bug the `flux` /
@@ -95,7 +110,7 @@ use crate::tools::{get_tool_path, tools};
 /// `kubectl` is first on `PATH` at every pre-lift site. Remaining
 /// pending consumers on the `KUBECTL_BIN`-routing frontier: the
 /// various `commands/*.rs` sites the grep in the shield tests'
-/// docstrings enumerates (`flux.rs`, `migrations.rs`,
+/// docstrings enumerates (`migrations.rs`,
 /// `federation_tests.rs`, `integration_tests.rs`, `rollout.rs`,
 /// `search_sync.rs`, `rust_service.rs`, `attestation.rs`,
 /// `seed.rs`) plus the raw `Command::new("kubectl")` sites still
