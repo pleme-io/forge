@@ -657,7 +657,7 @@ fn build_and_load_image(repo_root: &str, name: &str, flake_attr: &str) -> Result
 
     // Build with Nix
     ui::print_info(&format!("Building {} image via Nix", name));
-    let build_status = Command::new("nix")
+    let build_status = Command::new(get_tool_path("NIX_BIN", "nix"))
         .current_dir(repo_root)
         .args(["build", flake_attr, "-o", &output_path])
         .status()
@@ -1044,6 +1044,82 @@ mod resolve_repo_root_git_bin_routing_tests {
             "resolve_repo_root() must delegate the git spawn to \
              `crate::git::git_command_sync()` — the delegation string \
              was not found in resolve_repo_root()."
+        );
+    }
+}
+
+#[cfg(test)]
+mod nix_bin_routing_tests {
+    /// Whole-module shield: no raw `Command::new("nix")` may live in
+    /// `commands/e2e.rs`'s non-test body. Every `nix` spawn in this
+    /// module must first resolve `NIX_BIN` via
+    /// [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// every other nix-invocation site in forge honors
+    /// (`commands/build.rs::execute` d8ef0d5,
+    /// `commands/tool.rs::build_lock_target`,
+    /// `commands/developer_tools.rs::rust_update_cargo_nix` and
+    /// siblings 4dfb2b3, `commands/rust_service.rs`'s three nix spawn
+    /// sites 7c34e57,
+    /// `commands/product_release.rs::run_nix_release_app` d0cd622,
+    /// `commands/nix_builder.rs::test`'s remote-build probe d930a5d,
+    /// `nix.rs::build_flake_attr_in` / `build_docker_image_from_dir`
+    /// / `path_info_recursive`, and
+    /// `nix_hooks.rs::NixHooks::build_and_get_path`).
+    ///
+    /// Pre-lift this module carried one real `nix` spawn site:
+    /// `build_and_load_image`'s `nix build <flake_attr> -o <path>` at
+    /// line 660 — the E2E-image build step that `forge e2e run` (and
+    /// the auto-build fallback inside `run_test_pyramid`'s E2E phase)
+    /// invokes to materialize the backend/web container images that
+    /// docker-load into the test daemon. The spawn spelled
+    /// `Command::new("nix")` verbatim, bypassing `NIX_BIN` at exactly
+    /// the moment hermetic-runner consistency matters most — the
+    /// step that produces the very images the E2E tier will exercise.
+    /// A Nix-hermetic runner with a store-path `nix` binary silently
+    /// fell through to whatever `nix` was first on `PATH` at this
+    /// site, diverging from every other nix-invocation surface in
+    /// forge and from the sibling KUBECTL_BIN / GIT_BIN / CARGO /
+    /// DOCKER_BIN / HELM_BIN frontier's uniform discipline.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\n` marker in source order,
+    /// which lands at the sibling `resolve_repo_root_git_bin_routing_tests`
+    /// block above) so this shield's own docstring mentions of
+    /// `Command::new("nix")` — living in a `#[cfg(test)]` block below
+    /// that first marker — stay out of scope AND every current or
+    /// future nix-spawning helper landing anywhere in the top-level
+    /// module body cannot silently ride along without going through
+    /// `NIX_BIN`. Mirrors the sibling whole-module shields on
+    /// `commands/build.rs::test_execute_routes_nix_through_nix_bin_not_raw_command`
+    /// (d8ef0d5),
+    /// `commands/developer_tools.rs::test_developer_tools_routes_nix_through_nix_bin_not_raw_command`
+    /// (4dfb2b3),
+    /// `commands/rust_service.rs::test_rust_service_routes_nix_through_nix_bin_not_raw_command`
+    /// (7c34e57), and
+    /// `commands/nix_builder.rs::test_nix_builder_routes_nix_through_nix_bin_not_raw_command`
+    /// (d930a5d) — the whole-module-boundary scan discipline
+    /// pioneered on `commands/supergraph_verification.rs` (65283fb).
+    #[test]
+    fn test_e2e_routes_nix_through_nix_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("e2e.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "e2e.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"nix\")"),
+            "commands/e2e.rs must not spawn `nix` via the bare \
+             literal — every `nix` spawn must resolve `NIX_BIN` via \
+             `crate::repo::get_tool_path(\"NIX_BIN\", \"nix\")` first. \
+             A raw `Command::new(\"nix\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"NIX_BIN\", \"nix\")"),
+            "commands/e2e.rs must resolve the nix binary via \
+             `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical \
+             lookup was not found in the module body."
         );
     }
 }
