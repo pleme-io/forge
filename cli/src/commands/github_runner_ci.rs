@@ -226,7 +226,7 @@ pub async fn execute(
         spinner.set_message("Building with Nix...");
         spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
-        let build_result = Command::new("nix")
+        let build_result = Command::new(get_tool_path("NIX_BIN", "nix"))
             .current_dir(&working_dir)
             .args(&["build", ".#dockerImage", "--print-build-logs"])
             .status()
@@ -1202,6 +1202,90 @@ mod tests {
             "execute() must delegate every kubectl spawn to \
              `kubectl_command_async()` — the delegation string was not \
              found in execute()."
+        );
+    }
+}
+
+#[cfg(test)]
+mod nix_bin_routing_tests {
+    /// Whole-module shield: no raw `Command::new("nix")` may live in
+    /// `commands/github_runner_ci.rs`'s non-test body. Every `nix`
+    /// spawn in this module must first resolve `NIX_BIN` via
+    /// [`crate::repo::get_tool_path`] — the canonical env-var
+    /// override every other nix-invocation site in forge honors
+    /// (`commands/build.rs::execute` d8ef0d5,
+    /// `commands/tool.rs::build_lock_target`,
+    /// `commands/developer_tools.rs::rust_update_cargo_nix` and
+    /// siblings 4dfb2b3, `commands/rust_service.rs`'s three nix
+    /// spawn sites 7c34e57,
+    /// `commands/product_release.rs::run_nix_release_app` d0cd622,
+    /// `commands/nix_builder.rs::test`'s remote-build probe d930a5d,
+    /// `commands/e2e.rs::build_and_load_image` 5cd137f,
+    /// `nix.rs::build_flake_attr_in` / `build_docker_image_from_dir`
+    /// / `path_info_recursive`, and
+    /// `nix_hooks.rs::NixHooks::build_and_get_path`).
+    ///
+    /// Pre-lift this module carried one real `nix` spawn site: the
+    /// `nix build .#dockerImage --print-build-logs` invocation in
+    /// `execute()` at line 229 — Step 1/3 of the
+    /// `forge github-runner-ci` workflow that materializes the
+    /// self-hosted runner's OCI image (the image that subsequently
+    /// gets pushed to GHCR via doca and pinned into the FluxCD-
+    /// managed StatefulSet manifest). The spawn spelled
+    /// `Command::new("nix")` verbatim, bypassing `NIX_BIN` at exactly
+    /// the moment hermetic-runner consistency matters most — the
+    /// step that produces the very image feeding the CI runner
+    /// fleet. A Nix-hermetic runner with a store-path `nix` binary
+    /// silently fell through to whatever `nix` was first on `PATH`
+    /// at this site, diverging from every other nix-invocation
+    /// surface in forge and from the sibling KUBECTL_BIN / GIT_BIN /
+    /// CARGO / DOCKER_BIN / HELM_BIN frontier's uniform discipline.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\n` marker in source order,
+    /// which lands at the sibling `mod tests` block above) so this
+    /// shield's own docstring mentions of `Command::new("nix")` —
+    /// living in a `#[cfg(test)]` block below that first marker —
+    /// stay out of scope AND every current or future nix-spawning
+    /// helper landing anywhere in the top-level module body cannot
+    /// silently ride along without going through `NIX_BIN`. Mirrors
+    /// the sibling whole-module shields on `commands/build.rs`
+    /// (d8ef0d5), `commands/developer_tools.rs` (4dfb2b3),
+    /// `commands/rust_service.rs` (7c34e57),
+    /// `commands/nix_builder.rs` (d930a5d), and `commands/e2e.rs`
+    /// (5cd137f) — the whole-module-boundary scan discipline
+    /// pioneered on `commands/supergraph_verification.rs` (65283fb).
+    ///
+    /// This shield closes the last raw `Command::new("nix")` site
+    /// the prior five commit bodies enumerated as remaining on the
+    /// command surface: with this migration, EVERY nix-invocation
+    /// site across forge's `commands/` tree resolves the binary
+    /// through the `NIX_BIN` env override — the "no raw nix spawn
+    /// in a command module" floor is now a compile-checked
+    /// whole-module-boundary invariant across the full command
+    /// surface.
+    #[test]
+    fn test_github_runner_ci_routes_nix_through_nix_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("github_runner_ci.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "github_runner_ci.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"nix\")"),
+            "commands/github_runner_ci.rs must not spawn `nix` via \
+             the bare literal — every `nix` spawn must resolve \
+             `NIX_BIN` via `crate::repo::get_tool_path(\"NIX_BIN\", \
+             \"nix\")` first. A raw `Command::new(\"nix\")` bypasses \
+             the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"NIX_BIN\", \"nix\")"),
+            "commands/github_runner_ci.rs must resolve the nix \
+             binary via `get_tool_path(\"NIX_BIN\", \"nix\")` — the \
+             canonical lookup was not found in the module body."
         );
     }
 }
