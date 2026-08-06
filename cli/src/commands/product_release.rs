@@ -20,6 +20,7 @@ use tokio::process::Command;
 use crate::commands::attestation;
 use crate::config::DeployConfig;
 use crate::infrastructure::git::{CommitPushOutcome, GitClient};
+use crate::infrastructure::kubectl::kubectl_command_async;
 
 /// Run a forge subcommand by re-invoking the current binary.
 pub(crate) async fn run_forge_subcommand(args: &[&str]) -> Result<()> {
@@ -93,7 +94,7 @@ pub(crate) async fn run_health_check(
 
     // Check rollout status
     let timeout_str = format!("{}s", timeout_secs);
-    let status = Command::new("kubectl")
+    let status = kubectl_command_async()
         .args([
             "rollout",
             "status",
@@ -116,7 +117,7 @@ pub(crate) async fn run_health_check(
     }
 
     // Verify at least one pod is Running
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args([
             "get",
             "pods",
@@ -972,6 +973,76 @@ mod tests {
             "push to a non-existent remote MUST surface a typed error, \
              never the silent Ok(Pushed) the pre-lift inline sequence produced; \
              got: {result:?}"
+        );
+    }
+
+    /// Regression-shield: every `kubectl`-spawning site in
+    /// `commands/product_release.rs::run_health_check` MUST resolve
+    /// the binary through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`]
+    /// rather than the pre-lift `Command::new("kubectl")` literal.
+    /// Pre-migration two sites (rollout status + pod-phase probe)
+    /// bypassed the `KUBECTL_BIN` env override the
+    /// `tools::get_tool_path(tools::KUBECTL)` idiom
+    /// (cli/src/tools.rs:102-105) resolves — the same class of bug
+    /// the sibling `flux` / `cargo` / `doca` / free-function-`git` /
+    /// `GitClient` / `commands/federation.rs` / `commands/push.rs` /
+    /// `commands/rollback.rs` / `commands/helm.rs` migrations redeemed
+    /// at 621f827 / f0dfa12 / d3dd199 / 685642f / d6f6bc7 / dd5a212 /
+    /// 673e4be / b02d4eb / 54a9985 / 139b37a / 818ed9a / badcdf4 /
+    /// 8653403 / f6be190 / 8a1958e / 81d7486 / 0d922f6 / 82376e1 /
+    /// 34661e3.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("kubectl")` string does not
+    /// reappear in `run_health_check` while the delegation to
+    /// `kubectl_command_async` does. A future regression that re-fuses
+    /// the raw-spawn body fails here, not silently in production where
+    /// a Nix-hermetic runner's `KUBECTL_BIN`-provided `kubectl` would
+    /// lose to whatever `kubectl` is first on `PATH` at deploy time.
+    ///
+    /// The check is deliberately structural (substring on the source
+    /// text) rather than behavioral — the end-to-end `KUBECTL_BIN`-
+    /// routing invariant is already pinned by
+    /// [`crate::infrastructure::kubectl::tests::test_kubectl_command_async_routes_through_kubectl_bin_env_var`]
+    /// on the primitive itself; this shield only certifies that every
+    /// `run_health_check` kubectl spawn reads through that primitive.
+    #[test]
+    fn test_run_health_check_routes_kubectl_through_kubectl_command_async_not_raw_command() {
+        const SOURCE: &str = include_str!("product_release.rs");
+
+        // Bound the scan to `run_health_check` — the two kubectl spawn
+        // sites all live inside it. The wrapping `push_prebuilt_image`
+        // still uses `Command::new("docker")` legitimately, and the
+        // tests / docstrings below reference the pre-migration string.
+        let fn_marker = "pub(crate) async fn run_health_check(";
+        let start = SOURCE.find(fn_marker).expect(
+            "product_release.rs must contain `pub(crate) async fn run_health_check(` \
+             — module invariant",
+        );
+        let after_fn = &SOURCE[start..];
+        // Bound at the next top-level function marker in source order.
+        // `check_local_image_exists` follows `run_health_check`.
+        let end_relative = after_fn
+            .find("\nasync fn check_local_image_exists(")
+            .expect(
+                "product_release.rs must contain `async fn check_local_image_exists(` \
+                 after `run_health_check`",
+            );
+        let fn_body = &after_fn[..end_relative];
+
+        assert!(
+            !fn_body.contains("Command::new(\"kubectl\")"),
+            "run_health_check() must NOT spawn `kubectl` directly — route \
+             through `crate::infrastructure::kubectl::kubectl_command_async()` \
+             so `KUBECTL_BIN` overrides land at the shared primitive. \
+             Found the pre-migration spawn body in run_health_check()."
+        );
+        assert!(
+            fn_body.contains("kubectl_command_async()"),
+            "run_health_check() must delegate every kubectl spawn to \
+             `kubectl_command_async()` — the delegation string was not \
+             found in run_health_check()."
         );
     }
 }
