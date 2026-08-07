@@ -30,7 +30,6 @@ use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::collections::BTreeMap;
 use std::process::Stdio;
-use tokio::process::Command;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
@@ -41,6 +40,7 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use crate::config::DeployConfig;
+use crate::infrastructure::kubectl::kubectl_command_async;
 
 /// Run federation integration tests for a service
 ///
@@ -113,7 +113,7 @@ pub async fn run_federation_tests(
 
     // Apply the job
     println!("   🚀 Creating federation test job...");
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args(&["apply", "-f", &manifest_path])
         .output()
         .await
@@ -164,7 +164,7 @@ pub async fn run_federation_tests(
             println!();
 
             // Fetch logs with better error handling
-            let log_output = Command::new("kubectl")
+            let log_output = kubectl_command_async()
                 .args(&[
                     "logs",
                     "-n",
@@ -194,7 +194,7 @@ pub async fn run_federation_tests(
 
             // Also fetch job status for more details
             println!("   📋 Fetching job status...");
-            let status_output = Command::new("kubectl")
+            let status_output = kubectl_command_async()
                 .args(&["get", "job", &job_name, "-n", namespace, "-o", "yaml"])
                 .output()
                 .await;
@@ -374,7 +374,10 @@ fn create_federation_test_job(
         },
         EnvVar {
             name: "RUST_LOG".to_string(),
-            value: Some(format!("info,{}_federation_tests=debug", product.replace('-', "_"))),
+            value: Some(format!(
+                "info,{}_federation_tests=debug",
+                product.replace('-', "_")
+            )),
             ..Default::default()
         },
         EnvVar {
@@ -508,7 +511,7 @@ async fn wait_for_job_completion(
         }
 
         // Query job status
-        let output = Command::new("kubectl")
+        let output = kubectl_command_async()
             .args(&[
                 "get",
                 "job",
@@ -536,7 +539,7 @@ async fn wait_for_job_completion(
 
 /// Check if job succeeded
 async fn check_job_success(job_name: &str, namespace: &str) -> Result<bool> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args(&[
             "get",
             "job",
@@ -552,4 +555,82 @@ async fn check_job_success(job_name: &str, namespace: &str) -> Result<bool> {
 
     let succeeded = String::from_utf8_lossy(&output.stdout);
     Ok(succeeded.trim() == "1")
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regression shield: every `kubectl`-spawning site in
+    /// `commands/federation_tests.rs`'s five top-level async helpers
+    /// (`run_federation_tests` apply + logs-capture + status-yaml,
+    /// `wait_for_job_completion` status-jsonpath poll,
+    /// `check_job_success` succeeded-jsonpath probe) MUST resolve the
+    /// binary through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`]
+    /// rather than the pre-lift `Command::new("kubectl")` literal.
+    /// Pre-migration five sites each spelled the bare
+    /// `Command::new("kubectl")` shape verbatim and thereby bypassed
+    /// the `KUBECTL_BIN` env override the tools-registry idiom
+    /// (`crate::tools::get_tool_path(tools::KUBECTL)`,
+    /// cli/src/tools.rs:102-105) resolves — the same class of bug the
+    /// sibling `commands/migrations.rs` (946e573),
+    /// `commands/status.rs` (c2760df), `commands/flux.rs` (f8da719),
+    /// `commands/supergraph_verification.rs` (65283fb),
+    /// `commands/product_release.rs::run_health_check` (5bb7cff),
+    /// `commands/github_runner_ci.rs::execute` (5566415),
+    /// `services/migration_service.rs::MigrationService` (5986a10)
+    /// migrations redeemed. This module is the surface that actually
+    /// applies the Kubernetes Job every deploy step trusts to
+    /// materialize the federation-integration-test verdict against a
+    /// freshly-updated Hive Router — the last blocking gate before
+    /// `forge deploy` reports service-ready.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("kubectl")` string does not
+    /// reappear anywhere in the module's non-test body while the
+    /// delegation to `kubectl_command_async()` does. A future
+    /// regression that re-fuses the raw-spawn body fails here, not
+    /// silently in production where a Nix-hermetic runner's
+    /// `KUBECTL_BIN`-provided `kubectl` would lose to whatever
+    /// `kubectl` is first on `PATH` at `forge deploy`
+    /// federation-tests invocation time.
+    ///
+    /// The scan is bounded strictly to the module's non-test body
+    /// — from the file start to the `#[cfg(test)]` marker — so this
+    /// shield's own docstring mention of `Command::new("kubectl")`
+    /// (which lives inside this `#[cfg(test)] mod tests` block below
+    /// that marker) stays out of scope AND every current or future
+    /// kubectl-spawning helper landing anywhere in the top-level
+    /// module body (i.e., in any of the five migrated sites or any
+    /// as-yet unadded sibling) cannot silently ride along without
+    /// going through the primitive. Mirrors the whole-module boundary
+    /// discipline the sibling `commands/migrations.rs` shield
+    /// (946e573), `commands/status.rs` shield (c2760df), and
+    /// `commands/supergraph_verification.rs` shield (65283fb)
+    /// pioneered on the multi-function consumer surface.
+    #[test]
+    fn test_federation_tests_routes_kubectl_through_kubectl_command_async_not_raw_command() {
+        let source = include_str!("federation_tests.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        assert!(
+            !module_body.contains("Command::new(\"kubectl\")"),
+            "federation_tests.rs must NOT spawn `kubectl` directly — \
+             route through \
+             `crate::infrastructure::kubectl::kubectl_command_async()` \
+             so `KUBECTL_BIN` overrides land at the shared primitive. \
+             Found the pre-migration spawn body in the module."
+        );
+        assert!(
+            module_body.contains("kubectl_command_async()"),
+            "federation_tests.rs must delegate every kubectl spawn to \
+             `kubectl_command_async()` — the delegation string was \
+             not found in the module body."
+        );
+    }
 }
