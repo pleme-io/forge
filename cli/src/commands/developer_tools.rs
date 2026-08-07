@@ -408,7 +408,8 @@ pub async fn rust_dev(
                 .dimmed()
             );
 
-            let mut cmd = Command::new("docker-compose");
+            let docker_compose = get_tool_path("DOCKER_COMPOSE_BIN", "docker-compose");
+            let mut cmd = Command::new(&docker_compose);
             cmd.args(&["-f", compose_path.to_str().unwrap(), "up", "-d"]);
             crate::retry::run_inherited_status(cmd, "docker-compose up")
                 .await
@@ -560,7 +561,8 @@ pub async fn rust_dev_down(service: String) -> Result<()> {
     let compose_file = find_compose_file(service_path)?;
 
     if let Some(compose_path) = compose_file {
-        let mut cmd = Command::new("docker-compose");
+        let docker_compose = get_tool_path("DOCKER_COMPOSE_BIN", "docker-compose");
+        let mut cmd = Command::new(&docker_compose);
         cmd.args(&["-f", compose_path.to_str().unwrap(), "down"]);
         crate::retry::run_inherited_status(cmd, "docker-compose down")
             .await
@@ -767,6 +769,56 @@ mod tests {
              every `cargo` spawn must resolve `CARGO` via \
              `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
              A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("docker-compose")` may live in
+    /// this module's non-test body. Every `docker-compose` spawn in
+    /// `commands/developer_tools.rs` must first resolve `DOCKER_COMPOSE_BIN`
+    /// via [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// idiom every sibling tool-spawn site in this module already honors
+    /// (`NIX_BIN` for nix; `CARGO` for cargo), and the same idiom every
+    /// sibling docker-family surface honors (`commands/local.rs::docker_bin`,
+    /// `commands/e2e.rs::docker_bin`, both routing through `DOCKER_BIN`).
+    ///
+    /// Pre-lift the two consumer sites (`rust_dev`'s docker-compose-up,
+    /// `rust_dev_down`'s docker-compose-down) each spelled
+    /// `Command::new("docker-compose")` verbatim, ignoring
+    /// `DOCKER_COMPOSE_BIN` at both. A Nix-hermetic runner with a store-path
+    /// `docker-compose` binary silently fell through to whatever
+    /// `docker-compose` was first on PATH at these two sites specifically —
+    /// the same silent-PATH-fallback bug class the NIX_BIN / CARGO shields
+    /// above (4dfb2b3 / 8687093) closed on their respective spawn surfaces,
+    /// and the sibling DOCKER_BIN lifts at 1a984dd / 23241a6 closed on the
+    /// `docker` surface across `commands/local.rs` and `commands/e2e.rs`.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file start
+    /// to the FIRST `\n#[cfg(test)]\nmod tests {` marker in source order,
+    /// which lands at this shield's `#[cfg(test)] mod tests` opener) so
+    /// this shield's own docstring mentions of `Command::new("docker-compose")`
+    /// — living in a `#[cfg(test)]` block below that first marker — stay
+    /// out of scope AND every current or future docker-compose-spawning
+    /// helper landing anywhere in the top-level module body cannot silently
+    /// ride along without going through `DOCKER_COMPOSE_BIN`. Mirrors the
+    /// sibling `NIX_BIN` / `CARGO` shields above and the whole-module-boundary
+    /// scan discipline pioneered on
+    /// `commands/supergraph_verification.rs::test_supergraph_verification_routes_kubectl_through_kubectl_command_async_not_raw_command`
+    /// (65283fb).
+    #[test]
+    fn test_developer_tools_routes_docker_compose_through_docker_compose_bin_not_raw_command() {
+        let source = include_str!("developer_tools.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "developer_tools.rs must have a `#[cfg(test)] mod tests {` marker \
+                     — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"docker-compose\")"),
+            "commands/developer_tools.rs must not spawn `docker-compose` via the bare literal — \
+             every `docker-compose` spawn must resolve `DOCKER_COMPOSE_BIN` via \
+             `crate::repo::get_tool_path(\"DOCKER_COMPOSE_BIN\", \"docker-compose\")` first. \
+             A raw `Command::new(\"docker-compose\")` bypasses the hermetic-runner \
              contract substrate's mkRuntimeToolsEnv exports."
         );
     }
