@@ -14,6 +14,27 @@ use std::time::{Duration, Instant};
 use crate::repo::get_tool_path;
 use crate::ui;
 
+/// Resolve the `docker` binary path via `DOCKER_BIN`, falling back to
+/// `docker` on `PATH`. Wired through [`crate::repo::get_tool_path`] — the
+/// canonical env-var-or-PATH lookup the sibling `commands/local.rs`
+/// `docker_bin` sigil (1a984dd) resolves through. The pre-lift shape in
+/// this module spelled `"docker"` bare at fourteen spawn sites
+/// (`cleanup_testcontainers` ps + rm + ryuk-ps + ryuk-rm;
+/// `cleanup_e2e_images` rmi + image-prune; `verify_docker` info;
+/// `build_and_load_image` load; `print_image_info` images;
+/// `print_failure_diagnostics` ps + ps-exited + images;
+/// `ensure_docker_running` info + retry-info). Each bypassed the
+/// `DOCKER_BIN` env override the substrate-`mkRuntimeToolsEnv` derivation
+/// exports, so a Nix-hermetic runner's docker nixpkgs pin lost to
+/// whatever `docker` was first on PATH at the E2E-image build /
+/// docker-load / cleanup / diagnostics surface every `forge test`,
+/// `forge e2e-run`, `forge e2e-cleanup`, and `forge e2e-prepare` step
+/// trusts. Mirrors the sibling `docker_bin` sigil on
+/// `commands/local.rs` (1a984dd).
+fn docker_bin() -> String {
+    get_tool_path("DOCKER_BIN", "docker")
+}
+
 /// Test pyramid levels
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TestLevel {
@@ -461,7 +482,7 @@ pub fn cleanup_testcontainers() -> Result<()> {
     ui::print_info("Cleaning up testcontainers...");
 
     // Kill containers with testcontainers label
-    let output = Command::new("docker")
+    let output = Command::new(docker_bin())
         .args(["ps", "-q", "--filter", "label=org.testcontainers=true"])
         .output()
         .context("Failed to list testcontainers")?;
@@ -477,11 +498,11 @@ pub fn cleanup_testcontainers() -> Result<()> {
         for id in &ids {
             args.push(id);
         }
-        let _ = Command::new("docker").args(&args).output();
+        let _ = Command::new(docker_bin()).args(&args).output();
     }
 
     // Kill Ryuk sidecars (may not have the label)
-    let ryuk_output = Command::new("docker")
+    let ryuk_output = Command::new(docker_bin())
         .args(["ps", "-q", "--filter", "ancestor=testcontainers/ryuk"])
         .output()
         .context("Failed to list Ryuk containers")?;
@@ -501,7 +522,7 @@ pub fn cleanup_testcontainers() -> Result<()> {
         for id in &ids {
             args.push(id);
         }
-        let _ = Command::new("docker").args(&args).output();
+        let _ = Command::new(docker_bin()).args(&args).output();
     }
 
     let total = tc_count + ryuk_count;
@@ -526,7 +547,7 @@ pub fn cleanup_e2e_images() -> Result<()> {
     for image in &["backend", "web"] {
         let exists = check_image_exists(image).unwrap_or(false);
         if exists {
-            let status = Command::new("docker")
+            let status = Command::new(docker_bin())
                 .args(["rmi", "-f", image])
                 .output()
                 .context(format!("Failed to remove {} image", image))?;
@@ -538,7 +559,7 @@ pub fn cleanup_e2e_images() -> Result<()> {
     }
 
     // Prune dangling images from testcontainers
-    let _ = Command::new("docker")
+    let _ = Command::new(docker_bin())
         .args([
             "image",
             "prune",
@@ -622,7 +643,7 @@ fn verify_docker() -> Result<()> {
     }
 
     // Check if Docker daemon is running
-    let info_output = Command::new("docker")
+    let info_output = Command::new(docker_bin())
         .arg("info")
         .output()
         .context("Failed to run docker info")?;
@@ -674,7 +695,7 @@ fn build_and_load_image(repo_root: &str, name: &str, flake_attr: &str) -> Result
     let image_file = std::fs::File::open(&output_path)
         .context(format!("Failed to open image file: {}", output_path))?;
 
-    let mut docker_load = Command::new("docker")
+    let mut docker_load = Command::new(docker_bin())
         .arg("load")
         .stdin(image_file)
         .spawn()
@@ -696,7 +717,7 @@ fn build_and_load_image(repo_root: &str, name: &str, flake_attr: &str) -> Result
 fn print_image_info() -> Result<()> {
     println!("Loaded images:");
 
-    let output = Command::new("docker")
+    let output = Command::new(docker_bin())
         .args([
             "images",
             "--format",
@@ -724,7 +745,7 @@ fn print_failure_diagnostics() {
 
     // Docker container status
     eprintln!("\nDocker containers (running):");
-    if let Ok(output) = Command::new("docker")
+    if let Ok(output) = Command::new(docker_bin())
         .args(["ps", "--format", "  {{.Names}}\t{{.Status}}\t{{.Ports}}"])
         .output()
     {
@@ -738,7 +759,7 @@ fn print_failure_diagnostics() {
 
     // Recently exited containers (testcontainers that died)
     eprintln!("\nDocker containers (recently exited):");
-    if let Ok(output) = Command::new("docker")
+    if let Ok(output) = Command::new(docker_bin())
         .args([
             "ps",
             "-a",
@@ -761,7 +782,7 @@ fn print_failure_diagnostics() {
 
     // Check Docker images
     eprintln!("\nE2E Docker images:");
-    if let Ok(output) = Command::new("docker")
+    if let Ok(output) = Command::new(docker_bin())
         .args([
             "images",
             "--format",
@@ -929,7 +950,7 @@ pub fn ensure_docker_running() -> Result<()> {
     }
 
     // Check if Docker daemon is running
-    let info_output = Command::new("docker")
+    let info_output = Command::new(docker_bin())
         .arg("info")
         .output()
         .context("Failed to run docker info")?;
@@ -951,7 +972,7 @@ pub fn ensure_docker_running() -> Result<()> {
         for i in 1..=30 {
             thread::sleep(Duration::from_secs(2));
 
-            let check = Command::new("docker")
+            let check = Command::new(docker_bin())
                 .arg("info")
                 .output()
                 .context("Failed to run docker info")?;
@@ -1120,6 +1141,85 @@ mod nix_bin_routing_tests {
             "commands/e2e.rs must resolve the nix binary via \
              `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical \
              lookup was not found in the module body."
+        );
+    }
+}
+
+#[cfg(test)]
+mod docker_bin_routing_tests {
+    /// Whole-module shield: no raw `Command::new("docker")` may live in
+    /// `commands/e2e.rs`'s non-test body. Every `docker` spawn in this
+    /// module must first resolve `DOCKER_BIN` via [`super::docker_bin`],
+    /// which delegates to [`crate::repo::get_tool_path`] — the canonical
+    /// env-var override every other docker-invocation site in forge
+    /// honors (`commands/local.rs` five spawns 1a984dd,
+    /// `infrastructure/docker.rs::find_first_image_id_by_name` /
+    /// `..._async`).
+    ///
+    /// Pre-lift this module carried fourteen real `docker` spawn sites:
+    /// `cleanup_testcontainers` `docker ps` + `docker rm -f` (testcontainer
+    /// class); `cleanup_testcontainers` ryuk-sidecar `docker ps` +
+    /// `docker rm -f`; `cleanup_e2e_images` `docker rmi -f <image>` +
+    /// `docker image prune -f`; `verify_docker` `docker info`;
+    /// `build_and_load_image` piped `docker load`; `print_image_info`
+    /// `docker images --format`; `print_failure_diagnostics` `docker ps`
+    /// (running) + `docker ps -a --status=exited --since=15m` +
+    /// `docker images` (E2E-image slice); `ensure_docker_running`
+    /// `docker info` and its retry-poll `docker info`. Every one of
+    /// those spawns spelled `Command::new("docker")` verbatim,
+    /// bypassing `DOCKER_BIN` at exactly the moment hermetic-runner
+    /// consistency matters most — the surface `forge test`, `forge
+    /// e2e-run`, `forge e2e-prepare`, and `forge e2e-cleanup` invoke to
+    /// build, load, run, tear down, and diagnose the very containers
+    /// the E2E tier trusts. A Nix-hermetic runner with a store-path
+    /// `docker` binary silently fell through to whatever `docker` was
+    /// first on `PATH` at each site, diverging from every other
+    /// docker-invocation surface in forge and from the sibling
+    /// KUBECTL_BIN / GIT_BIN / CARGO / NIX_BIN / HELM_BIN frontier's
+    /// uniform discipline.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\n` marker in source order,
+    /// which lands at the sibling `resolve_repo_root_git_bin_routing_tests`
+    /// block near the end of the module body) so this shield's own
+    /// docstring mentions of `Command::new("docker")` — living in a
+    /// `#[cfg(test)]` block below that first marker — stay out of scope
+    /// AND every current or future docker-spawning helper landing
+    /// anywhere in the top-level module body cannot silently ride
+    /// along without going through `docker_bin()`. Mirrors the sibling
+    /// whole-module shields on `commands/local.rs` (1a984dd),
+    /// `commands/migrations.rs` (946e573), `commands/crossplane.rs`
+    /// (ee50c0e), `commands/status.rs` (c2760df), `commands/flux.rs`
+    /// (f8da719), and this same module's `nix_bin_routing_tests`
+    /// sibling above — the whole-module-boundary scan discipline
+    /// pioneered on `commands/supergraph_verification.rs` (65283fb).
+    #[test]
+    fn test_e2e_routes_docker_through_docker_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("e2e.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "e2e.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"docker\")"),
+            "commands/e2e.rs must not spawn `docker` via the bare \
+             literal — every `docker` spawn must resolve `DOCKER_BIN` \
+             via `docker_bin()` first. A raw `Command::new(\"docker\")` \
+             bypasses the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("Command::new(docker_bin())"),
+            "commands/e2e.rs must resolve the docker binary via \
+             `Command::new(docker_bin())` — the canonical delegation \
+             was not found in the module body."
+        );
+        assert!(
+            body.contains("fn docker_bin()"),
+            "commands/e2e.rs must define the `docker_bin` sigil — the \
+             one bridge between this module's docker spawns and the \
+             substrate-exported `DOCKER_BIN` env override."
         );
     }
 }
