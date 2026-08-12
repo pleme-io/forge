@@ -17,6 +17,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{debug, info, warn};
 
+/// Resolve the `jsonnet` binary path via `JSONNET_BIN`, falling back to
+/// `jsonnet` on `PATH`. Wired through [`crate::tools::get_tool_path`] so
+/// a Nix-hermetic runner's substrate-derived `jsonnet` path lands at
+/// every jsonnet-spawning site in this module. Mirrors the sibling
+/// `commands/rebac_validation.rs::redis_cli_bin` (9aed883) and
+/// `commands/infra.rs::docker_bin` (7f49465) sigil discipline: the one
+/// bridge between the forge dashboards-generation surface and the
+/// substrate-`mkRuntimeToolsEnv`-exported binary path. Pre-lift the
+/// single `Command::new` site in `run_jsonnet` spelled the bare
+/// `"jsonnet"` literal verbatim, ignoring `JSONNET_BIN` — a
+/// Nix-hermetic runner's substrate-derived jsonnet path lost to
+/// whatever `jsonnet` sat first on PATH.
+fn jsonnet_bin() -> String {
+    crate::tools::get_tool_path("jsonnet")
+}
+
 /// Configuration for dashboard generation
 #[derive(Debug, Clone)]
 pub struct DashboardConfig {
@@ -346,8 +362,8 @@ fn run_jsonnet(config: &DashboardConfig) -> Result<HashMap<String, serde_json::V
         return generate_builtin_dashboards(config);
     }
 
-    // Run jsonnet command
-    let output = Command::new("jsonnet")
+    let jsonnet = jsonnet_bin();
+    let output = Command::new(&jsonnet)
         .arg("-J")
         .arg(templates_dir.join("vendor"))
         .arg(&main_jsonnet)
@@ -680,4 +696,64 @@ fn generate_kustomization(dashboards: &HashMap<String, serde_json::Value>) -> se
             "oac.nexus.io/generated": "true"
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw `"jsonnet"`-literal spawn may live in
+    /// `commands/dashboards.rs`. Every jsonnet spawn must resolve
+    /// `JSONNET_BIN` via [`super::jsonnet_bin`] first.
+    ///
+    /// Pre-lift the single `Command::new` site in `run_jsonnet` — the
+    /// dashboard-templates renderer that reads `dashboards.jsonnet` from
+    /// the product's `observability_scripts` dir — spelled the bare
+    /// `"jsonnet"` literal verbatim, ignoring `JSONNET_BIN`. A
+    /// Nix-hermetic runner's substrate-derived jsonnet path lost to
+    /// whatever `jsonnet` sat first on PATH — the same silent-PATH-
+    /// fallback bug class the sibling
+    /// `commands/rebac_validation.rs::test_redis_cli_spawns_route_through_redis_cli_bin_not_raw_literal`
+    /// shield (9aed883) and `commands/infra.rs::docker_bin_routing_tests`
+    /// shield (7f49465) closed for their surfaces.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape. The forbidden shape is
+    /// reconstructed via [`format!`] so this shield's own source text
+    /// does not false-match itself — the whole-module scan therefore
+    /// covers both the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block (any of which could otherwise silently re-
+    /// introduce a raw literal). The end-to-end `JSONNET_BIN`-routing
+    /// invariant of the underlying primitive is pinned separately by
+    /// [`crate::tools::tests::test_get_tool_path_from_env`] /
+    /// [`crate::tools::tests::test_get_tool_path_fallback`]; this
+    /// shield only certifies that every jsonnet-spawning site in this
+    /// module reads through `jsonnet_bin()`.
+    #[test]
+    fn test_jsonnet_spawn_routes_through_jsonnet_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("dashboards.rs");
+
+        let bare = "jsonnet";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/dashboards.rs must not spawn `jsonnet` via the \
+             bare literal — every jsonnet spawn must resolve \
+             `JSONNET_BIN` via `jsonnet_bin()` first. A raw literal \
+             at `Command::new` bypasses the hermetic-runner contract \
+             substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            SOURCE.contains("fn jsonnet_bin()"),
+            "commands/dashboards.rs must define `jsonnet_bin()` — the \
+             sigil function that resolves the tools-registry \
+             `JSONNET_BIN` override for every jsonnet spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::tools::get_tool_path(\"jsonnet\")"),
+            "`jsonnet_bin()` must delegate to \
+             `crate::tools::get_tool_path(\"jsonnet\")` — the canonical \
+             lookup was not found in the module. A regression here \
+             would silently downgrade to the PATH fallback."
+        );
+    }
 }
