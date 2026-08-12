@@ -104,7 +104,8 @@ impl RegistryCredentials {
     }
 
     fn try_gh_cli_token() -> Option<String> {
-        std::process::Command::new("gh")
+        let gh = get_tool_path("GH_BIN", "gh");
+        std::process::Command::new(&gh)
             .args(["auth", "token"])
             .output()
             .ok()
@@ -879,5 +880,56 @@ mod tests {
             }
             other => panic!("expected PushFailed, got: {other:?}"),
         }
+    }
+
+    /// Whole-module shield: no `Command::new`-with-bare-`gh`-literal
+    /// may live in `infrastructure/registry.rs`. Every `gh` spawn must
+    /// resolve `GH_BIN` via [`crate::repo::get_tool_path`] first.
+    ///
+    /// Pre-lift the sole `gh` spawn site — `try_gh_cli_token`'s
+    /// `gh auth token` fetch on the GHCR-credential-discovery path —
+    /// spelled the bare `"gh"` literal verbatim, ignoring `GH_BIN` at
+    /// the site. A Nix-hermetic runner's substrate-derived `gh` path
+    /// was lost to whatever `gh` sat first on PATH — the same silent-
+    /// PATH-fallback bug class the sibling `DOCA_BIN` / `REGCTL_BIN`
+    /// lookups in this file already avoid, and the discipline the
+    /// sibling `docker` / `kubectl` / `nix` / `git` / `helm` /
+    /// `crossplane` / `flux` / `attic` / `redis-cli` surfaces
+    /// converged on across the prior claude-routine commits.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape. The forbidden shape is
+    /// reconstructed via [`format!`] so this shield's own source text
+    /// does not false-match itself — the whole-module scan therefore
+    /// covers both the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block (any of which could otherwise silently re-
+    /// introduce a raw literal). The end-to-end `GH_BIN`-routing
+    /// invariant of the underlying primitive is pinned separately by
+    /// [`crate::repo::test_get_tool_path_with_env`]; this shield only
+    /// certifies that every `gh`-spawning site in this module resolves
+    /// through the `get_tool_path` canonical lookup first.
+    #[test]
+    fn test_gh_spawn_routes_through_gh_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("registry.rs");
+
+        let bare = "gh";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "infrastructure/registry.rs must not spawn `gh` via the \
+             bare literal — every `gh` spawn must resolve the \
+             substrate-exported `GH_BIN` env override via \
+             `get_tool_path` first. A raw literal at `Command::new` \
+             bypasses the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports."
+        );
+        let sigil = format!("get_tool_path(\"GH_BIN\", \"{}\")", bare);
+        assert!(
+            SOURCE.contains(&sigil),
+            "infrastructure/registry.rs must resolve the `gh` binary \
+             via the two-argument `get_tool_path(\"GH_BIN\", \"gh\")` \
+             lookup — the canonical form was not found in the module."
+        );
     }
 }
