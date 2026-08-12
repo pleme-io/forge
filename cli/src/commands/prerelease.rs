@@ -52,6 +52,25 @@ use super::frontend_validation;
 use super::e2e;
 use super::migration_validation;
 
+/// Resolve the `docker` binary path via `DOCKER_BIN`, falling back to
+/// `docker` on `PATH`. Wired through [`crate::tools::get_tool_path`] so a
+/// Nix-hermetic runner's substrate-derived `DOCKER_BIN` lands at every
+/// docker-spawning site in this module. Mirrors the sibling `docker_bin`
+/// sigils in `commands/local.rs`, `commands/infra.rs`,
+/// `commands/e2e.rs`, and `infrastructure/docker.rs` — the one bridge
+/// between the forge pre-release-gate surface and the substrate-
+/// `mkRuntimeToolsEnv`-exported binary path. Pre-lift the three
+/// `std::process::Command` spawns inside `print_e2e_diagnostics`
+/// (docker ps / docker ps -a exited / docker images) each spelled
+/// the bare tool-name literal, so a Nix-hermetic runner's substrate-
+/// derived docker path lost to whatever `docker` was first on `PATH`
+/// at diagnostics time — silently redirecting an engineer chasing an
+/// E2E flake to a different daemon's container list than the one the
+/// failing test actually spawned against.
+fn docker_bin() -> String {
+    crate::tools::get_tool_path(crate::tools::tools::DOCKER)
+}
+
 /// Configuration for the pre-release validation
 #[derive(Debug, Clone)]
 pub struct PreReleaseConfig {
@@ -893,7 +912,7 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
     // Docker containers still running
     println!("\n   Docker containers (running):");
-    if let Ok(output) = std::process::Command::new("docker")
+    if let Ok(output) = std::process::Command::new(docker_bin())
         .args(["ps", "--format", "     {{.Names}}\t{{.Status}}\t{{.Ports}}"])
         .output()
     {
@@ -907,7 +926,7 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
     // Recently exited containers
     println!("\n   Docker containers (recently exited):");
-    if let Ok(output) = std::process::Command::new("docker")
+    if let Ok(output) = std::process::Command::new(docker_bin())
         .args([
             "ps", "-a",
             "--filter", "status=exited",
@@ -926,7 +945,7 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
     // E2E images
     println!("\n   E2E Docker images:");
-    if let Ok(output) = std::process::Command::new("docker")
+    if let Ok(output) = std::process::Command::new(docker_bin())
         .args(["images", "--format", "     {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.ID}}"])
         .output()
     {
@@ -1652,5 +1671,88 @@ mod tests {
         assert!(config.fail_on_error);
         assert!(config.integration.enabled);
         assert!(config.e2e.enabled);
+    }
+
+    /// Whole-module shield: no raw `docker`-literal spawn may live in
+    /// `commands/prerelease.rs`. Every docker spawn must resolve
+    /// `DOCKER_BIN` via [`super::docker_bin`] first.
+    ///
+    /// Pre-lift the three `std::process::Command` sites inside
+    /// `print_e2e_diagnostics` (docker ps / docker ps -a exited /
+    /// docker images) each spelled the bare tool-name literal,
+    /// ignoring `DOCKER_BIN` at every site — a Nix-hermetic runner's
+    /// substrate-derived docker path lost to whatever `docker` was
+    /// first on PATH, so an engineer chasing an E2E flake saw a
+    /// different daemon's container list than the one the failing
+    /// test actually spawned against.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare
+    /// `Command::new(...)`, and the `tokio::process::Command::new(...)`
+    /// long form). The forbidden shapes are reconstructed via
+    /// [`format!`] so this shield's own source text does not
+    /// false-match itself — the whole-module scan therefore covers
+    /// both the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block (any of which could otherwise silently
+    /// re-introduce a raw literal — the most likely growth site as
+    /// new diagnostics stanzas land in the pre-release-gate surface).
+    /// Also asserts the canonical
+    /// `crate::tools::get_tool_path(crate::tools::tools::DOCKER)`
+    /// delegation form is present so the sigil-body itself cannot
+    /// silently drift away from the substrate-exported env-var
+    /// contract.
+    ///
+    /// The end-to-end `DOCKER_BIN`-routing invariant of the underlying
+    /// primitive is pinned separately by
+    /// [`crate::tools::tests::test_get_tool_path_from_env`] and
+    /// [`crate::tools::tests::test_get_tool_path_fallback`]; this
+    /// shield only certifies that every docker-spawning site in this
+    /// module reads through `docker_bin()`.
+    #[test]
+    fn test_docker_spawn_routes_through_docker_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("prerelease.rs");
+
+        let bare = "docker";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/prerelease.rs must not spawn `docker` via the \
+             bare literal — every docker spawn must resolve \
+             `DOCKER_BIN` via `docker_bin()` first. A raw literal at \
+             `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/prerelease.rs must not spawn `docker` via the \
+             bare literal — every docker spawn must resolve \
+             `DOCKER_BIN` via `docker_bin()` first. A raw literal at \
+             `Command::new` (either the top-level `use` alias or the \
+             bare form) bypasses the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/prerelease.rs must not spawn `docker` via the \
+             bare literal — every docker spawn must resolve \
+             `DOCKER_BIN` via `docker_bin()` first. A raw literal at \
+             `tokio::process::Command::new` bypasses the \
+             hermetic-runner contract."
+        );
+        assert!(
+            SOURCE.contains("fn docker_bin()"),
+            "commands/prerelease.rs must define `docker_bin()` — the \
+             sigil function that resolves the tools-registry \
+             `DOCKER_BIN` override for every docker spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::tools::get_tool_path(crate::tools::tools::DOCKER)"),
+            "`docker_bin()` must delegate to \
+             `crate::tools::get_tool_path(crate::tools::tools::DOCKER)` \
+             — the canonical lookup was not found in the module."
+        );
     }
 }
