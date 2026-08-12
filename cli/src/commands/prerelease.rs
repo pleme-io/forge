@@ -71,6 +71,38 @@ fn docker_bin() -> String {
     crate::tools::get_tool_path(crate::tools::tools::DOCKER)
 }
 
+/// Resolve the `cargo` binary path via `CARGO`, falling back to `cargo`
+/// on `PATH`. Wired through [`crate::repo::get_tool_path`] — the two-arg
+/// form, because the substrate-exported override for cargo is the
+/// unadorned `CARGO` var (the same var Cargo itself honors when a
+/// wrapping cargo binary re-invokes cargo), not the derived
+/// `CARGO_BIN`. Mirrors the sibling `docker_bin` above and the same
+/// idiom every cargo-invocation site in forge honors
+/// (`commands/test_ci.rs` per e1677d3, `commands/developer_tools.rs`
+/// per 8687093, `commands/comprehensive_release.rs` per f95d541,
+/// `commands/bootstrap.rs:639`, `commands/pangea.rs:473`,
+/// `graphql_schema.rs:193`; the doc-comment idiom lives at
+/// `repo.rs:92`).
+///
+/// Pre-lift the seven consumer sites — `run_integration_tests` at
+/// the integration-gate cargo-test spawn, `run_e2e_tests` at the
+/// E2E-gate cargo-test spawn, `run_cargo_check` (G1), `run_cargo_clippy`
+/// (G2), `run_cargo_fmt_check` (G3 fix + G3 --check), and
+/// `run_cargo_test` (G4) — each spelled the bare-literal
+/// `Command::new(<bare>)` shape verbatim, ignoring `CARGO` at every
+/// one. A Nix-hermetic runner with a
+/// store-path `cargo` binary silently fell through to whatever `cargo`
+/// was first on PATH at these seven sites specifically — every
+/// pre-release-gate verdict (G1–G4, G13, G14) was attributed to
+/// whichever `cargo` PATH resolved first, not to the substrate-pinned
+/// cargo derivation the flake declared. Same silent-PATH-fallback bug
+/// class the sibling `CARGO` lifts (e1677d3 / 8687093 / f95d541) and
+/// the `DOCKER_BIN` / `KUBECTL_BIN` / `GIT_BIN` migrations closed on
+/// their respective spawn surfaces.
+fn cargo_bin() -> String {
+    crate::repo::get_tool_path("CARGO", "cargo")
+}
+
 /// Configuration for the pre-release validation
 #[derive(Debug, Clone)]
 pub struct PreReleaseConfig {
@@ -844,9 +876,10 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
     }
 
     let timeout_secs = config.gates.integration.timeout_secs;
+    let cargo = cargo_bin();
     let output = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        Command::new("cargo")
+        Command::new(&cargo)
             .args([
                 "test",
                 "--test",
@@ -1025,7 +1058,8 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
     let headless = config.gates.e2e.headless;
     let timeout_secs = config.gates.e2e.timeout_secs;
 
-    let mut cmd = Command::new("cargo");
+    let cargo = cargo_bin();
+    let mut cmd = Command::new(&cargo);
     cmd.args([
             "test",
             "--test",
@@ -1166,7 +1200,8 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
 
     // Check lib and bins only (not tests) - consistent with clippy
     // Test targets require test-helpers feature and are validated separately
-    let output = Command::new("cargo")
+    let cargo = cargo_bin();
+    let output = Command::new(&cargo)
         .args(["check", "--lib", "--bins"])
         .current_dir(backend_dir)
         .output()
@@ -1206,7 +1241,8 @@ async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
 
     // Check lib and bins only (not tests) - test dead code warnings are expected
     // since GraphQL types aren't constructed directly in test code
-    let output = Command::new("cargo")
+    let cargo = cargo_bin();
+    let output = Command::new(&cargo)
         .args(["clippy", "--lib", "--bins", "--", "-D", "warnings"])
         .current_dir(backend_dir)
         .output()
@@ -1248,7 +1284,8 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
     let start = Instant::now();
 
     // First, auto-fix formatting
-    let fix_output = Command::new("cargo")
+    let cargo = cargo_bin();
+    let fix_output = Command::new(&cargo)
         .args(["fmt"])
         .current_dir(backend_dir)
         .output()
@@ -1269,7 +1306,7 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
     }
 
     // Then verify with --check (should always pass after auto-fix)
-    let check_output = Command::new("cargo")
+    let check_output = Command::new(&cargo)
         .args(["fmt", "--", "--check"])
         .current_dir(backend_dir)
         .output()
@@ -1311,7 +1348,8 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
     println!("{}", "G4: cargo test".bold());
     let start = Instant::now();
 
-    let output = Command::new("cargo")
+    let cargo = cargo_bin();
+    let output = Command::new(&cargo)
         .args(["test", "--lib", "--bins"])
         .current_dir(backend_dir)
         .output()
@@ -1753,6 +1791,94 @@ mod tests {
             "`docker_bin()` must delegate to \
              `crate::tools::get_tool_path(crate::tools::tools::DOCKER)` \
              — the canonical lookup was not found in the module."
+        );
+    }
+
+    /// Whole-module shield: no raw `cargo`-literal spawn may live in
+    /// `commands/prerelease.rs`. Every `cargo` spawn must resolve
+    /// `CARGO` via [`super::cargo_bin`] first — the canonical env-var
+    /// override every sibling cargo-invocation site in forge honors
+    /// (`commands/test_ci.rs` per e1677d3, `commands/developer_tools.rs`
+    /// per 8687093, `commands/comprehensive_release.rs` per f95d541,
+    /// `commands/bootstrap.rs:639`, `commands/pangea.rs:473`,
+    /// `graphql_schema.rs:193`; the doc-comment idiom lives at
+    /// `repo.rs:92`).
+    ///
+    /// Pre-lift each of the seven consumer sites — `run_integration_tests`
+    /// (G13 integration-gate cargo-test spawn), `run_e2e_tests` (G14
+    /// E2E-gate cargo-test spawn), `run_cargo_check` (G1),
+    /// `run_cargo_clippy` (G2), `run_cargo_fmt_check` (G3 fix + G3
+    /// --check), and `run_cargo_test` (G4) — spelled the bare-literal
+    /// `Command::new(<bare>)` shape verbatim and ignored `CARGO`.
+    /// Pre-release
+    /// gates are invoked from `product-sdlc.nix` under a hermetic-runner
+    /// sandbox that exports `CARGO=/nix/store/...-cargo/bin/cargo`;
+    /// pre-lift each verdict (G1–G4, G13, G14) was attributed to whichever
+    /// `cargo` the wrapper's PATH found first, not to the substrate-pinned
+    /// cargo derivation the flake declared. Same silent-PATH-fallback bug
+    /// class the `test_ci.rs` / `developer_tools.rs` /
+    /// `comprehensive_release.rs` CARGO lifts (e1677d3 / 8687093 /
+    /// f95d541) closed on their respective spawn surfaces.
+    ///
+    /// This shield scans the module's own source via [`include_str!`] and
+    /// forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare `Command::new(...)`,
+    /// and the `tokio::process::Command::new(...)` long form). The
+    /// forbidden shapes are reconstructed via [`format!`] so this
+    /// shield's own source text does not false-match itself — the
+    /// whole-module scan therefore covers both the top-of-file
+    /// production body AND every sibling `#[cfg(test)]` block (any of
+    /// which could otherwise silently re-introduce a raw literal — the
+    /// most likely growth site as new gate stanzas land in the
+    /// pre-release-gate surface). Also asserts the canonical
+    /// `crate::repo::get_tool_path("CARGO", "cargo")` delegation form is
+    /// present so the sigil-body itself cannot silently drift away from
+    /// the substrate-exported env-var contract. Mirrors the sibling
+    /// docker-literal shield above.
+    #[test]
+    fn test_cargo_spawn_routes_through_cargo_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("prerelease.rs");
+
+        let bare = "cargo";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/prerelease.rs must not spawn `cargo` via the \
+             bare literal — every cargo spawn must resolve `CARGO` via \
+             `cargo_bin()` first. A raw literal at \
+             `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/prerelease.rs must not spawn `cargo` via the \
+             bare literal — every cargo spawn must resolve `CARGO` via \
+             `cargo_bin()` first. A raw literal at `Command::new` \
+             (either the top-level `use` alias or the bare form) \
+             bypasses the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/prerelease.rs must not spawn `cargo` via the \
+             bare literal — every cargo spawn must resolve `CARGO` via \
+             `cargo_bin()` first. A raw literal at \
+             `tokio::process::Command::new` bypasses the \
+             hermetic-runner contract."
+        );
+        assert!(
+            SOURCE.contains("fn cargo_bin()"),
+            "commands/prerelease.rs must define `cargo_bin()` — the \
+             sigil function that resolves the `CARGO` override for \
+             every cargo spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::repo::get_tool_path(\"CARGO\", \"cargo\")"),
+            "`cargo_bin()` must delegate to \
+             `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` — the \
+             canonical lookup was not found in the module."
         );
     }
 }
