@@ -91,12 +91,19 @@ use crate::tools::{get_tool_path, tools};
 ///   conditions jsonpath, `-o wide` pod listing, container-state
 ///   jsonpath, waiting/terminated-reason jsonpath, deployment-
 ///   scoped events, namespace-wide pod events), migrated at
-///   this commit. First lift onto a module that had no prior
+///   f8da719. First lift onto a module that had no prior
 ///   `#[cfg(test)]` block; the shield adds the block itself
 ///   and bounds the include_str! scan by the same
 ///   `\n#[cfg(test)]\nmod tests {` marker discipline the
 ///   status.rs (c2760df) and supergraph_verification.rs
 ///   (65283fb) shields hold.
+/// - `commands/rollout.rs::execute` — one site, the
+///   `kubectl rollout undo deployment/<name> -n <ns>` step on
+///   the `--rollback` branch of `forge rollout`, migrated at
+///   this commit. Single-spawn module; the shield is a
+///   whole-module include_str! scan (no marker narrowing
+///   needed — the module has no sibling kubectl-spawning
+///   helpers to bound around).
 ///
 /// Pre-lift each of these sites spelled the bare literal
 /// `Command::new("kubectl")` — the exact class of bug the `flux` /
@@ -117,6 +124,9 @@ use crate::tools::{get_tool_path, tools};
 /// living in pin-only production paths (`pod_health.rs`,
 /// `pod_listing.rs`, `network_policy_admission.rs`,
 /// `flux_source_verification.rs`, `helm_release_signature.rs`).
+/// The `rollout.rs::execute` entry above closes the last raw
+/// `Command::new("kubectl")` on the `commands/rollout.rs`
+/// surface.
 pub fn kubectl_command_async() -> tokio::process::Command {
     tokio::process::Command::new(get_tool_path(tools::KUBECTL))
 }

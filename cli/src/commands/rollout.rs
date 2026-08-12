@@ -1,9 +1,9 @@
 use anyhow::Result;
 use colored::Colorize;
 use std::collections::HashMap;
-use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
+use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::k8s;
 
 #[derive(Clone, Debug)]
@@ -29,7 +29,7 @@ pub async fn execute(
         info!("   Deployment: {}", name);
         println!();
 
-        let rollback_result = Command::new("kubectl")
+        let rollback_result = kubectl_command_async()
             .args(&[
                 "rollout",
                 "undo",
@@ -478,5 +478,64 @@ mod tests {
                 "malformed input {bad:?} must be echoed in the error: {err}"
             );
         }
+    }
+
+    /// Whole-module shield: no raw `Command::new`-with-bare-`kubectl`-
+    /// literal may live in `commands/rollout.rs`. Every `kubectl`
+    /// spawn on this module's `execute` rollback path must resolve
+    /// through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`] —
+    /// the async constructor that reads the `KUBECTL_BIN` env
+    /// override via [`crate::tools::get_tool_path`] on the canonical
+    /// `tools::KUBECTL` name.
+    ///
+    /// Pre-lift the sole `kubectl` spawn — `execute`'s
+    /// `kubectl rollout undo deployment/<name> -n <ns>` step on the
+    /// `--rollback` branch — spelled the bare `"kubectl"` literal
+    /// verbatim, ignoring `KUBECTL_BIN` at the site. A Nix-hermetic
+    /// runner's substrate-derived `kubectl` path was lost to
+    /// whatever `kubectl` sat first on PATH — the same silent-PATH-
+    /// fallback bug class the sibling ten async-consumer sites in
+    /// forge already avoid (`product_release::run_health_check`,
+    /// `github_runner_ci::execute`, `services/migration_service`,
+    /// `supergraph_verification`, `commands/status`, `commands/flux`,
+    /// `commands/migrations`, `commands/federation_tests`,
+    /// `commands/e2e`, and the tools-registry-idiom sibling
+    /// consumers the recent claude-routine commits converged on).
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape. The forbidden shape is
+    /// reconstructed via [`format!`] so this shield's own source text
+    /// does not false-match itself — the whole-module scan therefore
+    /// covers both the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block (any of which could otherwise silently
+    /// re-introduce a raw literal). The end-to-end
+    /// `KUBECTL_BIN`-routing invariant of the underlying primitive
+    /// is pinned separately by
+    /// [`crate::infrastructure::kubectl::tests::test_kubectl_command_async_routes_through_kubectl_bin_env_var`];
+    /// this shield only certifies that every `kubectl`-spawning site
+    /// in this module resolves through the constructor first.
+    #[test]
+    fn test_kubectl_spawn_routes_through_kubectl_command_async_not_raw_literal() {
+        const SOURCE: &str = include_str!("rollout.rs");
+
+        let bare = "kubectl";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/rollout.rs must not spawn `kubectl` via the \
+             bare literal — every `kubectl` spawn must resolve the \
+             substrate-exported `KUBECTL_BIN` env override via \
+             `kubectl_command_async` first. A raw literal at \
+             `Command::new` bypasses the hermetic-runner contract \
+             substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            SOURCE.contains("kubectl_command_async()"),
+            "commands/rollout.rs must resolve the `kubectl` binary \
+             via the canonical `kubectl_command_async()` constructor \
+             — the required form was not found in the module."
+        );
     }
 }
