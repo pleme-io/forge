@@ -15,6 +15,23 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::process::Command;
 
+/// Resolve the `redis-cli` binary path via `REDIS_CLI_BIN`, falling back to
+/// `redis-cli` on `PATH`. Wired through [`crate::tools::get_tool_path`] —
+/// which canonicalizes the dash-bearing tool name to the shell-safe
+/// `REDIS_CLI_BIN` env var — so a Nix-hermetic runner's substrate-derived
+/// `redis-cli` path lands at every redis-cli-spawning site in this module.
+/// Mirrors the sibling `commands/infra.rs::docker_bin` (7f49465) sigil
+/// discipline: the one bridge between the forge rebac-validation surface
+/// and the substrate-`mkRuntimeToolsEnv`-exported binary path. Pre-lift
+/// the three `Command::new` sites in `check_redis_connectivity`
+/// (`ping`, `KEYS <prefix>:rel:*`, `KEYS <prefix>:perm:*`) each spelled
+/// the bare `"redis-cli"` literal verbatim, ignoring `REDIS_CLI_BIN` at
+/// every site — a Nix-hermetic runner's substrate-derived redis-cli path
+/// lost to whatever `redis-cli` sat first on PATH.
+fn redis_cli_bin() -> String {
+    crate::tools::get_tool_path("redis-cli")
+}
+
 /// Configuration for ReBAC validation
 #[derive(Debug, Clone)]
 pub struct RebacValidationConfig {
@@ -490,7 +507,8 @@ async fn check_redis_connectivity(
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
     // Try to ping Redis
-    let output = Command::new("redis-cli")
+    let redis_cli = redis_cli_bin();
+    let output = Command::new(&redis_cli)
         .args(["-u", &redis_url, "ping"])
         .output()
         .await;
@@ -506,7 +524,7 @@ async fn check_redis_connectivity(
 
             // Count keys
             let rel_glob = format!("{}:rel:*", config.redis_key_prefix);
-            let keys_output = Command::new("redis-cli")
+            let keys_output = Command::new(&redis_cli)
                 .args(["-u", &redis_url, "KEYS", &rel_glob])
                 .output()
                 .await;
@@ -522,7 +540,7 @@ async fn check_redis_connectivity(
             }
 
             let perm_glob = format!("{}:perm:*", config.redis_key_prefix);
-            let perm_output = Command::new("redis-cli")
+            let perm_output = Command::new(&redis_cli)
                 .args(["-u", &redis_url, "KEYS", &perm_glob])
                 .output()
                 .await;
@@ -752,5 +770,62 @@ mod tests {
         );
         assert_eq!(config2.backend_dir, None);
         assert_eq!(config2.docs_dir, None);
+    }
+
+    /// Whole-module shield: no raw `"redis-cli"`-literal spawn may live in
+    /// `commands/rebac_validation.rs`. Every redis-cli spawn must resolve
+    /// `REDIS_CLI_BIN` via [`super::redis_cli_bin`] first.
+    ///
+    /// Pre-lift the three `Command::new` sites in
+    /// `check_redis_connectivity` — the `ping` probe, the `KEYS
+    /// <prefix>:rel:*` scan, and the `KEYS <prefix>:perm:*` scan — each
+    /// spelled the bare `"redis-cli"` literal verbatim, ignoring
+    /// `REDIS_CLI_BIN` at every site. A Nix-hermetic runner's substrate-
+    /// derived redis-cli path lost to whatever `redis-cli` sat first on
+    /// PATH — the same silent-PATH-fallback bug class the sibling
+    /// `commands/infra.rs::docker_bin_routing_tests` shield (7f49465)
+    /// closed for the docker surface.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape. The forbidden shape is
+    /// reconstructed via [`format!`] so this shield's own source text
+    /// does not false-match itself — the whole-module scan therefore
+    /// covers both the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block (any of which could otherwise silently re-
+    /// introduce a raw literal). The end-to-end `REDIS_CLI_BIN`-routing
+    /// invariant of the underlying primitive is pinned separately by
+    /// [`crate::tools::tests::test_get_tool_path_canonicalizes_single_dash_to_underscore`];
+    /// this shield only certifies that every redis-cli-spawning site in
+    /// this module reads through `redis_cli_bin()`.
+    #[test]
+    fn test_redis_cli_spawns_route_through_redis_cli_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("rebac_validation.rs");
+
+        let bare = "redis-cli";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/rebac_validation.rs must not spawn `redis-cli` via \
+             the bare literal — every redis-cli spawn must resolve \
+             `REDIS_CLI_BIN` via `redis_cli_bin()` first. A raw literal \
+             at `Command::new` bypasses the hermetic-runner contract \
+             substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            SOURCE.contains("fn redis_cli_bin()"),
+            "commands/rebac_validation.rs must define `redis_cli_bin()` \
+             — the sigil function that resolves the tools-registry \
+             `REDIS_CLI_BIN` override for every redis-cli spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::tools::get_tool_path(\"redis-cli\")"),
+            "`redis_cli_bin()` must delegate to \
+             `crate::tools::get_tool_path(\"redis-cli\")` — the canonical \
+             lookup was not found in the module. The dash-bearing tool \
+             name is canonicalized to `REDIS_CLI_BIN` by the underlying \
+             primitive; a regression here would silently downgrade to \
+             the PATH fallback."
+        );
     }
 }
