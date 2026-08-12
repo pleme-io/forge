@@ -18,6 +18,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use tracing::info;
 
+use crate::tools::{get_tool_path, tools};
+
 const SEED_EMAIL_PREFIX: &str = "test-seed-";
 const PHOTOS_PER_PROFILE: u32 = 3;
 
@@ -65,8 +67,22 @@ fn env_config_from_product(product: &crate::config::ProductConfig, env: &str) ->
 }
 
 /// Execute SQL via kubectl exec into CNPG primary pod
+///
+/// The `kubectl` binary is resolved through
+/// [`crate::tools::get_tool_path`] on the canonical `tools::KUBECTL`
+/// name so a Nix-hermetic runner's `KUBECTL_BIN`-provided store-path
+/// `kubectl` reaches this stdin-fed sync spawn. Pre-lift the site
+/// spelled the bare `"kubectl"` literal at `Command::new` and
+/// silently resolved to whatever `kubectl` was first on `PATH` —
+/// the same class of bug the sibling `commands/rollout.rs::execute`
+/// migration (c5fcf83) redeemed on the last raw `kubectl` spawn on
+/// that module's surface. This site retains its sync
+/// `std::process::Command` + `.spawn()` shape because the seed SQL
+/// payload writes into `stdin` synchronously; the stdin-piping
+/// discipline is orthogonal to the binary-resolution lift.
 fn exec_psql(namespace: &str, pod: &str, db_name: &str, sql: &str) -> Result<String> {
-    let mut child = Command::new("kubectl")
+    let kubectl = get_tool_path(tools::KUBECTL);
+    let mut child = Command::new(&kubectl)
         .args([
             "exec",
             "-i",
@@ -123,10 +139,26 @@ fn exec_psql(namespace: &str, pod: &str, db_name: &str, sql: &str) -> Result<Str
 /// tuple `(cmd, args, exit_code, stderr)` THEORY §V.4 Phase 1
 /// attestation telemetry pattern-matches on is preserved by
 /// construction.
+///
+/// The `kubectl` binary name is resolved via
+/// [`crate::tools::get_tool_path`] on the canonical `tools::KUBECTL`
+/// name BEFORE it reaches `run_query_capture_sync`, because the
+/// primitive itself takes the tool as a bare `&str` and spawns it
+/// verbatim (retry.rs:13012-13018) — every consumer that wants the
+/// `KUBECTL_BIN`-or-PATH lookup discipline must pre-resolve at the
+/// call site. Pre-lift this site handed the primitive the bare
+/// `"kubectl"` literal and thereby bypassed the env override the
+/// sibling `exec_psql` (this module, migrated in the same commit)
+/// and the `commands/rollout.rs::execute` (c5fcf83), migrations
+/// listed on the `kubectl_command_async` doc block redeemed.
+/// Harmonizing the two sibling seed-module spawn surfaces closes
+/// the last raw `kubectl` name-resolution bypass on
+/// `commands/seed.rs`.
 fn find_primary_pod(namespace: &str, postgres_cluster: &str) -> Result<String> {
     let label = format!("cnpg.io/cluster={},role=primary", postgres_cluster);
+    let kubectl = get_tool_path(tools::KUBECTL);
     crate::retry::run_query_capture_sync(
-        "kubectl",
+        &kubectl,
         &[
             "get",
             "pod",
@@ -334,4 +366,111 @@ pub async fn unseed(working_dir: &Path, env: &str, dry_run: bool) -> Result<()> 
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw `Command::new`-with-bare-`kubectl`-
+    /// literal, and no bare-`kubectl`-literal-as-first-arg to
+    /// [`crate::retry::run_query_capture_sync`], may live in
+    /// `commands/seed.rs`'s non-test body. Every `kubectl` spawn on
+    /// this module's two entry points — [`exec_psql`] (sync
+    /// stdin-fed `std::process::Command` spawn) and
+    /// [`find_primary_pod`] (sync capture via `run_query_capture_sync`,
+    /// whose primitive body spawns the caller-supplied `&str` verbatim
+    /// via `std::process::Command::new(cmd)` per retry.rs:13012-13018
+    /// and therefore requires the caller to pre-resolve through
+    /// [`crate::tools::get_tool_path`] on the canonical
+    /// `tools::KUBECTL` name) MUST resolve the binary through
+    /// `KUBECTL_BIN` (or PATH) via
+    /// [`crate::tools::get_tool_path`] first.
+    ///
+    /// Pre-lift the two `kubectl` spawns spelled the bare `"kubectl"`
+    /// string verbatim: `exec_psql` at `Command::new`, `find_primary_pod`
+    /// at `run_query_capture_sync`'s first argument. Both silently
+    /// bypassed the substrate-exported `KUBECTL_BIN` env override the
+    /// tools-registry idiom (`crate::tools::get_tool_path(tools::KUBECTL)`,
+    /// cli/src/tools.rs:102-105) resolves — the same class of bug
+    /// the sibling `commands/migrations.rs` (946e573),
+    /// `commands/federation_tests.rs` (9a409e8),
+    /// `commands/rollout.rs::execute` (c5fcf83),
+    /// `commands/status.rs` (c2760df), `commands/flux.rs` (f8da719),
+    /// `commands/supergraph_verification.rs` (65283fb),
+    /// `commands/product_release.rs::run_health_check` (5bb7cff),
+    /// `commands/github_runner_ci.rs::execute` (5566415),
+    /// `services/migration_service.rs::MigrationService` (5986a10)
+    /// migrations redeemed. A Nix-hermetic runner whose `KUBECTL_BIN`
+    /// points at a specific store-path `kubectl` (substrate's
+    /// `mkRuntimeToolsEnv`) would lose to whatever `kubectl` is first
+    /// on `PATH` at every pre-lift site — the exact failure mode
+    /// `forge seed` / `forge unseed` on a staging cluster would hit
+    /// on a runner where two `kubectl` versions coexist.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts neither forbidden shape appears in the non-test
+    /// body while the canonical `get_tool_path(tools::KUBECTL)`
+    /// delegation does. Forbidden shapes are reconstructed via
+    /// [`format!`] so this shield's own docstring and body do not
+    /// false-match themselves. The scan is bounded strictly to the
+    /// module's non-test body — from the file start to the
+    /// `#[cfg(test)]` marker — so this shield's own text stays out of
+    /// scope AND every current or future kubectl-spawning helper
+    /// landing anywhere in the top-level module body (across the two
+    /// migrated entry points or any as-yet unadded sibling) is
+    /// covered by the same shield without a per-function narrowing.
+    /// Mirrors the whole-module boundary discipline the sibling
+    /// `commands/rollout.rs` shield (c5fcf83),
+    /// `commands/federation_tests.rs` shield (9a409e8),
+    /// `commands/status.rs` shield (c2760df), and
+    /// `commands/supergraph_verification.rs` shield (65283fb) hold.
+    ///
+    /// The end-to-end `KUBECTL_BIN`-routing invariant of the
+    /// underlying primitives is pinned separately by
+    /// [`crate::infrastructure::kubectl::tests::test_kubectl_command_async_routes_through_kubectl_bin_env_var`]
+    /// on the async surface and by
+    /// [`crate::tools::tests::test_get_tool_path_from_env`] on the
+    /// sync resolver; this shield only certifies that every
+    /// `kubectl`-spawning site in this module resolves through the
+    /// canonical resolver first.
+    #[test]
+    fn test_kubectl_spawns_resolve_through_tools_kubectl_not_bare_literal() {
+        const SOURCE: &str = include_str!("seed.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = SOURCE.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &SOURCE[..body_end];
+
+        let bare = "kubectl";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+        let bypass_primitive = format!("run_query_capture_sync(\n        \"{}\"", bare);
+
+        assert!(
+            !module_body.contains(&raw_command),
+            "commands/seed.rs must NOT spawn `kubectl` via the bare \
+             literal at `Command::new` — every `kubectl` spawn must \
+             resolve the substrate-exported `KUBECTL_BIN` env \
+             override via `get_tool_path(tools::KUBECTL)` first. \
+             A raw literal at `Command::new` bypasses the hermetic-\
+             runner contract substrate's `mkRuntimeToolsEnv` exports."
+        );
+        assert!(
+            !module_body.contains(&bypass_primitive),
+            "commands/seed.rs must NOT hand the bare `\"kubectl\"` \
+             literal to `run_query_capture_sync` as its first arg — \
+             the primitive spawns the caller-supplied `&str` verbatim \
+             via `std::process::Command::new(cmd)`, so every consumer \
+             must pre-resolve through `get_tool_path(tools::KUBECTL)` \
+             first. A bare literal at the primitive call site bypasses \
+             the `KUBECTL_BIN` env override every sibling site honors."
+        );
+        assert!(
+            module_body.contains("get_tool_path(tools::KUBECTL)"),
+            "commands/seed.rs must resolve the `kubectl` binary via \
+             the canonical `get_tool_path(tools::KUBECTL)` lookup — \
+             the required form was not found in the module body."
+        );
+    }
 }
