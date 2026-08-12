@@ -11,6 +11,25 @@ use std::time::SystemTime;
 use tokio::process::Command;
 use tracing::{debug, info};
 
+/// Resolve the `npm` binary path via `NPM_BIN`, falling back to `npm` on
+/// `PATH`. Wired through [`crate::tools::get_tool_path`] so a Nix-hermetic
+/// runner's substrate-derived `npm` path lands at every npm-spawning site
+/// in this module. Mirrors the sibling `commands/dashboards.rs::jsonnet_bin`
+/// (a826ac0), `commands/rebac_validation.rs::redis_cli_bin` (9aed883), and
+/// `commands/infra.rs::docker_bin` (7f49465) sigil discipline: the one
+/// bridge between the forge workspace-dependency build surface and the
+/// substrate-`mkRuntimeToolsEnv`-exported binary path. Pre-lift the two
+/// `Command::new` sites in `build_package` (`npm install --silent` and
+/// `npm run build --silent`) each spelled the bare `"npm"` literal
+/// verbatim, ignoring `NPM_BIN` — a Nix-hermetic runner's
+/// substrate-derived npm path lost to whatever `npm` sat first on PATH,
+/// so a workspace-dependency prebuild would silently invoke the wrong
+/// node/npm pair and cache the resulting `dist/` under the wrong
+/// toolchain fingerprint.
+fn npm_bin() -> String {
+    crate::tools::get_tool_path("npm")
+}
+
 /// Package state after checking
 #[derive(Debug)]
 enum PackageState {
@@ -227,8 +246,10 @@ fn get_newest_mtime(dir: &Path) -> Result<SystemTime> {
 async fn build_package(pkg: &WorkspacePackage) -> Result<()> {
     println!("   📦 Building {}...", pkg.name.bright_cyan());
 
+    let npm = npm_bin();
+
     // First, install dependencies
-    let install_status = Command::new("npm")
+    let install_status = Command::new(&npm)
         .args(["install", "--silent"])
         .current_dir(&pkg.path)
         .status()
@@ -247,7 +268,7 @@ async fn build_package(pkg: &WorkspacePackage) -> Result<()> {
     }
 
     // Then, build
-    let build_status = Command::new("npm")
+    let build_status = Command::new(&npm)
         .args(["run", "build", "--silent"])
         .current_dir(&pkg.path)
         .status()
@@ -268,4 +289,69 @@ async fn build_package(pkg: &WorkspacePackage) -> Result<()> {
     println!("   {} {} built successfully", "✓".bright_green(), pkg.name);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw `"npm"`-literal spawn may live in
+    /// `commands/workspace_deps.rs`. Every npm spawn must resolve
+    /// `NPM_BIN` via [`super::npm_bin`] first.
+    ///
+    /// Pre-lift the two `Command::new` sites in `build_package` — the
+    /// `npm install --silent` and `npm run build --silent` steps that
+    /// materialize each `@pleme/*` workspace package's `dist/` before a
+    /// pleme-linker consumer wires it into `node_modules` — each spelled
+    /// the bare `"npm"` literal verbatim, ignoring `NPM_BIN`. A
+    /// Nix-hermetic runner's substrate-derived npm path lost to
+    /// whatever `npm` sat first on PATH — the same silent-PATH-fallback
+    /// bug class the sibling `commands/dashboards.rs::jsonnet_bin`
+    /// shield (a826ac0), `commands/rebac_validation.rs::redis_cli_bin`
+    /// shield (9aed883), and `commands/infra.rs::docker_bin` shield
+    /// (7f49465) closed for their surfaces. The bug bites doubly here
+    /// because the resulting `dist/` bytes are then hashed into the
+    /// pleme-linker fingerprint that determines cache reuse — a wrong
+    /// npm (a wrong node runtime) silently poisons the workspace-
+    /// dependency layer of every subsequent Nix build.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape. The forbidden shape is
+    /// reconstructed via [`format!`] so this shield's own source text
+    /// does not false-match itself — the whole-module scan therefore
+    /// covers both the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block (any of which could otherwise silently re-
+    /// introduce a raw literal). The end-to-end `NPM_BIN`-routing
+    /// invariant of the underlying primitive is pinned separately by
+    /// [`crate::tools::tests::test_get_tool_path_from_env`] /
+    /// [`crate::tools::tests::test_get_tool_path_fallback`]; this
+    /// shield only certifies that every npm-spawning site in this
+    /// module reads through `npm_bin()`.
+    #[test]
+    fn test_npm_spawn_routes_through_npm_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("workspace_deps.rs");
+
+        let bare = "npm";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/workspace_deps.rs must not spawn `npm` via the \
+             bare literal — every npm spawn must resolve \
+             `NPM_BIN` via `npm_bin()` first. A raw literal at \
+             `Command::new` bypasses the hermetic-runner contract \
+             substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            SOURCE.contains("fn npm_bin()"),
+            "commands/workspace_deps.rs must define `npm_bin()` — the \
+             sigil function that resolves the tools-registry \
+             `NPM_BIN` override for every npm spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::tools::get_tool_path(\"npm\")"),
+            "`npm_bin()` must delegate to \
+             `crate::tools::get_tool_path(\"npm\")` — the canonical \
+             lookup was not found in the module. A regression here \
+             would silently downgrade to the PATH fallback."
+        );
+    }
 }
