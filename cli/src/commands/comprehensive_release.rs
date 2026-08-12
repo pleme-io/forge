@@ -137,7 +137,16 @@ pub async fn execute(
         spinner.set_message("Running cargo test --lib --bins...");
         spinner.enable_steady_tick(Duration::from_millis(100));
 
-        let test_result = Command::new("cargo")
+        // Resolve the `cargo` binary path via `CARGO`, falling back to
+        // `cargo` on `PATH`. Matches the sibling `CARGO` sigil
+        // discipline in `commands/test_ci.rs` (e1677d3) and
+        // `commands/developer_tools.rs` (8687093) — a Nix-hermetic
+        // runner's substrate-derived `CARGO` lands at the unit-test
+        // gate that decides whether the comprehensive release proceeds
+        // past Step 1/5.
+        let cargo = get_tool_path("CARGO", "cargo");
+
+        let test_result = Command::new(&cargo)
             .current_dir(&working_dir)
             .args(&["test", "--lib", "--bins", "--", "--show-output"])
             .env("RUST_LOG", "info")
@@ -399,7 +408,16 @@ pub async fn execute(
                 info!("🧪 Running integration tests...");
                 println!();
 
-                let integration_test_result = Command::new("cargo")
+                // Resolve the `cargo` binary path via `CARGO` for the
+                // integration-test spawn — shares the sibling sigil
+                // discipline of `commands/test_ci.rs` (e1677d3) and
+                // `commands/developer_tools.rs` (8687093) so the
+                // integration-test invocation and the unit-test
+                // invocation above both name the same substrate-derived
+                // cargo derivation on a Nix-hermetic runner.
+                let cargo = get_tool_path("CARGO", "cargo");
+
+                let integration_test_result = Command::new(&cargo)
                     .current_dir(&working_dir)
                     .args(&["test", "--test", "*", "--", "--ignored", "--test-threads=1"])
                     .env("RUST_LOG", "info")
@@ -719,6 +737,63 @@ mod tests {
             body.contains("get_tool_path(\"DOCKER_BIN\", \"docker\")"),
             "commands/comprehensive_release.rs must resolve the `docker` binary via \
              `get_tool_path(\"DOCKER_BIN\", \"docker\")` — the canonical lookup \
+             was not found in the module body."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("cargo")` may live in
+    /// this module's non-test body. Every `cargo` spawn in
+    /// `commands/comprehensive_release.rs` must first resolve `CARGO`
+    /// via [`crate::repo::get_tool_path`] — the canonical env-var
+    /// override idiom every sibling cargo-consuming surface honors
+    /// (`commands/test_ci.rs` four cargo sites at e1677d3;
+    /// `commands/developer_tools.rs` nine cargo sites at 8687093).
+    ///
+    /// Pre-lift the two consumer sites in `execute` — the Step 1/5
+    /// unit-test spawn (`cargo test --lib --bins`) and the Step 3/5
+    /// integration-test spawn (`cargo test --test * -- --ignored
+    /// --test-threads=1`) — each spelled `Command::new("cargo")`
+    /// verbatim, ignoring `CARGO` at both sites. A Nix-hermetic
+    /// runner with a store-path `cargo` binary silently fell through
+    /// to whatever `cargo` was first on PATH — the same
+    /// silent-PATH-fallback bug class the sibling `commands/test_ci.rs`
+    /// shield closed at e1677d3 and `commands/developer_tools.rs`
+    /// shield closed at 8687093, and the sibling `DOCKER_BIN` /
+    /// `DOCKER_COMPOSE_BIN` shields above closed for the docker
+    /// surface in this same file.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\nmod tests {` marker in
+    /// source order, which lands at the sibling docker-compose
+    /// shield's `#[cfg(test)] mod tests` opener at the top of this
+    /// block) so this shield's own docstring mentions of
+    /// `Command::new("cargo")` — living in a `#[cfg(test)]` block
+    /// below that first marker — stay out of scope AND every current
+    /// or future cargo-spawning helper landing anywhere in the
+    /// top-level module body cannot silently ride along without going
+    /// through `CARGO`. Mirrors the whole-module-boundary scan
+    /// discipline of the sibling docker / docker-compose shields
+    /// above and the lineage traced there.
+    #[test]
+    fn test_comprehensive_release_routes_cargo_through_cargo_env_not_raw_command() {
+        let source = include_str!("comprehensive_release.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "comprehensive_release.rs must have a `#[cfg(test)] mod tests {` marker \
+                     — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"cargo\")"),
+            "commands/comprehensive_release.rs must not spawn `cargo` via the bare literal — \
+             every `cargo` spawn must resolve `CARGO` via \
+             `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
+             A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"CARGO\", \"cargo\")"),
+            "commands/comprehensive_release.rs must resolve the `cargo` binary via \
+             `get_tool_path(\"CARGO\", \"cargo\")` — the canonical lookup \
              was not found in the module body."
         );
     }
