@@ -21,6 +21,44 @@ use crate::retry::run_inherited_status;
 use crate::config::DeployConfig;
 use crate::path_builder::PathBuilder;
 
+/// Resolve the `rover-fhs` binary path via `ROVER_FHS_BIN`, falling back to
+/// `rover-fhs` on `PATH`. Wired through [`crate::repo::get_tool_path`] with
+/// the derived-`_BIN`-suffix override — Apollo Rover's runtime already
+/// claims the unadorned `APOLLO_*` / `ROVER_*` env-var surface for its
+/// own config (`APOLLO_KEY`, `APOLLO_TELEMETRY_DISABLED`, `ROVER_HOME`,
+/// `ROVER_CONFIG_HOME`, `ROVER_INSECURE_UNSAFE_STDIN`, …), so a bare
+/// `ROVER_FHS` env-var export from substrate would sit next to the tool's
+/// own namespace and confuse review; the `_BIN`-suffix idiom honors the
+/// convention every substrate-exported tool with a name-collision-prone
+/// unadorned env honors (`ATTIC_BIN`, `GH_BIN`, `DOCA_BIN`, `KUBECTL_BIN`,
+/// `DOCKER_BIN`, `BUNDLE_BIN`, `INSPEC_BIN`, `GEM_BIN`). The one bridge
+/// between the supergraph-composition surface (`update_federation`) and
+/// the substrate-`mkRuntimeToolsEnv`-exported binary path.
+///
+/// `rover-fhs` is the FHS-environment wrapper substrate builds around the
+/// upstream `rover` release-binary so it can dynamically link against a
+/// system glibc from inside a pure-Nix closure (Apollo ships Rover as a
+/// dynamically-linked pre-built binary; a pure-Nix `rover` derivation
+/// would need to patchelf the whole download graph). Pre-lift the
+/// composition site (`update_federation`, `rover-fhs supergraph compose
+/// --config supergraph-config.yaml --elv2-license accept`) spelled the
+/// bare-literal tool-name form (a `Command::new` call with the tool name
+/// inline as a string) verbatim, ignoring `ROVER_FHS_BIN` at the exact
+/// gate where the supergraph-composition verdict is load-bearing:
+/// composition emits the pinned-federation-version supergraph schema
+/// every downstream Hive Router pod trusts as its query-plan input, and
+/// the `federation_version: =2.11.3` header the config declares only
+/// binds against the Rover-version the spawned binary happens to be. A
+/// pre-lift ambient-PATH `rover-fhs` at this gate silently attributed
+/// the composition verdict to whichever `rover-fhs` PATH resolved to,
+/// not to the substrate-pinned Rover derivation the flake declared —
+/// same silent-PATH-fallback bug class the sibling `BUNDLE_BIN` /
+/// `INSPEC_BIN` / `GEM_BIN` / `TERRAFORM` migrations closed on their
+/// respective spawn surfaces.
+fn rover_fhs_bin() -> String {
+    crate::repo::get_tool_path("ROVER_FHS_BIN", "rover-fhs")
+}
+
 /// Extract GraphQL schema from a service
 ///
 /// Uses the new schema validation module which:
@@ -175,7 +213,8 @@ pub async fn update_federation(
     // Run rover supergraph compose via rover-fhs (FHS environment for dynamic linking)
     // Rover downloads pre-built supergraph binaries that need dynamic linking (not available in pure Nix)
     println!("🔨 Composing supergraph schema with Rover...");
-    let output = Command::new("rover-fhs")
+    let rover = rover_fhs_bin();
+    let output = Command::new(&rover)
         .args(&[
             "supergraph",
             "compose",
@@ -612,4 +651,95 @@ pub async fn notify_bff_supergraph_reload(bff_url: &str) -> Result<BffReloadResp
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw `rover-fhs`-literal spawn may live in
+    /// `commands/federation.rs`. Every rover-fhs spawn must resolve
+    /// `ROVER_FHS_BIN` via [`super::rover_fhs_bin`] first — matches the
+    /// sibling `gem_bin()` / `bundle_bin()` / `terraform_bin()` /
+    /// `inspec_bin()` shields on the other tool-lifecycle surfaces
+    /// verbatim, so every substrate-exported-binary consumer converges
+    /// on the same env-var-override contract.
+    ///
+    /// Pre-lift the one consumer site — `update_federation`
+    /// (`rover-fhs supergraph compose --config supergraph-config.yaml
+    /// --elv2-license accept`) — spelled the bare-literal tool-name form
+    /// (a `Command::new` call with the tool name inline as a string)
+    /// verbatim, ignoring `ROVER_FHS_BIN`. The composition-verdict this
+    /// spawn produces is the load-bearing schema every downstream Hive
+    /// Router pod trusts as its query-plan input: a pre-lift ambient-
+    /// PATH `rover-fhs` at this gate silently attributed the composed
+    /// supergraph-schema to whichever `rover-fhs` PATH resolved to, not
+    /// to the substrate-pinned Rover derivation the flake declared, and
+    /// the pinned-`federation_version: =2.11.3` header the config
+    /// declares only binds against the Rover-version the spawned binary
+    /// happens to be. Same silent-PATH-fallback bug class the sibling
+    /// `TERRAFORM` / `BUNDLE_BIN` / `INSPEC_BIN` / `GEM_BIN` migrations
+    /// closed on their respective spawn surfaces.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare `Command::new(...)`,
+    /// and `tokio::process::Command::new(...)` long form). The forbidden
+    /// shapes are reconstructed via [`format!`] so this shield's own
+    /// source text does not false-match itself — the whole-module scan
+    /// therefore covers both the top-of-file production body AND every
+    /// sibling `#[cfg(test)]` block. Also asserts the canonical
+    /// `crate::repo::get_tool_path("ROVER_FHS_BIN", "rover-fhs")`
+    /// delegation form is present so the sigil-body itself cannot
+    /// silently drift away from the substrate-exported env-var contract.
+    ///
+    /// The end-to-end `ROVER_FHS_BIN`-routing invariant of the
+    /// underlying primitive is pinned separately by
+    /// [`crate::repo`]'s own `get_tool_path` tests; this shield only
+    /// certifies that every rover-fhs-spawning site in this module reads
+    /// through `rover_fhs_bin()`.
+    #[test]
+    fn test_rover_fhs_spawn_routes_through_rover_fhs_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("federation.rs");
+
+        let bare = "rover-fhs";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/federation.rs must not spawn `rover-fhs` via the \
+             bare literal — every rover-fhs spawn must resolve \
+             `ROVER_FHS_BIN` via `rover_fhs_bin()` first. A raw literal \
+             at `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/federation.rs must not spawn `rover-fhs` via the \
+             bare literal — every rover-fhs spawn must resolve \
+             `ROVER_FHS_BIN` via `rover_fhs_bin()` first. A raw literal \
+             at `Command::new` (either the top-level `use` alias or the \
+             bare form) bypasses the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/federation.rs must not spawn `rover-fhs` via the \
+             bare literal — every rover-fhs spawn must resolve \
+             `ROVER_FHS_BIN` via `rover_fhs_bin()` first. A raw literal \
+             at `tokio::process::Command::new` bypasses the hermetic-runner \
+             contract."
+        );
+        assert!(
+            SOURCE.contains("fn rover_fhs_bin()"),
+            "commands/federation.rs must define `rover_fhs_bin()` — the \
+             sigil function that resolves the `ROVER_FHS_BIN` override \
+             for every rover-fhs spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::repo::get_tool_path(\"ROVER_FHS_BIN\", \"rover-fhs\")"),
+            "`rover_fhs_bin()` must delegate to \
+             `crate::repo::get_tool_path(\"ROVER_FHS_BIN\", \"rover-fhs\")` \
+             — the canonical lookup was not found in the module."
+        );
+    }
 }
