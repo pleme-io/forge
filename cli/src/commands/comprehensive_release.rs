@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
+use crate::repo::get_tool_path;
 use crate::{commands, git};
 
 /// Comprehensive release workflow with full testing
@@ -269,8 +270,10 @@ pub async fn execute(
                 println!();
                 info!("🚀 Starting docker-compose environment...");
 
+                let docker_compose = get_tool_path("DOCKER_COMPOSE_BIN", "docker-compose");
+
                 // Start docker-compose
-                let up_result = Command::new("docker-compose")
+                let up_result = Command::new(&docker_compose)
                     .current_dir(&working_dir)
                     .args(&["-f", compose_path, "up", "-d"])
                     .status()
@@ -279,7 +282,7 @@ pub async fn execute(
 
                 if !up_result.success() {
                     // Cleanup on failure
-                    let _ = Command::new("docker-compose")
+                    let _ = Command::new(&docker_compose)
                         .current_dir(&working_dir)
                         .args(&["-f", compose_path, "down", "-v"])
                         .status()
@@ -293,7 +296,7 @@ pub async fn execute(
                 let max_attempts = 60; // 2 minutes (60 * 2s)
 
                 loop {
-                    let ps_result = Command::new("docker-compose")
+                    let ps_result = Command::new(&docker_compose)
                         .current_dir(&working_dir)
                         .args(&["-f", compose_path, "ps"])
                         .output()
@@ -307,13 +310,13 @@ pub async fn execute(
                     attempts += 1;
                     if attempts >= max_attempts {
                         // Show logs and cleanup
-                        let _ = Command::new("docker-compose")
+                        let _ = Command::new(&docker_compose)
                             .current_dir(&working_dir)
                             .args(&["-f", compose_path, "logs"])
                             .status()
                             .await;
 
-                        let _ = Command::new("docker-compose")
+                        let _ = Command::new(&docker_compose)
                             .current_dir(&working_dir)
                             .args(&["-f", compose_path, "down", "-v"])
                             .status()
@@ -404,7 +407,7 @@ pub async fn execute(
                     info!("📋 Dumping service logs for debugging...");
                     println!();
 
-                    let _ = Command::new("docker-compose")
+                    let _ = Command::new(&docker_compose)
                         .current_dir(&working_dir)
                         .args(&["-f", compose_path, "logs", "--tail=100"])
                         .status()
@@ -415,7 +418,7 @@ pub async fn execute(
 
                 // Always cleanup compose environment
                 info!("🧹 Cleaning up docker-compose environment...");
-                let cleanup_result = Command::new("docker-compose")
+                let cleanup_result = Command::new(&docker_compose)
                     .current_dir(&working_dir)
                     .args(&["-f", compose_path, "down", "-v"])
                     .status()
@@ -594,4 +597,58 @@ pub async fn execute(
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw `Command::new("docker-compose")` may live in
+    /// this module's non-test body. Every `docker-compose` spawn in
+    /// `commands/comprehensive_release.rs` must first resolve `DOCKER_COMPOSE_BIN`
+    /// via [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// idiom every sibling docker-family surface honors
+    /// (`commands/local.rs::docker_bin`, `commands/e2e.rs::docker_bin` via
+    /// `DOCKER_BIN` at 1a984dd / 23241a6; `commands/developer_tools.rs`'s
+    /// two docker-compose sites via `DOCKER_COMPOSE_BIN` at bdb7fb0).
+    ///
+    /// Pre-lift the seven consumer sites in `execute` (the integration-test
+    /// step's docker-compose up / cleanup-on-failure / ps-poll loop / logs-
+    /// on-timeout / down-on-timeout / logs-on-test-failure / final cleanup)
+    /// each spelled `Command::new("docker-compose")` verbatim, ignoring
+    /// `DOCKER_COMPOSE_BIN` at all seven. A Nix-hermetic runner with a
+    /// store-path `docker-compose` binary silently fell through to whatever
+    /// `docker-compose` was first on PATH — the same silent-PATH-fallback
+    /// bug class the sibling `commands/developer_tools.rs` shield closed at
+    /// bdb7fb0 for its two docker-compose sites, and the `DOCKER_BIN` lifts
+    /// (1a984dd / 23241a6) closed for the sibling `docker` surface across
+    /// `commands/local.rs` and `commands/e2e.rs`.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file start
+    /// to the FIRST `\n#[cfg(test)]\nmod tests {` marker in source order,
+    /// which lands at this shield's `#[cfg(test)] mod tests` opener) so
+    /// this shield's own docstring mentions of `Command::new("docker-compose")`
+    /// — living in a `#[cfg(test)]` block below that first marker — stay
+    /// out of scope AND every current or future docker-compose-spawning
+    /// helper landing anywhere in the top-level module body cannot silently
+    /// ride along without going through `DOCKER_COMPOSE_BIN`. Mirrors the
+    /// whole-module-boundary scan discipline of the sibling
+    /// `commands/developer_tools.rs::tests::test_developer_tools_routes_docker_compose_through_docker_compose_bin_not_raw_command`
+    /// (bdb7fb0) and the lineage traced there.
+    #[test]
+    fn test_comprehensive_release_routes_docker_compose_through_docker_compose_bin_not_raw_command()
+    {
+        let source = include_str!("comprehensive_release.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "comprehensive_release.rs must have a `#[cfg(test)] mod tests {` marker \
+                     — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"docker-compose\")"),
+            "commands/comprehensive_release.rs must not spawn `docker-compose` via the bare literal — \
+             every `docker-compose` spawn must resolve `DOCKER_COMPOSE_BIN` via \
+             `crate::repo::get_tool_path(\"DOCKER_COMPOSE_BIN\", \"docker-compose\")` first. \
+             A raw `Command::new(\"docker-compose\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+    }
 }
