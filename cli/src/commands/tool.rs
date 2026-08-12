@@ -124,7 +124,8 @@ pub async fn release(
         gh_args.push(artifact.clone());
     }
 
-    let gh_status = Command::new("gh")
+    let gh_bin = get_tool_path("GH_BIN", "gh");
+    let gh_status = Command::new(&gh_bin)
         .args(&gh_args)
         .current_dir(dir)
         .status()
@@ -868,6 +869,63 @@ mod tests {
             store_path.as_str(),
             "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-mytool",
             "the canonical StorePath accessor must return the trimmed nix stdout verbatim"
+        );
+    }
+
+    /// Whole-module shield: no `Command::new`-with-bare-`gh`-literal
+    /// may live in `commands/tool.rs`. The sole `gh` spawn site —
+    /// `release`'s `gh release create` step at the tag-and-publish
+    /// tail of the tool-release pipeline — must resolve `GH_BIN` via
+    /// [`crate::repo::get_tool_path`] first, the same substrate-
+    /// exported env-override contract the sibling
+    /// `infrastructure/registry.rs::try_gh_cli_token` GH_BIN lift
+    /// already rides on.
+    ///
+    /// Pre-lift the site spelled the bare literal verbatim, ignoring
+    /// `GH_BIN` at the site: a Nix-hermetic runner's substrate-derived
+    /// `gh` path was lost to whatever `gh` sat first on PATH — the
+    /// same silent-PATH-fallback bug class the sibling `NIX_BIN`
+    /// lookup in this file's own `build_lock_target` already avoids,
+    /// and the discipline the sibling `docker` / `kubectl` / `nix` /
+    /// `git` / `helm` / `crossplane` / `flux` / `attic` / `redis-cli`
+    /// / `doca` / `regctl` surfaces converged on across the prior
+    /// claude-routine commits.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape. The forbidden shape is
+    /// reconstructed via [`format!`] so this shield's own source text
+    /// does not false-match itself — the whole-module scan therefore
+    /// covers both the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block. Also asserts the canonical two-argument
+    /// `get_tool_path("GH_BIN", "gh")` lookup form is present in the
+    /// module, so the sigil-body itself cannot silently drift away
+    /// from the substrate-exported env-var contract. The end-to-end
+    /// `GH_BIN`-routing invariant of the underlying primitive is
+    /// pinned separately by `crate::repo::test_get_tool_path_with_env`;
+    /// this shield only certifies that every `gh`-spawning site in
+    /// this module resolves through the `get_tool_path` canonical
+    /// lookup first.
+    #[test]
+    fn test_gh_spawn_routes_through_gh_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("tool.rs");
+
+        let bare = "gh";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/tool.rs must not spawn `gh` via the bare \
+             literal — every `gh` spawn must resolve the substrate-\
+             exported `GH_BIN` env override via `get_tool_path` first. \
+             A raw literal at `Command::new` bypasses the hermetic-\
+             runner contract substrate's mkRuntimeToolsEnv exports."
+        );
+        let sigil = format!("get_tool_path(\"GH_BIN\", \"{}\")", bare);
+        assert!(
+            SOURCE.contains(&sigil),
+            "commands/tool.rs must resolve the `gh` binary via the \
+             two-argument `get_tool_path(\"GH_BIN\", \"gh\")` lookup \
+             — the canonical form was not found in the module."
         );
     }
 }
