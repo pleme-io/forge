@@ -8,6 +8,37 @@ use anyhow::{Context, Result, bail, ensure};
 use std::process::Command;
 use tracing::info;
 
+/// Resolve the `terraform` binary path via `TERRAFORM`, falling back to
+/// `terraform` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
+/// the two-arg form, because the substrate-exported override for
+/// terraform is the unadorned `TERRAFORM` var (the same var the HashiCorp
+/// tooling ecosystem itself honors), not a derived `TERRAFORM_BIN`. The
+/// one bridge between the pangea-infra SDLC surface and the substrate-
+/// `mkRuntimeToolsEnv`-exported binary path. Mirrors the sibling
+/// `cargo_bin` idiom in `commands/prerelease.rs` (cfdba0d) and the same
+/// idiom every tool-invocation site in forge honors
+/// (`commands/test_ci.rs` per e1677d3, `commands/developer_tools.rs`
+/// per 8687093, `commands/comprehensive_release.rs` per f95d541; the
+/// doc-comment idiom lives at `repo.rs:92`).
+///
+/// Pre-lift the four consumer sites — `plan` (`terraform plan`), `apply`
+/// (`terraform apply`), `destroy` (`terraform destroy`), and `status`
+/// (`terraform show`) — each spelled the bare-literal tool-name form
+/// (a `Command::new` call with the tool name inline as a string)
+/// verbatim, ignoring `TERRAFORM` at every one. A Nix-hermetic runner
+/// with a substrate-derived terraform
+/// binary silently fell through to whichever `terraform` was first on
+/// PATH at these four SDLC-phase-verdict-producing sites: the plan phase
+/// that decides whether the infrastructure-change diff is acceptable,
+/// the apply phase that mutates the workspace, the destroy phase that
+/// tears it down, and the status phase whose read-only view feeds the
+/// drift-detection verdict. Same silent-PATH-fallback bug class the
+/// sibling `CARGO` / `DOCKER_BIN` / `KUBECTL_BIN` / `GIT_BIN`
+/// migrations closed on their respective spawn surfaces.
+fn terraform_bin() -> String {
+    crate::repo::get_tool_path("TERRAFORM", "terraform")
+}
+
 /// Run RSpec synthesis tests for a pangea architecture.
 ///
 /// Executes `bundle exec rspec` targeting the architecture spec and
@@ -48,7 +79,8 @@ pub fn test(working_dir: &str, architecture: &str) -> Result<()> {
 pub fn plan(workspace: &str, working_dir: &str) -> Result<()> {
     info!("Running terraform plan for workspace: {}", workspace);
 
-    let status = Command::new("terraform")
+    let terraform = terraform_bin();
+    let status = Command::new(&terraform)
         .args(["plan", "-input=false"])
         .current_dir(working_dir)
         .env("TF_WORKSPACE", workspace)
@@ -74,7 +106,8 @@ pub fn apply(workspace: &str, working_dir: &str, auto_approve: bool) -> Result<(
         args.push("-auto-approve");
     }
 
-    let status = Command::new("terraform")
+    let terraform = terraform_bin();
+    let status = Command::new(&terraform)
         .args(&args)
         .current_dir(working_dir)
         .env("TF_WORKSPACE", workspace)
@@ -163,7 +196,8 @@ pub fn destroy(workspace: &str, working_dir: &str, auto_approve: bool) -> Result
         args.push("-auto-approve");
     }
 
-    let status = Command::new("terraform")
+    let terraform = terraform_bin();
+    let status = Command::new(&terraform)
         .args(&args)
         .current_dir(working_dir)
         .env("TF_WORKSPACE", workspace)
@@ -196,7 +230,8 @@ pub fn drift(workspace: &str, working_dir: &str, architecture: &str) -> Result<(
 pub fn status(workspace: &str, working_dir: &str) -> Result<()> {
     info!("Checking status for workspace: {}", workspace);
 
-    let status = Command::new("terraform")
+    let terraform = terraform_bin();
+    let status = Command::new(&terraform)
         .args(["show", "-no-color"])
         .current_dir(working_dir)
         .env("TF_WORKSPACE", workspace)
@@ -229,4 +264,100 @@ fn confirm(message: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw `terraform`-literal spawn may live in
+    /// `commands/pangea_infra.rs`. Every terraform spawn must resolve
+    /// `TERRAFORM` via [`super::terraform_bin`] first — the canonical
+    /// env-var override every sibling tool-invocation site in forge
+    /// honors (`commands/prerelease.rs` per cfdba0d,
+    /// `commands/test_ci.rs` per e1677d3,
+    /// `commands/developer_tools.rs` per 8687093,
+    /// `commands/comprehensive_release.rs` per f95d541; the doc-comment
+    /// idiom lives at `repo.rs:92`).
+    ///
+    /// Pre-lift the four consumer sites — `plan` (`terraform plan`),
+    /// `apply` (`terraform apply`), `destroy` (`terraform destroy`),
+    /// and `status` (`terraform show`) — each spelled the bare-literal
+    /// tool-name form (a `Command::new` call with the tool name inline
+    /// as a string) verbatim, ignoring `TERRAFORM` at every one.
+    /// Pangea SDLC commands are invoked from a
+    /// hermetic-runner sandbox that exports
+    /// `TERRAFORM=/nix/store/...-terraform/bin/terraform`; pre-lift each
+    /// SDLC-phase verdict (plan / apply / destroy / status) was
+    /// attributed to whichever `terraform` the wrapper's PATH found
+    /// first, not to the substrate-pinned terraform derivation the flake
+    /// declared. Same silent-PATH-fallback bug class the sibling `CARGO`
+    /// / `DOCKER_BIN` / `KUBECTL_BIN` / `GIT_BIN` migrations closed on
+    /// their respective spawn surfaces.
+    ///
+    /// This shield scans the module's own source via [`include_str!`] and
+    /// forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare `Command::new(...)`,
+    /// and the `tokio::process::Command::new(...)` long form). The
+    /// forbidden shapes are reconstructed via [`format!`] so this
+    /// shield's own source text does not false-match itself — the
+    /// whole-module scan therefore covers both the top-of-file
+    /// production body AND every sibling `#[cfg(test)]` block (any of
+    /// which could otherwise silently re-introduce a raw literal — the
+    /// most likely growth site as new SDLC-phase stanzas land in the
+    /// pangea-infra surface). Also asserts the canonical
+    /// `crate::repo::get_tool_path("TERRAFORM", "terraform")` delegation
+    /// form is present so the sigil-body itself cannot silently drift
+    /// away from the substrate-exported env-var contract.
+    ///
+    /// The end-to-end `TERRAFORM`-routing invariant of the underlying
+    /// primitive is pinned separately by
+    /// [`crate::tools::tests::test_get_tool_path_from_env`] and
+    /// [`crate::tools::tests::test_get_tool_path_fallback`]; this
+    /// shield only certifies that every terraform-spawning site in
+    /// this module reads through `terraform_bin()`.
+    #[test]
+    fn test_terraform_spawn_routes_through_terraform_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("pangea_infra.rs");
+
+        let bare = "terraform";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/pangea_infra.rs must not spawn `terraform` via the \
+             bare literal — every terraform spawn must resolve `TERRAFORM` \
+             via `terraform_bin()` first. A raw literal at \
+             `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/pangea_infra.rs must not spawn `terraform` via the \
+             bare literal — every terraform spawn must resolve `TERRAFORM` \
+             via `terraform_bin()` first. A raw literal at `Command::new` \
+             (either the top-level `use` alias or the bare form) bypasses \
+             the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/pangea_infra.rs must not spawn `terraform` via the \
+             bare literal — every terraform spawn must resolve `TERRAFORM` \
+             via `terraform_bin()` first. A raw literal at \
+             `tokio::process::Command::new` bypasses the hermetic-runner \
+             contract."
+        );
+        assert!(
+            SOURCE.contains("fn terraform_bin()"),
+            "commands/pangea_infra.rs must define `terraform_bin()` — the \
+             sigil function that resolves the `TERRAFORM` override for \
+             every terraform spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::repo::get_tool_path(\"TERRAFORM\", \"terraform\")"),
+            "`terraform_bin()` must delegate to \
+             `crate::repo::get_tool_path(\"TERRAFORM\", \"terraform\")` — \
+             the canonical lookup was not found in the module."
+        );
+    }
 }
