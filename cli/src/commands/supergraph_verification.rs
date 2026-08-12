@@ -16,6 +16,46 @@ use tokio::process::Command;
 
 use crate::infrastructure::kubectl::kubectl_command_async;
 
+/// Resolve the `rover-fhs` binary path via `ROVER_FHS_BIN`, falling back to
+/// `rover-fhs` on `PATH`. Wired through [`crate::repo::get_tool_path`] with
+/// the derived-`_BIN`-suffix override — matches the sigil-body defined at
+/// `commands/federation.rs::rover_fhs_bin` (8ae4568) verbatim so the two
+/// rover-fhs consumers on this repo converge on the same
+/// substrate-`mkRuntimeToolsEnv`-exported env-var contract. Apollo Rover's
+/// runtime already claims the unadorned `APOLLO_*` / `ROVER_*` env-var
+/// surface for its own config (`APOLLO_KEY`, `APOLLO_TELEMETRY_DISABLED`,
+/// `ROVER_HOME`, `ROVER_CONFIG_HOME`, `ROVER_INSECURE_UNSAFE_STDIN`, …),
+/// so a bare `ROVER_FHS` env-var export from substrate would sit next to
+/// the tool's own namespace and confuse review; the `_BIN`-suffix idiom
+/// honors the convention every substrate-exported tool with a
+/// name-collision-prone unadorned env honors (`ATTIC_BIN`, `GH_BIN`,
+/// `DOCA_BIN`, `KUBECTL_BIN`, `DOCKER_BIN`, `BUNDLE_BIN`, `INSPEC_BIN`,
+/// `GEM_BIN`).
+///
+/// This module's two pre-lift consumer sites both probe the tool's
+/// `--version` output at supergraph-verification-time: `get_rover_version`
+/// captures the version string embedded in every
+/// `SupergraphMetadata::rover_version` field the metadata JSON persists
+/// (the very field an on-disk supergraph.metadata.json cites as
+/// authoritative for "which Rover composed this schema"), and
+/// `pre_composition_check`'s Check 4 asserts the binary is invocable at
+/// all before the sibling `commands/federation.rs::update_federation` gate
+/// tries to compose against it. A pre-lift ambient-PATH `rover-fhs` at
+/// either probe silently attributed the version-provenance record — and
+/// the pre-flight go/no-go verdict — to whichever `rover-fhs` PATH
+/// resolved to, not to the substrate-pinned Rover derivation the flake
+/// declared; the recorded `rover_version` would then disagree with the
+/// binary that actually composed the schema in the very same pipeline
+/// run. Post-lift both probes flow through the same `ROVER_FHS_BIN`
+/// override the sibling composition site (`update_federation`, 8ae4568)
+/// already honors, so the version recorded in `SupergraphMetadata` and
+/// the go/no-go pre-flight verdict both attribute to the same
+/// substrate-pinned Rover derivation the composition itself binds
+/// against.
+fn rover_fhs_bin() -> String {
+    crate::repo::get_tool_path("ROVER_FHS_BIN", "rover-fhs")
+}
+
 /// Metadata tracking supergraph composition
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SupergraphMetadata {
@@ -198,7 +238,8 @@ fn format_timestamp(time: &std::time::SystemTime) -> String {
 
 /// Get Rover CLI version
 async fn get_rover_version() -> Result<String> {
-    let output = Command::new("rover-fhs").arg("--version").output().await?;
+    let rover = rover_fhs_bin();
+    let output = Command::new(&rover).arg("--version").output().await?;
 
     let version = String::from_utf8_lossy(&output.stdout);
     Ok(version.trim().to_string())
@@ -427,11 +468,8 @@ pub async fn run_pre_composition_checks(subgraphs_dir: &Path) -> Result<PreCompo
     }
 
     // Check 4: Rover CLI is available
-    let rover_available = Command::new("rover-fhs")
-        .arg("--version")
-        .output()
-        .await
-        .is_ok();
+    let rover = rover_fhs_bin();
+    let rover_available = Command::new(&rover).arg("--version").output().await.is_ok();
 
     checks.push(CheckResult {
         name: "Rover CLI available".to_string(),
@@ -678,6 +716,93 @@ mod tests {
             "supergraph_verification.rs must delegate every kubectl \
              spawn to `kubectl_command_async()` — the delegation \
              string was not found in the module body."
+        );
+    }
+
+    /// Whole-module shield: no raw `rover-fhs`-literal spawn may live in
+    /// `commands/supergraph_verification.rs`. Every rover-fhs spawn must
+    /// resolve `ROVER_FHS_BIN` via [`super::rover_fhs_bin`] first —
+    /// matches the sibling `commands/federation.rs` shield (8ae4568)
+    /// verbatim so the two rover-fhs consumers on this repo converge on
+    /// the same env-var-override contract, and matches the sibling
+    /// `gem_bin()` / `bundle_bin()` / `terraform_bin()` / `inspec_bin()`
+    /// shields on the other tool-lifecycle surfaces.
+    ///
+    /// Pre-lift the two consumer sites — `get_rover_version` (the
+    /// `SupergraphMetadata::rover_version` provenance capture that every
+    /// on-disk supergraph.metadata.json trusts as authoritative for
+    /// "which Rover composed this schema") and `pre_composition_check`
+    /// Check 4 (the pre-flight go/no-go gate that guards the sibling
+    /// `commands/federation.rs::update_federation` composition spawn) —
+    /// both spelled the bare-literal tool-name form (a `Command::new`
+    /// call with the tool name inline as a string) verbatim, ignoring
+    /// `ROVER_FHS_BIN`. A pre-lift ambient-PATH `rover-fhs` at either
+    /// probe silently attributed the version-provenance record and the
+    /// go/no-go verdict to whichever `rover-fhs` PATH resolved to, not
+    /// to the substrate-pinned Rover derivation the flake declared, and
+    /// the recorded `rover_version` would then disagree with the binary
+    /// that actually composed the schema (the composition site's own
+    /// spawn, sibling `commands/federation.rs::update_federation`, was
+    /// already lifted at 8ae4568). Same silent-PATH-fallback bug class
+    /// the sibling `TERRAFORM` / `BUNDLE_BIN` / `INSPEC_BIN` / `GEM_BIN`
+    /// migrations closed on their respective spawn surfaces.
+    ///
+    /// This shield reads the module's own source via [`include_str!`]
+    /// and asserts the raw `Command::new("rover-fhs")` string does not
+    /// reappear anywhere in the module's non-test body while the
+    /// delegation to `rover_fhs_bin()` does. The scan is bounded
+    /// strictly to the module's non-test body — from the file start to
+    /// the `#[cfg(test)]` marker — mirroring the sibling
+    /// `kubectl_command_async` shield's slice trick in this same module
+    /// so this shield's own docstring mention of the raw spawn shape
+    /// (which lives inside the sibling `#[cfg(test)] mod tests` block)
+    /// stays out of scope. Also asserts the canonical
+    /// `crate::repo::get_tool_path("ROVER_FHS_BIN", "rover-fhs")`
+    /// delegation form is present in the module so the sigil-body
+    /// itself cannot silently drift away from the substrate-exported
+    /// env-var contract.
+    ///
+    /// The end-to-end `ROVER_FHS_BIN`-routing invariant of the
+    /// underlying primitive is pinned separately by [`crate::repo`]'s
+    /// own `get_tool_path` tests; this shield only certifies that every
+    /// rover-fhs-spawning site in this module reads through
+    /// `rover_fhs_bin()`.
+    #[test]
+    fn test_rover_fhs_spawn_routes_through_rover_fhs_bin_not_raw_literal() {
+        let source = include_str!("supergraph_verification.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+                 the module body — the shield's slice boundary relies \
+                 on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        assert!(
+            !module_body.contains("Command::new(\"rover-fhs\")"),
+            "commands/supergraph_verification.rs must NOT spawn \
+             `rover-fhs` via the bare literal — every rover-fhs \
+             spawn must resolve `ROVER_FHS_BIN` via \
+             `rover_fhs_bin()` first. A raw literal bypasses the \
+             hermetic-runner contract substrate's mkRuntimeToolsEnv \
+             exports, causing the recorded `rover_version` and the \
+             pre-flight go/no-go verdict to attribute to whichever \
+             `rover-fhs` PATH resolved to instead of the \
+             substrate-pinned Rover derivation the sibling \
+             composition spawn (`commands/federation.rs::update_federation`) \
+             binds against."
+        );
+        assert!(
+            module_body.contains("rover_fhs_bin()"),
+            "commands/supergraph_verification.rs must delegate every \
+             rover-fhs spawn to `rover_fhs_bin()` — the delegation \
+             string was not found in the module body."
+        );
+        assert!(
+            source.contains("crate::repo::get_tool_path(\"ROVER_FHS_BIN\", \"rover-fhs\")"),
+            "`rover_fhs_bin()` must delegate to \
+             `crate::repo::get_tool_path(\"ROVER_FHS_BIN\", \"rover-fhs\")` \
+             — the canonical lookup was not found in the module."
         );
     }
 }
