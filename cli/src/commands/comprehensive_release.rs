@@ -223,8 +223,23 @@ pub async fn execute(
             } else {
                 info!("📦 Loading Docker image into local daemon...");
 
+                // Resolve the `docker` binary path via `DOCKER_BIN`, falling
+                // back to `docker` on `PATH`. Hoisted once and shared across
+                // both the load + tag spawn sites below so a Nix-hermetic
+                // runner's substrate-derived `DOCKER_BIN` lands at every
+                // docker-invocation in the integration-test path — matching
+                // the sibling docker-family sigils
+                // (`commands/local.rs::docker_bin`,
+                // `commands/infra.rs::docker_bin`,
+                // `commands/e2e.rs::docker_bin`,
+                // `commands/product_release.rs::push_prebuilt_image`) and
+                // the file's own established `get_tool_path(
+                // "DOCKER_COMPOSE_BIN", "docker-compose")` idiom for the
+                // seven docker-compose spawn sites below.
+                let docker = get_tool_path("DOCKER_BIN", "docker");
+
                 // Load Docker image
-                let load_result = Command::new("docker")
+                let load_result = Command::new(&docker)
                     .current_dir(&working_dir)
                     .args(&["load", "-i", build_output])
                     .output()
@@ -257,7 +272,7 @@ pub async fn execute(
                 let compose_tag = format!("{}:latest", registry);
                 info!("🏷️  Tagging image: {}", compose_tag);
 
-                let tag_result = Command::new("docker")
+                let tag_result = Command::new(&docker)
                     .args(&["tag", image_name, &compose_tag])
                     .status()
                     .await
@@ -649,6 +664,62 @@ mod tests {
              `crate::repo::get_tool_path(\"DOCKER_COMPOSE_BIN\", \"docker-compose\")` first. \
              A raw `Command::new(\"docker-compose\")` bypasses the hermetic-runner \
              contract substrate's mkRuntimeToolsEnv exports."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("docker")` may live in
+    /// this module's non-test body. Every `docker` spawn in
+    /// `commands/comprehensive_release.rs` must first resolve `DOCKER_BIN`
+    /// via [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// idiom every sibling docker-family surface honors
+    /// (`commands/local.rs::docker_bin`, `commands/infra.rs::docker_bin`,
+    /// `commands/e2e.rs::docker_bin` via `DOCKER_BIN` at 1a984dd / 7f49465
+    /// / 23241a6; `commands/product_release.rs::push_prebuilt_image` via
+    /// `DOCKER_BIN` at b7d432f; `commands/prerelease.rs`'s three docker
+    /// diag spawns via `DOCKER_BIN` at 7c096f8).
+    ///
+    /// Pre-lift the two consumer sites in `execute` — the integration-test
+    /// step's `docker load -i <archive>` and downstream `docker tag
+    /// <image_name> <compose_tag>` — each spelled `Command::new("docker")`
+    /// verbatim, ignoring `DOCKER_BIN` at both sites. A Nix-hermetic
+    /// runner with a store-path `docker` binary silently fell through to
+    /// whatever `docker` was first on PATH — the same silent-PATH-fallback
+    /// bug class the sibling docker-compose shield above closed for the
+    /// seven docker-compose sites, and the sibling `DOCKER_BIN` lifts
+    /// (1a984dd / 7f49465 / 23241a6 / b7d432f / 7c096f8) closed across the
+    /// docker surface elsewhere in the fleet.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file start
+    /// to the FIRST `\n#[cfg(test)]\nmod tests {` marker in source order,
+    /// which lands at the sibling shield's `#[cfg(test)] mod tests`
+    /// opener above) so this shield's own docstring mentions of
+    /// `Command::new("docker")` — living in a `#[cfg(test)]` block below
+    /// that first marker — stay out of scope AND every current or future
+    /// docker-spawning helper landing anywhere in the top-level module
+    /// body cannot silently ride along without going through `DOCKER_BIN`.
+    /// Mirrors the whole-module-boundary scan discipline of the sibling
+    /// docker-compose shield above.
+    #[test]
+    fn test_comprehensive_release_routes_docker_through_docker_bin_not_raw_command() {
+        let source = include_str!("comprehensive_release.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "comprehensive_release.rs must have a `#[cfg(test)] mod tests {` marker \
+                     — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"docker\")"),
+            "commands/comprehensive_release.rs must not spawn `docker` via the bare literal — \
+             every `docker` spawn must resolve `DOCKER_BIN` via \
+             `crate::repo::get_tool_path(\"DOCKER_BIN\", \"docker\")` first. \
+             A raw `Command::new(\"docker\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"DOCKER_BIN\", \"docker\")"),
+            "commands/comprehensive_release.rs must resolve the `docker` binary via \
+             `get_tool_path(\"DOCKER_BIN\", \"docker\")` — the canonical lookup \
+             was not found in the module body."
         );
     }
 }
