@@ -9,6 +9,69 @@ use tracing::info;
 
 use crate::version;
 
+/// Resolve the `gem` binary path via `GEM_BIN`, falling back to `gem` on
+/// `PATH`. Wired through [`crate::repo::get_tool_path`] with the derived-
+/// `_BIN`-suffix override: RubyGems itself claims the unadorned `GEM_*`
+/// env-var surface for its own runtime config (`GEM_HOME`, `GEM_PATH`,
+/// `GEM_SPEC_CACHE`, …), so a bare `GEM` env-var export from substrate
+/// would collide with the tool's own read of that same env-var
+/// namespace. The sigil therefore honors the `_BIN` derivation convention
+/// every substrate-exported tool with a name-collision-prone unadorned
+/// env honors (`ATTIC_BIN`, `GH_BIN`, `DOCA_BIN`, `KUBECTL_BIN`,
+/// `DOCKER_BIN`, `BUNDLE_BIN`, `INSPEC_BIN` — the last two per e26787c
+/// on the sibling Ruby-toolchain surface). The one bridge between the
+/// gem-lifecycle surface (`build`, `push`) and the substrate-
+/// `mkRuntimeToolsEnv`-exported binary path.
+///
+/// Pre-lift the two consumer sites — `build` (`gem build <gemspec>`)
+/// and `push` (`gem push <gem-path> [--otp <code>]`) — spelled the
+/// bare-literal tool-name form (a `Command::new` call with the tool
+/// name inline as a string) verbatim, ignoring `GEM_BIN` at exactly
+/// the two gates where a wrong-binary verdict is load-bearing: `build`
+/// packages a gem whose `Gem::Specification` marshal-format is written
+/// by whichever `gem` the wrapper's PATH found first (the RubyGems
+/// marshal-format is Ruby-version-sensitive and the spec author-
+/// signature is baked in at package time), and `push` publishes the
+/// built artifact to the RubyGems.org registry under an OTP-authenticated
+/// session whose credential-file semantics vary across gem major
+/// versions (2.x vs 3.x credentials-file schema differs). A pre-lift
+/// ambient-PATH `gem` at either site silently attributed the packaging
+/// or publishing verdict to whichever `gem` PATH resolved to, not to
+/// the substrate-pinned RubyGems derivation the flake declared. Same
+/// silent-PATH-fallback bug class the sibling `TERRAFORM` / `BUNDLE_BIN`
+/// / `INSPEC_BIN` migrations closed on their respective spawn surfaces.
+fn gem_bin() -> String {
+    crate::repo::get_tool_path("GEM_BIN", "gem")
+}
+
+/// Resolve the `bundle` binary path via `BUNDLE_BIN`, falling back to
+/// `bundle` on `PATH`. Wired through [`crate::repo::get_tool_path`] with
+/// the derived-`_BIN`-suffix override — Bundler itself claims the bare
+/// `BUNDLE_*` env-var surface for its own runtime config (`BUNDLE_PATH`,
+/// `BUNDLE_GEMFILE`, `BUNDLE_JOBS`, …), so the sigil honors the `_BIN`
+/// derivation convention matching the sibling `bundle_bin()` in
+/// `commands/pangea_infra.rs` (e26787c) verbatim. The one bridge between
+/// the gem-lifecycle test surface and the substrate-`mkRuntimeToolsEnv`-
+/// exported binary path.
+///
+/// Pre-lift the single consumer site — `test`
+/// (`bundle exec rake spec`) — spelled the bare-literal tool-name form
+/// (a `Command::new` call with the tool name inline as a string)
+/// verbatim, ignoring `BUNDLE_BIN` at the RSpec-gate every downstream
+/// gem-publish decision depends on: a stale ambient-PATH `bundle`
+/// resolves the Gemfile lockfile against the wrong Ruby version
+/// (Bundler's version-selection algorithm's lockfile-vs-runtime-Ruby
+/// mismatches are the load-bearing failure mode), so the wrong bundler
+/// at this gate silently attributes the test verdict every gem-push
+/// downstream trusts to the wrong Ruby toolchain. Same silent-PATH-
+/// fallback bug class the sibling `BUNDLE_BIN` migration on
+/// `commands/pangea_infra.rs` (e26787c) closed on its RSpec-synthesis
+/// surface — this commit closes the parallel gate on the gem-lifecycle
+/// surface.
+fn bundle_bin() -> String {
+    crate::repo::get_tool_path("BUNDLE_BIN", "bundle")
+}
+
 /// Detect the gem name from a directory by finding the single *.gemspec file.
 fn detect_gem_name(dir: &Path) -> Result<String> {
     let gemspecs: Vec<_> = std::fs::read_dir(dir)?
@@ -146,7 +209,8 @@ pub fn build(working_dir: &str, name: Option<String>) -> Result<String> {
     }
 
     // gem build
-    let status = Command::new("gem")
+    let gem = gem_bin();
+    let status = Command::new(&gem)
         .args(["build", &gemspec])
         .current_dir(dir)
         .status()
@@ -218,7 +282,8 @@ pub fn push(
         args.push(otp_code.clone());
     }
 
-    let status = Command::new("gem")
+    let gem = gem_bin();
+    let status = Command::new(&gem)
         .args(&args)
         .status()
         .context("Failed to run gem push")?;
@@ -245,7 +310,8 @@ pub fn test(working_dir: &str, name: Option<String>) -> Result<()> {
 
     info!("Running tests for gem: {}", gem_name);
 
-    let status = Command::new("bundle")
+    let bundle = bundle_bin();
+    let status = Command::new(&bundle)
         .args(["exec", "rake", "spec"])
         .current_dir(dir)
         .status()
@@ -287,4 +353,179 @@ fn find_gem_file(dir: &Path, prefix: &str) -> Result<String> {
         .first()
         .map(|e| e.file_name().to_string_lossy().to_string())
         .context(format!("No .gem file found for {} in {}", prefix, dir.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw `gem`-literal spawn may live in
+    /// `commands/gem.rs`. Every gem spawn must resolve `GEM_BIN` via
+    /// [`super::gem_bin`] first — the derived-`_BIN` override the
+    /// sibling `_BIN`-suffix tools (`ATTIC_BIN`, `GH_BIN`, `DOCA_BIN`,
+    /// `KUBECTL_BIN`, `DOCKER_BIN`, `BUNDLE_BIN`, `INSPEC_BIN`) honor,
+    /// chosen over the bare-name form because RubyGems itself claims the
+    /// unadorned `GEM_*` env-var surface for its own runtime config
+    /// (`GEM_HOME`, `GEM_PATH`, `GEM_SPEC_CACHE`, …). Mirrors the
+    /// sibling `BUNDLE_BIN` / `INSPEC_BIN` shields in
+    /// `commands/pangea_infra.rs` (e26787c) — the immediate structural
+    /// precedent from the same Ruby-toolchain surface.
+    ///
+    /// Pre-lift the two consumer sites — `build` (`gem build
+    /// <gemspec>`) and `push` (`gem push <gem-path> [--otp <code>]`) —
+    /// spelled the bare-literal tool-name form (a `Command::new` call
+    /// with the tool name inline as a string) verbatim, ignoring
+    /// `GEM_BIN` at both gates. `build` writes a
+    /// `Gem::Specification`-marshaled artifact whose format is
+    /// Ruby-version-sensitive, and `push` publishes it through a
+    /// credentials-file schema that varies across gem 2.x / 3.x major
+    /// versions; a stale ambient-PATH `gem` at either site silently
+    /// attributed the packaging or publishing verdict to the wrong
+    /// RubyGems binary, not to the substrate-pinned derivation the
+    /// flake declared. Same silent-PATH-fallback bug class the sibling
+    /// `TERRAFORM` / `BUNDLE_BIN` / `INSPEC_BIN` migrations closed on
+    /// their respective spawn surfaces.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare `Command::new(...)`,
+    /// and the `tokio::process::Command::new(...)` long form). The
+    /// forbidden shapes are reconstructed via [`format!`] so this
+    /// shield's own source text does not false-match itself — the
+    /// whole-module scan therefore covers both the top-of-file
+    /// production body AND every sibling `#[cfg(test)]` block (any of
+    /// which could otherwise silently re-introduce a raw literal — the
+    /// most likely growth site as new gem-lifecycle stanzas land in the
+    /// gem-toolchain surface). Also asserts the canonical
+    /// `crate::repo::get_tool_path("GEM_BIN", "gem")` delegation form
+    /// is present so the sigil-body itself cannot silently drift away
+    /// from the substrate-exported env-var contract.
+    ///
+    /// The end-to-end `GEM_BIN`-routing invariant of the underlying
+    /// primitive is pinned separately by
+    /// [`crate::repo::tests::test_get_tool_path_with_env`] and
+    /// [`crate::repo::tests::test_get_tool_path_fallback`]; this shield
+    /// only certifies that every gem-spawning site in this module reads
+    /// through `gem_bin()`.
+    #[test]
+    fn test_gem_spawn_routes_through_gem_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("gem.rs");
+
+        let bare = "gem";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/gem.rs must not spawn `gem` via the bare literal \
+             — every gem spawn must resolve `GEM_BIN` via `gem_bin()` \
+             first. A raw literal at `std::process::Command::new` \
+             bypasses the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/gem.rs must not spawn `gem` via the bare literal \
+             — every gem spawn must resolve `GEM_BIN` via `gem_bin()` \
+             first. A raw literal at `Command::new` (either the \
+             top-level `use` alias or the bare form) bypasses the \
+             hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/gem.rs must not spawn `gem` via the bare literal \
+             — every gem spawn must resolve `GEM_BIN` via `gem_bin()` \
+             first. A raw literal at `tokio::process::Command::new` \
+             bypasses the hermetic-runner contract."
+        );
+        assert!(
+            SOURCE.contains("fn gem_bin()"),
+            "commands/gem.rs must define `gem_bin()` — the sigil \
+             function that resolves the `GEM_BIN` override for every \
+             gem spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::repo::get_tool_path(\"GEM_BIN\", \"gem\")"),
+            "`gem_bin()` must delegate to \
+             `crate::repo::get_tool_path(\"GEM_BIN\", \"gem\")` — the \
+             canonical lookup was not found in the module."
+        );
+    }
+
+    /// Whole-module shield: no raw `bundle`-literal spawn may live in
+    /// `commands/gem.rs`. Every bundle spawn must resolve `BUNDLE_BIN`
+    /// via [`super::bundle_bin`] first — matches the sibling
+    /// `bundle_bin()` shield in `commands/pangea_infra.rs` (e26787c)
+    /// verbatim, so both Ruby-toolchain surfaces converge on the same
+    /// env-var-override contract.
+    ///
+    /// Pre-lift the one consumer site — `test` (`bundle exec rake
+    /// spec`) — spelled the bare-literal tool-name form (a
+    /// `Command::new` call with the tool name inline as a string)
+    /// verbatim, ignoring `BUNDLE_BIN`. The RSpec-gate this spawn
+    /// produces is the load-bearing verdict every gem-push downstream
+    /// of it depends on for correctness: a pre-lift ambient-PATH
+    /// `bundle` silently resolved the Gemfile lockfile against a
+    /// wrong-Ruby-version bundler (Bundler's version-selection
+    /// algorithm's lockfile-vs-runtime-Ruby mismatches are the
+    /// load-bearing failure mode), so the wrong-binary verdict silently
+    /// attributed the test-gate result every gem-publish downstream
+    /// trusts to the wrong Ruby toolchain. Same silent-PATH-fallback
+    /// bug class the sibling `TERRAFORM` / `BUNDLE_BIN` / `INSPEC_BIN`
+    /// migrations closed on their respective spawn surfaces.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare `Command::new(...)`,
+    /// and the `tokio::process::Command::new(...)` long form),
+    /// reconstructed via [`format!`] so this shield's own source text
+    /// does not false-match itself. Also asserts the canonical
+    /// `crate::repo::get_tool_path("BUNDLE_BIN", "bundle")` delegation
+    /// form is present so the sigil-body itself cannot silently drift
+    /// away from the substrate-exported env-var contract.
+    #[test]
+    fn test_bundle_spawn_routes_through_bundle_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("gem.rs");
+
+        let bare = "bundle";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/gem.rs must not spawn `bundle` via the bare \
+             literal — every bundle spawn must resolve `BUNDLE_BIN` \
+             via `bundle_bin()` first. A raw literal at \
+             `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/gem.rs must not spawn `bundle` via the bare \
+             literal — every bundle spawn must resolve `BUNDLE_BIN` \
+             via `bundle_bin()` first. A raw literal at `Command::new` \
+             (either the top-level `use` alias or the bare form) \
+             bypasses the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/gem.rs must not spawn `bundle` via the bare \
+             literal — every bundle spawn must resolve `BUNDLE_BIN` \
+             via `bundle_bin()` first. A raw literal at \
+             `tokio::process::Command::new` bypasses the hermetic-runner \
+             contract."
+        );
+        assert!(
+            SOURCE.contains("fn bundle_bin()"),
+            "commands/gem.rs must define `bundle_bin()` — the sigil \
+             function that resolves the `BUNDLE_BIN` override for every \
+             bundle spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")"),
+            "`bundle_bin()` must delegate to \
+             `crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")` \
+             — the canonical lookup was not found in the module."
+        );
+    }
 }
