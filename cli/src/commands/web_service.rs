@@ -13,6 +13,8 @@ use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use tokio::process::Command;
 
+use crate::repo::get_tool_path;
+
 /// Regenerate deps.nix for web frontend + Cargo.nix for Hanabi (shared BFF)
 ///
 /// This command:
@@ -23,6 +25,14 @@ use tokio::process::Command;
 /// - product: Product name (e.g., myapp)
 /// - service: Service name (typically "web")
 /// - repo_root: Git repository root path
+///
+/// # Environment Variables
+///
+/// * `PLEME_LINKER_BIN` - Path to pleme-linker binary (falls back to
+///   "pleme-linker" on PATH)
+/// * `CRATE2NIX` - Path to crate2nix binary (falls back to "crate2nix" on
+///   PATH); also propagated into pleme-linker's `--crate2nix` arg so the
+///   substrate-pinned crate2nix reaches pleme-linker's inner spawn too
 pub async fn web_regenerate(product: String, service: String, repo_root: String) -> Result<()> {
     println!(
         "🔄 {} {} {}",
@@ -60,25 +70,27 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
         );
     }
 
+    let pleme_linker = get_tool_path("PLEME_LINKER_BIN", "pleme-linker");
+    let crate2nix = get_tool_path("CRATE2NIX", "crate2nix");
+
     println!("📂 Service: {}", service_dir.display());
     println!("📂 Hanabi: {}", hanabi_dir.display());
     println!();
 
     // Step 1: Regenerate frontend deps.nix using pleme-linker
-    // pleme-linker is available in PATH from the Nix environment
     println!(
         "📦 {} {}",
         "Regenerating frontend deps.nix".bold(),
         "(pleme-linker regen)".dimmed()
     );
 
-    let mut cmd = Command::new("pleme-linker");
+    let mut cmd = Command::new(&pleme_linker);
     cmd.args(&[
         "regen",
         "--project-root",
         service_dir.to_str().unwrap(),
         "--crate2nix",
-        "crate2nix", // crate2nix is in PATH from Nix wrapper
+        &crate2nix,
     ])
     .current_dir(&repo_root);
     crate::retry::run_inherited_status(cmd, "pleme-linker regen")
@@ -88,14 +100,13 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     println!();
 
     // Step 2: Regenerate Hanabi Cargo.nix using crate2nix
-    // crate2nix is available in PATH from the Nix environment
     println!(
         "🦀 {} {}",
         "Regenerating Hanabi Cargo.nix".bold(),
         "(crate2nix generate)".dimmed()
     );
 
-    let mut cmd = Command::new("crate2nix");
+    let mut cmd = Command::new(&crate2nix);
     cmd.arg("generate").current_dir(&hanabi_dir);
     crate::retry::run_inherited_status(cmd, "crate2nix generate")
         .await
@@ -130,6 +141,14 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
 /// - product: Product name (e.g., myapp) - for context only
 /// - service: Service name (typically "web") - for context only
 /// - repo_root: Git repository root path
+///
+/// # Environment Variables
+///
+/// * `CARGO` - Path to cargo binary (falls back to "cargo" on PATH); matches
+///   the sibling convention every cargo-spawning module in forge uses
+/// * `CRATE2NIX` - Path to crate2nix binary (falls back to "crate2nix" on
+///   PATH); matches `commands/bootstrap.rs::regenerate` and
+///   `commands/pangea.rs`
 pub async fn web_cargo_update(product: String, service: String, repo_root: String) -> Result<()> {
     println!(
         "🔄 {} {} {}",
@@ -152,6 +171,9 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
         );
     }
 
+    let cargo = get_tool_path("CARGO", "cargo");
+    let crate2nix = get_tool_path("CRATE2NIX", "crate2nix");
+
     println!("📂 Hanabi: {}", hanabi_dir.display());
     println!();
 
@@ -162,7 +184,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
         "(cargo update)".dimmed()
     );
 
-    let mut cmd = Command::new("cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.arg("update").current_dir(&hanabi_dir);
     crate::retry::run_inherited_status(cmd, "cargo update")
         .await
@@ -171,14 +193,13 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     println!();
 
     // Step 2: Regenerate Cargo.nix
-    // crate2nix is available in PATH from the Nix environment
     println!(
         "🦀 {} {}",
         "Regenerating Cargo.nix".bold(),
         "(crate2nix generate)".dimmed()
     );
 
-    let mut cmd = Command::new("crate2nix");
+    let mut cmd = Command::new(&crate2nix);
     cmd.arg("generate").current_dir(&hanabi_dir);
     crate::retry::run_inherited_status(cmd, "crate2nix generate")
         .await
@@ -202,4 +223,71 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw pleme-linker, crate2nix, or cargo
+    /// literal spawn may live in `commands/web_service.rs`. Every spawn
+    /// must resolve through the tools-registry two-argument idiom
+    /// `crate::repo::get_tool_path(<env_var>, <fallback>)` first — the
+    /// canonical form the sibling `commands/bootstrap.rs::regenerate`
+    /// and `commands/pangea.rs` already use.
+    ///
+    /// Pre-lift `web_regenerate` and `web_cargo_update` spelled the bare
+    /// tool-name literal at four `Command::new` sites — a Nix-hermetic
+    /// runner's substrate-derived paths lost to whatever binary sat
+    /// first on PATH, the exact silent-PATH-fallback bug class the
+    /// sibling `commands/dashboards.rs` (a826ac0),
+    /// `commands/tool.rs` (659a1e1), and prior claude-routine commits
+    /// closed for their surfaces. Post-lift the two functions resolve
+    /// `PLEME_LINKER_BIN`, `CRATE2NIX`, and `CARGO` env-var overrides;
+    /// the `--crate2nix` arg-value passed to `pleme-linker regen` also
+    /// carries the resolved `CRATE2NIX` path, so the substrate-pinned
+    /// crate2nix propagates into pleme-linker's inner spawn surface too,
+    /// not just the top-level spawn.
+    ///
+    /// This shield scans the module's own source via `include_str!` and
+    /// forbids the fused literal shape at every `Command::new` site.
+    /// Forbidden shapes are reconstructed via `format!` so the shield's
+    /// own source text does not false-match itself — the whole-module
+    /// scan therefore covers both the top-of-file production body AND
+    /// every sibling `#[cfg(test)]` block.
+    #[test]
+    fn test_web_service_spawns_route_through_tools_registry_not_raw_literals() {
+        const SOURCE: &str = include_str!("web_service.rs");
+
+        for bare in ["pleme-linker", "crate2nix", "cargo"] {
+            let raw_command = format!("Command::new(\"{}\")", bare);
+            assert!(
+                !SOURCE.contains(&raw_command),
+                "commands/web_service.rs must not spawn `{bare}` via the \
+                 bare literal — every spawn must resolve the tools-registry \
+                 env-var override via `crate::repo::get_tool_path(<env_var>, \
+                 \"{bare}\")` first. A raw literal at `Command::new` bypasses \
+                 the hermetic-runner contract substrate's mkRuntimeToolsEnv \
+                 exports."
+            );
+        }
+
+        assert!(
+            SOURCE.contains("get_tool_path(\"PLEME_LINKER_BIN\", \"pleme-linker\")"),
+            "commands/web_service.rs must resolve `pleme-linker` via \
+             `get_tool_path(\"PLEME_LINKER_BIN\", \"pleme-linker\")` — the \
+             canonical two-argument lookup was not found in the module."
+        );
+        assert!(
+            SOURCE.contains("get_tool_path(\"CRATE2NIX\", \"crate2nix\")"),
+            "commands/web_service.rs must resolve `crate2nix` via \
+             `get_tool_path(\"CRATE2NIX\", \"crate2nix\")` — the canonical \
+             sibling form used by `commands/bootstrap.rs::regenerate` and \
+             `commands/pangea.rs`."
+        );
+        assert!(
+            SOURCE.contains("get_tool_path(\"CARGO\", \"cargo\")"),
+            "commands/web_service.rs must resolve `cargo` via \
+             `get_tool_path(\"CARGO\", \"cargo\")` — the canonical form \
+             every sibling cargo-spawning module in forge uses."
+        );
+    }
 }
