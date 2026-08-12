@@ -194,8 +194,19 @@ async fn push_prebuilt_image(local_name: &str, registry: &str, deploy_tag: &str)
     // across 20+ sites, extract the primitive).
     let full_tag = crate::oci_manifest::image_reference(registry, deploy_tag);
 
+    // Resolve the `docker` binary path via `DOCKER_BIN`, falling back
+    // to `docker` on `PATH`. Hoisted once and shared across the tag +
+    // push spawn sites below so a Nix-hermetic runner's substrate-
+    // derived `DOCKER_BIN` lands at every docker-invocation in this
+    // Phase-1 registry-push path — matching the sibling docker-family
+    // sigils (`commands/local.rs::docker_bin`,
+    // `commands/infra.rs::docker_bin`, `commands/e2e.rs::docker_bin`)
+    // and the file's own established `get_tool_path("NIX_BIN", "nix")`
+    // idiom for `run_nix_release_app` above.
+    let docker = get_tool_path("DOCKER_BIN", "docker");
+
     // Tag with registry URL and SHA
-    let status = Command::new("docker")
+    let status = Command::new(&docker)
         .args(["tag", &image_id, &full_tag])
         .status()
         .await
@@ -206,7 +217,7 @@ async fn push_prebuilt_image(local_name: &str, registry: &str, deploy_tag: &str)
     }
 
     // Push to registry
-    let status = Command::new("docker")
+    let status = Command::new(&docker)
         .args(["push", &full_tag])
         .status()
         .await
@@ -1015,7 +1026,7 @@ mod tests {
 
         // Bound the scan to `run_health_check` — the two kubectl spawn
         // sites all live inside it. The wrapping `push_prebuilt_image`
-        // still uses `Command::new("docker")` legitimately, and the
+        // still uses `Command::new(&docker)` legitimately, and the
         // tests / docstrings below reference the pre-migration string.
         let fn_marker = "pub(crate) async fn run_health_check(";
         let start = SOURCE.find(fn_marker).expect(
@@ -1072,12 +1083,14 @@ mod tests {
     /// The scan bounds to `run_nix_release_app`'s function body
     /// (from the fn header to the next top-level `async fn` in source
     /// order, `run_health_check`) so the sibling `Command::new(exe)`
-    /// self-exec in `run_forge_subcommand` above, the two legitimate
-    /// `Command::new("docker")` sites in `push_prebuilt_image` below,
-    /// and this shield's own docstring mentions of
-    /// `Command::new("nix")` stay out of scope. Mirrors the sibling
-    /// scoped shield on `run_health_check` above and matches the
-    /// bounded-fn-body scan discipline used across
+    /// self-exec in `run_forge_subcommand` above and this shield's own
+    /// docstring mentions of `Command::new("nix")` stay out of scope.
+    /// (The `push_prebuilt_image` docker sites below have since been
+    /// lifted onto `get_tool_path("DOCKER_BIN", "docker")` and pinned
+    /// by their own sibling shield
+    /// [`tests::test_push_prebuilt_image_routes_docker_through_docker_bin_not_raw_command`].)
+    /// Mirrors the sibling scoped shield on `run_health_check` above
+    /// and matches the bounded-fn-body scan discipline used across
     /// `commands/product_release.rs`.
     #[test]
     fn test_run_nix_release_app_routes_nix_through_nix_bin_not_raw_command() {
@@ -1112,6 +1125,67 @@ mod tests {
             "run_nix_release_app() must resolve the nix binary via \
              `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical lookup \
              was not found in run_nix_release_app()."
+        );
+    }
+
+    /// Regression-shield: every `docker`-spawning site in
+    /// `commands/product_release.rs::push_prebuilt_image` MUST
+    /// resolve the binary through
+    /// [`crate::repo::get_tool_path`]`("DOCKER_BIN", "docker")`
+    /// rather than the pre-lift `Command::new(&docker)` literal.
+    /// Pre-migration the two Phase-1 registry-push spawn sites
+    /// (`docker tag <image_id> <full_tag>` + `docker push <full_tag>`)
+    /// each spelled the bare `"docker"` literal verbatim, ignoring
+    /// `DOCKER_BIN` at every site — a Nix-hermetic runner's
+    /// substrate-derived docker path lost to whatever `docker` was
+    /// first on PATH at exactly the moment release-orchestration tag
+    /// stability matters most (deploy.yaml pins the tag the push
+    /// wrote). Mirrors the sibling `docker_bin` sigils at
+    /// `commands/local.rs` (1a984dd), `commands/e2e.rs` (23241a6),
+    /// `commands/infra.rs` (7f49465) and the file's own established
+    /// `get_tool_path("NIX_BIN", "nix")` idiom for
+    /// `run_nix_release_app` above.
+    ///
+    /// The scan bounds to `push_prebuilt_image`'s function body (from
+    /// the fn header to the next top-level `async fn` in source order,
+    /// `write_artifact_tags`) so the sibling `Command::new(exe)`
+    /// self-exec in `run_forge_subcommand`, the `Command::new(&nix_bin)`
+    /// spawn in `run_nix_release_app`, and the tests-mod docstring
+    /// references to the pre-migration `Command::new(&docker)` string
+    /// (including this shield's own) stay out of scope. Matches the
+    /// bounded-fn-body scan discipline used by the sibling shields on
+    /// `run_health_check` and `run_nix_release_app` above.
+    #[test]
+    fn test_push_prebuilt_image_routes_docker_through_docker_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("product_release.rs");
+
+        let fn_marker = "async fn push_prebuilt_image(";
+        let start = SOURCE.find(fn_marker).expect(
+            "product_release.rs must contain `async fn push_prebuilt_image(` \
+             — module invariant",
+        );
+        let after_fn = &SOURCE[start..];
+        // Bound at the next top-level fn marker in source order.
+        // `write_artifact_tags` follows `push_prebuilt_image`.
+        let end_relative = after_fn.find("\nasync fn write_artifact_tags(").expect(
+            "product_release.rs must contain `async fn write_artifact_tags(` \
+                 after `push_prebuilt_image`",
+        );
+        let fn_body = &after_fn[..end_relative];
+
+        assert!(
+            !fn_body.contains("Command::new(\"docker\")"),
+            "push_prebuilt_image() must NOT spawn `docker` directly — resolve \
+             `DOCKER_BIN` via `crate::repo::get_tool_path(\"DOCKER_BIN\", \"docker\")` \
+             first so the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports land at every spawn site. Found the \
+             pre-migration spawn body in push_prebuilt_image()."
+        );
+        assert!(
+            fn_body.contains("get_tool_path(\"DOCKER_BIN\", \"docker\")"),
+            "push_prebuilt_image() must resolve the docker binary via \
+             `get_tool_path(\"DOCKER_BIN\", \"docker\")` — the canonical lookup \
+             was not found in push_prebuilt_image()."
         );
     }
 }
