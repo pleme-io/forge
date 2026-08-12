@@ -33,6 +33,28 @@ use tokio::process::Command;
 
 use crate::oci_manifest::ContentDigest;
 
+/// Resolve the `cosign` binary path via `COSIGN_BIN`, falling back to
+/// `cosign` on `PATH`. Wired through [`crate::tools::get_tool_path`] so a
+/// Nix-hermetic runner's substrate-derived `cosign` path lands at every
+/// cosign-spawning site in this module. Mirrors the sibling
+/// `commands/dashboards.rs::jsonnet_bin` (a826ac0),
+/// `commands/rebac_validation.rs::redis_cli_bin` (9aed883), and
+/// `commands/infra.rs::docker_bin` (7f49465) sigil discipline — the one
+/// bridge between the forge Phase 1.5 attestation-composition surface and
+/// the substrate-`mkRuntimeToolsEnv`-exported binary path. Pre-lift the
+/// single [`Command::new`] site in `compute_image_attestation` — the
+/// `cosign verify --output json` probe whose captured JSON output typed
+/// through [`crate::cosign::parse_verify_output`] becomes the
+/// `ImageAttestation::cosign_verified` and `signer_identity` fields that
+/// gate strict-production policy admission — spelled the bare `"cosign"`
+/// literal verbatim, ignoring `COSIGN_BIN`. A Nix-hermetic runner's
+/// substrate-derived cosign path lost to whatever `cosign` sat first on
+/// PATH, so the signer identity a release-gate attestation cited was
+/// observed by a client the substrate derivation did not pin.
+fn cosign_bin() -> String {
+    crate::tools::get_tool_path("cosign")
+}
+
 /// Emit the canonical eleven-field probe-coverage [`tracing::info!`] event
 /// uniformly across the three attestation phases — Phase 1 build, Phase 1
 /// chart, Phase 2 deployment — without retyping the `(ran, absent, total,
@@ -754,7 +776,8 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     // to a double-tagged repository slice; the one-oracle-site route
     // closes that class by construction (theory §III.1 / §VI.1).
     let cosign_image_ref = crate::oci_manifest::image_reference(image_ref, tag);
-    let cosign_captured = Command::new("cosign")
+    let cosign = cosign_bin();
+    let cosign_captured = Command::new(&cosign)
         .current_dir(Path::new("."))
         .args(["verify", &cosign_image_ref, "--output", "json"])
         .output()
@@ -1962,6 +1985,95 @@ async fn run_command_output(cwd: &Path, cmd: &str, args: &[&str]) -> Result<Stri
 
 #[cfg(test)]
 mod tests {
+    /// Whole-module shield: no raw `"cosign"`-literal spawn may live in
+    /// `commands/attestation.rs`. Every cosign spawn must resolve
+    /// `COSIGN_BIN` via [`super::cosign_bin`] first.
+    ///
+    /// Pre-lift the single [`super::Command::new`] site in
+    /// `compute_image_attestation` — the `cosign verify --output json`
+    /// probe whose captured JSON typed through
+    /// [`crate::cosign::parse_verify_output`] becomes the
+    /// `ImageAttestation::cosign_verified` and `signer_identity` fields
+    /// that gate strict-production policy admission — spelled the bare
+    /// `"cosign"` literal verbatim, ignoring `COSIGN_BIN`. A Nix-hermetic
+    /// runner's substrate-derived cosign path lost to whatever `cosign`
+    /// sat first on PATH, so the signer identity a release-gate
+    /// attestation cited was observed by a client the substrate
+    /// derivation did not pin — the same silent-PATH-fallback bug class
+    /// the sibling `commands/dashboards.rs::test_jsonnet_spawn_routes_through_jsonnet_bin_not_raw_literal`
+    /// shield (a826ac0) and `commands/rebac_validation.rs::test_redis_cli_spawns_route_through_redis_cli_bin_not_raw_literal`
+    /// shield (9aed883) closed for their surfaces.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare
+    /// `Command::new(...)`, and the `tokio::process::Command::new(...)`
+    /// long form). The forbidden shapes are reconstructed via
+    /// [`format!`] so this shield's own source text does not
+    /// false-match itself — the whole-module scan therefore covers
+    /// both the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block (any of which could otherwise silently re-
+    /// introduce a raw literal — the most likely growth site as future
+    /// cosign probes for `attest`, `sign`, or `tree` land in the
+    /// attestation-composition surface). Also asserts the canonical
+    /// `crate::tools::get_tool_path("cosign")` delegation form is
+    /// present in the module, so the sigil-body itself cannot silently
+    /// drift away from the substrate-exported env-var contract.
+    ///
+    /// The end-to-end `COSIGN_BIN`-routing invariant of the underlying
+    /// primitive is pinned separately by
+    /// [`crate::tools::tests::test_get_tool_path_from_env`] and
+    /// [`crate::tools::tests::test_get_tool_path_fallback`]; this
+    /// shield only certifies that every cosign-spawning site in this
+    /// module reads through `cosign_bin()`.
+    #[test]
+    fn test_cosign_spawn_routes_through_cosign_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("attestation.rs");
+
+        let bare = "cosign";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/attestation.rs must not spawn `cosign` via the \
+             bare literal — every cosign spawn must resolve \
+             `COSIGN_BIN` via `cosign_bin()` first. A raw literal at \
+             `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/attestation.rs must not spawn `cosign` via the \
+             bare literal — every cosign spawn must resolve \
+             `COSIGN_BIN` via `cosign_bin()` first. A raw literal at \
+             `Command::new` (either the top-level `use` alias or the \
+             bare form) bypasses the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/attestation.rs must not spawn `cosign` via the \
+             bare literal — every cosign spawn must resolve \
+             `COSIGN_BIN` via `cosign_bin()` first. A raw literal at \
+             `tokio::process::Command::new` bypasses the \
+             hermetic-runner contract."
+        );
+        assert!(
+            SOURCE.contains("fn cosign_bin()"),
+            "commands/attestation.rs must define `cosign_bin()` — the \
+             sigil function that resolves the tools-registry \
+             `COSIGN_BIN` override for every cosign spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::tools::get_tool_path(\"cosign\")"),
+            "`cosign_bin()` must delegate to \
+             `crate::tools::get_tool_path(\"cosign\")` — the canonical \
+             lookup was not found in the module. A regression here \
+             would silently downgrade to the PATH fallback."
+        );
+    }
+
     /// ★ THE THREE MANIFEST OUTCOMES MUST STAY THREE DISTINCT HASHES.
     ///
     /// manifest_hash can be produced by three genuinely different situations:
