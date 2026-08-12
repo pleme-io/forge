@@ -39,6 +39,65 @@ fn terraform_bin() -> String {
     crate::repo::get_tool_path("TERRAFORM", "terraform")
 }
 
+/// Resolve the `bundle` binary path via `BUNDLE_BIN`, falling back to
+/// `bundle` on `PATH`. Wired through [`crate::repo::get_tool_path`] with
+/// the derived-`_BIN`-suffix override: Bundler already claims the bare
+/// `BUNDLE` env-var surface for its own runtime config (`BUNDLE_PATH`,
+/// `BUNDLE_GEMFILE`, …), so the sigil honors the `_BIN` derivation
+/// convention every substrate-exported tool with a name-collision-prone
+/// unadorned env honors (`ATTIC_BIN`, `GH_BIN`, `DOCA_BIN`, `KUBECTL_BIN`,
+/// `DOCKER_BIN`) rather than the HashiCorp-tool `TERRAFORM`-style
+/// bare-name form that the sibling `terraform_bin()` sigil above honors.
+/// The one bridge between the pangea-infra RSpec-synthesis-test surface
+/// and the substrate-`mkRuntimeToolsEnv`-exported binary path.
+///
+/// Pre-lift the single consumer site — `test`
+/// (`bundle exec rspec <arch_spec> [<security_spec>] --format
+/// documentation`) — spelled the bare-literal tool-name form (a
+/// `Command::new` call with the tool name inline as a string) verbatim,
+/// ignoring `BUNDLE_BIN` at the one gate every SDLC-phase downstream of
+/// it depends on for correctness: `cycle` funnels every apply through the
+/// `test` gate first (Phase 1/5), and `drift` reruns it (Phase 1/2), so a
+/// stale ambient-PATH `bundle` would silently produce a wrong-Ruby-version
+/// spec verdict at exactly the two SDLC-phase entrypoints whose test-gate
+/// verdict every mutation and every drift verdict trusts. Same
+/// silent-PATH-fallback bug class the sibling `TERRAFORM` / `CARGO` /
+/// `DOCKER_BIN` / `KUBECTL_BIN` migrations closed on their respective
+/// spawn surfaces.
+fn bundle_bin() -> String {
+    crate::repo::get_tool_path("BUNDLE_BIN", "bundle")
+}
+
+/// Resolve the `inspec` binary path via `INSPEC_BIN`, falling back to
+/// `inspec` on `PATH`. Wired through [`crate::repo::get_tool_path`] with
+/// the derived-`_BIN`-suffix override: Chef InSpec reserves several
+/// `INSPEC_*` env-var prefixes for its own reporter/config surface, so
+/// the sigil honors the `_BIN` derivation convention every
+/// substrate-exported tool with a name-collision-prone unadorned env
+/// honors, matching the sibling `bundle_bin` above. The one bridge
+/// between the pangea-infra InSpec-verify surface and the substrate-
+/// `mkRuntimeToolsEnv`-exported binary path.
+///
+/// Pre-lift the single consumer site — `verify`
+/// (`inspec exec <profile> -t <target> --reporter cli`) — spelled the
+/// bare-literal tool-name form (a `Command::new` call with the tool name
+/// inline as a string) verbatim, ignoring `INSPEC_BIN` at the one gate
+/// `cycle`'s Phase 5/5 (the live-infrastructure-compliance verdict)
+/// depends on: a substrate-derived InSpec binary paired with an
+/// ambient-PATH `inspec` at the verify phase would attribute the
+/// live-infrastructure-compliance verdict to whichever `inspec` the
+/// wrapper's PATH found first — the Chef-InSpec-family binaries have
+/// broken compliance-profile syntax across major versions (Ruby-tooling
+/// upgrade paths, Cinc-Auditor forks, and vendored profile inputs are
+/// the load-bearing failure modes), and the wrong verdict here does not
+/// fail loudly but attributes a compliance-passing (or -failing) verdict
+/// to the wrong binary. Same silent-PATH-fallback bug class the sibling
+/// `TERRAFORM` / `CARGO` / `DOCKER_BIN` / `KUBECTL_BIN` migrations
+/// closed on their respective spawn surfaces.
+fn inspec_bin() -> String {
+    crate::repo::get_tool_path("INSPEC_BIN", "inspec")
+}
+
 /// Run RSpec synthesis tests for a pangea architecture.
 ///
 /// Executes `bundle exec rspec` targeting the architecture spec and
@@ -63,7 +122,8 @@ pub fn test(working_dir: &str, architecture: &str) -> Result<()> {
         args.insert(2, security_spec);
     }
 
-    let status = Command::new("bundle")
+    let bundle = bundle_bin();
+    let status = Command::new(&bundle)
         .args(&args)
         .current_dir(working_dir)
         .status()
@@ -124,7 +184,8 @@ pub fn apply(workspace: &str, working_dir: &str, auto_approve: bool) -> Result<(
 pub fn verify(workspace: &str, inspec_profile: &str, target: &str) -> Result<()> {
     info!("Running InSpec verification for workspace: {}", workspace);
 
-    let status = Command::new("inspec")
+    let inspec = inspec_bin();
+    let status = Command::new(&inspec)
         .args([
             "exec",
             inspec_profile,
@@ -357,6 +418,169 @@ mod tests {
             SOURCE.contains("crate::repo::get_tool_path(\"TERRAFORM\", \"terraform\")"),
             "`terraform_bin()` must delegate to \
              `crate::repo::get_tool_path(\"TERRAFORM\", \"terraform\")` — \
+             the canonical lookup was not found in the module."
+        );
+    }
+
+    /// Whole-module shield: no raw `bundle`-literal spawn may live in
+    /// `commands/pangea_infra.rs`. Every bundle spawn must resolve
+    /// `BUNDLE_BIN` via [`super::bundle_bin`] first — the derived-`_BIN`
+    /// override the sibling `_BIN`-suffix tools (`ATTIC_BIN`, `GH_BIN`,
+    /// `DOCA_BIN`, `KUBECTL_BIN`, `DOCKER_BIN`) honor, chosen over the
+    /// bare-name form because Bundler itself claims the unadorned
+    /// `BUNDLE` env-var surface for its own runtime config
+    /// (`BUNDLE_PATH`, `BUNDLE_GEMFILE`, …). Mirrors the
+    /// sibling terraform shield above.
+    ///
+    /// Pre-lift the one consumer site — `test` (`bundle exec rspec
+    /// <arch_spec> [<security_spec>] --format documentation`) —
+    /// spelled the bare-literal tool-name form (a `Command::new` call
+    /// with the tool name inline as a string) verbatim, ignoring
+    /// `BUNDLE_BIN`. The RSpec-synthesis-test gate this spawn produces
+    /// is the load-bearing verdict every SDLC-phase downstream of it
+    /// depends on: `cycle`'s Phase 1/5 funnels every apply through it,
+    /// and `drift`'s Phase 1/2 reruns it, so a pre-lift ambient-PATH
+    /// `bundle` silently attributed both gate verdicts to whichever
+    /// `bundle` the wrapper's PATH found first, not to the
+    /// substrate-pinned bundler derivation the flake declared. Same
+    /// silent-PATH-fallback bug class the sibling `TERRAFORM` / `CARGO`
+    /// / `DOCKER_BIN` / `KUBECTL_BIN` / `GIT_BIN` migrations closed on
+    /// their respective spawn surfaces.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare `Command::new(...)`,
+    /// and the `tokio::process::Command::new(...)` long form). The
+    /// forbidden shapes are reconstructed via [`format!`] so this
+    /// shield's own source text does not false-match itself — the
+    /// whole-module scan therefore covers both the top-of-file
+    /// production body AND every sibling `#[cfg(test)]` block. Also
+    /// asserts the canonical
+    /// `crate::repo::get_tool_path("BUNDLE_BIN", "bundle")` delegation
+    /// form is present so the sigil-body itself cannot silently drift
+    /// away from the substrate-exported env-var contract.
+    #[test]
+    fn test_bundle_spawn_routes_through_bundle_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("pangea_infra.rs");
+
+        let bare = "bundle";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/pangea_infra.rs must not spawn `bundle` via the \
+             bare literal — every bundle spawn must resolve `BUNDLE_BIN` \
+             via `bundle_bin()` first. A raw literal at \
+             `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/pangea_infra.rs must not spawn `bundle` via the \
+             bare literal — every bundle spawn must resolve `BUNDLE_BIN` \
+             via `bundle_bin()` first. A raw literal at `Command::new` \
+             (either the top-level `use` alias or the bare form) \
+             bypasses the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/pangea_infra.rs must not spawn `bundle` via the \
+             bare literal — every bundle spawn must resolve `BUNDLE_BIN` \
+             via `bundle_bin()` first. A raw literal at \
+             `tokio::process::Command::new` bypasses the hermetic-runner \
+             contract."
+        );
+        assert!(
+            SOURCE.contains("fn bundle_bin()"),
+            "commands/pangea_infra.rs must define `bundle_bin()` — the \
+             sigil function that resolves the `BUNDLE_BIN` override for \
+             every bundle spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")"),
+            "`bundle_bin()` must delegate to \
+             `crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")` — \
+             the canonical lookup was not found in the module."
+        );
+    }
+
+    /// Whole-module shield: no raw `inspec`-literal spawn may live in
+    /// `commands/pangea_infra.rs`. Every inspec spawn must resolve
+    /// `INSPEC_BIN` via [`super::inspec_bin`] first — the derived-`_BIN`
+    /// override the sibling `_BIN`-suffix tools honor. Chef InSpec
+    /// reserves several `INSPEC_*` env-var prefixes for its own
+    /// reporter/config surface, so the sigil honors the derivation
+    /// `_BIN`-suffix convention rather than the bare-name form.
+    ///
+    /// Pre-lift the one consumer site — `verify`
+    /// (`inspec exec <profile> -t <target> --reporter cli`) — spelled
+    /// the bare-literal tool-name form (a `Command::new` call with the
+    /// tool name inline as a string) verbatim, ignoring `INSPEC_BIN`
+    /// at exactly the load-bearing gate `cycle`'s Phase 5/5
+    /// (live-infrastructure-compliance verdict) depends on. Chef-InSpec
+    /// binaries have broken compliance-profile syntax across major
+    /// versions (Ruby-tooling upgrade paths, Cinc-Auditor forks, and
+    /// vendored profile inputs are the load-bearing failure modes);
+    /// a wrong-binary verdict at this phase does not fail loudly, it
+    /// attributes a compliance-passing (or -failing) verdict to the
+    /// wrong `inspec`. Same silent-PATH-fallback bug class the sibling
+    /// `TERRAFORM` / `CARGO` / `DOCKER_BIN` / `KUBECTL_BIN` / `GIT_BIN`
+    /// migrations closed on their respective spawn surfaces.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare `Command::new(...)`,
+    /// and the `tokio::process::Command::new(...)` long form),
+    /// reconstructed via [`format!`] so this shield's own source text
+    /// does not false-match itself. Also asserts the canonical
+    /// `crate::repo::get_tool_path("INSPEC_BIN", "inspec")` delegation
+    /// form is present so the sigil-body itself cannot silently drift
+    /// away from the substrate-exported env-var contract.
+    #[test]
+    fn test_inspec_spawn_routes_through_inspec_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("pangea_infra.rs");
+
+        let bare = "inspec";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/pangea_infra.rs must not spawn `inspec` via the \
+             bare literal — every inspec spawn must resolve `INSPEC_BIN` \
+             via `inspec_bin()` first. A raw literal at \
+             `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/pangea_infra.rs must not spawn `inspec` via the \
+             bare literal — every inspec spawn must resolve `INSPEC_BIN` \
+             via `inspec_bin()` first. A raw literal at `Command::new` \
+             (either the top-level `use` alias or the bare form) \
+             bypasses the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/pangea_infra.rs must not spawn `inspec` via the \
+             bare literal — every inspec spawn must resolve `INSPEC_BIN` \
+             via `inspec_bin()` first. A raw literal at \
+             `tokio::process::Command::new` bypasses the hermetic-runner \
+             contract."
+        );
+        assert!(
+            SOURCE.contains("fn inspec_bin()"),
+            "commands/pangea_infra.rs must define `inspec_bin()` — the \
+             sigil function that resolves the `INSPEC_BIN` override for \
+             every inspec spawn."
+        );
+        assert!(
+            SOURCE.contains("crate::repo::get_tool_path(\"INSPEC_BIN\", \"inspec\")"),
+            "`inspec_bin()` must delegate to \
+             `crate::repo::get_tool_path(\"INSPEC_BIN\", \"inspec\")` — \
              the canonical lookup was not found in the module."
         );
     }
