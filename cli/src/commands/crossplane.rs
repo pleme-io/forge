@@ -11,12 +11,30 @@
 //! built by Nix (`dockerTools`) and handed in as a `docker save` tarball; this
 //! command only embeds + pushes it via the `crossplane` CLI.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
 use crate::repo::get_tool_path;
+
+/// Resolve the `crossplane` CLI path via `CROSSPLANE_BIN`, falling back to
+/// PATH. Every `crossplane` spawn in this module reads through this sigil
+/// so the resolve happens in exactly one place — mirrors the `helm_bin()`
+/// / `docker_bin()` / `flux_bin()` / `open_bin()` sigil discipline on
+/// sibling command modules. Solve-once at the sigil (THEORY §I.5 —
+/// duplication budget zero; every recurring shape becomes a generator or
+/// helper before it becomes duplicated code) means a future added
+/// `crossplane` spawn cannot silently repeat the two-argument resolve
+/// string and drift away from `CROSSPLANE_BIN` at exactly the tier the
+/// hermetic-runner contract binds. The whole-module shield below asserts
+/// both the sigil's existence and its unique resolve — the pre-lift form
+/// scattered the resolve across four sites (`function_release`'s xpkg
+/// build + push, `configuration_release`'s xpkg build + push, `render`,
+/// `validate`), each carrying its own copy of the fallback string.
+fn crossplane_bin() -> String {
+    get_tool_path("CROSSPLANE_BIN", "crossplane")
+}
 
 /// Build a Crossplane Function package (xpkg) from a Nix-built runtime image and
 /// a `package/` root, then push it to `package_ref:tag`.
@@ -54,7 +72,7 @@ pub fn function_release(
         runtime_image,
         out.display()
     );
-    let crossplane = get_tool_path("CROSSPLANE_BIN", "crossplane");
+    let crossplane = crossplane_bin();
     let build = Command::new(&crossplane)
         .args([
             "xpkg",
@@ -103,10 +121,20 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
     }
     let out = std::env::temp_dir().join(".xpkg-config.xpkg");
     let examples = Path::new(package_root).join("examples");
-    info!("crossplane xpkg build (configuration): {} → {}", package_root, out.display());
-    let crossplane = get_tool_path("CROSSPLANE_BIN", "crossplane");
+    info!(
+        "crossplane xpkg build (configuration): {} → {}",
+        package_root,
+        out.display()
+    );
+    let crossplane = crossplane_bin();
     let build = Command::new(&crossplane)
-        .args(["xpkg", "build", "--package-root", package_root, "--package-file"])
+        .args([
+            "xpkg",
+            "build",
+            "--package-root",
+            package_root,
+            "--package-file",
+        ])
         .arg(&out)
         .arg("--examples-root")
         .arg(&examples)
@@ -152,7 +180,10 @@ pub fn render(
     }
     if let Some(o) = observed {
         if !Path::new(o).exists() {
-            bail!("crossplane render: observed-resources file not found: {}", o);
+            bail!(
+                "crossplane render: observed-resources file not found: {}",
+                o
+            );
         }
     }
     let mut args = vec!["render", composite, composition, functions];
@@ -160,7 +191,7 @@ pub fn render(
         args.push("--observed-resources");
         args.push(o);
     }
-    let crossplane = get_tool_path("CROSSPLANE_BIN", "crossplane");
+    let crossplane = crossplane_bin();
     let status = Command::new(&crossplane)
         .args(&args)
         .status()
@@ -179,7 +210,7 @@ pub fn validate(extensions: &str, resources: &str) -> Result<()> {
             bail!("crossplane validate: {} path not found: {}", label, path);
         }
     }
-    let crossplane = get_tool_path("CROSSPLANE_BIN", "crossplane");
+    let crossplane = crossplane_bin();
     let status = Command::new(&crossplane)
         .args(["beta", "validate", extensions, resources])
         .status()
@@ -238,16 +269,40 @@ mod tests {
             !body.contains("Command::new(\"crossplane\")"),
             "commands/crossplane.rs must not spawn `crossplane` via the \
              bare literal — every `crossplane` spawn must resolve \
-             `CROSSPLANE_BIN` via \
-             `crate::repo::get_tool_path(\"CROSSPLANE_BIN\", \"crossplane\")` \
-             first. A raw `Command::new(\"crossplane\")` bypasses the \
+             `CROSSPLANE_BIN` via the `crossplane_bin()` sigil first. A \
+             raw `Command::new(\"crossplane\")` bypasses the \
              hermetic-runner contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("fn crossplane_bin()"),
+            "commands/crossplane.rs must define `crossplane_bin()` — the \
+             sigil function that resolves the tools-registry \
+             `CROSSPLANE_BIN` override for every crossplane spawn. \
+             Mirrors the `helm_bin()` / `docker_bin()` / `flux_bin()` / \
+             `open_bin()` sigil discipline on sibling command modules."
         );
         assert!(
             body.contains("get_tool_path(\"CROSSPLANE_BIN\", \"crossplane\")"),
             "commands/crossplane.rs must resolve the crossplane binary via \
              `get_tool_path(\"CROSSPLANE_BIN\", \"crossplane\")` — the \
              canonical lookup was not found in the module body."
+        );
+        // Solve-once: the two-argument resolve string appears in exactly
+        // ONE place — the `crossplane_bin()` sigil definition — so a
+        // future added spawn cannot silently re-copy the resolve inline
+        // and drift away from the sigil's single point of truth. Every
+        // consumer must read through `crossplane_bin()`. THEORY §I.5:
+        // duplication budget zero.
+        let resolve_count = body
+            .matches("get_tool_path(\"CROSSPLANE_BIN\", \"crossplane\")")
+            .count();
+        assert_eq!(
+            resolve_count, 1,
+            "the two-argument resolve `get_tool_path(\"CROSSPLANE_BIN\", \
+             \"crossplane\")` must appear exactly ONCE in the module body \
+             (only in the `crossplane_bin()` sigil), not {resolve_count} \
+             times — every consumer must route through `crossplane_bin()`, \
+             not re-copy the resolve inline"
         );
     }
 }
