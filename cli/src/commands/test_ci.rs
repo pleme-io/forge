@@ -9,6 +9,26 @@ use tracing::info;
 
 use crate::repo::get_tool_path;
 
+/// Resolve the `cargo` binary via `CARGO`, falling back to PATH. Every
+/// `cargo` spawn in this module reads through this sigil so the resolve
+/// happens in exactly one place — mirrors the `cargo_bin()` sigil at
+/// `commands/prerelease.rs:102` (79e03a5) and the sibling `crossplane_bin()`
+/// / `cosign_bin()` / `jsonnet_bin()` sigil discipline on other command
+/// modules (6b3ac16 / a070a3c / a826ac0). Solve-once at the sigil
+/// (THEORY §I.5 — duplication budget zero; every recurring shape becomes
+/// a generator or helper before it becomes duplicated code) means a
+/// future added `cargo` spawn cannot silently repeat the two-argument
+/// resolve string and drift away from `CARGO` at exactly the tier the
+/// hermetic-runner contract binds. The whole-module shield below asserts
+/// both the sigil's existence and its unique resolve — the pre-lift form
+/// scattered the resolve across two sites (`execute` at the nextest /
+/// cargo-test fallback pair, `coverage` at the tarpaulin install-gate /
+/// tarpaulin run pair), each carrying its own copy of the fallback
+/// string.
+fn cargo_bin() -> String {
+    get_tool_path("CARGO", "cargo")
+}
+
 /// Run tests in CI mode: prefer cargo-nextest, fall back to cargo test.
 pub fn execute(working_dir: &str, threads: u32) -> Result<()> {
     let dir = Path::new(working_dir);
@@ -16,7 +36,7 @@ pub fn execute(working_dir: &str, threads: u32) -> Result<()> {
         bail!("Working directory not found: {}", working_dir);
     }
 
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
 
     if which::which("cargo-nextest").is_ok() {
         info!("Running tests with cargo nextest (threads={})...", threads);
@@ -66,7 +86,7 @@ pub fn coverage(working_dir: &str, format: &str) -> Result<()> {
         bail!("Working directory not found: {}", working_dir);
     }
 
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
 
     if which::which("cargo-tarpaulin").is_err() {
         info!("Installing cargo-tarpaulin...");
@@ -102,11 +122,13 @@ mod tests {
     /// `commands/test_ci.rs` — the four sites in `execute` (nextest and
     /// the cargo-test fallback) and `coverage` (the tarpaulin install
     /// gate and the tarpaulin run itself) — must first resolve `CARGO`
-    /// via [`crate::repo::get_tool_path`], the canonical env-var
-    /// override every other cargo-invocation site in forge honors
-    /// (`commands/bootstrap.rs:639`, `commands/pangea.rs:473`,
-    /// `graphql_schema.rs:193`; the doc-comment idiom lives at
-    /// `repo.rs:92`).
+    /// via the `cargo_bin()` sigil, which delegates to
+    /// [`crate::repo::get_tool_path`] in exactly one place — the
+    /// canonical env-var override every other cargo-invocation site in
+    /// forge honors (`commands/bootstrap.rs:639`, `commands/pangea.rs`,
+    /// `graphql_schema.rs`; the sibling sigil lives at
+    /// `commands/prerelease.rs::cargo_bin`; the doc-comment idiom lives
+    /// at `repo.rs:92`).
     ///
     /// Pre-lift each of the four sites spelled `Command::new("cargo")`
     /// verbatim and ignored `CARGO`. `test:ci` is invoked from
@@ -117,6 +139,18 @@ mod tests {
     /// `developer_tools.rs` CARGO lift (8687093), the `NIX_BIN`
     /// migration (4dfb2b3), and the `KUBECTL_BIN`/`GIT_BIN` migrations
     /// (5bb7cff, 818ed9a) closed on their respective spawn surfaces.
+    ///
+    /// The subsequent lift consolidates the two `execute` / `coverage`
+    /// resolves onto a single `cargo_bin()` sigil (mirrors the recent
+    /// `crossplane_bin()` sigil at 6b3ac16 and the `cargo_bin()` sigil
+    /// at `commands/prerelease.rs:102`, 79e03a5). The shield below then
+    /// asserts three invariants: (a) no bare `Command::new("cargo")`
+    /// literal in the body, (b) `fn cargo_bin()` is defined, and (c)
+    /// the two-argument resolve string appears in EXACTLY one place in
+    /// the module body — only the sigil definition — so a future added
+    /// spawn cannot silently re-copy the resolve inline and drift away
+    /// from `cargo_bin()`'s single point of truth. THEORY §I.5:
+    /// duplication budget zero.
     ///
     /// The scan bounds on the whole-module boundary (from the file
     /// start to the `\n#[cfg(test)]\nmod tests {` marker above) so
@@ -129,20 +163,45 @@ mod tests {
     /// the whole-module-boundary scan discipline pioneered on
     /// `commands/supergraph_verification.rs` (65283fb).
     #[test]
-    fn test_test_ci_routes_cargo_through_cargo_env_not_raw_command() {
-        let source = include_str!("test_ci.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+    fn test_test_ci_routes_cargo_through_cargo_bin_sigil_not_raw_command() {
+        const SOURCE: &str = include_str!("test_ci.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
             "test_ci.rs must have a `#[cfg(test)] mod tests {` marker \
              — the shield's scan boundary depends on it",
         );
-        let body = &source[..cutoff];
+        let body = &SOURCE[..cutoff];
         assert!(
             !body.contains("Command::new(\"cargo\")"),
             "commands/test_ci.rs must not spawn `cargo` via the bare literal — \
-             every `cargo` spawn must resolve `CARGO` via \
-             `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
-             A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
+             every `cargo` spawn must resolve `CARGO` via the `cargo_bin()` \
+             sigil first. A raw `Command::new(\"cargo\")` bypasses the \
+             hermetic-runner contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("fn cargo_bin()"),
+            "commands/test_ci.rs must define `cargo_bin()` — the sigil \
+             function that resolves the tools-registry `CARGO` override \
+             for every cargo spawn. Mirrors the `cargo_bin()` sigil at \
+             `commands/prerelease.rs:102` and the sibling \
+             `crossplane_bin()` / `cosign_bin()` / `jsonnet_bin()` sigil \
+             discipline on other command modules."
+        );
+        // Solve-once: the two-argument resolve string appears in exactly
+        // ONE place — the `cargo_bin()` sigil definition — so a future
+        // added spawn cannot silently re-copy the resolve inline and
+        // drift away from the sigil's single point of truth. Every
+        // consumer must read through `cargo_bin()`. THEORY §I.5:
+        // duplication budget zero.
+        let resolve_count = body
+            .matches("get_tool_path(\"CARGO\", \"cargo\")")
+            .count();
+        assert_eq!(
+            resolve_count, 1,
+            "the two-argument resolve `get_tool_path(\"CARGO\", \"cargo\")` \
+             must appear exactly ONCE in the module body (only in the \
+             `cargo_bin()` sigil), not {resolve_count} times — every \
+             consumer must route through `cargo_bin()`, not re-copy the \
+             resolve inline"
         );
     }
 }
