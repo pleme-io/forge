@@ -203,6 +203,8 @@ async fn run_rust_tests(service: &str, service_dir: &str, test_type: TestType) -
     let run_unit = test_type == TestType::Unit || test_type == TestType::All;
     let run_integration = test_type == TestType::Integration || test_type == TestType::All;
 
+    let cargo = crate::repo::get_tool_path("CARGO", "cargo");
+
     if run_unit {
         println!(
             "  {} Running Rust unit tests for {}...",
@@ -210,7 +212,7 @@ async fn run_rust_tests(service: &str, service_dir: &str, test_type: TestType) -
             service.bright_cyan()
         );
 
-        let mut cmd = Command::new("cargo");
+        let mut cmd = Command::new(&cargo);
         cmd.args(["test", "--lib", "--bins"])
             .current_dir(service_dir);
         crate::retry::run_inherited_status(cmd, "cargo test --lib --bins")
@@ -227,7 +229,7 @@ async fn run_rust_tests(service: &str, service_dir: &str, test_type: TestType) -
             service.bright_cyan()
         );
 
-        let mut cmd = Command::new("cargo");
+        let mut cmd = Command::new(&cargo);
         cmd.args(["test", "--test", "*"]).current_dir(service_dir);
         crate::retry::run_inherited_status(cmd, "cargo test --test *")
             .await
@@ -546,5 +548,56 @@ mod tests {
     fn test_service_type_from_str_invalid() {
         assert!(ServiceType::from_str("python").is_err());
         assert!(ServiceType::from_str("").is_err());
+    }
+
+    /// Whole-module shield: no raw `Command::new("cargo")` may live in
+    /// this module's non-test body. Every `cargo` spawn in
+    /// `commands/test.rs` — the `run_rust_tests` unit-test spawn and
+    /// integration-test spawn — must first resolve `CARGO` via
+    /// [`crate::repo::get_tool_path`], the canonical env-var override
+    /// every sibling cargo-consuming surface honors
+    /// (`commands/test_ci.rs` four sites at e1677d3;
+    /// `commands/developer_tools.rs` nine sites at 8687093;
+    /// `commands/comprehensive_release.rs` two sites at f95d541;
+    /// `commands/prerelease.rs` seven sites at cfdba0d;
+    /// `commands/tool.rs` five sites at 79e03a5).
+    ///
+    /// Pre-lift both sites spelled `Command::new("cargo")` verbatim,
+    /// ignoring `CARGO` at every one. `forge test <rust-service>` is
+    /// invoked from CI wrappers that export
+    /// `CARGO=/nix/store/...-cargo/bin/cargo`; pre-lift the two rust-
+    /// test spawns silently fell through to whatever `cargo` the
+    /// wrapper's PATH found first — the same silent-PATH-fallback bug
+    /// class the `test_ci.rs` (e1677d3), `developer_tools.rs`
+    /// (8687093), `comprehensive_release.rs` (f95d541), `prerelease.rs`
+    /// (cfdba0d), and `tool.rs` (79e03a5) CARGO lifts closed on their
+    /// respective spawn surfaces.
+    ///
+    /// Scan bounds on the whole-module boundary — from file start to
+    /// the FIRST `\n#[cfg(test)]\nmod tests {` marker in source order
+    /// — so this shield's own docstring mentions of the forbidden
+    /// literal, living in the `#[cfg(test)]` block below that marker,
+    /// stay out of scope AND every current or future cargo-spawning
+    /// helper landing anywhere in the top-level module body cannot
+    /// silently ride along without going through `CARGO`. Mirrors the
+    /// whole-module-boundary scan discipline of the sibling
+    /// `test_ci.rs` cargo shield (e1677d3) and every sibling module's
+    /// CARGO shield.
+    #[test]
+    fn test_cargo_spawn_routes_through_cargo_env_not_raw_literal() {
+        let source = include_str!("test.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "test.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"cargo\")"),
+            "commands/test.rs must not spawn `cargo` via the bare literal — \
+             every `cargo` spawn must resolve `CARGO` via \
+             `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
+             A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
     }
 }
