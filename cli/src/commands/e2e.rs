@@ -179,7 +179,8 @@ pub fn run_test_pyramid(
 fn run_backend_unit_tests(backend_dir: &str, filter: Option<&str>) -> Result<()> {
     ui::print_info("Running cargo test --lib");
 
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.current_dir(backend_dir).arg("test").arg("--lib");
 
     if let Some(f) = filter {
@@ -305,7 +306,8 @@ fn run_backend_integration_tests(backend_dir: &str, filter: Option<&str>) -> Res
     ui::print_info(&format!("Running cargo {}", args.join(" ")));
 
     let start = Instant::now();
-    let status = Command::new("cargo")
+    let cargo = get_tool_path("CARGO", "cargo");
+    let status = Command::new(&cargo)
         .current_dir(backend_dir)
         .args(&args)
         .status()
@@ -439,7 +441,8 @@ pub fn run_e2e_tests(
 
     let start = Instant::now();
 
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.current_dir(&backend_dir).args(&args);
 
     // Set headless mode
@@ -1284,6 +1287,74 @@ mod which_probe_routing_tests {
             "commands/e2e.rs must probe the `docker` binary via the \
              canonical `which::which(\"docker\")` crate call — the \
              required form was not found in the module."
+        );
+    }
+}
+
+#[cfg(test)]
+mod cargo_env_routing_tests {
+    /// Whole-module shield: no raw `Command::new("cargo")` may live in
+    /// `commands/e2e.rs`'s non-test body. Every `cargo` spawn in this
+    /// module must first resolve `CARGO` via
+    /// [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// every other cargo-invocation site in forge honors
+    /// (`commands/test.rs`'s two `run_rust_tests` spawns 4ea5076,
+    /// `commands/test_ci.rs`'s four spawns e1677d3,
+    /// `commands/tool.rs`'s five `cargo`/`crate2nix` spawns 79e03a5,
+    /// `commands/comprehensive_release.rs`'s two spawns f95d541,
+    /// `commands/prerelease.rs`'s seven spawns cfdba0d).
+    ///
+    /// Pre-lift this module carried three real `cargo` spawn sites in
+    /// the test-pyramid orchestration surface: `run_backend_unit_tests`'
+    /// `cargo test --lib` at line 182; `run_backend_integration_tests`'
+    /// `cargo test --test integration_tests --features integration-tests`
+    /// at line 308; and `run_e2e_tests`' `cargo test --test e2e_tests
+    /// --features integration-tests -- --include-ignored` at line 442.
+    /// Each spawn spelled `Command::new("cargo")` verbatim, bypassing
+    /// `CARGO` at exactly the moment hermetic-runner consistency matters
+    /// most — the surface `forge test-pyramid`, `forge e2e-run`, and the
+    /// pyramid's Unit / Integration / E2E phases invoke to build and run
+    /// the very test binaries the pyramid trusts. A Nix-hermetic runner
+    /// with a store-path `cargo` binary silently fell through to whatever
+    /// `cargo` was first on `PATH` at each site, diverging from every
+    /// other cargo-invocation surface in forge and from the sibling
+    /// KUBECTL_BIN / GIT_BIN / NIX_BIN / DOCKER_BIN / HELM_BIN frontier's
+    /// uniform discipline.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file start
+    /// to the FIRST `\n#[cfg(test)]\n` marker in source order, which
+    /// lands at the sibling `resolve_repo_root_git_bin_routing_tests`
+    /// block near the end of the module body) so this shield's own
+    /// docstring mentions of `Command::new("cargo")` — living in a
+    /// `#[cfg(test)]` block below that first marker — stay out of scope
+    /// AND every current or future cargo-spawning helper landing anywhere
+    /// in the top-level module body cannot silently ride along without
+    /// going through `get_tool_path("CARGO", "cargo")`. Mirrors the
+    /// sibling whole-module shields on `commands/test.rs` (4ea5076),
+    /// `commands/test_ci.rs` (e1677d3), and `commands/tool.rs` (79e03a5)
+    /// — the whole-module-boundary scan discipline pioneered on
+    /// `commands/supergraph_verification.rs` (65283fb).
+    #[test]
+    fn test_e2e_routes_cargo_through_cargo_env_not_raw_command() {
+        const SOURCE: &str = include_str!("e2e.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "e2e.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"cargo\")"),
+            "commands/e2e.rs must not spawn `cargo` via the bare \
+             literal — every `cargo` spawn must resolve `CARGO` via \
+             `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
+             A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"CARGO\", \"cargo\")"),
+            "commands/e2e.rs must resolve the cargo binary via \
+             `get_tool_path(\"CARGO\", \"cargo\")` — the canonical \
+             lookup was not found in the module body."
         );
     }
 }
