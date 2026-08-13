@@ -838,7 +838,7 @@ mod tests {
         std::fs::create_dir(&work).expect("mkdir work");
 
         let run = |args: &[&str], cwd: &Path| {
-            let status = Command::new("git")
+            let status = git_command_sync()
                 .args(args)
                 .current_dir(cwd)
                 .status()
@@ -898,7 +898,7 @@ mod tests {
             .expect("commit_and_push_in must succeed");
 
         let probe = parent.path().join("probe");
-        let status = Command::new("git")
+        let status = git_command_sync()
             .args([
                 "clone",
                 bare.to_str().expect("bare utf-8"),
@@ -907,7 +907,7 @@ mod tests {
             .status()
             .expect("spawn git clone");
         assert!(status.success(), "clone probe failed");
-        let subject_out = Command::new("git")
+        let subject_out = git_command_sync()
             .args(["log", "-1", "--pretty=%s"])
             .current_dir(&probe)
             .output()
@@ -946,7 +946,7 @@ mod tests {
         .expect("commit_and_push_in must succeed");
 
         let probe = parent.path().join("probe");
-        let status = Command::new("git")
+        let status = git_command_sync()
             .args([
                 "clone",
                 bare.to_str().expect("bare utf-8"),
@@ -955,7 +955,7 @@ mod tests {
             .status()
             .expect("spawn git clone");
         assert!(status.success(), "clone probe failed");
-        let files_out = Command::new("git")
+        let files_out = git_command_sync()
             .args(["show", "--name-only", "--pretty=", "HEAD"])
             .current_dir(&probe)
             .output()
@@ -1248,6 +1248,141 @@ mod tests {
             "git_command_sync().status() must surface the shim's exit code \
              verbatim — proves the sync constructor spawns the GIT_BIN \
              shim end-to-end, not a PATH-resolved `git`"
+        );
+    }
+
+    /// Whole-module shield: no raw bare-literal `git` spawn may live on
+    /// an executable code line in `cli/src/git.rs`. Every git spawn —
+    /// the two `pub fn` production entry points ([`git_capture`],
+    /// [`git_capture_async`], [`git_capture_remote`], the
+    /// `git_command_{sync,async}` free-function constructors, plus every
+    /// sibling `#[cfg(test)]` fixture and probe (the `run` closure inside
+    /// [`tests::make_bare_origin_with_work`] and the four
+    /// `git clone` / `git log` / `git show` probes in
+    /// [`tests::test_commit_and_push_in_lands_commit_on_origin`] and
+    /// [`tests::test_commit_and_push_in_stages_every_file_in_slice`]) —
+    /// must resolve `GIT_BIN` via the canonical
+    /// [`git_command_sync`] / [`git_command_async`] constructors (or one
+    /// of the higher-level `git_capture{,_async,_remote}` primitives
+    /// that already delegate through `get_tool_path(tools::GIT)`). A
+    /// Nix-hermetic runner invocation with a substrate-derivation-pinned
+    /// `git` must land at that same store path, not at whichever `git`
+    /// sits first on `PATH`.
+    ///
+    /// This module is the substrate for every git spawn in forge: the
+    /// production primitives here delegate through
+    /// `get_tool_path(tools::GIT)`, and the test-side fixture
+    /// `make_bare_origin_with_work` seeds the bare+work pair every
+    /// `commit_and_push_in` round-trip test in this module consumes. A
+    /// raw literal at any test-side site would silently fall through
+    /// to the PATH-resolved `git` and observe a state the substrate-
+    /// pinned `git` (the one every production consumer routes through)
+    /// did not produce — the same class of foreign-`git`-observing-
+    /// substrate-`git` inversion the sibling
+    /// `commands/release_commit.rs` (8f27812) /
+    /// `commands/product_release.rs` (0ea75ba) /
+    /// `commands/attestation.rs` (1c90949) /
+    /// `cli/src/test_support.rs` (3036a55) shields close on their
+    /// modules.
+    ///
+    /// The three forbidden shapes (`std::process::Command::new("git")`,
+    /// bare `Command::new("git")`, `tokio::process::Command::new("git")`)
+    /// are reconstructed via `format!` from the bare string `"git"` so
+    /// this shield's own source text does not false-match itself. The
+    /// per-line filter drops `///` / `//!` / `//` comment lines so the
+    /// pre-existing docstrings on `git_command_{sync,async}` and the
+    /// three `git_capture` primitives — which narrate the historical
+    /// `Command::new("git")` anti-pattern by literal quotation — do not
+    /// register as violations. Every one of the remaining occurrences
+    /// (before this shield) at lines 471 / 477 / 482 / 504 / 700 / 983 /
+    /// 1146 / 1214 lives inside a `///` docstring; the shield fires only
+    /// on executable code.
+    ///
+    /// The production body of this module (`git_capture_with_bin`,
+    /// `git_capture_async_with_bin`, `git_capture_remote_with_bin`)
+    /// spawns via `Command::new(bin)` where `bin` is the resolved
+    /// argument threaded from `get_tool_path(tools::GIT)` — a variable,
+    /// not the bare literal this shield forbids, so it does not match.
+    /// Similarly `git_command_sync` / `git_command_async` construct via
+    /// `Command::new(get_tool_path(tools::GIT))` — again a variable.
+    ///
+    /// The end-to-end `GIT_BIN`-routing invariant of the underlying
+    /// primitives is pinned separately by
+    /// [`test_git_command_sync_routes_through_git_bin_env_var`] and
+    /// [`test_git_command_async_routes_through_git_bin_env_var`]; this
+    /// shield only certifies that every git-spawning site in this
+    /// module reads through one of them.
+    #[test]
+    fn test_git_spawn_routes_through_git_command_sync_not_raw_literal() {
+        const SOURCE: &str = include_str!("git.rs");
+
+        let bare = "git";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        let is_code_line = |line: &str| -> bool {
+            let t = line.trim_start();
+            !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("//")
+        };
+
+        let hits_for = |needle: &str| -> Vec<String> {
+            SOURCE
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.contains(needle))
+                .filter(|(_, l)| is_code_line(l))
+                .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+                .collect()
+        };
+
+        let std_hits = hits_for(&raw_std);
+        assert!(
+            std_hits.is_empty(),
+            "cli/src/git.rs must not spawn `git` via the bare literal at \
+             `std::process::Command::new` — every git spawn must resolve \
+             `GIT_BIN` via `git_command_sync()` / `git_command_async()` \
+             (or one of the `git_capture{{,_async,_remote}}` primitives \
+             that delegate through them) first. A raw literal bypasses \
+             the hermetic-runner contract substrate's `mkRuntimeToolsEnv` \
+             exports. Offending code lines: {std_hits:?}"
+        );
+
+        let bare_hits = hits_for(&raw_bare);
+        assert!(
+            bare_hits.is_empty(),
+            "cli/src/git.rs must not spawn `git` via the bare literal at \
+             `Command::new` (top-of-file alias) — every git spawn must \
+             resolve `GIT_BIN` via `git_command_sync()` / \
+             `git_command_async()` (or one of the \
+             `git_capture{{,_async,_remote}}` primitives that delegate \
+             through them) first. A raw literal bypasses the \
+             hermetic-runner contract. Offending code lines: {bare_hits:?}"
+        );
+
+        let tokio_hits = hits_for(&raw_tokio);
+        assert!(
+            tokio_hits.is_empty(),
+            "cli/src/git.rs must not spawn `git` via the bare literal at \
+             `tokio::process::Command::new` — every async git spawn must \
+             resolve `GIT_BIN` via `git_command_async()` first. A raw \
+             literal bypasses the hermetic-runner contract. Offending \
+             code lines: {tokio_hits:?}"
+        );
+
+        assert!(
+            SOURCE.contains("pub fn git_command_sync"),
+            "cli/src/git.rs must expose the canonical `git_command_sync()` \
+             constructor — the required form was not found in the module. \
+             A regression that removed it would silently downgrade every \
+             sync test-side spawn to the PATH fallback."
+        );
+        assert!(
+            SOURCE.contains("pub fn git_command_async"),
+            "cli/src/git.rs must expose the canonical `git_command_async()` \
+             constructor — the required form was not found in the module. \
+             A regression that removed it would silently downgrade every \
+             async consumer to the PATH fallback."
         );
     }
 }
