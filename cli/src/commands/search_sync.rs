@@ -8,6 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
+use std::env;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -16,6 +17,7 @@ use tokio::time::timeout;
 
 use crate::config::{DeployConfig, NovaSearchConfig};
 use crate::infrastructure::kubectl::kubectl_command_async;
+use crate::repo::get_tool_path;
 
 /// Run search service GitOps sync using novasearchctl
 ///
@@ -59,7 +61,22 @@ pub async fn run_novasearch_sync(
 }
 
 /// Check if novasearchctl is available
+///
+/// Fast path: if `NOVASEARCHCTL_BIN` is exported (typically by a nix-hermetic
+/// runner's `mkRuntimeToolsEnv`), the substrate has already resolved and
+/// pinned the binary — trust that and skip the PATH probe. Falling through
+/// to `which novasearchctl` in that world would falsely report "not
+/// available" whenever bare `novasearchctl` isn't on PATH (the norm for
+/// nix-shell derivations, which only export the specific tool paths a
+/// derivation declares), silently downgrading the local-spawn path to the
+/// kubectl-exec fallback and losing the substrate-derived binary.
+///
+/// Fallback: probe PATH via `which` for the mixed / non-Nix development
+/// environment where `NOVASEARCHCTL_BIN` is unset.
 async fn check_novasearchctl_available() -> bool {
+    if env::var("NOVASEARCHCTL_BIN").is_ok() {
+        return true;
+    }
     Command::new("which")
         .arg("novasearchctl")
         .stdout(Stdio::null())
@@ -71,8 +88,16 @@ async fn check_novasearchctl_available() -> bool {
 }
 
 /// Run sync using novasearchctl directly
+///
+/// Resolves the binary via the canonical two-argument tools-registry idiom
+/// `crate::repo::get_tool_path("NOVASEARCHCTL_BIN", "novasearchctl")` — the
+/// same shape the sibling `commands/typescript.rs::regenerate` (5d87339)
+/// and `commands/web_service.rs::web_regenerate` (2396779) already ride on.
+/// A Nix-hermetic runner's substrate-derived `NOVASEARCHCTL_BIN` path is
+/// honored; the bare-`"novasearchctl"` fallback preserves non-Nix behavior.
 async fn run_sync_direct(config_path: &Path, config: &NovaSearchConfig) -> Result<()> {
-    let mut cmd = Command::new("novasearchctl");
+    let novasearchctl = get_tool_path("NOVASEARCHCTL_BIN", "novasearchctl");
+    let mut cmd = Command::new(&novasearchctl);
     cmd.arg("--server").arg(&config.api_url);
     cmd.arg("sync");
     cmd.arg("--source").arg(config_path);
@@ -297,6 +322,74 @@ mod tests {
             "commands/search_sync.rs must resolve the `kubectl` binary \
              via the canonical `kubectl_command_async()` constructor \
              — the required form was not found in the module."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new`-with-bare-`novasearchctl`-
+    /// literal may live in `commands/search_sync.rs`. The sole `novasearchctl`
+    /// spawn on the direct-invocation path (`run_sync_direct`) must resolve
+    /// through the canonical two-argument tools-registry idiom
+    /// [`crate::repo::get_tool_path`] against `NOVASEARCHCTL_BIN` first —
+    /// the same shape the sibling `commands/typescript.rs::regenerate`
+    /// (5d87339) and `commands/web_service.rs::web_regenerate` (2396779)
+    /// already ride on.
+    ///
+    /// Pre-lift the single spawn site (`run_sync_direct`'s
+    /// `Command::new(<bare>)`) spelled the bare literal verbatim,
+    /// ignoring `NOVASEARCHCTL_BIN` at the site. A Nix-hermetic runner's
+    /// substrate-derived novasearchctl path was lost to whatever
+    /// `novasearchctl` sat first on PATH — and, worse, the `which`-based
+    /// availability probe (`check_novasearchctl_available`) would report
+    /// "not available" in a nix-hermetic env where bare `novasearchctl`
+    /// isn't on PATH even though `NOVASEARCHCTL_BIN` was exported,
+    /// silently downgrading every direct-invocation call to the
+    /// `kubectl exec` pod-side fallback. This shield pins the direct-path
+    /// spawn onto the substrate-exported env var; the sibling probe was
+    /// rewritten in the same lift to short-circuit on `NOVASEARCHCTL_BIN`
+    /// before falling through to the PATH probe, so the two halves stay
+    /// aligned.
+    ///
+    /// The `novasearchctl` string literal still appears in this module as
+    /// (a) the `which` probe's argument name at the fallback path
+    /// (`check_novasearchctl_available`, PATH-probe body only), (b) the
+    /// pod-side kubectl-exec arg list at `run_sync_via_kubectl`, and (c)
+    /// the diagnostic `println!` labels — none of which are local spawns
+    /// of the binary. The shield forbids only the fused
+    /// `Command::new(<bare>)` shape, reconstructed via
+    /// [`format!`] so the shield's own source text does not false-match
+    /// itself; the whole-module scan therefore covers both the top-of-file
+    /// production body AND every sibling `#[cfg(test)]` block. Also
+    /// asserts the canonical `get_tool_path("NOVASEARCHCTL_BIN",
+    /// "novasearchctl")` lookup form is present in the module, so the
+    /// sigil-body itself cannot silently drift away from the substrate-
+    /// exported env-var contract.
+    #[test]
+    fn test_novasearchctl_spawn_routes_through_novasearchctl_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("search_sync.rs");
+
+        let bare = "novasearchctl";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/search_sync.rs must not spawn `novasearchctl` via \
+             the bare literal — the direct-invocation spawn must resolve \
+             the substrate-exported `NOVASEARCHCTL_BIN` env override via \
+             `crate::repo::get_tool_path(\"NOVASEARCHCTL_BIN\", \
+             \"novasearchctl\")` first. A raw literal at `Command::new` \
+             bypasses the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports and (worse) races the sibling \
+             `which`-based availability probe: the probe would silently \
+             report `false` in a nix-hermetic env where bare \
+             `novasearchctl` isn't on PATH, downgrading every direct \
+             call to the `kubectl exec` fallback."
+        );
+        assert!(
+            SOURCE.contains("get_tool_path(\"NOVASEARCHCTL_BIN\", \"novasearchctl\")"),
+            "commands/search_sync.rs must resolve the `novasearchctl` \
+             binary via the canonical two-argument \
+             `get_tool_path(\"NOVASEARCHCTL_BIN\", \"novasearchctl\")` \
+             lookup — the required form was not found in the module."
         );
     }
 }
