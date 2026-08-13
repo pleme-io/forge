@@ -309,9 +309,9 @@ async fn write_artifact_tags(
 /// # Why this lift
 ///
 /// Pre-this-commit the call site at [`write_artifact_tags`] carried three
-/// inline `Command::new("git").args([...]).status().await.context(...)?`
-/// invocations — for `git add`, `git commit`, `git push` — each WITHOUT
-/// the `if !status.success() { bail!() }` envelope. Every step silently
+/// inline sync `git`-spawn invocations — `git add` / `git commit` /
+/// `git push` — each WITHOUT the `if !status.success() { bail!() }`
+/// envelope. Every step silently
 /// swallowed non-zero git exits: a push rejected as non-fast-forward, an
 /// auth denial, a remote unreachable — all routed to `Ok(())` and the
 /// function then printed "✅ Artifact tags committed and pushed"
@@ -850,8 +850,8 @@ pub async fn product_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::git_command_sync;
     use crate::test_support::{add_bare_origin, init_repo_with_one_commit};
-    use std::process::Command as SyncCommand;
 
     /// `commit_artifact_tags` MUST use the canonical commit-subject
     /// format `"chore: update artifact tags to <sha>"` and MUST land
@@ -884,7 +884,7 @@ mod tests {
         // to be empty); git creates the directory. Picking a path inside
         // the parent tempdir keeps cleanup automatic.
         let probe = parent.path().join("probe");
-        let clone = SyncCommand::new("git")
+        let clone = git_command_sync()
             .args([
                 "clone",
                 bare.to_str().expect("bare utf-8"),
@@ -893,7 +893,7 @@ mod tests {
             .status()
             .expect("git clone");
         assert!(clone.success(), "probe clone must succeed");
-        let subject_out = SyncCommand::new("git")
+        let subject_out = git_command_sync()
             .args(["log", "-1", "--pretty=%s"])
             .current_dir(&probe)
             .output()
@@ -941,8 +941,8 @@ mod tests {
 
     /// `commit_artifact_tags` MUST surface a typed error when the
     /// push step fails — the exact regression the pre-lift inline
-    /// `Command::new("git").args([...]).status().await.context(...)?`
-    /// sequence at `write_artifact_tags` silently swallowed.
+    /// sync `git`-spawn sequence at `write_artifact_tags` silently
+    /// swallowed.
     ///
     /// Pre-lift each step dropped its success check, so a push
     /// rejected as non-fast-forward / auth-denied / remote-unreachable
@@ -962,7 +962,7 @@ mod tests {
         let work = tempfile::tempdir().expect("work tempdir");
         init_repo_with_one_commit(work.path());
         let bogus = work.path().join("bogus-origin.does-not-exist");
-        let add = SyncCommand::new("git")
+        let add = git_command_sync()
             .args([
                 "remote",
                 "add",
@@ -1186,6 +1186,85 @@ mod tests {
             "push_prebuilt_image() must resolve the docker binary via \
              `get_tool_path(\"DOCKER_BIN\", \"docker\")` — the canonical lookup \
              was not found in push_prebuilt_image()."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new(<bare>)` on the `git`
+    /// binary may live in `commands/product_release.rs`. Every git spawn
+    /// on this surface must resolve `GIT_BIN` via the canonical
+    /// [`crate::git::git_command_sync`] constructor so a hermetic-runner
+    /// (Nix `mkRuntimeToolsEnv`) invocation with a pinned
+    /// substrate-derivation git falls through to that shim rather than
+    /// whichever `git` sits first on `PATH`. Pre-lift the three test-side
+    /// probe sites (`git clone` at the origin-round-trip pin in
+    /// `test_commit_artifact_tags_uses_canonical_commit_subject_format`,
+    /// `git log -1 --pretty=%s` at the subject-verification pin in the
+    /// same test, and `git remote add origin` at the push-failure pin in
+    /// `test_commit_artifact_tags_surfaces_push_failure`) each spelled
+    /// the bare shape `SyncCommand::new(<bare>)` verbatim (the local
+    /// `use std::process::Command as SyncCommand` alias resolves to the
+    /// same shape the sibling shields forbid). The alias was removed at
+    /// the top of the `tests` module and the three sites now route
+    /// through `git_command_sync()` — same discipline as the sibling
+    /// `test_git_spawn_routes_through_git_command_sync_not_raw_literal`
+    /// shield in `commands/release_commit.rs` (8f27812).
+    ///
+    /// The three forbidden shapes (`std::process::Command::new(...)`,
+    /// bare `Command::new(...)`, `tokio::process::Command::new(...)`) are
+    /// reconstructed via `format!` from the bare string `"git"` so this
+    /// shield's own source text does not false-match itself — the
+    /// whole-module scan therefore covers both the top-of-file production
+    /// body AND every sibling `#[cfg(test)]` block, any of which could
+    /// otherwise silently re-introduce a raw literal. Also asserts the
+    /// canonical `crate::git::git_command_sync` delegation form is
+    /// present in the module so the sigil-body itself cannot silently
+    /// drift away from the substrate-exported env-var contract.
+    ///
+    /// The end-to-end `GIT_BIN`-routing invariant of the underlying
+    /// primitive is pinned separately by
+    /// [`crate::git::tests::test_git_command_sync_routes_through_git_bin_env_var`];
+    /// this shield only certifies that every git-spawning site in this
+    /// module reads through `git_command_sync()`.
+    #[test]
+    fn test_git_spawn_routes_through_git_command_sync_not_raw_literal() {
+        const SOURCE: &str = include_str!("product_release.rs");
+
+        let bare = "git";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/product_release.rs must not spawn `git` via the \
+             bare literal — every git spawn must resolve `GIT_BIN` via \
+             `crate::git::git_command_sync()` first. A raw literal at \
+             `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/product_release.rs must not spawn `git` via the \
+             bare literal — every git spawn must resolve `GIT_BIN` via \
+             `crate::git::git_command_sync()` first. A raw literal at \
+             `Command::new` (either the top-level `use` alias or the \
+             bare form) bypasses the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/product_release.rs must not spawn `git` via the \
+             bare literal — every git spawn must resolve `GIT_BIN` via \
+             `crate::git::git_command_sync()` first. A raw literal at \
+             `tokio::process::Command::new` bypasses the \
+             hermetic-runner contract."
+        );
+        assert!(
+            SOURCE.contains("crate::git::git_command_sync"),
+            "commands/product_release.rs must resolve the `git` binary \
+             via the canonical `crate::git::git_command_sync()` \
+             constructor — the required form was not found in the \
+             module. A regression here would silently downgrade to the \
+             PATH fallback."
         );
     }
 }
