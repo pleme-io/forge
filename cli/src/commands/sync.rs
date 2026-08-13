@@ -482,27 +482,32 @@ async fn count_migrations(migrations_dir: &Path) -> usize {
 /// Fast path: if `SEA_ORM_CLI_BIN` is exported (typically by a nix-hermetic
 /// runner's `mkRuntimeToolsEnv`), the substrate has already resolved and
 /// pinned the binary — trust that and skip the PATH probe. Falling through
-/// to `which sea-orm-cli` in that world would falsely report "not
-/// available" whenever bare `sea-orm-cli` isn't on PATH (the norm for
-/// nix-shell derivations, which only export the specific tool paths a
-/// derivation declares), silently skipping SeaORM entity generation even
-/// though the substrate-pinned binary is present. Mirrors the
+/// to a PATH probe in that world would falsely report "not available"
+/// whenever bare `sea-orm-cli` isn't on PATH (the norm for nix-shell
+/// derivations, which only export the specific tool paths a derivation
+/// declares), silently skipping SeaORM entity generation even though the
+/// substrate-pinned binary is present. Mirrors the
 /// `check_novasearchctl_available` probe in `commands/search_sync.rs`
 /// (19463db) — the same probe/spawn alignment discipline: whatever the
 /// probe says "yes" to is what the spawn actually invokes.
 ///
-/// Fallback: probe PATH via `which` for the mixed / non-Nix development
-/// environment where `SEA_ORM_CLI_BIN` is unset.
+/// Fallback: probe PATH via the `which` crate for the mixed / non-Nix
+/// development environment where `SEA_ORM_CLI_BIN` is unset. Uses
+/// `which::which(...)` — the same crate-backed idiom the sibling probes in
+/// `commands/test_ci.rs` (`cargo-nextest`, `cargo-tarpaulin`),
+/// `commands/rust_service.rs` (`qemu-aarch64-static`), and
+/// `commands/tool.rs` (`crate2nix`) already ride on — rather than a
+/// subprocess spawn on the `which` binary, so there is no ambient
+/// dependency on a `which` binary existing on PATH itself. This matters on
+/// minimal Nix containers whose derivation only exports the specific tool
+/// paths declared, where a `which` subprocess spawn would fail-to-exec
+/// entirely and the probe would silently report `false` for that reason
+/// alone.
 async fn check_sea_orm_cli_available() -> bool {
     if std::env::var("SEA_ORM_CLI_BIN").is_ok() {
         return true;
     }
-    Command::new("which")
-        .arg("sea-orm-cli")
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    which::which("sea-orm-cli").is_ok()
 }
 
 /// Generate SeaORM entities from database
@@ -690,6 +695,65 @@ mod tests {
              the canonical two-argument \
              `get_tool_path(\"SEA_ORM_CLI_BIN\", \"sea-orm-cli\")` \
              lookup — the required form was not found in the module."
+        );
+    }
+
+    /// Whole-module shield: no bare `which`-binary spawn (a raw
+    /// `Command::new` on the bare tool-name literal) may live in
+    /// `commands/sync.rs`. The PATH-probe fallback in
+    /// `check_sea_orm_cli_available` must resolve through the
+    /// `which::which(...)` crate idiom, the same shape the sibling probes
+    /// in `commands/test_ci.rs` (`cargo-nextest`, `cargo-tarpaulin`),
+    /// `commands/rust_service.rs` (`qemu-aarch64-static`), and
+    /// `commands/tool.rs` (`crate2nix`) already ride on.
+    ///
+    /// Pre-lift the probe spawned a `which` subprocess via the bare
+    /// tool-name literal — a fork+exec that added an ambient dependency
+    /// on a `which` binary existing on PATH itself. On a minimal Nix
+    /// container whose derivation only exports the specific tool paths
+    /// declared, the `which` binary is absent and the spawn
+    /// fails-to-exec entirely, so the probe silently reports `false`
+    /// for that reason alone — the exact same silent-false failure mode
+    /// the sibling `SEA_ORM_CLI_BIN` fast-path was written to bypass,
+    /// only one layer of ambient dependency deeper. Post-lift the probe
+    /// resolves PATH in-process via the `which` crate; no fork+exec, no
+    /// ambient binary, no silent false.
+    ///
+    /// The forbidden shape is reconstructed at test time via [`format!`]
+    /// so this shield's own source text does not false-match itself,
+    /// and the docstring above uses `which`-binary paraphrase rather
+    /// than the literal shape for the same reason; the whole-module
+    /// scan therefore covers both the top-of-file production body AND
+    /// every sibling `#[cfg(test)]` block. Also asserts the canonical
+    /// `which::which(...)` crate idiom is present in the module, so
+    /// the sigil-body itself cannot silently drift back to a
+    /// subprocess spawn.
+    #[test]
+    fn test_which_probe_routes_through_which_crate_not_command_spawn() {
+        const SOURCE: &str = include_str!("sync.rs");
+
+        let raw_command = format!("Command::new(\"{}\")", "which");
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/sync.rs must not spawn the `which` binary via the \
+             bare tool-name literal — the PATH-probe fallback in \
+             `check_sea_orm_cli_available` must resolve through the \
+             in-process `which::which(...)` crate idiom, the same shape \
+             the sibling probes in `commands/test_ci.rs`, \
+             `commands/rust_service.rs`, and `commands/tool.rs` already \
+             ride on. A bare-literal spawn on the `which` binary adds \
+             an ambient dependency on `which` existing on PATH itself; \
+             on a minimal Nix container whose derivation only exports \
+             the specific tool paths declared, the spawn fails-to-exec \
+             and the probe silently reports `false` for that reason \
+             alone."
+        );
+        assert!(
+            SOURCE.contains("which::which(\"sea-orm-cli\")"),
+            "commands/sync.rs must probe the `sea-orm-cli` binary via \
+             the canonical `which::which(\"sea-orm-cli\")` crate call \
+             — the required form was not found in the module."
         );
     }
 }
