@@ -154,7 +154,8 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
     match language {
         "rust" => {
             // Use cargo set-version for Rust
-            let status = Command::new("cargo")
+            let cargo = get_tool_path("CARGO", "cargo");
+            let status = Command::new(&cargo)
                 .args(["set-version", "--bump", level])
                 .current_dir(dir)
                 .status()
@@ -164,10 +165,18 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
                 bail!("cargo set-version --bump {} failed", level);
             }
 
-            // Regenerate Cargo.nix if crate2nix is available
-            if which::which("crate2nix").is_ok() {
+            // Regenerate Cargo.nix if crate2nix is available.
+            //
+            // Probe the substrate-resolved `CRATE2NIX` sigil (not the bare
+            // literal): a Nix-hermetic runner may export
+            // `CRATE2NIX=/nix/store/…/bin/crate2nix` while omitting
+            // `crate2nix` from PATH. `which::which` accepts absolute paths
+            // and checks executability, so a single sigil-form probe
+            // covers both the substrate-exported path and the PATH-fallback.
+            let crate2nix = get_tool_path("CRATE2NIX", "crate2nix");
+            if which::which(&crate2nix).is_ok() {
                 info!("Regenerating Cargo.nix...");
-                let status = Command::new("crate2nix")
+                let status = Command::new(&crate2nix)
                     .args(["generate"])
                     .current_dir(dir)
                     .status()
@@ -203,8 +212,9 @@ pub fn check(name: &str, language: &str, working_dir: &str) -> Result<()> {
 
     match language {
         "rust" => {
+            let cargo = get_tool_path("CARGO", "cargo");
             info!("{}: running cargo fmt --check...", name);
-            run_cmd(dir, "cargo", &["fmt", "--check"])?;
+            run_cmd(dir, &cargo, &["fmt", "--check"])?;
 
             info!("{}: running cargo clippy...", name);
             // Held in a binding: dropping the TempDir deletes the clippy.toml
@@ -213,7 +223,7 @@ pub fn check(name: &str, language: &str, working_dir: &str) -> Result<()> {
             run_clippy(dir, clippy_conf.as_ref().map(tempfile::TempDir::path))?;
 
             info!("{}: running cargo test...", name);
-            run_cmd(dir, "cargo", &["test"])?;
+            run_cmd(dir, &cargo, &["test"])?;
 
             info!("{}: all checks passed", name);
         }
@@ -241,8 +251,9 @@ pub fn regenerate(language: &str, working_dir: &str) -> Result<()> {
 
     match language {
         "rust" => {
+            let crate2nix = get_tool_path("CRATE2NIX", "crate2nix");
             info!("Running crate2nix generate...");
-            run_cmd(dir, "crate2nix", &["generate"])?;
+            run_cmd(dir, &crate2nix, &["generate"])?;
             info!("Cargo.nix regenerated");
         }
         "zig" => {
@@ -290,7 +301,8 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
     info!("[2/3] Testing...");
     let test_result = match language {
         "rust" => {
-            run_cmd(dir, "cargo", &["test", "--quiet"])?;
+            let cargo = get_tool_path("CARGO", "cargo");
+            run_cmd(dir, &cargo, &["test", "--quiet"])?;
             "pass"
         }
         "zig" => {
@@ -511,7 +523,8 @@ fn write_fleet_clippy_conf() -> Result<tempfile::TempDir> {
 
 /// Run `cargo clippy -- -D warnings`, optionally pointing it at `conf_dir`.
 fn run_clippy(dir: &Path, conf_dir: Option<&Path>) -> Result<()> {
-    let mut cmd = Command::new("cargo");
+    let cargo = get_tool_path("CARGO", "cargo");
+    let mut cmd = Command::new(&cargo);
     cmd.args(["clippy", "--", "-D", "warnings"])
         .current_dir(dir);
 
@@ -926,6 +939,115 @@ mod tests {
             "commands/tool.rs must resolve the `gh` binary via the \
              two-argument `get_tool_path(\"GH_BIN\", \"gh\")` lookup \
              — the canonical form was not found in the module."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("cargo")` may live in
+    /// `commands/tool.rs`'s non-test body. Every `cargo` spawn in this
+    /// module must first resolve `CARGO` via [`crate::repo::get_tool_path`]
+    /// — the canonical env-var override idiom every sibling
+    /// cargo-consuming surface honors (`commands/test_ci.rs` four cargo
+    /// sites at e1677d3; `commands/developer_tools.rs` nine cargo sites
+    /// at 8687093; `commands/comprehensive_release.rs` two cargo sites
+    /// at f95d541; `commands/prerelease.rs` seven cargo sites at
+    /// cfdba0d).
+    ///
+    /// Pre-lift the three consumer sites — `bump`'s `cargo set-version
+    /// --bump <level>` invocation, `check`'s `cargo fmt --check` +
+    /// `cargo test` pair (via `run_cmd`), `lock`'s `cargo test
+    /// --quiet` invocation (via `run_cmd`), and `run_clippy`'s
+    /// `cargo clippy -- -D warnings` invocation — each spelled the
+    /// bare literal verbatim, ignoring `CARGO` at every site. A
+    /// Nix-hermetic runner with a store-path `cargo` binary silently
+    /// fell through to whatever `cargo` was first on PATH at these
+    /// sites specifically — the same silent-PATH-fallback bug class
+    /// the sibling shields above closed for their respective cargo
+    /// surfaces, and the sibling `NIX_BIN`-lifted `build_lock_target`
+    /// site in this same file already avoids at the nix-frontier.
+    ///
+    /// Scan bounds on the whole-module boundary — from the file start
+    /// to the FIRST `\n#[cfg(test)]\nmod tests {` marker in source
+    /// order, which lands at the sibling `gh` shield's `#[cfg(test)]
+    /// mod tests` opener at the top of this block — so this shield's
+    /// own docstring mentions of the bare literal, living in a
+    /// `#[cfg(test)]` block below that marker, stay out of scope AND
+    /// every current or future cargo-spawning helper landing anywhere
+    /// in the top-level module body cannot silently ride along without
+    /// going through `CARGO`. Mirrors the whole-module-boundary scan
+    /// discipline of the sibling `comprehensive_release.rs` cargo
+    /// shield (f95d541) and its lineage.
+    #[test]
+    fn test_cargo_spawn_routes_through_cargo_env_not_raw_literal() {
+        let source = include_str!("tool.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "commands/tool.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"cargo\")"),
+            "commands/tool.rs must not spawn `cargo` via the bare literal — \
+             every `cargo` spawn must resolve `CARGO` via \
+             `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
+             A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"CARGO\", \"cargo\")"),
+            "commands/tool.rs must resolve the `cargo` binary via \
+             `get_tool_path(\"CARGO\", \"cargo\")` — the canonical lookup \
+             was not found in the module body."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("crate2nix")` may live
+    /// in `commands/tool.rs`'s non-test body. Every `crate2nix` spawn
+    /// in this module must first resolve `CRATE2NIX` via
+    /// [`crate::repo::get_tool_path`] — the canonical env-var override
+    /// idiom every sibling crate2nix-consuming surface honors
+    /// (`commands/web_service.rs::regenerate`, `commands/pangea.rs`,
+    /// `commands/bootstrap.rs`).
+    ///
+    /// Pre-lift the two consumer sites — `bump`'s optional Cargo.nix
+    /// regeneration and `regenerate`'s explicit `crate2nix generate`
+    /// invocation (via `run_cmd`) — each spelled the bare literal
+    /// verbatim, ignoring `CRATE2NIX` at both sites. The
+    /// `which::which` probe in `bump` also probed the bare literal,
+    /// so a Nix-hermetic runner exporting `CRATE2NIX=/nix/store/…/bin/
+    /// crate2nix` while omitting `crate2nix` from PATH silently
+    /// skipped the regeneration step entirely — a substrate-derived
+    /// path that was declared but never invoked. Post-lift both the
+    /// probe and the spawn resolve through the same sigil, so the
+    /// substrate-exported path fully governs whether regeneration
+    /// runs and, if so, which binary runs it.
+    ///
+    /// Scan bounds on the whole-module boundary — same discipline as
+    /// the sibling `cargo` shield above and the `comprehensive_release
+    /// .rs` `sqlx` shield (ecace0a) lineage. The forbidden
+    /// `Command::new("crate2nix")` shape is not reconstructed via
+    /// `format!` because scan-bounding already excludes this shield's
+    /// own docstring from the search.
+    #[test]
+    fn test_crate2nix_spawn_routes_through_crate2nix_env_not_raw_literal() {
+        let source = include_str!("tool.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "commands/tool.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"crate2nix\")"),
+            "commands/tool.rs must not spawn `crate2nix` via the bare literal — \
+             every `crate2nix` spawn must resolve `CRATE2NIX` via \
+             `crate::repo::get_tool_path(\"CRATE2NIX\", \"crate2nix\")` first. \
+             A raw `Command::new(\"crate2nix\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"CRATE2NIX\", \"crate2nix\")"),
+            "commands/tool.rs must resolve the `crate2nix` binary via \
+             `get_tool_path(\"CRATE2NIX\", \"crate2nix\")` — the canonical \
+             lookup was not found in the module body."
         );
     }
 }
