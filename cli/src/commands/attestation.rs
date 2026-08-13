@@ -2074,6 +2074,99 @@ mod tests {
         );
     }
 
+    /// Whole-module shield: no raw `"git"`-literal spawn may live in
+    /// `commands/attestation.rs`. Every `git` spawn on this module —
+    /// pre-lift the sole `test_commit_signed_routes_through_typed_
+    /// signature_outcome` hermetic-fixture SHA read (a
+    /// `std::process::Command::new`-form `git rev-parse HEAD` on the
+    /// `init_repo_with_one_commit` tempdir feeding the end-to-end
+    /// `compute_source_attestation` half of the typed-`%G?`-outcome pin)
+    /// — must resolve through [`crate::git::git_command_sync`], the sync
+    /// constructor that reads the `GIT_BIN` env override via
+    /// [`crate::tools::get_tool_path`] on the canonical `tools::GIT`
+    /// name.
+    ///
+    /// Pre-lift the `git` spawn site spelled the bare `"git"` literal
+    /// via `std::process::Command::new`, ignoring `GIT_BIN` at the site
+    /// — even inside a `#[cfg(test)]` block a bare literal is still a
+    /// silent-PATH-fallback: a hermetic-runner test suite invoked with
+    /// `GIT_BIN` pinned to a shim would lose the shim at this site and
+    /// silently observe whichever `git` sat first on PATH, so the SHA
+    /// the end-to-end assertion consumes would flow from a different
+    /// binary than the substrate-`mkRuntimeToolsEnv`-exported one. The
+    /// same silent-PATH-fallback bug class the sibling consumer sites
+    /// in forge already avoid on the `commands/*.rs` layer
+    /// (`commands/helm.rs` at 82376e1, `commands/rust_service.rs::
+    /// deploy_rust_service_with_tag` at 34661e3, `commands/e2e.rs::
+    /// resolve_repo_root` at 447cad1, `commands/push.rs` /
+    /// `commands/rollback.rs` / `commands/codegen_validation.rs` /
+    /// `commands/federation.rs` on the async half).
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare `Command::new(...)`,
+    /// and the `tokio::process::Command::new(...)` long form). The
+    /// forbidden shapes are reconstructed via [`format!`] from the bare
+    /// string `"git"` so this shield's own source text does not
+    /// false-match itself — the whole-module scan therefore covers both
+    /// the top-of-file production body AND every sibling `#[cfg(test)]`
+    /// block (the pre-existing `tests` module and any future block),
+    /// any of which could otherwise silently re-introduce a raw literal
+    /// — the most likely growth site as future hermetic-fixture SHA
+    /// reads or `git log` probes land in the attestation-composition
+    /// surface. Also asserts the canonical `crate::git::git_command_sync`
+    /// delegation form is present in the module, so the sigil-body
+    /// itself cannot silently drift away from the substrate-exported
+    /// env-var contract.
+    ///
+    /// The end-to-end `GIT_BIN`-routing invariant of the underlying
+    /// primitive is pinned separately by
+    /// [`crate::git::tests::test_git_command_async_routes_through_git_bin_env_var`];
+    /// this shield only certifies that every git-spawning site in this
+    /// module reads through `git_command_sync()`.
+    #[test]
+    fn test_git_spawn_routes_through_git_command_sync_not_raw_literal() {
+        const SOURCE: &str = include_str!("attestation.rs");
+
+        let bare = "git";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "commands/attestation.rs must not spawn `git` via the \
+             bare literal — every git spawn must resolve `GIT_BIN` via \
+             `crate::git::git_command_sync()` first. A raw literal at \
+             `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "commands/attestation.rs must not spawn `git` via the \
+             bare literal — every git spawn must resolve `GIT_BIN` via \
+             `crate::git::git_command_sync()` first. A raw literal at \
+             `Command::new` (either the top-level `use` alias or the \
+             bare form) bypasses the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "commands/attestation.rs must not spawn `git` via the \
+             bare literal — every git spawn must resolve `GIT_BIN` via \
+             `crate::git::git_command_sync()` first. A raw literal at \
+             `tokio::process::Command::new` bypasses the \
+             hermetic-runner contract."
+        );
+        assert!(
+            SOURCE.contains("crate::git::git_command_sync()"),
+            "commands/attestation.rs must resolve the `git` binary via \
+             the canonical `crate::git::git_command_sync()` constructor \
+             — the required form was not found in the module. A \
+             regression here would silently downgrade to the PATH \
+             fallback."
+        );
+    }
+
     /// ★ THE THREE MANIFEST OUTCOMES MUST STAY THREE DISTINCT HASHES.
     ///
     /// manifest_hash can be produced by three genuinely different situations:
@@ -4160,7 +4253,7 @@ dependencies:
         // arm from.
         let tmp = tempfile::tempdir().expect("tempdir");
         crate::test_support::init_repo_with_one_commit(tmp.path());
-        let sha_out = std::process::Command::new("git")
+        let sha_out = crate::git::git_command_sync()
             .args(["rev-parse", "HEAD"])
             .current_dir(tmp.path())
             .output()
