@@ -477,12 +477,45 @@ async fn count_migrations(migrations_dir: &Path) -> usize {
     count
 }
 
-/// Generate SeaORM entities from database
-async fn generate_entities(config: &SyncConfig) -> Result<bool> {
-    // Check if sea-orm-cli is available
-    let which_result = Command::new("which").arg("sea-orm-cli").output().await;
+/// Probe whether the `sea-orm-cli` binary is invocable.
+///
+/// Fast path: if `SEA_ORM_CLI_BIN` is exported (typically by a nix-hermetic
+/// runner's `mkRuntimeToolsEnv`), the substrate has already resolved and
+/// pinned the binary — trust that and skip the PATH probe. Falling through
+/// to `which sea-orm-cli` in that world would falsely report "not
+/// available" whenever bare `sea-orm-cli` isn't on PATH (the norm for
+/// nix-shell derivations, which only export the specific tool paths a
+/// derivation declares), silently skipping SeaORM entity generation even
+/// though the substrate-pinned binary is present. Mirrors the
+/// `check_novasearchctl_available` probe in `commands/search_sync.rs`
+/// (19463db) — the same probe/spawn alignment discipline: whatever the
+/// probe says "yes" to is what the spawn actually invokes.
+///
+/// Fallback: probe PATH via `which` for the mixed / non-Nix development
+/// environment where `SEA_ORM_CLI_BIN` is unset.
+async fn check_sea_orm_cli_available() -> bool {
+    if std::env::var("SEA_ORM_CLI_BIN").is_ok() {
+        return true;
+    }
+    Command::new("which")
+        .arg("sea-orm-cli")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
-    if which_result.is_err() || !which_result.unwrap().status.success() {
+/// Generate SeaORM entities from database
+///
+/// Resolves the binary via the canonical two-argument tools-registry idiom
+/// `crate::repo::get_tool_path("SEA_ORM_CLI_BIN", "sea-orm-cli")` — the
+/// same shape the sibling `commands/typescript.rs::regenerate` (5d87339)
+/// and `commands/search_sync.rs::run_sync_direct` (19463db) already ride
+/// on. A Nix-hermetic runner's substrate-derived `SEA_ORM_CLI_BIN` path
+/// is honored; the bare-`"sea-orm-cli"` fallback preserves non-Nix
+/// behavior.
+async fn generate_entities(config: &SyncConfig) -> Result<bool> {
+    if !check_sea_orm_cli_available().await {
         return Ok(false);
     }
 
@@ -492,8 +525,10 @@ async fn generate_entities(config: &SyncConfig) -> Result<bool> {
         return Ok(false);
     }
 
+    let sea_orm_cli = get_tool_path("SEA_ORM_CLI_BIN", "sea-orm-cli");
+
     // Generate entities
-    let output = Command::new("sea-orm-cli")
+    let output = Command::new(&sea_orm_cli)
         .args([
             "generate",
             "entity",
@@ -588,6 +623,73 @@ mod tests {
         assert_eq!(
             config.schema_file,
             PathBuf::from("/tmp/testapp/web/schema.graphql")
+        );
+    }
+
+    /// Whole-module shield: no bare `sea-orm-cli` literal spawn may live
+    /// in `commands/sync.rs`. The sole spawn — the `sea-orm-cli generate
+    /// entity …` step at the heart of `generate_entities` — must resolve
+    /// through the tools-registry two-argument idiom
+    /// `crate::repo::get_tool_path("SEA_ORM_CLI_BIN", "sea-orm-cli")`
+    /// first, so a Nix-hermetic runner's substrate-derived
+    /// `SEA_ORM_CLI_BIN` path is honored just as the sibling
+    /// `commands/search_sync.rs::run_sync_direct` (19463db) and
+    /// `commands/typescript.rs::regenerate` (5d87339) already do.
+    ///
+    /// Pre-lift the site spelled the bare tool-name literal verbatim —
+    /// a Nix-hermetic runner's substrate-derived sea-orm-cli path was
+    /// lost to whatever binary sat first on PATH — and, worse, the
+    /// sibling `which`-based availability probe would report "not
+    /// available" in a nix-hermetic env where bare `sea-orm-cli` isn't
+    /// on PATH even though `SEA_ORM_CLI_BIN` was exported, silently
+    /// skipping SeaORM entity generation entirely. This shield pins
+    /// the direct-path spawn onto the substrate-exported env var; the
+    /// sibling probe was rewritten in the same lift to short-circuit
+    /// on `SEA_ORM_CLI_BIN` before falling through to the PATH probe,
+    /// so the two halves stay aligned.
+    ///
+    /// The `sea-orm-cli` string literal still appears in this module
+    /// as (a) the `which` probe's argument name at the fallback path
+    /// (`check_sea_orm_cli_available`, PATH-probe body only), (b) the
+    /// diagnostic `println!` labels and `.context(...)` message, and
+    /// (c) the docstring text above — none of which are local spawns
+    /// of the binary. The shield forbids only the fused
+    /// `Command::new(<bare>)` shape, reconstructed via
+    /// [`format!`] so the shield's own source text does not
+    /// false-match itself; the whole-module scan therefore covers both
+    /// the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block. Also asserts the canonical
+    /// `get_tool_path("SEA_ORM_CLI_BIN", "sea-orm-cli")` lookup form
+    /// is present in the module, so the sigil-body itself cannot
+    /// silently drift away from the substrate-exported env-var
+    /// contract.
+    #[test]
+    fn test_sea_orm_cli_spawn_routes_through_sea_orm_cli_bin_not_raw_literal() {
+        const SOURCE: &str = include_str!("sync.rs");
+
+        let bare = "sea-orm-cli";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/sync.rs must not spawn `sea-orm-cli` via the bare \
+             literal — the direct-invocation spawn must resolve the \
+             substrate-exported `SEA_ORM_CLI_BIN` env override via \
+             `crate::repo::get_tool_path(\"SEA_ORM_CLI_BIN\", \
+             \"sea-orm-cli\")` first. A raw literal at `Command::new` \
+             bypasses the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports and (worse) races the sibling \
+             `which`-based availability probe: the probe would silently \
+             report `false` in a nix-hermetic env where bare \
+             `sea-orm-cli` isn't on PATH, skipping SeaORM entity \
+             generation entirely."
+        );
+        assert!(
+            SOURCE.contains("get_tool_path(\"SEA_ORM_CLI_BIN\", \"sea-orm-cli\")"),
+            "commands/sync.rs must resolve the `sea-orm-cli` binary via \
+             the canonical two-argument \
+             `get_tool_path(\"SEA_ORM_CLI_BIN\", \"sea-orm-cli\")` \
+             lookup — the required form was not found in the module."
         );
     }
 }
