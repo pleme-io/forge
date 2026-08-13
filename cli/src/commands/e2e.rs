@@ -35,6 +35,35 @@ fn docker_bin() -> String {
     get_tool_path("DOCKER_BIN", "docker")
 }
 
+/// Resolve the macOS `open` binary path via `OPEN_BIN`, falling back to
+/// `open` on `PATH`. Wired through [`crate::repo::get_tool_path`] — the
+/// canonical env-var-or-PATH lookup the sibling `docker_bin` sigil above
+/// (23241a6) rides on, and the same two-arg
+/// `get_tool_path("<TOOL>_BIN", "<tool>")` convention every other
+/// substrate-declared tool-spawn site in forge honors (sibling `SH_BIN`
+/// b382b78; `{SSH,NC,DIG}_BIN` 5e6672d; `SQLX_BIN` ecace0a;
+/// `SEA_ORM_CLI_BIN` b037895; `NOVASEARCHCTL_BIN` 19463db).
+///
+/// The single spawn site lives in [`ensure_docker_running`], where the
+/// macOS-only `cfg!(target_os = "macos")` branch invokes `open -a Docker`
+/// to auto-start Docker Desktop after `docker info` fails on a macOS
+/// host. Pre-lift that site spawned `open` via the bare tool-name
+/// literal, bypassing `OPEN_BIN` at exactly the moment hermetic-runner
+/// consistency matters most — the surface `forge test`, `forge e2e-run`,
+/// `forge e2e-prepare`, and `forge integration-tests` invoke to bootstrap
+/// the Docker daemon the E2E and integration tiers trust. A macOS-hosted
+/// Nix-hermetic runner whose derivation exports
+/// `OPEN_BIN=/nix/store/…-open/bin/open` but omits `open` from PATH
+/// silently fell through to whatever `open` was first on `PATH` — or, if
+/// none, the spawn's `.output()` failed and its return was discarded by
+/// the `let _ = …` binding, degrading auto-start into a 60-second timeout
+/// wait for a daemon that would never come up. Post-lift both branches
+/// observe the same substrate-declared path every other spawn site in
+/// this module observes, without an ambient-PATH intermediary.
+fn open_bin() -> String {
+    get_tool_path("OPEN_BIN", "open")
+}
+
 /// Test pyramid levels
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TestLevel {
@@ -964,7 +993,7 @@ pub fn ensure_docker_running() -> Result<()> {
         ui::print_warning("Docker daemon not running. Attempting to start Docker Desktop...");
 
         // Try to open Docker Desktop
-        let _ = Command::new("open").args(["-a", "Docker"]).output();
+        let _ = Command::new(open_bin()).args(["-a", "Docker"]).output();
 
         // Wait for Docker to start (up to 60 seconds)
         ui::print_info("Waiting for Docker to start...");
@@ -1355,6 +1384,83 @@ mod cargo_env_routing_tests {
             "commands/e2e.rs must resolve the cargo binary via \
              `get_tool_path(\"CARGO\", \"cargo\")` — the canonical \
              lookup was not found in the module body."
+        );
+    }
+}
+
+#[cfg(test)]
+mod open_bin_routing_tests {
+    /// Whole-module shield: no raw `Command::new("open")` may live in
+    /// `commands/e2e.rs`'s non-test body. The single macOS `open`-binary
+    /// spawn site — [`super::ensure_docker_running`]'s Docker Desktop
+    /// auto-start call under `cfg!(target_os = "macos")` — must resolve
+    /// through [`super::open_bin`], which delegates to
+    /// [`crate::repo::get_tool_path`] — the two-arg env-var override
+    /// every sibling probe/spawn surface in forge honors (this module's
+    /// own `docker_bin` sigil 23241a6; `SH_BIN` two-arg lift b382b78;
+    /// `{SSH,NC,DIG}_BIN` 5e6672d; `SQLX_BIN` ecace0a;
+    /// `SEA_ORM_CLI_BIN` b037895; `NOVASEARCHCTL_BIN` 19463db).
+    ///
+    /// Pre-lift the site spelled `Command::new("open")` verbatim,
+    /// bypassing `OPEN_BIN` at exactly the surface `forge test`,
+    /// `forge e2e-run`, `forge e2e-prepare`, and `forge
+    /// integration-tests` all invoke on macOS hosts to bootstrap the
+    /// Docker daemon the E2E and integration tiers trust. A macOS-hosted
+    /// Nix-hermetic runner whose derivation exports
+    /// `OPEN_BIN=/nix/store/…-open/bin/open` but omits `open` from PATH
+    /// silently fell through to whatever `open` was first on PATH — or,
+    /// if none, the spawn's `.output()` failed and its return was
+    /// discarded by the `let _ = …` binding, degrading auto-start into a
+    /// 60-second wait for a daemon that would never come up. The same
+    /// silent-PATH-fallback bug class the sibling `docker_bin` shield
+    /// closes for the docker-invocation surface, here closed for the
+    /// macOS auto-start surface.
+    ///
+    /// Scan bounds on the whole-module boundary — from the file start to
+    /// the FIRST `\n#[cfg(test)]\n` marker in source order (which lands
+    /// at the sibling `resolve_repo_root_git_bin_routing_tests` block
+    /// near the end of the module body) — so this shield's own docstring
+    /// mentions of the forbidden literal, living in a `#[cfg(test)]`
+    /// block below that first marker, stay out of scope AND every
+    /// current or future `open`-spawning helper landing anywhere in the
+    /// top-level module body cannot silently ride along without going
+    /// through `open_bin()`. The forbidden shape is reconstructed at
+    /// test time via [`format!`] from the bare string `"open"` so this
+    /// shield's own source text does not false-match itself. Also
+    /// asserts the canonical `Command::new(open_bin())` delegation and
+    /// the `fn open_bin()` sigil are present, so a regression that
+    /// removed the sigil would surface with a diagnostic pointing at
+    /// the missing constructor rather than at a compile error at the
+    /// call site.
+    #[test]
+    fn test_e2e_routes_open_through_open_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("e2e.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "e2e.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        let bare = "open";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+        assert!(
+            !body.contains(&raw_command),
+            "commands/e2e.rs must not spawn `open` via the bare \
+             literal — every `open` spawn must resolve `OPEN_BIN` via \
+             `open_bin()` first. A raw `Command::new(\"open\")` bypasses \
+             the hermetic-runner contract substrate's mkRuntimeToolsEnv \
+             exports."
+        );
+        assert!(
+            body.contains("Command::new(open_bin())"),
+            "commands/e2e.rs must resolve the open binary via \
+             `Command::new(open_bin())` — the canonical delegation was \
+             not found in the module body."
+        );
+        assert!(
+            body.contains("fn open_bin()"),
+            "commands/e2e.rs must define the `open_bin` sigil — the one \
+             bridge between this module's `open` spawn and the \
+             substrate-exported `OPEN_BIN` env override."
         );
     }
 }
