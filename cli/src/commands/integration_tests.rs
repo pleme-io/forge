@@ -12,6 +12,8 @@ use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
+use crate::infrastructure::kubectl::kubectl_command_async;
+
 /// Integration test suite configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestSuite {
@@ -439,7 +441,7 @@ async fn prepare_environment(config: &IntegrationTestConfig) -> Result<HashMap<S
 
 /// Fetch secret from Kubernetes
 async fn fetch_secret(secret_name: &str, key: &str) -> Result<String> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command_async()
         .args(&[
             "get",
             "secret",
@@ -1455,6 +1457,79 @@ mod tests {
         assert_eq!(
             parse_post_deployment_suite_timeout(&suite).unwrap(),
             Duration::from_secs(300)
+        );
+    }
+}
+
+#[cfg(test)]
+mod kubectl_bin_routing_tests {
+    /// Whole-module shield: no raw `Command::new`-with-bare-`kubectl`-
+    /// literal may live in `commands/integration_tests.rs`. Every
+    /// `kubectl` spawn on this module — pre-lift the sole
+    /// `fetch_secret` `kubectl get secret … -o jsonpath={.data.<key>}`
+    /// call at line 442 (the Kubernetes-Secret-backed credential
+    /// resolver `build_env_vars` uses to inject `TEST_USER_EMAIL` /
+    /// `TEST_USER_PASSWORD` into every integration-test suite the
+    /// `forge test` flow spawns) — must resolve through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`] —
+    /// the async constructor that reads the `KUBECTL_BIN` env
+    /// override via [`crate::tools::get_tool_path`] on the canonical
+    /// `tools::KUBECTL` name.
+    ///
+    /// Pre-lift the `kubectl` spawn site spelled the bare
+    /// `"kubectl"` literal via `Command::new` (aliased through the
+    /// module's `use tokio::process::Command`), ignoring
+    /// `KUBECTL_BIN` at the site. A Nix-hermetic runner's substrate-
+    /// derived `kubectl` path was lost to whatever `kubectl` sat
+    /// first on PATH — the same silent-PATH-fallback bug class the
+    /// sibling consumer sites in forge already avoid
+    /// (`commands/rust_service.rs` at 40cfe44,
+    /// `commands/search_sync.rs` at 2bf0490,
+    /// `commands/rollout.rs::execute` at c5fcf83,
+    /// `commands/migrations.rs` at 946e573,
+    /// `commands/status.rs` at c2760df,
+    /// `commands/flux.rs` at f8da719,
+    /// `commands/federation_tests.rs` at 9a409e8,
+    /// `commands/supergraph_verification.rs` at 65283fb,
+    /// `services/migration_service.rs` at 5986a10,
+    /// `commands/github_runner_ci.rs` at 5566415,
+    /// `commands/product_release.rs::run_health_check` at 5bb7cff).
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape. The forbidden shape is
+    /// reconstructed via [`format!`] from the bare string `"kubectl"`
+    /// so this shield's own source text does not false-match itself
+    /// — the whole-module scan therefore covers both the top-of-file
+    /// production body AND every sibling `#[cfg(test)]` block (the
+    /// pre-existing `tests` module and this block), any of which
+    /// could otherwise silently re-introduce a raw literal. The
+    /// end-to-end `KUBECTL_BIN`-routing invariant of the underlying
+    /// primitive is pinned separately by
+    /// [`crate::infrastructure::kubectl::tests::test_kubectl_command_async_routes_through_kubectl_bin_env_var`];
+    /// this shield only certifies that every `kubectl`-spawning site
+    /// in this module resolves through the constructor first.
+    #[test]
+    fn test_kubectl_spawn_routes_through_kubectl_command_async_not_raw_literal() {
+        const SOURCE: &str = include_str!("integration_tests.rs");
+
+        let bare = "kubectl";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/integration_tests.rs must not spawn `kubectl` via \
+             the bare literal — every `kubectl` spawn must resolve the \
+             substrate-exported `KUBECTL_BIN` env override via \
+             `kubectl_command_async` first. A raw literal at \
+             `Command::new` bypasses the hermetic-runner contract \
+             substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            SOURCE.contains("kubectl_command_async()"),
+            "commands/integration_tests.rs must resolve the `kubectl` \
+             binary via the canonical `kubectl_command_async()` \
+             constructor — the required form was not found in the \
+             module."
         );
     }
 }
