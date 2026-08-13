@@ -10,7 +10,6 @@ use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::env;
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -65,26 +64,29 @@ pub async fn run_novasearch_sync(
 /// Fast path: if `NOVASEARCHCTL_BIN` is exported (typically by a nix-hermetic
 /// runner's `mkRuntimeToolsEnv`), the substrate has already resolved and
 /// pinned the binary — trust that and skip the PATH probe. Falling through
-/// to `which novasearchctl` in that world would falsely report "not
-/// available" whenever bare `novasearchctl` isn't on PATH (the norm for
-/// nix-shell derivations, which only export the specific tool paths a
-/// derivation declares), silently downgrading the local-spawn path to the
-/// kubectl-exec fallback and losing the substrate-derived binary.
+/// to a PATH probe in that world would falsely report "not available"
+/// whenever bare `novasearchctl` isn't on PATH (the norm for nix-shell
+/// derivations, which only export the specific tool paths a derivation
+/// declares), silently downgrading the local-spawn path to the kubectl-exec
+/// fallback and losing the substrate-derived binary.
 ///
-/// Fallback: probe PATH via `which` for the mixed / non-Nix development
-/// environment where `NOVASEARCHCTL_BIN` is unset.
+/// Fallback: probe PATH via the `which` crate for the mixed / non-Nix
+/// development environment where `NOVASEARCHCTL_BIN` is unset. Uses
+/// `which::which(...)` — the same crate-backed idiom the sibling probes in
+/// `commands/test_ci.rs` (`cargo-nextest`, `cargo-tarpaulin`),
+/// `commands/rust_service.rs` (`qemu-aarch64-static`), and
+/// `commands/tool.rs` (`crate2nix`) already ride on — rather than a
+/// subprocess spawn on the `which` binary, so there is no ambient
+/// dependency on a `which` binary existing on PATH itself. This matters on
+/// minimal Nix containers whose derivation only exports the specific tool
+/// paths declared, where a `which` subprocess spawn would fail-to-exec
+/// entirely and the probe would silently report `false` for that reason
+/// alone.
 async fn check_novasearchctl_available() -> bool {
     if env::var("NOVASEARCHCTL_BIN").is_ok() {
         return true;
     }
-    Command::new("which")
-        .arg("novasearchctl")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+    which::which("novasearchctl").is_ok()
 }
 
 /// Run sync using novasearchctl directly
@@ -390,6 +392,65 @@ mod tests {
              binary via the canonical two-argument \
              `get_tool_path(\"NOVASEARCHCTL_BIN\", \"novasearchctl\")` \
              lookup — the required form was not found in the module."
+        );
+    }
+
+    /// Whole-module shield: no bare `which`-binary spawn (a raw
+    /// `Command::new` on the bare tool-name literal) may live in
+    /// `commands/search_sync.rs`. The PATH-probe fallback in
+    /// `check_novasearchctl_available` must resolve through the
+    /// `which::which(...)` crate idiom, the same shape the sibling probes
+    /// in `commands/test_ci.rs` (`cargo-nextest`, `cargo-tarpaulin`),
+    /// `commands/rust_service.rs` (`qemu-aarch64-static`), and
+    /// `commands/tool.rs` (`crate2nix`) already ride on.
+    ///
+    /// Pre-lift the probe spawned a `which` subprocess via the bare
+    /// tool-name literal — a fork+exec that added an ambient dependency
+    /// on a `which` binary existing on PATH itself. On a minimal Nix
+    /// container whose derivation only exports the specific tool paths
+    /// declared, the `which` binary is absent and the spawn
+    /// fails-to-exec entirely, so the probe silently reports `false`
+    /// for that reason alone — the exact same silent-false failure mode
+    /// the sibling `NOVASEARCHCTL_BIN` fast-path was written to bypass,
+    /// only one layer of ambient dependency deeper. Post-lift the probe
+    /// resolves PATH in-process via the `which` crate; no fork+exec, no
+    /// ambient binary, no silent false.
+    ///
+    /// The forbidden shape is reconstructed at test time via [`format!`]
+    /// so this shield's own source text does not false-match itself,
+    /// and the docstring above uses `which`-binary paraphrase rather
+    /// than the literal shape for the same reason; the whole-module
+    /// scan therefore covers both the top-of-file production body AND
+    /// every sibling `#[cfg(test)]` block. Also asserts the canonical
+    /// `which::which(...)` crate idiom is present in the module, so
+    /// the sigil-body itself cannot silently drift back to a
+    /// subprocess spawn.
+    #[test]
+    fn test_which_probe_routes_through_which_crate_not_command_spawn() {
+        const SOURCE: &str = include_str!("search_sync.rs");
+
+        let raw_command = format!("Command::new(\"{}\")", "which");
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/search_sync.rs must not spawn the `which` binary \
+             via the bare tool-name literal — the PATH-probe fallback \
+             in `check_novasearchctl_available` must resolve through the \
+             in-process `which::which(...)` crate idiom, the same shape \
+             the sibling probes in `commands/test_ci.rs`, \
+             `commands/rust_service.rs`, and `commands/tool.rs` already \
+             ride on. A bare-literal spawn on the `which` binary adds \
+             an ambient dependency on `which` existing on PATH itself; \
+             on a minimal Nix container whose derivation only exports \
+             the specific tool paths declared, the spawn fails-to-exec \
+             and the probe silently reports `false` for that reason \
+             alone."
+        );
+        assert!(
+            SOURCE.contains("which::which(\"novasearchctl\")"),
+            "commands/search_sync.rs must probe the `novasearchctl` \
+             binary via the canonical `which::which(\"novasearchctl\")` \
+             crate call — the required form was not found in the module."
         );
     }
 }
