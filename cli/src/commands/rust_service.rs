@@ -32,6 +32,7 @@
 
 use crate::commands::service_config::{DatabaseType, ServiceConfig};
 use crate::config::{resolve_deploy_yaml_path, DeployConfig};
+use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::infrastructure::registry::{ArchImage, RegistryClient, RegistryCredentials};
 use crate::path_builder::PathBuilder;
 use crate::repo::get_tool_path;
@@ -1981,7 +1982,7 @@ async fn print_deployment_report(
     println!();
 
     // Check current pod status
-    let pod_status = Command::new("kubectl")
+    let pod_status = kubectl_command_async()
         .args(&[
             "get",
             "pods",
@@ -1995,7 +1996,7 @@ async fn print_deployment_report(
         .output()
         .await;
 
-    let current_image = Command::new("kubectl")
+    let current_image = kubectl_command_async()
         .args(&[
             "get",
             "pods",
@@ -2876,6 +2877,76 @@ mod nix_bin_routing_tests {
             "commands/rust_service.rs must resolve the nix binary via \
              `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical \
              lookup was not found in the module body."
+        );
+    }
+}
+
+#[cfg(test)]
+mod kubectl_bin_routing_tests {
+    /// Whole-module shield: no raw `Command::new`-with-bare-`kubectl`-
+    /// literal may live in `commands/rust_service.rs`. Every `kubectl`
+    /// spawn on this module — pre-lift the two
+    /// `print_deployment_report` pod-phase / pod-image probes at lines
+    /// 1984 and 1998 in the "PENDING ROLLOUTS" report section — must
+    /// resolve through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`] —
+    /// the async constructor that reads the `KUBECTL_BIN` env
+    /// override via [`crate::tools::get_tool_path`] on the canonical
+    /// `tools::KUBECTL` name.
+    ///
+    /// Pre-lift each of the two `kubectl` spawn sites spelled the
+    /// bare `"kubectl"` literal via `Command::new` (aliased through
+    /// the module's `use tokio::process::Command`), ignoring
+    /// `KUBECTL_BIN` at the site. A Nix-hermetic runner's substrate-
+    /// derived `kubectl` path was lost to whatever `kubectl` sat
+    /// first on PATH — the same silent-PATH-fallback bug class the
+    /// sibling consumer sites in forge already avoid
+    /// (`commands/search_sync.rs` at 2bf0490,
+    /// `commands/rollout.rs::execute` at c5fcf83,
+    /// `commands/migrations.rs` at 946e573,
+    /// `commands/status.rs` at c2760df,
+    /// `commands/flux.rs` at f8da719,
+    /// `commands/federation_tests.rs` at 9a409e8,
+    /// `commands/supergraph_verification.rs` at 65283fb,
+    /// `services/migration_service.rs` at 5986a10,
+    /// `commands/github_runner_ci.rs` at 5566415,
+    /// `commands/product_release.rs::run_health_check` at 5bb7cff).
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape. The forbidden shape is
+    /// reconstructed via [`format!`] from the bare string `"kubectl"`
+    /// so this shield's own source text does not false-match itself
+    /// — the whole-module scan therefore covers both the top-of-file
+    /// production body AND every sibling `#[cfg(test)]` block (the
+    /// `deploy_rust_service_with_tag_git_bin_routing_tests` /
+    /// `nix_bin_routing_tests` / this block), any of which could
+    /// otherwise silently re-introduce a raw literal. The end-to-end
+    /// `KUBECTL_BIN`-routing invariant of the underlying primitive
+    /// is pinned separately by
+    /// [`crate::infrastructure::kubectl::tests::test_kubectl_command_async_routes_through_kubectl_bin_env_var`];
+    /// this shield only certifies that every `kubectl`-spawning site
+    /// in this module resolves through the constructor first.
+    #[test]
+    fn test_kubectl_spawn_routes_through_kubectl_command_async_not_raw_literal() {
+        const SOURCE: &str = include_str!("rust_service.rs");
+
+        let bare = "kubectl";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/rust_service.rs must not spawn `kubectl` via the \
+             bare literal — every `kubectl` spawn must resolve the \
+             substrate-exported `KUBECTL_BIN` env override via \
+             `kubectl_command_async` first. A raw literal at \
+             `Command::new` bypasses the hermetic-runner contract \
+             substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            SOURCE.contains("kubectl_command_async()"),
+            "commands/rust_service.rs must resolve the `kubectl` binary \
+             via the canonical `kubectl_command_async()` constructor \
+             — the required form was not found in the module."
         );
     }
 }
