@@ -15,6 +15,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::config::{DeployConfig, NovaSearchConfig};
+use crate::infrastructure::kubectl::kubectl_command_async;
 
 /// Run search service GitOps sync using novasearchctl
 ///
@@ -145,7 +146,7 @@ async fn run_sync_via_kubectl(
     // Copy config files to the pod
     let remote_config_path = "/tmp/search-sync-config";
 
-    let cp_status = Command::new("kubectl")
+    let cp_status = kubectl_command_async()
         .args([
             "cp",
             &config_path.to_string_lossy(),
@@ -192,7 +193,7 @@ async fn run_sync_via_kubectl(
 
     let timeout_duration = Duration::from_secs(config.timeout_secs);
 
-    let mut exec_cmd = Command::new("kubectl");
+    let mut exec_cmd = kubectl_command_async();
     exec_cmd.args(&exec_args);
 
     let result = timeout(
@@ -202,7 +203,7 @@ async fn run_sync_via_kubectl(
     .await;
 
     // Clean up: remove config from pod
-    let _ = Command::new("kubectl")
+    let _ = kubectl_command_async()
         .args([
             "exec",
             "-n",
@@ -234,4 +235,68 @@ async fn run_sync_via_kubectl(
 /// Check if search sync should run based on deploy config
 pub fn should_run_novasearch_sync(deploy_config: &DeployConfig) -> bool {
     deploy_config.service.novasearch.enabled
+}
+
+#[cfg(test)]
+mod tests {
+    /// Whole-module shield: no raw `Command::new`-with-bare-`kubectl`-
+    /// literal may live in `commands/search_sync.rs`. Every `kubectl`
+    /// spawn on this module's `run_sync_via_kubectl` fallback path
+    /// (the `kubectl cp` config-copy, the `kubectl exec … --
+    /// novasearchctl sync` invocation, and the `kubectl exec … --
+    /// rm -rf` cleanup) must resolve through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`] —
+    /// the async constructor that reads the `KUBECTL_BIN` env
+    /// override via [`crate::tools::get_tool_path`] on the canonical
+    /// `tools::KUBECTL` name.
+    ///
+    /// Pre-lift each of the three `kubectl` spawn sites spelled the
+    /// bare `"kubectl"` literal verbatim, ignoring `KUBECTL_BIN` at
+    /// the site. A Nix-hermetic runner's substrate-derived `kubectl`
+    /// path was lost to whatever `kubectl` sat first on PATH — the
+    /// same silent-PATH-fallback bug class the sibling consumer
+    /// sites in forge already avoid (`commands/rollout.rs::execute`
+    /// at c5fcf83, `commands/migrations.rs` at 946e573,
+    /// `commands/status.rs` at c2760df, `commands/flux.rs` at
+    /// f8da719, `commands/federation_tests.rs` at 9a409e8,
+    /// `commands/supergraph_verification.rs` at 65283fb,
+    /// `services/migration_service.rs` at 5986a10,
+    /// `commands/github_runner_ci.rs` at 5566415,
+    /// `commands/product_release.rs::run_health_check` at 5bb7cff).
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape. The forbidden shape is
+    /// reconstructed via [`format!`] so this shield's own source text
+    /// does not false-match itself — the whole-module scan therefore
+    /// covers both the top-of-file production body AND every sibling
+    /// `#[cfg(test)]` block (any of which could otherwise silently
+    /// re-introduce a raw literal). The end-to-end
+    /// `KUBECTL_BIN`-routing invariant of the underlying primitive
+    /// is pinned separately by
+    /// [`crate::infrastructure::kubectl::tests::test_kubectl_command_async_routes_through_kubectl_bin_env_var`];
+    /// this shield only certifies that every `kubectl`-spawning site
+    /// in this module resolves through the constructor first.
+    #[test]
+    fn test_kubectl_spawn_routes_through_kubectl_command_async_not_raw_literal() {
+        const SOURCE: &str = include_str!("search_sync.rs");
+
+        let bare = "kubectl";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/search_sync.rs must not spawn `kubectl` via the \
+             bare literal — every `kubectl` spawn must resolve the \
+             substrate-exported `KUBECTL_BIN` env override via \
+             `kubectl_command_async` first. A raw literal at \
+             `Command::new` bypasses the hermetic-runner contract \
+             substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            SOURCE.contains("kubectl_command_async()"),
+            "commands/search_sync.rs must resolve the `kubectl` binary \
+             via the canonical `kubectl_command_async()` constructor \
+             — the required form was not found in the module."
+        );
+    }
 }
