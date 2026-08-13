@@ -632,13 +632,11 @@ fn resolve_repo_root(repo_root: Option<String>) -> Result<String> {
 fn verify_docker() -> Result<()> {
     ui::print_info("Verifying Docker daemon");
 
-    // Check if docker command exists
-    let which_output = Command::new("which")
-        .arg("docker")
-        .output()
-        .context("Failed to check for docker command")?;
-
-    if !which_output.status.success() {
+    // Check if docker command exists via the in-process `which` crate rather
+    // than a `which`-binary subprocess spawn. Mirrors the sibling
+    // `check_novasearchctl_available` / `check_sea_orm_cli_available` lifts
+    // (a46d580) — no ambient dependency on a `which` binary existing on PATH.
+    if which::which("docker").is_err() {
         bail!("Docker is not installed. Please install Docker first.");
     }
 
@@ -939,13 +937,11 @@ pub fn run_e2e_tests_smart(
 
 /// Ensure Docker daemon is running, auto-starting on macOS if needed
 pub fn ensure_docker_running() -> Result<()> {
-    // Check if docker command exists
-    let which_output = Command::new("which")
-        .arg("docker")
-        .output()
-        .context("Failed to check for docker command")?;
-
-    if !which_output.status.success() {
+    // Check if docker command exists via the in-process `which` crate rather
+    // than a `which`-binary subprocess spawn. Mirrors the sibling
+    // `check_novasearchctl_available` / `check_sea_orm_cli_available` lifts
+    // (a46d580) — no ambient dependency on a `which` binary existing on PATH.
+    if which::which("docker").is_err() {
         bail!("Docker is not installed. Please install Docker first.");
     }
 
@@ -1220,6 +1216,74 @@ mod docker_bin_routing_tests {
             "commands/e2e.rs must define the `docker_bin` sigil — the \
              one bridge between this module's docker spawns and the \
              substrate-exported `DOCKER_BIN` env override."
+        );
+    }
+}
+
+#[cfg(test)]
+mod which_probe_routing_tests {
+    /// Whole-module shield: no bare `which`-binary spawn (a raw
+    /// `Command::new` on the bare tool-name literal) may live in
+    /// `commands/e2e.rs`. The two sync PATH-probe sites — `verify_docker`
+    /// and `ensure_docker_running`, both checking for the `docker`
+    /// binary before invoking the daemon — must resolve through the
+    /// in-process `which::which(...)` crate idiom, the same shape the
+    /// sibling probes in `commands/test_ci.rs` (`cargo-nextest`,
+    /// `cargo-tarpaulin`), `commands/rust_service.rs`
+    /// (`qemu-aarch64-static`), `commands/tool.rs` (`crate2nix`),
+    /// `commands/search_sync.rs` (`novasearchctl`, a46d580), and
+    /// `commands/sync.rs` (`sea-orm-cli`, a46d580) already ride on.
+    ///
+    /// Pre-lift both sites spawned a `which` subprocess via the bare
+    /// tool-name literal — a fork+exec that added an ambient dependency
+    /// on a `which` binary existing on PATH itself. On a minimal Nix
+    /// container whose derivation only exports the specific tool paths
+    /// declared, the `which` binary is absent and the spawn
+    /// fails-to-exec entirely, so the probe silently reports "not
+    /// installed" for that reason alone — the exact same silent-false
+    /// failure mode the sibling `DOCKER_BIN` fast-path at `docker_bin()`
+    /// (23241a6) was written to close for its spawn surface, only one
+    /// layer of ambient dependency deeper. Post-lift the probes resolve
+    /// PATH in-process via the `which` crate; no fork+exec, no ambient
+    /// binary, no silent-false. Closes the last two `Command::new`-on-
+    /// `which` sites in forge — the sync half of the a46d580 lift.
+    ///
+    /// The forbidden shape is reconstructed at test time via [`format!`]
+    /// so this shield's own source text does not false-match itself,
+    /// and the docstring above uses `which`-binary paraphrase rather
+    /// than the literal shape for the same reason; the whole-module
+    /// scan therefore covers both the top-of-file production body AND
+    /// every sibling `#[cfg(test)]` block. Also asserts the canonical
+    /// `which::which("docker")` crate idiom is present in the module,
+    /// so the sigil-body itself cannot silently drift back to a
+    /// subprocess spawn.
+    #[test]
+    fn test_which_probes_route_through_which_crate_not_command_spawn() {
+        const SOURCE: &str = include_str!("e2e.rs");
+
+        let raw_command = format!("Command::new(\"{}\")", "which");
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/e2e.rs must not spawn the `which` binary via the \
+             bare tool-name literal — both PATH-probe sites in \
+             `verify_docker` and `ensure_docker_running` must resolve \
+             through the in-process `which::which(...)` crate idiom, the \
+             same shape the sibling probes in `commands/test_ci.rs`, \
+             `commands/rust_service.rs`, `commands/tool.rs`, \
+             `commands/search_sync.rs`, and `commands/sync.rs` already \
+             ride on. A bare-literal spawn on the `which` binary adds \
+             an ambient dependency on `which` existing on PATH itself; \
+             on a minimal Nix container whose derivation only exports \
+             the specific tool paths declared, the spawn fails-to-exec \
+             and the probe silently reports \"not installed\" for that \
+             reason alone."
+        );
+        assert!(
+            SOURCE.contains("which::which(\"docker\")"),
+            "commands/e2e.rs must probe the `docker` binary via the \
+             canonical `which::which(\"docker\")` crate call — the \
+             required form was not found in the module."
         );
     }
 }
