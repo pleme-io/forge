@@ -447,10 +447,7 @@ pub fn list_components() {
         "forge".bright_cyan()
     );
     println!("   {} pangea push-all", "forge".bright_cyan());
-    println!(
-        "   {} pangea push-all --parallel",
-        "forge".bright_cyan()
-    );
+    println!("   {} pangea push-all --parallel", "forge".bright_cyan());
     println!();
 }
 
@@ -505,8 +502,18 @@ pub async fn regenerate_compiler() -> Result<()> {
 
     verify_directory(&pangea_dir, &["Gemfile"])?;
 
-    let bundler = get_tool_path("BUNDLER", "bundle");
-    let bundix = get_tool_path("BUNDIX", "bundix");
+    // Env-var names honor the derived-`_BIN`-suffix convention every
+    // sibling substrate-exported Ruby-toolchain surface uses
+    // (`BUNDLE_BIN` per `commands/gem.rs:72` and `commands/pangea_infra.rs`,
+    // `INSPEC_BIN` per `commands/pangea_infra.rs`). `BUNDIX_BIN` follows
+    // the same derivation. The pre-lift `BUNDLER` / `BUNDIX` bare names
+    // were exported by nothing in the fleet, so both lookups silently
+    // fell through to whichever `bundle` / `bundix` sat first on PATH —
+    // defeating the substrate-pinned Ruby toolchain at the pangea-
+    // compiler gemset regen surface. See
+    // `test_regenerate_compiler_ruby_toolchain_env_vars_route_through_bin_suffix`.
+    let bundler = get_tool_path("BUNDLE_BIN", "bundle");
+    let bundix = get_tool_path("BUNDIX_BIN", "bundix");
 
     info!("Using bundler: {}", bundler);
     info!("Using bundix: {}", bundix);
@@ -560,7 +567,12 @@ pub async fn regenerate_compiler() -> Result<()> {
 ///
 /// Scans a provider gem directory for resources that lack synthesis specs,
 /// then generates them using the resource.rb and types.rb files as input.
-pub fn spec_gen(provider_dir: &str, resource: Option<&str>, force: bool, dry_run: bool) -> Result<()> {
+pub fn spec_gen(
+    provider_dir: &str,
+    resource: Option<&str>,
+    force: bool,
+    dry_run: bool,
+) -> Result<()> {
     let provider_path = std::path::Path::new(provider_dir);
     if !provider_path.exists() {
         anyhow::bail!("Provider directory not found: {}", provider_dir);
@@ -570,7 +582,10 @@ pub fn spec_gen(provider_dir: &str, resource: Option<&str>, force: bool, dry_run
     let spec_dir = provider_path.join("spec/resources");
 
     if !resources_dir.exists() {
-        anyhow::bail!("No resources directory found at: {}", resources_dir.display());
+        anyhow::bail!(
+            "No resources directory found at: {}",
+            resources_dir.display()
+        );
     }
 
     // Find resource directories
@@ -621,7 +636,10 @@ pub fn spec_gen(provider_dir: &str, resource: Option<&str>, force: bool, dry_run
         };
 
         // Extract provider module (look for "module AWS" or "module Akeyless" etc.)
-        let module_re = regex::Regex::new(r"module\s+(AWS|Akeyless|Cloudflare|Google|Azure|Hcloud|Datadog|Splunk)").unwrap();
+        let module_re = regex::Regex::new(
+            r"module\s+(AWS|Akeyless|Cloudflare|Google|Azure|Hcloud|Datadog|Splunk)",
+        )
+        .unwrap();
         let provider_module = match module_re.captures(&resource_content) {
             Some(caps) => format!("Pangea::Resources::{}", &caps[1]),
             None => continue,
@@ -631,12 +649,8 @@ pub fn spec_gen(provider_dir: &str, resource: Option<&str>, force: bool, dry_run
         let has_tags = resource_content.contains("tags");
 
         // Generate spec
-        let spec_content = generate_synthesis_spec(
-            &provider_module,
-            &method_name,
-            &resource_name,
-            has_tags,
-        );
+        let spec_content =
+            generate_synthesis_spec(&provider_module, &method_name, &resource_name, has_tags);
 
         if dry_run {
             println!("=== {} ===", spec_path.display());
@@ -750,5 +764,103 @@ mod tests {
             .unwrap();
         // Registry uses get_registry_base() which defaults to "ghcr.io/org/project"
         assert!(component.registry_url().ends_with("/pangea-operator"));
+    }
+
+    /// Whole-module shield: `regenerate_compiler` must resolve `bundle`
+    /// and `bundix` through the derived-`_BIN`-suffix env vars
+    /// (`BUNDLE_BIN`, `BUNDIX_BIN`) that substrate's `mkRuntimeToolsEnv`
+    /// exports, mirroring the sibling `bundle_bin()` sigils in
+    /// `commands/gem.rs` (f201d24) and `commands/pangea_infra.rs`
+    /// (e26787c). The pre-lift bare `BUNDLER` / `BUNDIX` env-var names
+    /// were exported by nothing in the fleet — a source grep of the
+    /// entire `cli/` tree finds `BUNDLER` at exactly one call-site
+    /// (this one) and no substrate module writes it — so both
+    /// [`crate::repo::get_tool_path`] calls silently fell through to
+    /// the PATH-based fallback at every invocation. That's the exact
+    /// silent-PATH-fallback bug class the sibling `BUNDLE_BIN` /
+    /// `INSPEC_BIN` migrations on `commands/pangea_infra.rs` (e26787c)
+    /// and `commands/gem.rs` (f201d24) closed on their respective
+    /// Ruby-toolchain surfaces, and the same class the DOCA regression
+    /// test at `tools.rs:200` pins on the doca frontier: an env-var
+    /// name mismatch between what substrate exports and what the Rust
+    /// call-site reads defeats every Nix-hermetic binding at that
+    /// spawn surface without a visible failure mode.
+    ///
+    /// The `bundle`-spawn produces the updated `Gemfile.lock` the
+    /// downstream `bundix` step feeds on for the `gemset.nix`
+    /// regeneration verdict every Pangea compiler build downstream
+    /// trusts as its Ruby-dependency-graph fingerprint. A wrong-binary
+    /// verdict at either step attributes the regenerated `gemset.nix`
+    /// (and therefore every downstream compiler-image build) to
+    /// whichever `bundle` / `bundix` PATH resolved to at the time,
+    /// not to the substrate-pinned Ruby derivation the flake declared —
+    /// the same failure class the sibling Ruby-toolchain migrations
+    /// closed on their gates.
+    ///
+    /// Scans this module's own source via [`include_str!`] for the
+    /// canonical `crate::repo::get_tool_path("BUNDLE_BIN", "bundle")`
+    /// and `crate::repo::get_tool_path("BUNDIX_BIN", "bundix")`
+    /// delegation forms (present-check) and the pre-lift bare
+    /// `BUNDLER` / `BUNDIX` env-var forms (absence-check, so a
+    /// regression that spells the wrong-env-var lookup at either
+    /// site fires the shield). The bare-name string literals below
+    /// are reconstructed via `format!` so this shield's own source
+    /// text does not false-match itself. Fail-before-pass-after:
+    /// briefly reverting `BUNDLE_BIN` back to `BUNDLER` at the
+    /// call-site fires the `BUNDLER`-absence assertion; restoring
+    /// the fix makes both pass.
+    #[test]
+    fn test_regenerate_compiler_ruby_toolchain_env_vars_route_through_bin_suffix() {
+        const SOURCE: &str = include_str!("pangea.rs");
+
+        assert!(
+            SOURCE.contains("crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")")
+                || SOURCE.contains("get_tool_path(\"BUNDLE_BIN\", \"bundle\")"),
+            "commands/pangea.rs must resolve `bundle` via \
+             `get_tool_path(\"BUNDLE_BIN\", \"bundle\")` — the \
+             canonical `_BIN`-suffix env-var lookup substrate's \
+             `mkRuntimeToolsEnv` exports, matching the sibling \
+             `bundle_bin()` sigils in `commands/gem.rs` and \
+             `commands/pangea_infra.rs`."
+        );
+        assert!(
+            SOURCE.contains("get_tool_path(\"BUNDIX_BIN\", \"bundix\")"),
+            "commands/pangea.rs must resolve `bundix` via \
+             `get_tool_path(\"BUNDIX_BIN\", \"bundix\")` — the \
+             canonical `_BIN`-suffix env-var lookup honoring the same \
+             derivation convention every substrate-exported tool uses."
+        );
+
+        let bare_bundler = "BUNDLER";
+        let bare_bundix_env = format!("get_tool_path(\"{}\", \"bundle\")", bare_bundler);
+        assert!(
+            !SOURCE.contains(&bare_bundix_env),
+            "commands/pangea.rs must not resolve `bundle` via the bare \
+             `{}` env-var name — substrate's `mkRuntimeToolsEnv` \
+             exports `BUNDLE_BIN`, not `{}`. A `get_tool_path(\"{}\", …)` \
+             lookup silently falls through to the PATH-based fallback \
+             at every invocation, defeating the substrate-pinned Ruby \
+             toolchain at the pangea-compiler gemset regen surface \
+             (same silent-PATH-fallback bug class the sibling \
+             `BUNDLE_BIN` migrations on `commands/gem.rs` and \
+             `commands/pangea_infra.rs` closed).",
+            bare_bundler,
+            bare_bundler,
+            bare_bundler
+        );
+
+        let bare_bundix = "BUNDIX";
+        let bare_bundix_only_env = format!("get_tool_path(\"{}\", \"bundix\")", bare_bundix);
+        assert!(
+            !SOURCE.contains(&bare_bundix_only_env),
+            "commands/pangea.rs must not resolve `bundix` via the bare \
+             `{}` env-var name — the derived-`_BIN`-suffix convention \
+             every substrate-exported tool honors requires `BUNDIX_BIN`. \
+             A `get_tool_path(\"{}\", …)` lookup silently falls through \
+             to PATH-based invocation, defeating the substrate-pinned \
+             bundix derivation at the gemset.nix regeneration verdict.",
+            bare_bundix,
+            bare_bundix
+        );
     }
 }
