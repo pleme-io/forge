@@ -54,7 +54,7 @@ pub async fn test(hostname: String, port: u16, ssh_key: String, package: String)
     }
 
     info!("Testing SSH connection...");
-    let ssh_test = Command::new("ssh")
+    let ssh_test = Command::new(get_tool_path("SSH_BIN", "ssh"))
         .args(&[
             "-i",
             &ssh_key,
@@ -126,7 +126,7 @@ async fn verify_k8s_service(service: &str, namespace: &str, port: u16) -> Result
     );
 
     // Use netcat to check if port is accessible
-    let nc_check = Command::new("nc")
+    let nc_check = Command::new(get_tool_path("NC_BIN", "nc"))
         .args(&[
             "-zv",
             &format!("{}.{}.svc.cluster.local", service, namespace),
@@ -150,7 +150,7 @@ async fn verify_external(hostname: &str, port: u16) -> Result<()> {
 
     // Check DNS resolution
     info!("Resolving DNS for {}", hostname);
-    let dig_output = Command::new("dig")
+    let dig_output = Command::new(get_tool_path("DIG_BIN", "dig"))
         .args(&["+short", hostname])
         .output()
         .context("Failed to resolve DNS")?;
@@ -165,7 +165,7 @@ async fn verify_external(hostname: &str, port: u16) -> Result<()> {
 
     // Check TCP connectivity with timeout
     info!("Checking TCP connectivity to {}:{}", hostname, port);
-    let nc_check = Command::new("nc")
+    let nc_check = Command::new(get_tool_path("NC_BIN", "nc"))
         .args(&["-zv", "-G", "5", hostname, &port.to_string()])
         .output()
         .context("Failed to execute netcat check")?;
@@ -557,5 +557,94 @@ mod nix_bin_routing_tests {
              `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical \
              lookup was not found in the module body."
         );
+    }
+
+    /// Whole-module shield: no raw `Command::new("ssh")`, `Command::new("nc")`,
+    /// or `Command::new("dig")` may live in `commands/nix_builder.rs`'s
+    /// non-test body. Every network-probe spawn in this module must first
+    /// resolve `{SSH_BIN, NC_BIN, DIG_BIN}` via
+    /// [`crate::repo::get_tool_path`] — the same `{TOOL}_BIN` env-var
+    /// override convention every other `Command::new(get_tool_path(...))`
+    /// call site in forge honors (`commands/build.rs` NIX_BIN d8ef0d5,
+    /// `commands/comprehensive_release.rs` DOCKER_BIN 7236cd6,
+    /// `commands/rebac_validation.rs` REDIS_CLI_BIN 9aed883, etc.).
+    ///
+    /// Pre-lift this module carried four raw network-probe spawn sites:
+    /// `test`'s `ssh -i <key> ... root@<host> 'echo ...'` reachability
+    /// probe (line 57 — decides whether the remote AMD64 builder is
+    /// reachable at all before the nix cross-build test even runs);
+    /// `verify_k8s_service`'s `nc -zv <svc>.<ns>.svc.cluster.local <port>`
+    /// probe (line 129 — the sole in-cluster reachability signal for
+    /// `forge nix-builder verify --k8s-service`); `verify_external`'s
+    /// `dig +short <hostname>` DNS resolution probe (line 153 — the
+    /// external-verification path's DNS-health signal); and
+    /// `verify_external`'s `nc -zv -G 5 <hostname> <port>` TCP probe
+    /// (line 168 — the external-verification path's L4 reachability
+    /// signal). Each spawn spelled `Command::new("<probe>")` verbatim,
+    /// ignoring `SSH_BIN` / `NC_BIN` / `DIG_BIN` on a Nix-hermetic
+    /// runner whose derivation exports those exact paths. On a
+    /// minimal Nix container that omits `ssh` / `nc` / `dig` from
+    /// PATH entirely — but wires the corresponding `*_BIN` env vars
+    /// from the substrate — every probe silently fails-to-exec and
+    /// the verify/test commands falsely report the remote builder
+    /// unreachable. Post-lift the four probes ride the same
+    /// `{TOOL}_BIN` frontier the sibling nix invocation above (line
+    /// 89) already rides.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the first `\n#[cfg(test)]\n` marker, which delimits
+    /// the sibling NIX_BIN shield's `mod nix_bin_routing_tests`
+    /// block above) so shield docstring mentions of the forbidden
+    /// `Command::new("<probe>")` shapes stay out of scope AND every
+    /// current or future probe helper landing anywhere in the
+    /// top-level module body cannot silently ride along without
+    /// going through the `{TOOL}_BIN` env var. Mirrors the sibling
+    /// whole-module shields on `commands/rebac_validation.rs`
+    /// (REDIS_CLI_BIN, 9aed883) and `commands/comprehensive_release.rs`
+    /// (DOCKER_BIN, 7236cd6) — the whole-module-boundary scan
+    /// discipline pioneered on
+    /// `commands/supergraph_verification.rs` (65283fb).
+    ///
+    /// The forbidden `Command::new("<probe>")` shapes are
+    /// reconstructed at test time via `format!` so the shield's
+    /// own source text does not false-match itself; every
+    /// docstring mention of the forbidden shape uses probe-name
+    /// paraphrase for the same reason.
+    #[test]
+    fn test_nix_builder_probes_route_through_ssh_nc_dig_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("nix_builder.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "nix_builder.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        for probe in ["ssh", "nc", "dig"] {
+            let forbidden = format!("Command::new(\"{}\")", probe);
+            assert!(
+                !body.contains(&forbidden),
+                "commands/nix_builder.rs must not spawn `{probe}` via the \
+                 bare literal — every `{probe}` spawn must resolve the \
+                 corresponding `{{TOOL}}_BIN` env var via \
+                 `crate::repo::get_tool_path` first. A raw \
+                 `Command::new(<probe>)` bypasses the hermetic-runner \
+                 contract substrate's mkRuntimeToolsEnv exports.",
+                probe = probe
+            );
+        }
+        for env_var in ["SSH_BIN", "NC_BIN", "DIG_BIN"] {
+            let canonical = format!(
+                "get_tool_path(\"{}\", \"{}\")",
+                env_var,
+                env_var.trim_end_matches("_BIN").to_lowercase()
+            );
+            assert!(
+                body.contains(&canonical),
+                "commands/nix_builder.rs must resolve the {env_var} probe via \
+                 `{canonical}` — the canonical lookup was not found in the \
+                 module body.",
+                env_var = env_var,
+                canonical = canonical
+            );
+        }
     }
 }
