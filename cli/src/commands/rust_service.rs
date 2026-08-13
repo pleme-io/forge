@@ -44,6 +44,34 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tokio::select;
 
+/// Resolve the `ps` binary path via `PS_BIN`, falling back to `ps` on
+/// `PATH`. Wired through [`crate::repo::get_tool_path`] — the canonical
+/// env-var-or-PATH lookup the sibling `docker_bin` and `open_bin` sigils
+/// on `commands/e2e.rs` (23241a6 / 8f4c717) ride on, and the same two-arg
+/// `get_tool_path("<TOOL>_BIN", "<tool>")` convention every other
+/// substrate-declared tool-spawn site in forge honors (`SH_BIN` b382b78;
+/// `{SSH,NC,DIG}_BIN` 5e6672d; `SQLX_BIN` ecace0a; `SEA_ORM_CLI_BIN`
+/// b037895; `NOVASEARCHCTL_BIN` 19463db; `OPEN_BIN` 8f4c717).
+///
+/// The single spawn site lives in [`release_rust_service`], where the
+/// concurrent-release-lock check reads `/tmp/forge-<service>.lock`,
+/// parses the PID it contains, and shells out `ps -p <pid>` to test
+/// whether the prior release process is still alive. Pre-lift that site
+/// spawned `ps` via a bare tool-name literal on
+/// `std::process::Command`, bypassing `PS_BIN` at exactly the moment
+/// the concurrent-release interlock guarantees serialisation across
+/// `forge push-rust-service` invocations. A Nix-hermetic runner whose
+/// derivation exports `PS_BIN=/nix/store/…-procps/bin/ps` but omits
+/// `ps` from `PATH` silently fell through to whatever `ps` was first on
+/// `PATH`; on a runner with no `ps` on `PATH` at all, the spawn's
+/// `.output()` call resolved to `Err(_)` and the interlock treated the
+/// lock as stale — permitting a concurrent release the guard exists to
+/// prevent. Post-lift the site observes the same substrate-declared
+/// path every other spawn site in this module observes.
+fn ps_bin() -> String {
+    get_tool_path("PS_BIN", "ps")
+}
+
 /// Compute the tag to use for deployment.
 ///
 /// In normal mode: `tag_suffix` is a raw git SHA, deploy tag is `{arch}-{sha}`
@@ -1111,7 +1139,7 @@ pub async fn orchestrate_release(
             if let Ok(pid) = contents.trim().parse::<i32>() {
                 // Check if the process is still running
                 use std::process::Command as StdCommand;
-                let check_result = StdCommand::new("ps")
+                let check_result = StdCommand::new(ps_bin())
                     .args(&["-p", &pid.to_string()])
                     .output();
 
@@ -2947,6 +2975,88 @@ mod kubectl_bin_routing_tests {
             "commands/rust_service.rs must resolve the `kubectl` binary \
              via the canonical `kubectl_command_async()` constructor \
              — the required form was not found in the module."
+        );
+    }
+}
+
+#[cfg(test)]
+mod ps_bin_routing_tests {
+    /// Whole-module shield: no raw `ps`-tool-name literal fused into a
+    /// `Command::new(...)` call may live in `commands/rust_service.rs`'s
+    /// non-test body. The single `ps` spawn site — the concurrent-release
+    /// interlock's PID liveness probe inside [`super::release_rust_service`]
+    /// (`ps -p <pid>` on `/tmp/forge-<service>.lock`'s contents) — must
+    /// resolve through [`super::ps_bin`], which delegates to
+    /// [`crate::repo::get_tool_path`] on the canonical two-arg
+    /// `("PS_BIN", "ps")` env-var override every sibling probe/spawn
+    /// surface in forge honors (this module's own `NIX_BIN` shield above;
+    /// `commands/e2e.rs`'s `docker_bin` 23241a6 and `open_bin` 8f4c717;
+    /// `SH_BIN` two-arg lift b382b78; `{SSH,NC,DIG}_BIN` 5e6672d;
+    /// `SQLX_BIN` ecace0a; `SEA_ORM_CLI_BIN` b037895;
+    /// `NOVASEARCHCTL_BIN` 19463db).
+    ///
+    /// Pre-lift the site spawned `ps` via the bare tool-name literal on
+    /// `std::process::Command` (imported inline via `use std::process::
+    /// Command as StdCommand;`), bypassing `PS_BIN` at the exact
+    /// surface `forge push-rust-service` — and every derived
+    /// `forge rust-service release` / `forge comprehensive-release` /
+    /// `forge product-release` pipeline that reaches
+    /// [`super::release_rust_service`] — checks whether a prior release
+    /// of the same service is still running. A Nix-hermetic runner
+    /// whose derivation exports `PS_BIN=/nix/store/…-procps/bin/ps` but
+    /// omits `ps` from `PATH` silently fell through to whatever `ps`
+    /// sat first on `PATH`; on a runner with no `ps` on `PATH` at all,
+    /// the spawn's `.output()` return resolved to `Err(_)`, the
+    /// interlock's `if let Ok(output) = check_result` binding never
+    /// fired, and the guard treated the lock as stale — permitting a
+    /// concurrent release the interlock exists to prevent.
+    ///
+    /// Scan bounds on the whole-module boundary — from the file start
+    /// to the FIRST `\n#[cfg(test)]\n` marker in source order (which
+    /// lands at the sibling
+    /// `deploy_rust_service_with_tag_git_bin_routing_tests` block) — so
+    /// this shield's own docstring mentions of the forbidden literal,
+    /// living in a `#[cfg(test)]` block below that first marker, stay
+    /// out of scope AND every current or future `ps`-spawning helper
+    /// landing anywhere in the top-level module body cannot silently
+    /// ride along without going through `ps_bin()`. The forbidden
+    /// shape is reconstructed at test time via [`format!`] from the
+    /// bare string `"ps"` so this shield's own source text does not
+    /// false-match itself; the sigil docstring paraphrases the anti-
+    /// pattern for the same reason. Also asserts the canonical
+    /// `StdCommand::new(ps_bin())` delegation and the `fn ps_bin()`
+    /// sigil are present, so a regression that removed the sigil would
+    /// surface with a diagnostic pointing at the missing constructor
+    /// rather than at a compile error at the call site.
+    #[test]
+    fn test_rust_service_routes_ps_through_ps_bin_not_raw_command() {
+        const SOURCE: &str = include_str!("rust_service.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "rust_service.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        let bare = "ps";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+        assert!(
+            !body.contains(&raw_command),
+            "commands/rust_service.rs must not spawn `ps` via the bare \
+             literal — every `ps` spawn must resolve `PS_BIN` via \
+             `ps_bin()` first. A raw literal at `Command::new` bypasses \
+             the hermetic-runner contract substrate's mkRuntimeToolsEnv \
+             exports."
+        );
+        assert!(
+            body.contains("StdCommand::new(ps_bin())"),
+            "commands/rust_service.rs must resolve the ps binary via \
+             `StdCommand::new(ps_bin())` — the canonical delegation was \
+             not found in the module body."
+        );
+        assert!(
+            body.contains("fn ps_bin()"),
+            "commands/rust_service.rs must define the `ps_bin` sigil — \
+             the one bridge between this module's `ps` spawn and the \
+             substrate-exported `PS_BIN` env override."
         );
     }
 }
