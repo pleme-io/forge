@@ -569,7 +569,7 @@ async fn execute_suite(
         // Build command
         let suite_working_dir = working_dir.join(&suite.working_dir);
 
-        let mut cmd = Command::new("sh");
+        let mut cmd = Command::new(crate::repo::get_tool_path("SH_BIN", "sh"));
         cmd.arg("-c")
             .arg(&suite.command)
             .current_dir(&suite_working_dir)
@@ -1528,6 +1528,66 @@ mod kubectl_bin_routing_tests {
             SOURCE.contains("kubectl_command_async()"),
             "commands/integration_tests.rs must resolve the `kubectl` \
              binary via the canonical `kubectl_command_async()` \
+             constructor — the required form was not found in the \
+             module."
+        );
+    }
+}
+
+#[cfg(test)]
+mod sh_bin_routing_tests {
+    /// Whole-module shield: no raw `Command::new`-with-bare-`sh`-literal
+    /// may live in `commands/integration_tests.rs`. The sole `sh` spawn
+    /// on this module — the per-suite `sh -c <suite.command>` invocation
+    /// at line 572 inside `run_test_suite` that drives every
+    /// `deploy.yaml` integration `TestSuite.command` string through a
+    /// shell — must resolve `SH_BIN` via
+    /// [`crate::repo::get_tool_path`], the two-arg env-var override
+    /// every sibling probe/spawn surface honors (`commands/nix_builder.rs`
+    /// `{SSH,NC,DIG}_BIN` four sites at 5e6672d;
+    /// `commands/comprehensive_release.rs` `SQLX_BIN` at ecace0a;
+    /// `commands/sync.rs` `SEA_ORM_CLI_BIN` at b037895;
+    /// `commands/search_sync.rs` `NOVASEARCHCTL_BIN` at 19463db).
+    ///
+    /// Pre-lift the spawn site spelled the bare `"sh"` literal via
+    /// `Command::new` (aliased through the module's
+    /// `use tokio::process::Command`), ignoring `SH_BIN` at the site.
+    /// A Nix-hermetic runner whose derivation exports
+    /// `SH_BIN=/nix/store/…-bash/bin/sh` but omits `sh` from PATH
+    /// silently fell through to whatever ambient shell an outer
+    /// wrapper had — the same silent-PATH-fallback bug class the
+    /// sibling `KUBECTL_BIN` shield above closes for the `kubectl`
+    /// surface, here closed for the `sh -c` integration-driver
+    /// surface.
+    ///
+    /// This shield scans the module's own source via [`include_str!`]
+    /// and forbids the fused literal shape. The forbidden shape is
+    /// reconstructed via [`format!`] from the bare string `"sh"` so
+    /// this shield's own source text does not false-match itself —
+    /// the whole-module scan therefore covers both the top-of-file
+    /// production body AND every sibling `#[cfg(test)]` block, any
+    /// of which could otherwise silently re-introduce a raw literal.
+    #[test]
+    fn test_sh_spawn_routes_through_sh_bin_env_not_raw_literal() {
+        const SOURCE: &str = include_str!("integration_tests.rs");
+
+        let bare = "sh";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_command),
+            "commands/integration_tests.rs must not spawn `sh` via \
+             the bare literal — every `sh -c` spawn must resolve \
+             `SH_BIN` via `crate::repo::get_tool_path(\"SH_BIN\", \
+             \"sh\")` first. A raw `Command::new(\"sh\")` bypasses \
+             the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            SOURCE.contains("get_tool_path(\"SH_BIN\", \"sh\")"),
+            "commands/integration_tests.rs must resolve the `sh` \
+             binary via the canonical \
+             `crate::repo::get_tool_path(\"SH_BIN\", \"sh\")` two-arg \
              constructor — the required form was not found in the \
              module."
         );

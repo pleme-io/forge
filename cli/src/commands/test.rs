@@ -434,7 +434,7 @@ async fn run_test_suite(
         spinner.enable_steady_tick(Duration::from_millis(100));
 
         let result = timeout(test_timeout, async {
-            let output = Command::new("sh")
+            let output = Command::new(crate::repo::get_tool_path("SH_BIN", "sh"))
                 .arg("-c")
                 .arg(&config.command)
                 .current_dir(&working_dir)
@@ -598,6 +598,65 @@ mod tests {
              `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
              A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
              contract substrate's mkRuntimeToolsEnv exports."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("sh")` may live in this
+    /// module's non-test body. `run_web_test_suite`'s per-suite spawn
+    /// (line 437, inside `timeout(test_timeout, async { … })`) drives
+    /// user-supplied `deploy.yaml deployment.tests.<suite>.command`
+    /// strings through `sh -c`; every such spawn must first resolve
+    /// `SH_BIN` via [`crate::repo::get_tool_path`], the two-arg env-var
+    /// override every sibling probe/spawn surface honors
+    /// (`commands/nix_builder.rs` `{SSH,NC,DIG}_BIN` four sites at
+    /// 5e6672d; `commands/comprehensive_release.rs` `SQLX_BIN` at
+    /// ecace0a; `commands/sync.rs` `SEA_ORM_CLI_BIN` at b037895;
+    /// `commands/search_sync.rs` `NOVASEARCHCTL_BIN` at 19463db).
+    ///
+    /// Pre-lift the site spelled `Command::new("sh")` verbatim, ignoring
+    /// `SH_BIN` at the site. A Nix-hermetic runner whose derivation
+    /// exports `SH_BIN=/nix/store/…-bash/bin/sh` but omits `sh` from
+    /// PATH silently fell through to whatever ambient shell an outer
+    /// wrapper had (or fail-to-exec, when none) — the same
+    /// silent-PATH-fallback bug class the sibling `CARGO` shield
+    /// (this module's `run_rust_tests` spawns) closes for the
+    /// build-tool surface, here closed for the `sh -c` test-driver
+    /// surface.
+    ///
+    /// Scan bounds on the whole-module boundary — from file start to
+    /// the FIRST `\n#[cfg(test)]\nmod tests {` marker in source order
+    /// — so this shield's own docstring mentions of the forbidden
+    /// literal, living in the `#[cfg(test)]` block below that marker,
+    /// stay out of scope AND every current or future `sh`-spawning
+    /// helper landing anywhere in the top-level module body cannot
+    /// silently ride along without going through `SH_BIN`. The
+    /// forbidden shape is reconstructed via [`format!`] from the bare
+    /// string `"sh"` so this shield's own source text does not
+    /// false-match itself.
+    #[test]
+    fn test_sh_spawn_routes_through_sh_bin_env_not_raw_literal() {
+        let source = include_str!("test.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "test.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        let bare = "sh";
+        let raw_command = format!("Command::new(\"{}\")", bare);
+        assert!(
+            !body.contains(&raw_command),
+            "commands/test.rs must not spawn `sh` via the bare literal — \
+             every `sh -c` spawn must resolve `SH_BIN` via \
+             `crate::repo::get_tool_path(\"SH_BIN\", \"sh\")` first. \
+             A raw `Command::new(\"sh\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"SH_BIN\", \"sh\")"),
+            "commands/test.rs must resolve the `sh` binary via the \
+             canonical `crate::repo::get_tool_path(\"SH_BIN\", \"sh\")` \
+             two-arg constructor — the required form was not found \
+             in the module body."
         );
     }
 }
