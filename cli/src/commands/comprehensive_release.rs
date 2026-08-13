@@ -371,7 +371,22 @@ pub async fn execute(
                         db_user, db_port, db_name
                     );
 
-                    let migrate_result = Command::new("sqlx")
+                    // Resolve the `sqlx` binary path via `SQLX_BIN` for the
+                    // migrate spawn — shares the sibling sigil discipline of
+                    // the docker / docker-compose / cargo lifts elsewhere in
+                    // this module so the migrate step names the same
+                    // substrate-derived sqlx-cli derivation on a
+                    // Nix-hermetic runner. A bare literal spawn would
+                    // silently fall through to whatever `sqlx` binary is
+                    // first on PATH — the same silent-PATH-fallback bug
+                    // class the sibling shields below close for docker /
+                    // docker-compose / cargo in this same file. The shield
+                    // asserts the forbidden literal shape is absent from
+                    // the module body, so this comment names the bug class
+                    // without spelling the exact string the shield scans
+                    // for.
+                    let sqlx_bin = get_tool_path("SQLX_BIN", "sqlx");
+                    let migrate_result = Command::new(&sqlx_bin)
                         .args(&[
                             "migrate",
                             "run",
@@ -794,6 +809,70 @@ mod tests {
             body.contains("get_tool_path(\"CARGO\", \"cargo\")"),
             "commands/comprehensive_release.rs must resolve the `cargo` binary via \
              `get_tool_path(\"CARGO\", \"cargo\")` — the canonical lookup \
+             was not found in the module body."
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("sqlx")` may live in
+    /// this module's non-test body. Every `sqlx` spawn in
+    /// `commands/comprehensive_release.rs` must first resolve `SQLX_BIN`
+    /// via [`crate::repo::get_tool_path`] — the canonical env-var
+    /// override idiom every sibling sqlx-consuming surface honors
+    /// (`commands/developer_tools.rs::rust_dev`'s `sqlx_cmd` fallback
+    /// path, whose CLI-arg-first resolution now falls through to
+    /// `SQLX_BIN` before bare PATH — the last consumer of the raw
+    /// `"sqlx"` fallback string anywhere in forge).
+    ///
+    /// Pre-lift the one consumer site in `execute` — the integration-
+    /// test step's `sqlx migrate run --database-url <db_url> --source
+    /// <migrations_dir>` migration invocation — spelled
+    /// `Command::new("sqlx")` verbatim, ignoring `SQLX_BIN`. A
+    /// Nix-hermetic runner with a store-path `sqlx-cli` binary silently
+    /// fell through to whatever `sqlx` was first on PATH — the same
+    /// silent-PATH-fallback bug class the sibling `docker` /
+    /// `docker-compose` / `cargo` shields above closed for those three
+    /// tool surfaces in this same file, and every sibling
+    /// `{TOOL}_BIN`-lifted shield across the fleet closed for the
+    /// respective tool.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\nmod tests {` marker in
+    /// source order, which lands at the sibling docker-compose
+    /// shield's `#[cfg(test)] mod tests` opener above) so this
+    /// shield's own docstring mentions of `Command::new("sqlx")` —
+    /// living in a `#[cfg(test)]` block below that first marker —
+    /// stay out of scope AND every current or future sqlx-spawning
+    /// helper landing anywhere in the top-level module body cannot
+    /// silently ride along without going through `SQLX_BIN`. Mirrors
+    /// the whole-module-boundary scan discipline of the sibling
+    /// docker / docker-compose / cargo shields above and the lineage
+    /// traced there.
+    ///
+    /// The forbidden `Command::new("sqlx")` shape is reconstructed at
+    /// test time via `format!` so the shield's own source text does
+    /// not false-match itself — mirrors the anti-self-match discipline
+    /// the sibling `SEA_ORM_CLI_BIN` shield (b037895) established.
+    #[test]
+    fn test_comprehensive_release_routes_sqlx_through_sqlx_bin_not_raw_command() {
+        let source = include_str!("comprehensive_release.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "comprehensive_release.rs must have a `#[cfg(test)] mod tests {` marker \
+                     — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        let forbidden = format!("Command::new({}sqlx{})", "\"", "\"");
+        assert!(
+            !body.contains(&forbidden),
+            "commands/comprehensive_release.rs must not spawn `sqlx` via the bare literal — \
+             every `sqlx` spawn must resolve `SQLX_BIN` via \
+             `crate::repo::get_tool_path(\"SQLX_BIN\", \"sqlx\")` first. \
+             A raw `Command::new(\"sqlx\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("get_tool_path(\"SQLX_BIN\", \"sqlx\")"),
+            "commands/comprehensive_release.rs must resolve the `sqlx` binary via \
+             `get_tool_path(\"SQLX_BIN\", \"sqlx\")` — the canonical lookup \
              was not found in the module body."
         );
     }

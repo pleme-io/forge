@@ -468,8 +468,19 @@ pub async fn rust_dev(
                 "(sqlx migrate run)".dimmed()
             );
 
-            // Use sqlx_cli from CLI arg (nix derivation path), otherwise try "sqlx" in PATH
-            let sqlx_cmd = sqlx_cli.clone().unwrap_or_else(|| "sqlx".to_string());
+            // Use sqlx_cli from CLI arg (nix derivation path); if unset,
+            // fall through to `SQLX_BIN` via `crate::repo::get_tool_path`
+            // before landing on bare `"sqlx"` in PATH — same substrate-
+            // lifted env-var contract the sibling
+            // `commands/comprehensive_release.rs::execute`'s sqlx migrate
+            // spawn honors. Preserves the CLI-arg-first precedence (a
+            // caller passing `--sqlx-cli /nix/store/.../bin/sqlx` still
+            // wins) while closing the silent-PATH-fallback gap on
+            // Nix-hermetic runners that export `SQLX_BIN` but no
+            // `--sqlx-cli` flag.
+            let sqlx_cmd = sqlx_cli
+                .clone()
+                .unwrap_or_else(|| get_tool_path("SQLX_BIN", "sqlx"));
 
             let status = Command::new(&sqlx_cmd)
                 .args(&["migrate", "run", "--source", "./migrations"])
