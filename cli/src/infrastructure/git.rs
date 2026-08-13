@@ -328,11 +328,11 @@ impl GitClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::git_command_sync;
     use crate::test_support::{
         add_bare_origin, init_repo_with_one_commit, make_executable_shim, GitBinScope,
         GIT_BIN_ENV_LOCK,
     };
-    use std::process::Command as SyncCommand;
 
     /// Test-binding helper: build a `GitClient` in `dir` whose spawn
     /// path is pinned to the string literal `"git"` (PATH lookup) via
@@ -383,11 +383,25 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         init_repo_with_one_commit(dir.path());
         std::fs::write(dir.path().join("staged.txt"), "fresh\n").unwrap();
-        let add = SyncCommand::new("git")
-            .args(["add", "staged.txt"])
-            .current_dir(dir.path())
-            .status()
-            .expect("git add");
+        // Route the fixture-side `git add` through the canonical
+        // `git_command_sync()` constructor so the resolved binary is the
+        // same `GIT_BIN`-pinned store path every production consumer in
+        // this module routes through. `git_command_sync()` reads
+        // `GIT_BIN` at spawn time, so hold `GIT_BIN_ENV_LOCK` across the
+        // spawn to serialize against every concurrent test that mutates
+        // the env var (`test_git_client_no_bin_surface_routes_through_git_bin_env_var`
+        // below and the sibling shim-driven tests in `cli/src/git.rs`).
+        // `init_repo_with_one_commit` has already acquired + released the
+        // lock by this point (it holds it internally for its own two
+        // spawns), so the fresh acquisition here does not deadlock.
+        let add = {
+            let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            git_command_sync()
+                .args(["add", "staged.txt"])
+                .current_dir(dir.path())
+                .status()
+                .expect("git add")
+        };
         assert!(add.success());
         let client = git_client_in_dir_path_git(dir.path());
         let staged = client
@@ -711,5 +725,138 @@ mod tests {
                 Err(e) => e,
             }
         }
+    }
+
+    /// Every git-spawning site in `cli/src/infrastructure/git.rs` — both
+    /// the production `GitClient` methods AND the test-side fixture step
+    /// in [`test_has_staged_changes_returns_true_when_index_dirty`] —
+    /// must resolve `GIT_BIN` via the canonical
+    /// [`crate::git::git_command_sync`] / [`crate::git::git_command_async`]
+    /// constructors, or via `Command::new(self.resolve_git_bin())`
+    /// (which threads `get_tool_path(tools::GIT)` through
+    /// [`GitClient::resolve_git_bin`]). A Nix-hermetic runner invocation
+    /// with a substrate-derivation-pinned `git` must land at that same
+    /// store path, not at whichever `git` sits first on `PATH`.
+    ///
+    /// Pre-shield the test-side `git add` fixture at the sibling test
+    /// [`test_has_staged_changes_returns_true_when_index_dirty`]
+    /// spelled the raw `SyncCommand::new("git")` shape via a
+    /// `use std::process::Command as SyncCommand;` alias, silently
+    /// bypassing `GIT_BIN`. A hermetic test suite invoked with `GIT_BIN`
+    /// pinned to a substrate-derivation shim would lose the shim at
+    /// exactly this fixture step — a wrong-provenance `git` staging a
+    /// file into the tempdir index while every production
+    /// `has_staged_changes` / `add` / `commit` / `push` spawn in the
+    /// same test resolved the substrate-pinned `git`. The two `git`s
+    /// would observe different index states and the assertion could
+    /// pass or fail for the wrong reason. Same class of foreign-`git`-
+    /// observing-substrate-`git` inversion the sibling shields in
+    /// `cli/src/git.rs` (932cddf), `cli/src/test_support.rs` (3036a55),
+    /// `commands/release_commit.rs` (8f27812),
+    /// `commands/product_release.rs` (0ea75ba), and
+    /// `commands/attestation.rs` (1c90949) close on their modules.
+    ///
+    /// The four forbidden shapes (`std::process::Command::new("git")`,
+    /// bare `Command::new("git")`, `tokio::process::Command::new("git")`,
+    /// and the module-local `SyncCommand::new("git")` alias form the
+    /// pre-shield test module used) are reconstructed via `format!` from
+    /// the bare string `"git"` so this shield's own source text does not
+    /// false-match itself. A per-line filter drops `///` / `//!` / `//`
+    /// comment lines so the pre-existing docstrings on `stage_commit_push_release`
+    /// (line 297), `git_client_in_dir_path_git` (line 340), and
+    /// `test_git_client_no_bin_surface_routes_through_git_bin_env_var`
+    /// (lines 581, 594) — which narrate the historical
+    /// `Command::new("git")` anti-pattern by literal quotation — do not
+    /// register as violations; the shield fires only on executable code.
+    ///
+    /// The production body of this module (`is_clean`, `add`, `commit`,
+    /// `push`, `push_to`, `has_staged_changes`) spawns via
+    /// `Command::new(self.resolve_git_bin())` — a variable, not the bare
+    /// literal — so it does not match. The end-to-end `GIT_BIN`-routing
+    /// invariant of the underlying `resolve_git_bin` predicate is pinned
+    /// separately by
+    /// [`test_git_client_no_bin_surface_routes_through_git_bin_env_var`]
+    /// above; this shield only certifies that every git-spawning site in
+    /// this module reads through one of the canonical constructors.
+    #[test]
+    fn test_infra_git_spawn_routes_through_git_command_sync_not_raw_literal() {
+        const SOURCE: &str = include_str!("git.rs");
+
+        let bare = "git";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+        let raw_sync_alias = format!("SyncCommand::new(\"{}\")", bare);
+
+        let is_code_line = |line: &str| -> bool {
+            let t = line.trim_start();
+            !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("//")
+        };
+
+        let hits_for = |needle: &str| -> Vec<String> {
+            SOURCE
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.contains(needle))
+                .filter(|(_, l)| is_code_line(l))
+                .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+                .collect()
+        };
+
+        let std_hits = hits_for(&raw_std);
+        assert!(
+            std_hits.is_empty(),
+            "cli/src/infrastructure/git.rs must not spawn `git` via the \
+             bare literal at `std::process::Command::new` — every git \
+             spawn must resolve `GIT_BIN` via `git_command_sync()` / \
+             `git_command_async()` (or via `Command::new(self.resolve_git_bin())` \
+             on the `GitClient` production body). A raw literal bypasses \
+             the hermetic-runner contract substrate's `mkRuntimeToolsEnv` \
+             exports. Offending code lines: {std_hits:?}"
+        );
+
+        let bare_hits = hits_for(&raw_bare);
+        assert!(
+            bare_hits.is_empty(),
+            "cli/src/infrastructure/git.rs must not spawn `git` via the \
+             bare literal at `Command::new` (top-of-file alias) — every \
+             git spawn must resolve `GIT_BIN` via `git_command_sync()` / \
+             `git_command_async()` (or via `Command::new(self.resolve_git_bin())` \
+             on the `GitClient` production body). A raw literal bypasses \
+             the hermetic-runner contract. Offending code lines: \
+             {bare_hits:?}"
+        );
+
+        let tokio_hits = hits_for(&raw_tokio);
+        assert!(
+            tokio_hits.is_empty(),
+            "cli/src/infrastructure/git.rs must not spawn `git` via the \
+             bare literal at `tokio::process::Command::new` — every \
+             async git spawn must resolve `GIT_BIN` via \
+             `git_command_async()` first. A raw literal bypasses the \
+             hermetic-runner contract. Offending code lines: {tokio_hits:?}"
+        );
+
+        let alias_hits = hits_for(&raw_sync_alias);
+        assert!(
+            alias_hits.is_empty(),
+            "cli/src/infrastructure/git.rs must not spawn `git` via the \
+             module-local `SyncCommand` alias (`use std::process::Command as SyncCommand`) — \
+             a fixture-side spawn through the alias silently bypassed \
+             `GIT_BIN` for one release cycle and observed a foreign \
+             `git`'s staging of the tempdir index while every production \
+             consumer resolved the substrate-pinned `git`. Route via \
+             `crate::git::git_command_sync()` instead. Offending code \
+             lines: {alias_hits:?}"
+        );
+
+        assert!(
+            SOURCE.contains("use crate::git::git_command_sync"),
+            "cli/src/infrastructure/git.rs must import the canonical \
+             `git_command_sync` constructor — the required form was not \
+             found in the module. A regression that removed it would \
+             silently downgrade the fixture-side git spawn to the raw \
+             literal it was lifted from."
+        );
     }
 }
