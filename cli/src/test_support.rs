@@ -44,15 +44,16 @@
 #![cfg(test)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command as SyncCommand;
+
+use crate::git::git_command_sync;
 
 /// Write an executable shim script to a fresh tempdir under `name`,
 /// chmod it 0o755 (Unix), and return the `(TempDir, absolute path)` pair.
 ///
 /// `name` is the basename the shim is written as; tests pass `"git"`,
 /// `"nix"`, `"attic"` (and friends) so the OS process-lookup path
-/// matches the producer site's `Command::new("git")` / `"nix"` /
-/// `"attic"` invocation.
+/// matches whatever binary basename the producer site's spawn resolves
+/// to (`git` / `nix` / `attic`, etc.).
 ///
 /// `body` is the script body (typically `#!/bin/sh\n<output>\nexit <N>\n`).
 /// The body is written verbatim — callers retain full control over the
@@ -179,9 +180,28 @@ impl Drop for GitBinScope {
 /// fires, not be deferred into a confusing downstream "git rejected
 /// the operation" diagnostic. Same loud-failure discipline as
 /// [`make_executable_shim`]'s `expect("write shim")`.
+///
+/// # Env-var lock discipline
+///
+/// Acquires [`GIT_BIN_ENV_LOCK`] for the duration of every spawn.
+/// Post the lift onto [`crate::git::git_command_sync`] the fixture
+/// reads `GIT_BIN` at spawn — same substrate-pinned resolution every
+/// production consumer honors. Without the lock a concurrently-running
+/// shim test (`git.rs::test_no_bin_entry_points_route_through_git_bin_env_var`,
+/// `infrastructure/git.rs::test_git_client_no_bin_surface_routes_through_git_bin_env_var`,
+/// etc.) could set `GIT_BIN=<shim>` between two of the seven spawns
+/// this fixture drives, so `git init` would succeed against the real
+/// git while `git commit` hit the shim (or vice versa) — a race
+/// masquerading as a flake. Holding the lock across the whole fixture
+/// pins the resolution stable for the seven spawns; the pre-lift
+/// PATH-bypass shape (`SyncCommand::new(<bare>)`) achieved the same
+/// serialization only accidentally, by ignoring the env var. This
+/// spelling preserves the accidental serialization AND the intentional
+/// substrate-pinning — both post-lift properties are load-bearing.
 pub fn init_repo_with_one_commit(dir: &Path) {
+    let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let run = |args: &[&str]| {
-        let status = SyncCommand::new("git")
+        let status = git_command_sync()
             .args(args)
             .current_dir(dir)
             .status()
@@ -228,8 +248,18 @@ pub fn init_repo_with_one_commit(dir: &Path) {
 /// Panics on any failed git spawn or non-zero exit — fixture-setup
 /// failure is loud rather than deferred into a downstream "remote
 /// rejected" diagnostic.
+///
+/// # Env-var lock discipline
+///
+/// Same [`GIT_BIN_ENV_LOCK`] discipline as
+/// [`init_repo_with_one_commit`]: the two spawns this fixture drives
+/// read `GIT_BIN` at construction, so the lock guarantees a
+/// concurrently-running shim test cannot mutate the env var between
+/// the `git init --bare` and the `git remote add origin` half of the
+/// fixture.
 pub fn add_bare_origin(work_dir: &Path, bare_dir: &Path) {
-    let init = SyncCommand::new("git")
+    let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let init = git_command_sync()
         .args(["init", "-q", "--bare", "--initial-branch=main"])
         .current_dir(bare_dir)
         .status()
@@ -238,7 +268,7 @@ pub fn add_bare_origin(work_dir: &Path, bare_dir: &Path) {
         init.success(),
         "git init --bare must succeed in {bare_dir:?}"
     );
-    let add = SyncCommand::new("git")
+    let add = git_command_sync()
         .args([
             "remote",
             "add",
@@ -393,7 +423,19 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         init_repo_with_one_commit(dir.path());
 
-        let branch = Command::new("git")
+        // Acquire the env-var lock AFTER the fixture returns (the fixture
+        // holds the lock internally around its own spawns; std Mutex is
+        // not reentrant, so this acquisition can only happen after the
+        // fixture's guard has dropped). Verification spawns below use
+        // `git_command_sync()` and therefore read `GIT_BIN`; without the
+        // lock a concurrently-running shim test could mutate the env var
+        // mid-verification. Pre-lift this file's verification spawns
+        // spelled the bare `Command::new(<bare>)` shape and were
+        // insulated by ignoring `GIT_BIN`; the shield forbids that
+        // shape now, and this lock is the constructive substitute.
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let branch = git_command_sync()
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(dir.path())
             .output()
@@ -405,7 +447,7 @@ mod tests {
             "fixture must initialize on `main`, not `master`"
         );
 
-        let status = Command::new("git")
+        let status = git_command_sync()
             .args(["status", "--porcelain"])
             .current_dir(dir.path())
             .output()
@@ -417,7 +459,7 @@ mod tests {
             "post-fixture work-tree must be clean"
         );
 
-        let subject = Command::new("git")
+        let subject = git_command_sync()
             .args(["log", "-1", "--pretty=%s"])
             .current_dir(dir.path())
             .output()
@@ -454,7 +496,14 @@ mod tests {
         init_repo_with_one_commit(&work);
         add_bare_origin(&work, &bare);
 
-        let push = Command::new("git")
+        // Same rationale as
+        // `test_init_repo_with_one_commit_leaves_clean_tree_on_main`:
+        // acquire the env-var lock AFTER both fixtures have released
+        // their internal guards so the three verification spawns
+        // (push, clone, log) read `GIT_BIN` under serialization.
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let push = git_command_sync()
             .args(["push", "-u", "origin", "main"])
             .current_dir(&work)
             .status()
@@ -462,7 +511,7 @@ mod tests {
         assert!(push.success(), "push to fixture's bare origin must succeed");
 
         let probe = parent.path().join("probe");
-        let clone = Command::new("git")
+        let clone = git_command_sync()
             .args([
                 "clone",
                 bare.to_str().expect("bare utf-8"),
@@ -476,7 +525,7 @@ mod tests {
              --initial-branch=main drift would surface here"
         );
 
-        let subject = Command::new("git")
+        let subject = git_command_sync()
             .args(["log", "-1", "--pretty=%s"])
             .current_dir(&probe)
             .output()
@@ -489,6 +538,106 @@ mod tests {
             String::from_utf8_lossy(&subject.stdout).trim(),
             "seed",
             "probe-clone must resolve HEAD to the seed commit on main"
+        );
+    }
+
+    /// Whole-module shield: no raw bare-literal `git` spawn may live in
+    /// `cli/src/test_support.rs`. Every git spawn — the two `pub fn`
+    /// hermetic fixtures ([`init_repo_with_one_commit`],
+    /// [`add_bare_origin`]) that every release-commit test module in
+    /// forge consumes, AND every sibling `#[cfg(test)]` block that
+    /// probes the fixtures' own post-conditions — must resolve `GIT_BIN`
+    /// via the canonical [`crate::git::git_command_sync`] constructor
+    /// so a hermetic-runner (Nix `mkRuntimeToolsEnv`) invocation with a
+    /// pinned substrate-derivation git falls through to that shim
+    /// rather than whichever `git` sits first on `PATH`.
+    ///
+    /// Because this module is the SHARED fixture surface every
+    /// downstream release-commit test in forge inherits, a raw literal
+    /// here would silently regress the routing at every downstream
+    /// consumer even after each consumer's own sibling shield
+    /// (`commands/release_commit.rs`, `commands/product_release.rs`,
+    /// `commands/attestation.rs`) had certified the consumer body.
+    /// Pinning the fixture-side spawn routing at the shared root
+    /// closes that frontier: the routing invariant compounds outward
+    /// through every fixture caller without each having to re-pin it.
+    ///
+    /// Pre-lift the two `pub fn` fixtures used the top-of-file
+    /// `use std::process::Command as SyncCommand;` alias verbatim
+    /// (`SyncCommand::new(<bare>)` at `init_repo_with_one_commit`'s
+    /// `run` closure and at both spawns inside `add_bare_origin`), and
+    /// the six `#[cfg(test)]` sibling probes used the bare
+    /// `Command::new(<bare>)` shape (the local `use std::process::Command;`
+    /// alias inside the tests submodule). The alias at the top of the
+    /// file was removed and every spawn now routes through
+    /// `git_command_sync()`; the `Command` alias inside the tests
+    /// submodule remains solely for the shim-path invocation at
+    /// `test_make_executable_shim_executes_caller_supplied_body`, which
+    /// spawns by absolute path (`Command::new(&path)`) — a runtime path
+    /// variable, not the bare tool literal this shield forbids.
+    ///
+    /// The three forbidden shapes (`std::process::Command::new(...)`,
+    /// bare `Command::new(...)`, `tokio::process::Command::new(...)`)
+    /// are reconstructed via `format!` from the bare string `"git"` so
+    /// this shield's own source text does not false-match itself — the
+    /// whole-module scan therefore covers both the top-of-file
+    /// production body AND every sibling `#[cfg(test)]` block, any of
+    /// which could otherwise silently re-introduce a raw literal.
+    /// Also asserts the canonical `crate::git::git_command_sync`
+    /// delegation form is present in the module so the sigil-body
+    /// itself cannot silently drift away from the substrate-exported
+    /// env-var contract.
+    ///
+    /// The end-to-end `GIT_BIN`-routing invariant of the underlying
+    /// primitive is pinned separately by
+    /// [`crate::git::tests::test_git_command_sync_routes_through_git_bin_env_var`];
+    /// this shield only certifies that every git-spawning site in this
+    /// module reads through `git_command_sync()`.
+    ///
+    /// Sibling shield to
+    /// `test_git_spawn_routes_through_git_command_sync_not_raw_literal`
+    /// in `commands/release_commit.rs`, `commands/product_release.rs`,
+    /// and `commands/attestation.rs`.
+    #[test]
+    fn test_git_spawn_routes_through_git_command_sync_not_raw_literal() {
+        const SOURCE: &str = include_str!("test_support.rs");
+
+        let bare = "git";
+        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
+        let raw_bare = format!("Command::new(\"{}\")", bare);
+        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+
+        assert!(
+            !SOURCE.contains(&raw_std),
+            "cli/src/test_support.rs must not spawn `git` via the \
+             bare literal — every git spawn must resolve `GIT_BIN` via \
+             `crate::git::git_command_sync()` first. A raw literal at \
+             `std::process::Command::new` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            !SOURCE.contains(&raw_bare),
+            "cli/src/test_support.rs must not spawn `git` via the \
+             bare literal — every git spawn must resolve `GIT_BIN` via \
+             `crate::git::git_command_sync()` first. A raw literal at \
+             `Command::new` (either the top-level `use` alias or the \
+             bare form) bypasses the hermetic-runner contract."
+        );
+        assert!(
+            !SOURCE.contains(&raw_tokio),
+            "cli/src/test_support.rs must not spawn `git` via the \
+             bare literal — every git spawn must resolve `GIT_BIN` via \
+             `crate::git::git_command_sync()` first. A raw literal at \
+             `tokio::process::Command::new` bypasses the \
+             hermetic-runner contract."
+        );
+        assert!(
+            SOURCE.contains("crate::git::git_command_sync"),
+            "cli/src/test_support.rs must resolve the `git` binary \
+             via the canonical `crate::git::git_command_sync()` \
+             constructor — the required form was not found in the \
+             module. A regression here would silently downgrade to the \
+             PATH fallback."
         );
     }
 }
