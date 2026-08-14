@@ -714,11 +714,18 @@ mod tests {
             "ROVER_FHS_BIN",
             "rover-fhs",
         );
-        assert!(
-            SOURCE.contains("crate::repo::get_tool_path(\"ROVER_FHS_BIN\", \"rover-fhs\")"),
-            "`rover_fhs_bin()` must delegate to \
-             `crate::repo::get_tool_path(\"ROVER_FHS_BIN\", \"rover-fhs\")` \
-             — the canonical lookup was not found in the module."
+        // Assert the canonical two-arg sigil-delegation form appears at
+        // a code line. Pre-lift the shield's own docstring (line 690)
+        // and panic message quoted
+        // `crate::repo::get_tool_path("ROVER_FHS_BIN", "rover-fhs")`
+        // verbatim, so a regression at `commands/federation.rs:59` (the
+        // production sigil body) silently passed the naive `contains`
+        // shield. The helper's `code_line_hits` filter closes it.
+        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
+            SOURCE,
+            "commands/federation.rs",
+            "ROVER_FHS_BIN",
+            "rover-fhs",
         );
     }
 }
