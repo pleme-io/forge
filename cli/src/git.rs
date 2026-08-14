@@ -1316,10 +1316,7 @@ mod tests {
     fn test_git_spawn_routes_through_git_command_sync_not_raw_literal() {
         const SOURCE: &str = include_str!("git.rs");
 
-        let bare = "git";
-        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
-        let raw_bare = format!("Command::new(\"{}\")", bare);
-        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("git");
 
         let is_code_line = |line: &str| -> bool {
             let t = line.trim_start();

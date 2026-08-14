@@ -1758,10 +1758,7 @@ mod tests {
     fn test_docker_spawn_routes_through_docker_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("prerelease.rs");
 
-        let bare = "docker";
-        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
-        let raw_bare = format!("Command::new(\"{}\")", bare);
-        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("docker");
 
         assert!(
             !SOURCE.contains(&raw_std),
@@ -1895,10 +1892,7 @@ mod tests {
     fn test_cargo_spawn_routes_through_cargo_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("prerelease.rs");
 
-        let bare = "cargo";
-        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
-        let raw_bare = format!("Command::new(\"{}\")", bare);
-        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("cargo");
 
         assert!(
             !SOURCE.contains(&raw_std),
