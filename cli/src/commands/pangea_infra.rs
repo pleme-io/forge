@@ -4,7 +4,7 @@
 //! operations for Pangea-managed infrastructure. Each command follows the
 //! gated workspace pattern: tests must pass before any infrastructure changes.
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use std::process::Command;
 use tracing::info;
 
@@ -103,7 +103,10 @@ fn inspec_bin() -> String {
 /// Executes `bundle exec rspec` targeting the architecture spec and
 /// its corresponding security spec (if it exists).
 pub fn test(working_dir: &str, architecture: &str) -> Result<()> {
-    info!("Running RSpec synthesis tests for architecture: {}", architecture);
+    info!(
+        "Running RSpec synthesis tests for architecture: {}",
+        architecture
+    );
 
     let spec_file = format!("spec/architectures/{}_spec.rb", architecture);
     let security_spec = format!("spec/security/{}_security_spec.rb", architecture);
@@ -129,7 +132,11 @@ pub fn test(working_dir: &str, architecture: &str) -> Result<()> {
         .status()
         .context("Failed to run bundle exec rspec")?;
 
-    ensure!(status.success(), "RSpec synthesis tests failed for architecture: {}", architecture);
+    ensure!(
+        status.success(),
+        "RSpec synthesis tests failed for architecture: {}",
+        architecture
+    );
 
     info!("All synthesis tests passed for: {}", architecture);
     Ok(())
@@ -147,7 +154,11 @@ pub fn plan(workspace: &str, working_dir: &str) -> Result<()> {
         .status()
         .context("Failed to run terraform plan")?;
 
-    ensure!(status.success(), "Terraform plan failed for workspace: {}", workspace);
+    ensure!(
+        status.success(),
+        "Terraform plan failed for workspace: {}",
+        workspace
+    );
 
     info!("Plan complete for workspace: {}", workspace);
     Ok(())
@@ -156,7 +167,10 @@ pub fn plan(workspace: &str, working_dir: &str) -> Result<()> {
 /// Apply terraform changes for a pangea workspace.
 pub fn apply(workspace: &str, working_dir: &str, auto_approve: bool) -> Result<()> {
     if !auto_approve {
-        confirm(&format!("Apply infrastructure changes to workspace '{}'?", workspace))?;
+        confirm(&format!(
+            "Apply infrastructure changes to workspace '{}'?",
+            workspace
+        ))?;
     }
 
     info!("Applying terraform changes for workspace: {}", workspace);
@@ -174,7 +188,11 @@ pub fn apply(workspace: &str, working_dir: &str, auto_approve: bool) -> Result<(
         .status()
         .context("Failed to run terraform apply")?;
 
-    ensure!(status.success(), "Terraform apply failed for workspace: {}", workspace);
+    ensure!(
+        status.success(),
+        "Terraform apply failed for workspace: {}",
+        workspace
+    );
 
     info!("Apply complete for workspace: {}", workspace);
     Ok(())
@@ -186,18 +204,15 @@ pub fn verify(workspace: &str, inspec_profile: &str, target: &str) -> Result<()>
 
     let inspec = inspec_bin();
     let status = Command::new(&inspec)
-        .args([
-            "exec",
-            inspec_profile,
-            "-t",
-            target,
-            "--reporter",
-            "cli",
-        ])
+        .args(["exec", inspec_profile, "-t", target, "--reporter", "cli"])
         .status()
         .context("Failed to run inspec exec")?;
 
-    ensure!(status.success(), "InSpec verification failed for workspace: {}", workspace);
+    ensure!(
+        status.success(),
+        "InSpec verification failed for workspace: {}",
+        workspace
+    );
 
     info!("InSpec verification passed for workspace: {}", workspace);
     Ok(())
@@ -211,7 +226,10 @@ pub fn cycle(
     inspec_profile: Option<&str>,
     inspec_target: &str,
 ) -> Result<()> {
-    info!("Starting full infrastructure cycle for workspace: {}", workspace);
+    info!(
+        "Starting full infrastructure cycle for workspace: {}",
+        workspace
+    );
 
     // Phase 1: Test
     info!("Phase 1/5: Running synthesis tests...");
@@ -265,7 +283,11 @@ pub fn destroy(workspace: &str, working_dir: &str, auto_approve: bool) -> Result
         .status()
         .context("Failed to run terraform destroy")?;
 
-    ensure!(status.success(), "Terraform destroy failed for workspace: {}", workspace);
+    ensure!(
+        status.success(),
+        "Terraform destroy failed for workspace: {}",
+        workspace
+    );
 
     info!("Destroy complete for workspace: {}", workspace);
     Ok(())
@@ -310,7 +332,7 @@ pub fn status(workspace: &str, working_dir: &str) -> Result<()> {
 
 /// Prompt user for confirmation.
 fn confirm(message: &str) -> Result<()> {
-    use std::io::{Write, BufRead};
+    use std::io::{BufRead, Write};
 
     print!("{} [y/N] ", message);
     std::io::stdout().flush()?;
@@ -379,33 +401,13 @@ mod tests {
     fn test_terraform_spawn_routes_through_terraform_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("pangea_infra.rs");
 
-        let [raw_std, raw_bare, raw_tokio] =
-            crate::test_support::forbidden_spawn_shapes("terraform");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/pangea_infra.rs",
+            "terraform",
+            "resolve `TERRAFORM` via `terraform_bin()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "commands/pangea_infra.rs must not spawn `terraform` via the \
-             bare literal — every terraform spawn must resolve `TERRAFORM` \
-             via `terraform_bin()` first. A raw literal at \
-             `std::process::Command::new` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "commands/pangea_infra.rs must not spawn `terraform` via the \
-             bare literal — every terraform spawn must resolve `TERRAFORM` \
-             via `terraform_bin()` first. A raw literal at `Command::new` \
-             (either the top-level `use` alias or the bare form) bypasses \
-             the hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "commands/pangea_infra.rs must not spawn `terraform` via the \
-             bare literal — every terraform spawn must resolve `TERRAFORM` \
-             via `terraform_bin()` first. A raw literal at \
-             `tokio::process::Command::new` bypasses the hermetic-runner \
-             contract."
-        );
         assert!(
             SOURCE.contains("fn terraform_bin()"),
             "commands/pangea_infra.rs must define `terraform_bin()` — the \
@@ -461,32 +463,13 @@ mod tests {
     fn test_bundle_spawn_routes_through_bundle_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("pangea_infra.rs");
 
-        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("bundle");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/pangea_infra.rs",
+            "bundle",
+            "resolve `BUNDLE_BIN` via `bundle_bin()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "commands/pangea_infra.rs must not spawn `bundle` via the \
-             bare literal — every bundle spawn must resolve `BUNDLE_BIN` \
-             via `bundle_bin()` first. A raw literal at \
-             `std::process::Command::new` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "commands/pangea_infra.rs must not spawn `bundle` via the \
-             bare literal — every bundle spawn must resolve `BUNDLE_BIN` \
-             via `bundle_bin()` first. A raw literal at `Command::new` \
-             (either the top-level `use` alias or the bare form) \
-             bypasses the hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "commands/pangea_infra.rs must not spawn `bundle` via the \
-             bare literal — every bundle spawn must resolve `BUNDLE_BIN` \
-             via `bundle_bin()` first. A raw literal at \
-             `tokio::process::Command::new` bypasses the hermetic-runner \
-             contract."
-        );
         assert!(
             SOURCE.contains("fn bundle_bin()"),
             "commands/pangea_infra.rs must define `bundle_bin()` — the \
@@ -537,32 +520,13 @@ mod tests {
     fn test_inspec_spawn_routes_through_inspec_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("pangea_infra.rs");
 
-        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("inspec");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/pangea_infra.rs",
+            "inspec",
+            "resolve `INSPEC_BIN` via `inspec_bin()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "commands/pangea_infra.rs must not spawn `inspec` via the \
-             bare literal — every inspec spawn must resolve `INSPEC_BIN` \
-             via `inspec_bin()` first. A raw literal at \
-             `std::process::Command::new` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "commands/pangea_infra.rs must not spawn `inspec` via the \
-             bare literal — every inspec spawn must resolve `INSPEC_BIN` \
-             via `inspec_bin()` first. A raw literal at `Command::new` \
-             (either the top-level `use` alias or the bare form) \
-             bypasses the hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "commands/pangea_infra.rs must not spawn `inspec` via the \
-             bare literal — every inspec spawn must resolve `INSPEC_BIN` \
-             via `inspec_bin()` first. A raw literal at \
-             `tokio::process::Command::new` bypasses the hermetic-runner \
-             contract."
-        );
         assert!(
             SOURCE.contains("fn inspec_bin()"),
             "commands/pangea_infra.rs must define `inspec_bin()` — the \

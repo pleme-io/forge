@@ -161,9 +161,11 @@ pub(crate) async fn run_health_check(
 /// `is_empty` body verbatim (THEORY §VI.1 three-is-a-law); the typed
 /// primitive consolidates them onto one shape.
 async fn check_local_image_exists(name: &str) -> Result<bool> {
-    Ok(crate::infrastructure::docker::find_first_image_id_by_name_async(name)
-        .await
-        .is_some())
+    Ok(
+        crate::infrastructure::docker::find_first_image_id_by_name_async(name)
+            .await
+            .is_some(),
+    )
 }
 
 /// Push a locally-built Docker image to the registry.
@@ -1229,32 +1231,13 @@ mod tests {
     fn test_git_spawn_routes_through_git_command_sync_not_raw_literal() {
         const SOURCE: &str = include_str!("product_release.rs");
 
-        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("git");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/product_release.rs",
+            "git",
+            "resolve `GIT_BIN` via `crate::git::git_command_sync()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "commands/product_release.rs must not spawn `git` via the \
-             bare literal — every git spawn must resolve `GIT_BIN` via \
-             `crate::git::git_command_sync()` first. A raw literal at \
-             `std::process::Command::new` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "commands/product_release.rs must not spawn `git` via the \
-             bare literal — every git spawn must resolve `GIT_BIN` via \
-             `crate::git::git_command_sync()` first. A raw literal at \
-             `Command::new` (either the top-level `use` alias or the \
-             bare form) bypasses the hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "commands/product_release.rs must not spawn `git` via the \
-             bare literal — every git spawn must resolve `GIT_BIN` via \
-             `crate::git::git_command_sync()` first. A raw literal at \
-             `tokio::process::Command::new` bypasses the \
-             hermetic-runner contract."
-        );
         assert!(
             SOURCE.contains("crate::git::git_command_sync"),
             "commands/product_release.rs must resolve the `git` binary \

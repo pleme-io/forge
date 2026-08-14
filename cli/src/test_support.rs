@@ -342,6 +342,110 @@ pub fn forbidden_spawn_shapes(bare: &str) -> [String; 3] {
     ]
 }
 
+/// Assert the given `source` — typically a module's own body pulled in
+/// via [`include_str!`] — contains none of the three canonical
+/// bare-literal spawn shapes [`forbidden_spawn_shapes`] returns for
+/// `bare`, panicking on the first offending substring with a
+/// shape-specific remediation message.
+///
+/// - `module_path` names the module in the panic prose (e.g.
+///   `"commands/gem.rs"` or `"cli/src/test_support.rs"`); every
+///   caller passes the same string spelling its own shield already
+///   used, so the migration is prose-identical to the pre-lift assert
+///   text.
+/// - `bare` is the tool basename the shield forbids as a raw
+///   spawn-literal (e.g. `"gem"`, `"terraform"`, `"rover-fhs"`).
+/// - `remediation` is the sigil-routing sentence the whole-module
+///   shield exists to enforce, e.g.
+///   `"resolve `GEM_BIN` via `gem_bin()`"` or
+///   `"resolve `GIT_BIN` via `crate::git::git_command_sync()`"`. It is
+///   injected verbatim after `"must "` and before `" first."` in every
+///   message — the shape a reader of a failing shield already expects
+///   from the pre-lift wording.
+///
+/// # Why one canonical helper
+///
+/// Thirteen whole-module routing shields — one per simple-substring
+/// tool surface across `cli/src/test_support.rs`,
+/// `cli/src/commands/{attestation,federation,gem,pangea_infra,
+/// prerelease,product_release,release_commit}.rs` — each spelled the
+/// same three-`assert!(!SOURCE.contains(...))` block verbatim,
+/// differing only in `module_path` / `bare` / the remediation
+/// sentence. Thirteen occurrences × three assertions each = 39
+/// verbatim `!source.contains(...)`-style call sites past THEORY §VI.1's
+/// three-times threshold. This helper is the law-redeeming
+/// consolidation: a future edit to the message wording (say adding a
+/// `"see substrate mkRuntimeToolsEnv"` link, or refining the
+/// hermetic-runner phrasing) lands in one place and propagates to
+/// every shield; and a new shield added by a subsequent `_BIN`-routing
+/// refactor inherits the message shape as one call, not fifteen lines
+/// of boilerplate.
+///
+/// The two bespoke shields in `cli/src/git.rs` and
+/// `cli/src/infrastructure/git.rs` that filter doc-comment lines out
+/// of the substring scan quote the bare `Command::new(<bare-git-literal>)`
+/// shape verbatim in their own docs (the pre-lift anti-pattern they
+/// forbid) and therefore cannot use a naive
+/// `SOURCE.contains(&raw_git)` predicate — they remain intentionally
+/// bespoke. This module's own shield avoids quoting the shape
+/// literally too: mentions are templated (`Command::new(<bare>)`) so
+/// the whole-module scan does not false-match this helper's own
+/// prose.
+///
+/// # Load-bearing message shape
+///
+/// The three panic messages preserve the exact pre-lift semantics — a
+/// reader of a failing shield sees the same `<module> must not spawn
+/// `<bare>` via the bare literal — every <bare> spawn must
+/// <remediation> first. A raw literal at `<spawn shape>` bypasses the
+/// hermetic-runner contract...` sentence they saw before the lift.
+/// The shape-specific tail differs across the three assertions so a
+/// reader can tell from the message which of the three forbidden
+/// spawn shapes matched, not just that some shape did.
+pub fn assert_source_forbids_bare_spawn_shapes(
+    source: &str,
+    module_path: &str,
+    bare: &str,
+    remediation: &str,
+) {
+    let [raw_std, raw_bare, raw_tokio] = forbidden_spawn_shapes(bare);
+
+    // Order: prefixed shapes first (raw_std, raw_tokio), then the bare
+    // alias last. raw_bare (`Command::new("<bare>")`) is a suffix of
+    // both raw_std and raw_tokio — so checking raw_bare first would
+    // fire on ANY source containing a prefixed shape and the
+    // prefix-specific messages (`std::process::` / `tokio::process::`)
+    // would be unreachable. Checking prefixed shapes first pins each
+    // of the three shapes to its own most-specific message: a
+    // std-prefixed literal panics with the std message, a
+    // tokio-prefixed literal panics with the tokio message, and only
+    // a pure bare `Command::new("<bare>")` panics with the bare-alias
+    // message. Pinned by the three
+    // `test_assert_source_forbids_bare_spawn_shapes_panics_on_*`
+    // shape-specific tests below.
+    assert!(
+        !source.contains(&raw_std),
+        "{module_path} must not spawn `{bare}` via the bare literal — \
+         every {bare} spawn must {remediation} first. A raw literal at \
+         `std::process::Command::new` bypasses the hermetic-runner \
+         contract substrate's mkRuntimeToolsEnv exports."
+    );
+    assert!(
+        !source.contains(&raw_tokio),
+        "{module_path} must not spawn `{bare}` via the bare literal — \
+         every {bare} spawn must {remediation} first. A raw literal at \
+         `tokio::process::Command::new` bypasses the hermetic-runner \
+         contract."
+    );
+    assert!(
+        !source.contains(&raw_bare),
+        "{module_path} must not spawn `{bare}` via the bare literal — \
+         every {bare} spawn must {remediation} first. A raw literal at \
+         `Command::new` (either the top-level `use` alias or the bare \
+         form) bypasses the hermetic-runner contract."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +483,89 @@ mod tests {
                 "Command::new(\"git\")".to_string(),
                 "tokio::process::Command::new(\"git\")".to_string(),
             ]
+        );
+    }
+
+    /// A shape-free source — one containing none of the three canonical
+    /// bare-literal spawn shapes for `bare` — passes cleanly. The
+    /// pre-lift block was the three `assert!(!SOURCE.contains(...))`
+    /// early-returning on the happy path; the helper's happy path is
+    /// return-without-panic. Pinning this is the floor every shield
+    /// consumes: absent any forbidden shape, the helper is a no-op.
+    ///
+    /// The `remediation` slot is exercised with a spelling different
+    /// from any real shield's ("fake-remedy") so a future refactor that
+    /// silently hard-coded the remediation phrase would surface here as
+    /// a substitution-drift failure, not as a passing test with
+    /// wrong-message diagnostics downstream.
+    #[test]
+    fn test_assert_source_forbids_bare_spawn_shapes_accepts_shape_free_source() {
+        assert_source_forbids_bare_spawn_shapes(
+            "let cmd = crate::routing::sigil::foo_bin(); cmd.arg(\"probe\");",
+            "fake/module.rs",
+            "foo",
+            "route through `fake-remedy`",
+        );
+    }
+
+    /// The `std::process::Command::new("<bare>")` shape is caught and
+    /// the panic message names the module, the bare tool, the
+    /// remediation phrase, AND the specific `std::process::Command::new`
+    /// spawn shape. `should_panic(expected = ...)` matches on a
+    /// substring of the panic payload, so a future edit that dropped
+    /// any of the four substituted / templated tokens from the message
+    /// (say, condensing the shape-specific tail into a generic "raw
+    /// literal") would break this test before shipping — a reader of a
+    /// failing shield relies on the shape-specific tail to know which
+    /// of the three forbidden spawn shapes matched.
+    ///
+    /// The bare tool `zeta-widget` is deliberately distinct from every
+    /// real shield's `bare` so a Grep of the crate for `zeta-widget`
+    /// resolves to exactly this test and its two siblings — a fast way
+    /// to find the pinning tests when editing the helper.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must not spawn `zeta-widget` via the bare literal — every zeta-widget spawn must route through `zeta_bin()` first. A raw literal at `std::process::Command::new`"
+    )]
+    fn test_assert_source_forbids_bare_spawn_shapes_panics_on_std_process_shape() {
+        assert_source_forbids_bare_spawn_shapes(
+            "let cmd = std::process::Command::new(\"zeta-widget\");",
+            "fake/module.rs",
+            "zeta-widget",
+            "route through `zeta_bin()`",
+        );
+    }
+
+    /// The bare-alias `Command::new("<bare>")` shape is caught and the
+    /// message names the top-of-file `use` alias as the offending
+    /// spawn form. Sibling pin to
+    /// [`test_assert_source_forbids_bare_spawn_shapes_panics_on_std_process_shape`].
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must not spawn `zeta-widget` via the bare literal — every zeta-widget spawn must route through `zeta_bin()` first. A raw literal at `Command::new` (either the top-level `use` alias or the bare form)"
+    )]
+    fn test_assert_source_forbids_bare_spawn_shapes_panics_on_bare_alias_shape() {
+        assert_source_forbids_bare_spawn_shapes(
+            "let cmd = Command::new(\"zeta-widget\");",
+            "fake/module.rs",
+            "zeta-widget",
+            "route through `zeta_bin()`",
+        );
+    }
+
+    /// The `tokio::process::Command::new("<bare>")` shape is caught and
+    /// the message names the async spawn form. Sibling pin to
+    /// [`test_assert_source_forbids_bare_spawn_shapes_panics_on_std_process_shape`].
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must not spawn `zeta-widget` via the bare literal — every zeta-widget spawn must route through `zeta_bin()` first. A raw literal at `tokio::process::Command::new`"
+    )]
+    fn test_assert_source_forbids_bare_spawn_shapes_panics_on_tokio_process_shape() {
+        assert_source_forbids_bare_spawn_shapes(
+            "let cmd = tokio::process::Command::new(\"zeta-widget\");",
+            "fake/module.rs",
+            "zeta-widget",
+            "route through `zeta_bin()`",
         );
     }
 
@@ -695,32 +882,13 @@ mod tests {
     fn test_git_spawn_routes_through_git_command_sync_not_raw_literal() {
         const SOURCE: &str = include_str!("test_support.rs");
 
-        let [raw_std, raw_bare, raw_tokio] = forbidden_spawn_shapes("git");
+        assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "cli/src/test_support.rs",
+            "git",
+            "resolve `GIT_BIN` via `crate::git::git_command_sync()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "cli/src/test_support.rs must not spawn `git` via the \
-             bare literal — every git spawn must resolve `GIT_BIN` via \
-             `crate::git::git_command_sync()` first. A raw literal at \
-             `std::process::Command::new` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "cli/src/test_support.rs must not spawn `git` via the \
-             bare literal — every git spawn must resolve `GIT_BIN` via \
-             `crate::git::git_command_sync()` first. A raw literal at \
-             `Command::new` (either the top-level `use` alias or the \
-             bare form) bypasses the hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "cli/src/test_support.rs must not spawn `git` via the \
-             bare literal — every git spawn must resolve `GIT_BIN` via \
-             `crate::git::git_command_sync()` first. A raw literal at \
-             `tokio::process::Command::new` bypasses the \
-             hermetic-runner contract."
-        );
         assert!(
             SOURCE.contains("crate::git::git_command_sync"),
             "cli/src/test_support.rs must resolve the `git` binary \
