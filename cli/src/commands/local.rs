@@ -175,16 +175,13 @@ mod docker_bin_routing_tests {
         // but never the fused literal, so this file's source text
         // does not match itself when this shield scans below.
         let bare = "docker";
-        let raw_command = format!("Command::new(\"{}\")", bare);
         let raw_capture = format!("run_query_capture_sync(\"{}\",", bare);
 
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/local.rs must not spawn `docker` via the bare \
-             literal — every docker spawn must resolve `DOCKER_BIN` via \
-             `docker_bin()` first. A raw literal at `Command::new` \
-             bypasses the hermetic-runner contract substrate's \
-             mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/local.rs",
+            "docker",
+            "resolve the substrate-exported `DOCKER_BIN` env override via `docker_bin()`",
         );
         assert!(
             !SOURCE.contains(&raw_capture),
