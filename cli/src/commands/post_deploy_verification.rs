@@ -13,6 +13,75 @@ use colored::Colorize;
 use reqwest::Client;
 use std::time::{Duration, Instant};
 
+use crate::retry::RetryPolicy;
+
+/// The typed exponential-backoff policy for [`verify_health_endpoint`]
+/// retries — `initial_backoff` 1s × `factor` 2 capped at `max_backoff`
+/// 30s. Consumes the pre-existing typed primitive at
+/// [`crate::retry::RetryPolicy`] so the per-attempt delay lands at
+/// [`RetryPolicy::compute_delay`], which the retry module's docstring
+/// names as its raison d'être: "the pre-existing fixed `sleep(2s)`
+/// schedule ... is the worst of both worlds ... Exponential backoff
+/// (Bazel-style: 250ms × factor=2 capped at 30s) covers both regimes
+/// by construction." Pre-lift the two verbatim
+/// `tokio::time::sleep(Duration::from_secs(2_u64.pow(attempt))).await`
+/// sites in [`verify_health_endpoint`] carried two defects the typed-
+/// primitive body forecloses:
+/// 1. **Unbounded schedule.** `2_u64.pow(attempt)` grew without cap, so
+///    a caller passing `retries: 20` produced a final pre-retry sleep of
+///    `2^19 = 524_288s ≈ 6.1 days` before the loop released the caller
+///    — the exact "too short when it's a 30-second upstream incident,
+///    12 days too long when it's the same" failure mode the Bazel /
+///    Buck2 / BuildKit frontier hermetic-build systems close under
+///    their [`RetryPolicy::max_backoff`] cap.
+/// 2. **`u64::pow` overflow panic.** `2_u64.pow(attempt)` panics for
+///    `attempt >= 64` (`u64::MAX < 2^64`), converting a `retries: 64`+
+///    config into a hard panic at the post-deploy health-probe surface
+///    — the exact fail-loud defect [`RetryPolicy::compute_delay`]'s
+///    `checked_pow` saturating body was written to foreclose ("the cap
+///    is enforced even when `factor.pow(n-2)` overflows `u32`, so the
+///    schedule is safe for arbitrarily-large `n` without panic").
+///
+/// The 1s initial / 30s cap preserves the pre-lift schedule at the
+/// first five retries (`1s → 2s → 4s → 8s → 16s`, matching the pre-lift
+/// `2_u64.pow(0..=4)`) and diverges only at the sixth retry onward
+/// where the pre-lift `32s → 64s → 128s → …` climb is replaced by the
+/// bounded `30s` ceiling — a strictly-better schedule at every
+/// beyond-cap attempt and identical at every within-cap attempt.
+///
+/// `max_attempts: 1` is a placeholder — the health-endpoint retry loop
+/// drives its own attempt budget through the caller-supplied `retries`
+/// parameter of the `for attempt in 0..=retries` loop and consumes
+/// only [`RetryPolicy::compute_delay`] from this policy, not
+/// [`RetryPolicy::max_attempts`]. The `max_attempts` field is
+/// unconsulted at this consumption site.
+const HEALTH_ENDPOINT_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: 1,
+    initial_backoff: Duration::from_secs(1),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between health-endpoint probe retries, given a 0-indexed
+/// local `attempt` counter (the `for attempt in 0..=retries` shape
+/// [`verify_health_endpoint`] drives).
+///
+/// Maps the local 0-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(2)`:
+/// local `attempt == 0` (the pre-retry sleep after the first failed
+/// call) reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff`; local `attempt == 1` reads as
+/// `compute_delay(3) = initial_backoff * factor^1`; and so on. The
+/// `saturating_add` clamp forecloses the `u32` overflow class at the
+/// bridge — an unlikely-but-possible `attempt == u32::MAX` from a
+/// pathological caller reads as `compute_delay(u32::MAX)`, which
+/// itself saturates to [`HEALTH_ENDPOINT_BACKOFF::max_backoff`] via
+/// the `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
+/// without panic.
+fn health_endpoint_retry_delay(attempt: u32) -> Duration {
+    HEALTH_ENDPOINT_BACKOFF.compute_delay(attempt.saturating_add(2))
+}
+
 /// Configuration for post-deploy verification
 #[derive(Debug, Clone)]
 pub struct PostDeployConfig {
@@ -109,7 +178,7 @@ pub async fn verify_health_endpoint(
                             retries + 1,
                             status
                         );
-                        tokio::time::sleep(Duration::from_secs(2_u64.pow(attempt))).await;
+                        tokio::time::sleep(health_endpoint_retry_delay(attempt)).await;
                     } else {
                         println!("   {} Health check failed: Status {}", "❌".red(), status);
                         return Ok((false, Some(latency_ms)));
@@ -125,7 +194,7 @@ pub async fn verify_health_endpoint(
                         retries + 1,
                         e
                     );
-                    tokio::time::sleep(Duration::from_secs(2_u64.pow(attempt))).await;
+                    tokio::time::sleep(health_endpoint_retry_delay(attempt)).await;
                 } else {
                     println!("   {} Health check failed: {}", "❌".red(), e);
                     return Ok((false, None));
@@ -204,13 +273,11 @@ pub async fn verify_graphql_endpoint(
 
 /// Default smoke queries to validate deployment health
 pub fn default_smoke_queries() -> Vec<SmokeQuery> {
-    vec![
-        SmokeQuery {
-            name: "Schema introspection".to_string(),
-            query: r#"{ __schema { queryType { name } } }"#.to_string(),
-            expect_field: "__schema".to_string(),
-        },
-    ]
+    vec![SmokeQuery {
+        name: "Schema introspection".to_string(),
+        query: r#"{ __schema { queryType { name } } }"#.to_string(),
+        expect_field: "__schema".to_string(),
+    }]
 }
 
 /// G15: Verify smoke queries return expected data
@@ -274,12 +341,7 @@ pub async fn verify_smoke_queries(
                             .is_some();
 
                         if has_field {
-                            println!(
-                                "   {} {}: OK ({}ms)",
-                                "✅".green(),
-                                smoke.name,
-                                latency_ms
-                            );
+                            println!("   {} {}: OK ({}ms)", "✅".green(), smoke.name, latency_ms);
                             results.push(SmokeQueryResult {
                                 name: smoke.name.clone(),
                                 passed: true,
@@ -289,10 +351,7 @@ pub async fn verify_smoke_queries(
                         } else {
                             let has_errors = json.get("errors").is_some();
                             let error_msg = if has_errors {
-                                format!(
-                                    "GraphQL errors: {}",
-                                    json.get("errors").unwrap()
-                                )
+                                format!("GraphQL errors: {}", json.get("errors").unwrap())
                             } else {
                                 format!(
                                     "Missing expected field '{}' in response",
@@ -413,10 +472,7 @@ pub async fn verify_deployment(config: &PostDeployConfig) -> Result<PostDeployRe
         passed
     } else {
         println!();
-        println!(
-            "   {} G15: Smoke queries (disabled)",
-            "⏭️"
-        );
+        println!("   {} G15: Smoke queries (disabled)", "⏭️");
         true // Don't fail if disabled
     };
 
@@ -714,5 +770,101 @@ mod tests {
         let (health, graphql) = get_product_endpoints("example.io", "staging");
         assert_eq!(health, "https://staging.example.io/health");
         assert_eq!(graphql, "https://staging.example.io/graphql");
+    }
+
+    // ====================================================================
+    // health-endpoint retry backoff — HEALTH_ENDPOINT_BACKOFF + helper
+    // ====================================================================
+    //
+    // These pin the RetryPolicy-consuming replacement of the pre-lift
+    // `tokio::time::sleep(Duration::from_secs(2_u64.pow(attempt)))` sites
+    // in `verify_health_endpoint`. The pre-lift schedule (a) grew
+    // unbounded and (b) panicked at `attempt >= 64` via `u64::pow`
+    // overflow; the RetryPolicy-consuming replacement inherits
+    // `compute_delay`'s `checked_pow`-then-cap saturating body, so
+    // (a) the schedule tops out at `max_backoff` and (b) arbitrarily-large
+    // attempts return a bounded delay without panic.
+    //
+    // Test 1 pins the const's `(initial_backoff, factor, max_backoff)`
+    // shape as a load-bearing invariant a future edit desyncs at a named
+    // site rather than silently across the two consumption sites in the
+    // health-endpoint loop.
+    //
+    // Test 2 pins the pre-lift-schedule-preservation property at every
+    // in-cap attempt: `attempt in 0..=4` produces `1s / 2s / 4s / 8s /
+    // 16s` verbatim, matching the pre-lift `2_u64.pow(0..=4)` at every
+    // legal-schedule attempt so the lift is behavior-preserving in the
+    // regime the pre-lift schedule was ever intended to reach.
+    //
+    // Test 3 pins the max-backoff-cap property at every past-cap
+    // attempt: `attempt in 5..=20` all cap at `30s`, whereas the
+    // pre-lift schedule at attempt=5 was 32s, at attempt=6 was 64s, at
+    // attempt=10 was 1024s (~17 min), at attempt=20 was 1_048_576s
+    // (~12 days) — a bounded ceiling that closes the "12-days-of-sleep"
+    // pathology the pre-lift `retries: 20` config would silently
+    // produce. Fails pre-lift because
+    // `Duration::from_secs(2_u64.pow(5)) == Duration::from_secs(32)`,
+    // not `Duration::from_secs(30)`.
+    //
+    // Test 4 pins the no-panic property at arbitrarily-large attempts,
+    // the defect that would have been a hard runtime panic pre-lift.
+    // A pre-lift `2_u64.pow(64)` panics with attempt-to-compute-2^64-
+    // which-does-not-fit-in-u64; the RetryPolicy body's
+    // `checked_pow(u128)` returns `None` on overflow, which the body
+    // maps to `self.max_backoff` short-circuit. The bridge helper's
+    // `saturating_add(2)` closes the outer overflow class before
+    // `compute_delay` sees the argument.
+
+    #[test]
+    fn test_health_endpoint_backoff_policy_shape() {
+        assert_eq!(
+            HEALTH_ENDPOINT_BACKOFF.initial_backoff,
+            Duration::from_secs(1)
+        );
+        assert_eq!(HEALTH_ENDPOINT_BACKOFF.factor, 2);
+        assert_eq!(HEALTH_ENDPOINT_BACKOFF.max_backoff, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_health_endpoint_retry_delay_matches_pre_lift_schedule_at_in_cap_attempts() {
+        // Pre-lift verbatim: `Duration::from_secs(2_u64.pow(attempt))`
+        // for `attempt in 0..=4`. Every attempt within the 30s cap
+        // is behavior-preserving under the lift.
+        assert_eq!(health_endpoint_retry_delay(0), Duration::from_secs(1));
+        assert_eq!(health_endpoint_retry_delay(1), Duration::from_secs(2));
+        assert_eq!(health_endpoint_retry_delay(2), Duration::from_secs(4));
+        assert_eq!(health_endpoint_retry_delay(3), Duration::from_secs(8));
+        assert_eq!(health_endpoint_retry_delay(4), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn test_health_endpoint_retry_delay_caps_at_max_backoff_past_the_cap() {
+        // Pre-lift these attempts produced 32s, 64s, 1024s, and
+        // 1_048_576s (~12 days) — an unbounded exponential the retry-
+        // module's typed primitive replaces with a bounded 30s ceiling.
+        // Fails pre-lift: `2_u64.pow(5) == 32`, not `30`.
+        assert_eq!(health_endpoint_retry_delay(5), Duration::from_secs(30));
+        assert_eq!(health_endpoint_retry_delay(6), Duration::from_secs(30));
+        assert_eq!(health_endpoint_retry_delay(10), Duration::from_secs(30));
+        assert_eq!(health_endpoint_retry_delay(20), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_health_endpoint_retry_delay_saturates_without_panic_at_arbitrarily_large_attempt() {
+        // Pre-lift `2_u64.pow(64)` panics with `attempt to multiply with
+        // overflow` (u64::MAX == 2^64 - 1 < 2^64). The RetryPolicy
+        // body's u128 checked_pow returns None on overflow, mapped to
+        // `max_backoff` — no panic. The bridge helper's
+        // `saturating_add(2)` closes the outer u32 overflow class
+        // before `compute_delay` sees the argument.
+        assert_eq!(health_endpoint_retry_delay(64), Duration::from_secs(30));
+        assert_eq!(
+            health_endpoint_retry_delay(u32::MAX - 1),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            health_endpoint_retry_delay(u32::MAX),
+            Duration::from_secs(30)
+        );
     }
 }
