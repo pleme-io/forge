@@ -1318,22 +1318,7 @@ mod tests {
 
         let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("git");
 
-        let is_code_line = |line: &str| -> bool {
-            let t = line.trim_start();
-            !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("//")
-        };
-
-        let hits_for = |needle: &str| -> Vec<String> {
-            SOURCE
-                .lines()
-                .enumerate()
-                .filter(|(_, l)| l.contains(needle))
-                .filter(|(_, l)| is_code_line(l))
-                .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
-                .collect()
-        };
-
-        let std_hits = hits_for(&raw_std);
+        let std_hits = crate::test_support::code_line_hits(SOURCE, &raw_std);
         assert!(
             std_hits.is_empty(),
             "cli/src/git.rs must not spawn `git` via the bare literal at \
@@ -1345,7 +1330,7 @@ mod tests {
              exports. Offending code lines: {std_hits:?}"
         );
 
-        let bare_hits = hits_for(&raw_bare);
+        let bare_hits = crate::test_support::code_line_hits(SOURCE, &raw_bare);
         assert!(
             bare_hits.is_empty(),
             "cli/src/git.rs must not spawn `git` via the bare literal at \
@@ -1357,7 +1342,7 @@ mod tests {
              hermetic-runner contract. Offending code lines: {bare_hits:?}"
         );
 
-        let tokio_hits = hits_for(&raw_tokio);
+        let tokio_hits = crate::test_support::code_line_hits(SOURCE, &raw_tokio);
         assert!(
             tokio_hits.is_empty(),
             "cli/src/git.rs must not spawn `git` via the bare literal at \
