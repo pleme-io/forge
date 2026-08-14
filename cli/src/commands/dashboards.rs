@@ -18,19 +18,32 @@ use std::process::Command;
 use tracing::{debug, info, warn};
 
 /// Resolve the `jsonnet` binary path via `JSONNET_BIN`, falling back to
-/// `jsonnet` on `PATH`. Wired through [`crate::tools::get_tool_path`] so
+/// `jsonnet` on `PATH`. Wired through [`crate::repo::get_tool_path`] so
 /// a Nix-hermetic runner's substrate-derived `jsonnet` path lands at
 /// every jsonnet-spawning site in this module. Mirrors the sibling
-/// `commands/rebac_validation.rs::redis_cli_bin` (9aed883) and
-/// `commands/infra.rs::docker_bin` (7f49465) sigil discipline: the one
-/// bridge between the forge dashboards-generation surface and the
-/// substrate-`mkRuntimeToolsEnv`-exported binary path. Pre-lift the
-/// single `Command::new` site in `run_jsonnet` spelled the bare
-/// `"jsonnet"` literal verbatim, ignoring `JSONNET_BIN` — a
-/// Nix-hermetic runner's substrate-derived jsonnet path lost to
-/// whatever `jsonnet` sat first on PATH.
+/// `commands/local.rs::docker_bin` (947ea7c), `commands/e2e.rs::docker_bin`
+/// (23241a6), `commands/test_ci.rs::cargo_bin` (916f1a4), and every
+/// `<tool>_bin()` sigil landed since 23241a6 that spells the resolve
+/// as `crate::repo::get_tool_path("<TOOL>_BIN", "<tool>")` — the
+/// explicit two-arg form that makes the substrate-exported env-var
+/// literal visible to a fleet-wide `grep JSONNET_BIN cli/src/` audit.
+/// Pre-lift the sigil used the deriving one-arg form
+/// `crate::tools::get_tool_path("jsonnet")`, which hid the
+/// `JSONNET_BIN` literal behind an implicit `to_uppercase() + "_BIN"`
+/// derivation — an audit-time reader had to mentally suffix `"jsonnet"`
+/// to know which env var this sigil reads. Post-unify the resolve
+/// spells the env var at the sigil site verbatim.
+///
+/// The unify also closes the DOCA-class silent-divergence bug the
+/// deriving form structurally allows: if a future rename ever makes
+/// the tool-name argument disagree with the substrate-exported env
+/// var (as `tools::DOCA = "oci-push"` did, pinned by
+/// `cli/src/tools.rs::tests::doca_resolves_from_doca_bin_and_the_deriving_lookup_does_not`),
+/// the deriving form would silently read the wrong env var and
+/// downgrade to PATH; the explicit two-arg form cannot express that
+/// divergence.
 fn jsonnet_bin() -> String {
-    crate::tools::get_tool_path("jsonnet")
+    crate::repo::get_tool_path("JSONNET_BIN", "jsonnet")
 }
 
 /// Configuration for dashboard generation
@@ -702,7 +715,12 @@ fn generate_kustomization(dashboards: &HashMap<String, serde_json::Value>) -> se
 mod tests {
     /// Whole-module shield: no raw `"jsonnet"`-literal spawn may live in
     /// `commands/dashboards.rs`. Every jsonnet spawn must resolve
-    /// `JSONNET_BIN` via [`super::jsonnet_bin`] first.
+    /// `JSONNET_BIN` via [`super::jsonnet_bin`] first, AND the sigil
+    /// itself must spell its resolve as the explicit two-arg
+    /// `crate::repo::get_tool_path("JSONNET_BIN", "jsonnet")` — the
+    /// audit-visible form the sibling `<tool>_bin()` sigils across
+    /// forge already ride (947ea7c unified the four `docker_bin`
+    /// sigils onto this shape).
     ///
     /// Pre-lift the single `Command::new` site in `run_jsonnet` — the
     /// dashboard-templates renderer that reads `dashboards.jsonnet` from
@@ -723,10 +741,19 @@ mod tests {
     /// `#[cfg(test)]` block (any of which could otherwise silently re-
     /// introduce a raw literal). The end-to-end `JSONNET_BIN`-routing
     /// invariant of the underlying primitive is pinned separately by
-    /// [`crate::tools::tests::test_get_tool_path_from_env`] /
-    /// [`crate::tools::tests::test_get_tool_path_fallback`]; this
+    /// [`crate::repo::tests::test_get_tool_path_with_env`] /
+    /// [`crate::repo::tests::test_get_tool_path_fallback`]; this
     /// shield only certifies that every jsonnet-spawning site in this
     /// module reads through `jsonnet_bin()`.
+    ///
+    /// Also asserts the pre-lift deriving one-arg form
+    /// `crate::tools::get_tool_path("jsonnet")` does NOT reappear at
+    /// any *code* line — a `JSONNET_BIN`-literal audit would miss the
+    /// site under that form. Docstring and shield-message narrations
+    /// of the anti-pattern are excluded via a `///` / `//!` / `//`
+    /// per-line filter, the same discipline the sibling
+    /// `commands/local.rs::docker_bin_routing_tests` shield rides
+    /// (947ea7c).
     #[test]
     fn test_jsonnet_spawn_routes_through_jsonnet_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("dashboards.rs");
@@ -748,12 +775,60 @@ mod tests {
              sigil function that resolves the tools-registry \
              `JSONNET_BIN` override for every jsonnet spawn."
         );
+        // Reconstruct the canonical delegation string at test time so
+        // this shield's own source text is not what makes the positive
+        // assertion pass — a body that dropped the sigil while a
+        // docstring elsewhere still mentioned the literal would
+        // otherwise slip past. Same reconstruction discipline the
+        // sibling `commands/local.rs::docker_bin_routing_tests` shield
+        // rides (947ea7c).
+        let canonical = format!(
+            "crate::repo::get_tool_path(\"{}_BIN\", \"{}\")",
+            "JSONNET", "jsonnet"
+        );
         assert!(
-            SOURCE.contains("crate::tools::get_tool_path(\"jsonnet\")"),
+            SOURCE.contains(&canonical),
             "`jsonnet_bin()` must delegate to \
-             `crate::tools::get_tool_path(\"jsonnet\")` — the canonical \
-             lookup was not found in the module. A regression here \
-             would silently downgrade to the PATH fallback."
+             `crate::repo::get_tool_path(\"JSONNET_BIN\", \"jsonnet\")` \
+             — the canonical two-arg env-var-or-fallback lookup \
+             (matching `local::docker_bin`, `e2e::docker_bin`, \
+             `test_ci::cargo_bin`, `crossplane::crossplane_bin`, and \
+             every sibling `<tool>_bin()` sigil since 23241a6) was not \
+             found in the module. If the sigil regressed to the \
+             deriving one-arg form (see the sibling negative shield \
+             below for its exact shape), the substrate-exported \
+             `JSONNET_BIN` env-var literal is again hidden from a \
+             fleet-wide `JSONNET_BIN` audit."
+        );
+        // Also assert the pre-lift deriving one-arg form does NOT
+        // reappear at any *code* line (docstrings and shield error
+        // messages narrating the anti-pattern are excluded via a
+        // per-line filter — same discipline the sibling
+        // `commands/local.rs::docker_bin_routing_tests` shield rides
+        // at 947ea7c). The forbidden shape is reconstructed via
+        // `format!` so the shield's own body does not literally
+        // contain it either.
+        let deriving = format!("crate::tools::get_tool_path(\"{}\")", "jsonnet");
+        let is_code_line = |line: &str| -> bool {
+            let t = line.trim_start();
+            !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("//")
+        };
+        let deriving_code_hits: Vec<String> = SOURCE
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(&deriving))
+            .filter(|(_, l)| is_code_line(l))
+            .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+            .collect();
+        assert!(
+            deriving_code_hits.is_empty(),
+            "commands/dashboards.rs must not resolve `jsonnet` via the \
+             pre-lift deriving one-arg form at any code line — a \
+             `JSONNET_BIN`-literal audit would miss the site. Use the \
+             two-arg `crate::repo::get_tool_path(\"JSONNET_BIN\", \
+             \"jsonnet\")` form the sibling sigils honor. Code-line \
+             hits: {:#?}",
+            deriving_code_hits
         );
     }
 }
