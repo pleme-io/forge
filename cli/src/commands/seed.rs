@@ -444,17 +444,13 @@ mod tests {
         let module_body = &SOURCE[..body_end];
 
         let bare = "kubectl";
-        let raw_command = format!("Command::new(\"{}\")", bare);
         let bypass_primitive = format!("run_query_capture_sync(\n        \"{}\"", bare);
 
-        assert!(
-            !module_body.contains(&raw_command),
-            "commands/seed.rs must NOT spawn `kubectl` via the bare \
-             literal at `Command::new` — every `kubectl` spawn must \
-             resolve the substrate-exported `KUBECTL_BIN` env \
-             override via `get_tool_path(tools::KUBECTL)` first. \
-             A raw literal at `Command::new` bypasses the hermetic-\
-             runner contract substrate's `mkRuntimeToolsEnv` exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            module_body,
+            "commands/seed.rs",
+            "kubectl",
+            "resolve the substrate-exported `KUBECTL_BIN` env override via `get_tool_path(tools::KUBECTL)`",
         );
         assert!(
             !module_body.contains(&bypass_primitive),

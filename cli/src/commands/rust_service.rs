@@ -3031,15 +3031,11 @@ mod ps_bin_routing_tests {
              the shield's scan boundary depends on it",
         );
         let body = &SOURCE[..cutoff];
-        let bare = "ps";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-        assert!(
-            !body.contains(&raw_command),
-            "commands/rust_service.rs must not spawn `ps` via the bare \
-             literal — every `ps` spawn must resolve `PS_BIN` via \
-             `ps_bin()` first. A raw literal at `Command::new` bypasses \
-             the hermetic-runner contract substrate's mkRuntimeToolsEnv \
-             exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            body,
+            "commands/rust_service.rs",
+            "ps",
+            "resolve `PS_BIN` via `ps_bin()`",
         );
         assert!(
             body.contains("StdCommand::new(ps_bin())"),

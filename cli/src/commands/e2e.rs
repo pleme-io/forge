@@ -1428,15 +1428,11 @@ mod open_bin_routing_tests {
              the shield's scan boundary depends on it",
         );
         let body = &SOURCE[..cutoff];
-        let bare = "open";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-        assert!(
-            !body.contains(&raw_command),
-            "commands/e2e.rs must not spawn `open` via the bare \
-             literal — every `open` spawn must resolve `OPEN_BIN` via \
-             `open_bin()` first. A raw `Command::new(\"open\")` bypasses \
-             the hermetic-runner contract substrate's mkRuntimeToolsEnv \
-             exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            body,
+            "commands/e2e.rs",
+            "open",
+            "resolve `OPEN_BIN` via `open_bin()`",
         );
         assert!(
             body.contains("Command::new(open_bin())"),
