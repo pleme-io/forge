@@ -248,25 +248,34 @@ mod tests {
     /// not just the top-level spawn.
     ///
     /// This shield scans the module's own source via `include_str!` and
-    /// forbids the fused literal shape at every `Command::new` site.
-    /// Forbidden shapes are reconstructed via `format!` so the shield's
-    /// own source text does not false-match itself — the whole-module
-    /// scan therefore covers both the top-of-file production body AND
-    /// every sibling `#[cfg(test)]` block.
+    /// forbids the fused literal shape at every spawn form
+    /// (`std::process::Command::new(...)`, the bare `Command::new(...)`,
+    /// and the `tokio::process::Command::new(...)` long form) at each of
+    /// the three tool names, delegating the three-shape check to the
+    /// shared `crate::test_support::assert_source_forbids_bare_spawn_shapes`
+    /// helper (introduced 4e178e6). Forbidden shapes are reconstructed
+    /// via `format!` so the shield's own source text does not false-match
+    /// itself — the whole-module scan therefore covers both the
+    /// top-of-file production body AND every sibling `#[cfg(test)]`
+    /// block.
     #[test]
     fn test_web_service_spawns_route_through_tools_registry_not_raw_literals() {
         const SOURCE: &str = include_str!("web_service.rs");
 
-        for bare in ["pleme-linker", "crate2nix", "cargo"] {
-            let raw_command = format!("Command::new(\"{}\")", bare);
-            assert!(
-                !SOURCE.contains(&raw_command),
-                "commands/web_service.rs must not spawn `{bare}` via the \
-                 bare literal — every spawn must resolve the tools-registry \
-                 env-var override via `crate::repo::get_tool_path(<env_var>, \
-                 \"{bare}\")` first. A raw literal at `Command::new` bypasses \
-                 the hermetic-runner contract substrate's mkRuntimeToolsEnv \
-                 exports."
+        for (bare, env_var) in [
+            ("pleme-linker", "PLEME_LINKER_BIN"),
+            ("crate2nix", "CRATE2NIX"),
+            ("cargo", "CARGO"),
+        ] {
+            let remediation = format!(
+                "resolve the tools-registry env-var override via \
+                 `crate::repo::get_tool_path(\"{env_var}\", \"{bare}\")`"
+            );
+            crate::test_support::assert_source_forbids_bare_spawn_shapes(
+                SOURCE,
+                "commands/web_service.rs",
+                bare,
+                &remediation,
             );
         }
 
