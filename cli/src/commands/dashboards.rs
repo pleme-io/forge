@@ -771,30 +771,21 @@ mod tests {
              sigil function that resolves the tools-registry \
              `JSONNET_BIN` override for every jsonnet spawn."
         );
-        // Reconstruct the canonical delegation string at test time so
-        // this shield's own source text is not what makes the positive
-        // assertion pass — a body that dropped the sigil while a
-        // docstring elsewhere still mentioned the literal would
-        // otherwise slip past. Same reconstruction discipline the
-        // sibling `commands/local.rs::docker_bin_routing_tests` shield
-        // rides (947ea7c).
-        let canonical = format!(
-            "crate::repo::get_tool_path(\"{}_BIN\", \"{}\")",
-            "JSONNET", "jsonnet"
-        );
-        assert!(
-            SOURCE.contains(&canonical),
-            "`jsonnet_bin()` must delegate to \
-             `crate::repo::get_tool_path(\"JSONNET_BIN\", \"jsonnet\")` \
-             — the canonical two-arg env-var-or-fallback lookup \
-             (matching `local::docker_bin`, `e2e::docker_bin`, \
-             `test_ci::cargo_bin`, `crossplane::crossplane_bin`, and \
-             every sibling `<tool>_bin()` sigil since 23241a6) was not \
-             found in the module. If the sigil regressed to the \
-             deriving one-arg form (see the sibling negative shield \
-             below for its exact shape), the substrate-exported \
-             `JSONNET_BIN` env-var literal is again hidden from a \
-             fleet-wide `JSONNET_BIN` audit."
+        // Assert the canonical two-arg sigil-delegation form appears at
+        // a code line — filtered through `code_line_hits` so a
+        // docstring-only match cannot silently satisfy the shield if
+        // the production sigil body regresses. Pre-lift the shield
+        // spelled `SOURCE.contains(&canonical)` against the substituted
+        // form; the module docstring above at `commands/dashboards.rs`
+        // quotes the same form verbatim inside a `///` block, so a
+        // regression at `commands/dashboards.rs:46` would silently
+        // pass the pre-lift shield. Shared helper closes that defect
+        // once for the four-plus-cargo shield family.
+        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
+            SOURCE,
+            "commands/dashboards.rs",
+            "JSONNET_BIN",
+            "jsonnet",
         );
         // Also assert the pre-lift deriving one-arg form does NOT
         // reappear at any *code* line (docstrings and shield error
