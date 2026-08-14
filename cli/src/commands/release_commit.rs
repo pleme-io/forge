@@ -279,13 +279,11 @@ mod tests {
             "resolve `GIT_BIN` via `crate::git::git_command_sync()`",
         );
 
-        assert!(
-            SOURCE.contains("crate::git::git_command_sync"),
-            "commands/release_commit.rs must resolve the `git` binary \
-             via the canonical `crate::git::git_command_sync()` \
-             constructor — the required form was not found in the \
-             module. A regression here would silently downgrade to the \
-             PATH fallback."
+        crate::test_support::assert_source_delegates_via_constructor_call_code_line(
+            SOURCE,
+            "commands/release_commit.rs",
+            "git",
+            "git_command_sync",
         );
     }
 }

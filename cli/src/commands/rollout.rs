@@ -526,11 +526,11 @@ mod tests {
             "resolve the substrate-exported `KUBECTL_BIN` env override via \
              `kubectl_command_async`",
         );
-        assert!(
-            SOURCE.contains("kubectl_command_async()"),
-            "commands/rollout.rs must resolve the `kubectl` binary \
-             via the canonical `kubectl_command_async()` constructor \
-             — the required form was not found in the module."
+        crate::test_support::assert_source_delegates_via_constructor_call_code_line(
+            SOURCE,
+            "commands/rollout.rs",
+            "kubectl",
+            "kubectl_command_async",
         );
     }
 }

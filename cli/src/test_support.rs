@@ -1033,6 +1033,123 @@ pub fn assert_source_defines_sigil_bin_fn_code_line(
     );
 }
 
+/// Reconstruct the canonical constructor-call needle
+/// `<constructor_name>()` — the parenthesized call form every
+/// per-module constructor-delegation shield asserts on. `constructor_name`
+/// is the (usually short) function name — either the imported-alias short
+/// form (e.g. `"git_command_sync"`) or the fully-qualified path (e.g.
+/// `"crate::git::git_command_sync"`). Passing the short form matches BOTH
+/// spellings via substring semantics: `git_command_sync()` is a suffix of
+/// `crate::git::git_command_sync()`, so a shield that scans for the short
+/// needle catches production calls whether the module imports the
+/// constructor at the top (call site `git_command_sync()`) or spells the
+/// path in full at each site (`crate::git::git_command_sync()`).
+///
+/// # Reconstruction discipline
+///
+/// The needle is built via `format!` — this helper's own source text
+/// carries only the templated form (with a `{}` placeholder for the
+/// constructor-name position), never a substituted concrete literal. A
+/// shield that scans `include_str!("test_support.rs")` therefore does
+/// not false-match this helper's body on any concrete constructor.
+/// Sibling primitive to [`canonical_two_arg_sigil_needle`],
+/// [`deriving_one_arg_sigil_needle_constant`],
+/// [`deriving_one_arg_sigil_needle_literal`],
+/// [`get_tool_path_two_arg_call_needle`], and
+/// [`sigil_bin_fn_definition_needle`] — all six honor the same
+/// `format!`-based self-match discipline.
+pub fn constructor_call_needle(constructor_name: &str) -> String {
+    format!("{}()", constructor_name)
+}
+
+/// Assert the given `source` calls the canonical `<constructor_name>()`
+/// constructor at at least one *code* line — i.e., outside `///` /
+/// `//!` / `//` comments. Panics with a diagnostic naming `module_path`,
+/// `bare`, and the canonical constructor call form.
+///
+/// # Why one canonical helper
+///
+/// Eight whole-module shields across seven files spelled the same
+/// `assert!(SOURCE.contains("<constructor>[()]"), "<module>.rs must
+/// resolve the `<bare>` binary via the canonical `<constructor>()`
+/// constructor — the required form was not found in the module.[ A
+/// regression here would silently downgrade to the PATH fallback.]")`
+/// block verbatim, differing only in the substituted
+/// `constructor_name` / `bare` / `module_path` tokens plus a
+/// "A regression here would silently downgrade to the PATH fallback."
+/// tail present on the four `crate::git::git_command_sync` sites
+/// (`commands/release_commit.rs`, `commands/product_release.rs`,
+/// `commands/attestation.rs`, `cli/src/test_support.rs`) and absent on
+/// the four `kubectl_command_async()` sites (`commands/rust_service.rs`,
+/// `commands/integration_tests.rs`, `commands/rollout.rs`,
+/// `commands/search_sync.rs`). Eight occurrences past THEORY.md §VI.1's
+/// three-times threshold ("two occurrences is a coincidence; three is a
+/// law"). This helper is the law-redeeming consolidation: a future edit
+/// to the remediation prose lands in one place and propagates to every
+/// shield, and a new shield added by a subsequent constructor-family
+/// refactor inherits the discipline as one call rather than the
+/// six-line stanza. The consolidated message unconditionally carries
+/// the PATH-fallback tail — the same substrate concern applies to every
+/// constructor-delegation shield (a bypass falls back to `PATH`
+/// regardless of which constructor was skipped), so promoting the more
+/// informative tail to the canonical is a strict enrichment of the
+/// pre-lift `kubectl_command_async` variants.
+///
+/// # Why the code-line filter is load-bearing
+///
+/// A naive `SOURCE.contains(...)` positive assertion silently passes
+/// whenever the constructor's short name appears in the module's
+/// docstrings, `use` imports, or sibling shield error-prose. This is a
+/// real regression class pre-existing in three of the four
+/// `crate::git::git_command_sync` shields on `main` before this
+/// helper's introduction: each scanned for the fully-qualified name
+/// WITHOUT parens (`SOURCE.contains("crate::git::git_command_sync")`),
+/// which matches the module's `use crate::git::git_command_sync;`
+/// import line and every docstring quoting the path — deleting every
+/// production call would still leave the shield green as long as the
+/// `use` import survived. The parenthesized short-name needle
+/// (`git_command_sync()`) matches only actual call sites (whether
+/// imported-alias short-form or fully-qualified) and the code-line
+/// filter suppresses docstring and prose mentions inside `///` blocks.
+///
+/// # Known false-match residue
+///
+/// The code-line filter suppresses `///` / `//!` / `//` doc comments
+/// but does NOT suppress needle mentions embedded in string literals on
+/// code lines. Two of the four `git_command_sync` shields' sibling
+/// [`assert_source_forbids_bare_spawn_shapes`] calls pass a
+/// `remediation` argument that quotes `crate::git::git_command_sync()`
+/// verbatim as prose (e.g.
+/// `"resolve `GIT_BIN` via `crate::git::git_command_sync()`"`). That
+/// argument's code line contains the parenthesized needle as a
+/// substring and counts as a hit. The shield therefore cannot
+/// distinguish "production has real calls" from "sibling shield's
+/// remediation-prose quotes the call" — a regression that dropped
+/// every production call would still see the sibling-shield line as a
+/// hit and silently pass. The pre-lift naive shield was strictly worse
+/// (matched every docstring and the `use` import too), so this
+/// consolidation is a net improvement, but the sibling-remediation
+/// false-match survives and is worth naming here so a future refactor
+/// that closes it — either by rephrasing the sibling remediations
+/// without parens, or by adding a string-literal-line filter — knows
+/// what it's closing.
+pub fn assert_source_delegates_via_constructor_call_code_line(
+    source: &str,
+    module_path: &str,
+    bare: &str,
+    constructor_name: &str,
+) {
+    let needle = constructor_call_needle(constructor_name);
+    let hits = code_line_hits(source, &needle);
+    assert!(
+        !hits.is_empty(),
+        "{module_path} must resolve the `{bare}` binary via the canonical \
+         `{needle}` constructor call at a *code* line — the required call \
+         form was not found in the module. A regression here would silently \
+         downgrade to the PATH fallback."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1790,6 +1907,115 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         );
     }
 
+    /// The constructor-call needle constructor emits the exact
+    /// `<constructor_name>()` substituted form the eight migrated
+    /// shields consume verbatim via `code_line_hits(SOURCE, &needle)`.
+    /// A template drift (a stray space, dropped paren, an extra `!`
+    /// baked into the template) would silently disarm every migrated
+    /// shield. Distinct sibling cases pin that the constructor-name
+    /// position is load-bearing — a template that discarded it would
+    /// collapse the eight shields to a single string.
+    #[test]
+    fn test_constructor_call_needle_reconstructs_substituted_form() {
+        assert_eq!(
+            constructor_call_needle("git_command_sync"),
+            "git_command_sync()".to_string(),
+        );
+        assert_eq!(
+            constructor_call_needle("kubectl_command_async"),
+            "kubectl_command_async()".to_string(),
+        );
+        assert_eq!(
+            constructor_call_needle("zeta_widget_ctor"),
+            "zeta_widget_ctor()".to_string(),
+        );
+    }
+
+    /// A source with the constructor call at a *code* line passes
+    /// cleanly. Pinning the code-line acceptance path is the floor
+    /// every migrated shield consumes: absent any regression, the
+    /// helper is silent. The `zeta_widget_ctor` name is deliberately
+    /// distinct from every real shield's constructor so a Grep of the
+    /// crate for `zeta_widget_ctor` resolves to exactly this test's
+    /// family — a fast way to find the pinning tests when editing the
+    /// helper.
+    #[test]
+    fn test_assert_source_delegates_via_constructor_call_code_line_accepts_code_line() {
+        assert_source_delegates_via_constructor_call_code_line(
+            "fn regen() { let cmd = zeta_widget_ctor(); }\n",
+            "fake/module.rs",
+            "zeta-widget",
+            "zeta_widget_ctor",
+        );
+    }
+
+    /// A source with the fully-qualified call form at a code line ALSO
+    /// satisfies the shield — the substring semantics catch both the
+    /// imported-alias short form (`zeta_widget_ctor()`) and the
+    /// fully-qualified form (`crate::infra::zeta_widget_ctor()`) with
+    /// one needle. Pinning this is the load-bearing property that lets
+    /// the four `git_command_sync` shields consume `"git_command_sync"`
+    /// (short) while `commands/attestation.rs`'s sole call site
+    /// (`crate::git::git_command_sync()`) still satisfies the shield.
+    #[test]
+    fn test_assert_source_delegates_via_constructor_call_code_line_accepts_qualified_call() {
+        assert_source_delegates_via_constructor_call_code_line(
+            "fn regen() { let cmd = crate::infra::zeta_widget_ctor(); }\n",
+            "fake/module.rs",
+            "zeta-widget",
+            "zeta_widget_ctor",
+        );
+    }
+
+    /// A source that mentions the constructor-call form ONLY inside a
+    /// `///` docstring (with no code-line occurrence) fires the shield
+    /// — the docstring-self-match defect the code-line filter exists
+    /// to close. Pins the load-bearing correctness property named in
+    /// the helper's docs: a naive `SOURCE.contains("<constructor>()")`
+    /// shield would silently pass on this exact input class whenever a
+    /// module's docstring quotes the constructor call verbatim. A
+    /// future refactor that dropped the code-line filter would break
+    /// this test before shipping and re-open the silent-pass
+    /// regression class.
+    ///
+    /// `should_panic(expected = ...)` matches on a substring of the
+    /// panic payload; the substring pins the substituted `module_path`
+    /// / `bare` / `constructor_name` tokens in the diagnostic so a
+    /// message rewrite that dropped any of them would surface here.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must resolve the `zeta-widget` binary via the canonical `zeta_widget_ctor()` constructor call at a *code* line"
+    )]
+    fn test_assert_source_delegates_via_constructor_call_code_line_rejects_docstring_only_match() {
+        assert_source_delegates_via_constructor_call_code_line(
+            "/// production sites delegate via `zeta_widget_ctor()` — narrated\n\
+             fn regen() { let _ = 0; }\n",
+            "fake/module.rs",
+            "zeta-widget",
+            "zeta_widget_ctor",
+        );
+    }
+
+    /// A source that omits the constructor-call form entirely fires
+    /// the shield — the plain missing-call regression class. Sibling
+    /// pin to
+    /// [`test_assert_source_delegates_via_constructor_call_code_line_rejects_docstring_only_match`]:
+    /// the two together certify both failure modes (docstring-only and
+    /// missing-outright) trigger the same diagnostic including the
+    /// PATH-fallback tail.
+    #[test]
+    #[should_panic(
+        expected = "the required call form was not found in the module. A regression here would silently downgrade to the PATH fallback."
+    )]
+    fn test_assert_source_delegates_via_constructor_call_code_line_rejects_missing_call() {
+        assert_source_delegates_via_constructor_call_code_line(
+            "fn regen() { let _ = 0; }\n",
+            "fake/module.rs",
+            "zeta-widget",
+            "zeta_widget_ctor",
+        );
+    }
+
     /// The returned absolute path resolves to a real file inside the
     /// returned `TempDir`. Pinning this is the floor for every shim-
     /// based test in forge: if the path the helper hands back doesn't
@@ -2110,13 +2336,11 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "resolve `GIT_BIN` via `crate::git::git_command_sync()`",
         );
 
-        assert!(
-            SOURCE.contains("crate::git::git_command_sync"),
-            "cli/src/test_support.rs must resolve the `git` binary \
-             via the canonical `crate::git::git_command_sync()` \
-             constructor — the required form was not found in the \
-             module. A regression here would silently downgrade to the \
-             PATH fallback."
+        assert_source_delegates_via_constructor_call_code_line(
+            SOURCE,
+            "cli/src/test_support.rs",
+            "git",
+            "git_command_sync",
         );
     }
 }
