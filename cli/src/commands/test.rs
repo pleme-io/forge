@@ -641,15 +641,11 @@ mod tests {
              — the shield's scan boundary depends on it",
         );
         let body = &source[..cutoff];
-        let bare = "sh";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-        assert!(
-            !body.contains(&raw_command),
-            "commands/test.rs must not spawn `sh` via the bare literal — \
-             every `sh -c` spawn must resolve `SH_BIN` via \
-             `crate::repo::get_tool_path(\"SH_BIN\", \"sh\")` first. \
-             A raw `Command::new(\"sh\")` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            body,
+            "commands/test.rs",
+            "sh",
+            "resolve `SH_BIN` via `crate::repo::get_tool_path(\"SH_BIN\", \"sh\")`",
         );
         assert!(
             body.contains("get_tool_path(\"SH_BIN\", \"sh\")"),
