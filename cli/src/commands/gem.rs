@@ -423,11 +423,12 @@ mod tests {
             "resolve `GEM_BIN` via `gem_bin()`",
         );
 
-        assert!(
-            SOURCE.contains("fn gem_bin()"),
-            "commands/gem.rs must define `gem_bin()` — the sigil \
-             function that resolves the `GEM_BIN` override for every \
-             gem spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/gem.rs",
+            "gem_bin",
+            "GEM_BIN",
+            "gem",
         );
         assert!(
             SOURCE.contains("crate::repo::get_tool_path(\"GEM_BIN\", \"gem\")"),
@@ -479,11 +480,12 @@ mod tests {
             "resolve `BUNDLE_BIN` via `bundle_bin()`",
         );
 
-        assert!(
-            SOURCE.contains("fn bundle_bin()"),
-            "commands/gem.rs must define `bundle_bin()` — the sigil \
-             function that resolves the `BUNDLE_BIN` override for every \
-             bundle spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/gem.rs",
+            "bundle_bin",
+            "BUNDLE_BIN",
+            "bundle",
         );
         assert!(
             SOURCE.contains("crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")"),

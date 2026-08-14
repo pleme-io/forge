@@ -807,11 +807,12 @@ mod tests {
             "redis-cli",
             "resolve `REDIS_CLI_BIN` via `redis_cli_bin()`",
         );
-        assert!(
-            SOURCE.contains("fn redis_cli_bin()"),
-            "commands/rebac_validation.rs must define `redis_cli_bin()` \
-             — the sigil function that resolves the tools-registry \
-             `REDIS_CLI_BIN` override for every redis-cli spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/rebac_validation.rs",
+            "redis_cli_bin",
+            "REDIS_CLI_BIN",
+            "redis-cli",
         );
         assert!(
             SOURCE.contains("crate::tools::get_tool_path(\"redis-cli\")"),

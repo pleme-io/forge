@@ -408,11 +408,12 @@ mod tests {
             "resolve `TERRAFORM` via `terraform_bin()`",
         );
 
-        assert!(
-            SOURCE.contains("fn terraform_bin()"),
-            "commands/pangea_infra.rs must define `terraform_bin()` — the \
-             sigil function that resolves the `TERRAFORM` override for \
-             every terraform spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/pangea_infra.rs",
+            "terraform_bin",
+            "TERRAFORM",
+            "terraform",
         );
         assert!(
             SOURCE.contains("crate::repo::get_tool_path(\"TERRAFORM\", \"terraform\")"),
@@ -470,11 +471,12 @@ mod tests {
             "resolve `BUNDLE_BIN` via `bundle_bin()`",
         );
 
-        assert!(
-            SOURCE.contains("fn bundle_bin()"),
-            "commands/pangea_infra.rs must define `bundle_bin()` — the \
-             sigil function that resolves the `BUNDLE_BIN` override for \
-             every bundle spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/pangea_infra.rs",
+            "bundle_bin",
+            "BUNDLE_BIN",
+            "bundle",
         );
         assert!(
             SOURCE.contains("crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")"),
@@ -527,11 +529,12 @@ mod tests {
             "resolve `INSPEC_BIN` via `inspec_bin()`",
         );
 
-        assert!(
-            SOURCE.contains("fn inspec_bin()"),
-            "commands/pangea_infra.rs must define `inspec_bin()` — the \
-             sigil function that resolves the `INSPEC_BIN` override for \
-             every inspec spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/pangea_infra.rs",
+            "inspec_bin",
+            "INSPEC_BIN",
+            "inspec",
         );
         assert!(
             SOURCE.contains("crate::repo::get_tool_path(\"INSPEC_BIN\", \"inspec\")"),

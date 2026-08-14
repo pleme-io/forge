@@ -951,6 +951,88 @@ pub fn assert_source_has_get_tool_path_two_arg_call_code_line(
     );
 }
 
+/// Reconstruct the audit-visible sigil-definition signature
+/// `fn <tool_bin_name>()` — the shape every per-module `<tool>_bin()`
+/// sigil across forge presents at its definition site. Returns the
+/// string `fn <tool_bin_name>()`.
+///
+/// # Reconstruction discipline
+///
+/// The needle is built via `format!` — this helper's own source text
+/// carries only the templated form (with a `{}` placeholder for the
+/// sigil-name position), never a substituted concrete literal. A
+/// shield that scans `include_str!("test_support.rs")` therefore does
+/// not false-match this helper's body on any concrete sigil. Sibling
+/// primitive to [`canonical_two_arg_sigil_needle`],
+/// [`deriving_one_arg_sigil_needle_constant`],
+/// [`deriving_one_arg_sigil_needle_literal`], and
+/// [`get_tool_path_two_arg_call_needle`] — all four honor the same
+/// `format!`-based self-match discipline.
+pub fn sigil_bin_fn_definition_needle(tool_bin_name: &str) -> String {
+    format!("fn {}()", tool_bin_name)
+}
+
+/// Assert the given `source` defines the per-module sigil function
+/// `fn <tool_bin_name>()` at at least one *code* line — i.e., outside
+/// `///` / `//!` / `//` comments. Panics with a diagnostic naming
+/// `module_path`, `tool_bin_name`, `env_var`, and `bare`.
+///
+/// # Why one canonical helper
+///
+/// Fifteen whole-module routing shields — `commands/{local,helm,infra,
+/// gem (×2),pangea_infra (×3),rebac_validation,attestation,dashboards,
+/// workspace_deps,prerelease (×2),federation}.rs` — each spelled the
+/// same `assert!(SOURCE.contains("fn <tool>_bin()"), "commands/X.rs
+/// must define `<tool>_bin()` — the sigil function that resolves the
+/// [tools-registry ]`<ENV>` override for every <bare> spawn.")` block
+/// verbatim, differing only in the substituted `tool_bin_name` /
+/// `env_var` / `bare` tokens plus incidental prose variance (a
+/// "tools-registry" prefix present at some sites, absent at others).
+/// Fifteen occurrences past THEORY.md §VI.1's three-times threshold
+/// ("two occurrences is a coincidence; three is a law"). This helper
+/// is the law-redeeming consolidation: a future edit to the
+/// remediation prose lands in one place and propagates to every
+/// shield, and a new shield added by a subsequent `_BIN`-routing
+/// refactor inherits the discipline as one call rather than the
+/// six-line stanza.
+///
+/// # Why the code-line filter is load-bearing
+///
+/// A naive `SOURCE.contains("fn <tool>_bin()")` positive assertion
+/// silently passes whenever a `///` docstring or sibling shield's
+/// panic-message prose in the same module quotes the sigil signature
+/// verbatim — the same docstring-self-match defect
+/// [`assert_source_has_canonical_two_arg_sigil_code_line`] and
+/// [`assert_source_has_get_tool_path_two_arg_call_code_line`] close
+/// for the sibling sigil-body and consumer-call shields. Several of
+/// the fifteen pre-lift sites carry docstrings that narrate the
+/// sigil's role and quote `fn <tool>_bin()` verbatim (e.g.
+/// `commands/prerelease.rs:1837`'s panic message quotes `cargo_bin()`;
+/// the analogous shield-message and docstring quoting is pervasive
+/// across the family). Deleting the production definition would leave
+/// those bytes intact and the pre-lift shield would report green.
+/// Filtering the positive assertion through [`code_line_hits`] closes
+/// that class with one primitive.
+pub fn assert_source_defines_sigil_bin_fn_code_line(
+    source: &str,
+    module_path: &str,
+    tool_bin_name: &str,
+    env_var: &str,
+    bare: &str,
+) {
+    let needle = sigil_bin_fn_definition_needle(tool_bin_name);
+    let hits = code_line_hits(source, &needle);
+    assert!(
+        !hits.is_empty(),
+        "{module_path} must define `{tool_bin_name}()` at a code line \
+         — the sigil function that resolves the `{env_var}` override \
+         for every {bare} spawn. A docstring-only match no longer \
+         satisfies the shield, so a regression that dropped the \
+         production sigil definition while a docstring still quoted \
+         the signature is caught here rather than passing silently."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1607,6 +1689,102 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         assert_source_has_get_tool_path_two_arg_call_code_line(
             "fn regen() { let _ = 0; }\n",
             "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// The sigil-definition needle constructor emits the exact
+    /// `fn <tool_bin_name>()` substituted form the fifteen migrated
+    /// shields consume verbatim via `code_line_hits(SOURCE, &needle)`.
+    /// A template drift (a stray space, a missing paren, a `pub`
+    /// prefix baked into the template) would silently disarm every
+    /// migrated shield. Distinct sibling cases pin that the sigil-name
+    /// position is load-bearing — a template that discarded it would
+    /// collapse the fifteen shields to a single string.
+    #[test]
+    fn test_sigil_bin_fn_definition_needle_reconstructs_substituted_form() {
+        assert_eq!(
+            sigil_bin_fn_definition_needle("docker_bin"),
+            "fn docker_bin()".to_string(),
+        );
+        assert_eq!(
+            sigil_bin_fn_definition_needle("cargo_bin"),
+            "fn cargo_bin()".to_string(),
+        );
+        assert_eq!(
+            sigil_bin_fn_definition_needle("zeta_widget_bin"),
+            "fn zeta_widget_bin()".to_string(),
+        );
+    }
+
+    /// A source with the sigil-definition line at a *code* line passes
+    /// cleanly. Pinning the code-line acceptance path is the floor
+    /// every migrated shield consumes: absent any regression, the
+    /// helper is silent. The `zeta_widget_bin` sigil name is
+    /// deliberately distinct from every real shield's sigil name so a
+    /// Grep of the crate for `zeta_widget_bin` resolves to exactly
+    /// this test's family — a fast way to find the pinning tests when
+    /// editing the helper.
+    #[test]
+    fn test_assert_source_defines_sigil_bin_fn_code_line_accepts_code_line() {
+        assert_source_defines_sigil_bin_fn_code_line(
+            "fn zeta_widget_bin() -> String {\n    \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")\n\
+             }\n",
+            "fake/module.rs",
+            "zeta_widget_bin",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// A source that mentions the sigil-definition signature ONLY
+    /// inside a `///` docstring (with no code-line occurrence) fires
+    /// the shield — the docstring-self-match defect the code-line
+    /// filter exists to close. Pins the load-bearing correctness
+    /// property named in the helper's docs: a naive
+    /// `SOURCE.contains("fn <tool>_bin()")` shield would silently pass
+    /// on this exact input class whenever a module's docstring or
+    /// sibling shield's panic-message prose quotes the sigil
+    /// signature. A future refactor that dropped the code-line filter
+    /// (say, going back to a naive substring shield) would break this
+    /// test before shipping and re-open the silent-pass regression
+    /// class.
+    ///
+    /// `should_panic(expected = ...)` matches on a substring of the
+    /// panic payload; the substring pins the substituted
+    /// `module_path` / `tool_bin_name` / `env_var` / `bare` tokens in
+    /// the diagnostic so a message rewrite that dropped any of them
+    /// would surface here.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must define `zeta_widget_bin()` at a code line — the sigil function that resolves the `ZETA_WIDGET_BIN` override for every zeta-widget spawn."
+    )]
+    fn test_assert_source_defines_sigil_bin_fn_code_line_rejects_docstring_only_match() {
+        assert_source_defines_sigil_bin_fn_code_line(
+            "/// The `fn zeta_widget_bin()` sigil resolves the override\n\
+             fn other() -> String { String::new() }\n",
+            "fake/module.rs",
+            "zeta_widget_bin",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// A source that omits the sigil-definition line entirely fires
+    /// the shield — the plain missing-sigil regression class. Sibling
+    /// pin to
+    /// [`test_assert_source_defines_sigil_bin_fn_code_line_rejects_docstring_only_match`]:
+    /// the two together certify both failure modes (docstring-only and
+    /// missing-outright) trigger the same diagnostic.
+    #[test]
+    #[should_panic(expected = "fake/module.rs must define `zeta_widget_bin()` at a code line")]
+    fn test_assert_source_defines_sigil_bin_fn_code_line_rejects_missing_definition() {
+        assert_source_defines_sigil_bin_fn_code_line(
+            "fn other() -> String { String::new() }\n",
+            "fake/module.rs",
+            "zeta_widget_bin",
             "ZETA_WIDGET_BIN",
             "zeta-widget",
         );
