@@ -519,17 +519,12 @@ mod tests {
     fn test_kubectl_spawn_routes_through_kubectl_command_async_not_raw_literal() {
         const SOURCE: &str = include_str!("rollout.rs");
 
-        let bare = "kubectl";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/rollout.rs must not spawn `kubectl` via the \
-             bare literal — every `kubectl` spawn must resolve the \
-             substrate-exported `KUBECTL_BIN` env override via \
-             `kubectl_command_async` first. A raw literal at \
-             `Command::new` bypasses the hermetic-runner contract \
-             substrate's mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/rollout.rs",
+            "kubectl",
+            "resolve the substrate-exported `KUBECTL_BIN` env override via \
+             `kubectl_command_async`",
         );
         assert!(
             SOURCE.contains("kubectl_command_async()"),

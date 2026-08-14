@@ -801,16 +801,11 @@ mod tests {
     fn test_redis_cli_spawns_route_through_redis_cli_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("rebac_validation.rs");
 
-        let bare = "redis-cli";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/rebac_validation.rs must not spawn `redis-cli` via \
-             the bare literal — every redis-cli spawn must resolve \
-             `REDIS_CLI_BIN` via `redis_cli_bin()` first. A raw literal \
-             at `Command::new` bypasses the hermetic-runner contract \
-             substrate's mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/rebac_validation.rs",
+            "redis-cli",
+            "resolve `REDIS_CLI_BIN` via `redis_cli_bin()`",
         );
         assert!(
             SOURCE.contains("fn redis_cli_bin()"),

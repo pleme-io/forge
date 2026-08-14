@@ -912,21 +912,14 @@ mod tests {
     fn test_gh_spawn_routes_through_gh_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("registry.rs");
 
-        let bare = "gh";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "infrastructure/registry.rs must not spawn `gh` via the \
-             bare literal — every `gh` spawn must resolve the \
-             substrate-exported `GH_BIN` env override via \
-             `get_tool_path` first. A raw literal at `Command::new` \
-             bypasses the hermetic-runner contract substrate's \
-             mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "infrastructure/registry.rs",
+            "gh",
+            "resolve the substrate-exported `GH_BIN` env override via `get_tool_path`",
         );
-        let sigil = format!("get_tool_path(\"GH_BIN\", \"{}\")", bare);
         assert!(
-            SOURCE.contains(&sigil),
+            SOURCE.contains("get_tool_path(\"GH_BIN\", \"gh\")"),
             "infrastructure/registry.rs must resolve the `gh` binary \
              via the two-argument `get_tool_path(\"GH_BIN\", \"gh\")` \
              lookup — the canonical form was not found in the module."

@@ -1512,17 +1512,12 @@ mod kubectl_bin_routing_tests {
     fn test_kubectl_spawn_routes_through_kubectl_command_async_not_raw_literal() {
         const SOURCE: &str = include_str!("integration_tests.rs");
 
-        let bare = "kubectl";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/integration_tests.rs must not spawn `kubectl` via \
-             the bare literal — every `kubectl` spawn must resolve the \
-             substrate-exported `KUBECTL_BIN` env override via \
-             `kubectl_command_async` first. A raw literal at \
-             `Command::new` bypasses the hermetic-runner contract \
-             substrate's mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/integration_tests.rs",
+            "kubectl",
+            "resolve the substrate-exported `KUBECTL_BIN` env override via \
+             `kubectl_command_async`",
         );
         assert!(
             SOURCE.contains("kubectl_command_async()"),
@@ -1571,17 +1566,11 @@ mod sh_bin_routing_tests {
     fn test_sh_spawn_routes_through_sh_bin_env_not_raw_literal() {
         const SOURCE: &str = include_str!("integration_tests.rs");
 
-        let bare = "sh";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/integration_tests.rs must not spawn `sh` via \
-             the bare literal — every `sh -c` spawn must resolve \
-             `SH_BIN` via `crate::repo::get_tool_path(\"SH_BIN\", \
-             \"sh\")` first. A raw `Command::new(\"sh\")` bypasses \
-             the hermetic-runner contract substrate's \
-             mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/integration_tests.rs",
+            "sh",
+            "resolve `SH_BIN` via `crate::repo::get_tool_path(\"SH_BIN\", \"sh\")`",
         );
         assert!(
             SOURCE.contains("get_tool_path(\"SH_BIN\", \"sh\")"),

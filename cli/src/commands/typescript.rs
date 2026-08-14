@@ -88,16 +88,12 @@ mod tests {
     fn test_pleme_linker_spawn_routes_through_pleme_linker_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("typescript.rs");
 
-        let bare = "pleme-linker";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/typescript.rs must not spawn `{bare}` via the \
-             bare literal — every spawn must resolve the tools-registry \
-             env-var override via `crate::repo::get_tool_path(\"PLEME_LINKER_BIN\", \
-             \"{bare}\")` first. A raw literal at `Command::new` bypasses \
-             the hermetic-runner contract substrate's mkRuntimeToolsEnv \
-             exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/typescript.rs",
+            "pleme-linker",
+            "resolve the tools-registry env-var override via \
+             `crate::repo::get_tool_path(\"PLEME_LINKER_BIN\", \"pleme-linker\")`",
         );
 
         assert!(
