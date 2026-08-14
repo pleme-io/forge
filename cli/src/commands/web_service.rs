@@ -279,24 +279,17 @@ mod tests {
             );
         }
 
-        assert!(
-            SOURCE.contains("get_tool_path(\"PLEME_LINKER_BIN\", \"pleme-linker\")"),
-            "commands/web_service.rs must resolve `pleme-linker` via \
-             `get_tool_path(\"PLEME_LINKER_BIN\", \"pleme-linker\")` — the \
-             canonical two-argument lookup was not found in the module."
-        );
-        assert!(
-            SOURCE.contains("get_tool_path(\"CRATE2NIX\", \"crate2nix\")"),
-            "commands/web_service.rs must resolve `crate2nix` via \
-             `get_tool_path(\"CRATE2NIX\", \"crate2nix\")` — the canonical \
-             sibling form used by `commands/bootstrap.rs::regenerate` and \
-             `commands/pangea.rs`."
-        );
-        assert!(
-            SOURCE.contains("get_tool_path(\"CARGO\", \"cargo\")"),
-            "commands/web_service.rs must resolve `cargo` via \
-             `get_tool_path(\"CARGO\", \"cargo\")` — the canonical form \
-             every sibling cargo-spawning module in forge uses."
-        );
+        for (bare, env_var) in [
+            ("pleme-linker", "PLEME_LINKER_BIN"),
+            ("crate2nix", "CRATE2NIX"),
+            ("cargo", "CARGO"),
+        ] {
+            crate::test_support::assert_source_has_get_tool_path_two_arg_call_code_line(
+                SOURCE,
+                "commands/web_service.rs",
+                env_var,
+                bare,
+            );
+        }
     }
 }

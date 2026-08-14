@@ -1572,13 +1572,11 @@ mod sh_bin_routing_tests {
             "sh",
             "resolve `SH_BIN` via `crate::repo::get_tool_path(\"SH_BIN\", \"sh\")`",
         );
-        assert!(
-            SOURCE.contains("get_tool_path(\"SH_BIN\", \"sh\")"),
-            "commands/integration_tests.rs must resolve the `sh` \
-             binary via the canonical \
-             `crate::repo::get_tool_path(\"SH_BIN\", \"sh\")` two-arg \
-             constructor — the required form was not found in the \
-             module."
+        crate::test_support::assert_source_has_get_tool_path_two_arg_call_code_line(
+            SOURCE,
+            "commands/integration_tests.rs",
+            "SH_BIN",
+            "sh",
         );
     }
 }

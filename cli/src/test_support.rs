@@ -754,6 +754,101 @@ pub fn assert_source_forbids_deriving_one_arg_sigil_literal_form(
     );
 }
 
+/// Reconstruct the suffix-form canonical two-arg
+/// `get_tool_path("<env_var>", "<bare>")` call needle — the shape every
+/// downstream consumer-site sigil call across forge routes through,
+/// spelled either fully-qualified (`crate::repo::get_tool_path(...)`)
+/// or via a top-of-file `use crate::repo::get_tool_path;` import
+/// (`get_tool_path(...)` alone). This needle is the shorter suffix of
+/// [`canonical_two_arg_sigil_needle`]'s output, so a substring scan
+/// against it catches BOTH spellings — the shape the eleven consumer
+/// sigil shields already assert on.
+///
+/// # Reconstruction discipline
+///
+/// The needle is built via `format!` — this helper's own source text
+/// contains only the templated form (with `{}` placeholders for the
+/// two-arg positions), never a substituted concrete literal. A shield
+/// that scans `include_str!("test_support.rs")` therefore does not
+/// false-match this helper's body on any concrete tool. Sibling
+/// primitive to [`canonical_two_arg_sigil_needle`] (the fully-qualified
+/// variant used by the five sigil-body shields).
+pub fn get_tool_path_two_arg_call_needle(env_var: &str, bare: &str) -> String {
+    format!("get_tool_path(\"{}\", \"{}\")", env_var, bare)
+}
+
+/// Assert the given `source` contains the canonical two-arg
+/// `get_tool_path("<env_var>", "<bare>")` call form at at least one
+/// *code* line — i.e., outside `///` / `//!` / `//` comments. Panics
+/// with a diagnostic naming `module_path`, `env_var`, `bare`, and the
+/// canonical form.
+///
+/// # Why one canonical helper
+///
+/// Eleven whole-module consumer-sigil shields across eight files
+/// (`infrastructure/registry.rs`, `commands/{tool,typescript,sync,
+/// integration_tests,search_sync,pangea,web_service}.rs`) each spelled
+/// the same `assert!(SOURCE.contains("get_tool_path(\"<BIN>\", \"<bare>\")"),
+/// "…")` block verbatim, differing only in the substituted
+/// `env_var` / `bare` tokens and per-site remediation prose. Eleven
+/// occurrences past THEORY §VI.1's three-times threshold ("two
+/// occurrences is a coincidence; three is a law"). This helper is the
+/// law-redeeming consolidation: a future edit to the remediation prose
+/// (say, refining the audit-visibility phrasing or naming the
+/// substrate-exported env-var contract explicitly) lands in one place
+/// and propagates to every shield; and a new shield added by a
+/// subsequent `_BIN`-routing refactor inherits the discipline as one
+/// call, not the six-line stanza.
+///
+/// # Why the code-line filter is load-bearing
+///
+/// Five of the eleven pre-lift sites carry docstrings or `//`
+/// line-comments that literally quote the canonical
+/// `get_tool_path("<BIN>", "<bare>")` form (e.g. `commands/sync.rs:157,516,638,667`,
+/// `commands/tool.rs:358,913`, `commands/pangea.rs:801-802`,
+/// `commands/search_sync.rs:95,359`, `commands/typescript.rs:60`).
+/// A naive `SOURCE.contains(&needle)` shield silently passes on
+/// production regression whenever any such doc-line quotes the form —
+/// deleting the production sigil call still leaves the doc-line's
+/// bytes intact and the shield reports green. Filtering through
+/// [`code_line_hits`] closes that class: only executable code
+/// satisfies the shield, not narration. This is the same
+/// docstring-self-match defect [`assert_source_has_canonical_two_arg_sigil_code_line`]
+/// closes for the sibling sigil-body shields.
+///
+/// # Why a distinct helper from `assert_source_has_canonical_two_arg_sigil_code_line`
+///
+/// The sibling `_canonical_two_arg_sigil_` helper's needle is the
+/// fully-qualified `crate::repo::get_tool_path("<BIN>", "<bare>")`
+/// form — the shape the five sigil-body definitions
+/// (`commands/{local,infra,dashboards,prerelease}.rs`, plus the second
+/// `prerelease.rs` shield) spell verbatim. The eleven consumer sites
+/// resolved through this helper instead call via a `use`-imported
+/// unqualified `get_tool_path("<BIN>", "<bare>")`, so the qualified
+/// needle would fail to match — the shorter suffix needle is required
+/// to catch both spellings.
+pub fn assert_source_has_get_tool_path_two_arg_call_code_line(
+    source: &str,
+    module_path: &str,
+    env_var: &str,
+    bare: &str,
+) {
+    let needle = get_tool_path_two_arg_call_needle(env_var, bare);
+    let hits = code_line_hits(source, &needle);
+    assert!(
+        !hits.is_empty(),
+        "{module_path} must resolve `{bare}` via the canonical two-arg \
+         `{needle}` call at a *code* line — either the fully-qualified \
+         `crate::repo::get_tool_path` form or the \
+         `use crate::repo::get_tool_path;`-imported unqualified form \
+         satisfies the shield, but a docstring-only match does not. \
+         If the sigil regressed to a bare-literal spawn or a \
+         wrong-env-var lookup, the substrate-exported `{env_var}` \
+         env-var literal is again hidden from a fleet-wide `{env_var}` \
+         audit."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,13 +1267,128 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     /// filter pin to
     /// [`test_assert_source_forbids_deriving_one_arg_sigil_constant_form_accepts_docstring_only_match`].
     #[test]
-    fn test_assert_source_forbids_deriving_one_arg_sigil_literal_form_accepts_docstring_only_match(
-    ) {
+    fn test_assert_source_forbids_deriving_one_arg_sigil_literal_form_accepts_docstring_only_match()
+    {
         assert_source_forbids_deriving_one_arg_sigil_literal_form(
             "/// pre-lift the sigil delegated via \
              `crate::tools::get_tool_path(\"zeta-widget\")` which hid \
              the ZETA_WIDGET_BIN override\n\
              fn zeta_bin() -> String { String::new() }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// The suffix-form needle constructor emits the exact
+    /// `get_tool_path("<BIN>", "<bare>")` substituted form the eleven
+    /// consumer sigil shields consume verbatim via
+    /// `code_line_hits(SOURCE, &needle)`. A template drift (a stray
+    /// space, dropped double colon, quote rewrite) would silently
+    /// disarm every migrated shield. Distinct sibling cases pin that
+    /// both substitution positions are load-bearing — a template that
+    /// discarded either would collapse the pair to the same string.
+    #[test]
+    fn test_get_tool_path_two_arg_call_needle_reconstructs_substituted_form() {
+        assert_eq!(
+            get_tool_path_two_arg_call_needle("GH_BIN", "gh"),
+            "get_tool_path(\"GH_BIN\", \"gh\")".to_string(),
+        );
+        assert_eq!(
+            get_tool_path_two_arg_call_needle("SEA_ORM_CLI_BIN", "sea-orm-cli"),
+            "get_tool_path(\"SEA_ORM_CLI_BIN\", \"sea-orm-cli\")".to_string(),
+        );
+        assert_eq!(
+            get_tool_path_two_arg_call_needle("ZETA_WIDGET_BIN", "zeta-widget"),
+            "get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")".to_string(),
+        );
+    }
+
+    /// A source with the canonical suffix-form call at a code line
+    /// passes cleanly under either spelling — fully-qualified (with
+    /// the `crate::repo::` prefix) or `use`-imported unqualified.
+    /// Pinning both the acceptance-with-prefix and
+    /// acceptance-without-prefix paths is the floor every migrated
+    /// shield consumes: the eleven consumer sites partition into these
+    /// two spellings and both must satisfy the shield. The bare
+    /// `zeta-widget` is deliberately distinct from every real shield's
+    /// `bare` so a Grep of the crate for `zeta-widget` resolves to
+    /// this test's family — a fast way to find the pinning tests when
+    /// editing the helper.
+    #[test]
+    fn test_assert_source_has_get_tool_path_two_arg_call_code_line_accepts_qualified_call() {
+        assert_source_has_get_tool_path_two_arg_call_code_line(
+            "fn regen() {\n    \
+             let bin = crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\");\n\
+             }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// Sibling pin to
+    /// [`test_assert_source_has_get_tool_path_two_arg_call_code_line_accepts_qualified_call`]
+    /// — the `use crate::repo::get_tool_path;`-imported unqualified
+    /// call form ALSO satisfies the shield, so consumer sites that
+    /// import the sigil at the top of the module (the pattern eight
+    /// of the eleven pre-lift shields protect against a regression on)
+    /// need not spell the `crate::repo::` prefix at every call site.
+    #[test]
+    fn test_assert_source_has_get_tool_path_two_arg_call_code_line_accepts_unqualified_call() {
+        assert_source_has_get_tool_path_two_arg_call_code_line(
+            "use crate::repo::get_tool_path;\n\
+             fn regen() {\n    \
+             let bin = get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\");\n\
+             }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// A source that mentions the canonical form ONLY inside a `///`
+    /// docstring (with no code-line occurrence) fires the shield —
+    /// the docstring-self-match defect the code-line filter exists to
+    /// close. Pins the load-bearing correctness property named in the
+    /// helper's docs: the pre-lift `SOURCE.contains(&needle)` shield
+    /// silently passed on this exact input class in five production
+    /// shields on `main` (`commands/sync.rs`, `commands/tool.rs`,
+    /// `commands/pangea.rs`, `commands/search_sync.rs`,
+    /// `commands/typescript.rs`), any of which quoted the canonical
+    /// form in a `///` block that the naive substring shield matched.
+    /// A future refactor that dropped the code-line filter would break
+    /// this test before shipping and re-open the silent-pass
+    /// regression class.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must resolve `zeta-widget` via the canonical two-arg `get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")` call at a *code* line"
+    )]
+    fn test_assert_source_has_get_tool_path_two_arg_call_code_line_rejects_docstring_only_match() {
+        assert_source_has_get_tool_path_two_arg_call_code_line(
+            "/// consumer resolves via `get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")` — narrated\n\
+             fn regen() { }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// A source that omits the canonical form entirely fires the shield
+    /// — the plain missing-sigil regression class. Sibling pin to
+    /// [`test_assert_source_has_get_tool_path_two_arg_call_code_line_rejects_docstring_only_match`]:
+    /// the two together certify both failure modes (docstring-only and
+    /// missing-outright) trigger the same diagnostic. The
+    /// substring-pinned `env_var` / `bare` / `module_path` tokens in
+    /// the `should_panic(expected = ...)` payload guarantee a message
+    /// rewrite that dropped any of them would surface here.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must resolve `zeta-widget` via the canonical two-arg `get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")` call at a *code* line"
+    )]
+    fn test_assert_source_has_get_tool_path_two_arg_call_code_line_rejects_missing_form() {
+        assert_source_has_get_tool_path_two_arg_call_code_line(
+            "fn regen() { let _ = 0; }\n",
             "fake/module.rs",
             "ZETA_WIDGET_BIN",
             "zeta-widget",

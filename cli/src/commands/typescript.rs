@@ -96,13 +96,11 @@ mod tests {
              `crate::repo::get_tool_path(\"PLEME_LINKER_BIN\", \"pleme-linker\")`",
         );
 
-        assert!(
-            SOURCE.contains("get_tool_path(\"PLEME_LINKER_BIN\", \"pleme-linker\")"),
-            "commands/typescript.rs must resolve `pleme-linker` via \
-             `get_tool_path(\"PLEME_LINKER_BIN\", \"pleme-linker\")` — the \
-             canonical two-argument lookup used by the sibling \
-             `commands/web_service.rs::web_regenerate` (line 73) was not \
-             found in the module."
+        crate::test_support::assert_source_has_get_tool_path_two_arg_call_code_line(
+            SOURCE,
+            "commands/typescript.rs",
+            "PLEME_LINKER_BIN",
+            "pleme-linker",
         );
     }
 }
