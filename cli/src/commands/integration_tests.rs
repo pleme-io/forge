@@ -13,6 +13,81 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
 use crate::infrastructure::kubectl::kubectl_command_async;
+use crate::retry::RetryPolicy;
+
+/// The typed exponential-backoff policy for [`execute_suite`]'s
+/// between-retry sleeps — `initial_backoff` 5s × `factor` 2 capped at
+/// `max_backoff` 30s. Consumes the pre-existing typed primitive at
+/// [`crate::retry::RetryPolicy`] so the per-attempt delay lands at
+/// [`RetryPolicy::compute_delay`], whose docstring names its
+/// raison d'être: "the pre-existing fixed `sleep(2s)` schedule ... is
+/// the worst of both worlds ... Exponential backoff (Bazel-style:
+/// 250ms × factor=2 capped at 30s) covers both regimes by
+/// construction."
+///
+/// Pre-lift the three sibling `sleep(Duration::from_secs(5)).await`
+/// sites in [`execute_suite`]'s post-deployment retry loop (one per
+/// failure branch: test-non-zero-exit, command-error, timeout) each
+/// carried three defects the typed-primitive body forecloses,
+/// exactly the sibling-shape the `TEST_RETRY_BACKOFF` docstring at
+/// `commands/test.rs::run_test_suite` (commit 9fd38d3) cites for
+/// its own three-sibling `sleep(Duration::from_secs(2)).await`
+/// retry-loop lift:
+///
+/// 1. **Fixed 5s schedule.** A flat `sleep(5s)` between attempts is
+///    "too short when it's a 30-second upstream incident, 12 days too
+///    long when it's a real integration-test flake that needs the
+///    upstream to recover" — the exact failure mode the Bazel / Buck2
+///    / BuildKit frontier hermetic-build systems close under an
+///    exponential-with-cap schedule.
+/// 2. **Three-way duplication of one schedule.** The (5s) magic number
+///    lived at three sibling `sleep(Duration::from_secs(5))` call sites
+///    in the same retry loop; a future edit to the schedule had to be
+///    applied at three sites in lock-step, or one branch silently
+///    diverged. The lifted `INTEGRATION_TEST_RETRY_BACKOFF` const is
+///    one load-bearing structural surface all three branches read
+///    through.
+/// 3. **No caller-visible schedule invariant.** The bare
+///    `Duration::from_secs(5)` literal at three sites carried no name
+///    a shield could pin. The lifted `INTEGRATION_TEST_RETRY_BACKOFF`
+///    const names the (seed, factor, cap) triple a shield can cite
+///    and enforce.
+///
+/// `max_attempts: 1` is a placeholder — the retry loop drives its own
+/// attempt budget through the caller-supplied `suite.max_retries`
+/// deploy.yaml field and consumes only [`RetryPolicy::compute_delay`]
+/// from this policy, not [`RetryPolicy::max_attempts`]. The
+/// `max_attempts` field is unconsulted at this consumption site.
+const INTEGRATION_TEST_RETRY_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: 1,
+    initial_backoff: Duration::from_secs(5),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between post-deployment integration-test-suite retries,
+/// given the 1-indexed local `attempts` counter of the attempt that
+/// just failed (the `loop { attempts += 1; ... }` shape
+/// [`execute_suite`] drives).
+///
+/// Maps the local 1-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(1)`:
+/// local `attempts == 1` (the pre-retry sleep after the first failed
+/// call) reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff = 5s`; local `attempts == 2` reads as
+/// `compute_delay(3) = 10s`; local `attempts == 3` reads as
+/// `compute_delay(4) = 20s`; local `attempts == 4` reads as
+/// `compute_delay(5) = min(40s, 30s) = 30s` (cap); local
+/// `attempts >= 4` stays at 30s. The `saturating_add` clamp forecloses
+/// the `u32` overflow class at the bridge — an unlikely-but-possible
+/// `attempts == u32::MAX` from a pathological `suite.max_retries`
+/// reads as `compute_delay(u32::MAX)`, which itself saturates to
+/// [`INTEGRATION_TEST_RETRY_BACKOFF::max_backoff`] via the
+/// `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
+/// without panic.
+fn integration_test_retry_delay(attempts: u32) -> Duration {
+    INTEGRATION_TEST_RETRY_BACKOFF.compute_delay(attempts.saturating_add(1))
+}
 
 /// Integration test suite configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,7 +753,7 @@ async fn execute_suite(
                     }
 
                     warn!("   🔄 Retrying ({}/{})", attempts, max_attempts);
-                    sleep(Duration::from_secs(5)).await;
+                    sleep(integration_test_retry_delay(attempts)).await;
                 }
             }
             Ok(Err(e)) => {
@@ -696,7 +771,7 @@ async fn execute_suite(
                 }
 
                 warn!("   🔄 Retrying ({}/{})", attempts, max_attempts);
-                sleep(Duration::from_secs(5)).await;
+                sleep(integration_test_retry_delay(attempts)).await;
             }
             Err(_) => {
                 error!("   ⏱️  Test suite timed out after {:?}", suite_timeout);
@@ -713,7 +788,7 @@ async fn execute_suite(
                 }
 
                 warn!("   🔄 Retrying ({}/{})", attempts, max_attempts);
-                sleep(Duration::from_secs(5)).await;
+                sleep(integration_test_retry_delay(attempts)).await;
             }
         }
     }
@@ -1457,6 +1532,209 @@ mod tests {
         assert_eq!(
             parse_post_deployment_suite_timeout(&suite).unwrap(),
             Duration::from_secs(300)
+        );
+    }
+}
+
+#[cfg(test)]
+mod integration_test_retry_backoff_tests {
+    use super::*;
+
+    // ====================================================================
+    // integration-test-suite retry backoff — INTEGRATION_TEST_RETRY_BACKOFF
+    // + helper
+    // ====================================================================
+    //
+    // These pin the RetryPolicy-consuming replacement of the pre-lift
+    // three sibling `sleep(Duration::from_secs(5)).await` sites that
+    // `execute_suite`'s post-deployment retry loop (test-non-zero-exit,
+    // command-error, timeout branches) polled through. Sibling of the
+    // `TEST_RETRY_BACKOFF` shields at `commands/test.rs::tests` (commit
+    // 9fd38d3), the `FLUX_POLL_BACKOFF` shields at `commands/flux.rs::
+    // tests` (commit 65de62f), the `SHINKA_MIGRATION_POLL_BACKOFF`
+    // shields at `commands/migrations.rs::tests` (commit b962db5), and
+    // the `HEALTH_ENDPOINT_BACKOFF` shields at
+    // `commands/post_deploy_verification.rs::tests` (commit b5db3b6) —
+    // same const- + delegation-helper shape, same four-test pattern
+    // (policy-shape / in-cap-schedule / past-cap-cap /
+    // saturating-no-panic), same whole-module boundary shield that
+    // forbids re-fusing the pre-lift bare-literal `sleep(5s)` shape.
+
+    /// The `INTEGRATION_TEST_RETRY_BACKOFF` const's
+    /// `(initial_backoff, factor, max_backoff)` triple is the
+    /// load-bearing invariant every consumption site (all three
+    /// retry-loop failure branches, plus any future retry-loop
+    /// consumer that reads the same schedule) shares. Pinned here so
+    /// a future edit at the const's site is caught at a named test
+    /// rather than silently across the three consumption sites and
+    /// the delegation helper.
+    #[test]
+    fn test_integration_test_retry_backoff_policy_shape() {
+        assert_eq!(
+            INTEGRATION_TEST_RETRY_BACKOFF.initial_backoff,
+            Duration::from_secs(5),
+            "INTEGRATION_TEST_RETRY_BACKOFF.initial_backoff must be 5s \
+             — preserves the pre-lift `sleep(Duration::from_secs(5))` \
+             seed verbatim at the first between-retry sleep.",
+        );
+        assert_eq!(
+            INTEGRATION_TEST_RETRY_BACKOFF.factor, 2,
+            "INTEGRATION_TEST_RETRY_BACKOFF.factor must be 2 \
+             — Bazel-style doubling climb between retries.",
+        );
+        assert_eq!(
+            INTEGRATION_TEST_RETRY_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "INTEGRATION_TEST_RETRY_BACKOFF.max_backoff must be 30s \
+             — the shared cap every sibling RetryPolicy-consumer \
+             (TEST_RETRY_BACKOFF, FLUX_POLL_BACKOFF, \
+             SHINKA_MIGRATION_POLL_BACKOFF, HEALTH_ENDPOINT_BACKOFF) \
+             also names.",
+        );
+    }
+
+    /// Pre-lift the first between-retry sleep emitted
+    /// `sleep(Duration::from_secs(5))` verbatim; the lift's 1-indexed
+    /// `attempts` counter must reproduce that seed at
+    /// `attempts == 1` via `integration_test_retry_delay(1)`. The
+    /// subsequent within-cap attempts (2/3) must emit the Bazel-style
+    /// doubling climb (10s/20s), strictly better than the pre-lift
+    /// flat-5s schedule at every retry past the first.
+    #[test]
+    fn test_integration_test_retry_delay_matches_pre_lift_seed_and_climbs_at_in_cap_attempts() {
+        assert_eq!(
+            integration_test_retry_delay(1),
+            Duration::from_secs(5),
+            "attempts=1 must sleep 5s — matches pre-lift \
+             `sleep(Duration::from_secs(5))` seed verbatim.",
+        );
+        assert_eq!(
+            integration_test_retry_delay(2),
+            Duration::from_secs(10),
+            "attempts=2 must sleep 10s — Bazel-style `5s * 2 = 10s`.",
+        );
+        assert_eq!(
+            integration_test_retry_delay(3),
+            Duration::from_secs(20),
+            "attempts=3 must sleep 20s — Bazel-style `10s * 2 = 20s`.",
+        );
+    }
+
+    /// Attempts past the cap must all emit `max_backoff = 30s` —
+    /// `(20s * 2).min(30s) = 30s` at attempts=4 and `(30s * 2).min(30s)
+    /// = 30s` at every subsequent attempt. `suite.max_retries` is a
+    /// user-supplied `deploy.yaml` field with no upper bound in the
+    /// schema, so beyond-cap attempts must stay at the ceiling rather
+    /// than climb past it and stretch a single suite's total retry
+    /// wall-clock into hours.
+    #[test]
+    fn test_integration_test_retry_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            integration_test_retry_delay(4),
+            Duration::from_secs(30),
+            "attempts=4 must sleep 30s (cap) — `(20s * 2).min(30s) = 30s`.",
+        );
+        assert_eq!(
+            integration_test_retry_delay(5),
+            Duration::from_secs(30),
+            "attempts=5 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            integration_test_retry_delay(50),
+            Duration::from_secs(30),
+            "attempts=50 must sleep 30s (cap) — a pathological \
+             `suite.max_retries` cannot stretch a single sleep past \
+             the ceiling.",
+        );
+    }
+
+    /// The retry loop's `attempts` counter is a `u32` bounded only by
+    /// the caller-supplied `suite.max_retries + 1`, so a pathological
+    /// deploy.yaml with `max_retries: u32::MAX` could in principle
+    /// drive `integration_test_retry_delay(u32::MAX)`. Pre-lift the
+    /// fixed `Duration::from_secs(5)` literal never panicked at any
+    /// attempt; post-lift `saturating_add(1)` inside
+    /// `integration_test_retry_delay` bounds the argument to
+    /// `RetryPolicy::compute_delay`, whose `checked_pow`-then-cap
+    /// body itself saturates without panic. This test pins that
+    /// composition: an `attempts == u32::MAX` argument returns a
+    /// bounded delay rather than panicking.
+    #[test]
+    fn test_integration_test_retry_delay_saturates_without_panic_at_arbitrarily_large_attempt() {
+        assert_eq!(
+            integration_test_retry_delay(u32::MAX),
+            Duration::from_secs(30),
+            "attempts=u32::MAX must saturate to max_backoff without \
+             panic — the `saturating_add(1)` bridge + \
+             `RetryPolicy::compute_delay`'s `checked_pow` cap close \
+             the u32 overflow class by construction.",
+        );
+        assert_eq!(
+            integration_test_retry_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "attempts=u32::MAX - 1 must also saturate to max_backoff \
+             — the bridge `saturating_add(1)` returns u32::MAX, still \
+             far past the cap.",
+        );
+    }
+
+    /// Whole-module boundary shield: `execute_suite`'s post-deployment
+    /// retry loop MUST consume the typed primitive at
+    /// `integration_test_retry_delay` rather than re-fusing the
+    /// pre-lift bare-literal `sleep(Duration::from_secs(5))` shape
+    /// (or any sibling `Duration::from_secs(N)`-in-a-`sleep`-call
+    /// fixed schedule) at any of the three failure branches. A future
+    /// refactor that reintroduces a flat schedule — or grows a fourth
+    /// branch and copies the pre-lift shape — fails here, not
+    /// silently in production. Whole-module boundary discipline
+    /// sibling of
+    /// `test_run_test_suite_consumes_typed_retry_delay_not_bare_fixed_sleep`
+    /// at `commands/test.rs::tests` (commit 9fd38d3),
+    /// `test_flux_polling_loops_consume_typed_poll_delay_not_bespoke_backoff_struct`
+    /// at `commands/flux.rs::tests` (commit 65de62f), and
+    /// `test_wait_for_shinka_migration_consumes_typed_poll_delay_not_mut_backoff_secs`
+    /// at `commands/migrations.rs::tests` (commit b962db5).
+    ///
+    /// Code-line filter (via [`crate::test_support::code_line_hits`])
+    /// skips docstring / prose-comment lines, so the shield does not
+    /// false-positive on `INTEGRATION_TEST_RETRY_BACKOFF`'s own
+    /// docstring above (which cites the pre-lift
+    /// `Duration::from_secs(5)` shape as context for the three
+    /// defects it forecloses).
+    #[test]
+    fn test_execute_suite_consumes_typed_retry_delay_not_bare_fixed_sleep() {
+        let source = include_str!("integration_tests.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let bare_sleep_hits =
+            crate::test_support::code_line_hits(module_body, "sleep(Duration::from_secs(5))");
+        assert!(
+            bare_sleep_hits.is_empty(),
+            "commands/integration_tests.rs must NOT drive the \
+             post-deployment retry loop through a bare \
+             `sleep(Duration::from_secs(5))` — every sleep site in \
+             `execute_suite`'s retry loop must consume \
+             `integration_test_retry_delay(attempts)`, grounding \
+             through `RetryPolicy::compute_delay`. Found code-line \
+             hits: {:#?}",
+            bare_sleep_hits,
+        );
+        let delegation_hits = crate::test_support::code_line_hits(
+            module_body,
+            "integration_test_retry_delay(attempts)",
+        );
+        assert!(
+            !delegation_hits.is_empty(),
+            "commands/integration_tests.rs must consume the typed \
+             retry-delay helper at every failure branch of \
+             `execute_suite`'s retry loop — the canonical delegation \
+             call was not found at any code line.",
         );
     }
 }
