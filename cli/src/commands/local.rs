@@ -190,11 +190,12 @@ mod docker_bin_routing_tests {
              through `run_query_capture_sync(&docker_bin(), …)`. A raw \
              literal at `run_query_capture_sync` bypasses `DOCKER_BIN`."
         );
-        assert!(
-            SOURCE.contains("fn docker_bin()"),
-            "commands/local.rs must define `docker_bin()` — the sigil \
-             function that resolves the tools-registry `DOCKER_BIN` \
-             override for every docker spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/local.rs",
+            "docker_bin",
+            "DOCKER_BIN",
+            "docker",
         );
         // Assert the canonical two-arg sigil-delegation form appears at
         // a code line — filtered through `code_line_hits` so a

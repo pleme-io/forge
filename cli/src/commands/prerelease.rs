@@ -1747,11 +1747,12 @@ mod tests {
             "resolve `DOCKER_BIN` via `docker_bin()`",
         );
 
-        assert!(
-            SOURCE.contains("fn docker_bin()"),
-            "commands/prerelease.rs must define `docker_bin()` — the \
-             sigil function that resolves the tools-registry \
-             `DOCKER_BIN` override for every docker spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/prerelease.rs",
+            "docker_bin",
+            "DOCKER_BIN",
+            "docker",
         );
         // Assert the canonical two-arg sigil-delegation form appears at
         // a code line — filtered through `code_line_hits` so a
@@ -1832,11 +1833,12 @@ mod tests {
             "resolve `CARGO` via `cargo_bin()`",
         );
 
-        assert!(
-            SOURCE.contains("fn cargo_bin()"),
-            "commands/prerelease.rs must define `cargo_bin()` — the \
-             sigil function that resolves the `CARGO` override for \
-             every cargo spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/prerelease.rs",
+            "cargo_bin",
+            "CARGO",
+            "cargo",
         );
         // Assert the canonical two-arg sigil-delegation form appears at
         // a code line — filtered through `code_line_hits` so a

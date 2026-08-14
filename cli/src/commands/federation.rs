@@ -707,11 +707,12 @@ mod tests {
             "resolve `ROVER_FHS_BIN` via `rover_fhs_bin()`",
         );
 
-        assert!(
-            SOURCE.contains("fn rover_fhs_bin()"),
-            "commands/federation.rs must define `rover_fhs_bin()` — the \
-             sigil function that resolves the `ROVER_FHS_BIN` override \
-             for every rover-fhs spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/federation.rs",
+            "rover_fhs_bin",
+            "ROVER_FHS_BIN",
+            "rover-fhs",
         );
         assert!(
             SOURCE.contains("crate::repo::get_tool_path(\"ROVER_FHS_BIN\", \"rover-fhs\")"),

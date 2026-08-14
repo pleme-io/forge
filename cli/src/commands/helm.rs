@@ -2072,11 +2072,12 @@ mod helm_bin_routing_tests {
              raw literal at `run_program_timed` bypasses \
              `HELM_BIN`."
         );
-        assert!(
-            SOURCE.contains("fn helm_bin()"),
-            "commands/helm.rs must define `helm_bin()` — the sigil \
-             function that resolves the tools-registry `HELM_BIN` \
-             override for every helm spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/helm.rs",
+            "helm_bin",
+            "HELM_BIN",
+            "helm",
         );
         assert!(
             SOURCE.contains("crate::tools::get_tool_path(crate::tools::tools::HELM)"),

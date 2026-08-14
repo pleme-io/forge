@@ -2037,11 +2037,12 @@ mod tests {
             "resolve `COSIGN_BIN` via `cosign_bin()`",
         );
 
-        assert!(
-            SOURCE.contains("fn cosign_bin()"),
-            "commands/attestation.rs must define `cosign_bin()` — the \
-             sigil function that resolves the tools-registry \
-             `COSIGN_BIN` override for every cosign spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/attestation.rs",
+            "cosign_bin",
+            "COSIGN_BIN",
+            "cosign",
         );
         assert!(
             SOURCE.contains("crate::tools::get_tool_path(\"cosign\")"),

@@ -765,11 +765,12 @@ mod tests {
             "resolve `JSONNET_BIN` via `jsonnet_bin()`",
         );
 
-        assert!(
-            SOURCE.contains("fn jsonnet_bin()"),
-            "commands/dashboards.rs must define `jsonnet_bin()` — the \
-             sigil function that resolves the tools-registry \
-             `JSONNET_BIN` override for every jsonnet spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/dashboards.rs",
+            "jsonnet_bin",
+            "JSONNET_BIN",
+            "jsonnet",
         );
         // Assert the canonical two-arg sigil-delegation form appears at
         // a code line — filtered through `code_line_hits` so a

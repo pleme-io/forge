@@ -335,11 +335,12 @@ mod tests {
             "npm",
             "resolve `NPM_BIN` via `npm_bin()`",
         );
-        assert!(
-            SOURCE.contains("fn npm_bin()"),
-            "commands/workspace_deps.rs must define `npm_bin()` — the \
-             sigil function that resolves the tools-registry \
-             `NPM_BIN` override for every npm spawn."
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/workspace_deps.rs",
+            "npm_bin",
+            "NPM_BIN",
+            "npm",
         );
         assert!(
             SOURCE.contains("crate::tools::get_tool_path(\"npm\")"),
