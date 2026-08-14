@@ -672,23 +672,14 @@ mod tests {
     fn test_sea_orm_cli_spawn_routes_through_sea_orm_cli_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("sync.rs");
 
-        let bare = "sea-orm-cli";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/sync.rs must not spawn `sea-orm-cli` via the bare \
-             literal — the direct-invocation spawn must resolve the \
-             substrate-exported `SEA_ORM_CLI_BIN` env override via \
-             `crate::repo::get_tool_path(\"SEA_ORM_CLI_BIN\", \
-             \"sea-orm-cli\")` first. A raw literal at `Command::new` \
-             bypasses the hermetic-runner contract substrate's \
-             mkRuntimeToolsEnv exports and (worse) races the sibling \
-             `which`-based availability probe: the probe would silently \
-             report `false` in a nix-hermetic env where bare \
-             `sea-orm-cli` isn't on PATH, skipping SeaORM entity \
-             generation entirely."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/sync.rs",
+            "sea-orm-cli",
+            "resolve the substrate-exported `SEA_ORM_CLI_BIN` env override \
+             via `crate::repo::get_tool_path(\"SEA_ORM_CLI_BIN\", \"sea-orm-cli\")`",
         );
+
         assert!(
             SOURCE.contains("get_tool_path(\"SEA_ORM_CLI_BIN\", \"sea-orm-cli\")"),
             "commands/sync.rs must resolve the `sea-orm-cli` binary via \

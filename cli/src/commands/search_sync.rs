@@ -307,18 +307,13 @@ mod tests {
     fn test_kubectl_spawn_routes_through_kubectl_command_async_not_raw_literal() {
         const SOURCE: &str = include_str!("search_sync.rs");
 
-        let bare = "kubectl";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/search_sync.rs must not spawn `kubectl` via the \
-             bare literal — every `kubectl` spawn must resolve the \
-             substrate-exported `KUBECTL_BIN` env override via \
-             `kubectl_command_async` first. A raw literal at \
-             `Command::new` bypasses the hermetic-runner contract \
-             substrate's mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/search_sync.rs",
+            "kubectl",
+            "resolve the substrate-exported `KUBECTL_BIN` env override via `kubectl_command_async`",
         );
+
         assert!(
             SOURCE.contains("kubectl_command_async()"),
             "commands/search_sync.rs must resolve the `kubectl` binary \
@@ -369,23 +364,14 @@ mod tests {
     fn test_novasearchctl_spawn_routes_through_novasearchctl_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("search_sync.rs");
 
-        let bare = "novasearchctl";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/search_sync.rs must not spawn `novasearchctl` via \
-             the bare literal — the direct-invocation spawn must resolve \
-             the substrate-exported `NOVASEARCHCTL_BIN` env override via \
-             `crate::repo::get_tool_path(\"NOVASEARCHCTL_BIN\", \
-             \"novasearchctl\")` first. A raw literal at `Command::new` \
-             bypasses the hermetic-runner contract substrate's \
-             mkRuntimeToolsEnv exports and (worse) races the sibling \
-             `which`-based availability probe: the probe would silently \
-             report `false` in a nix-hermetic env where bare \
-             `novasearchctl` isn't on PATH, downgrading every direct \
-             call to the `kubectl exec` fallback."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/search_sync.rs",
+            "novasearchctl",
+            "resolve the substrate-exported `NOVASEARCHCTL_BIN` env override \
+             via `crate::repo::get_tool_path(\"NOVASEARCHCTL_BIN\", \"novasearchctl\")`",
         );
+
         assert!(
             SOURCE.contains("get_tool_path(\"NOVASEARCHCTL_BIN\", \"novasearchctl\")"),
             "commands/search_sync.rs must resolve the `novasearchctl` \

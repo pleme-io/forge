@@ -758,17 +758,13 @@ mod tests {
     fn test_jsonnet_spawn_routes_through_jsonnet_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("dashboards.rs");
 
-        let bare = "jsonnet";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/dashboards.rs must not spawn `jsonnet` via the \
-             bare literal — every jsonnet spawn must resolve \
-             `JSONNET_BIN` via `jsonnet_bin()` first. A raw literal \
-             at `Command::new` bypasses the hermetic-runner contract \
-             substrate's mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/dashboards.rs",
+            "jsonnet",
+            "resolve `JSONNET_BIN` via `jsonnet_bin()`",
         );
+
         assert!(
             SOURCE.contains("fn jsonnet_bin()"),
             "commands/dashboards.rs must define `jsonnet_bin()` — the \

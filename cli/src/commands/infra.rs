@@ -179,17 +179,13 @@ mod docker_bin_routing_tests {
     fn test_docker_spawns_route_through_docker_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("infra.rs");
 
-        let bare = "docker";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/infra.rs must not spawn `docker` via the bare \
-             literal — every docker spawn must resolve `DOCKER_BIN` \
-             via `docker_bin()` first. A raw literal at `Command::new` \
-             bypasses the hermetic-runner contract substrate's \
-             mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/infra.rs",
+            "docker",
+            "resolve `DOCKER_BIN` via `docker_bin()`",
         );
+
         assert!(
             SOURCE.contains("fn docker_bin()"),
             "commands/infra.rs must define `docker_bin()` — the sigil \
