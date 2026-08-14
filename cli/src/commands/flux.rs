@@ -11,6 +11,97 @@ use crate::flux_get::{
     FluxGetKustomizationsError, KustomizationRow,
 };
 use crate::infrastructure::kubectl::kubectl_command_async;
+use crate::retry::RetryPolicy;
+
+/// The typed exponential-backoff policy for the two deployment-pod-
+/// polling loops in this module ([`verify_deployment_image`] and
+/// [`wait_for_deployment`]) — `initial_backoff` 2s × `factor` 2 capped at
+/// `max_backoff` 30s. Consumes the pre-existing typed primitive at
+/// [`crate::retry::RetryPolicy`] so the per-attempt delay lands at
+/// [`RetryPolicy::compute_delay`], the same shared body the sibling
+/// reconcile-poll surface `commands/migrations.rs::
+/// SHINKA_MIGRATION_POLL_BACKOFF` (commit b962db5) and the health-endpoint
+/// retry surface `commands/post_deploy_verification.rs::
+/// HEALTH_ENDPOINT_BACKOFF` (commit b5db3b6) read through.
+///
+/// Pre-lift the hand-rolled schedule was spelled inline as the two-field
+/// struct `struct Backoff { current: u64 }` seeded via
+/// `Self { current: 2 }` and driven by `sleep(Duration::from_secs(
+/// self.current)).await; self.current = (self.current * 2).min(30);`.
+/// That shape carried three structural defects the typed-primitive body
+/// forecloses:
+/// 1. **Instance-state escape.** The `Backoff` struct owned its state in
+///    a `current: u64` field held by an instance passed to a helper
+///    method — the state lived outside the loop body and outside the
+///    caller's local scope. A future refactor that hoisted a single
+///    `Backoff` instance across two polling loops (e.g., an outer retry
+///    wrapping an inner poll) silently continued from the prior loop's
+///    cap (30s) instead of resetting to the 2s seed, converting a fresh
+///    2s first sleep into a 30s wait with no visible source-level
+///    change. This is a strictly worse variant of the same
+///    `mut backoff_secs` local-state escape that
+///    `SHINKA_MIGRATION_POLL_BACKOFF`'s docstring cites at
+///    `commands/migrations.rs`, because instance state survives loop
+///    exit whereas a local dies at the enclosing block. Lifting to
+///    `compute_delay(attempt)` names the schedule as a pure function of
+///    a monotonic counter that is re-seeded to `0` at every consumer's
+///    loop entry, so no code path can silently desync the delay from
+///    the iteration index across loop boundaries.
+/// 2. **`u64 * 2` unbounded until the cap.** The multiply was unbounded
+///    until the `.min(30)` clamp — safe in practice because the cap
+///    fired at iteration 4 (16 → 32.min(30) = 30), but the shape did
+///    not compose with a future refactor that lifted the cap or the
+///    factor. [`RetryPolicy::compute_delay`]'s `checked_pow` saturating
+///    body is safe by construction under arbitrarily-large `factor` and
+///    `attempt`.
+/// 3. **No caller-visible schedule invariant.** The `Backoff` struct
+///    was a bespoke private newtype whose `(seed=2, factor=2, cap=30)`
+///    schedule was three magic numbers spread across `Self { current: 2
+///    }` and `(self.current * 2).min(30)`. A future edit that bumped
+///    the cap to 60 or the seed to 5 landed silently at the struct's
+///    private state without a named-primitive audit surface. The lifted
+///    const `FLUX_POLL_BACKOFF` is a single load-bearing structural
+///    surface that a caller can point at, cite, and test-shield in one
+///    place.
+///
+/// `max_attempts: u32::MAX` is a placeholder — both polling loops are
+/// unbounded by design (`wait_for_deployment`'s `_timeout_secs`
+/// parameter carries a `kept for API compat, not used as hard timeout`
+/// comment; `verify_deployment_image` mirrors the same shape) and
+/// consume only [`RetryPolicy::compute_delay`] from this policy, not
+/// [`RetryPolicy::max_attempts`]. The `max_attempts` field is
+/// unconsulted at these consumption sites.
+const FLUX_POLL_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: u32::MAX,
+    initial_backoff: Duration::from_secs(2),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between deployment-pod-polling iterations, given a 0-indexed
+/// local `attempt` counter (the `loop { ... }` shape both
+/// [`verify_deployment_image`] and [`wait_for_deployment`] drive
+/// increments once per non-terminal iteration).
+///
+/// Maps the local 0-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(2)`:
+/// local `attempt == 0` (the sleep after the first non-terminal poll)
+/// reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff = 2s`; local `attempt == 1` reads as `compute_delay(3)
+/// = 4s`; local `attempt == 2` reads as `compute_delay(4) = 8s`; local
+/// `attempt == 3` reads as `compute_delay(5) = 16s`; local `attempt >= 4`
+/// reads as `compute_delay(>=6) = 30s` (cap) — matching the pre-lift
+/// `Backoff` struct's `2 → 4 → 8 → 16 → 30 → 30 → …` schedule verbatim.
+///
+/// The `saturating_add` clamp forecloses the `u32` overflow class at
+/// the bridge — an unbounded polling loop that reaches
+/// `attempt == u32::MAX` reads as `compute_delay(u32::MAX)`, which
+/// itself saturates to [`FLUX_POLL_BACKOFF::max_backoff`] via the
+/// `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
+/// without panic.
+fn flux_poll_delay(attempt: u32) -> Duration {
+    FLUX_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
+}
 
 /// FluxCD health check before and after deployments.
 ///
@@ -411,7 +502,7 @@ pub async fn verify_deployment_image(
     );
 
     let start = std::time::Instant::now();
-    let mut backoff = Backoff::new();
+    let mut backoff_attempt: u32 = 0;
     let mut last_diag_at = 0u64;
 
     loop {
@@ -458,7 +549,8 @@ pub async fn verify_deployment_image(
             println!("{}", diag);
         }
 
-        backoff.wait().await;
+        sleep(flux_poll_delay(backoff_attempt)).await;
+        backoff_attempt = backoff_attempt.saturating_add(1);
     }
 }
 
@@ -494,7 +586,7 @@ pub async fn wait_for_deployment(
     println!("   Expected git SHA in image tag: {}", expected_sha);
 
     let start = std::time::Instant::now();
-    let mut backoff = Backoff::new();
+    let mut backoff_attempt: u32 = 0;
     let mut last_diag_at = 0u64;
 
     loop {
@@ -554,24 +646,8 @@ pub async fn wait_for_deployment(
             println!("{}", diag);
         }
 
-        backoff.wait().await;
-    }
-}
-
-/// Exponential backoff for polling loops.
-/// Starts at 2s, doubles each iteration, caps at 30s.
-struct Backoff {
-    current: u64,
-}
-
-impl Backoff {
-    fn new() -> Self {
-        Self { current: 2 }
-    }
-
-    async fn wait(&mut self) {
-        sleep(Duration::from_secs(self.current)).await;
-        self.current = (self.current * 2).min(30);
+        sleep(flux_poll_delay(backoff_attempt)).await;
+        backoff_attempt = backoff_attempt.saturating_add(1);
     }
 }
 
@@ -928,6 +1004,196 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
 
 #[cfg(test)]
 mod tests {
+    use super::{flux_poll_delay, FLUX_POLL_BACKOFF};
+    use crate::test_support::code_line_hits;
+    use std::time::Duration;
+
+    // ====================================================================
+    // deployment-pod-polling backoff — FLUX_POLL_BACKOFF + helper
+    // ====================================================================
+    //
+    // These pin the RetryPolicy-consuming replacement of the pre-lift
+    // bespoke `Backoff` struct (`Self { current: 2 }` seed, driven by
+    // `sleep(Duration::from_secs(self.current)); self.current =
+    // (self.current * 2).min(30)`) that both `verify_deployment_image`
+    // and `wait_for_deployment` polled through. Sibling of the
+    // `SHINKA_MIGRATION_POLL_BACKOFF` shields at
+    // `commands/migrations.rs::tests` (commit b962db5) — same const-
+    // + delegation-helper shape, same three-test pattern
+    // (policy-shape / in-cap-schedule / past-cap-cap /
+    // saturating-no-panic), same whole-module boundary shield that
+    // forbids re-fusing the pre-lift `Backoff` struct.
+
+    /// The `FLUX_POLL_BACKOFF` const's `(initial_backoff, factor,
+    /// max_backoff)` triple is the load-bearing invariant every
+    /// consumption site (both polling loops here, plus any future
+    /// polling-loop consumer that reads the same schedule) shares.
+    /// Pinned here so a future edit at the const's site is caught
+    /// at a named test rather than silently across the two
+    /// consumption sites and the delegation helper.
+    #[test]
+    fn test_flux_poll_backoff_policy_shape() {
+        assert_eq!(
+            FLUX_POLL_BACKOFF.initial_backoff,
+            Duration::from_secs(2),
+            "FLUX_POLL_BACKOFF.initial_backoff must be 2s \
+             — preserves the pre-lift bespoke `Backoff {{ current: 2 }}` \
+             seed verbatim at both polling loops' first sleep.",
+        );
+        assert_eq!(
+            FLUX_POLL_BACKOFF.factor, 2,
+            "FLUX_POLL_BACKOFF.factor must be 2 \
+             — preserves the pre-lift `self.current * 2` climb verbatim.",
+        );
+        assert_eq!(
+            FLUX_POLL_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "FLUX_POLL_BACKOFF.max_backoff must be 30s \
+             — preserves the pre-lift `.min(30)` cap verbatim.",
+        );
+    }
+
+    /// Pre-lift the deployment-pod-polling loop's first four iterations
+    /// emitted `sleep(2) → sleep(4) → sleep(8) → sleep(16)` via the
+    /// mutating `Backoff::wait` body (seeded at 2, doubled after each
+    /// non-terminal iteration, capped at 30). The lift's 0-indexed
+    /// `attempt` counter must reproduce that schedule verbatim under
+    /// `flux_poll_delay` at every within-cap attempt.
+    #[test]
+    fn test_flux_poll_delay_matches_pre_lift_schedule_at_in_cap_attempts() {
+        assert_eq!(
+            flux_poll_delay(0),
+            Duration::from_secs(2),
+            "iter 0 must sleep 2s — matches pre-lift `Backoff {{ current: 2 }}` seed.",
+        );
+        assert_eq!(
+            flux_poll_delay(1),
+            Duration::from_secs(4),
+            "iter 1 must sleep 4s — matches pre-lift `2 * 2 = 4`.",
+        );
+        assert_eq!(
+            flux_poll_delay(2),
+            Duration::from_secs(8),
+            "iter 2 must sleep 8s — matches pre-lift `4 * 2 = 8`.",
+        );
+        assert_eq!(
+            flux_poll_delay(3),
+            Duration::from_secs(16),
+            "iter 3 must sleep 16s — matches pre-lift `8 * 2 = 16`.",
+        );
+    }
+
+    /// Iterations past the cap must all emit `max_backoff = 30s` —
+    /// pre-lift `(16 * 2).min(30) = 30` at iter 4 and `(30 * 2).min(30)
+    /// = 30` at every subsequent iter. Both `verify_deployment_image`
+    /// and `wait_for_deployment` are unbounded polling loops that can
+    /// run minutes on slow deployments, so beyond-cap iterations must
+    /// stay at the ceiling.
+    #[test]
+    fn test_flux_poll_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            flux_poll_delay(4),
+            Duration::from_secs(30),
+            "iter 4 must sleep 30s (cap) — pre-lift `(16 * 2).min(30) = 30`.",
+        );
+        assert_eq!(
+            flux_poll_delay(5),
+            Duration::from_secs(30),
+            "iter 5 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            flux_poll_delay(50),
+            Duration::from_secs(30),
+            "iter 50 must sleep 30s (cap) — polling loops can run \
+             minutes on slow deployments, so beyond-cap iterations \
+             must stay at the ceiling.",
+        );
+    }
+
+    /// Both polling loops are unbounded by design (`_timeout_secs`
+    /// carries a `kept for API compat, not used as hard timeout`
+    /// comment), so `backoff_attempt` can in principle reach any
+    /// `u32` value. Pre-lift the `self.current * 2` climb was safe
+    /// only because `.min(30)` fired at iter 4; post-lift
+    /// `saturating_add(2)` inside `flux_poll_delay` bounds the
+    /// argument to `RetryPolicy::compute_delay`, whose
+    /// `checked_pow`-then-cap body itself saturates without panic.
+    /// This test pins that composition: an `attempt == u32::MAX`
+    /// argument (a pathologically-long-running poll) returns a bounded
+    /// delay rather than panicking.
+    #[test]
+    fn test_flux_poll_delay_saturates_without_panic_at_arbitrarily_large_attempt() {
+        assert_eq!(
+            flux_poll_delay(u32::MAX),
+            Duration::from_secs(30),
+            "attempt=u32::MAX must saturate to max_backoff without \
+             panic — the `saturating_add(2)` bridge + \
+             `RetryPolicy::compute_delay`'s `checked_pow` cap close \
+             the u32 overflow class by construction.",
+        );
+        assert_eq!(
+            flux_poll_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "attempt=u32::MAX - 1 must also saturate to max_backoff \
+             — the bridge `saturating_add(2)` returns u32::MAX, still \
+             far past the cap.",
+        );
+    }
+
+    /// Whole-module boundary shield: both polling-loop bodies MUST
+    /// consume the typed primitive at `flux_poll_delay` rather than
+    /// re-fusing the pre-lift bespoke `Backoff` struct or its
+    /// mutating `Self { current: u64 }` state escape. A future
+    /// refactor that reintroduces the instance-state escape (see
+    /// `FLUX_POLL_BACKOFF`'s docstring for the three structural
+    /// defects the lift closed) fails here, not silently in
+    /// production. Whole-module boundary discipline sibling of
+    /// `test_wait_for_shinka_migration_consumes_typed_poll_delay_not_mut_backoff_secs`
+    /// at `commands/migrations.rs::tests` (commit b962db5).
+    #[test]
+    fn test_flux_polling_loops_consume_typed_poll_delay_not_bespoke_backoff_struct() {
+        let source = include_str!("flux.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        // Code-line filter (via `code_line_hits`) skips docstring /
+        // prose-comment lines, so the shield does not false-positive
+        // on `FLUX_POLL_BACKOFF`'s own docstring above (which cites
+        // the pre-lift `struct Backoff { current: u64 }` shape as
+        // context for the three defects it forecloses).
+        let bespoke_struct_hits = code_line_hits(module_body, "struct Backoff");
+        assert!(
+            bespoke_struct_hits.is_empty(),
+            "flux.rs must NOT hand-roll a bespoke `struct Backoff` \
+             for the polling loops — the schedule lives at \
+             `FLUX_POLL_BACKOFF` + `flux_poll_delay`, both grounding \
+             through `RetryPolicy::compute_delay`. Found code-line \
+             hits: {:#?}",
+            bespoke_struct_hits,
+        );
+        let wait_call_hits = code_line_hits(module_body, "backoff.wait().await");
+        assert!(
+            wait_call_hits.is_empty(),
+            "flux.rs must NOT drive the polling loops through a \
+             bespoke `backoff.wait().await` method — the sleep site \
+             must consume `sleep(flux_poll_delay(backoff_attempt))`. \
+             Found code-line hits: {:#?}",
+            wait_call_hits,
+        );
+        let delegation_hits = code_line_hits(module_body, "flux_poll_delay(backoff_attempt)");
+        assert!(
+            !delegation_hits.is_empty(),
+            "flux.rs must consume the typed poll-delay helper at both \
+             polling loops' sleep sites — the canonical delegation \
+             call was not found at any code line.",
+        );
+    }
+
     /// Regression shield: every `kubectl`-spawning site in
     /// `commands/flux.rs`'s two async diagnostic helpers
     /// (`get_pod_status_full`, `gather_deployment_diagnostics`) MUST
