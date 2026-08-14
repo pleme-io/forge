@@ -409,10 +409,7 @@ mod tests {
     fn test_gem_spawn_routes_through_gem_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("gem.rs");
 
-        let bare = "gem";
-        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
-        let raw_bare = format!("Command::new(\"{}\")", bare);
-        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("gem");
 
         assert!(
             !SOURCE.contains(&raw_std),
@@ -486,10 +483,7 @@ mod tests {
     fn test_bundle_spawn_routes_through_bundle_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("gem.rs");
 
-        let bare = "bundle";
-        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
-        let raw_bare = format!("Command::new(\"{}\")", bare);
-        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("bundle");
 
         assert!(
             !SOURCE.contains(&raw_std),

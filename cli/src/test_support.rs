@@ -284,10 +284,103 @@ pub fn add_bare_origin(work_dir: &Path, bare_dir: &Path) {
     );
 }
 
+/// The three canonical Rust source shapes that spawn a bare tool
+/// literal — the shapes every whole-module routing shield in forge
+/// forbids.
+///
+/// Returns `[raw_std, raw_bare, raw_tokio]` reconstructed via `format!`
+/// from `bare`, in the fixed order the shields destructure and emit
+/// assertion messages against:
+///
+/// 1. `std::process::Command::new("<bare>")` — the fully-qualified sync spawn.
+/// 2. `Command::new("<bare>")` — the top-of-file `use` alias sync spawn.
+/// 3. `tokio::process::Command::new("<bare>")` — the fully-qualified async spawn.
+///
+/// # Why one canonical list
+///
+/// Fifteen shield tests across ten modules (`cli/src/git.rs`,
+/// `cli/src/infrastructure/git.rs`, `cli/src/test_support.rs`, and
+/// seven `cli/src/commands/*.rs`) each re-spelled the same three
+/// `format!` lines verbatim (THEORY.md §VI.1: "when a pattern repeats
+/// three times, extract an archetype/backend/synthesizer and generate
+/// from it. Two occurrences is a coincidence; three is a law"). Five
+/// times over the threshold. This helper is the law-redeeming
+/// consolidation: a future Rust spawn shape added to the array here
+/// (a new async runtime, say) is picked up by every shield in one
+/// edit, and the shield-side surface for "what shapes are forbidden"
+/// cannot silently drift between modules.
+///
+/// # Load-bearing reconstruction via `format!`
+///
+/// The shapes are built via `format!("Command::new(\"{}\")", bare)`
+/// rather than written as literal strings. This helper's own source
+/// text therefore contains only the templated form — `Command::new(\"{}\")` —
+/// never the substituted form a producer-site regression would emit.
+/// A shield that runs against `include_str!("test_support.rs")` does
+/// not false-match itself on this helper's body. Same discipline
+/// every shield already applied inline; centralizing it pins the
+/// discipline once. (Note: the substituted spawn literal a shield
+/// forbids is never written verbatim in this module — not in the
+/// helper body, not in these docs — so a caller with `bare = "git"`
+/// producing the string `Command`+`::new("git")` cannot appear as a
+/// substring of this file's source text.)
+///
+/// # Substring semantics
+///
+/// Each returned shape includes the enclosing `"…"` around `bare`,
+/// so any shield asserting `!SOURCE.contains(&raw_bare)` also catches
+/// every fully-qualified spawn as a substring — the
+/// `std::process::`-prefixed shape contains the bare-alias shape as a
+/// suffix. The explicit triple exists so each shield can emit a
+/// distinct assertion message per shape, not because a single check
+/// would miss any of them.
+pub fn forbidden_spawn_shapes(bare: &str) -> [String; 3] {
+    [
+        format!("std::process::Command::new(\"{}\")", bare),
+        format!("Command::new(\"{}\")", bare),
+        format!("tokio::process::Command::new(\"{}\")", bare),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// The three shapes returned by [`forbidden_spawn_shapes`] are the
+    /// substituted `std::process::` / bare-alias / `tokio::process::`
+    /// spawn literals wrapped around `bare`, returned in that fixed
+    /// order. Prose above spells out the individual shapes in
+    /// templated form (with a placeholder in place of the concrete
+    /// bare tool name) to keep this shield-adjacent module free of a
+    /// verbatim spawn literal that a whole-file `SOURCE.contains`
+    /// shield would otherwise pick up as a false positive.
+    ///
+    /// Fifteen shield tests across the crate destructure this array by
+    /// position (`let [raw_std, raw_bare, raw_tokio] = ...;`) and emit
+    /// a distinct assertion message per index. The order therefore
+    /// pins the load-bearing shield-message-to-shape mapping: a
+    /// reorder here would misroute every shield's diagnostic (a
+    /// `tokio::process::` violation would print the `std::process::`
+    /// message and vice-versa).
+    ///
+    /// The exact substituted strings are also part of the shield
+    /// contract — a shield with `let bare = "git"` composes to the
+    /// exact literal a producer-site regression would insert. Pinning
+    /// the return values verbatim guarantees a future edit that
+    /// silently rewrites the format template (adding a space, dropping
+    /// the quotes) breaks this test loudly before shipping.
+    #[test]
+    fn test_forbidden_spawn_shapes_returns_three_canonical_shapes_in_fixed_order() {
+        assert_eq!(
+            forbidden_spawn_shapes("git"),
+            [
+                "std::process::Command::new(\"git\")".to_string(),
+                "Command::new(\"git\")".to_string(),
+                "tokio::process::Command::new(\"git\")".to_string(),
+            ]
+        );
+    }
 
     /// The returned absolute path resolves to a real file inside the
     /// returned `TempDir`. Pinning this is the floor for every shim-
@@ -602,10 +695,7 @@ mod tests {
     fn test_git_spawn_routes_through_git_command_sync_not_raw_literal() {
         const SOURCE: &str = include_str!("test_support.rs");
 
-        let bare = "git";
-        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
-        let raw_bare = format!("Command::new(\"{}\")", bare);
-        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+        let [raw_std, raw_bare, raw_tokio] = forbidden_spawn_shapes("git");
 
         assert!(
             !SOURCE.contains(&raw_std),

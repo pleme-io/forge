@@ -700,10 +700,8 @@ mod tests {
     fn test_rover_fhs_spawn_routes_through_rover_fhs_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("federation.rs");
 
-        let bare = "rover-fhs";
-        let raw_std = format!("std::process::Command::new(\"{}\")", bare);
-        let raw_bare = format!("Command::new(\"{}\")", bare);
-        let raw_tokio = format!("tokio::process::Command::new(\"{}\")", bare);
+        let [raw_std, raw_bare, raw_tokio] =
+            crate::test_support::forbidden_spawn_shapes("rover-fhs");
 
         assert!(
             !SOURCE.contains(&raw_std),
