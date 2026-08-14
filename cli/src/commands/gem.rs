@@ -2,7 +2,7 @@
 //!
 //! Provides build, push, and version bump operations for Ruby gems.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 use tracing::info;
@@ -153,9 +153,12 @@ pub fn bump(working_dir: &str, level: &str, name: Option<String>) -> Result<(Str
     let re = regex::Regex::new(r#"VERSION\s*=\s*%\((\d+\.\d+\.\d+)\)\.freeze"#)
         .context("Failed to compile version regex")?;
 
-    let caps = re
-        .captures(&content)
-        .with_context(|| format!("No VERSION = %(X.Y.Z).freeze found in {}", version_file.display()))?;
+    let caps = re.captures(&content).with_context(|| {
+        format!(
+            "No VERSION = %(X.Y.Z).freeze found in {}",
+            version_file.display()
+        )
+    })?;
 
     let old_version = caps[1].to_string();
     let new_version = version::bump_semver(&old_version, level)?;
@@ -352,7 +355,11 @@ fn find_gem_file(dir: &Path, prefix: &str) -> Result<String> {
     entries
         .first()
         .map(|e| e.file_name().to_string_lossy().to_string())
-        .context(format!("No .gem file found for {} in {}", prefix, dir.display()))
+        .context(format!(
+            "No .gem file found for {} in {}",
+            prefix,
+            dir.display()
+        ))
 }
 
 #[cfg(test)]
@@ -409,31 +416,13 @@ mod tests {
     fn test_gem_spawn_routes_through_gem_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("gem.rs");
 
-        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("gem");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/gem.rs",
+            "gem",
+            "resolve `GEM_BIN` via `gem_bin()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "commands/gem.rs must not spawn `gem` via the bare literal \
-             — every gem spawn must resolve `GEM_BIN` via `gem_bin()` \
-             first. A raw literal at `std::process::Command::new` \
-             bypasses the hermetic-runner contract substrate's \
-             mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "commands/gem.rs must not spawn `gem` via the bare literal \
-             — every gem spawn must resolve `GEM_BIN` via `gem_bin()` \
-             first. A raw literal at `Command::new` (either the \
-             top-level `use` alias or the bare form) bypasses the \
-             hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "commands/gem.rs must not spawn `gem` via the bare literal \
-             — every gem spawn must resolve `GEM_BIN` via `gem_bin()` \
-             first. A raw literal at `tokio::process::Command::new` \
-             bypasses the hermetic-runner contract."
-        );
         assert!(
             SOURCE.contains("fn gem_bin()"),
             "commands/gem.rs must define `gem_bin()` — the sigil \
@@ -483,32 +472,13 @@ mod tests {
     fn test_bundle_spawn_routes_through_bundle_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("gem.rs");
 
-        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("bundle");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/gem.rs",
+            "bundle",
+            "resolve `BUNDLE_BIN` via `bundle_bin()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "commands/gem.rs must not spawn `bundle` via the bare \
-             literal — every bundle spawn must resolve `BUNDLE_BIN` \
-             via `bundle_bin()` first. A raw literal at \
-             `std::process::Command::new` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "commands/gem.rs must not spawn `bundle` via the bare \
-             literal — every bundle spawn must resolve `BUNDLE_BIN` \
-             via `bundle_bin()` first. A raw literal at `Command::new` \
-             (either the top-level `use` alias or the bare form) \
-             bypasses the hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "commands/gem.rs must not spawn `bundle` via the bare \
-             literal — every bundle spawn must resolve `BUNDLE_BIN` \
-             via `bundle_bin()` first. A raw literal at \
-             `tokio::process::Command::new` bypasses the hermetic-runner \
-             contract."
-        );
         assert!(
             SOURCE.contains("fn bundle_bin()"),
             "commands/gem.rs must define `bundle_bin()` — the sigil \

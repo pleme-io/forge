@@ -700,33 +700,13 @@ mod tests {
     fn test_rover_fhs_spawn_routes_through_rover_fhs_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("federation.rs");
 
-        let [raw_std, raw_bare, raw_tokio] =
-            crate::test_support::forbidden_spawn_shapes("rover-fhs");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/federation.rs",
+            "rover-fhs",
+            "resolve `ROVER_FHS_BIN` via `rover_fhs_bin()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "commands/federation.rs must not spawn `rover-fhs` via the \
-             bare literal — every rover-fhs spawn must resolve \
-             `ROVER_FHS_BIN` via `rover_fhs_bin()` first. A raw literal \
-             at `std::process::Command::new` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "commands/federation.rs must not spawn `rover-fhs` via the \
-             bare literal — every rover-fhs spawn must resolve \
-             `ROVER_FHS_BIN` via `rover_fhs_bin()` first. A raw literal \
-             at `Command::new` (either the top-level `use` alias or the \
-             bare form) bypasses the hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "commands/federation.rs must not spawn `rover-fhs` via the \
-             bare literal — every rover-fhs spawn must resolve \
-             `ROVER_FHS_BIN` via `rover_fhs_bin()` first. A raw literal \
-             at `tokio::process::Command::new` bypasses the hermetic-runner \
-             contract."
-        );
         assert!(
             SOURCE.contains("fn rover_fhs_bin()"),
             "commands/federation.rs must define `rover_fhs_bin()` — the \

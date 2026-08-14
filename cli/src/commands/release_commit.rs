@@ -272,32 +272,13 @@ mod tests {
     fn test_git_spawn_routes_through_git_command_sync_not_raw_literal() {
         const SOURCE: &str = include_str!("release_commit.rs");
 
-        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("git");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/release_commit.rs",
+            "git",
+            "resolve `GIT_BIN` via `crate::git::git_command_sync()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "commands/release_commit.rs must not spawn `git` via the \
-             bare literal — every git spawn must resolve `GIT_BIN` via \
-             `crate::git::git_command_sync()` first. A raw literal at \
-             `std::process::Command::new` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "commands/release_commit.rs must not spawn `git` via the \
-             bare literal — every git spawn must resolve `GIT_BIN` via \
-             `crate::git::git_command_sync()` first. A raw literal at \
-             `Command::new` (either the top-level `use` alias or the \
-             bare form) bypasses the hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "commands/release_commit.rs must not spawn `git` via the \
-             bare literal — every git spawn must resolve `GIT_BIN` via \
-             `crate::git::git_command_sync()` first. A raw literal at \
-             `tokio::process::Command::new` bypasses the \
-             hermetic-runner contract."
-        );
         assert!(
             SOURCE.contains("crate::git::git_command_sync"),
             "commands/release_commit.rs must resolve the `git` binary \

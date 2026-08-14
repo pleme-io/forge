@@ -48,8 +48,8 @@ use tokio::process::Command;
 use crate::config::PreReleaseGatesConfig;
 
 use super::codegen_validation;
-use super::frontend_validation;
 use super::e2e;
+use super::frontend_validation;
 use super::migration_validation;
 
 /// Resolve the `docker` binary path via `DOCKER_BIN`, falling back to
@@ -352,10 +352,7 @@ pub async fn execute(
     // Phase 0a: Fast gates (parallel)
     // Backend, Migration, and Frontend gates run concurrently
     // ========================================
-    println!(
-        "{}",
-        "Phase 0a: Fast Gates (parallel)".bold().underline()
-    );
+    println!("{}", "Phase 0a: Fast Gates (parallel)".bold().underline());
     println!();
 
     let (backend_results, migration_results, frontend_results) = tokio::join!(
@@ -368,21 +365,27 @@ pub async fn execute(
     let backend_results = backend_results?;
     summary.passed.extend(backend_results.passed);
     summary.failed.extend(backend_results.failed);
-    summary.failed_details.extend(backend_results.failed_details);
+    summary
+        .failed_details
+        .extend(backend_results.failed_details);
     summary.skipped.extend(backend_results.skipped);
 
     // Merge migration results
     let migration_results = migration_results?;
     summary.passed.extend(migration_results.passed);
     summary.failed.extend(migration_results.failed);
-    summary.failed_details.extend(migration_results.failed_details);
+    summary
+        .failed_details
+        .extend(migration_results.failed_details);
     summary.skipped.extend(migration_results.skipped);
 
     // Merge frontend results
     let frontend_results = frontend_results?;
     summary.passed.extend(frontend_results.passed);
     summary.failed.extend(frontend_results.failed);
-    summary.failed_details.extend(frontend_results.failed_details);
+    summary
+        .failed_details
+        .extend(frontend_results.failed_details);
     summary.skipped.extend(frontend_results.skipped);
 
     // ========================================
@@ -404,29 +407,20 @@ pub async fn execute(
             .push(format!("G13: Integration tests ({})", reason));
     } else {
         println!();
-        println!(
-            "{}",
-            "Phase 0b: Integration Tests (G13)".bold().underline()
-        );
+        println!("{}", "Phase 0b: Integration Tests (G13)".bold().underline());
         println!();
 
         match run_integration_gate(&config).await {
             Ok(passed) => {
                 if passed {
-                    summary
-                        .passed
-                        .push("G13: Integration tests".to_string());
+                    summary.passed.push("G13: Integration tests".to_string());
                 } else {
-                    summary
-                        .failed
-                        .push("G13: Integration tests".to_string());
+                    summary.failed.push("G13: Integration tests".to_string());
                 }
             }
             Err(e) => {
                 println!("   {} Integration tests error: {}", "❌".red(), e);
-                summary
-                    .failed
-                    .push("G13: Integration tests".to_string());
+                summary.failed.push("G13: Integration tests".to_string());
             }
         }
     }
@@ -445,15 +439,10 @@ pub async fn execute(
         } else {
             "disabled"
         };
-        summary
-            .skipped
-            .push(format!("G14: E2E tests ({})", reason));
+        summary.skipped.push(format!("G14: E2E tests ({})", reason));
     } else {
         println!();
-        println!(
-            "{}",
-            "Phase 0c: E2E Tests (G14)".bold().underline()
-        );
+        println!("{}", "Phase 0c: E2E Tests (G14)".bold().underline());
         println!();
 
         match run_e2e_gate(&config).await {
@@ -798,10 +787,9 @@ async fn run_frontend_gates(config: &PreReleaseConfig) -> Result<GateSummary> {
         } else {
             summary.failed.push("G10: Type-check".to_string());
             if !frontend_result.type_check_details.is_empty() {
-                summary.failed_details.push((
-                    "G10".to_string(),
-                    frontend_result.type_check_details,
-                ));
+                summary
+                    .failed_details
+                    .push(("G10".to_string(), frontend_result.type_check_details));
             }
         }
 
@@ -820,10 +808,9 @@ async fn run_frontend_gates(config: &PreReleaseConfig) -> Result<GateSummary> {
         } else {
             summary.failed.push(format!("G11: {}", linter_name));
             if !frontend_result.lint_details.is_empty() {
-                summary.failed_details.push((
-                    "G11".to_string(),
-                    frontend_result.lint_details,
-                ));
+                summary
+                    .failed_details
+                    .push(("G11".to_string(), frontend_result.lint_details));
             }
         }
 
@@ -841,10 +828,9 @@ async fn run_frontend_gates(config: &PreReleaseConfig) -> Result<GateSummary> {
         } else {
             summary.failed.push("G12: Unit tests".to_string());
             if !frontend_result.test_details.is_empty() {
-                summary.failed_details.push((
-                    "G12".to_string(),
-                    frontend_result.test_details,
-                ));
+                summary
+                    .failed_details
+                    .push(("G12".to_string(), frontend_result.test_details));
             }
         }
     } else {
@@ -874,11 +860,7 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
 
     // Ensure Docker is running (auto-start on macOS)
     if let Err(e) = e2e::ensure_docker_running() {
-        println!(
-            "   {} Docker not available: {}",
-            "❌".red(),
-            e
-        );
+        println!("   {} Docker not available: {}", "❌".red(), e);
         return Ok(false);
     }
 
@@ -927,11 +909,7 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
             }
         }
         Ok(Err(e)) => {
-            println!(
-                "   {} Failed to run integration tests: {}",
-                "❌".red(),
-                e
-            );
+            println!("   {} Failed to run integration tests: {}", "❌".red(), e);
             Ok(false)
         }
         Err(_) => {
@@ -968,10 +946,14 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
     println!("\n   Docker containers (recently exited):");
     if let Ok(output) = std::process::Command::new(docker_bin())
         .args([
-            "ps", "-a",
-            "--filter", "status=exited",
-            "--since", "15m",
-            "--format", "     {{.Names}}\t{{.Status}}\t{{.Image}}",
+            "ps",
+            "-a",
+            "--filter",
+            "status=exited",
+            "--since",
+            "15m",
+            "--format",
+            "     {{.Names}}\t{{.Status}}\t{{.Image}}",
         ])
         .output()
     {
@@ -986,7 +968,11 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
     // E2E images
     println!("\n   E2E Docker images:");
     if let Ok(output) = std::process::Command::new(docker_bin())
-        .args(["images", "--format", "     {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.ID}}"])
+        .args([
+            "images",
+            "--format",
+            "     {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.ID}}",
+        ])
         .output()
     {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1002,7 +988,12 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
     if let Ok(entries) = std::fs::read_dir(&screenshot_dir) {
         let screenshots: Vec<_> = entries
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext == "png").unwrap_or(false))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "png")
+                    .unwrap_or(false)
+            })
             .collect();
         if !screenshots.is_empty() {
             println!("\n   Screenshots captured:");
@@ -1028,37 +1019,22 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
 
     // Ensure Docker is running (may already be started by G13)
     if let Err(e) = e2e::ensure_docker_running() {
-        println!(
-            "   {} Docker not available: {}",
-            "❌".red(),
-            e
-        );
+        println!("   {} Docker not available: {}", "❌".red(), e);
         return Ok(false);
     }
 
     // Resolve repo root for image preparation
-    let repo_root = config
-        .working_dir
-        .to_str()
-        .map(|s| s.to_string());
+    let repo_root = config.working_dir.to_str().map(|s| s.to_string());
 
     // Pre-cleanup: ensure no orphaned containers from previous runs
     if let Err(e) = e2e::cleanup_testcontainers() {
-        println!(
-            "   {} Pre-cleanup warning: {}",
-            "⚠️".yellow(),
-            e
-        );
+        println!("   {} Pre-cleanup warning: {}", "⚠️".yellow(), e);
     }
 
     // Always force-rebuild E2E images to ensure tests run against the current code.
     // Without force=true, stale images from a previous build would be reused.
     if let Err(e) = e2e::prepare_e2e_images(repo_root.clone(), false, false, true) {
-        println!(
-            "   {} Failed to prepare E2E images: {}",
-            "❌".red(),
-            e
-        );
+        println!("   {} Failed to prepare E2E images: {}", "❌".red(), e);
         return Ok(false);
     }
 
@@ -1068,15 +1044,15 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
     let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.args([
-            "test",
-            "--test",
-            "e2e_tests",
-            "--features",
-            "integration-tests",
-            "--",
-            "--include-ignored",
-        ])
-        .current_dir(&config.backend_dir);
+        "test",
+        "--test",
+        "e2e_tests",
+        "--features",
+        "integration-tests",
+        "--",
+        "--include-ignored",
+    ])
+    .current_dir(&config.backend_dir);
 
     if headless {
         cmd.env("E2E_HEADLESS", "1");
@@ -1085,18 +1061,11 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
     println!(
         "   Command: cargo test --test e2e_tests --features integration-tests -- --include-ignored"
     );
-    println!(
-        "   Dir:     {}",
-        config.backend_dir.display()
-    );
+    println!("   Dir:     {}", config.backend_dir.display());
     println!("   Headless: {}, Timeout: {}s", headless, timeout_secs);
     println!();
 
-    let output = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        cmd.output(),
-    )
-    .await;
+    let output = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
 
     let duration = start.elapsed();
 
@@ -1129,8 +1098,18 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
                     println!("   {}", line);
                 }
                 println!("{}", "── cargo test stderr ──".dimmed());
-                for line in stderr.lines().rev().take(50).collect::<Vec<_>>().into_iter().rev() {
-                    if line.contains("FAILED") || line.contains("panicked") || line.contains("error") {
+                for line in stderr
+                    .lines()
+                    .rev()
+                    .take(50)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                {
+                    if line.contains("FAILED")
+                        || line.contains("panicked")
+                        || line.contains("error")
+                    {
                         println!("   {}", line.red());
                     } else {
                         println!("   {}", line);
@@ -1527,7 +1506,8 @@ mod tests {
         };
         gates.migrations.check_after = Some("20240101".to_string());
 
-        let config = PreReleaseConfig::from_working_dir_with_gates(Path::new("/tmp/testapp"), gates);
+        let config =
+            PreReleaseConfig::from_working_dir_with_gates(Path::new("/tmp/testapp"), gates);
         assert!(!config.gates.fail_on_error);
         assert_eq!(
             config.gates.migrations.check_after,
@@ -1545,7 +1525,8 @@ mod tests {
             ..PreReleaseGatesConfig::default()
         };
 
-        let config = PreReleaseConfig::from_working_dir_with_gates(Path::new("/tmp/testapp"), gates);
+        let config =
+            PreReleaseConfig::from_working_dir_with_gates(Path::new("/tmp/testapp"), gates);
         assert!(!config.gates.integration.enabled);
         assert_eq!(config.gates.integration.timeout_secs, 120);
         // Other groups remain default
@@ -1563,7 +1544,8 @@ mod tests {
             ..PreReleaseGatesConfig::default()
         };
 
-        let config = PreReleaseConfig::from_working_dir_with_gates(Path::new("/tmp/testapp"), gates);
+        let config =
+            PreReleaseConfig::from_working_dir_with_gates(Path::new("/tmp/testapp"), gates);
         assert!(config.gates.e2e.enabled);
         assert_eq!(config.gates.e2e.timeout_secs, 1200);
         assert!(!config.gates.e2e.headless);
@@ -1758,32 +1740,13 @@ mod tests {
     fn test_docker_spawn_routes_through_docker_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("prerelease.rs");
 
-        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("docker");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/prerelease.rs",
+            "docker",
+            "resolve `DOCKER_BIN` via `docker_bin()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "commands/prerelease.rs must not spawn `docker` via the \
-             bare literal — every docker spawn must resolve \
-             `DOCKER_BIN` via `docker_bin()` first. A raw literal at \
-             `std::process::Command::new` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "commands/prerelease.rs must not spawn `docker` via the \
-             bare literal — every docker spawn must resolve \
-             `DOCKER_BIN` via `docker_bin()` first. A raw literal at \
-             `Command::new` (either the top-level `use` alias or the \
-             bare form) bypasses the hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "commands/prerelease.rs must not spawn `docker` via the \
-             bare literal — every docker spawn must resolve \
-             `DOCKER_BIN` via `docker_bin()` first. A raw literal at \
-             `tokio::process::Command::new` bypasses the \
-             hermetic-runner contract."
-        );
         assert!(
             SOURCE.contains("fn docker_bin()"),
             "commands/prerelease.rs must define `docker_bin()` — the \
@@ -1892,32 +1855,13 @@ mod tests {
     fn test_cargo_spawn_routes_through_cargo_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("prerelease.rs");
 
-        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("cargo");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/prerelease.rs",
+            "cargo",
+            "resolve `CARGO` via `cargo_bin()`",
+        );
 
-        assert!(
-            !SOURCE.contains(&raw_std),
-            "commands/prerelease.rs must not spawn `cargo` via the \
-             bare literal — every cargo spawn must resolve `CARGO` via \
-             `cargo_bin()` first. A raw literal at \
-             `std::process::Command::new` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            !SOURCE.contains(&raw_bare),
-            "commands/prerelease.rs must not spawn `cargo` via the \
-             bare literal — every cargo spawn must resolve `CARGO` via \
-             `cargo_bin()` first. A raw literal at `Command::new` \
-             (either the top-level `use` alias or the bare form) \
-             bypasses the hermetic-runner contract."
-        );
-        assert!(
-            !SOURCE.contains(&raw_tokio),
-            "commands/prerelease.rs must not spawn `cargo` via the \
-             bare literal — every cargo spawn must resolve `CARGO` via \
-             `cargo_bin()` first. A raw literal at \
-             `tokio::process::Command::new` bypasses the \
-             hermetic-runner contract."
-        );
         assert!(
             SOURCE.contains("fn cargo_bin()"),
             "commands/prerelease.rs must define `cargo_bin()` — the \
