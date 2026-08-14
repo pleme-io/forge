@@ -25,11 +25,79 @@ use crate::observability::{
     emit_event, EventMetadata, MigrationTracker, ReleaseEvent, ShinkaMigrationCompletedEvent,
     ShinkaMigrationFailedEvent,
 };
+use crate::retry::RetryPolicy;
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use serde::Deserialize;
 use std::process::Stdio;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// The typed exponential-backoff policy for [`wait_for_shinka_migration`]
+/// reconcile-poll cadence — `initial_backoff` 2s × `factor` 2 capped at
+/// `max_backoff` 30s. Consumes the pre-existing typed primitive at
+/// [`crate::retry::RetryPolicy`] so the per-attempt delay lands at
+/// [`RetryPolicy::compute_delay`], the same shared body the sibling
+/// health-endpoint retry surface `commands/post_deploy_verification.rs::
+/// HEALTH_ENDPOINT_BACKOFF` (commit b5db3b6) reads through.
+///
+/// Pre-lift the hand-rolled schedule was spelled inline as the mutating
+/// pair `let mut backoff_secs: u64 = 2; ... backoff_secs =
+/// (backoff_secs * 2).min(30);`. That shape carried two structural
+/// defects the typed-primitive body forecloses:
+/// 1. **Local-state escape.** The `mut backoff_secs` local is shared
+///    across the loop's iterations and is not a pure function of the
+///    iteration index — a future refactor that introduces an early-
+///    `continue` or a nested `match` arm that forgets to advance
+///    `backoff_secs` silently sticks the loop at the same delay
+///    forever. Lifting to `compute_delay(attempt)` names the schedule
+///    as a pure function of a monotonic counter, so no code path can
+///    silently desync the delay from the iteration index.
+/// 2. **`u32 * 2` unbounded until the cap.** The multiply is
+///    unbounded until the `.min(30)` clamp — safe in practice
+///    because the cap fires at iteration 4 (16 → 32.min(30) = 30),
+///    but the shape does not compose with a future refactor that
+///    lifts the cap or the factor. [`RetryPolicy::compute_delay`]'s
+///    `checked_pow` saturating body is safe by construction under
+///    arbitrarily-large `factor` and `attempt`.
+///
+/// `max_attempts: u32::MAX` is a placeholder — the reconcile-poll
+/// loop is unbounded by design (waits for `Ready` / `Failed`, no hard
+/// timeout — see the `_timeout_secs` parameter's `kept for API compat,
+/// no hard timeout` comment at [`wait_for_shinka_migration`]'s
+/// signature) and consumes only [`RetryPolicy::compute_delay`] from
+/// this policy, not [`RetryPolicy::max_attempts`]. The `max_attempts`
+/// field is unconsulted at this consumption site.
+const SHINKA_MIGRATION_POLL_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: u32::MAX,
+    initial_backoff: Duration::from_secs(2),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between Shinka reconcile-poll iterations, given a 0-indexed
+/// local `attempt` counter (the `loop { ... }` shape
+/// [`wait_for_shinka_migration`] drives increments once per non-terminal
+/// arm).
+///
+/// Maps the local 0-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(2)`:
+/// local `attempt == 0` (the sleep after the first non-terminal poll)
+/// reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff = 2s`; local `attempt == 1` reads as `compute_delay(3)
+/// = 4s`; local `attempt == 2` reads as `compute_delay(4) = 8s`; local
+/// `attempt == 3` reads as `compute_delay(5) = 16s`; local `attempt >= 4`
+/// reads as `compute_delay(>=6) = 30s` (cap) — matching the pre-lift
+/// `2 → 4 → 8 → 16 → 30 → 30 → …` schedule verbatim.
+///
+/// The `saturating_add` clamp forecloses the `u32` overflow class at
+/// the bridge — an unbounded reconcile loop that reaches
+/// `attempt == u32::MAX` reads as `compute_delay(u32::MAX)`, which
+/// itself saturates to [`SHINKA_MIGRATION_POLL_BACKOFF::max_backoff`]
+/// via the `checked_pow`-then-cap body inside
+/// [`RetryPolicy::compute_delay`] without panic.
+fn shinka_migration_poll_delay(attempt: u32) -> Duration {
+    SHINKA_MIGRATION_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
+}
 
 // =============================================================================
 // Shinka CRD Status Types (for rich JSON parsing)
@@ -866,8 +934,10 @@ pub async fn wait_for_shinka_migration(
     set_expected_tag_annotation(&migration_name, namespace, expected_image_tag).await;
 
     let start = Instant::now();
-    // Exponential backoff: 2s → 4s → 8s → 16s → 30s cap
-    let mut backoff_secs: u64 = 2;
+    // Exponential backoff: 2s → 4s → 8s → 16s → 30s cap via
+    // `SHINKA_MIGRATION_POLL_BACKOFF` + `shinka_migration_poll_delay`,
+    // both grounding through `RetryPolicy::compute_delay`.
+    let mut backoff_attempt: u32 = 0;
     let mut last_phase = String::new();
     let mut last_retry_count: Option<u32> = None;
 
@@ -1047,8 +1117,8 @@ pub async fn wait_for_shinka_migration(
             }
             _ => {
                 // Still waiting — phase is Pending, Migrating, CheckingHealth, or tag doesn't match yet
-                tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
-                backoff_secs = (backoff_secs * 2).min(30);
+                tokio::time::sleep(shinka_migration_poll_delay(backoff_attempt)).await;
+                backoff_attempt = backoff_attempt.saturating_add(1);
             }
         }
     }
@@ -1257,6 +1327,200 @@ mod tests {
     /// discipline the sibling `commands/status.rs` shield (c2760df) and
     /// `commands/supergraph_verification.rs` shield (65283fb) pioneered
     /// on the multi-function consumer surface.
+    use super::{shinka_migration_poll_delay, SHINKA_MIGRATION_POLL_BACKOFF};
+    use crate::retry::RetryPolicy;
+    use crate::test_support::code_line_hits;
+    use std::time::Duration;
+
+    /// The `(initial_backoff, factor, max_backoff)` shape of the
+    /// Shinka reconcile-poll backoff policy is a load-bearing invariant
+    /// shared with the sibling health-endpoint retry surface at
+    /// `commands/post_deploy_verification.rs::HEALTH_ENDPOINT_BACKOFF`
+    /// (differing only in the 1s-vs-2s initial-backoff kept to preserve
+    /// each pre-lift schedule verbatim) and pinned here so a future
+    /// silent-desync at the const site (a factor bump, a cap change) is
+    /// caught at a named test rather than silently across the two
+    /// consumption sites (`shinka_migration_poll_delay` + the loop
+    /// body). Sibling of
+    /// `test_health_endpoint_backoff_policy_shape` (commit b5db3b6).
+    #[test]
+    fn test_shinka_migration_poll_backoff_policy_shape() {
+        assert_eq!(
+            SHINKA_MIGRATION_POLL_BACKOFF.initial_backoff,
+            Duration::from_secs(2),
+            "SHINKA_MIGRATION_POLL_BACKOFF.initial_backoff must be 2s \
+             — preserves the pre-lift hand-rolled `let mut backoff_secs: \
+             u64 = 2` seed verbatim at the reconcile-loop's first sleep.",
+        );
+        assert_eq!(
+            SHINKA_MIGRATION_POLL_BACKOFF.factor, 2,
+            "SHINKA_MIGRATION_POLL_BACKOFF.factor must be 2 \
+             — preserves the pre-lift `backoff_secs * 2` climb verbatim.",
+        );
+        assert_eq!(
+            SHINKA_MIGRATION_POLL_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "SHINKA_MIGRATION_POLL_BACKOFF.max_backoff must be 30s \
+             — preserves the pre-lift `.min(30)` cap verbatim.",
+        );
+    }
+
+    /// Pre-lift the reconcile-loop's first five iterations emitted
+    /// `sleep(2) → sleep(4) → sleep(8) → sleep(16) → sleep(30)` via the
+    /// mutating `backoff_secs` local (seeded at 2, doubled after each
+    /// non-terminal arm, capped at 30). The lift's 0-indexed
+    /// `attempt` counter must reproduce that schedule verbatim under
+    /// `shinka_migration_poll_delay`.
+    #[test]
+    fn test_shinka_migration_poll_delay_matches_pre_lift_schedule_at_in_cap_attempts() {
+        assert_eq!(
+            shinka_migration_poll_delay(0),
+            Duration::from_secs(2),
+            "iter 0 must sleep 2s — matches pre-lift `backoff_secs = 2` seed.",
+        );
+        assert_eq!(
+            shinka_migration_poll_delay(1),
+            Duration::from_secs(4),
+            "iter 1 must sleep 4s — matches pre-lift `2 * 2 = 4`.",
+        );
+        assert_eq!(
+            shinka_migration_poll_delay(2),
+            Duration::from_secs(8),
+            "iter 2 must sleep 8s — matches pre-lift `4 * 2 = 8`.",
+        );
+        assert_eq!(
+            shinka_migration_poll_delay(3),
+            Duration::from_secs(16),
+            "iter 3 must sleep 16s — matches pre-lift `8 * 2 = 16`.",
+        );
+    }
+
+    /// Iterations past the cap must all emit `max_backoff = 30s` —
+    /// pre-lift `(16 * 2).min(30) = 30` at iter 4 and `(30 * 2).min(30)
+    /// = 30` at every subsequent iter.
+    #[test]
+    fn test_shinka_migration_poll_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            shinka_migration_poll_delay(4),
+            Duration::from_secs(30),
+            "iter 4 must sleep 30s (cap) — pre-lift `(16 * 2).min(30) = 30`.",
+        );
+        assert_eq!(
+            shinka_migration_poll_delay(5),
+            Duration::from_secs(30),
+            "iter 5 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            shinka_migration_poll_delay(50),
+            Duration::from_secs(30),
+            "iter 50 must sleep 30s (cap) — reconcile loops can run \
+             minutes on slow migrations, so beyond-cap iterations \
+             must stay at the ceiling.",
+        );
+    }
+
+    /// The reconcile loop is unbounded by design (no hard timeout —
+    /// waits for terminal `Ready` / `Failed`), so `backoff_attempt`
+    /// can in principle reach any `u32` value. Pre-lift the
+    /// `backoff_secs * 2` climb was safe only because `.min(30)`
+    /// fired at iter 4; post-lift `saturating_add(2)` inside
+    /// `shinka_migration_poll_delay` bounds the argument to
+    /// `RetryPolicy::compute_delay`, whose `checked_pow`-then-cap
+    /// body itself saturates without panic. This test pins that
+    /// composition: an `attempt == u32::MAX` argument (a
+    /// pathologically-long-running reconcile) returns a bounded
+    /// delay rather than panicking.
+    #[test]
+    fn test_shinka_migration_poll_delay_saturates_without_panic_at_arbitrarily_large_attempt() {
+        assert_eq!(
+            shinka_migration_poll_delay(u32::MAX),
+            Duration::from_secs(30),
+            "attempt=u32::MAX must saturate to max_backoff without \
+             panic — the `saturating_add(2)` bridge + \
+             `RetryPolicy::compute_delay`'s `checked_pow` cap close \
+             the u32 overflow class by construction.",
+        );
+        assert_eq!(
+            shinka_migration_poll_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "attempt=u32::MAX - 1 must also saturate to max_backoff \
+             — the bridge `saturating_add(2)` returns u32::MAX, still \
+             far past the cap.",
+        );
+    }
+
+    /// The reconcile-poll loop-body shape MUST consume the typed
+    /// primitive at `shinka_migration_poll_delay` rather than the
+    /// pre-lift mutating `let mut backoff_secs: u64 = ...;` local.
+    /// A future refactor that reintroduces the local-state escape
+    /// (see `SHINKA_MIGRATION_POLL_BACKOFF`'s docstring for the two
+    /// structural defects the lift closed) fails here, not silently
+    /// in production. Whole-module boundary discipline sibling of
+    /// `test_migrations_routes_kubectl_through_kubectl_command_async_not_raw_command`
+    /// below.
+    #[test]
+    fn test_wait_for_shinka_migration_consumes_typed_poll_delay_not_mut_backoff_secs() {
+        let source = include_str!("migrations.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        // Code-line filter (via `code_line_hits`) skips docstring /
+        // prose-comment lines, so the shield does not false-positive
+        // on `SHINKA_MIGRATION_POLL_BACKOFF`'s own docstring above
+        // (which cites the pre-lift `let mut backoff_secs` shape as
+        // context for the two defects it forecloses).
+        let mut_backoff_hits = code_line_hits(module_body, "let mut backoff_secs");
+        assert!(
+            mut_backoff_hits.is_empty(),
+            "migrations.rs must NOT hand-roll a `let mut backoff_secs` \
+             local for the reconcile-poll loop — the schedule lives at \
+             `SHINKA_MIGRATION_POLL_BACKOFF` + \
+             `shinka_migration_poll_delay`, both grounding through \
+             `RetryPolicy::compute_delay`. Found code-line hits: {:#?}",
+            mut_backoff_hits,
+        );
+        let delegation_hits =
+            code_line_hits(module_body, "shinka_migration_poll_delay(backoff_attempt)");
+        assert!(
+            !delegation_hits.is_empty(),
+            "migrations.rs must consume the typed poll-delay helper at \
+             the reconcile-loop's sleep site — the canonical delegation \
+             call was not found at any code line.",
+        );
+    }
+
+    /// [`RetryPolicy::network`]'s `factor == 2` and
+    /// `max_backoff == 30s` are the Bazel/Buck2/SLSA-frontier
+    /// reference schedule the retry module cites in its constructor
+    /// docstrings. The Shinka poll policy consumes the same
+    /// `(factor, max_backoff)` pair, diverging only at
+    /// `initial_backoff` (2s vs 250ms) to preserve the pre-lift
+    /// reconcile-loop schedule verbatim. Pin the shared invariants
+    /// so a future refinement to the retry module's reference schedule
+    /// surfaces the intentional Shinka-side divergence as a named
+    /// test failure rather than silently propagating.
+    #[test]
+    fn test_shinka_migration_poll_backoff_shares_network_factor_and_cap() {
+        let network = RetryPolicy::network();
+        assert_eq!(
+            SHINKA_MIGRATION_POLL_BACKOFF.factor, network.factor,
+            "SHINKA_MIGRATION_POLL_BACKOFF.factor must match \
+             RetryPolicy::network().factor — both consume the \
+             Bazel/Buck2/SLSA-frontier factor=2 reference.",
+        );
+        assert_eq!(
+            SHINKA_MIGRATION_POLL_BACKOFF.max_backoff, network.max_backoff,
+            "SHINKA_MIGRATION_POLL_BACKOFF.max_backoff must match \
+             RetryPolicy::network().max_backoff — both consume the \
+             Bazel/Buck2/SLSA-frontier 30s cap reference.",
+        );
+    }
+
     #[test]
     fn test_migrations_routes_kubectl_through_kubectl_command_async_not_raw_command() {
         let source = include_str!("migrations.rs");
