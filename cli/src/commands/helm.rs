@@ -2056,16 +2056,13 @@ mod helm_bin_routing_tests {
         // but never the fused literal, so this file's source text
         // does not match itself when this shield scans below.
         let bare = "helm";
-        let raw_command = format!("Command::new(\"{}\")", bare);
         let raw_bounded = format!("run_program_timed(\"{}\",", bare);
 
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/helm.rs must not spawn `helm` via the bare \
-             literal — every helm spawn must resolve `HELM_BIN` via \
-             `helm_bin()` first. A raw literal at `Command::new` \
-             bypasses the hermetic-runner contract substrate's \
-             mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/helm.rs",
+            "helm",
+            "resolve the substrate-exported `HELM_BIN` env override via `helm_bin()`",
         );
         assert!(
             !SOURCE.contains(&raw_bounded),
