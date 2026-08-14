@@ -21,6 +21,77 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::info;
 
+use crate::retry::RetryPolicy;
+
+/// The typed exponential-backoff policy for [`run_test_suite`]'s
+/// between-retry sleeps — `initial_backoff` 2s × `factor` 2 capped at
+/// `max_backoff` 30s. Consumes the pre-existing typed primitive at
+/// [`crate::retry::RetryPolicy`] so the per-attempt delay lands at
+/// [`RetryPolicy::compute_delay`], whose docstring names its
+/// raison d'être: "the pre-existing fixed `sleep(2s)` schedule ... is
+/// the worst of both worlds ... Exponential backoff (Bazel-style:
+/// 250ms × factor=2 capped at 30s) covers both regimes by
+/// construction."
+///
+/// Pre-lift the three sibling `tokio::time::sleep(Duration::from_secs(2))
+/// .await` sites in [`run_test_suite`]'s retry loop (one per failure
+/// branch: test-non-zero-exit, command-error, timeout) each carried
+/// three defects the typed-primitive body forecloses:
+///
+/// 1. **Fixed 2s schedule.** A flat `sleep(2s)` between attempts is
+///    "too short when it's a 30-second upstream incident, 12 days too
+///    long when it's a real integration-test flake that needs the
+///    upstream to recover" — the exact failure mode the Bazel / Buck2
+///    / BuildKit frontier hermetic-build systems close under an
+///    exponential-with-cap schedule.
+/// 2. **Three-way duplication of one schedule.** The (2s) magic number
+///    lived at three sibling `tokio::time::sleep(Duration::from_secs(2))`
+///    call sites in the same retry loop; a future edit to the schedule
+///    (say, bumping to 5s to match `run_test_suite_with_retry` at
+///    `commands/integration_tests.rs`) had to be applied at three
+///    sites in lock-step, or one branch silently diverged. The lifted
+///    `TEST_RETRY_BACKOFF` const is one load-bearing structural
+///    surface all three branches read through.
+/// 3. **No caller-visible schedule invariant.** The bare
+///    `Duration::from_secs(2)` literal at three sites carried no name
+///    a shield could pin — a future edit that changed the schedule at
+///    one branch but not the others silently drifted. The lifted
+///    `TEST_RETRY_BACKOFF` const names the (seed, factor, cap) triple
+///    a shield can cite and enforce.
+///
+/// `max_attempts: 1` is a placeholder — the retry loop drives its own
+/// attempt budget through the caller-supplied `config.max_retries`
+/// parameter of the `for attempt in 1..=max_attempts` loop and
+/// consumes only [`RetryPolicy::compute_delay`] from this policy, not
+/// [`RetryPolicy::max_attempts`]. The `max_attempts` field is
+/// unconsulted at this consumption site.
+const TEST_RETRY_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: 1,
+    initial_backoff: Duration::from_secs(2),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between web-test-suite retries, given the 1-indexed local
+/// `attempt` counter of the attempt that just failed (the
+/// `for attempt in 1..=max_attempts` shape [`run_test_suite`] drives).
+///
+/// Maps the local 1-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(1)`:
+/// local `attempt == 1` (the pre-retry sleep after the first failed
+/// call) reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff`; local `attempt == 2` reads as
+/// `compute_delay(3) = initial_backoff * factor^1`; and so on. The
+/// `saturating_add` clamp forecloses the `u32` overflow class at the
+/// bridge — an unlikely-but-possible `attempt == u32::MAX` from a
+/// pathological `config.max_retries` reads as `compute_delay(u32::MAX)`,
+/// which itself saturates to [`TEST_RETRY_BACKOFF::max_backoff`] via
+/// the `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
+/// without panic.
+fn test_retry_delay(attempt: u32) -> Duration {
+    TEST_RETRY_BACKOFF.compute_delay(attempt.saturating_add(1))
+}
+
 /// Test type to run
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TestType {
@@ -459,7 +530,7 @@ async fn run_test_suite(
                     bail!("{} tests failed", suite_name);
                 }
                 println!("     {} Test failed, will retry...", "⚠️ ".bright_yellow());
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(test_retry_delay(attempt)).await;
             }
             Ok(Err(e)) => {
                 if attempt == max_attempts {
@@ -470,14 +541,14 @@ async fn run_test_suite(
                     "⚠️ ".bright_yellow(),
                     e
                 );
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(test_retry_delay(attempt)).await;
             }
             Err(_) => {
                 if attempt == max_attempts {
                     bail!("{} tests timed out after {:?}", suite_name, test_timeout);
                 }
                 println!("     {} Timed out, will retry...", "⚠️ ".bright_yellow());
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(test_retry_delay(attempt)).await;
             }
         }
     }
@@ -653,6 +724,197 @@ mod tests {
              canonical `crate::repo::get_tool_path(\"SH_BIN\", \"sh\")` \
              two-arg constructor — the required form was not found \
              in the module body."
+        );
+    }
+
+    // ====================================================================
+    // web-test-suite retry backoff — TEST_RETRY_BACKOFF + helper
+    // ====================================================================
+    //
+    // These pin the RetryPolicy-consuming replacement of the pre-lift
+    // three sibling `tokio::time::sleep(Duration::from_secs(2)).await`
+    // sites that `run_test_suite`'s retry loop (test-non-zero-exit,
+    // command-error, timeout branches) polled through. Sibling of the
+    // `FLUX_POLL_BACKOFF` shields at `commands/flux.rs::tests` (commit
+    // 65de62f), the `SHINKA_MIGRATION_POLL_BACKOFF` shields at
+    // `commands/migrations.rs::tests` (commit b962db5), and the
+    // `HEALTH_ENDPOINT_BACKOFF` shields at
+    // `commands/post_deploy_verification.rs::tests` (commit b5db3b6) —
+    // same const- + delegation-helper shape, same four-test pattern
+    // (policy-shape / in-cap-schedule / past-cap-cap /
+    // saturating-no-panic), same whole-module boundary shield that
+    // forbids re-fusing the pre-lift bare-literal `sleep(2s)` shape.
+
+    /// The `TEST_RETRY_BACKOFF` const's `(initial_backoff, factor,
+    /// max_backoff)` triple is the load-bearing invariant every
+    /// consumption site (all three retry-loop failure branches, plus
+    /// any future retry-loop consumer that reads the same schedule)
+    /// shares. Pinned here so a future edit at the const's site is
+    /// caught at a named test rather than silently across the three
+    /// consumption sites and the delegation helper.
+    #[test]
+    fn test_test_retry_backoff_policy_shape() {
+        assert_eq!(
+            TEST_RETRY_BACKOFF.initial_backoff,
+            Duration::from_secs(2),
+            "TEST_RETRY_BACKOFF.initial_backoff must be 2s \
+             — preserves the pre-lift `sleep(Duration::from_secs(2))` \
+             seed verbatim at the first between-retry sleep.",
+        );
+        assert_eq!(
+            TEST_RETRY_BACKOFF.factor, 2,
+            "TEST_RETRY_BACKOFF.factor must be 2 \
+             — Bazel-style doubling climb between retries.",
+        );
+        assert_eq!(
+            TEST_RETRY_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "TEST_RETRY_BACKOFF.max_backoff must be 30s \
+             — the shared cap every sibling RetryPolicy-consumer \
+             (FLUX_POLL_BACKOFF, SHINKA_MIGRATION_POLL_BACKOFF, \
+             HEALTH_ENDPOINT_BACKOFF) also names.",
+        );
+    }
+
+    /// Pre-lift the first between-retry sleep emitted
+    /// `sleep(Duration::from_secs(2))` verbatim; the lift's 1-indexed
+    /// `attempt` counter must reproduce that seed at `attempt == 1`
+    /// via `test_retry_delay(1)`. The subsequent within-cap attempts
+    /// (2/3/4) must emit the Bazel-style doubling climb (4s/8s/16s),
+    /// strictly better than the pre-lift flat-2s schedule at every
+    /// retry past the first.
+    #[test]
+    fn test_test_retry_delay_matches_pre_lift_seed_and_climbs_at_in_cap_attempts() {
+        assert_eq!(
+            test_retry_delay(1),
+            Duration::from_secs(2),
+            "attempt=1 must sleep 2s — matches pre-lift \
+             `sleep(Duration::from_secs(2))` seed verbatim.",
+        );
+        assert_eq!(
+            test_retry_delay(2),
+            Duration::from_secs(4),
+            "attempt=2 must sleep 4s — Bazel-style `2s * 2 = 4s`.",
+        );
+        assert_eq!(
+            test_retry_delay(3),
+            Duration::from_secs(8),
+            "attempt=3 must sleep 8s — Bazel-style `4s * 2 = 8s`.",
+        );
+        assert_eq!(
+            test_retry_delay(4),
+            Duration::from_secs(16),
+            "attempt=4 must sleep 16s — Bazel-style `8s * 2 = 16s`.",
+        );
+    }
+
+    /// Attempts past the cap must all emit `max_backoff = 30s` —
+    /// `(16s * 2).min(30s) = 30s` at attempt=5 and `(30s * 2).min(30s)
+    /// = 30s` at every subsequent attempt. `config.max_retries` is a
+    /// user-supplied `deploy.yaml` field with no upper bound in the
+    /// schema, so beyond-cap attempts must stay at the ceiling rather
+    /// than climb past it and stretch a single suite's total retry
+    /// wall-clock into hours.
+    #[test]
+    fn test_test_retry_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            test_retry_delay(5),
+            Duration::from_secs(30),
+            "attempt=5 must sleep 30s (cap) — `(16s * 2).min(30s) = 30s`.",
+        );
+        assert_eq!(
+            test_retry_delay(6),
+            Duration::from_secs(30),
+            "attempt=6 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            test_retry_delay(50),
+            Duration::from_secs(30),
+            "attempt=50 must sleep 30s (cap) — a pathological \
+             `config.max_retries` cannot stretch a single sleep past \
+             the ceiling.",
+        );
+    }
+
+    /// The retry loop's `attempt` counter is a `u32` bounded only by
+    /// the caller-supplied `config.max_retries + 1`, so a pathological
+    /// deploy.yaml with `max_retries: u32::MAX` could in principle
+    /// drive `test_retry_delay(u32::MAX)`. Pre-lift the fixed
+    /// `Duration::from_secs(2)` literal never panicked at any attempt;
+    /// post-lift `saturating_add(1)` inside `test_retry_delay` bounds
+    /// the argument to `RetryPolicy::compute_delay`, whose
+    /// `checked_pow`-then-cap body itself saturates without panic.
+    /// This test pins that composition: an `attempt == u32::MAX`
+    /// argument returns a bounded delay rather than panicking.
+    #[test]
+    fn test_test_retry_delay_saturates_without_panic_at_arbitrarily_large_attempt() {
+        assert_eq!(
+            test_retry_delay(u32::MAX),
+            Duration::from_secs(30),
+            "attempt=u32::MAX must saturate to max_backoff without \
+             panic — the `saturating_add(1)` bridge + \
+             `RetryPolicy::compute_delay`'s `checked_pow` cap close \
+             the u32 overflow class by construction.",
+        );
+        assert_eq!(
+            test_retry_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "attempt=u32::MAX - 1 must also saturate to max_backoff \
+             — the bridge `saturating_add(1)` returns u32::MAX, still \
+             far past the cap.",
+        );
+    }
+
+    /// Whole-module boundary shield: the `run_test_suite` retry loop
+    /// MUST consume the typed primitive at `test_retry_delay` rather
+    /// than re-fusing the pre-lift bare-literal
+    /// `tokio::time::sleep(Duration::from_secs(2))` shape (or any
+    /// sibling `Duration::from_secs(N)`-in-a-`sleep`-call fixed
+    /// schedule). A future refactor that reintroduces a flat
+    /// schedule at any of the three failure branches — or grows a
+    /// fourth branch and copies the pre-lift shape — fails here, not
+    /// silently in production. Whole-module boundary discipline
+    /// sibling of
+    /// `test_flux_polling_loops_consume_typed_poll_delay_not_bespoke_backoff_struct`
+    /// at `commands/flux.rs::tests` (commit 65de62f) and
+    /// `test_wait_for_shinka_migration_consumes_typed_poll_delay_not_mut_backoff_secs`
+    /// at `commands/migrations.rs::tests` (commit b962db5).
+    ///
+    /// Code-line filter (via [`crate::test_support::code_line_hits`])
+    /// skips docstring / prose-comment lines, so the shield does not
+    /// false-positive on `TEST_RETRY_BACKOFF`'s own docstring above
+    /// (which cites the pre-lift `Duration::from_secs(2)` shape as
+    /// context for the three defects it forecloses).
+    #[test]
+    fn test_run_test_suite_consumes_typed_retry_delay_not_bare_fixed_sleep() {
+        let source = include_str!("test.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let bare_sleep_hits =
+            crate::test_support::code_line_hits(module_body, "sleep(Duration::from_secs(2))");
+        assert!(
+            bare_sleep_hits.is_empty(),
+            "commands/test.rs must NOT drive the retry loop through \
+             a bare `sleep(Duration::from_secs(2))` — the sleep site \
+             must consume `test_retry_delay(attempt)`, grounding \
+             through `RetryPolicy::compute_delay`. Found code-line \
+             hits: {:#?}",
+            bare_sleep_hits,
+        );
+        let delegation_hits =
+            crate::test_support::code_line_hits(module_body, "test_retry_delay(attempt)");
+        assert!(
+            !delegation_hits.is_empty(),
+            "commands/test.rs must consume the typed retry-delay \
+             helper at every failure branch of `run_test_suite`'s \
+             retry loop — the canonical delegation call was not \
+             found at any code line.",
         );
     }
 }
