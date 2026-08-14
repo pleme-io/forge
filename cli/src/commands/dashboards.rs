@@ -805,17 +805,7 @@ mod tests {
         // `format!` so the shield's own body does not literally
         // contain it either.
         let deriving = format!("crate::tools::get_tool_path(\"{}\")", "jsonnet");
-        let is_code_line = |line: &str| -> bool {
-            let t = line.trim_start();
-            !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("//")
-        };
-        let deriving_code_hits: Vec<String> = SOURCE
-            .lines()
-            .enumerate()
-            .filter(|(_, l)| l.contains(&deriving))
-            .filter(|(_, l)| is_code_line(l))
-            .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
-            .collect();
+        let deriving_code_hits = crate::test_support::code_line_hits(SOURCE, &deriving);
         assert!(
             deriving_code_hits.is_empty(),
             "commands/dashboards.rs must not resolve `jsonnet` via the \

@@ -446,6 +446,98 @@ pub fn assert_source_forbids_bare_spawn_shapes(
     );
 }
 
+/// Enumerate every 1-indexed *code* line in `source` that contains
+/// `needle`, returned as `"line <N>: <trimmed line>"`. A "code" line is
+/// one whose trimmed-left prefix is NOT a slash comment marker (`///`,
+/// `//!`, or `//`) — so docstrings and prose comments that narrate the
+/// anti-pattern the caller's shield forbids (by literally quoting the
+/// forbidden form inside a `///` block or a shield error message) do
+/// not register as violations. The shield fires only on executable
+/// code.
+///
+/// # Why one canonical helper
+///
+/// Six whole-module routing shields — `cli/src/git.rs`,
+/// `cli/src/infrastructure/git.rs`, and
+/// `cli/src/commands/{dashboards,infra,local,prerelease}.rs` — each
+/// spelled the SAME closure verbatim:
+///
+/// ```ignore
+/// let is_code_line = |line: &str| -> bool {
+///     let t = line.trim_start();
+///     !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("//")
+/// };
+/// let hits: Vec<String> = SOURCE
+///     .lines()
+///     .enumerate()
+///     .filter(|(_, l)| l.contains(&needle))
+///     .filter(|(_, l)| is_code_line(l))
+///     .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+///     .collect();
+/// ```
+///
+/// Six occurrences past THEORY.md §VI.1's three-times threshold ("two
+/// occurrences is a coincidence; three is a law"). This helper is the
+/// law-redeeming consolidation: a future edit to the code-line
+/// predicate (say adding block-comment `/*` handling, or narrowing to
+/// exclude `#[cfg(test)]` bodies) lands in one place and propagates to
+/// every shield, and a new shield that needs the code-line-filtered
+/// scan inherits the discipline as one call, not eight lines of
+/// closure-plus-collect boilerplate.
+///
+/// # Why the doc-comment filter is load-bearing
+///
+/// Two of the six shielded modules (`cli/src/git.rs` and
+/// `cli/src/infrastructure/git.rs`) carry pre-existing docstrings that
+/// literally quote the historical bare-`Command::new(<tool>)`
+/// anti-pattern — prose narrating the regression the shield exists to
+/// catch. A naive `SOURCE.contains(needle)` would false-match those
+/// docstrings and fire the shield on every run. Four of the six
+/// (`local.rs`, `infra.rs`, `dashboards.rs`, `prerelease.rs`) forbid a
+/// deriving one-arg sigil form (`crate::tools::get_tool_path(...)`)
+/// that the shield's OWN error message quotes in the "use the two-arg
+/// form instead" remediation prose — same self-match trap in a
+/// different disguise. The `///` / `//!` / `//` prefix filter is the
+/// single spelling that dodges both traps.
+///
+/// This module itself uses the templated form (`<tool>` in place of the
+/// concrete bare basename) rather than a fused literal so the
+/// whole-module shield at [`tests::test_git_spawn_routes_through_git_command_sync_not_raw_literal`]
+/// — which rides the naive [`assert_source_forbids_bare_spawn_shapes`]
+/// helper without a code-line filter — does not false-match this
+/// helper's own docs.
+///
+/// # Substring-vs-line-scan semantics
+///
+/// This helper returns hits per LINE, not per substring: a line
+/// containing `needle` twice contributes one entry. Every existing
+/// caller consumes the returned vec via `is_empty()` for the
+/// assertion decision and `{:?}` / `{:#?}` for the diagnostic
+/// payload — neither cares about multiplicity, only presence.
+///
+/// # Why not fold the assertion in
+///
+/// The four `deriving-form-drift` sites and the two `git-spawn`
+/// sites need different assertion messages (`code line — a
+/// `<TOOL>_BIN`-literal audit would miss the site` vs `bare literal
+/// at `std::process::Command::new` — every git spawn must resolve
+/// `GIT_BIN`...`), and the git-spawn sites emit three distinct
+/// messages against three needles. Extracting the collection
+/// primitive without the assertion keeps each shield in control of
+/// its own diagnostic prose while sharing the underlying scan.
+pub fn code_line_hits(source: &str, needle: &str) -> Vec<String> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.contains(needle))
+        .filter(|(_, l)| {
+            let t = l.trim_start();
+            !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("//")
+        })
+        .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,6 +658,62 @@ mod tests {
             "fake/module.rs",
             "zeta-widget",
             "route through `zeta_bin()`",
+        );
+    }
+
+    /// A `needle`-free source produces an empty hit vec. Pinning this is
+    /// the floor every shield consumes: absent any forbidden shape, the
+    /// helper is a no-op the shield's `is_empty()` guard reads as green.
+    #[test]
+    fn test_code_line_hits_returns_empty_on_shape_free_source() {
+        let hits = code_line_hits(
+            "fn ok() { let x = crate::routing::sigil::foo_bin(); }\n",
+            "raw_literal_that_never_appears",
+        );
+        assert!(hits.is_empty(), "shape-free source must produce no hits");
+    }
+
+    /// A `needle`-bearing code line is reported with its 1-indexed line
+    /// number and trimmed content in the `"line <N>: <trimmed>"` shape
+    /// every shield's `assert!(hits.is_empty(), "... {hits:?}")` prose
+    /// consumes. Pinning both the line number origin (1-indexed, matching
+    /// what a text editor shows) and the trim (leading indentation
+    /// stripped so the diagnostic reads compactly regardless of nesting
+    /// depth) prevents a future refactor from silently drifting to
+    /// 0-indexed line numbers or untrimmed lines — either would misalign
+    /// every existing shield's diagnostic against its file view.
+    #[test]
+    fn test_code_line_hits_reports_one_indexed_trimmed_hits() {
+        let source = "fn ok() { }\n    let _ = FORBIDDEN_MARKER;\nfn also_ok() { }\n";
+        let hits = code_line_hits(source, "FORBIDDEN_MARKER");
+        assert_eq!(hits, vec!["line 2: let _ = FORBIDDEN_MARKER;".to_string()]);
+    }
+
+    /// A `needle`-bearing line whose trimmed prefix is `///`, `//!`, or
+    /// `//` is filtered out — the doc-comment / shield-error-prose
+    /// exclusion is the load-bearing property the six shielded modules
+    /// rely on. Two of them (`git.rs`, `infrastructure/git.rs`) carry
+    /// docstrings that literally quote the bare-`Command::new(<tool>)`
+    /// anti-pattern; four (`local.rs`, `infra.rs`, `dashboards.rs`,
+    /// `prerelease.rs`) forbid a deriving sigil form their OWN error
+    /// message quotes in the "use the two-arg form instead" prose.
+    /// Without this filter every one of those shields would false-fire
+    /// on its own body. A future edit that dropped any of the three
+    /// prefixes would break this pinning test before shipping.
+    #[test]
+    fn test_code_line_hits_filters_out_doc_and_line_comments() {
+        let source = "\
+/// FORBIDDEN_MARKER inside a doc line
+//! FORBIDDEN_MARKER inside a module doc line
+// FORBIDDEN_MARKER inside a plain line comment
+    /// FORBIDDEN_MARKER inside an indented doc line
+fn ok() { let _ = FORBIDDEN_MARKER; }
+";
+        let hits = code_line_hits(source, "FORBIDDEN_MARKER");
+        assert_eq!(
+            hits,
+            vec!["line 5: fn ok() { let _ = FORBIDDEN_MARKER; }".to_string()],
+            "only the executable-code line must be reported"
         );
     }
 
