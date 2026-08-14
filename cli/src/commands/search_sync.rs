@@ -372,12 +372,11 @@ mod tests {
              via `crate::repo::get_tool_path(\"NOVASEARCHCTL_BIN\", \"novasearchctl\")`",
         );
 
-        assert!(
-            SOURCE.contains("get_tool_path(\"NOVASEARCHCTL_BIN\", \"novasearchctl\")"),
-            "commands/search_sync.rs must resolve the `novasearchctl` \
-             binary via the canonical two-argument \
-             `get_tool_path(\"NOVASEARCHCTL_BIN\", \"novasearchctl\")` \
-             lookup — the required form was not found in the module."
+        crate::test_support::assert_source_has_get_tool_path_two_arg_call_code_line(
+            SOURCE,
+            "commands/search_sync.rs",
+            "NOVASEARCHCTL_BIN",
+            "novasearchctl",
         );
     }
 

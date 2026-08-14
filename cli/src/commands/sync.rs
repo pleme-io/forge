@@ -680,12 +680,11 @@ mod tests {
              via `crate::repo::get_tool_path(\"SEA_ORM_CLI_BIN\", \"sea-orm-cli\")`",
         );
 
-        assert!(
-            SOURCE.contains("get_tool_path(\"SEA_ORM_CLI_BIN\", \"sea-orm-cli\")"),
-            "commands/sync.rs must resolve the `sea-orm-cli` binary via \
-             the canonical two-argument \
-             `get_tool_path(\"SEA_ORM_CLI_BIN\", \"sea-orm-cli\")` \
-             lookup — the required form was not found in the module."
+        crate::test_support::assert_source_has_get_tool_path_two_arg_call_code_line(
+            SOURCE,
+            "commands/sync.rs",
+            "SEA_ORM_CLI_BIN",
+            "sea-orm-cli",
         );
     }
 

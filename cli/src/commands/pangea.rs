@@ -813,22 +813,17 @@ mod tests {
     fn test_regenerate_compiler_ruby_toolchain_env_vars_route_through_bin_suffix() {
         const SOURCE: &str = include_str!("pangea.rs");
 
-        assert!(
-            SOURCE.contains("crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")")
-                || SOURCE.contains("get_tool_path(\"BUNDLE_BIN\", \"bundle\")"),
-            "commands/pangea.rs must resolve `bundle` via \
-             `get_tool_path(\"BUNDLE_BIN\", \"bundle\")` — the \
-             canonical `_BIN`-suffix env-var lookup substrate's \
-             `mkRuntimeToolsEnv` exports, matching the sibling \
-             `bundle_bin()` sigils in `commands/gem.rs` and \
-             `commands/pangea_infra.rs`."
+        crate::test_support::assert_source_has_get_tool_path_two_arg_call_code_line(
+            SOURCE,
+            "commands/pangea.rs",
+            "BUNDLE_BIN",
+            "bundle",
         );
-        assert!(
-            SOURCE.contains("get_tool_path(\"BUNDIX_BIN\", \"bundix\")"),
-            "commands/pangea.rs must resolve `bundix` via \
-             `get_tool_path(\"BUNDIX_BIN\", \"bundix\")` — the \
-             canonical `_BIN`-suffix env-var lookup honoring the same \
-             derivation convention every substrate-exported tool uses."
+        crate::test_support::assert_source_has_get_tool_path_two_arg_call_code_line(
+            SOURCE,
+            "commands/pangea.rs",
+            "BUNDIX_BIN",
+            "bundix",
         );
 
         let bare_bundler = "BUNDLER";

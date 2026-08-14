@@ -928,11 +928,11 @@ mod tests {
             "gh",
             "resolve the substrate-exported `GH_BIN` env override via `get_tool_path`",
         );
-        assert!(
-            SOURCE.contains("get_tool_path(\"GH_BIN\", \"gh\")"),
-            "commands/tool.rs must resolve the `gh` binary via the \
-             two-argument `get_tool_path(\"GH_BIN\", \"gh\")` lookup \
-             — the canonical form was not found in the module."
+        crate::test_support::assert_source_has_get_tool_path_two_arg_call_code_line(
+            SOURCE,
+            "commands/tool.rs",
+            "GH_BIN",
+            "gh",
         );
     }
 
