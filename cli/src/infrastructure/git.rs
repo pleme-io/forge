@@ -782,43 +782,17 @@ mod tests {
     fn test_infra_git_spawn_routes_through_git_command_sync_not_raw_literal() {
         const SOURCE: &str = include_str!("git.rs");
 
-        let [raw_std, raw_bare, raw_tokio] = crate::test_support::forbidden_spawn_shapes("git");
+        crate::test_support::assert_source_forbids_bare_spawn_shapes_code_line(
+            SOURCE,
+            "cli/src/infrastructure/git.rs",
+            "git",
+            "resolve `GIT_BIN` via `git_command_sync()` / \
+             `git_command_async()` (or via \
+             `Command::new(self.resolve_git_bin())` on the `GitClient` \
+             production body)",
+        );
+
         let raw_sync_alias = format!("SyncCommand::new(\"{}\")", "git");
-
-        let std_hits = crate::test_support::code_line_hits(SOURCE, &raw_std);
-        assert!(
-            std_hits.is_empty(),
-            "cli/src/infrastructure/git.rs must not spawn `git` via the \
-             bare literal at `std::process::Command::new` — every git \
-             spawn must resolve `GIT_BIN` via `git_command_sync()` / \
-             `git_command_async()` (or via `Command::new(self.resolve_git_bin())` \
-             on the `GitClient` production body). A raw literal bypasses \
-             the hermetic-runner contract substrate's `mkRuntimeToolsEnv` \
-             exports. Offending code lines: {std_hits:?}"
-        );
-
-        let bare_hits = crate::test_support::code_line_hits(SOURCE, &raw_bare);
-        assert!(
-            bare_hits.is_empty(),
-            "cli/src/infrastructure/git.rs must not spawn `git` via the \
-             bare literal at `Command::new` (top-of-file alias) — every \
-             git spawn must resolve `GIT_BIN` via `git_command_sync()` / \
-             `git_command_async()` (or via `Command::new(self.resolve_git_bin())` \
-             on the `GitClient` production body). A raw literal bypasses \
-             the hermetic-runner contract. Offending code lines: \
-             {bare_hits:?}"
-        );
-
-        let tokio_hits = crate::test_support::code_line_hits(SOURCE, &raw_tokio);
-        assert!(
-            tokio_hits.is_empty(),
-            "cli/src/infrastructure/git.rs must not spawn `git` via the \
-             bare literal at `tokio::process::Command::new` — every \
-             async git spawn must resolve `GIT_BIN` via \
-             `git_command_async()` first. A raw literal bypasses the \
-             hermetic-runner contract. Offending code lines: {tokio_hits:?}"
-        );
-
         let alias_hits = crate::test_support::code_line_hits(SOURCE, &raw_sync_alias);
         assert!(
             alias_hits.is_empty(),
