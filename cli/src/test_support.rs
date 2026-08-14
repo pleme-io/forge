@@ -642,6 +642,118 @@ pub fn assert_source_has_canonical_two_arg_sigil_code_line(
     );
 }
 
+/// Reconstruct the constant-driven pre-lift deriving one-arg
+/// `crate::tools::get_tool_path(crate::tools::tools::<constant_name>)`
+/// form — the pre-lift shape three docker-related shields
+/// (`commands/local.rs`, `commands/infra.rs`, `commands/prerelease.rs`)
+/// forbid at a code line as of ffa5271. The `constant_name` slot names
+/// the substrate's `crate::tools::tools::<CONST>` uppercase constant
+/// registry entry (see `cli/src/tools.rs`).
+///
+/// # Reconstruction discipline
+///
+/// The needle is built via `format!` — this helper's own source text
+/// contains only the templated form (with a `{}` placeholder for the
+/// constant-name position), never a substituted concrete literal. A
+/// shield that scans `include_str!("test_support.rs")` therefore does
+/// not false-match this helper's body on any concrete tool. Sibling
+/// primitive to [`canonical_two_arg_sigil_needle`] (the positive-side
+/// form the sigils migrated ONTO) and to
+/// [`deriving_one_arg_sigil_needle_literal`] (the other pre-lift
+/// deriving variant).
+pub fn deriving_one_arg_sigil_needle_constant(constant_name: &str) -> String {
+    format!(
+        "crate::tools::get_tool_path(crate::tools::tools::{})",
+        constant_name
+    )
+}
+
+/// Reconstruct the literal-string pre-lift deriving one-arg
+/// `crate::tools::get_tool_path("<bare>")` form — the pre-lift shape
+/// the `commands/dashboards.rs::jsonnet_bin_routing_tests` shield
+/// forbids at a code line as of ffa5271. Sibling to
+/// [`deriving_one_arg_sigil_needle_constant`] and to
+/// [`canonical_two_arg_sigil_needle`]; same `format!`-based
+/// reconstruction discipline.
+pub fn deriving_one_arg_sigil_needle_literal(bare: &str) -> String {
+    format!("crate::tools::get_tool_path(\"{}\")", bare)
+}
+
+/// Assert the given `source` does NOT contain the constant-driven
+/// pre-lift deriving one-arg
+/// `crate::tools::get_tool_path(crate::tools::tools::<constant_name>)`
+/// form at any *code* line — i.e., outside docstrings and shield
+/// error messages narrating the anti-pattern. Panics with a diagnostic
+/// naming `module_path`, `bare`, `env_var`, `constant_name`, the
+/// code-line hits, and the canonical two-arg remediation.
+///
+/// # Why one canonical helper
+///
+/// The pre-lift shape was replicated verbatim across three shields
+/// (`commands/local.rs`, `commands/infra.rs`, `commands/prerelease.rs`)
+/// — well past THEORY §VI.1's three-times threshold. Each site
+/// hand-spelled the `format!` needle constructor, a `code_line_hits`
+/// call, and a fifteen-line panic-message stanza. Consolidating them
+/// here means a future edit to the remediation prose (say, refining
+/// the audit-visibility phrasing or naming the substrate-exported
+/// env-var contract explicitly) lands in one place. Sibling to
+/// [`assert_source_has_canonical_two_arg_sigil_code_line`] (positive
+/// side) and to
+/// [`assert_source_forbids_deriving_one_arg_sigil_literal_form`] (the
+/// literal-string variant).
+///
+/// # Why the code-line filter is load-bearing
+///
+/// The three docker shields all carry a top-of-module docstring that
+/// narrates the anti-pattern verbatim inside `///` blocks (e.g.,
+/// `commands/local.rs:23`, `commands/infra.rs:23`, `commands/prerelease.rs:66`).
+/// A naive `source.contains(&deriving)` shield would panic on the
+/// docstring itself, forcing every shield to author around the
+/// docstring or drop the narration. Filtering through [`code_line_hits`]
+/// lets the docstring live where it belongs (near the sigil it
+/// documents) while the shield tracks only real code-line regressions.
+pub fn assert_source_forbids_deriving_one_arg_sigil_constant_form(
+    source: &str,
+    module_path: &str,
+    env_var: &str,
+    bare: &str,
+    constant_name: &str,
+) {
+    let deriving = deriving_one_arg_sigil_needle_constant(constant_name);
+    let hits = code_line_hits(source, &deriving);
+    assert!(
+        hits.is_empty(),
+        "{module_path} must not resolve `{bare}` via the pre-lift \
+         deriving one-arg constant-driven form at any code line — a \
+         `{env_var}`-literal audit would miss the site. Use the two-arg \
+         `crate::repo::get_tool_path(\"{env_var}\", \"{bare}\")` form \
+         the sibling sigils honor. Code-line hits: {hits:#?}"
+    );
+}
+
+/// Assert the given `source` does NOT contain the literal-string
+/// pre-lift deriving one-arg `crate::tools::get_tool_path("<bare>")`
+/// form at any *code* line. Sibling to
+/// [`assert_source_forbids_deriving_one_arg_sigil_constant_form`]; same
+/// docstring-filter rationale and same canonical two-arg remediation.
+pub fn assert_source_forbids_deriving_one_arg_sigil_literal_form(
+    source: &str,
+    module_path: &str,
+    env_var: &str,
+    bare: &str,
+) {
+    let deriving = deriving_one_arg_sigil_needle_literal(bare);
+    let hits = code_line_hits(source, &deriving);
+    assert!(
+        hits.is_empty(),
+        "{module_path} must not resolve `{bare}` via the pre-lift \
+         deriving one-arg literal-string form at any code line — a \
+         `{env_var}`-literal audit would miss the site. Use the two-arg \
+         `crate::repo::get_tool_path(\"{env_var}\", \"{bare}\")` form \
+         the sibling sigils honor. Code-line hits: {hits:#?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,6 +1024,161 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     fn test_assert_source_has_canonical_two_arg_sigil_code_line_rejects_missing_canonical() {
         assert_source_has_canonical_two_arg_sigil_code_line(
             "fn zeta_bin() -> String { String::new() }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// The constant-driven needle constructor emits the exact
+    /// `crate::tools::get_tool_path(crate::tools::tools::<CONST>)`
+    /// substituted form the three docker shields consume verbatim via
+    /// `code_line_hits(SOURCE, &needle)`. A template drift (a stray
+    /// space, dropped double colon, renamed `crate::tools::tools`
+    /// registry path) would silently disarm every migrated shield. The
+    /// distinct `ZETA_WIDGET` sibling case pins that the constant-name
+    /// position is load-bearing (a template that discarded it would
+    /// collapse all three docker shields to a single string, and every
+    /// future sigil-family shield with it).
+    #[test]
+    fn test_deriving_one_arg_sigil_needle_constant_reconstructs_substituted_form() {
+        assert_eq!(
+            deriving_one_arg_sigil_needle_constant("DOCKER"),
+            "crate::tools::get_tool_path(crate::tools::tools::DOCKER)".to_string(),
+        );
+        assert_eq!(
+            deriving_one_arg_sigil_needle_constant("ZETA_WIDGET"),
+            "crate::tools::get_tool_path(crate::tools::tools::ZETA_WIDGET)".to_string(),
+        );
+    }
+
+    /// The literal-string needle constructor emits the exact
+    /// `crate::tools::get_tool_path("<bare>")` substituted form the
+    /// dashboards jsonnet shield consumes verbatim. Sibling pin to
+    /// [`test_deriving_one_arg_sigil_needle_constant_reconstructs_substituted_form`];
+    /// the pair certifies both deriving-form variants round-trip
+    /// through their respective needle constructors.
+    #[test]
+    fn test_deriving_one_arg_sigil_needle_literal_reconstructs_substituted_form() {
+        assert_eq!(
+            deriving_one_arg_sigil_needle_literal("jsonnet"),
+            "crate::tools::get_tool_path(\"jsonnet\")".to_string(),
+        );
+        assert_eq!(
+            deriving_one_arg_sigil_needle_literal("zeta-widget"),
+            "crate::tools::get_tool_path(\"zeta-widget\")".to_string(),
+        );
+    }
+
+    /// A source with no deriving constant-driven form passes cleanly.
+    /// Pinning the happy path is the floor every migrated shield
+    /// consumes: absent any regression, the helper is silent. The
+    /// canonical two-arg form appears verbatim (as it does in every
+    /// real production body) so this test also certifies the shield
+    /// does not confuse the canonical two-arg form with the pre-lift
+    /// deriving one-arg form.
+    #[test]
+    fn test_assert_source_forbids_deriving_one_arg_sigil_constant_form_accepts_shape_free_source() {
+        assert_source_forbids_deriving_one_arg_sigil_constant_form(
+            "fn zeta_bin() -> String {\n    \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")\n\
+             }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+            "ZETA_WIDGET",
+        );
+    }
+
+    /// A source with the deriving constant-driven form at a code line
+    /// fires the shield. `should_panic(expected = ...)` pins the
+    /// substituted `module_path` / `bare` / `env_var` tokens plus the
+    /// canonical two-arg remediation phrase; a message rewrite that
+    /// dropped any of them would surface here.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must not resolve `zeta-widget` via the pre-lift deriving one-arg constant-driven form at any code line — a `ZETA_WIDGET_BIN`-literal audit would miss the site. Use the two-arg `crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")` form"
+    )]
+    fn test_assert_source_forbids_deriving_one_arg_sigil_constant_form_panics_on_deriving_shape() {
+        assert_source_forbids_deriving_one_arg_sigil_constant_form(
+            "fn zeta_bin() -> String {\n    \
+             crate::tools::get_tool_path(crate::tools::tools::ZETA_WIDGET)\n\
+             }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+            "ZETA_WIDGET",
+        );
+    }
+
+    /// A source that mentions the deriving constant-driven form ONLY
+    /// inside a `///` docstring (with no code-line occurrence) passes
+    /// cleanly — the docstring-filter property the code-line filter
+    /// exists to preserve. Pinning this is what lets the top-of-module
+    /// docstrings at `commands/local.rs:23`, `commands/infra.rs:23`,
+    /// and `commands/prerelease.rs:66` (which each narrate the
+    /// anti-pattern verbatim) continue to live where they belong
+    /// without forcing the shields to author around them.
+    #[test]
+    fn test_assert_source_forbids_deriving_one_arg_sigil_constant_form_accepts_docstring_only_match(
+    ) {
+        assert_source_forbids_deriving_one_arg_sigil_constant_form(
+            "/// pre-lift the sigil delegated via \
+             `crate::tools::get_tool_path(crate::tools::tools::ZETA_WIDGET)` \
+             which hid the ZETA_WIDGET_BIN override\n\
+             fn zeta_bin() -> String { String::new() }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+            "ZETA_WIDGET",
+        );
+    }
+
+    /// A source with no deriving literal-string form passes cleanly.
+    /// Sibling happy-path pin to
+    /// [`test_assert_source_forbids_deriving_one_arg_sigil_constant_form_accepts_shape_free_source`].
+    #[test]
+    fn test_assert_source_forbids_deriving_one_arg_sigil_literal_form_accepts_shape_free_source() {
+        assert_source_forbids_deriving_one_arg_sigil_literal_form(
+            "fn zeta_bin() -> String {\n    \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")\n\
+             }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// A source with the deriving literal-string form at a code line
+    /// fires the shield. Sibling panic-path pin to
+    /// [`test_assert_source_forbids_deriving_one_arg_sigil_constant_form_panics_on_deriving_shape`].
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must not resolve `zeta-widget` via the pre-lift deriving one-arg literal-string form at any code line — a `ZETA_WIDGET_BIN`-literal audit would miss the site. Use the two-arg `crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")` form"
+    )]
+    fn test_assert_source_forbids_deriving_one_arg_sigil_literal_form_panics_on_deriving_shape() {
+        assert_source_forbids_deriving_one_arg_sigil_literal_form(
+            "fn zeta_bin() -> String {\n    \
+             crate::tools::get_tool_path(\"zeta-widget\")\n\
+             }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// A source that mentions the deriving literal-string form ONLY
+    /// inside a `///` docstring passes cleanly — sibling docstring-
+    /// filter pin to
+    /// [`test_assert_source_forbids_deriving_one_arg_sigil_constant_form_accepts_docstring_only_match`].
+    #[test]
+    fn test_assert_source_forbids_deriving_one_arg_sigil_literal_form_accepts_docstring_only_match(
+    ) {
+        assert_source_forbids_deriving_one_arg_sigil_literal_form(
+            "/// pre-lift the sigil delegated via \
+             `crate::tools::get_tool_path(\"zeta-widget\")` which hid \
+             the ZETA_WIDGET_BIN override\n\
+             fn zeta_bin() -> String { String::new() }\n",
             "fake/module.rs",
             "ZETA_WIDGET_BIN",
             "zeta-widget",

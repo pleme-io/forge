@@ -787,25 +787,16 @@ mod tests {
             "JSONNET_BIN",
             "jsonnet",
         );
-        // Also assert the pre-lift deriving one-arg form does NOT
-        // reappear at any *code* line (docstrings and shield error
-        // messages narrating the anti-pattern are excluded via a
-        // per-line filter — same discipline the sibling
-        // `commands/local.rs::docker_bin_routing_tests` shield rides
-        // at 947ea7c). The forbidden shape is reconstructed via
-        // `format!` so the shield's own body does not literally
-        // contain it either.
-        let deriving = format!("crate::tools::get_tool_path(\"{}\")", "jsonnet");
-        let deriving_code_hits = crate::test_support::code_line_hits(SOURCE, &deriving);
-        assert!(
-            deriving_code_hits.is_empty(),
-            "commands/dashboards.rs must not resolve `jsonnet` via the \
-             pre-lift deriving one-arg form at any code line — a \
-             `JSONNET_BIN`-literal audit would miss the site. Use the \
-             two-arg `crate::repo::get_tool_path(\"JSONNET_BIN\", \
-             \"jsonnet\")` form the sibling sigils honor. Code-line \
-             hits: {:#?}",
-            deriving_code_hits
+        // Also assert the pre-lift deriving one-arg literal-string
+        // form does NOT reappear at any *code* line. Shared helper
+        // since the reconstruction + code-line filter + panic-message
+        // stanza mirrors its constant-driven sibling used across the
+        // three docker shields (`local.rs`, `infra.rs`, `prerelease.rs`).
+        crate::test_support::assert_source_forbids_deriving_one_arg_sigil_literal_form(
+            SOURCE,
+            "commands/dashboards.rs",
+            "JSONNET_BIN",
+            "jsonnet",
         );
     }
 }

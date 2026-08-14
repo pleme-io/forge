@@ -206,27 +206,16 @@ mod docker_bin_routing_tests {
             "docker",
         );
         // Also assert the pre-lift deriving one-arg form does NOT
-        // reappear at any *code* line (docstrings and shield error
-        // messages narrating the anti-pattern are excluded via a
-        // per-line filter — same discipline the sibling
-        // `infrastructure/git.rs::test_infra_git_spawn_routes_through_git_command_sync_not_raw_literal`
-        // shield rides at 8416189). The forbidden shape is
-        // reconstructed via `format!` so the shield's own body does
-        // not literally contain it either.
-        let deriving = format!(
-            "crate::tools::get_tool_path(crate::tools::tools::{})",
-            "DOCKER"
-        );
-        let deriving_code_hits = crate::test_support::code_line_hits(SOURCE, &deriving);
-        assert!(
-            deriving_code_hits.is_empty(),
-            "commands/infra.rs must not resolve `docker` via the \
-             pre-lift deriving one-arg constant-driven form at any \
-             code line — a `DOCKER_BIN`-literal audit would miss the \
-             site. Use the two-arg \
-             `crate::repo::get_tool_path(\"DOCKER_BIN\", \"docker\")` \
-             form the sibling sigils honor. Code-line hits: {:#?}",
-            deriving_code_hits
+        // reappear at any *code* line. Shared helper since the
+        // reconstruction + code-line filter + panic-message stanza
+        // was replicated verbatim across three shields (`local.rs`,
+        // `infra.rs`, `prerelease.rs`).
+        crate::test_support::assert_source_forbids_deriving_one_arg_sigil_constant_form(
+            SOURCE,
+            "commands/infra.rs",
+            "DOCKER_BIN",
+            "docker",
+            "DOCKER",
         );
     }
 }
