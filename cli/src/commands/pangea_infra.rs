@@ -415,11 +415,19 @@ mod tests {
             "TERRAFORM",
             "terraform",
         );
-        assert!(
-            SOURCE.contains("crate::repo::get_tool_path(\"TERRAFORM\", \"terraform\")"),
-            "`terraform_bin()` must delegate to \
-             `crate::repo::get_tool_path(\"TERRAFORM\", \"terraform\")` — \
-             the canonical lookup was not found in the module."
+        // Assert the canonical two-arg sigil-delegation form appears at
+        // a code line. Pre-lift the shield's own docstring (line 390)
+        // and panic message quoted
+        // `crate::repo::get_tool_path("TERRAFORM", "terraform")`
+        // verbatim, so a regression at `commands/pangea_infra.rs:39`
+        // (the production sigil body) silently passed the naive
+        // `contains` shield. The helper's `code_line_hits` filter
+        // closes it.
+        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
+            SOURCE,
+            "commands/pangea_infra.rs",
+            "TERRAFORM",
+            "terraform",
         );
     }
 
@@ -478,11 +486,17 @@ mod tests {
             "BUNDLE_BIN",
             "bundle",
         );
-        assert!(
-            SOURCE.contains("crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")"),
-            "`bundle_bin()` must delegate to \
-             `crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")` — \
-             the canonical lookup was not found in the module."
+        // Same docstring-self-match defect the sibling `TERRAFORM`
+        // shield above closes: pre-lift the shield's own docstring
+        // (line 460) and panic message quoted
+        // `crate::repo::get_tool_path("BUNDLE_BIN", "bundle")` verbatim,
+        // so a regression at `commands/pangea_infra.rs:68` silently
+        // passed the naive `contains` shield.
+        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
+            SOURCE,
+            "commands/pangea_infra.rs",
+            "BUNDLE_BIN",
+            "bundle",
         );
     }
 
@@ -536,11 +550,17 @@ mod tests {
             "INSPEC_BIN",
             "inspec",
         );
-        assert!(
-            SOURCE.contains("crate::repo::get_tool_path(\"INSPEC_BIN\", \"inspec\")"),
-            "`inspec_bin()` must delegate to \
-             `crate::repo::get_tool_path(\"INSPEC_BIN\", \"inspec\")` — \
-             the canonical lookup was not found in the module."
+        // Same docstring-self-match defect the sibling `TERRAFORM` /
+        // `BUNDLE_BIN` shields above close: pre-lift the shield's own
+        // docstring (line 518) and panic message quoted
+        // `crate::repo::get_tool_path("INSPEC_BIN", "inspec")` verbatim,
+        // so a regression at `commands/pangea_infra.rs:98` silently
+        // passed the naive `contains` shield.
+        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
+            SOURCE,
+            "commands/pangea_infra.rs",
+            "INSPEC_BIN",
+            "inspec",
         );
     }
 }

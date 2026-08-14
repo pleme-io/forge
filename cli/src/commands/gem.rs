@@ -430,11 +430,24 @@ mod tests {
             "GEM_BIN",
             "gem",
         );
-        assert!(
-            SOURCE.contains("crate::repo::get_tool_path(\"GEM_BIN\", \"gem\")"),
-            "`gem_bin()` must delegate to \
-             `crate::repo::get_tool_path(\"GEM_BIN\", \"gem\")` — the \
-             canonical lookup was not found in the module."
+        // Assert the canonical two-arg sigil-delegation form appears at
+        // a code line. Pre-lift the shield spelled
+        // `SOURCE.contains("crate::repo::get_tool_path(\"GEM_BIN\", \"gem\")")`
+        // against the substituted literal; the shield's own docstring
+        // above quotes the same form inside a `///` block and the
+        // shield's own panic message quoted it inline too, so the naive
+        // `contains` predicate always passed regardless of whether the
+        // production sigil body at `commands/gem.rs:44` was intact —
+        // deleting it would silently leave the doc/message bytes and
+        // the shield would report green. The helper rides
+        // `code_line_hits` (which filters `///`/`//!`/`//` lines) and
+        // moves the panic message into `test_support.rs` so neither
+        // narration site can satisfy the shield.
+        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
+            SOURCE,
+            "commands/gem.rs",
+            "GEM_BIN",
+            "gem",
         );
     }
 
@@ -487,11 +500,18 @@ mod tests {
             "BUNDLE_BIN",
             "bundle",
         );
-        assert!(
-            SOURCE.contains("crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")"),
-            "`bundle_bin()` must delegate to \
-             `crate::repo::get_tool_path(\"BUNDLE_BIN\", \"bundle\")` \
-             — the canonical lookup was not found in the module."
+        // Same docstring-self-match defect the sibling `GEM_BIN`
+        // shield above closes: pre-lift the shield's own docstring
+        // (line 469) and panic message quoted
+        // `crate::repo::get_tool_path("BUNDLE_BIN", "bundle")` verbatim,
+        // so a regression at `commands/gem.rs:72` (the production
+        // sigil body) silently passed the naive `contains` shield.
+        // The helper's `code_line_hits` filter closes it.
+        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
+            SOURCE,
+            "commands/gem.rs",
+            "BUNDLE_BIN",
+            "bundle",
         );
     }
 }
