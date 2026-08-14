@@ -329,16 +329,11 @@ mod tests {
     fn test_npm_spawn_routes_through_npm_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("workspace_deps.rs");
 
-        let bare = "npm";
-        let raw_command = format!("Command::new(\"{}\")", bare);
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/workspace_deps.rs must not spawn `npm` via the \
-             bare literal — every npm spawn must resolve \
-             `NPM_BIN` via `npm_bin()` first. A raw literal at \
-             `Command::new` bypasses the hermetic-runner contract \
-             substrate's mkRuntimeToolsEnv exports."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/workspace_deps.rs",
+            "npm",
+            "resolve `NPM_BIN` via `npm_bin()`",
         );
         assert!(
             SOURCE.contains("fn npm_bin()"),
