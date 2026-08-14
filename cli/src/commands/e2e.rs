@@ -1293,23 +1293,11 @@ mod which_probe_routing_tests {
     fn test_which_probes_route_through_which_crate_not_command_spawn() {
         const SOURCE: &str = include_str!("e2e.rs");
 
-        let raw_command = format!("Command::new(\"{}\")", "which");
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/e2e.rs must not spawn the `which` binary via the \
-             bare tool-name literal — both PATH-probe sites in \
-             `verify_docker` and `ensure_docker_running` must resolve \
-             through the in-process `which::which(...)` crate idiom, the \
-             same shape the sibling probes in `commands/test_ci.rs`, \
-             `commands/rust_service.rs`, `commands/tool.rs`, \
-             `commands/search_sync.rs`, and `commands/sync.rs` already \
-             ride on. A bare-literal spawn on the `which` binary adds \
-             an ambient dependency on `which` existing on PATH itself; \
-             on a minimal Nix container whose derivation only exports \
-             the specific tool paths declared, the spawn fails-to-exec \
-             and the probe silently reports \"not installed\" for that \
-             reason alone."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/e2e.rs",
+            "which",
+            "resolve through the in-process `which::which(...)` crate idiom",
         );
         assert!(
             SOURCE.contains("which::which(\"docker\")"),
