@@ -429,22 +429,11 @@ mod tests {
     fn test_which_probe_routes_through_which_crate_not_command_spawn() {
         const SOURCE: &str = include_str!("search_sync.rs");
 
-        let raw_command = format!("Command::new(\"{}\")", "which");
-
-        assert!(
-            !SOURCE.contains(&raw_command),
-            "commands/search_sync.rs must not spawn the `which` binary \
-             via the bare tool-name literal — the PATH-probe fallback \
-             in `check_novasearchctl_available` must resolve through the \
-             in-process `which::which(...)` crate idiom, the same shape \
-             the sibling probes in `commands/test_ci.rs`, \
-             `commands/rust_service.rs`, and `commands/tool.rs` already \
-             ride on. A bare-literal spawn on the `which` binary adds \
-             an ambient dependency on `which` existing on PATH itself; \
-             on a minimal Nix container whose derivation only exports \
-             the specific tool paths declared, the spawn fails-to-exec \
-             and the probe silently reports `false` for that reason \
-             alone."
+        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+            SOURCE,
+            "commands/search_sync.rs",
+            "which",
+            "resolve through the in-process `which::which(...)` crate idiom",
         );
         assert!(
             SOURCE.contains("which::which(\"novasearchctl\")"),
