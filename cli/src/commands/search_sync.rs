@@ -420,11 +420,10 @@ mod tests {
             "which",
             "resolve through the in-process `which::which(...)` crate idiom",
         );
-        assert!(
-            SOURCE.contains("which::which(\"novasearchctl\")"),
-            "commands/search_sync.rs must probe the `novasearchctl` \
-             binary via the canonical `which::which(\"novasearchctl\")` \
-             crate call — the required form was not found in the module."
+        crate::test_support::assert_source_probes_via_which_which_code_line(
+            SOURCE,
+            "commands/search_sync.rs",
+            "novasearchctl",
         );
     }
 }

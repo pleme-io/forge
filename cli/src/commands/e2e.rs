@@ -1299,11 +1299,10 @@ mod which_probe_routing_tests {
             "which",
             "resolve through the in-process `which::which(...)` crate idiom",
         );
-        assert!(
-            SOURCE.contains("which::which(\"docker\")"),
-            "commands/e2e.rs must probe the `docker` binary via the \
-             canonical `which::which(\"docker\")` crate call — the \
-             required form was not found in the module."
+        crate::test_support::assert_source_probes_via_which_which_code_line(
+            SOURCE,
+            "commands/e2e.rs",
+            "docker",
         );
     }
 }

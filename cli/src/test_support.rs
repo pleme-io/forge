@@ -1150,6 +1150,96 @@ pub fn assert_source_delegates_via_constructor_call_code_line(
     );
 }
 
+/// Reconstruct the canonical `which::which("<bare>")` in-process probe
+/// call needle — the shape three sibling shields
+/// (`commands/search_sync.rs`, `commands/e2e.rs`, `commands/sync.rs`)
+/// assert on to certify that the module's PATH-probe surface reads
+/// through the `which` crate rather than a subprocess `Command::new`
+/// spawn (the pre-a46d580 / pre-671f2e2 anti-pattern the two `async` /
+/// `sync` families lifted onto the in-process crate idiom).
+///
+/// # Reconstruction discipline
+///
+/// The needle is built via `format!` — this helper's own source text
+/// contains only the templated form (with a `{}` placeholder for the
+/// bare-tool position), never a substituted concrete literal. A shield
+/// that scans `include_str!("test_support.rs")` therefore does not
+/// false-match this helper's body on any concrete tool. Sibling primitive
+/// to [`canonical_two_arg_sigil_needle`] / [`constructor_call_needle`] /
+/// [`sigil_bin_fn_definition_needle`] / [`get_tool_path_two_arg_call_needle`]
+/// and to [`deriving_one_arg_sigil_needle_constant`] /
+/// [`deriving_one_arg_sigil_needle_literal`]; same `format!`-based
+/// self-match discipline.
+pub fn which_which_probe_needle(bare: &str) -> String {
+    format!("which::which(\"{}\")", bare)
+}
+
+/// Assert the given `source` probes for the `<bare>` binary via the
+/// canonical `which::which("<bare>")` in-process crate idiom at at
+/// least one *code* line — i.e., outside `///` / `//!` / `//` comments.
+/// Panics with a diagnostic naming `module_path`, `bare`, and the
+/// canonical probe form.
+///
+/// # Why one canonical helper
+///
+/// Three whole-module shields across three files
+/// (`commands/search_sync.rs::test_which_probe_routes_through_which_crate_not_command_spawn`,
+/// `commands/e2e.rs::test_which_probes_route_through_which_crate_not_command_spawn`,
+/// `commands/sync.rs::test_which_probe_routes_through_which_crate_not_command_spawn`)
+/// spelled the same
+/// `assert!(SOURCE.contains("which::which(\"<bare>\")"), "<module>.rs
+/// must probe the `<bare>` binary via the canonical
+/// `which::which(\"<bare>\")` crate call — the required form was not
+/// found in the module.")` block verbatim, differing only in the
+/// substituted `bare` / `module_path` tokens. Three occurrences at
+/// THEORY.md §VI.1's three-times threshold ("two occurrences is a
+/// coincidence; three is a law"). This helper is the law-redeeming
+/// consolidation: a future edit to the remediation prose lands in one
+/// place and propagates to every shield, and a new probe-family shield
+/// added by a subsequent lift onto the `which` crate idiom inherits
+/// the discipline as one call.
+///
+/// # Why the code-line filter is load-bearing
+///
+/// A naive `SOURCE.contains(...)` positive assertion silently passes
+/// whenever the concrete needle appears in the module's docstrings or
+/// its own shield panic-message prose. This is a real regression class
+/// pre-existing in all three shields on `main` before this helper's
+/// introduction: each module's shield-adjacent docstring quotes the
+/// paraphrased `which::which(...)` form, but each shield's own panic
+/// message quotes the CONCRETE `which::which("<bare>")` inline as
+/// remediation (e.g. `commands/search_sync.rs:426`,
+/// `commands/e2e.rs:1305`, `commands/sync.rs:734`), AND
+/// `commands/e2e.rs`'s docstring at `commands/e2e.rs:1289` also quotes
+/// the concrete `which::which("docker")` verbatim. Deleting every
+/// production probe call (`commands/search_sync.rs:89`,
+/// `commands/e2e.rs:671` / `commands/e2e.rs:976`,
+/// `commands/sync.rs:510`) would still leave the pre-lift shield green
+/// as long as those docstring or panic-message bytes survived.
+///
+/// Filtering through [`code_line_hits`] suppresses the `///` docstring
+/// mentions so only executable code satisfies the shield; the migrated
+/// panic-message text lives at one point of truth here in
+/// `test_support.rs` (templated via `{needle}`) so the caller's file
+/// contains only real probe sites, not the message prose. Same
+/// docstring-self-match defect the code-line-filtered sigil-body /
+/// sigil-definition / consumer-call / constructor-delegation helper
+/// families close for their respective form families — here closed for
+/// the in-process `which::which` probe form family.
+pub fn assert_source_probes_via_which_which_code_line(source: &str, module_path: &str, bare: &str) {
+    let needle = which_which_probe_needle(bare);
+    let hits = code_line_hits(source, &needle);
+    assert!(
+        !hits.is_empty(),
+        "{module_path} must probe the `{bare}` binary via the canonical \
+         `{needle}` in-process crate call at a *code* line — the required \
+         call form was not found in the module. A regression here would \
+         silently downgrade to a subprocess `Command::new(\"{bare}\")` \
+         spawn, bypassing the in-process probe discipline and re-adding \
+         a fork+exec on the module's PATH-lookup surface."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2013,6 +2103,100 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "fake/module.rs",
             "zeta-widget",
             "zeta_widget_ctor",
+        );
+    }
+
+    /// The `which::which("<bare>")` probe-needle constructor emits the
+    /// exact substituted form the three migrated shields consume
+    /// verbatim via `code_line_hits(SOURCE, &needle)`. A template drift
+    /// (a stray space, dropped paren, an extra `!` baked into the
+    /// template) would silently disarm every migrated shield. Distinct
+    /// sibling cases pin that the bare-tool position is load-bearing —
+    /// a template that discarded it would collapse the three shields
+    /// to a single string.
+    #[test]
+    fn test_which_which_probe_needle_reconstructs_substituted_form() {
+        assert_eq!(
+            which_which_probe_needle("novasearchctl"),
+            "which::which(\"novasearchctl\")".to_string(),
+        );
+        assert_eq!(
+            which_which_probe_needle("docker"),
+            "which::which(\"docker\")".to_string(),
+        );
+        assert_eq!(
+            which_which_probe_needle("sea-orm-cli"),
+            "which::which(\"sea-orm-cli\")".to_string(),
+        );
+        assert_eq!(
+            which_which_probe_needle("zeta-widget"),
+            "which::which(\"zeta-widget\")".to_string(),
+        );
+    }
+
+    /// A source with the `which::which("<bare>")` probe at a *code*
+    /// line passes cleanly. Pinning the code-line acceptance path is
+    /// the floor every migrated shield consumes: absent any
+    /// regression, the helper is silent. The `zeta-widget` bare is
+    /// deliberately distinct from every real shield's `bare` so a
+    /// Grep of the crate for `zeta-widget` resolves to exactly this
+    /// test's family — a fast way to find the pinning tests when
+    /// editing the helper.
+    #[test]
+    fn test_assert_source_probes_via_which_which_code_line_accepts_code_line() {
+        assert_source_probes_via_which_which_code_line(
+            "fn probe() -> bool { which::which(\"zeta-widget\").is_ok() }\n",
+            "fake/module.rs",
+            "zeta-widget",
+        );
+    }
+
+    /// A source that mentions the `which::which("<bare>")` form ONLY
+    /// inside a `///` docstring (with no code-line occurrence) fires
+    /// the shield — the docstring-self-match defect the code-line
+    /// filter exists to close. Pins the load-bearing correctness
+    /// property named in the helper's docs: a naive
+    /// `SOURCE.contains("which::which(\"<bare>\")")` shield would
+    /// silently pass on this exact input class whenever a module's
+    /// docstring (or the shield's own inline panic-message prose)
+    /// quotes the concrete probe form verbatim. A future refactor
+    /// that dropped the code-line filter would break this test before
+    /// shipping and re-open the silent-pass regression class the
+    /// three migrated shields carried pre-lift.
+    ///
+    /// `should_panic(expected = ...)` matches on a substring of the
+    /// panic payload; the substring pins the substituted `module_path`
+    /// / `bare` tokens in the diagnostic so a message rewrite that
+    /// dropped any of them would surface here.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must probe the `zeta-widget` binary via the canonical `which::which(\"zeta-widget\")` in-process crate call at a *code* line"
+    )]
+    fn test_assert_source_probes_via_which_which_code_line_rejects_docstring_only_match() {
+        assert_source_probes_via_which_which_code_line(
+            "/// production sites probe via `which::which(\"zeta-widget\")` — narrated\n\
+             fn probe() -> bool { false }\n",
+            "fake/module.rs",
+            "zeta-widget",
+        );
+    }
+
+    /// A source that omits the `which::which("<bare>")` probe entirely
+    /// fires the shield — the plain missing-probe regression class.
+    /// Sibling pin to
+    /// [`test_assert_source_probes_via_which_which_code_line_rejects_docstring_only_match`]:
+    /// the two together certify both failure modes (docstring-only
+    /// and missing-outright) trigger the same diagnostic including the
+    /// subprocess-downgrade remediation tail.
+    #[test]
+    #[should_panic(
+        expected = "the required call form was not found in the module. A regression here would silently downgrade to a subprocess `Command::new(\"zeta-widget\")` spawn"
+    )]
+    fn test_assert_source_probes_via_which_which_code_line_rejects_missing_probe() {
+        assert_source_probes_via_which_which_code_line(
+            "fn probe() -> bool { false }\n",
+            "fake/module.rs",
+            "zeta-widget",
         );
     }
 

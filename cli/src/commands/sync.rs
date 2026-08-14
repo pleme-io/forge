@@ -728,11 +728,10 @@ mod tests {
             "which",
             "resolve through the in-process `which::which(...)` crate idiom",
         );
-        assert!(
-            SOURCE.contains("which::which(\"sea-orm-cli\")"),
-            "commands/sync.rs must probe the `sea-orm-cli` binary via \
-             the canonical `which::which(\"sea-orm-cli\")` crate call \
-             — the required form was not found in the module."
+        crate::test_support::assert_source_probes_via_which_which_code_line(
+            SOURCE,
+            "commands/sync.rs",
+            "sea-orm-cli",
         );
     }
 }
