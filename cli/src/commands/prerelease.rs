@@ -1753,27 +1753,18 @@ mod tests {
              sigil function that resolves the tools-registry \
              `DOCKER_BIN` override for every docker spawn."
         );
-        // Reconstruct the canonical delegation string at test time so
-        // this shield's own source text is not what makes the positive
-        // assertion pass. Same reconstruction discipline the sibling
-        // `e2e::docker_bin_routing_tests` shield rides.
-        let canonical = format!(
-            "crate::repo::get_tool_path(\"{}_BIN\", \"{}\")",
-            "DOCKER", "docker"
-        );
-        assert!(
-            SOURCE.contains(&canonical),
-            "`docker_bin()` must delegate to \
-             `crate::repo::get_tool_path(\"DOCKER_BIN\", \"docker\")` \
-             — the canonical two-arg env-var-or-fallback lookup \
-             (matching `e2e::docker_bin`, `test_ci::cargo_bin`, \
-             `super::cargo_bin` in this same module, and every \
-             sibling `<tool>_bin()` sigil since 23241a6) was not found \
-             in the module. If the sigil regressed to the deriving \
-             one-arg constant-driven form (see the sibling negative \
-             shield below for its exact shape), the substrate-exported \
-             `DOCKER_BIN` env-var literal is again hidden from a \
-             fleet-wide `DOCKER_BIN` audit."
+        // Assert the canonical two-arg sigil-delegation form appears at
+        // a code line — filtered through `code_line_hits` so a
+        // docstring-only match cannot silently satisfy the shield if
+        // the production sigil body regresses. Shared helper since the
+        // needle-construction + code-line filter pair was replicated
+        // across five shields (`local.rs`, `infra.rs`, `dashboards.rs`,
+        // and this module's docker + cargo shields).
+        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
+            SOURCE,
+            "commands/prerelease.rs",
+            "DOCKER_BIN",
+            "docker",
         );
         // Also assert the pre-lift deriving one-arg form does NOT
         // reappear at any *code* line (docstrings and shield error
@@ -1858,11 +1849,21 @@ mod tests {
              sigil function that resolves the `CARGO` override for \
              every cargo spawn."
         );
-        assert!(
-            SOURCE.contains("crate::repo::get_tool_path(\"CARGO\", \"cargo\")"),
-            "`cargo_bin()` must delegate to \
-             `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` — the \
-             canonical lookup was not found in the module."
+        // Assert the canonical two-arg sigil-delegation form appears at
+        // a code line — filtered through `code_line_hits` so a
+        // docstring-only match cannot silently satisfy the shield if
+        // the production sigil body regresses. Pre-lift the shield
+        // spelled `SOURCE.contains("crate::repo::get_tool_path(\"CARGO\", \"cargo\")")`
+        // against the substituted form; the module docstring above at
+        // `commands/prerelease.rs` quotes the same form verbatim
+        // inside a `///` block, so a regression at
+        // `commands/prerelease.rs:110` would silently pass the pre-lift
+        // shield. Shared helper closes that defect.
+        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
+            SOURCE,
+            "commands/prerelease.rs",
+            "CARGO",
+            "cargo",
         );
     }
 }

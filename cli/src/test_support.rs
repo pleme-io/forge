@@ -538,6 +538,110 @@ pub fn code_line_hits(source: &str, needle: &str) -> Vec<String> {
         .collect()
 }
 
+/// Reconstruct the canonical two-arg `crate::repo::get_tool_path` sigil
+/// delegation needle at test time. Returns the string
+/// `crate::repo::get_tool_path("<env_var>", "<bare>")` — the
+/// audit-visible two-arg spelling every `<tool>_bin()` sigil across
+/// forge routes through (unified by 23241a6 onto the shape
+/// [`crate::repo::get_tool_path`] exports).
+///
+/// # Why one canonical needle-constructor
+///
+/// Five whole-module routing shields — `commands/local.rs`,
+/// `commands/infra.rs`, `commands/dashboards.rs`, and two shields in
+/// `commands/prerelease.rs` (docker + cargo) — each spelled the same
+/// `format!` template verbatim, differing only in the substituted
+/// `env_var` / `bare` tokens (three called `format!` with a
+/// `_BIN`-baked template; two spelled the literal directly). Five
+/// occurrences past THEORY.md §VI.1's three-times threshold ("two
+/// occurrences is a coincidence; three is a law"). This helper is the
+/// law-redeeming carve-out: a future edit to the canonical shape (a
+/// rename of `crate::repo::get_tool_path` to
+/// `crate::repo::tool_path_or_env`, a switch to a three-arg
+/// override-with-log form, etc.) lands in one place and propagates to
+/// every shield, and a new shield that needs the canonical needle
+/// inherits the discipline as one call.
+///
+/// # Reconstruction discipline
+///
+/// The needle is built via `format!` — this helper's own source text
+/// contains only the templated form (with `{}` placeholders for the
+/// two-arg positions), never a substituted concrete literal. A shield
+/// that scans `include_str!("test_support.rs")` therefore does not
+/// false-match this helper's body on any concrete tool. Sibling
+/// primitive to [`forbidden_spawn_shapes`], which enforces the same
+/// discipline on the negative-side spawn-literal needles.
+pub fn canonical_two_arg_sigil_needle(env_var: &str, bare: &str) -> String {
+    format!("crate::repo::get_tool_path(\"{}\", \"{}\")", env_var, bare)
+}
+
+/// Assert the given `source` contains the canonical two-arg
+/// `crate::repo::get_tool_path("<env_var>", "<bare>")` sigil delegation
+/// form at at least one *code* line — i.e., outside docstrings and
+/// prose comments. Panics with a diagnostic naming `module_path`,
+/// `env_var`, `bare`, and the canonical form the shield exists to
+/// enforce.
+///
+/// # Why the code-line filter is load-bearing
+///
+/// A naive `source.contains(&canonical)` positive assertion silently
+/// passes whenever a docstring in the module quotes the canonical form
+/// verbatim — a real regression class pre-existing in two shields on
+/// `main` before this helper's introduction:
+///
+/// - `commands/dashboards.rs::jsonnet_bin_routing_tests` — the module
+///   docs at `commands/dashboards.rs:720` quote
+///   `crate::repo::get_tool_path("JSONNET_BIN", "jsonnet")` verbatim
+///   inside a `///` block, so the pre-lift
+///   `SOURCE.contains(&canonical)` shield always passed regardless of
+///   whether the production sigil at `commands/dashboards.rs:46` was
+///   intact.
+/// - `commands/prerelease.rs::tests::test_cargo_spawn_routes_through_cargo_bin_not_raw_literal`
+///   — the module docs at `commands/prerelease.rs:1840` quote
+///   `crate::repo::get_tool_path("CARGO", "cargo")` verbatim inside a
+///   `///` block, so a regression at `commands/prerelease.rs:110`
+///   silently passed the pre-lift shield.
+///
+/// Filtering the positive assertion through [`code_line_hits`] closes
+/// both defects with one primitive: only executable code satisfies the
+/// shield, not narration.
+///
+/// # Why one canonical helper
+///
+/// Same five-occurrence three-times-rule justification as
+/// [`canonical_two_arg_sigil_needle`] — the pre-lift assertion + panic
+/// message pair was spelled with per-site prose variations that all
+/// collapse to the same shape: "the `<bare>_bin()` sigil in
+/// `<module_path>` must delegate to the canonical two-arg form; if the
+/// form is not found in code, the substrate-exported `<env_var>`
+/// env-var literal is again hidden from a fleet-wide `<env_var>` audit."
+/// Consolidating the message here means a future edit to the
+/// remediation prose (say, adding a link to `substrate/mkRuntimeToolsEnv`
+/// or refining the audit-visibility phrasing) lands in one place.
+pub fn assert_source_has_canonical_two_arg_sigil_code_line(
+    source: &str,
+    module_path: &str,
+    env_var: &str,
+    bare: &str,
+) {
+    let canonical = canonical_two_arg_sigil_needle(env_var, bare);
+    let hits = code_line_hits(source, &canonical);
+    assert!(
+        !hits.is_empty(),
+        "{module_path} must delegate `{bare}` via the canonical two-arg \
+         `{canonical}` at a *code* line — the audit-visible two-arg \
+         env-var-or-fallback lookup every sibling `<tool>_bin()` sigil \
+         across forge honors (unified by 23241a6). Docstrings and shield \
+         narrations mentioning the form are filtered out via `///` / \
+         `//!` / `//` prefix, so a regression that dropped the \
+         production sigil body while a docstring still quoted the \
+         canonical form no longer silently passes. If the sigil \
+         regressed to the deriving one-arg form, the substrate-exported \
+         `{env_var}` env-var literal is again hidden from a fleet-wide \
+         `{env_var}` audit."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,6 +818,103 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             hits,
             vec!["line 5: fn ok() { let _ = FORBIDDEN_MARKER; }".to_string()],
             "only the executable-code line must be reported"
+        );
+    }
+
+    /// The canonical needle for `("DOCKER_BIN", "docker")` is the
+    /// substituted two-arg literal every sibling `<tool>_bin()` sigil
+    /// across forge routes through. Pinning the exact substituted string
+    /// here means a future edit that silently rewrote the template
+    /// (adding a space, dropping the quotes, renaming `get_tool_path`)
+    /// would break this test loudly before shipping — the five callers
+    /// consume the return value verbatim via
+    /// `code_line_hits(SOURCE, &needle)`, so a template drift would
+    /// silently disarm every migrated shield.
+    ///
+    /// A distinct bare `zeta-widget` sibling case pins that both
+    /// substitution positions are load-bearing (a template that dropped
+    /// `env_var` or `bare` would collapse the pair to the same string).
+    #[test]
+    fn test_canonical_two_arg_sigil_needle_reconstructs_substituted_form() {
+        assert_eq!(
+            canonical_two_arg_sigil_needle("DOCKER_BIN", "docker"),
+            "crate::repo::get_tool_path(\"DOCKER_BIN\", \"docker\")".to_string(),
+        );
+        assert_eq!(
+            canonical_two_arg_sigil_needle("CARGO", "cargo"),
+            "crate::repo::get_tool_path(\"CARGO\", \"cargo\")".to_string(),
+        );
+        assert_eq!(
+            canonical_two_arg_sigil_needle("ZETA_WIDGET_BIN", "zeta-widget"),
+            "crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")".to_string(),
+        );
+    }
+
+    /// A source with the canonical sigil at a code line passes cleanly.
+    /// Pinning the code-line acceptance path is the floor every
+    /// migrated shield consumes: absent any regression, the helper is
+    /// silent. The `zeta-widget` bare is deliberately distinct from
+    /// every real shield's `bare` so a Grep of the crate for
+    /// `zeta-widget` resolves to exactly this test and its sibling —
+    /// a fast way to find the pinning tests when editing the helper.
+    #[test]
+    fn test_assert_source_has_canonical_two_arg_sigil_code_line_accepts_code_line() {
+        assert_source_has_canonical_two_arg_sigil_code_line(
+            "fn zeta_bin() -> String {\n    \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")\n\
+             }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// A source that mentions the canonical form ONLY inside a `///`
+    /// docstring (with no code-line occurrence) fires the shield — the
+    /// docstring-self-match defect the code-line filter exists to
+    /// close. Pins the load-bearing correctness property named in the
+    /// helper's docs: the pre-lift `SOURCE.contains(&canonical)` shield
+    /// silently passed on this exact input class in two production
+    /// shields on `main` (`commands/dashboards.rs::jsonnet_bin_routing_tests`
+    /// and `commands/prerelease.rs::tests::test_cargo_spawn_routes_through_cargo_bin_not_raw_literal`).
+    /// A future refactor that dropped the code-line filter (say, going
+    /// back to a naive `source.contains(&needle)` for the positive
+    /// assertion) would break this test before shipping and re-open the
+    /// silent-pass regression class.
+    ///
+    /// `should_panic(expected = ...)` matches on a substring of the
+    /// panic payload; the substring pins the substituted `env_var` /
+    /// `bare` / `module_path` tokens in the diagnostic so a message
+    /// rewrite that dropped any of them would surface here.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must delegate `zeta-widget` via the canonical two-arg `crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")` at a *code* line"
+    )]
+    fn test_assert_source_has_canonical_two_arg_sigil_code_line_rejects_docstring_only_match() {
+        assert_source_has_canonical_two_arg_sigil_code_line(
+            "/// `crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")` — narrated\n\
+             fn zeta_bin() -> String { String::new() }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
+        );
+    }
+
+    /// A source that omits the canonical form entirely fires the shield
+    /// — the plain missing-sigil regression class. Sibling pin to
+    /// [`test_assert_source_has_canonical_two_arg_sigil_code_line_rejects_docstring_only_match`]:
+    /// the two together certify both failure modes (docstring-only and
+    /// missing-outright) trigger the same diagnostic.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must delegate `zeta-widget` via the canonical two-arg"
+    )]
+    fn test_assert_source_has_canonical_two_arg_sigil_code_line_rejects_missing_canonical() {
+        assert_source_has_canonical_two_arg_sigil_code_line(
+            "fn zeta_bin() -> String { String::new() }\n",
+            "fake/module.rs",
+            "ZETA_WIDGET_BIN",
+            "zeta-widget",
         );
     }
 
