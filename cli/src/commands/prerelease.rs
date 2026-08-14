@@ -53,22 +53,29 @@ use super::e2e;
 use super::migration_validation;
 
 /// Resolve the `docker` binary path via `DOCKER_BIN`, falling back to
-/// `docker` on `PATH`. Wired through [`crate::tools::get_tool_path`] so a
-/// Nix-hermetic runner's substrate-derived `DOCKER_BIN` lands at every
-/// docker-spawning site in this module. Mirrors the sibling `docker_bin`
-/// sigils in `commands/local.rs`, `commands/infra.rs`,
-/// `commands/e2e.rs`, and `infrastructure/docker.rs` — the one bridge
-/// between the forge pre-release-gate surface and the substrate-
-/// `mkRuntimeToolsEnv`-exported binary path. Pre-lift the three
-/// `std::process::Command` spawns inside `print_e2e_diagnostics`
-/// (docker ps / docker ps -a exited / docker images) each spelled
-/// the bare tool-name literal, so a Nix-hermetic runner's substrate-
-/// derived docker path lost to whatever `docker` was first on `PATH`
-/// at diagnostics time — silently redirecting an engineer chasing an
-/// E2E flake to a different daemon's container list than the one the
-/// failing test actually spawned against.
+/// `docker` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
+/// the two-arg env-var-or-fallback form every recent sibling sigil
+/// (`e2e::docker_bin` at 23241a6, `local::docker_bin` unified in this
+/// same commit, `infra::docker_bin` unified in this same commit,
+/// `cargo_bin` at 916f1a4, `crossplane::crossplane_bin` at 6b3ac16,
+/// `ps_bin` at 758dd6f, `open_bin` at 8f4c717, `sh_bin` at b382b78)
+/// already rides. The two-arg form lifts the substrate-exported
+/// env-var literal (`DOCKER_BIN`) directly into the sigil site so a
+/// fleet-wide `grep DOCKER_BIN` reaches this module — the deriving
+/// one-arg form this module previously carried
+/// (`crate::tools::get_tool_path(crate::tools::tools::DOCKER)`) hid
+/// the env-var literal behind a `tools::DOCKER = "docker"` constant
+/// plus an uppercase-suffix derivation, so the load-bearing name
+/// never appeared in the source and a `DOCKER_BIN` audit missed the
+/// site. Pre-lift the three `std::process::Command` spawns inside
+/// `print_e2e_diagnostics` (docker ps / docker ps -a exited / docker
+/// images) each spelled the bare tool-name literal, so a Nix-hermetic
+/// runner's substrate-derived docker path lost to whatever `docker`
+/// was first on `PATH` at diagnostics time — silently redirecting an
+/// engineer chasing an E2E flake to a different daemon's container
+/// list than the one the failing test actually spawned against.
 fn docker_bin() -> String {
-    crate::tools::get_tool_path(crate::tools::tools::DOCKER)
+    crate::repo::get_tool_path("DOCKER_BIN", "docker")
 }
 
 /// Resolve the `cargo` binary path via `CARGO`, falling back to `cargo`
@@ -1786,11 +1793,60 @@ mod tests {
              sigil function that resolves the tools-registry \
              `DOCKER_BIN` override for every docker spawn."
         );
+        // Reconstruct the canonical delegation string at test time so
+        // this shield's own source text is not what makes the positive
+        // assertion pass. Same reconstruction discipline the sibling
+        // `e2e::docker_bin_routing_tests` shield rides.
+        let canonical = format!(
+            "crate::repo::get_tool_path(\"{}_BIN\", \"{}\")",
+            "DOCKER", "docker"
+        );
         assert!(
-            SOURCE.contains("crate::tools::get_tool_path(crate::tools::tools::DOCKER)"),
+            SOURCE.contains(&canonical),
             "`docker_bin()` must delegate to \
-             `crate::tools::get_tool_path(crate::tools::tools::DOCKER)` \
-             — the canonical lookup was not found in the module."
+             `crate::repo::get_tool_path(\"DOCKER_BIN\", \"docker\")` \
+             — the canonical two-arg env-var-or-fallback lookup \
+             (matching `e2e::docker_bin`, `test_ci::cargo_bin`, \
+             `super::cargo_bin` in this same module, and every \
+             sibling `<tool>_bin()` sigil since 23241a6) was not found \
+             in the module. If the sigil regressed to the deriving \
+             one-arg constant-driven form (see the sibling negative \
+             shield below for its exact shape), the substrate-exported \
+             `DOCKER_BIN` env-var literal is again hidden from a \
+             fleet-wide `DOCKER_BIN` audit."
+        );
+        // Also assert the pre-lift deriving one-arg form does NOT
+        // reappear at any *code* line (docstrings and shield error
+        // messages narrating the anti-pattern are excluded via a
+        // per-line filter — same discipline the sibling
+        // `infrastructure/git.rs::test_infra_git_spawn_routes_through_git_command_sync_not_raw_literal`
+        // shield rides at 8416189). The forbidden shape is
+        // reconstructed via `format!` so the shield's own body does
+        // not literally contain it either.
+        let deriving = format!(
+            "crate::tools::get_tool_path(crate::tools::tools::{})",
+            "DOCKER"
+        );
+        let is_code_line = |line: &str| -> bool {
+            let t = line.trim_start();
+            !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("//")
+        };
+        let deriving_code_hits: Vec<String> = SOURCE
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(&deriving))
+            .filter(|(_, l)| is_code_line(l))
+            .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+            .collect();
+        assert!(
+            deriving_code_hits.is_empty(),
+            "commands/prerelease.rs must not resolve `docker` via the \
+             pre-lift deriving one-arg constant-driven form at any \
+             code line — a `DOCKER_BIN`-literal audit would miss the \
+             site. Use the two-arg \
+             `crate::repo::get_tool_path(\"DOCKER_BIN\", \"docker\")` \
+             form the sibling sigils honor. Code-line hits: {:#?}",
+            deriving_code_hits
         );
     }
 
