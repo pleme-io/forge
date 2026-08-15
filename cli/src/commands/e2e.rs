@@ -6,12 +6,13 @@
 //! - Integration: auto-starts Docker on macOS if not running
 //! - E2E: auto-builds and loads images if missing
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::repo::get_tool_path;
+use crate::retry::RetryPolicy;
 use crate::ui;
 
 /// Resolve the `docker` binary path via `DOCKER_BIN`, falling back to
@@ -62,6 +63,108 @@ fn docker_bin() -> String {
 /// this module observes, without an ambient-PATH intermediary.
 fn open_bin() -> String {
     get_tool_path("OPEN_BIN", "open")
+}
+
+/// The typed exponential-backoff policy for [`ensure_docker_running`]'s
+/// macOS Docker Desktop startup-poll cadence — `initial_backoff` 2s ×
+/// `factor` 2 capped at `max_backoff` 30s. Consumes the pre-existing
+/// typed primitive at [`crate::retry::RetryPolicy`] so the per-attempt
+/// delay lands at [`RetryPolicy::compute_delay`], the same shared body
+/// the sibling post-deployment readiness-poll surface
+/// `commands/integration_tests.rs::POST_DEPLOYMENT_READINESS_POLL_BACKOFF`
+/// (commit ef57ce5), the docker-compose services-healthy poll surface
+/// `commands/comprehensive_release.rs::SERVICES_HEALTHY_POLL_BACKOFF`
+/// (commit ad2e31e), the k8s-Job status-poll surface
+/// `services/migration_service.rs::MIGRATION_JOB_POLL_BACKOFF` (commit
+/// ac61874), and the health-endpoint retry surface
+/// `commands/post_deploy_verification.rs::HEALTH_ENDPOINT_BACKOFF`
+/// (commit b5db3b6) read through.
+///
+/// Pre-lift the schedule was spelled inline as a bare fixed
+/// `thread::sleep(Duration::from_secs(2))` at every iteration of the
+/// macOS `open -a Docker` auto-start's `docker info` poll loop. That
+/// shape carried three structural defects the typed-primitive body
+/// forecloses:
+/// 1. **Fixed 2s schedule.** A flat `sleep(2s)` between `docker info`
+///    probes is "too short when Docker Desktop is still initializing
+///    (30 rapid-fire probes against a daemon that has not yet bound
+///    its Unix socket — noise against an already-loaded macOS host),
+///    2s too long when the daemon bound its socket 100ms ago" — the
+///    exact worst-of-both failure mode the sibling
+///    `POST_DEPLOYMENT_READINESS_POLL_BACKOFF` /
+///    `SERVICES_HEALTHY_POLL_BACKOFF` / `MIGRATION_JOB_POLL_BACKOFF` /
+///    `HEALTH_ENDPOINT_BACKOFF` docstrings cite. Post-lift, the first
+///    probe still waits 2s (preserving the seed verbatim), then 4s /
+///    8s / 16s / 30s / 30s / … under the exponential-with-cap climb
+///    rather than the pre-lift flat 2s at every probe.
+/// 2. **No caller-visible schedule invariant.** The bare
+///    `Duration::from_secs(2)` literal at the poll-loop sleep carried
+///    no name a shield could pin — a future edit that changed the
+///    schedule at this site did not surface at any named-primitive
+///    audit path. The lifted `DOCKER_STARTUP_POLL_BACKOFF` const names
+///    the (seed, factor, cap) triple a shield can cite and enforce.
+/// 3. **Schedule desync from the sibling readiness-poll surfaces.**
+///    The macOS Docker Desktop startup-poll loop observes a workload's
+///    terminal transition to "daemon accepting `docker info`" the
+///    same way the sibling docker-compose services-healthy poll
+///    observes container transitions to `Up (healthy)` and the sibling
+///    post-deployment readiness poll observes `/health` transitions to
+///    200. Pre-lift each spelled its own local fixed-sleep schedule,
+///    so a future edit to one silently diverged from the others.
+///    Post-lift all consume the same shared body via the same
+///    `RetryPolicy::network()` `(factor=2, max_backoff=30s)` reference
+///    schedule.
+///
+/// `max_attempts: u32::MAX` is a placeholder — the poll loop is bounded
+/// by wall-clock via [`DOCKER_STARTUP_MAX_WAIT`], not by attempt count
+/// — and consumes only [`RetryPolicy::compute_delay`] from this policy,
+/// not [`RetryPolicy::max_attempts`]. The `max_attempts` field is
+/// unconsulted at this consumption site.
+const DOCKER_STARTUP_POLL_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: u32::MAX,
+    initial_backoff: Duration::from_secs(2),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Wall-clock deadline for [`ensure_docker_running`]'s Docker Desktop
+/// startup poll — preserves the pre-lift 60-second bound the fixed-
+/// iteration `for i in 1..=30 { thread::sleep(Duration::from_secs(2)); }`
+/// shape provided (30 iterations × 2s = 60s). Post-lift the loop is
+/// wall-clock-bounded via `start.elapsed() >= DOCKER_STARTUP_MAX_WAIT`
+/// rather than iteration-count-bounded, so the exponential-with-cap
+/// climb at [`DOCKER_STARTUP_POLL_BACKOFF`] can pace the probes
+/// (2s → 4s → 8s → 16s → 30s → 30s → …) without exceeding the same
+/// 60-second budget the pre-lift shape declared in its error message.
+const DOCKER_STARTUP_MAX_WAIT: Duration = Duration::from_secs(60);
+
+/// Backoff between `docker info` probes in [`ensure_docker_running`]'s
+/// macOS auto-start loop, given a 0-indexed local `backoff_attempt`
+/// counter (the `loop { thread::sleep(...); backoff_attempt += 1; ... }`
+/// shape drives one increment per iteration).
+///
+/// Maps the local 0-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(2)`:
+/// local `backoff_attempt == 0` (the first between-probe sleep after
+/// the `open -a Docker` spawn) reads as `compute_delay(2) =
+/// initial_backoff * factor^0 = initial_backoff = 2s`; local
+/// `backoff_attempt == 1` reads as `compute_delay(3) = 4s`;
+/// `backoff_attempt == 2` reads as `compute_delay(4) = 8s`;
+/// `backoff_attempt == 3` reads as `compute_delay(5) = 16s`;
+/// `backoff_attempt >= 4` reads as `compute_delay(>=6) = 30s` (cap) —
+/// preserves the pre-lift `thread::sleep(Duration::from_secs(2))` seed
+/// verbatim at the first probe and strictly diverges upward at every
+/// later probe.
+///
+/// The `saturating_add` clamp forecloses the `u32` overflow class at
+/// the bridge — a pathologically-fast poll-arm (a stub `docker` that
+/// returns instantly against a daemon that never comes up) that
+/// exhausts `u32` iterations reads as `compute_delay(u32::MAX)`, which
+/// itself saturates to [`DOCKER_STARTUP_POLL_BACKOFF::max_backoff`]
+/// via the `checked_pow`-then-cap body inside
+/// [`RetryPolicy::compute_delay`] without panic.
+fn docker_startup_poll_delay(backoff_attempt: u32) -> Duration {
+    DOCKER_STARTUP_POLL_BACKOFF.compute_delay(backoff_attempt.saturating_add(2))
 }
 
 /// Test pyramid levels
@@ -995,27 +1098,40 @@ pub fn ensure_docker_running() -> Result<()> {
         // Try to open Docker Desktop
         let _ = Command::new(open_bin()).args(["-a", "Docker"]).output();
 
-        // Wait for Docker to start (up to 60 seconds)
+        // Wait for Docker to start (up to DOCKER_STARTUP_MAX_WAIT)
         ui::print_info("Waiting for Docker to start...");
-        for i in 1..=30 {
-            thread::sleep(Duration::from_secs(2));
+        let start = Instant::now();
+        let mut backoff_attempt: u32 = 0;
+        let mut last_report = start;
+        loop {
+            thread::sleep(docker_startup_poll_delay(backoff_attempt));
+            backoff_attempt = backoff_attempt.saturating_add(1);
 
             let check = Command::new(docker_bin())
                 .arg("info")
                 .output()
                 .context("Failed to run docker info")?;
 
+            let elapsed = start.elapsed();
             if check.status.success() {
-                ui::print_success(&format!("Docker started after {} seconds", i * 2));
+                ui::print_success(&format!("Docker started after {}s", elapsed.as_secs()));
                 return Ok(());
             }
 
-            if i % 5 == 0 {
-                ui::print_info(&format!("Still waiting... ({}s)", i * 2));
+            if elapsed >= DOCKER_STARTUP_MAX_WAIT {
+                break;
+            }
+
+            if last_report.elapsed() >= Duration::from_secs(10) {
+                ui::print_info(&format!("Still waiting... ({}s)", elapsed.as_secs()));
+                last_report = Instant::now();
             }
         }
 
-        bail!("Docker failed to start within 60 seconds. Please start Docker Desktop manually.");
+        bail!(
+            "Docker failed to start within {}s. Please start Docker Desktop manually.",
+            DOCKER_STARTUP_MAX_WAIT.as_secs()
+        );
     }
 
     bail!("Docker daemon is not running. Please start Docker first.");
@@ -1444,6 +1560,255 @@ mod open_bin_routing_tests {
             "commands/e2e.rs must define the `open_bin` sigil — the one \
              bridge between this module's `open` spawn and the \
              substrate-exported `OPEN_BIN` env override."
+        );
+    }
+}
+
+#[cfg(test)]
+mod docker_startup_poll_backoff_tests {
+    use super::*;
+
+    /// The `(initial_backoff, factor, max_backoff)` shape of the Docker
+    /// Desktop startup-poll backoff policy is a load-bearing invariant
+    /// shared with the sibling readiness-poll surfaces at
+    /// `commands/integration_tests.rs::POST_DEPLOYMENT_READINESS_POLL_BACKOFF`
+    /// (ef57ce5), `commands/comprehensive_release.rs::
+    /// SERVICES_HEALTHY_POLL_BACKOFF` (ad2e31e), and
+    /// `services/migration_service.rs::MIGRATION_JOB_POLL_BACKOFF`
+    /// (ac61874) — all four policies consume the same
+    /// `RetryPolicy::network()` `(factor=2, max_backoff=30s)` reference
+    /// schedule and the same 2s seed. Pinned here so a future silent-
+    /// desync at the const site (a factor bump, a cap change, a seed
+    /// drift) is caught at a named test rather than silently across the
+    /// two consumption sites (`docker_startup_poll_delay` + the loop
+    /// body).
+    #[test]
+    fn test_docker_startup_poll_backoff_policy_shape() {
+        assert_eq!(
+            DOCKER_STARTUP_POLL_BACKOFF.initial_backoff,
+            Duration::from_secs(2),
+            "DOCKER_STARTUP_POLL_BACKOFF.initial_backoff must be 2s \
+             — preserves the pre-lift bare `thread::sleep(Duration::\
+             from_secs(2))` seed verbatim at the poll loop's first \
+             sleep.",
+        );
+        assert_eq!(
+            DOCKER_STARTUP_POLL_BACKOFF.factor, 2,
+            "DOCKER_STARTUP_POLL_BACKOFF.factor must be 2 \
+             — the Bazel/Buck2/SLSA-frontier reference doubling climb \
+             the sibling `RetryPolicy::network()` factory also emits.",
+        );
+        assert_eq!(
+            DOCKER_STARTUP_POLL_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "DOCKER_STARTUP_POLL_BACKOFF.max_backoff must be 30s \
+             — the Bazel/Buck2/SLSA-frontier 30s cap the sibling \
+             `RetryPolicy::network()` factory also emits.",
+        );
+    }
+
+    /// The wall-clock deadline preserves the pre-lift 60-second bound
+    /// the fixed-iteration `for i in 1..=30 { thread::sleep(2s); }`
+    /// shape provided (30 iterations × 2s = 60s), pinned as a named
+    /// const so a future edit that changes the budget at
+    /// `ensure_docker_running` surfaces here rather than silently at
+    /// the loop body.
+    #[test]
+    fn test_docker_startup_max_wait_preserves_pre_lift_bound() {
+        assert_eq!(
+            DOCKER_STARTUP_MAX_WAIT,
+            Duration::from_secs(60),
+            "DOCKER_STARTUP_MAX_WAIT must be 60s — preserves the \
+             pre-lift `for i in 1..=30 {{ thread::sleep(Duration::\
+             from_secs(2)); }}` shape's 30 iterations × 2s = 60s \
+             wall-clock budget the bail! diagnostic named.",
+        );
+    }
+
+    /// The first probe preserves the pre-lift seed verbatim
+    /// (`backoff_attempt == 0` → `compute_delay(2) = initial_backoff =
+    /// 2s`); every later probe strictly diverges upward under the
+    /// exponential-with-cap climb (`4s → 8s → 16s → 30s → …`) rather
+    /// than re-emitting the pre-lift `2s` flat.
+    #[test]
+    fn test_docker_startup_poll_delay_matches_pre_lift_seed_and_climbs_at_in_cap_attempts() {
+        assert_eq!(
+            docker_startup_poll_delay(0),
+            Duration::from_secs(2),
+            "backoff_attempt=0 must sleep 2s — matches pre-lift \
+             `thread::sleep(Duration::from_secs(2))` seed verbatim.",
+        );
+        assert_eq!(
+            docker_startup_poll_delay(1),
+            Duration::from_secs(4),
+            "backoff_attempt=1 must sleep 4s — pre-lift stayed flat \
+             at 2s; post-lift climbs `initial_backoff * factor = 4s`.",
+        );
+        assert_eq!(
+            docker_startup_poll_delay(2),
+            Duration::from_secs(8),
+            "backoff_attempt=2 must sleep 8s — pre-lift stayed flat \
+             at 2s; post-lift climbs `initial_backoff * factor^2 = 8s`.",
+        );
+        assert_eq!(
+            docker_startup_poll_delay(3),
+            Duration::from_secs(16),
+            "backoff_attempt=3 must sleep 16s — pre-lift stayed flat \
+             at 2s; post-lift climbs `initial_backoff * factor^3 = 16s`.",
+        );
+    }
+
+    /// Iterations past the cap must all emit `max_backoff = 30s` —
+    /// under a wall-clock-bounded loop the exponential climb saturates
+    /// to the cap after `attempt >= 4` (`compute_delay(6) = 32s`
+    /// clamped to 30s).
+    #[test]
+    fn test_docker_startup_poll_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            docker_startup_poll_delay(4),
+            Duration::from_secs(30),
+            "backoff_attempt=4 must sleep 30s (cap) — \
+             `initial_backoff * factor^4 = 32s`, clamped to \
+             `max_backoff = 30s`.",
+        );
+        assert_eq!(
+            docker_startup_poll_delay(5),
+            Duration::from_secs(30),
+            "backoff_attempt=5 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            docker_startup_poll_delay(50),
+            Duration::from_secs(30),
+            "backoff_attempt=50 must sleep 30s (cap) — beyond-cap \
+             iterations must stay at the ceiling rather than drifting \
+             upward.",
+        );
+    }
+
+    /// The poll loop is bounded by wall-clock via
+    /// [`DOCKER_STARTUP_MAX_WAIT`], not by attempt count, so
+    /// `backoff_attempt` can in principle reach any `u32` value on a
+    /// pathologically-fast poll-arm (a stub `docker` that returns
+    /// instantly against a daemon that never comes up). This test pins
+    /// that composition: an `attempt == u32::MAX` argument returns a
+    /// bounded delay rather than panicking. The `saturating_add(2)`
+    /// bridge inside `docker_startup_poll_delay` clamps to `u32::MAX`,
+    /// and [`RetryPolicy::compute_delay`]'s `checked_pow`-then-cap body
+    /// itself saturates to `max_backoff` without panic.
+    #[test]
+    fn test_docker_startup_poll_delay_saturates_without_panic_at_arbitrarily_large_attempt() {
+        assert_eq!(
+            docker_startup_poll_delay(u32::MAX),
+            Duration::from_secs(30),
+            "backoff_attempt=u32::MAX must saturate to max_backoff \
+             without panic — the `saturating_add(2)` bridge + \
+             `RetryPolicy::compute_delay`'s `checked_pow` cap close \
+             the u32 overflow class by construction.",
+        );
+        assert_eq!(
+            docker_startup_poll_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "backoff_attempt=u32::MAX - 1 must also saturate to \
+             max_backoff — the bridge `saturating_add(2)` returns \
+             u32::MAX, still far past the cap.",
+        );
+    }
+
+    /// The `(factor, max_backoff)` pair of `DOCKER_STARTUP_POLL_BACKOFF`
+    /// matches the Bazel/Buck2/SLSA-frontier reference schedule the
+    /// retry module cites at [`RetryPolicy::network`]'s docstring. The
+    /// Docker startup-poll policy diverges only at `initial_backoff`
+    /// (2s vs 250ms) to preserve the pre-lift
+    /// `thread::sleep(Duration::from_secs(2))` seed verbatim. Pin the
+    /// shared invariants so a future refinement to the retry module's
+    /// reference schedule surfaces the intentional Docker-startup-side
+    /// divergence as a named test failure rather than silently
+    /// propagating.
+    #[test]
+    fn test_docker_startup_poll_backoff_shares_network_factor_and_cap() {
+        let network = RetryPolicy::network();
+        assert_eq!(
+            DOCKER_STARTUP_POLL_BACKOFF.factor, network.factor,
+            "DOCKER_STARTUP_POLL_BACKOFF.factor must match \
+             RetryPolicy::network().factor — both consume the \
+             Bazel/Buck2/SLSA-frontier factor=2 reference.",
+        );
+        assert_eq!(
+            DOCKER_STARTUP_POLL_BACKOFF.max_backoff, network.max_backoff,
+            "DOCKER_STARTUP_POLL_BACKOFF.max_backoff must match \
+             RetryPolicy::network().max_backoff — both consume the \
+             Bazel/Buck2/SLSA-frontier 30s cap reference.",
+        );
+    }
+
+    /// The macOS Docker Desktop startup-poll loop body inside
+    /// [`super::ensure_docker_running`] MUST consume the typed primitive
+    /// at `docker_startup_poll_delay(backoff_attempt)` rather than the
+    /// pre-lift bare `thread::sleep(Duration::from_secs(2))` literal. A
+    /// future refactor that reintroduces the fixed-literal shape (see
+    /// `DOCKER_STARTUP_POLL_BACKOFF`'s docstring for the three
+    /// structural defects the lift closed) fails here, not silently in
+    /// production where a slow-starting Docker Desktop would resume
+    /// hammering the daemon with ~30 rapid probes over its 60-second
+    /// window.
+    ///
+    /// Uses the [`crate::test_support::code_line_hits`] helper so the
+    /// shield does not false-positive on `DOCKER_STARTUP_POLL_BACKOFF`'s
+    /// own docstring above (which cites the pre-lift shape as context
+    /// for the three defects it forecloses). The forbidden literal is
+    /// reconstructed at test time via [`format!`] and the diagnostic
+    /// prose refers to it only via the reconstructed `bespoke_needle`
+    /// (never the fused literal), so the assert message body itself
+    /// stays unmatchable — same code-line-filter-plus-format-
+    /// reconstruction discipline sibling shields 4163c7e / ffa5271 /
+    /// fa2c702 / a7d5375 / ab06395 use.
+    ///
+    /// The scan is bounded strictly to `pub fn ensure_docker_running(`'s
+    /// body — from its signature through the next `\n#[cfg(test)]\n`
+    /// marker in source order — so unrelated `sleep` sites elsewhere in
+    /// this module do not false-trigger the shield, and this shield's
+    /// own docstring mention of the pre-lift shape (living in a
+    /// `#[cfg(test)]` block below that marker) stays out of scope.
+    #[test]
+    fn test_ensure_docker_running_consumes_typed_poll_delay_not_bare_fixed_sleep() {
+        const SOURCE: &str = include_str!("e2e.rs");
+
+        let fn_marker = "pub fn ensure_docker_running(";
+        let start = SOURCE.find(fn_marker).expect(
+            "commands/e2e.rs must contain `pub fn ensure_docker_running(` \
+             — the shield's slice boundary relies on this function name",
+        );
+        let after_fn = &SOURCE[start..];
+        let end_relative = after_fn.find("\n#[cfg(test)]\n").expect(
+            "commands/e2e.rs must have a `#[cfg(test)]` marker after \
+             `ensure_docker_running` — the shield's slice boundary \
+             depends on the module ordering",
+        );
+        let fn_body = &after_fn[..end_relative];
+
+        let bespoke_needle = format!(
+            "thread::sleep(Duration::from_secs({}))",
+            DOCKER_STARTUP_POLL_BACKOFF.initial_backoff.as_secs(),
+        );
+        let bespoke_hits = crate::test_support::code_line_hits(fn_body, &bespoke_needle);
+        assert!(
+            bespoke_hits.is_empty(),
+            "ensure_docker_running() must NOT re-fuse the pre-lift \
+             bare fixed sleep at the poll loop — the schedule lives \
+             at `DOCKER_STARTUP_POLL_BACKOFF` + \
+             `docker_startup_poll_delay`, both grounding through \
+             `RetryPolicy::compute_delay`. Found code-line hits: {:#?}",
+            bespoke_hits,
+        );
+        let delegation_hits = crate::test_support::code_line_hits(
+            fn_body,
+            "docker_startup_poll_delay(backoff_attempt)",
+        );
+        assert!(
+            !delegation_hits.is_empty(),
+            "ensure_docker_running() must consume the typed \
+             poll-delay helper at the poll loop's sleep site — the \
+             canonical delegation call was not found at any code line.",
         );
     }
 }
