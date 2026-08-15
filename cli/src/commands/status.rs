@@ -818,22 +818,63 @@ async fn fetch_configmap(namespace: &str, name: &str) -> Result<ConfigMapInfo> {
     })
 }
 
+/// Parse a `kubectl get ... -o json` list-shaped output into its
+/// `.items[]` array, extracted as an owned `Vec<serde_json::Value>` so
+/// the caller can iterate/filter/map without threading a borrow of the
+/// parsed document through the fetch site.
+///
+/// # Cases
+///
+/// - **Non-success exit** — returns `Ok(vec![])`. The four `fetch_*`
+///   list-shaped consumer sites in this module already collapse kubectl
+///   unavailability (RBAC-denied `get`, missing CRD, kubeconfig
+///   pointing at a down cluster) to an empty-result summary rather than
+///   failing the whole status render; this primitive preserves that
+///   discipline at one body.
+/// - **Success + valid JSON with an `.items[]` array** — returns the
+///   items in document order. Extraction uses `std::mem::take` on the
+///   parsed array in place of a `.cloned()` deep-copy so the primitive
+///   stays O(1) in the item count and moves the item [`serde_json::
+///   Value`]s rather than duplicating their nested heap allocations.
+/// - **Success + valid JSON without an `.items[]` array** — returns
+///   `Ok(vec![])`. The four pre-lift consumers all treated a
+///   missing/non-array `.items` field as an empty list (via
+///   `.and_then(|i| i.as_array()).unwrap_or(&empty_vec)`); this
+///   primitive preserves that at one body.
+/// - **Success + invalid JSON** — propagates the [`serde_json::Error`]
+///   through `?`. The four pre-lift consumers all spelled `serde_json::
+///   from_slice(&output.stdout)?` verbatim; this primitive preserves
+///   that at one body.
+///
+/// # Consumers
+///
+/// - [`fetch_secrets`]
+/// - [`fetch_k8s_services`]
+/// - [`fetch_migrations`]
+/// - [`fetch_events`]
+///
+/// Four sibling call sites past the "two is a coincidence; three is a
+/// law" threshold — see the retry-schedule (`RetryPolicy::compute_delay`)
+/// and helm-error-branch (`ensure_helm_success`) sibling lifts on the
+/// prior claude-routine chain.
+fn kubectl_get_items(output: &std::process::Output) -> Result<Vec<serde_json::Value>> {
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+    let mut json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    Ok(match json.get_mut("items") {
+        Some(serde_json::Value::Array(arr)) => std::mem::take(arr),
+        _ => vec![],
+    })
+}
+
 async fn fetch_secrets(namespace: &str, deployment_name: &str) -> Result<Vec<String>> {
     let output = kubectl_command_async()
         .args(["get", "secrets", "-n", namespace, "-o", "json"])
         .output()
         .await?;
 
-    if !output.status.success() {
-        return Ok(vec![]);
-    }
-
-    let secrets: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let empty_vec = vec![];
-    let items = secrets
-        .get("items")
-        .and_then(|i| i.as_array())
-        .unwrap_or(&empty_vec);
+    let items = kubectl_get_items(&output)?;
 
     Ok(items
         .iter()
@@ -858,16 +899,7 @@ async fn fetch_k8s_services(namespace: &str, deployment_name: &str) -> Result<Ve
         .output()
         .await?;
 
-    if !output.status.success() {
-        return Ok(vec![]);
-    }
-
-    let services: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let empty_vec = vec![];
-    let items = services
-        .get("items")
-        .and_then(|i| i.as_array())
-        .unwrap_or(&empty_vec);
+    let items = kubectl_get_items(&output)?;
 
     Ok(items
         .iter()
@@ -925,16 +957,7 @@ async fn fetch_migrations(namespace: &str, deployment_name: &str) -> Result<Vec<
         .output()
         .await?;
 
-    if !output.status.success() {
-        return Ok(vec![]);
-    }
-
-    let jobs: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let empty_vec = vec![];
-    let items = jobs
-        .get("items")
-        .and_then(|i| i.as_array())
-        .unwrap_or(&empty_vec);
+    let items = kubectl_get_items(&output)?;
 
     // Take last 5 jobs
     Ok(items
@@ -1004,16 +1027,7 @@ async fn fetch_events(namespace: &str, deployment_name: &str) -> Result<Vec<Even
         .output()
         .await?;
 
-    if !output.status.success() {
-        return Ok(vec![]);
-    }
-
-    let events: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let empty_vec = vec![];
-    let items = events
-        .get("items")
-        .and_then(|i| i.as_array())
-        .unwrap_or(&empty_vec);
+    let items = kubectl_get_items(&output)?;
 
     // Take last 5 events
     Ok(items
@@ -1538,6 +1552,203 @@ mod tests {
             "status.rs must delegate every kubectl spawn to \
              `kubectl_command_async()` — the delegation string was \
              not found in the module body."
+        );
+    }
+
+    // Build a synthetic `std::process::Output` for the `kubectl_get_items`
+    // shields below. Centralized so a future reshape of the shape
+    // (adding a captured signal, widening to a cross-platform
+    // `ExitStatusExt`) lands at one place, mirroring the sibling
+    // `commands/helm.rs::capture_tests::make_output` builder committed
+    // at 9e8e75c.
+    fn make_output(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if success { 0 } else { 1 << 8 }),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[test]
+    fn kubectl_get_items_returns_empty_vec_on_non_success_exit_status() {
+        // Pre-lift the four `fetch_*` list-shaped consumer sites each
+        // spelled `if !output.status.success() { return Ok(vec![]); }`
+        // verbatim — this shield pins the primitive collapses kubectl
+        // unavailability to the same empty-result summary at ONE body.
+        // Even when stdout carries a nominally valid `{"items":[...]}`
+        // document, a non-success exit MUST short-circuit before the
+        // parse: RBAC-denied `get` and missing-CRD `get` return an
+        // error status alongside a helpful stderr-shaped hint, and
+        // the pre-lift consumers all discarded stdout in that case.
+        let out = make_output(false, br#"{"items":[{"metadata":{"name":"leaked"}}]}"#, b"");
+        let items = super::kubectl_get_items(&out).expect("non-success exit is Ok(empty)");
+        assert!(
+            items.is_empty(),
+            "non-success exit must collapse to Ok(empty); a caller \
+             that saw the stdout-emitted `leaked` item would silently \
+             surface a stale kubectl response as though the query \
+             succeeded"
+        );
+    }
+
+    #[test]
+    fn kubectl_get_items_returns_items_array_in_document_order_on_success() {
+        // The four pre-lift consumer sites all iterated `items.iter()`
+        // — in document order — over the `.items[]` array. This shield
+        // pins that document-order iteration survives the lift by
+        // asserting the primitive returns items in the same order they
+        // appear in the kubectl JSON. A future regression that
+        // accidentally reversed (e.g., `.into_iter().rev().collect()`)
+        // would silently swap the "last 5 jobs" / "last 5 events"
+        // semantics at `fetch_migrations` and `fetch_events` — those
+        // two sites apply `.rev().take(5)` post-primitive, so an
+        // upstream reverse would surface the FIRST 5 (oldest) instead
+        // of the LAST 5 (newest).
+        let out = make_output(
+            true,
+            br#"{"items":[
+                {"metadata":{"name":"alpha"}},
+                {"metadata":{"name":"beta"}},
+                {"metadata":{"name":"gamma"}}
+            ]}"#,
+            b"",
+        );
+        let items = super::kubectl_get_items(&out).expect("success + valid JSON is Ok(items)");
+        let names: Vec<&str> = items
+            .iter()
+            .map(|i| {
+                i.pointer("/metadata/name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+            })
+            .collect();
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn kubectl_get_items_returns_empty_vec_when_items_field_missing() {
+        // Pre-lift the four consumer sites all spelled
+        // `.get("items").and_then(|i| i.as_array()).unwrap_or(&empty_vec)`
+        // verbatim — a missing `.items` field silently collapsed to an
+        // empty items list. This shield pins that: kubectl's `-o json`
+        // for a not-found single-object query (e.g., `get deployment
+        // nonexistent`) returns a JSON error document without an
+        // `.items[]` array — the pre-lift consumers treated that as
+        // empty rather than as an error. Preserved at the primitive.
+        let out = make_output(
+            true,
+            br#"{"kind":"Status","status":"Failure","message":"deployment not found"}"#,
+            b"",
+        );
+        let items = super::kubectl_get_items(&out).expect("success + missing items is Ok(empty)");
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn kubectl_get_items_returns_empty_vec_when_items_field_is_not_an_array() {
+        // Pre-lift the four consumer sites all guarded the `.items`
+        // extraction with `.and_then(|i| i.as_array())` — a `.items`
+        // field whose value was NOT an array (a `null`, a string, an
+        // object) collapsed to an empty items list rather than a type
+        // error. This shield pins that same lenient-typing discipline
+        // at the primitive: a well-formed JSON with `"items":null` or
+        // `"items":"unexpected"` yields `Ok(vec![])`, not a parse
+        // error. Symmetric to the missing-field shield above.
+        let out_null = make_output(true, br#"{"items":null}"#, b"");
+        assert!(super::kubectl_get_items(&out_null)
+            .expect("success + null items is Ok(empty)")
+            .is_empty());
+        let out_str = make_output(true, br#"{"items":"nope"}"#, b"");
+        assert!(super::kubectl_get_items(&out_str)
+            .expect("success + string items is Ok(empty)")
+            .is_empty());
+        let out_obj = make_output(true, br#"{"items":{"nested":"object"}}"#, b"");
+        assert!(super::kubectl_get_items(&out_obj)
+            .expect("success + object items is Ok(empty)")
+            .is_empty());
+    }
+
+    #[test]
+    fn kubectl_get_items_propagates_parse_error_on_invalid_json() {
+        // Pre-lift the four consumer sites all spelled
+        // `serde_json::from_slice(&output.stdout)?` verbatim — a
+        // success-status output whose stdout is not valid JSON
+        // propagates the parse error through `?` to the caller. The
+        // primitive preserves that: a shellshock-style scenario where
+        // kubectl exits 0 but emits corrupt or truncated bytes
+        // surfaces at the fetch site as an error, not as an empty
+        // items list masquerading as a healthy empty response.
+        let out = make_output(true, b"this is not json {{[", b"");
+        assert!(super::kubectl_get_items(&out).is_err());
+    }
+
+    /// Regression shield: `kubectl_get_items` is the ONLY consumer of
+    /// the pre-lift `if !output.status.success() { return Ok(vec![]); }
+    /// let X: serde_json::Value = serde_json::from_slice(&output.stdout)?;`
+    /// stanza in `commands/status.rs`. Pre-lift the four `fetch_*`
+    /// list-shaped consumer sites (`fetch_secrets`, `fetch_k8s_services`,
+    /// `fetch_migrations`, `fetch_events`) each spelled the verbatim
+    /// eight-line stanza:
+    /// ```text
+    /// if !output.status.success() {
+    ///     return Ok(vec![]);
+    /// }
+    ///
+    /// let X: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    /// let empty_vec = vec![];
+    /// let items = X
+    ///     .get("items")
+    ///     .and_then(|i| i.as_array())
+    ///     .unwrap_or(&empty_vec);
+    /// ```
+    /// A future regression that re-fused the pre-lift stanza at one
+    /// of the four sites (or at a new fifth list-shaped fetch helper)
+    /// would silently split the "kubectl unavailability → empty
+    /// result" discipline across the primitive and the re-fused site,
+    /// re-introducing the "seven-line stanza per site" duplication
+    /// this lift redeems. The shield pins the discipline at ONE call
+    /// site — the primitive itself — by asserting the `let empty_vec
+    /// = vec![];` needle (the only unique load-bearing token from the
+    /// pre-lift stanza, present at exactly zero sites post-lift)
+    /// appears zero times in the module's non-test body.
+    ///
+    /// The scan is bounded strictly to the module's non-test body via
+    /// the `\n#[cfg(test)]\nmod tests {` marker (same slice boundary
+    /// the sibling
+    /// `test_status_routes_kubectl_through_kubectl_command_async_not_raw_command`
+    /// shield uses) so this shield's own docstring mention of `let
+    /// empty_vec = vec![];` stays out of scope. And routes through
+    /// [`crate::test_support::code_line_hits`] so `///`-prefixed
+    /// doc-comment mentions in the module body's fn docs — should
+    /// any future doc reference the pre-lift shape as prose — do not
+    /// self-match as phantom hits, the same code-line-filter discipline
+    /// the sibling `code_line_hits` consumers established at prior
+    /// claude-routine commits (ab06395 / a7d5375 / fa2c702 / fd02aa6 /
+    /// cc81215 / 3e26bbc / 4163c7e / ffa5271 / 8eed602).
+    #[test]
+    fn kubectl_get_items_is_only_json_items_parse_at_the_fetch_helper_bail_surface() {
+        let source = include_str!("status.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let hits = crate::test_support::code_line_hits(module_body, "let empty_vec = vec![];");
+        assert!(
+            hits.is_empty(),
+            "status.rs must route every list-shaped fetch helper's \
+             `.items[]` extraction through `kubectl_get_items(&output)` \
+             so a future regression that re-fuses the pre-lift \
+             `let empty_vec = vec![]; let items = X.get(\"items\")\
+             .and_then(|i| i.as_array()).unwrap_or(&empty_vec);` stanza \
+             at any of the four `fetch_*` consumer sites (or at a new \
+             fifth list-shaped helper) fails here rather than silently \
+             splitting the discipline across the primitive and the \
+             re-fused site. Found: {hits:?}"
         );
     }
 }
