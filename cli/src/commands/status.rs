@@ -683,16 +683,7 @@ async fn fetch_statefulset(namespace: &str, name: &str) -> Result<StatefulSetInf
         .await?;
 
     let sts = kubectl_get_item(&output, "StatefulSet not found")?;
-    let status = sts.get("status").unwrap_or(&serde_json::Value::Null);
-
-    let ready = status
-        .get("readyReplicas")
-        .and_then(|r| r.as_i64())
-        .unwrap_or(0);
-    let desired = sts
-        .pointer("/spec/replicas")
-        .and_then(|r| r.as_i64())
-        .unwrap_or(0);
+    let (ready, status) = replica_readiness_display(&sts);
 
     let image = sts
         .pointer("/spec/template/spec/containers/0/image")
@@ -705,14 +696,10 @@ async fn fetch_statefulset(namespace: &str, name: &str) -> Result<StatefulSetInf
 
     Ok(StatefulSetInfo {
         name: name.to_string(),
-        ready: format!("{}/{}", ready, desired),
+        ready,
         image,
         storage,
-        status: if ready == desired {
-            "Ready".to_string()
-        } else {
-            "NotReady".to_string()
-        },
+        status,
     })
 }
 
@@ -723,25 +710,12 @@ async fn fetch_redis(namespace: &str, name: &str) -> Result<ResourceInfo> {
         .await?;
 
     let dep = kubectl_get_item(&output, "Redis deployment not found")?;
-    let status = dep.get("status").unwrap_or(&serde_json::Value::Null);
-
-    let ready = status
-        .get("readyReplicas")
-        .and_then(|r| r.as_i64())
-        .unwrap_or(0);
-    let desired = dep
-        .pointer("/spec/replicas")
-        .and_then(|r| r.as_i64())
-        .unwrap_or(0);
+    let (ready, status) = replica_readiness_display(&dep);
 
     Ok(ResourceInfo {
         name: name.to_string(),
-        status: if ready == desired {
-            "Ready".to_string()
-        } else {
-            "NotReady".to_string()
-        },
-        ready: format!("{}/{}", ready, desired),
+        status,
+        ready,
         image: dep
             .pointer("/spec/template/spec/containers/0/image")
             .and_then(|i| i.as_str())
@@ -756,25 +730,12 @@ async fn fetch_redis_statefulset(namespace: &str, name: &str) -> Result<Resource
         .await?;
 
     let sts = kubectl_get_item(&output, "Redis statefulset not found")?;
-    let status = sts.get("status").unwrap_or(&serde_json::Value::Null);
-
-    let ready = status
-        .get("readyReplicas")
-        .and_then(|r| r.as_i64())
-        .unwrap_or(0);
-    let desired = sts
-        .pointer("/spec/replicas")
-        .and_then(|r| r.as_i64())
-        .unwrap_or(0);
+    let (ready, status) = replica_readiness_display(&sts);
 
     Ok(ResourceInfo {
         name: name.to_string(),
-        status: if ready == desired {
-            "Ready".to_string()
-        } else {
-            "NotReady".to_string()
-        },
-        ready: format!("{}/{}", ready, desired),
+        status,
+        ready,
         image: sts
             .pointer("/spec/template/spec/containers/0/image")
             .and_then(|i| i.as_str())
@@ -916,6 +877,63 @@ fn kubectl_get_item(
         anyhow::bail!("{}", not_found_msg);
     }
     Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+/// Summarize the replica readiness of a workload document (Deployment
+/// or StatefulSet) into the display pair three sibling `fetch_*` sites
+/// emit verbatim: the `"<ready>/<desired>"` ratio string and the
+/// `"Ready"` (ready == desired) / `"NotReady"` (otherwise) status
+/// string.
+///
+/// Both slots read `/status/readyReplicas` and `/spec/replicas` via
+/// JSON pointers, treating a missing / malformed field as `0` — the
+/// discipline every pre-lift consumer applied verbatim through
+/// `.and_then(|r| r.as_i64()).unwrap_or(0)`. The ready == desired
+/// equality — rather than a threshold or a `>=` — matches the pre-lift
+/// consumers' behavior byte-for-byte: an over-provisioned pod count
+/// (readyReplicas > replicas, transient during scale-down) surfaces as
+/// `"NotReady"`, matching the pre-lift semantics rather than silently
+/// promoting it to `"Ready"`.
+///
+/// # Consumers
+///
+/// - [`fetch_statefulset`] — StatefulSet document, drives `StatefulSetInfo::{ready, status}`
+/// - [`fetch_redis`] — Deployment document, drives `ResourceInfo::{ready, status}`
+/// - [`fetch_redis_statefulset`] — StatefulSet document, drives `ResourceInfo::{ready, status}`
+///
+/// Three sibling call sites past the "two is a coincidence; three is a
+/// law" threshold — see the retry-schedule
+/// (`RetryPolicy::compute_delay`), helm-error-branch
+/// (`ensure_helm_success`), release-tracker HTTP-error
+/// (`ensure_success` + `format_failure`), list-shaped fetch
+/// (`kubectl_get_items`), and single-object fetch (`kubectl_get_item`)
+/// sibling lifts on the prior claude-routine chain.
+///
+/// # Why not extended to [`fetch_deployment`]
+///
+/// The sibling `fetch_deployment` at this module extracts the same
+/// `/status/readyReplicas` and `/spec/replicas` fields but folds them
+/// into the wider [`ReplicaStatus`] struct (also carrying
+/// `availableReplicas`, `updatedReplicas`, `unavailableReplicas`) as
+/// `i32`s rather than the display pair emitted here. That is a
+/// distinct extraction shape whose lift is a future concern; this
+/// primitive owns the `(ratio_display, ready_or_not_display)` pair the
+/// three simpler `fetch_*` sites emit.
+fn replica_readiness_display(doc: &serde_json::Value) -> (String, String) {
+    let ready = doc
+        .pointer("/status/readyReplicas")
+        .and_then(|r| r.as_i64())
+        .unwrap_or(0);
+    let desired = doc
+        .pointer("/spec/replicas")
+        .and_then(|r| r.as_i64())
+        .unwrap_or(0);
+    let status = if ready == desired {
+        "Ready".to_string()
+    } else {
+        "NotReady".to_string()
+    };
+    (format!("{}/{}", ready, desired), status)
 }
 
 async fn fetch_secrets(namespace: &str, deployment_name: &str) -> Result<Vec<String>> {
@@ -1970,6 +1988,210 @@ mod tests {
              silently splitting the bail-with-diagnostic discipline \
              across the primitive and the re-fused site. Found: \
              {compound_hits:?}"
+        );
+    }
+
+    // Build a synthetic workload document (Deployment / StatefulSet
+    // shape) for the `replica_readiness_display` shields below. Only
+    // the `/status/readyReplicas` and `/spec/replicas` fields are
+    // load-bearing at the primitive; the other pre-lift consumer-side
+    // extractions (`/spec/template/spec/containers/0/image`, etc.)
+    // remain at the consumer and are exercised by those consumers'
+    // own coverage.
+    fn make_workload_doc(ready: Option<i64>, desired: Option<i64>) -> serde_json::Value {
+        let mut root = serde_json::Map::new();
+        if let Some(d) = desired {
+            let mut spec = serde_json::Map::new();
+            spec.insert("replicas".to_string(), serde_json::json!(d));
+            root.insert("spec".to_string(), serde_json::Value::Object(spec));
+        }
+        if let Some(r) = ready {
+            let mut status = serde_json::Map::new();
+            status.insert("readyReplicas".to_string(), serde_json::json!(r));
+            root.insert("status".to_string(), serde_json::Value::Object(status));
+        }
+        serde_json::Value::Object(root)
+    }
+
+    #[test]
+    fn replica_readiness_display_emits_ready_when_ready_equals_desired() {
+        // Pre-lift the three `fetch_*` consumer sites each spelled `if
+        // ready == desired { "Ready".to_string() } else { "NotReady".
+        // to_string() }` verbatim. This shield pins the primitive
+        // emits `"Ready"` on the equality arm — the exact literal
+        // string every downstream text-render / JSON-render consumer
+        // greps against for the healthy-workload status marker.
+        let doc = make_workload_doc(Some(3), Some(3));
+        let (ratio, status) = super::replica_readiness_display(&doc);
+        assert_eq!(ratio, "3/3");
+        assert_eq!(status, "Ready");
+    }
+
+    #[test]
+    fn replica_readiness_display_emits_not_ready_when_ready_lt_desired() {
+        // The unhealthy arm every pre-lift consumer emitted: fewer
+        // ready pods than the spec desires (a scale-up mid-rollout or
+        // a crashlooping pod). Pinned separately from the healthy arm
+        // so a regression that inverted the equality (e.g., swapping
+        // `==` for `!=`) fails on exactly one arm rather than
+        // silently passing both via a compensating swap.
+        let doc = make_workload_doc(Some(1), Some(3));
+        let (ratio, status) = super::replica_readiness_display(&doc);
+        assert_eq!(ratio, "1/3");
+        assert_eq!(status, "NotReady");
+    }
+
+    #[test]
+    fn replica_readiness_display_emits_not_ready_when_ready_gt_desired() {
+        // Over-provisioned pod count — readyReplicas > replicas — is a
+        // transient state during scale-down (old pods still ready
+        // while the spec has already been reduced). The pre-lift
+        // consumers all emitted `if ready == desired` — a strict
+        // equality, not a `>=` threshold — so this transient state
+        // surfaced as `"NotReady"`. The primitive preserves that
+        // discipline: a future regression that softened the equality
+        // to `ready >= desired` would silently promote the transient
+        // over-provisioned state to `"Ready"` and mislead the operator
+        // watching a scale-down finish.
+        let doc = make_workload_doc(Some(5), Some(3));
+        let (ratio, status) = super::replica_readiness_display(&doc);
+        assert_eq!(ratio, "5/3");
+        assert_eq!(status, "NotReady");
+    }
+
+    #[test]
+    fn replica_readiness_display_treats_missing_ready_replicas_as_zero() {
+        // Pre-lift the three consumer sites all spelled `.get
+        // ("readyReplicas").and_then(|r| r.as_i64()).unwrap_or(0)`
+        // verbatim — a missing `/status/readyReplicas` field
+        // (kubectl's Deployment status shape omits `readyReplicas`
+        // when it's zero) collapsed to 0 rather than a type error.
+        // This shield pins that same lenient-typing discipline at
+        // the primitive: a Deployment document with a `/status`
+        // object that does NOT carry `readyReplicas` at all still
+        // reports `0/N` with `NotReady` (when N > 0), matching the
+        // pre-lift consumers byte-for-byte.
+        let doc = make_workload_doc(None, Some(2));
+        let (ratio, status) = super::replica_readiness_display(&doc);
+        assert_eq!(ratio, "0/2");
+        assert_eq!(status, "NotReady");
+    }
+
+    #[test]
+    fn replica_readiness_display_treats_missing_spec_replicas_as_zero() {
+        // Symmetric to the missing-readyReplicas shield above: a
+        // workload document whose `/spec/replicas` field is absent
+        // (a Deployment created without an explicit `replicas` field,
+        // relying on the API-server default of 1 but whose
+        // pre-defaulting document is being read from an admission
+        // hook) collapses to 0 at the primitive rather than a type
+        // error. Preserves the pre-lift `.pointer("/spec/replicas").
+        // and_then(|r| r.as_i64()).unwrap_or(0)` discipline.
+        let doc = make_workload_doc(Some(3), None);
+        let (ratio, status) = super::replica_readiness_display(&doc);
+        assert_eq!(ratio, "3/0");
+        assert_eq!(status, "NotReady");
+    }
+
+    #[test]
+    fn replica_readiness_display_treats_both_missing_as_zero_ready() {
+        // Both fields absent — the fresh-object-just-after-create
+        // window where the API server has accepted the manifest but
+        // the controller has not yet populated `/status` and the
+        // manifest itself did not set `/spec/replicas`. Pre-lift
+        // consumers surfaced `"0/0"` with `"Ready"` (per the strict
+        // equality) in this window; the primitive preserves that.
+        // Load-bearing: a future regression that special-cased the
+        // both-zero shape to `"Unknown"` would break the status-line
+        // grep at every downstream text-render consumer that expects
+        // exactly `"Ready"` or `"NotReady"`.
+        let doc = make_workload_doc(None, None);
+        let (ratio, status) = super::replica_readiness_display(&doc);
+        assert_eq!(ratio, "0/0");
+        assert_eq!(status, "Ready");
+    }
+
+    #[test]
+    fn replica_readiness_display_ignores_non_integer_field_types() {
+        // Pre-lift the three consumers guarded the extraction with
+        // `.and_then(|r| r.as_i64())` — a well-formed JSON with a
+        // non-integer value at `/status/readyReplicas` or
+        // `/spec/replicas` (a string, a float, a null) collapsed to
+        // 0 rather than propagating a type error. The primitive
+        // preserves that lenient-typing discipline: a manifest that
+        // spelled `replicas: "3"` (string) or `readyReplicas: null`
+        // yields `0/0` rather than an error the fetch site cannot
+        // recover from.
+        let doc = serde_json::json!({
+            "spec": { "replicas": "3" },
+            "status": { "readyReplicas": null },
+        });
+        let (ratio, status) = super::replica_readiness_display(&doc);
+        assert_eq!(ratio, "0/0");
+        assert_eq!(status, "Ready");
+    }
+
+    /// Regression shield: `replica_readiness_display` is the ONLY
+    /// consumer of the pre-lift `if ready == desired { "Ready".
+    /// to_string() } else { "NotReady".to_string() }` conditional in
+    /// `commands/status.rs`. Pre-lift the three simple `fetch_*`
+    /// consumer sites (`fetch_statefulset`, `fetch_redis`,
+    /// `fetch_redis_statefulset`) each spelled the verbatim `if ready
+    /// == desired { "Ready".to_string() } else { "NotReady".to_string()
+    /// }` conditional alongside the `format!("{}/{}", ready, desired)`
+    /// ratio-string. A future regression that re-fused the pre-lift
+    /// conditional at one of the three sites (or at a new fourth
+    /// consumer of the same shape) would silently split the
+    /// `"Ready"`/`"NotReady"` discipline across the primitive and the
+    /// re-fused site, re-introducing the "seven-line stanza per site"
+    /// duplication this lift redeems.
+    ///
+    /// The shield pins the discipline at ONE call site — the
+    /// primitive itself — by asserting the `if ready == desired {`
+    /// needle appears at exactly ONE code line in the module's
+    /// non-test body. The one legitimate hit is the primitive's own
+    /// body; a second hit fails this shield.
+    ///
+    /// The scan is bounded strictly to the module's non-test body via
+    /// the `\n#[cfg(test)]\nmod tests {` marker (same slice boundary
+    /// the sibling `kubectl_get_items_is_only_json_items_parse_at_the_fetch_helper_bail_surface`
+    /// and `kubectl_get_item_is_only_bail_not_found_parse_stanza_at_the_single_item_fetch_helper_surface`
+    /// shields use) so this shield's own docstring mention of `if
+    /// ready == desired {` stays out of scope. And routes through
+    /// [`crate::test_support::code_line_hits`] so `///`-prefixed
+    /// doc-comment mentions in the module body's fn docs — the
+    /// primitive's own docstring references the `ready == desired`
+    /// discipline in prose — do not self-match as phantom hits, the
+    /// same code-line-filter discipline the sibling `code_line_hits`
+    /// consumers established at prior claude-routine commits
+    /// (ab06395 / a7d5375 / fa2c702 / fd02aa6 / cc81215 / 3e26bbc /
+    /// 4163c7e / ffa5271 / 8eed602 / f6b4229 / 59c3391 / 695a8cc).
+    #[test]
+    fn replica_readiness_display_is_only_ready_equals_desired_conditional_at_fetch_helpers() {
+        let source = include_str!("status.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let hits = crate::test_support::code_line_hits(module_body, "if ready == desired {");
+        assert_eq!(
+            hits.len(),
+            1,
+            "status.rs must route every fetch helper's `if ready == \
+             desired {{ \"Ready\".to_string() }} else {{ \"NotReady\"\
+             .to_string() }}` conditional through \
+             `replica_readiness_display(&doc)` so a future regression \
+             that re-fuses the pre-lift conditional at any of the \
+             three `fetch_*` consumer sites (or at a new fourth \
+             consumer of the same shape) fails here rather than \
+             silently splitting the `\"Ready\"`/`\"NotReady\"` \
+             discipline across the primitive and the re-fused site. \
+             Expected exactly one hit (the primitive body itself). \
+             Found: {hits:?}"
         );
     }
 }
