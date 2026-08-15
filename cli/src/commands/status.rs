@@ -317,17 +317,17 @@ async fn fetch_service_status(
     environment: &str,
 ) -> Result<ServiceStatus> {
     // Fetch all data concurrently
-    let (deployment, pods_json, related, migrations, events) = tokio::join!(
+    let (deployment, pod_items, related, migrations, events) = tokio::join!(
         fetch_deployment(namespace, deployment_name),
-        fetch_pods_json(namespace, deployment_name),
+        fetch_pods(namespace, deployment_name),
         fetch_related_services(namespace, deployment_name),
         fetch_migrations(namespace, deployment_name),
         fetch_events(namespace, deployment_name),
     );
 
     let deployment_info = deployment?;
-    let pods_json = pods_json?;
-    let (pods, containers) = extract_pod_and_container_info(&pods_json, deployment_name);
+    let pod_items = pod_items?;
+    let (pods, containers) = extract_pod_and_container_info(&pod_items, deployment_name);
 
     Ok(ServiceStatus {
         service: service.to_string(),
@@ -458,145 +458,134 @@ fn extract_conditions(deployment: &serde_json::Value) -> Vec<ConditionStatus> {
         .unwrap_or_default()
 }
 
-async fn fetch_pods_json(namespace: &str, deployment_name: &str) -> Result<serde_json::Value> {
-    let output = kubectl_command_async()
-        .args([
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-l",
-            &format!("app={}", deployment_name),
-            "-o",
-            "json",
-        ])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        return Ok(serde_json::json!({"items": []}));
-    }
-
-    Ok(serde_json::from_slice(&output.stdout).unwrap_or(serde_json::json!({"items": []})))
+async fn fetch_pods(namespace: &str, deployment_name: &str) -> Result<Vec<serde_json::Value>> {
+    kubectl_list_items(&[
+        "get",
+        "pods",
+        "-n",
+        namespace,
+        "-l",
+        &format!("app={}", deployment_name),
+        "-o",
+        "json",
+    ])
+    .await
 }
 
 fn extract_pod_and_container_info(
-    pods_json: &serde_json::Value,
+    pod_items: &[serde_json::Value],
     deployment_name: &str,
 ) -> (Vec<PodInfo>, Vec<ContainerInfo>) {
     let mut pods = Vec::new();
     let mut containers = Vec::new();
 
-    if let Some(items) = pods_json.get("items").and_then(|i| i.as_array()) {
-        for pod in items {
-            let pod_name = pod
-                .pointer("/metadata/name")
+    for pod in pod_items {
+        let pod_name = pod
+            .pointer("/metadata/name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let phase = pod
+            .pointer("/status/phase")
+            .and_then(|p| p.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+
+        let container_statuses = pod
+            .pointer("/status/containerStatuses")
+            .and_then(|c| c.as_array());
+
+        let (ready_count, total_count, total_restarts) = container_statuses
+            .map(|cs| {
+                let ready = cs
+                    .iter()
+                    .filter(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false))
+                    .count();
+                let restarts: i64 = cs
+                    .iter()
+                    .filter_map(|c| c.get("restartCount")?.as_i64())
+                    .sum();
+                (ready, cs.len(), restarts as i32)
+            })
+            .unwrap_or((0, 0, 0));
+
+        pods.push(PodInfo {
+            name: pod_name.clone(),
+            status: phase,
+            ready: format!("{}/{}", ready_count, total_count),
+            restarts: total_restarts,
+            age: calculate_age(
+                pod.pointer("/metadata/creationTimestamp")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or(""),
+            ),
+            node: pod
+                .pointer("/spec/nodeName")
                 .and_then(|n| n.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let phase = pod
-                .pointer("/status/phase")
-                .and_then(|p| p.as_str())
-                .unwrap_or("Unknown")
-                .to_string();
+                .map(String::from),
+            ip: pod
+                .pointer("/status/podIP")
+                .and_then(|i| i.as_str())
+                .map(String::from),
+        });
 
-            let container_statuses = pod
-                .pointer("/status/containerStatuses")
-                .and_then(|c| c.as_array());
+        // Extract container details
+        if let Some(statuses) = container_statuses {
+            for cs in statuses {
+                let name = cs.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                let image_full = cs.get("image").and_then(|i| i.as_str()).unwrap_or("");
+                // Route through the typed primitive at
+                // `crate::oci_manifest::image_repository_and_tag`.
+                // The naïve `image_full.rsplit_once(':')`
+                // predecessor surfaced the digest hex of a
+                // `nginx@sha256:hex` reference and the port-bearing
+                // path suffix of a `registry.example.com:5000/nginx`
+                // reference as if either were a legitimate tag; the
+                // primitive scopes the tag scan to the final path
+                // component (per `image_tag`'s invariants) and
+                // reports the whole reference with `None` on either
+                // shape. The Docker default `"latest"` tag is
+                // preserved as the fallback when no tag is
+                // parseable, matching the display convention this
+                // container-row uses.
+                let (image_slice, tag_opt) =
+                    crate::oci_manifest::image_repository_and_tag(image_full);
+                let image = image_slice.to_string();
+                let tag = tag_opt.unwrap_or("latest").to_string();
 
-            let (ready_count, total_count, total_restarts) = container_statuses
-                .map(|cs| {
-                    let ready = cs
-                        .iter()
-                        .filter(|c| c.get("ready").and_then(|r| r.as_bool()).unwrap_or(false))
-                        .count();
-                    let restarts: i64 = cs
-                        .iter()
-                        .filter_map(|c| c.get("restartCount")?.as_i64())
-                        .sum();
-                    (ready, cs.len(), restarts as i32)
-                })
-                .unwrap_or((0, 0, 0));
+                let is_sidecar = name.contains("envoy")
+                    || name.contains("istio")
+                    || name.contains("proxy")
+                    || !image.contains("ghcr.io");
 
-            pods.push(PodInfo {
-                name: pod_name.clone(),
-                status: phase,
-                ready: format!("{}/{}", ready_count, total_count),
-                restarts: total_restarts,
-                age: calculate_age(
-                    pod.pointer("/metadata/creationTimestamp")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or(""),
-                ),
-                node: pod
-                    .pointer("/spec/nodeName")
-                    .and_then(|n| n.as_str())
-                    .map(String::from),
-                ip: pod
-                    .pointer("/status/podIP")
-                    .and_then(|i| i.as_str())
-                    .map(String::from),
-            });
+                let state = if cs.pointer("/state/running").is_some() {
+                    "Running".to_string()
+                } else if let Some(waiting) = cs.pointer("/state/waiting") {
+                    waiting
+                        .get("reason")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("Waiting")
+                        .to_string()
+                } else if let Some(terminated) = cs.pointer("/state/terminated") {
+                    terminated
+                        .get("reason")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("Terminated")
+                        .to_string()
+                } else {
+                    "Unknown".to_string()
+                };
 
-            // Extract container details
-            if let Some(statuses) = container_statuses {
-                for cs in statuses {
-                    let name = cs.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                    let image_full = cs.get("image").and_then(|i| i.as_str()).unwrap_or("");
-                    // Route through the typed primitive at
-                    // `crate::oci_manifest::image_repository_and_tag`.
-                    // The naïve `image_full.rsplit_once(':')`
-                    // predecessor surfaced the digest hex of a
-                    // `nginx@sha256:hex` reference and the port-bearing
-                    // path suffix of a `registry.example.com:5000/nginx`
-                    // reference as if either were a legitimate tag; the
-                    // primitive scopes the tag scan to the final path
-                    // component (per `image_tag`'s invariants) and
-                    // reports the whole reference with `None` on either
-                    // shape. The Docker default `"latest"` tag is
-                    // preserved as the fallback when no tag is
-                    // parseable, matching the display convention this
-                    // container-row uses.
-                    let (image_slice, tag_opt) =
-                        crate::oci_manifest::image_repository_and_tag(image_full);
-                    let image = image_slice.to_string();
-                    let tag = tag_opt.unwrap_or("latest").to_string();
-
-                    let is_sidecar = name.contains("envoy")
-                        || name.contains("istio")
-                        || name.contains("proxy")
-                        || !image.contains("ghcr.io");
-
-                    let state = if cs.pointer("/state/running").is_some() {
-                        "Running".to_string()
-                    } else if let Some(waiting) = cs.pointer("/state/waiting") {
-                        waiting
-                            .get("reason")
-                            .and_then(|r| r.as_str())
-                            .unwrap_or("Waiting")
-                            .to_string()
-                    } else if let Some(terminated) = cs.pointer("/state/terminated") {
-                        terminated
-                            .get("reason")
-                            .and_then(|r| r.as_str())
-                            .unwrap_or("Terminated")
-                            .to_string()
-                    } else {
-                        "Unknown".to_string()
-                    };
-
-                    containers.push(ContainerInfo {
-                        pod: pod_name.clone(),
-                        name: name.to_string(),
-                        image,
-                        tag,
-                        ready: cs.get("ready").and_then(|r| r.as_bool()).unwrap_or(false),
-                        restarts: cs.get("restartCount").and_then(|r| r.as_i64()).unwrap_or(0)
-                            as i32,
-                        state,
-                        is_sidecar,
-                    });
-                }
+                containers.push(ContainerInfo {
+                    pod: pod_name.clone(),
+                    name: name.to_string(),
+                    image,
+                    tag,
+                    ready: cs.get("ready").and_then(|r| r.as_bool()).unwrap_or(false),
+                    restarts: cs.get("restartCount").and_then(|r| r.as_i64()).unwrap_or(0) as i32,
+                    state,
+                    is_sidecar,
+                });
             }
         }
     }
@@ -803,9 +792,18 @@ async fn kubectl_get_object(
 /// Owns the "spawn `kubectl_command_async().args(argv).output().await?`,
 /// then `kubectl_get_items(&output)?`" two-step composition every
 /// list-shaped `fetch_*` consumer site in this module drove verbatim.
-/// Four pre-lift call sites past THEORY.md §VI.1's three-times
+/// Five pre-lift call sites past THEORY.md §VI.1's three-times
 /// threshold:
 ///
+/// - [`fetch_pods`] — 9-arg with `-l app=<deployment>` (pod listing
+///   for the deployment; the previously-straggling fifth site whose
+///   pre-lift shape returned the raw `{"items": [...]}` envelope and
+///   silently swallowed invalid-JSON via `.unwrap_or(json!({"items":
+///   []}))`; post-lift returns the moved `.items[]` array via the
+///   shared primitive and propagates the invalid-JSON parse error
+///   via `?` alongside the four siblings — a "sharpen the existing
+///   promise: error fidelity" pass on the pre-lift silent-swallow
+///   arm the sibling `.unwrap_or(json!({"items": []}))` shape hid).
 /// - [`fetch_secrets`] — 6-arg `["get", "secrets", "-n", <ns>, "-o", "json"]`
 ///   (unfiltered namespace list).
 /// - [`fetch_k8s_services`] — 8-arg with `-l app=<deployment>`.
@@ -817,11 +815,11 @@ async fn kubectl_get_object(
 /// # Why an invocation-layer primitive rather than a fully-fused
 /// `kubectl_list_items(kind, namespace, selector, ...) -> Vec<Value>`
 ///
-/// The four call sites' argv shapes drift on three orthogonal axes:
+/// The five call sites' argv shapes drift on three orthogonal axes:
 /// filtered vs unfiltered, label-selector vs field-selector, and
 /// sorted vs unsorted. A fully-fused helper would either force every
 /// site onto one shape (losing per-caller flexibility) or fork the
-/// primitive into four nearly-identical `kubectl_list_<flavor>`
+/// primitive into five nearly-identical `kubectl_list_<flavor>`
 /// helpers. The invocation-layer split — `argv: &[&str]` as the sole
 /// input — keeps ONE body for the spawn + I/O + parse composition
 /// while letting each caller spell its own argv. Same
@@ -832,16 +830,16 @@ async fn kubectl_get_object(
 ///
 /// A `.with_context(|| format!("Failed to execute kubectl {}", argv.join(" ")))`
 /// wraps the `.output().await` I/O error at ONE body — pre-lift the
-/// four sites carried a bare `?` with no spawn-failure context, so a
+/// five sites carried a bare `?` with no spawn-failure context, so a
 /// PATH-lookup failure or process-limit exhaustion surfaced as an
 /// opaque `no such file or directory (os error 2)` at the fetch site,
-/// with no indication of which kubectl invocation failed (`fetch_secrets`
-/// and `fetch_events` fire the same second in `forge status`; a single
-/// opaque IO error offered no discrimination). Post-lift every
-/// spawn-failure at any of the four sites surfaces with the exact
-/// kubectl argv at the site of failure — a "sharpen the existing
-/// promise: error fidelity" pass parallel to [`kubectl_get_object`]'s
-/// context wrapper.
+/// with no indication of which kubectl invocation failed (`fetch_pods`,
+/// `fetch_secrets`, and `fetch_events` fire the same second in
+/// `forge status`; a single opaque IO error offered no
+/// discrimination). Post-lift every spawn-failure at any of the five
+/// sites surfaces with the exact kubectl argv at the site of failure
+/// — a "sharpen the existing promise: error fidelity" pass parallel
+/// to [`kubectl_get_object`]'s context wrapper.
 ///
 /// # Composition
 ///
@@ -869,7 +867,7 @@ async fn kubectl_list_items(argv: &[&str]) -> Result<Vec<serde_json::Value>> {
 ///
 /// # Cases
 ///
-/// - **Non-success exit** — returns `Ok(vec![])`. The four `fetch_*`
+/// - **Non-success exit** — returns `Ok(vec![])`. The five `fetch_*`
 ///   list-shaped consumer sites in this module already collapse kubectl
 ///   unavailability (RBAC-denied `get`, missing CRD, kubeconfig
 ///   pointing at a down cluster) to an empty-result summary rather than
@@ -881,23 +879,32 @@ async fn kubectl_list_items(argv: &[&str]) -> Result<Vec<serde_json::Value>> {
 ///   stays O(1) in the item count and moves the item [`serde_json::
 ///   Value`]s rather than duplicating their nested heap allocations.
 /// - **Success + valid JSON without an `.items[]` array** — returns
-///   `Ok(vec![])`. The four pre-lift consumers all treated a
+///   `Ok(vec![])`. The five pre-lift consumers all treated a
 ///   missing/non-array `.items` field as an empty list (via
-///   `.and_then(|i| i.as_array()).unwrap_or(&empty_vec)`); this
+///   `.and_then(|i| i.as_array()).unwrap_or(&empty_vec)` at four sites,
+///   `.unwrap_or(json!({"items": []}))` at `fetch_pods`); this
 ///   primitive preserves that at one body.
 /// - **Success + invalid JSON** — propagates the [`serde_json::Error`]
-///   through `?`. The four pre-lift consumers all spelled `serde_json::
-///   from_slice(&output.stdout)?` verbatim; this primitive preserves
-///   that at one body.
+///   through `?`. Four pre-lift consumers spelled `serde_json::
+///   from_slice(&output.stdout)?` verbatim; the fifth (`fetch_pods`)
+///   pre-lift silently swallowed invalid-JSON via
+///   `.unwrap_or(json!({"items": []}))` and rendered `forge status`'s
+///   pod row as "0 pods" on a corrupt/truncated kubectl stdout — a
+///   diagnosis-defeating silent-empty on a state the operator would
+///   want surfaced. Post-lift `fetch_pods` propagates the parse error
+///   alongside the four siblings — the four sites' pre-existing
+///   discipline colonizes the fifth by lifting through this
+///   primitive.
 ///
 /// # Consumers
 ///
+/// - [`fetch_pods`]
 /// - [`fetch_secrets`]
 /// - [`fetch_k8s_services`]
 /// - [`fetch_migrations`]
 /// - [`fetch_events`]
 ///
-/// Four sibling call sites past the "two is a coincidence; three is a
+/// Five sibling call sites past the "two is a coincidence; three is a
 /// law" threshold — see the retry-schedule (`RetryPolicy::compute_delay`)
 /// and helm-error-branch (`ensure_helm_success`) sibling lifts on the
 /// prior claude-routine chain.
@@ -1669,7 +1676,7 @@ mod tests {
 
     /// Regression shield: every `kubectl`-spawning site in
     /// `commands/status.rs`'s ten top-level async fetch helpers
-    /// (`fetch_deployment`, `fetch_pods_json`, `fetch_statefulset`,
+    /// (`fetch_deployment`, `fetch_pods`, `fetch_statefulset`,
     /// `fetch_redis`, `fetch_redis_statefulset`, `fetch_configmap`,
     /// `fetch_secrets`, `fetch_k8s_services`, `fetch_migrations`,
     /// `fetch_events`) MUST resolve the binary through
@@ -1866,7 +1873,7 @@ mod tests {
     /// Regression shield: `kubectl_get_items` is the ONLY consumer of
     /// the pre-lift `if !output.status.success() { return Ok(vec![]); }
     /// let X: serde_json::Value = serde_json::from_slice(&output.stdout)?;`
-    /// stanza in `commands/status.rs`. Pre-lift the four `fetch_*`
+    /// stanza in `commands/status.rs`. Pre-lift four `fetch_*`
     /// list-shaped consumer sites (`fetch_secrets`, `fetch_k8s_services`,
     /// `fetch_migrations`, `fetch_events`) each spelled the verbatim
     /// eight-line stanza:
@@ -1883,7 +1890,11 @@ mod tests {
     ///     .unwrap_or(&empty_vec);
     /// ```
     /// A future regression that re-fused the pre-lift stanza at one
-    /// of the four sites (or at a new fifth list-shaped fetch helper)
+    /// of the four sites (or at a new sixth list-shaped fetch helper —
+    /// `fetch_pods` is the fifth, lifted onto `kubectl_list_items` via
+    /// its `.unwrap_or(serde_json::json!({"items": []}))` sibling
+    /// pre-lift shape pinned by
+    /// [`fetch_pods_pre_lift_items_envelope_default_does_not_reappear`])
     /// would silently split the "kubectl unavailability → empty
     /// result" discipline across the primitive and the re-fused site,
     /// re-introducing the "seven-line stanza per site" duplication
@@ -1926,9 +1937,88 @@ mod tests {
              `let empty_vec = vec![]; let items = X.get(\"items\")\
              .and_then(|i| i.as_array()).unwrap_or(&empty_vec);` stanza \
              at any of the four `fetch_*` consumer sites (or at a new \
-             fifth list-shaped helper) fails here rather than silently \
+             sixth list-shaped helper) fails here rather than silently \
              splitting the discipline across the primitive and the \
              re-fused site. Found: {hits:?}"
+        );
+    }
+
+    /// Regression shield: the pre-lift `fetch_pods_json` silent-swallow
+    /// shape `serde_json::json!({"items": []})` does NOT reappear in
+    /// the module body. Pre-lift `fetch_pods_json` spelled this
+    /// value literal at two lines — a `Ok(serde_json::json!({"items":
+    /// []}))` early-return on non-success exit, and an
+    /// `.unwrap_or(serde_json::json!({"items": []}))` on the JSON
+    /// parse — so a corrupt/truncated kubectl stdout on a `-o json`
+    /// success exit collapsed to an empty pods list at the fetch site
+    /// rather than propagating the parse error via `?`. Post-lift
+    /// `fetch_pods` routes both arms through [`kubectl_list_items`]:
+    /// the non-success arm collapses to `Ok(vec![])` at the shared
+    /// primitive body (parallel to the four sibling `fetch_*`
+    /// consumers), and the invalid-JSON arm propagates the
+    /// [`serde_json::Error`] via `?` alongside the four siblings —
+    /// closing the pre-lift "kubectl `-o json` succeeded, stdout is
+    /// nonsense → `forge status` reports 0 pods with no diagnostic"
+    /// silent-empty on the state the operator would want surfaced.
+    /// A future regression that re-fused either pre-lift arm at
+    /// `fetch_pods` (or at a new `fetch_*` helper of the same
+    /// silent-swallow shape) fails here rather than silently
+    /// re-introducing the empty-envelope-on-parse-error default the
+    /// lift redeems.
+    ///
+    /// Sibling shield to [`kubectl_get_items_is_only_json_items_parse_at_the_fetch_helper_bail_surface`]:
+    /// that shield pins the four `let empty_vec = vec![];`
+    /// consumer-side pre-lift stanza; this shield pins the distinct
+    /// `fetch_pods_json` `.unwrap_or(serde_json::json!({"items":
+    /// []}))` pre-lift stanza whose value-literal spelling does not
+    /// share a needle with the four siblings but whose silent-empty
+    /// discipline is the same class of pre-lift bug.
+    ///
+    /// The scan is bounded strictly to the module's non-test body
+    /// via the `\n#[cfg(test)]\nmod tests {` marker (same slice
+    /// boundary the sibling shields use) so this shield's own
+    /// docstring mentions of the pre-lift needle stay out of scope.
+    /// And routes through [`crate::test_support::code_line_hits`] so
+    /// `///`-prefixed doc-comment mentions in the module body's fn
+    /// docs — the primitive's own docstring references the pre-lift
+    /// shape in prose — do not self-match as phantom hits, the same
+    /// code-line-filter discipline the sibling `code_line_hits`
+    /// consumers established at prior claude-routine commits
+    /// (ab06395 / a7d5375 / fa2c702 / fd02aa6 / cc81215 / 3e26bbc /
+    /// 4163c7e / ffa5271 / 8eed602 / f6b4229 / 59c3391 / 695a8cc /
+    /// cd1cb10 / 89e3231 / 8216981 / 521bda3).
+    #[test]
+    fn fetch_pods_pre_lift_items_envelope_default_does_not_reappear() {
+        let source = include_str!("status.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let hits =
+            crate::test_support::code_line_hits(module_body, r#"serde_json::json!({"items": []})"#);
+        assert!(
+            hits.is_empty(),
+            "status.rs must route `fetch_pods` (and every future \
+             list-shaped fetch helper) through `kubectl_list_items` \
+             so the pre-lift `fetch_pods_json` silent-swallow shape \
+             `serde_json::json!({{\"items\": []}})` — used as both \
+             an `Ok(...)` early-return on non-success exit and as an \
+             `.unwrap_or(...)` default on the JSON parse — does not \
+             reappear in the module body. Pre-lift a corrupt/truncated \
+             kubectl `-o json` success stdout collapsed to \"0 pods\" \
+             at `forge status` with no diagnostic; post-lift the \
+             invalid-JSON arm propagates the `serde_json::Error` via \
+             `?` at the shared primitive alongside the four sibling \
+             list-shaped fetch consumers. A future regression that \
+             re-fuses the pre-lift envelope-default at `fetch_pods` \
+             or at any new `fetch_*` helper of the same silent-swallow \
+             shape fails here rather than silently re-introducing the \
+             empty-envelope-on-parse-error default the lift redeems. \
+             Found: {hits:?}"
         );
     }
 
@@ -2417,7 +2507,7 @@ mod tests {
     /// to lines that also spell `.pointer(` on the same code line
     /// (the primitive's `doc.pointer(ptr).and_then(...)` shape). The
     /// tightening excludes the orthogonal container-status
-    /// restart-count extraction at `fetch_pods_json` (`cs.get(
+    /// restart-count extraction at `fetch_pods` (`cs.get(
     /// "restartCount").and_then(|r| r.as_i64()).unwrap_or(0)`) whose
     /// `.get("restartCount")`-based two-step extraction against a
     /// container-status object is a distinct shape from this

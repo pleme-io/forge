@@ -73,7 +73,7 @@ use crate::tools::{get_tool_path, tools};
 ///   unadded sibling) is covered by the same shield without a
 ///   per-function narrowing.
 /// - `commands/status.rs` — ten sites across the ten async
-///   fetch helpers (`fetch_deployment`, `fetch_pods_json`,
+///   fetch helpers (`fetch_deployment`, `fetch_pods`,
 ///   `fetch_statefulset`, `fetch_redis`, `fetch_redis_statefulset`,
 ///   `fetch_configmap`, `fetch_secrets`, `fetch_k8s_services`,
 ///   `fetch_migrations`, `fetch_events`), migrated at c2760df.
