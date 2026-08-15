@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
@@ -87,6 +87,100 @@ const INTEGRATION_TEST_RETRY_BACKOFF: RetryPolicy = RetryPolicy {
 /// without panic.
 fn integration_test_retry_delay(attempts: u32) -> Duration {
     INTEGRATION_TEST_RETRY_BACKOFF.compute_delay(attempts.saturating_add(1))
+}
+
+/// The typed exponential-backoff policy for [`execute`]'s post-deployment
+/// readiness poll loop — `initial_backoff` 2s × `factor` 2 capped at
+/// `max_backoff` 30s. Consumes the pre-existing typed primitive at
+/// [`crate::retry::RetryPolicy`] so the per-attempt delay lands at
+/// [`RetryPolicy::compute_delay`], which the retry module's docstring
+/// names as its raison d'être: "the pre-existing fixed `sleep(2s)`
+/// schedule ... is the worst of both worlds ... Exponential backoff
+/// (Bazel-style: 250ms × factor=2 capped at 30s) covers both regimes
+/// by construction."
+///
+/// Pre-lift the readiness poll loop drove a flat
+/// `sleep(Duration::from_secs(2)).await` at every non-terminal iteration
+/// of the wall-clock-bounded `while start.elapsed() < max_wait` loop
+/// that waits for the freshly-deployed application's `/health` endpoint
+/// to return 200 before the post-deployment integration-test suite runs.
+/// That shape carried three structural defects the typed-primitive body
+/// forecloses, exactly the sibling shape the `HEALTH_ENDPOINT_BACKOFF`
+/// docstring at `commands/post_deploy_verification.rs::verify_health_endpoint`
+/// (commit b5db3b6) cites for its own health-endpoint retry-loop lift:
+///
+/// 1. **Fixed 2s schedule.** A flat `sleep(2s)` between health probes is
+///    "too short when the application is still starting (a stream of
+///    HTTP GETs every 2s across the full `warmup_delay` window
+///    hammering an application that hasn't yet bound its port), 2s too
+///    long when `/health` flipped to 200 100ms ago" — the exact worst-
+///    of-both failure mode the sibling `HEALTH_ENDPOINT_BACKOFF` /
+///    `SERVICES_HEALTHY_POLL_BACKOFF` / `MIGRATION_JOB_POLL_BACKOFF` /
+///    `SHINKA_MIGRATION_POLL_BACKOFF` / `GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF`
+///    / `FEDERATION_JOB_POLL_BACKOFF` docstrings cite. Post-lift the
+///    first probe still waits 2s (preserving the seed verbatim), then
+///    4s / 8s / 16s / 30s / 30s / … under the exponential-with-cap
+///    climb rather than the pre-lift flat 2s at every probe.
+/// 2. **No caller-visible schedule invariant.** The bare
+///    `Duration::from_secs(2)` literal at the poll-loop sleep carried
+///    no name a shield could pin — a future edit that changed the
+///    schedule at this site did not surface at any named-primitive
+///    audit path. The lifted `POST_DEPLOYMENT_READINESS_POLL_BACKOFF`
+///    const names the (seed, factor, cap) triple a shield can cite
+///    and enforce.
+/// 3. **Schedule desync from the sibling health-poll surface.** The
+///    post-deployment readiness poll observes the freshly-deployed
+///    application's `/health` endpoint transitioning to 200 the same
+///    way the sibling health-endpoint retry loop
+///    (`commands/post_deploy_verification.rs::verify_health_endpoint`,
+///    b5db3b6) observes it, and the same way the sibling docker-compose
+///    services-healthy poll loop
+///    (`commands/comprehensive_release.rs::execute`, ad2e31e) observes
+///    docker `ps` status. Pre-lift each spelled its own local fixed-
+///    sleep schedule, so a future edit to one silently diverged from
+///    the others. Post-lift all three consume the same shared body via
+///    the same `RetryPolicy::network()` `(factor=2, max_backoff=30s)`
+///    reference schedule.
+///
+/// `max_attempts: 1` is a placeholder — the readiness poll loop drives
+/// its own budget through the `while start.elapsed() < max_wait` wall-
+/// clock bound (`max_wait` from the caller-supplied
+/// `execution.warmup_delay` deploy.yaml field) and consumes only
+/// [`RetryPolicy::compute_delay`] from this policy, not
+/// [`RetryPolicy::max_attempts`]. The `max_attempts` field is
+/// unconsulted at this consumption site.
+const POST_DEPLOYMENT_READINESS_POLL_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: 1,
+    initial_backoff: Duration::from_secs(2),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between post-deployment readiness poll iterations, given the
+/// 0-indexed local `backoff_attempt` counter of the iteration about to
+/// sleep (the `while start.elapsed() < max_wait { ... backoff_attempt +=
+/// 1 }` shape [`execute`]'s readiness poll loop drives).
+///
+/// Maps the local 0-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(2)`:
+/// local `backoff_attempt == 0` (the first between-probe sleep after
+/// the first failed `/health` GET) reads as `compute_delay(2) =
+/// initial_backoff * factor^0 = initial_backoff = 2s`; local
+/// `backoff_attempt == 1` reads as `compute_delay(3) = 4s`;
+/// `backoff_attempt == 2` reads as `compute_delay(4) = 8s`;
+/// `backoff_attempt == 3` reads as `compute_delay(5) = 16s`;
+/// `backoff_attempt >= 4` reads as `compute_delay(>=6) = 30s` (cap) —
+/// preserves the pre-lift `sleep(Duration::from_secs(2))` seed verbatim
+/// at the first probe and strictly diverges upward at every later
+/// probe. The `saturating_add` clamp forecloses the `u32` overflow
+/// class at the bridge — an unlikely-but-possible `backoff_attempt ==
+/// u32::MAX` from a pathological `warmup_delay` wall-clock window reads
+/// as `compute_delay(u32::MAX)`, which itself saturates to
+/// [`POST_DEPLOYMENT_READINESS_POLL_BACKOFF::max_backoff`] via the
+/// `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
+/// without panic.
+fn post_deployment_readiness_poll_delay(backoff_attempt: u32) -> Duration {
+    POST_DEPLOYMENT_READINESS_POLL_BACKOFF.compute_delay(backoff_attempt.saturating_add(2))
 }
 
 /// Integration test suite configuration
@@ -359,6 +453,7 @@ pub async fn execute(
 
     let start = std::time::Instant::now();
     let mut ready = false;
+    let mut backoff_attempt: u32 = 0;
 
     while start.elapsed() < max_wait {
         match reqwest::get(&health_url).await {
@@ -393,8 +488,8 @@ pub async fn execute(
                 break;
             }
             _ => {
-                // Wait 2 seconds before next poll
-                sleep(Duration::from_secs(2)).await;
+                sleep(post_deployment_readiness_poll_delay(backoff_attempt)).await;
+                backoff_attempt = backoff_attempt.saturating_add(1);
             }
         }
     }
@@ -535,7 +630,7 @@ async fn fetch_secret(secret_name: &str, key: &str) -> Result<String> {
     let base64_value = String::from_utf8(output.stdout)?;
 
     // Decode base64 using the standard engine
-    use base64::{engine::general_purpose, Engine as _};
+    use base64::{Engine as _, engine::general_purpose};
     let decoded = general_purpose::STANDARD
         .decode(base64_value.trim())
         .context("Failed to decode base64 secret")?;
@@ -1735,6 +1830,259 @@ mod integration_test_retry_backoff_tests {
              retry-delay helper at every failure branch of \
              `execute_suite`'s retry loop — the canonical delegation \
              call was not found at any code line.",
+        );
+    }
+}
+
+#[cfg(test)]
+mod post_deployment_readiness_poll_backoff_tests {
+    use super::*;
+
+    // ====================================================================
+    // post-deployment readiness poll backoff —
+    // POST_DEPLOYMENT_READINESS_POLL_BACKOFF + helper
+    // ====================================================================
+    //
+    // These pin the `RetryPolicy`-consuming replacement of the pre-lift
+    // bare fixed `sleep(Duration::from_secs(2)).await` at the wall-clock-
+    // bounded readiness poll loop in `execute` that waits for the
+    // freshly-deployed application's `/health` endpoint to return 200
+    // before the post-deployment integration-test suite runs. Sibling of
+    // the `HEALTH_ENDPOINT_BACKOFF` shields at
+    // `commands/post_deploy_verification.rs::tests` (commit b5db3b6), the
+    // `SERVICES_HEALTHY_POLL_BACKOFF` shields at
+    // `commands/comprehensive_release.rs::tests` (commit ad2e31e), the
+    // `MIGRATION_JOB_POLL_BACKOFF` shields at
+    // `services/migration_service.rs::tests` (commit ac61874), and the
+    // `FEDERATION_JOB_POLL_BACKOFF` shields at
+    // `commands/federation_tests.rs::tests` (commit 8319fa2) — same
+    // const- + delegation-helper shape, same five-test pattern
+    // (policy-shape / in-cap-schedule / past-cap-cap / saturating-no-
+    // panic / delegation-boundary), and the same function-body-scoped
+    // no-re-fusion shield closes the pre-lift bare-literal shape at the
+    // `execute` readiness poll site.
+
+    /// The `POST_DEPLOYMENT_READINESS_POLL_BACKOFF` const's
+    /// `(initial_backoff, factor, max_backoff)` triple is the load-
+    /// bearing invariant every consumption site (the `execute` readiness
+    /// poll loop, plus any future readiness-poll consumer that reads
+    /// the same schedule) shares. Pinned here so a future edit at the
+    /// const's site is caught at a named test rather than silently
+    /// across the consumption site and the delegation helper.
+    #[test]
+    fn test_post_deployment_readiness_poll_backoff_policy_shape() {
+        assert_eq!(
+            POST_DEPLOYMENT_READINESS_POLL_BACKOFF.initial_backoff,
+            Duration::from_secs(2),
+            "POST_DEPLOYMENT_READINESS_POLL_BACKOFF.initial_backoff must be 2s \
+             — preserves the pre-lift bare `sleep(Duration::from_secs(2))` \
+             seed verbatim at the readiness poll loop's first sleep.",
+        );
+        assert_eq!(
+            POST_DEPLOYMENT_READINESS_POLL_BACKOFF.factor, 2,
+            "POST_DEPLOYMENT_READINESS_POLL_BACKOFF.factor must be 2 \
+             — Bazel-style doubling climb between probes.",
+        );
+        assert_eq!(
+            POST_DEPLOYMENT_READINESS_POLL_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "POST_DEPLOYMENT_READINESS_POLL_BACKOFF.max_backoff must be 30s \
+             — the shared cap every sibling RetryPolicy-consumer \
+             (HEALTH_ENDPOINT_BACKOFF, SERVICES_HEALTHY_POLL_BACKOFF, \
+             MIGRATION_JOB_POLL_BACKOFF, FEDERATION_JOB_POLL_BACKOFF) \
+             also names.",
+        );
+    }
+
+    /// Pre-lift the readiness poll loop emitted a flat
+    /// `sleep(Duration::from_secs(2))` at every non-terminal iteration.
+    /// Post-lift the first iteration preserves that 2s seed verbatim
+    /// (`backoff_attempt == 0` → `compute_delay(2) = initial_backoff =
+    /// 2s`), then diverges upward at every later iteration
+    /// (`backoff_attempt == 1` → `4s`, `== 2` → `8s`, `== 3` → `16s`) —
+    /// strictly better than the pre-lift flat 2s schedule at every
+    /// probe past the first.
+    #[test]
+    fn test_post_deployment_readiness_poll_delay_matches_pre_lift_seed_and_climbs_at_in_cap_attempts()
+     {
+        assert_eq!(
+            post_deployment_readiness_poll_delay(0),
+            Duration::from_secs(2),
+            "backoff_attempt=0 must sleep 2s — matches pre-lift \
+             `sleep(Duration::from_secs(2))` seed verbatim.",
+        );
+        assert_eq!(
+            post_deployment_readiness_poll_delay(1),
+            Duration::from_secs(4),
+            "backoff_attempt=1 must sleep 4s — Bazel-style `2s * 2 = 4s`.",
+        );
+        assert_eq!(
+            post_deployment_readiness_poll_delay(2),
+            Duration::from_secs(8),
+            "backoff_attempt=2 must sleep 8s — Bazel-style `4s * 2 = 8s`.",
+        );
+        assert_eq!(
+            post_deployment_readiness_poll_delay(3),
+            Duration::from_secs(16),
+            "backoff_attempt=3 must sleep 16s — Bazel-style `8s * 2 = 16s`.",
+        );
+    }
+
+    /// Iterations past the cap must all emit `max_backoff = 30s` —
+    /// `(16s * 2).min(30s) = 30s` at `backoff_attempt == 4` and every
+    /// subsequent iteration. `warmup_delay` is a user-supplied
+    /// `deploy.yaml` field with no upper bound in the schema, so
+    /// beyond-cap iterations must stay at the ceiling rather than
+    /// climb past it and stretch a single readiness-poll iteration's
+    /// sleep into minutes.
+    #[test]
+    fn test_post_deployment_readiness_poll_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            post_deployment_readiness_poll_delay(4),
+            Duration::from_secs(30),
+            "backoff_attempt=4 must sleep 30s (cap) — `(16s * 2).min(30s) = 30s`.",
+        );
+        assert_eq!(
+            post_deployment_readiness_poll_delay(5),
+            Duration::from_secs(30),
+            "backoff_attempt=5 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            post_deployment_readiness_poll_delay(50),
+            Duration::from_secs(30),
+            "backoff_attempt=50 must sleep 30s (cap) — a pathological \
+             `warmup_delay` cannot stretch a single sleep past the ceiling.",
+        );
+    }
+
+    /// The readiness poll loop's `backoff_attempt` counter is a `u32`
+    /// bounded only by the caller-supplied `warmup_delay` wall-clock
+    /// window, so a pathological `warmup_delay` of years could in
+    /// principle drive `post_deployment_readiness_poll_delay(u32::MAX)`.
+    /// Pre-lift the fixed `Duration::from_secs(2)` literal never panicked
+    /// at any iteration; post-lift `saturating_add(2)` inside
+    /// `post_deployment_readiness_poll_delay` bounds the argument to
+    /// `RetryPolicy::compute_delay`, whose `checked_pow`-then-cap body
+    /// itself saturates without panic. This test pins that composition:
+    /// a `backoff_attempt == u32::MAX` argument returns a bounded delay
+    /// rather than panicking.
+    #[test]
+    fn test_post_deployment_readiness_poll_delay_saturates_without_panic_at_arbitrarily_large_attempt()
+     {
+        assert_eq!(
+            post_deployment_readiness_poll_delay(u32::MAX),
+            Duration::from_secs(30),
+            "backoff_attempt=u32::MAX must saturate to max_backoff without \
+             panic — the `saturating_add(2)` bridge + \
+             `RetryPolicy::compute_delay`'s `checked_pow` cap close \
+             the u32 overflow class by construction.",
+        );
+        assert_eq!(
+            post_deployment_readiness_poll_delay(u32::MAX - 2),
+            Duration::from_secs(30),
+            "backoff_attempt=u32::MAX - 2 must also saturate to max_backoff \
+             — the bridge `saturating_add(2)` returns u32::MAX, still \
+             far past the cap.",
+        );
+    }
+
+    /// The readiness-poll policy shares `(factor, max_backoff)` with the
+    /// canonical [`RetryPolicy::network()`] reference schedule; only
+    /// `initial_backoff` diverges (2s vs 250ms) to preserve the pre-lift
+    /// bare `sleep(Duration::from_secs(2))` seed verbatim. Pin the
+    /// shared invariants so a future refinement to the retry module's
+    /// reference schedule surfaces the intentional 2s-seed divergence
+    /// as a named failure rather than a silent per-consumer drift.
+    #[test]
+    fn test_post_deployment_readiness_poll_backoff_shares_network_factor_and_cap() {
+        let net = RetryPolicy::network();
+        assert_eq!(
+            POST_DEPLOYMENT_READINESS_POLL_BACKOFF.factor, net.factor,
+            "POST_DEPLOYMENT_READINESS_POLL_BACKOFF.factor must match \
+             RetryPolicy::network().factor — the Bazel-style doubling \
+             climb is the shared invariant across every RetryPolicy \
+             consumer.",
+        );
+        assert_eq!(
+            POST_DEPLOYMENT_READINESS_POLL_BACKOFF.max_backoff, net.max_backoff,
+            "POST_DEPLOYMENT_READINESS_POLL_BACKOFF.max_backoff must match \
+             RetryPolicy::network().max_backoff — the 30s ceiling is the \
+             shared invariant across every RetryPolicy consumer.",
+        );
+    }
+
+    /// The `execute` readiness poll loop MUST consume the typed
+    /// primitive at `post_deployment_readiness_poll_delay(backoff_attempt)`
+    /// rather than re-fusing the pre-lift bare-literal
+    /// `sleep(Duration::from_secs(2))` shape. A future refactor that
+    /// reintroduces the fixed-literal shape (see
+    /// `POST_DEPLOYMENT_READINESS_POLL_BACKOFF`'s docstring for the
+    /// three structural defects the lift closed) fails here, not
+    /// silently in production where a slow-booting application would
+    /// resume flooding `/health` with ~30 probes per minute across the
+    /// full `warmup_delay` wall-clock window. Whole-function-body
+    /// boundary discipline sibling of
+    /// `test_wait_for_job_consumes_typed_poll_delay_not_bare_fixed_sleep`
+    /// at `services/migration_service.rs::tests` (commit ac61874) and
+    /// `test_execute_consumes_typed_poll_delay_not_bare_fixed_sleep`
+    /// at `commands/comprehensive_release.rs::tests` (commit ad2e31e).
+    ///
+    /// The scan is bounded strictly to the `pub async fn execute(` body
+    /// (from its signature through the next top-level function's
+    /// signature `async fn prepare_environment`) — the module also
+    /// carries an unrelated pre-existing `sleep(Duration::from_secs(2))`
+    /// site in `execute_manual`'s test-suite retry loop (line ~1304)
+    /// which is out of scope for this lift and out of scope for this
+    /// shield. Uses the [`crate::test_support::code_line_hits`] helper
+    /// so the shield does not false-positive on any comment or
+    /// docstring text inside the function body. The forbidden literal
+    /// is reconstructed at test time via [`format!`] and the diagnostic
+    /// prose refers to it only via the reconstructed `bespoke_needle`
+    /// (never the fused literal), so the assert message body itself
+    /// stays unmatchable.
+    #[test]
+    fn test_execute_readiness_poll_consumes_typed_delay_not_bare_fixed_sleep() {
+        let source = include_str!("integration_tests.rs");
+        let fn_marker = "pub async fn execute(";
+        let next_fn_marker = "\nasync fn prepare_environment";
+        let fn_start = source.find(fn_marker).expect(
+            "the `pub async fn execute(` signature must exist — the \
+             shield's slice boundary relies on this signature.",
+        );
+        let fn_body_rel = source[fn_start..].find(next_fn_marker).expect(
+            "the `async fn prepare_environment` signature must follow \
+             `execute` — the shield's slice boundary relies on this \
+             ordering.",
+        );
+        let execute_body = &source[fn_start..fn_start + fn_body_rel];
+
+        let bespoke_needle = format!(
+            "sleep(Duration::from_secs({}))",
+            POST_DEPLOYMENT_READINESS_POLL_BACKOFF
+                .initial_backoff
+                .as_secs(),
+        );
+        let bespoke_hits = crate::test_support::code_line_hits(execute_body, &bespoke_needle);
+        assert!(
+            bespoke_hits.is_empty(),
+            "commands/integration_tests.rs::execute must NOT re-fuse the \
+             pre-lift bare fixed sleep at the readiness poll loop — the \
+             schedule lives at `POST_DEPLOYMENT_READINESS_POLL_BACKOFF` \
+             + `post_deployment_readiness_poll_delay`, both grounding \
+             through `RetryPolicy::compute_delay`. Found code-line hits: \
+             {:#?}",
+            bespoke_hits,
+        );
+        let delegation_hits = crate::test_support::code_line_hits(
+            execute_body,
+            "post_deployment_readiness_poll_delay(backoff_attempt)",
+        );
+        assert!(
+            !delegation_hits.is_empty(),
+            "commands/integration_tests.rs::execute must consume the \
+             typed readiness-poll-delay helper at the poll loop's sleep \
+             site — the canonical delegation call was not found at any \
+             code line inside `pub async fn execute`.",
         );
     }
 }
