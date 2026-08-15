@@ -6,7 +6,108 @@ use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use crate::repo::get_tool_path;
+use crate::retry::RetryPolicy;
 use crate::{commands, git};
+
+/// The typed exponential-backoff policy for the docker-compose services-
+/// healthy status-poll cadence in [`execute`]'s integration-test step —
+/// `initial_backoff` 2s × `factor` 2 capped at `max_backoff` 30s. Consumes
+/// the pre-existing typed primitive at [`crate::retry::RetryPolicy`] so
+/// the per-attempt delay lands at [`RetryPolicy::compute_delay`], the same
+/// shared body the sibling k8s-Job status-poll surface
+/// `services/migration_service.rs::MIGRATION_JOB_POLL_BACKOFF`
+/// (commit ac61874), the reconcile-poll surface `commands/migrations.rs::
+/// SHINKA_MIGRATION_POLL_BACKOFF` (commit b962db5), the flux polling-loops
+/// surface `commands/flux.rs::FLUX_POLL_BACKOFF` (commit 65de62f), the
+/// health-endpoint retry surface `commands/post_deploy_verification.rs::
+/// HEALTH_ENDPOINT_BACKOFF` (commit b5db3b6), and the federation-test
+/// / rollout-watch / test-suite retry surfaces (commits 8319fa2 /
+/// 7fe79de / 9fd38d3 / e22b0a2) read through.
+///
+/// Pre-lift the schedule was spelled inline as a bare fixed
+/// `tokio::time::sleep(tokio::time::Duration::from_secs(2)).await` at the
+/// tail of every non-terminal iteration of the docker-compose `ps` health
+/// probe loop, bounded by a count-based `attempts >= 60` cap (the flat 2s
+/// × 60 iteration budget the pre-lift `// 2 minutes (60 * 2s)` comment
+/// cited as the intended wall-clock timeout). That shape carried three
+/// structural defects the typed-primitive body forecloses:
+/// 1. **Fixed 2s schedule.** A flat `sleep(2s)` between poll iterations
+///    is "too short when the services are still starting (60 `docker-
+///    compose ps` probes across a 2-minute window — a stream of daemon
+///    round-trips for containers that haven't yet emitted their
+///    healthcheck), 2s too long when the last container flipped to
+///    `healthy` 100ms ago" — the exact worst-of-both failure mode the
+///    sibling `MIGRATION_JOB_POLL_BACKOFF` / `SHINKA_MIGRATION_POLL_
+///    BACKOFF` / `GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF` / `FEDERATION_JOB_
+///    POLL_BACKOFF` docstrings cite. Post-lift, the first poll still
+///    waits 2s (preserving the seed verbatim), then 4s / 8s / 16s /
+///    30s / 30s / … — ~7 iterations reach the 2-minute window under the
+///    exponential-with-cap climb rather than 60 iterations under the
+///    pre-lift flat 2s.
+/// 2. **No caller-visible schedule invariant.** The bare
+///    `tokio::time::Duration::from_secs(2)` literal at the poll-loop
+///    sleep carried no name a shield could pin — a future edit that
+///    changed the schedule at this site did not surface at any named-
+///    primitive audit path. The lifted `SERVICES_HEALTHY_POLL_BACKOFF`
+///    const names the (seed, factor, cap) triple a shield can cite and
+///    enforce.
+/// 3. **Count-bounded timeout coupled to the pre-lift schedule.** The
+///    `attempts >= 60` cap encoded the 2-minute wall-clock budget as
+///    `60 * 2s`, so any schedule change (this lift itself, a future seed
+///    bump) silently invalidated the intended wall-clock semantics.
+///    Post-lift the loop rebounds on wall-clock (`start.elapsed() >
+///    SERVICES_HEALTHY_TIMEOUT`) — the schedule and the timeout are
+///    named at two independent typed sites, mirroring the sibling
+///    `services/migration_service.rs::MigrationService::wait_for_job`
+///    wall-clock-bound loop.
+///
+/// `max_attempts: u32::MAX` is a placeholder — the poll loop is bounded
+/// by wall-clock via [`SERVICES_HEALTHY_TIMEOUT`], not by attempt count —
+/// and consumes only [`RetryPolicy::compute_delay`] from this policy,
+/// not [`RetryPolicy::max_attempts`]. The `max_attempts` field is
+/// unconsulted at this consumption site.
+const SERVICES_HEALTHY_POLL_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: u32::MAX,
+    initial_backoff: Duration::from_secs(2),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Wall-clock timeout on the docker-compose services-healthy poll loop —
+/// preserves the pre-lift `60 * 2s = 2 minutes` intended budget the
+/// `// 2 minutes (60 * 2s)` inline comment cited. Named as an independent
+/// typed const so a future refinement of either the schedule
+/// ([`SERVICES_HEALTHY_POLL_BACKOFF`]) or the wall-clock budget lands at
+/// two named typed sites rather than fused into a single count-bounded
+/// cap that couples the two invariants.
+const SERVICES_HEALTHY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Backoff between docker-compose services-healthy poll iterations, given
+/// a 0-indexed local `attempt` counter (the `loop { ... }` shape in
+/// [`execute`]'s integration-test step drives increments once per
+/// non-terminal iteration).
+///
+/// Maps the local 0-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(2)`:
+/// local `attempt == 0` (the sleep after the first non-terminal poll)
+/// reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff = 2s`; local `attempt == 1` reads as `compute_delay(3)
+/// = 4s`; local `attempt == 2` reads as `compute_delay(4) = 8s`; local
+/// `attempt == 3` reads as `compute_delay(5) = 16s`; local `attempt >= 4`
+/// reads as `compute_delay(>=6) = 30s` (cap) — preserves the pre-lift
+/// `tokio::time::sleep(tokio::time::Duration::from_secs(2))` seed
+/// verbatim at the first poll and strictly diverges upward at every
+/// later poll.
+///
+/// The `saturating_add` clamp forecloses the `u32` overflow class at the
+/// bridge — a pathologically-long-running poll loop that reaches
+/// `attempt == u32::MAX` reads as `compute_delay(u32::MAX)`, which itself
+/// saturates to [`SERVICES_HEALTHY_POLL_BACKOFF::max_backoff`] via the
+/// `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
+/// without panic.
+fn services_healthy_poll_delay(attempt: u32) -> Duration {
+    SERVICES_HEALTHY_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
+}
 
 /// Comprehensive release workflow with full testing
 ///
@@ -316,8 +417,8 @@ pub async fn execute(
 
                 // Wait for services to be healthy
                 info!("⏳ Waiting for services to be healthy...");
-                let mut attempts = 0;
-                let max_attempts = 60; // 2 minutes (60 * 2s)
+                let health_start = Instant::now();
+                let mut backoff_attempt: u32 = 0;
 
                 loop {
                     let ps_result = Command::new(&docker_compose)
@@ -331,8 +432,7 @@ pub async fn execute(
                         break;
                     }
 
-                    attempts += 1;
-                    if attempts >= max_attempts {
+                    if health_start.elapsed() >= SERVICES_HEALTHY_TIMEOUT {
                         // Show logs and cleanup
                         let _ = Command::new(&docker_compose)
                             .current_dir(&working_dir)
@@ -349,7 +449,8 @@ pub async fn execute(
                         anyhow::bail!("Timeout waiting for services to become healthy");
                     }
 
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    tokio::time::sleep(services_healthy_poll_delay(backoff_attempt)).await;
+                    backoff_attempt = backoff_attempt.saturating_add(1);
                 }
 
                 info!("{}", "✅ Services are healthy".green());
@@ -407,7 +508,9 @@ pub async fn execute(
                                 "   ⚠️  Migration command failed with exit code: {:?}",
                                 status.code()
                             );
-                            warn!("   This might indicate a database connection issue or migration error");
+                            warn!(
+                                "   This might indicate a database connection issue or migration error"
+                            );
                         }
                         Err(e) => {
                             warn!("   ⚠️  Failed to execute sqlx: {}", e);
@@ -649,6 +752,273 @@ pub async fn execute(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        SERVICES_HEALTHY_POLL_BACKOFF, SERVICES_HEALTHY_TIMEOUT, services_healthy_poll_delay,
+    };
+    use crate::retry::RetryPolicy;
+    use std::time::Duration;
+
+    // ====================================================================
+    // SERVICES_HEALTHY_POLL_BACKOFF / services_healthy_poll_delay shields
+    // ====================================================================
+    //
+    // These pin the `RetryPolicy`-consuming replacement of the pre-lift
+    // bare fixed `tokio::time::sleep(tokio::time::Duration::from_secs(2))
+    // .await` at the docker-compose services-healthy poll loop in
+    // `execute`'s integration-test step. Sibling of the
+    // `MIGRATION_JOB_POLL_BACKOFF` shields at
+    // `services/migration_service.rs::tests` (commit ac61874), the
+    // `SHINKA_MIGRATION_POLL_BACKOFF` shields at
+    // `commands/migrations.rs::tests` (commit b962db5), and the
+    // `FEDERATION_JOB_POLL_BACKOFF` / `GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF`
+    // shields at `commands/federation_tests.rs::tests` /
+    // `commands/github_runner_ci.rs::tests` (commits 8319fa2 / 7fe79de).
+
+    /// The `(initial_backoff, factor, max_backoff)` shape of the
+    /// docker-compose services-healthy poll-backoff policy is a load-
+    /// bearing invariant shared with every sibling `_POLL_BACKOFF`
+    /// const across the fleet — all consume the same
+    /// `RetryPolicy::network()` `(factor=2, max_backoff=30s)` reference
+    /// schedule and diverge only at `initial_backoff` to preserve their
+    /// respective pre-lift seeds verbatim. Pinned here so a future
+    /// silent-desync at the const site (a factor bump, a cap change, a
+    /// seed drift) is caught at a named test rather than silently
+    /// propagating across the two consumption sites
+    /// (`services_healthy_poll_delay` + the loop body).
+    #[test]
+    fn test_services_healthy_poll_backoff_policy_shape() {
+        assert_eq!(
+            SERVICES_HEALTHY_POLL_BACKOFF.initial_backoff,
+            Duration::from_secs(2),
+            "SERVICES_HEALTHY_POLL_BACKOFF.initial_backoff must be 2s \
+             — preserves the pre-lift bare `tokio::time::sleep(\
+             tokio::time::Duration::from_secs(2))` seed verbatim at the \
+             poll loop's first sleep.",
+        );
+        assert_eq!(
+            SERVICES_HEALTHY_POLL_BACKOFF.factor, 2,
+            "SERVICES_HEALTHY_POLL_BACKOFF.factor must be 2 \
+             — the Bazel/Buck2/SLSA-frontier reference doubling climb \
+             the sibling `RetryPolicy::network()` factory also emits.",
+        );
+        assert_eq!(
+            SERVICES_HEALTHY_POLL_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "SERVICES_HEALTHY_POLL_BACKOFF.max_backoff must be 30s \
+             — the Bazel/Buck2/SLSA-frontier 30s cap the sibling \
+             `RetryPolicy::network()` factory also emits.",
+        );
+    }
+
+    /// Pre-lift the poll loop emitted a flat `tokio::time::sleep(\
+    /// tokio::time::Duration::from_secs(2))` at every non-terminal
+    /// iteration. Post-lift the first iteration preserves that 2s seed
+    /// verbatim (`services_healthy_poll_delay(0) == 2s`); every later
+    /// iteration strictly diverges upward under the exponential-with-cap
+    /// climb (`4s → 8s → 16s → 30s → …`) rather than re-emitting the
+    /// pre-lift `2s` flat.
+    #[test]
+    fn test_services_healthy_poll_delay_matches_pre_lift_seed_and_climbs() {
+        assert_eq!(
+            services_healthy_poll_delay(0),
+            Duration::from_secs(2),
+            "iter 0 must sleep 2s — matches pre-lift `tokio::time::\
+             sleep(tokio::time::Duration::from_secs(2))` seed verbatim.",
+        );
+        assert_eq!(
+            services_healthy_poll_delay(1),
+            Duration::from_secs(4),
+            "iter 1 must sleep 4s — pre-lift stayed flat at 2s; \
+             post-lift climbs `initial_backoff * factor = 4s`.",
+        );
+        assert_eq!(
+            services_healthy_poll_delay(2),
+            Duration::from_secs(8),
+            "iter 2 must sleep 8s — pre-lift stayed flat at 2s; \
+             post-lift climbs `initial_backoff * factor^2 = 8s`.",
+        );
+        assert_eq!(
+            services_healthy_poll_delay(3),
+            Duration::from_secs(16),
+            "iter 3 must sleep 16s — pre-lift stayed flat at 2s; \
+             post-lift climbs `initial_backoff * factor^3 = 16s`.",
+        );
+    }
+
+    /// Iterations past the cap must all emit `max_backoff = 30s` —
+    /// pre-lift stayed flat at 2s at every iteration, so a slow-boot
+    /// docker-compose stack (say, a Postgres pull-then-init the pre-lift
+    /// 60-attempt cap sized against) would emit ~60 `docker-compose ps`
+    /// probes over the 2-minute window; post-lift the climb caps at 30s
+    /// and the same 2-minute window emits ~7 probes.
+    #[test]
+    fn test_services_healthy_poll_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            services_healthy_poll_delay(4),
+            Duration::from_secs(30),
+            "iter 4 must sleep 30s (cap) — `initial_backoff * factor^4 \
+             = 32s`, clamped to `max_backoff = 30s`.",
+        );
+        assert_eq!(
+            services_healthy_poll_delay(5),
+            Duration::from_secs(30),
+            "iter 5 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            services_healthy_poll_delay(50),
+            Duration::from_secs(30),
+            "iter 50 must sleep 30s (cap) — long-boot compose stacks \
+             can poll for minutes past the cap, so beyond-cap iterations \
+             must stay at the ceiling rather than drifting upward.",
+        );
+    }
+
+    /// The poll loop is bounded by wall-clock via
+    /// [`SERVICES_HEALTHY_TIMEOUT`], not by attempt count, so
+    /// `backoff_attempt` can in principle reach any `u32` value on a
+    /// pathologically-fast poll-arm (a stub docker-compose that returns
+    /// instantly against a lengthened `SERVICES_HEALTHY_TIMEOUT`). This
+    /// test pins that composition: an `attempt == u32::MAX` argument
+    /// returns a bounded delay rather than panicking. The
+    /// `saturating_add(2)` bridge inside `services_healthy_poll_delay`
+    /// clamps to `u32::MAX`, and [`RetryPolicy::compute_delay`]'s
+    /// `checked_pow`-then-cap body itself saturates to `max_backoff`
+    /// without panic.
+    #[test]
+    fn test_services_healthy_poll_delay_saturates_without_panic_at_arbitrarily_large_attempt() {
+        assert_eq!(
+            services_healthy_poll_delay(u32::MAX),
+            Duration::from_secs(30),
+            "attempt=u32::MAX must saturate to max_backoff without \
+             panic — the `saturating_add(2)` bridge + `RetryPolicy::\
+             compute_delay`'s `checked_pow` cap close the u32 overflow \
+             class by construction.",
+        );
+        assert_eq!(
+            services_healthy_poll_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "attempt=u32::MAX - 1 must also saturate to max_backoff — \
+             the bridge `saturating_add(2)` returns u32::MAX, still far \
+             past the cap.",
+        );
+    }
+
+    /// The `(factor, max_backoff)` pair of `SERVICES_HEALTHY_POLL_BACKOFF`
+    /// matches the Bazel/Buck2/SLSA-frontier reference schedule the retry
+    /// module cites at [`RetryPolicy::network`]'s docstring. The docker-
+    /// compose services-healthy poll policy diverges only at
+    /// `initial_backoff` (2s vs 250ms) to preserve the pre-lift bare
+    /// `tokio::time::sleep(tokio::time::Duration::from_secs(2))` seed
+    /// verbatim. Pin the shared invariants so a future refinement to
+    /// the retry module's reference schedule surfaces the intentional
+    /// services-healthy-side divergence as a named test failure rather
+    /// than silently propagating. Sibling of
+    /// `test_migration_job_poll_backoff_shares_network_factor_and_cap`
+    /// at `services/migration_service.rs::tests` (commit ac61874).
+    #[test]
+    fn test_services_healthy_poll_backoff_shares_network_factor_and_cap() {
+        let network = RetryPolicy::network();
+        assert_eq!(
+            SERVICES_HEALTHY_POLL_BACKOFF.factor, network.factor,
+            "SERVICES_HEALTHY_POLL_BACKOFF.factor must match \
+             RetryPolicy::network().factor — both consume the \
+             Bazel/Buck2/SLSA-frontier factor=2 reference.",
+        );
+        assert_eq!(
+            SERVICES_HEALTHY_POLL_BACKOFF.max_backoff, network.max_backoff,
+            "SERVICES_HEALTHY_POLL_BACKOFF.max_backoff must match \
+             RetryPolicy::network().max_backoff — both consume the \
+             Bazel/Buck2/SLSA-frontier 30s cap reference.",
+        );
+    }
+
+    /// The wall-clock timeout on the services-healthy poll loop must
+    /// remain the pre-lift intended `60 * 2s = 120s` budget the removed
+    /// inline `// 2 minutes (60 * 2s)` comment cited. Pin the const so a
+    /// future silent bump does not decouple the observed wall-clock
+    /// behavior from the load-bearing 2-minute intent.
+    #[test]
+    fn test_services_healthy_timeout_preserves_pre_lift_two_minute_budget() {
+        assert_eq!(
+            SERVICES_HEALTHY_TIMEOUT,
+            Duration::from_secs(120),
+            "SERVICES_HEALTHY_TIMEOUT must be 120s — preserves the \
+             pre-lift `60 * 2s = 2 minutes` intended wall-clock budget \
+             at the docker-compose services-healthy poll loop.",
+        );
+    }
+
+    /// The docker-compose services-healthy poll loop body MUST consume
+    /// the typed primitive at `services_healthy_poll_delay(\
+    /// backoff_attempt)` rather than the pre-lift bare `tokio::time::\
+    /// sleep(tokio::time::Duration::from_secs(2))` literal. A future
+    /// refactor that reintroduces the fixed-literal shape (see
+    /// `SERVICES_HEALTHY_POLL_BACKOFF`'s docstring for the three
+    /// structural defects the lift closed) fails here, not silently in
+    /// production where a slow-booting compose stack would resume
+    /// flooding the docker daemon with ~60 probes over its 2-minute
+    /// window. Whole-module boundary discipline sibling of
+    /// `test_wait_for_job_consumes_typed_poll_delay_not_bare_fixed_sleep`
+    /// at `services/migration_service.rs::tests` (commit ac61874) and
+    /// `test_wait_for_shinka_migration_consumes_typed_poll_delay_not_mut_backoff_secs`
+    /// at `commands/migrations.rs::tests` (commit b962db5).
+    ///
+    /// Uses the [`crate::test_support::code_line_hits`] helper so the
+    /// shield does not false-positive on `SERVICES_HEALTHY_POLL_BACKOFF`'s
+    /// own docstring above (which cites the pre-lift shape as context
+    /// for the three defects it forecloses). The forbidden literal is
+    /// reconstructed at test time via [`format!`] and the diagnostic
+    /// prose refers to it only via the reconstructed `bespoke_needle`
+    /// (never the fused literal), so the assert message body itself
+    /// stays unmatchable — same code-line-filter-plus-format-
+    /// reconstruction discipline sibling shields 4163c7e / ffa5271 /
+    /// fa2c702 / a7d5375 / ab06395 use.
+    ///
+    /// The scan is bounded strictly to the pre-tests module body — from
+    /// the module start through the `#[cfg(test)]\nmod tests {` marker
+    /// — so this shield's own docstring mention of `tokio::time::sleep(\
+    /// tokio::time::Duration::from_secs(2))` (which lives inside this
+    /// `#[cfg(test)] mod tests` block below that marker) stays out of
+    /// scope AND every current or future sleep-emitting helper landing
+    /// anywhere in the top-level module body cannot silently ride along
+    /// without going through the primitive.
+    #[test]
+    fn test_execute_consumes_typed_poll_delay_not_bare_fixed_sleep() {
+        let source = include_str!("comprehensive_release.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let bespoke_needle = format!(
+            "tokio::time::sleep(tokio::time::Duration::from_secs({}))",
+            SERVICES_HEALTHY_POLL_BACKOFF.initial_backoff.as_secs(),
+        );
+        let bespoke_hits = crate::test_support::code_line_hits(module_body, &bespoke_needle);
+        assert!(
+            bespoke_hits.is_empty(),
+            "commands/comprehensive_release.rs must NOT re-fuse the pre-lift \
+             bare fixed sleep at the poll loop — the schedule lives at \
+             `SERVICES_HEALTHY_POLL_BACKOFF` + `services_healthy_poll_delay`, \
+             both grounding through `RetryPolicy::compute_delay`. Found \
+             code-line hits: {:#?}",
+            bespoke_hits,
+        );
+        let delegation_hits = crate::test_support::code_line_hits(
+            module_body,
+            "services_healthy_poll_delay(backoff_attempt)",
+        );
+        assert!(
+            !delegation_hits.is_empty(),
+            "commands/comprehensive_release.rs must consume the typed \
+             poll-delay helper at the poll loop's sleep site — the \
+             canonical delegation call was not found at any code line.",
+        );
+    }
+
     /// Whole-module shield: no raw `Command::new("docker-compose")` may live in
     /// this module's non-test body. Every `docker-compose` spawn in
     /// `commands/comprehensive_release.rs` must first resolve `DOCKER_COMPOSE_BIN`
