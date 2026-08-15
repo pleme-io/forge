@@ -50,10 +50,10 @@ pub async fn execute(
                 println!();
             }
             Ok(status) => {
-                anyhow::bail!("Rollback failed with exit code: {:?}", status.code());
+                anyhow::bail!("{}", format_rollback_non_success(&name, &namespace, status));
             }
             Err(e) => {
-                anyhow::bail!("Failed to execute rollback: {}", e);
+                anyhow::bail!("{}", format_rollback_spawn_failure(&name, &namespace, &e));
             }
         }
     }
@@ -391,6 +391,53 @@ fn parse_timeout(timeout_str: &str) -> Result<u64> {
     Ok((total_seconds / 3).max(1))
 }
 
+/// Format the operator-facing bail message for the "kubectl spawn
+/// returned Ok(status) but status.success() == false" branch of the
+/// `--rollback` path in [`execute`]. Includes the exact
+/// `kubectl rollout undo deployment/<name> -n <namespace>` invocation
+/// so an operator reading the error (or grepping a job log for
+/// "rollout undo") can identify BOTH which deployment forge tried to
+/// roll back AND that the failure was a non-zero kubectl exit, not a
+/// spawn failure — the two error surfaces the pre-lift bare
+/// `"Rollback failed with exit code: {status.code():?}"` message
+/// collapsed into an ambiguous "something failed with some code."
+///
+/// Same "sharpen error fidelity at the shared invocation surface"
+/// discipline the sibling `kubectl_list_items` and `kubectl_get_object`
+/// primitives (commits 521bda3 and 8216981) applied via
+/// `.with_context(|| format!("Failed to execute kubectl {}", …))` at
+/// `commands/status.rs` — pulled into a formatter here so a
+/// hermetic unit test can pin the message shape without spawning
+/// kubectl.
+fn format_rollback_non_success(
+    name: &str,
+    namespace: &str,
+    status: std::process::ExitStatus,
+) -> String {
+    format!(
+        "kubectl rollout undo deployment/{} -n {} failed with exit code: {:?}",
+        name,
+        namespace,
+        status.code()
+    )
+}
+
+/// Format the operator-facing bail message for the "kubectl spawn
+/// itself failed" branch of the `--rollback` path — a `PATH`-lookup
+/// failure, a missing `KUBECTL_BIN` target, or a `spawn(2)` errno
+/// under process-limit exhaustion. Same invocation-shape-in-the-
+/// message discipline as [`format_rollback_non_success`]: an
+/// operator sees the exact `kubectl rollout undo deployment/<name>
+/// -n <namespace>` that failed to spawn rather than the pre-lift
+/// bare `"Failed to execute rollback: {e}"` message that left the
+/// deployment and namespace out entirely.
+fn format_rollback_spawn_failure(name: &str, namespace: &str, err: &std::io::Error) -> String {
+    format!(
+        "Failed to spawn kubectl rollout undo deployment/{} -n {}: {}",
+        name, namespace, err
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,6 +525,90 @@ mod tests {
                 "malformed input {bad:?} must be echoed in the error: {err}"
             );
         }
+    }
+
+    /// `format_rollback_non_success` names the exact
+    /// `kubectl rollout undo deployment/<name> -n <namespace>`
+    /// invocation the operator saw fail, alongside the ExitStatus
+    /// code. Pre-lift the bail message was
+    /// `"Rollback failed with exit code: {status.code():?}"` — an
+    /// operator reading it learned neither WHICH deployment forge
+    /// tried to roll back nor that the failure classification was
+    /// "kubectl exited non-zero" rather than "kubectl failed to
+    /// spawn." Post-lift both dimensions land in the message, and a
+    /// future edit that drops either (say, on a refactor that plumbs
+    /// only the deployment name through) fails this shield.
+    ///
+    /// Rides `std::process::Command::new("false").status()` — the
+    /// canonical always-fails Unix invocation used to synthesize a
+    /// hermetic non-zero `ExitStatus` without spawning kubectl. Same
+    /// discipline the sibling `commands/status.rs` shields for
+    /// `kubectl_get_item` / `kubectl_get_items` follow: build the
+    /// output/status by hand rather than routing through the
+    /// production kubectl binary.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn format_rollback_non_success_names_exact_invocation_and_exit_code() {
+        let status = tokio::process::Command::new("false")
+            .status()
+            .await
+            .expect("spawn `false`");
+        assert!(!status.success(), "`false` must exit non-zero");
+
+        let msg = format_rollback_non_success("hive-router", "hive-production", status);
+
+        assert!(
+            msg.contains("kubectl rollout undo deployment/hive-router -n hive-production"),
+            "message must name the exact invocation for an operator to \
+             identify WHICH deployment forge tried to roll back: {msg}"
+        );
+        assert!(
+            msg.contains("failed with exit code:"),
+            "message must classify the failure as non-zero exit (vs \
+             spawn failure) so the operator's next step is `kubectl \
+             logs`, not `which kubectl`: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("{:?}", status.code())),
+            "message must echo the offending ExitStatus code verbatim \
+             so a jsonpath-style status decode remains grep-friendly: \
+             {msg}"
+        );
+    }
+
+    /// `format_rollback_spawn_failure` names the exact
+    /// `kubectl rollout undo deployment/<name> -n <namespace>`
+    /// invocation the operator's shell was unable to spawn, alongside
+    /// the underlying `std::io::Error`. Pre-lift the bail message was
+    /// `"Failed to execute rollback: {e}"` — the operator learned
+    /// neither which deployment nor which namespace nor which binary
+    /// the runner had failed to spawn. Post-lift all three land in
+    /// the message.
+    #[test]
+    fn format_rollback_spawn_failure_names_exact_invocation_and_underlying_io_error() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "kubectl binary missing");
+
+        let msg = format_rollback_spawn_failure("hive-router", "hive-production", &err);
+
+        assert!(
+            msg.contains("kubectl rollout undo deployment/hive-router -n hive-production"),
+            "message must name the exact invocation so an operator \
+             seeing this in a Nix-hermetic runner's log can trace \
+             which `KUBECTL_BIN` was resolved and which deployment \
+             was in-flight: {msg}"
+        );
+        assert!(
+            msg.contains("spawn"),
+            "message must classify the failure as a spawn failure \
+             (vs non-zero exit) so the operator's next step is `which \
+             kubectl` / `echo $KUBECTL_BIN`, not `kubectl logs`: {msg}"
+        );
+        assert!(
+            msg.contains("kubectl binary missing"),
+            "message must include the underlying std::io::Error \
+             display so ENOENT vs EACCES vs process-limit exhaustion \
+             remains distinguishable at the bail surface: {msg}"
+        );
     }
 
     /// Whole-module shield: no raw `Command::new`-with-bare-`kubectl`-
