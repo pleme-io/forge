@@ -137,6 +137,59 @@ impl AtticClient {
             .unwrap_or_else(|| get_tool_path("ATTIC_BIN", "attic"))
     }
 
+    /// Build a fresh `tokio::process::Command` targeting the resolved
+    /// `attic` binary. Callers chain `.args(...)` / `.stdin(...)` /
+    /// `.stdout(...)` / `.stderr(...)` / `.env(...)` to compose the
+    /// operation-specific spawn shape.
+    ///
+    /// # Why this primitive
+    ///
+    /// Three `&self` methods on `AtticClient` —
+    /// [`Self::push_closure_via_stdin`], [`Self::login`], and
+    /// [`Self::use_cache`] — each spelled the identical two-line
+    /// preamble verbatim:
+    ///
+    /// ```text
+    /// let attic_bin = self.resolve_attic_bin();
+    /// let mut cmd = Command::new(&attic_bin);
+    /// ```
+    ///
+    /// Three occurrences is THEORY §VI.1's three-is-a-law threshold
+    /// ("two occurrences is a coincidence; three is a law"); this
+    /// primitive is the law-redeeming consolidation, symmetric to the
+    /// just-landed [`crate::infrastructure::git::GitClient::command`]
+    /// carve-out on the sibling `git` client (commit b388f85). The
+    /// binary-resolution lives at ONE body and each consumer method
+    /// composes only its own argv + stdio wiring.
+    ///
+    /// # Why the two retry-driven consumers keep the local capture
+    ///
+    /// [`Self::push_with_retries`] and [`Self::login_with_retries`]
+    /// drive [`crate::retry::retry_command`] with an `FnMut(u32) ->
+    /// impl Future` closure whose returned future must be `'static`;
+    /// `&self` cannot cross the `async move` boundary, so each retry
+    /// site clones the resolved binary into a `String` outside the
+    /// closure and re-spawns `Command::new(&attic_bin)` inside the
+    /// async block. Those two sites therefore keep the local-capture
+    /// shape while the three direct-`&self` consumers migrate onto
+    /// this helper — the same shape asymmetry the sibling GitClient
+    /// carve-out (b388f85) landed with (all six GitClient methods are
+    /// direct-`&self`; GitClient has no retry-driven consumers).
+    ///
+    /// # What compounds
+    ///
+    /// A future edit that widens [`Self::resolve_attic_bin`] (e.g., a
+    /// per-spawn env-injection hook, a substrate-path validation step,
+    /// or a telemetry sigil on the resolved path) lands at ONE
+    /// direct-`&self` caller instead of three — silently degrading one
+    /// site's resolution without the other two noticing is impossible
+    /// post-lift. The end-to-end `ATTIC_BIN`-routing contract is
+    /// unchanged: the resolved binary and its `with_attic_bin` test
+    /// override still travel through this helper unchanged.
+    fn command(&self) -> Command {
+        Command::new(self.resolve_attic_bin())
+    }
+
     /// Discover Attic token from environment
     pub fn discover_token() -> Option<String> {
         std::env::var("ATTIC_TOKEN").ok().filter(|s| !s.is_empty())
@@ -331,8 +384,7 @@ impl AtticClient {
     ///   stderr — the structural-record tuple Phase 1 attestation
     ///   records (THEORY §V.4) consume.
     pub async fn push_closure_via_stdin(&self, closure_bytes: &[u8]) -> Result<(), AtticError> {
-        let attic_bin = self.resolve_attic_bin();
-        let mut cmd = Command::new(&attic_bin);
+        let mut cmd = self.command();
         cmd.args(["push", &self.cache_name, "--stdin"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -401,8 +453,7 @@ impl AtticClient {
                 server_url: server_url.to_string(),
             })?;
 
-        let attic_bin = self.resolve_attic_bin();
-        let mut cmd = Command::new(&attic_bin);
+        let mut cmd = self.command();
         cmd.args(["login", &self.cache_name, server_url, token])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -590,9 +641,8 @@ impl AtticClient {
     /// compose through this method rather than spawning `attic use`
     /// directly.
     pub async fn use_cache(&self, server: &str) -> Result<(), AtticError> {
-        let attic_bin = self.resolve_attic_bin();
         let cache_ref = format!("{}:{}", server, self.cache_name);
-        let mut cmd = Command::new(&attic_bin);
+        let mut cmd = self.command();
         cmd.args(["use", &cache_ref])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1844,5 +1894,100 @@ mod tests {
             }
             other => panic!("expected UseFailed, got: {other:?}"),
         }
+    }
+
+    /// [`AtticClient::command`] MUST target the resolved `attic` binary
+    /// (`self.resolve_attic_bin()`). Reads the returned `Command`'s
+    /// program directly via [`std::process::Command::get_program`]
+    /// (through `tokio::process::Command::as_std`) and asserts it
+    /// equals the shim's absolute path when [`AtticClient::with_attic_bin`]
+    /// binds it. A regression that swapped the helper body for a raw
+    /// `Command::new("attic")` (silently bypassing `ATTIC_BIN`) would
+    /// surface here as a mismatched program path — never as a silent-
+    /// PATH-fallback bug at deploy time. Runs hermetically: no spawn,
+    /// no process creation, no env-var mutation.
+    ///
+    /// Mirror of the sibling
+    /// `infrastructure/git.rs::test_command_helper_program_equals_resolve_git_bin`
+    /// (commit b388f85) on the attic client — same
+    /// `Command::as_std().get_program()` inspection technique, applied
+    /// to the attic-binary-resolution invariant here instead of the
+    /// git-binary-resolution invariant there.
+    #[test]
+    fn test_command_helper_program_equals_resolve_attic_bin() {
+        let shim = "/nonexistent/hermetic/shim/attic";
+        let client = AtticClient::new("cache-probe").with_attic_bin(shim);
+        let cmd = client.command();
+        assert_eq!(
+            cmd.as_std().get_program(),
+            std::ffi::OsStr::new(shim),
+            "AtticClient::command() must resolve the program through \
+             `self.resolve_attic_bin()`, not hardcode `attic`. Got \
+             program={:?}, expected {shim}",
+            cmd.as_std().get_program()
+        );
+    }
+
+    /// Whole-module shield: the `Command::new(self.resolve_attic_bin())`
+    /// direct-expression spawn shape MUST appear at exactly one code
+    /// line in this module — the [`AtticClient::command`] helper body.
+    /// Every direct-`&self` consumer method
+    /// ([`AtticClient::push_closure_via_stdin`], [`AtticClient::login`],
+    /// [`AtticClient::use_cache`]) MUST route through `self.command()`
+    /// instead of respelling the `let attic_bin = self.resolve_attic_bin();
+    /// let mut cmd = Command::new(&attic_bin);` two-line preamble
+    /// inline. Pre-lift the three consumer methods each carried the
+    /// preamble verbatim; the lift collapses them onto the helper and
+    /// this shield forbids re-fusion so the binary-resolution primitive
+    /// stays authored at ONE body.
+    ///
+    /// The needle is `Command::new(self.resolve_attic_bin())` — the
+    /// direct-expression form the post-lift helper body carries.
+    /// Retry-driven consumers ([`AtticClient::push_with_retries`],
+    /// [`AtticClient::login_with_retries`]) keep the local-capture
+    /// shape (`let attic_bin = self.resolve_attic_bin();` outside the
+    /// `retry_command` closure, `Command::new(&attic_bin)` inside the
+    /// `async move`) — the closure's `'static` future cannot borrow
+    /// `&self` across the boundary, so those two sites cannot compose
+    /// through `self.command()`. Neither the outside-closure
+    /// `self.resolve_attic_bin()` invocation (a bare method call, not
+    /// a `Command::new` construction) nor the inside-closure
+    /// `Command::new(&attic_bin)` (a local capture, not the `self.`
+    /// direct expression) matches this shield's needle, so the two
+    /// retry sites correctly do not count against the one-hit cap.
+    /// The static [`AtticClient::is_available`] (which uses
+    /// `Command::new(&attic_bin)` after a free-function `get_tool_path`
+    /// resolve, also not the `self.` direct expression) is also
+    /// exempted for the same reason.
+    ///
+    /// Routes through [`crate::test_support::code_line_hits`] so this
+    /// shield's own docstring prose (which quotes the forbidden literal
+    /// for narrative purposes) does not self-match. The needle is
+    /// reconstructed via [`format!`] from its two lexical halves so the
+    /// shield's own executable body does not false-fire against itself.
+    ///
+    /// Sibling shield to `infrastructure/git.rs`'s
+    /// `test_command_new_resolve_git_bin_is_only_at_the_command_helper_body`
+    /// (commit b388f85) — same one-hit-cap discipline, applied to the
+    /// attic surface here.
+    #[test]
+    fn test_command_new_resolve_attic_bin_is_only_at_the_command_helper_body() {
+        const SOURCE: &str = include_str!("attic.rs");
+
+        let needle = format!("Command::new(self.{}())", "resolve_attic_bin");
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the attic-binary construction expression must appear at \
+             exactly one code line in `cli/src/infrastructure/attic.rs` \
+             — the `AtticClient::command` helper body. Every \
+             direct-`&self` consumer method must route through \
+             `self.command()` instead of respelling the two-line \
+             `let attic_bin = self.resolve_attic_bin(); \
+             let mut cmd = Command::new(&attic_bin);` preamble inline. \
+             Found {} hit(s): {hits:#?}",
+            hits.len()
+        );
     }
 }
