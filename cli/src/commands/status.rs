@@ -343,19 +343,7 @@ async fn fetch_service_status(
 }
 
 async fn fetch_deployment(namespace: &str, deployment_name: &str) -> Result<DeploymentInfo> {
-    let output = kubectl_command_async()
-        .args([
-            "get",
-            "deployment",
-            deployment_name,
-            "-n",
-            namespace,
-            "-o",
-            "json",
-        ])
-        .output()
-        .await
-        .context("Failed to execute kubectl")?;
+    let output = kubectl_get_object("deployment", deployment_name, namespace).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -660,10 +648,7 @@ async fn fetch_related_services(namespace: &str, deployment_name: &str) -> Resul
 }
 
 async fn fetch_statefulset(namespace: &str, name: &str) -> Result<StatefulSetInfo> {
-    let output = kubectl_command_async()
-        .args(["get", "statefulset", name, "-n", namespace, "-o", "json"])
-        .output()
-        .await?;
+    let output = kubectl_get_object("statefulset", name, namespace).await?;
 
     let sts = kubectl_get_item(&output, "StatefulSet not found")?;
     let (ready, status) = replica_readiness_display(&sts);
@@ -687,10 +672,7 @@ async fn fetch_statefulset(namespace: &str, name: &str) -> Result<StatefulSetInf
 }
 
 async fn fetch_redis(namespace: &str, name: &str) -> Result<ResourceInfo> {
-    let output = kubectl_command_async()
-        .args(["get", "deployment", name, "-n", namespace, "-o", "json"])
-        .output()
-        .await?;
+    let output = kubectl_get_object("deployment", name, namespace).await?;
 
     let dep = kubectl_get_item(&output, "Redis deployment not found")?;
     let (ready, status) = replica_readiness_display(&dep);
@@ -707,10 +689,7 @@ async fn fetch_redis(namespace: &str, name: &str) -> Result<ResourceInfo> {
 }
 
 async fn fetch_redis_statefulset(namespace: &str, name: &str) -> Result<ResourceInfo> {
-    let output = kubectl_command_async()
-        .args(["get", "statefulset", name, "-n", namespace, "-o", "json"])
-        .output()
-        .await?;
+    let output = kubectl_get_object("statefulset", name, namespace).await?;
 
     let sts = kubectl_get_item(&output, "Redis statefulset not found")?;
     let (ready, status) = replica_readiness_display(&sts);
@@ -727,10 +706,7 @@ async fn fetch_redis_statefulset(namespace: &str, name: &str) -> Result<Resource
 }
 
 async fn fetch_configmap(namespace: &str, name: &str) -> Result<ConfigMapInfo> {
-    let output = kubectl_command_async()
-        .args(["get", "configmap", name, "-n", namespace, "-o", "json"])
-        .output()
-        .await?;
+    let output = kubectl_get_object("configmap", name, namespace).await?;
 
     let cm = kubectl_get_item(&output, "ConfigMap not found")?;
     let data = cm.get("data").and_then(|d| d.as_object());
@@ -745,6 +721,77 @@ async fn fetch_configmap(namespace: &str, name: &str) -> Result<ConfigMapInfo> {
         keys,
         data_size,
     })
+}
+
+/// Spawn `kubectl get <kind> <name> -n <namespace> -o json` and return
+/// the raw `std::process::Output` so the caller can compose the exit /
+/// stdout classification through the sibling [`kubectl_get_item`]
+/// primitive (or its own richer arm, per [`fetch_deployment`]).
+///
+/// # Single-object invocation peer of the list-shaped fetch helpers
+///
+/// Owns the seven-argument vector shape
+/// `["get", <kind>, <name>, "-n", <namespace>, "-o", "json"]`
+/// every single-object `fetch_*` consumer site in this module drove
+/// verbatim. Five pre-lift call sites past THEORY.md §VI.1's
+/// three-times threshold:
+///
+/// - [`fetch_deployment`] — `("deployment", <deployment>, <ns>)`; wraps
+///   with a richer `stderr`-bearing bail arm on non-success exit.
+/// - [`fetch_statefulset`] — `("statefulset", <name>, <ns>)`; routes
+///   through [`kubectl_get_item`] with `"StatefulSet not found"`.
+/// - [`fetch_redis`] — `("deployment", <name>, <ns>)`; routes through
+///   [`kubectl_get_item`] with `"Redis deployment not found"`.
+/// - [`fetch_redis_statefulset`] — `("statefulset", <name>, <ns>)`;
+///   routes through [`kubectl_get_item`] with `"Redis statefulset not
+///   found"`.
+/// - [`fetch_configmap`] — `("configmap", <name>, <ns>)`; routes through
+///   [`kubectl_get_item`] with `"ConfigMap not found"`.
+///
+/// # Why an invocation-layer primitive rather than a fully-fused
+/// `kubectl_get_object(kind, name, ns, not_found_msg) -> Value`
+///
+/// The five call sites split on the exit-status classification: four
+/// spell `kubectl_get_item(&output, "<X> not found")?` and route
+/// non-success exits to a fixed operator-grep-visible diagnostic;
+/// [`fetch_deployment`] instead composes a richer bail! including
+/// `stderr` alongside the `namespace` and `deployment_name`, so an
+/// RBAC-denied `get deployment` surfaces the exact kubectl error to
+/// the operator rather than a `"Deployment not found"` misdirection
+/// on a "the resource exists but the caller cannot see it" state. A
+/// fully-fused primitive would either force `fetch_deployment` onto
+/// the shared shape (losing the richer diagnostic) or fork the
+/// primitive into two nearly-identical helpers. The invocation-layer
+/// split keeps ONE body for the 7-arg vector while letting each
+/// caller compose its own exit-status classification.
+///
+/// # Context wrapper
+///
+/// A `.with_context(||
+/// format!("Failed to execute kubectl get {kind} {name} -n
+/// {namespace}"))` wraps the `.output().await` I/O error at ONE body
+/// rather than the pre-lift split where [`fetch_deployment`] carried
+/// `.context("Failed to execute kubectl")` (opaque as to which
+/// invocation failed) and the four sibling sites carried the bare `?`
+/// with no context at all. Post-lift every spawn-failure at any of
+/// the five sites surfaces with the exact `kubectl get <kind> <name>
+/// -n <namespace>` invocation shape at the site of failure — a
+/// "sharpen the existing promise: error fidelity" pass on the
+/// spawn-failure boundary the pre-lift shapes left ambiguous.
+///
+/// Sibling invocation-layer peer of the sibling per-invocation
+/// parsing primitives [`kubectl_get_item`] and [`kubectl_get_items`];
+/// composes with either downstream.
+async fn kubectl_get_object(
+    kind: &str,
+    name: &str,
+    namespace: &str,
+) -> Result<std::process::Output> {
+    kubectl_command_async()
+        .args(["get", kind, name, "-n", namespace, "-o", "json"])
+        .output()
+        .await
+        .with_context(|| format!("Failed to execute kubectl get {kind} {name} -n {namespace}"))
 }
 
 /// Parse a `kubectl get ... -o json` list-shaped output into its
@@ -2373,6 +2420,123 @@ mod tests {
              lenient-typing discipline across the primitive and the \
              re-fused site. Expected exactly one hit (the primitive \
              body itself). Found: {compound_hits:?}"
+        );
+    }
+
+    /// Regression shield: `kubectl_get_object` is the ONLY consumer of
+    /// the pre-lift seven-argument vector shape
+    /// `.args(["get", "<kind>", <name>, "-n", namespace, "-o", "json"])`
+    /// in `commands/status.rs`. Pre-lift the five single-object
+    /// `fetch_*` consumer sites (`fetch_deployment`, `fetch_statefulset`,
+    /// `fetch_redis`, `fetch_redis_statefulset`, `fetch_configmap`) each
+    /// spelled the verbatim seven-argument vector against
+    /// `kubectl_command_async()` immediately followed by
+    /// `.output().await` (four sites bare-`?`; `fetch_deployment` with
+    /// `.context("Failed to execute kubectl")`). A future regression
+    /// that re-fused any of the five pre-lift argument vectors at the
+    /// fetch site would silently split the invocation-layer discipline
+    /// across the primitive and the re-fused site and re-introduce the
+    /// "seven-line arg-vector per site" duplication this lift redeems.
+    ///
+    /// The shield pins the discipline at ONE call site — the primitive
+    /// itself — by asserting each of the five pre-lift caller-specific
+    /// argument-vector spellings appears at exactly ZERO code lines in
+    /// the module's non-test body. The primitive's own body spells the
+    /// canonical shape with `kind`/`name`/`namespace` identifier
+    /// placeholders (no literal `"deployment"`/`"statefulset"`/
+    /// `"configmap"` triple-quote form) so does not self-match any of
+    /// the five pre-lift needles.
+    ///
+    /// The scan is bounded strictly to the module's non-test body via
+    /// the `\n#[cfg(test)]\nmod tests {` marker (same slice boundary
+    /// the sibling
+    /// `kubectl_get_item_is_only_bail_not_found_parse_stanza_at_the_single_item_fetch_helper_surface`
+    /// and `kubectl_get_items_is_only_json_items_parse_at_the_fetch_helper_bail_surface`
+    /// shields use) so this shield's own docstring mentions of the
+    /// pre-lift needles stay out of scope. And routes through
+    /// [`crate::test_support::code_line_hits`] so `///`-prefixed
+    /// doc-comment mentions in the module body's fn docs — the
+    /// primitive's own docstring references the pre-lift shapes in
+    /// prose — do not self-match as phantom hits, the same
+    /// code-line-filter discipline the sibling `code_line_hits`
+    /// consumers established at prior claude-routine commits
+    /// (ab06395 / a7d5375 / fa2c702 / fd02aa6 / cc81215 / 3e26bbc /
+    /// 4163c7e / ffa5271 / 8eed602 / f6b4229 / 59c3391 / 695a8cc /
+    /// cd1cb10 / 89e3231).
+    #[test]
+    fn kubectl_get_object_is_only_seven_arg_get_vector_at_the_single_object_fetch_helper_surface() {
+        let source = include_str!("status.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        for pre_lift in [
+            r#".args(["get", "deployment", deployment_name, "-n", namespace, "-o", "json"])"#,
+            r#".args(["get", "deployment", name, "-n", namespace, "-o", "json"])"#,
+            r#".args(["get", "statefulset", name, "-n", namespace, "-o", "json"])"#,
+            r#".args(["get", "configmap", name, "-n", namespace, "-o", "json"])"#,
+        ] {
+            let hits = crate::test_support::code_line_hits(module_body, pre_lift);
+            assert!(
+                hits.is_empty(),
+                "status.rs must route every single-object fetch helper's \
+                 `kubectl_command_async().args([\"get\", <kind>, <name>, \
+                 \"-n\", namespace, \"-o\", \"json\"]).output().await` \
+                 seven-argument spawn through \
+                 `kubectl_get_object(<kind>, <name>, namespace).await?` \
+                 so a future regression that re-fuses the pre-lift \
+                 argument vector at any of the five `fetch_*` consumer \
+                 sites (or at a new sixth single-object fetch helper) \
+                 fails here rather than silently splitting the \
+                 invocation-layer discipline across the primitive and \
+                 the re-fused site. Pre-lift needle {pre_lift:?} must \
+                 not reappear; found: {hits:?}"
+            );
+        }
+    }
+
+    /// Regression shield: the seven-argument `["get", <kind>, <name>,
+    /// "-n", <namespace>, "-o", "json"]` vector with identifier
+    /// placeholders in the `<kind>` and `<name>` slots — the canonical
+    /// shape [`kubectl_get_object`] owns — MUST live at exactly ONE
+    /// code line in the module's non-test body: the primitive's own
+    /// `.args(...)` chain. A future consumer that re-fuses the
+    /// identifier-placeholder shape (`.args(["get", k, n, "-n", ns,
+    /// "-o", "json"])` with any variable-triple in slots 2 and 3)
+    /// fails here rather than silently colonizing the invocation
+    /// surface with a second copy of the primitive's spelling.
+    ///
+    /// Complements the sibling
+    /// `kubectl_get_object_is_only_seven_arg_get_vector_at_the_single_object_fetch_helper_surface`
+    /// shield above: that shield forbids the four pre-lift
+    /// literal-`kind` spellings at the caller; this shield pins the
+    /// identifier-placeholder spelling to exactly ONE site.
+    #[test]
+    fn kubectl_get_object_owns_the_seven_arg_vector_at_exactly_one_line() {
+        let source = include_str!("status.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let hits = crate::test_support::code_line_hits(
+            module_body,
+            r#".args(["get", kind, name, "-n", namespace, "-o", "json"])"#,
+        );
+        assert_eq!(
+            hits.len(),
+            1,
+            "status.rs must own the seven-argument single-object `kubectl \
+             get` vector at exactly ONE code line — the \
+             `kubectl_get_object` primitive body. Expected exactly one \
+             hit; found: {hits:?}"
         );
     }
 }
