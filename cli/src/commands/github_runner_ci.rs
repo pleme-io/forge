@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
@@ -9,6 +10,95 @@ use crate::git;
 use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::repo::get_tool_path;
 use crate::retry::{debug_log_capture_streams, log_retry_attempt, retry_command, RetryPolicy};
+
+/// The typed exponential-backoff policy for the StatefulSet rollout-watch
+/// pod-status-poll cadence in [`execute`]'s `--watch` branch — `initial_backoff`
+/// 5s × `factor` 2 capped at `max_backoff` 30s. Consumes the pre-existing typed
+/// primitive at [`crate::retry::RetryPolicy`] so the per-attempt delay lands at
+/// [`RetryPolicy::compute_delay`], the same shared body the sibling k8s-Job
+/// status-poll surface `services/migration_service.rs::MIGRATION_JOB_POLL_BACKOFF`
+/// (commit ac61874), the Shinka reconcile-poll surface `commands/migrations.rs::
+/// SHINKA_MIGRATION_POLL_BACKOFF` (commit b962db5), the flux polling-loops
+/// surface `commands/flux.rs::FLUX_POLL_BACKOFF` (commit 65de62f), the
+/// health-endpoint retry surface `commands/post_deploy_verification.rs::
+/// HEALTH_ENDPOINT_BACKOFF` (commit b5db3b6), the web / integration test-suite
+/// retry surfaces (commits 9fd38d3 / e22b0a2), and the helm-dependency-update
+/// retry surface `commands/helm.rs::HELM_DEP_UPDATE_RETRY_BACKOFF`
+/// (commit 0a087de) read through.
+///
+/// Pre-lift the schedule was spelled inline as a bare fixed
+/// `tokio::time::sleep(tokio::time::Duration::from_secs(5)).await` at the tail
+/// of every non-terminal iteration of the rollout-watch pod-status-poll loop.
+/// That shape carried three structural defects the typed-primitive body
+/// forecloses:
+/// 1. **Fixed 5s schedule.** A flat `sleep(5s)` between pod-status polls is
+///    "too short when the rollout is actually progressing (up to 60 kubectl
+///    probes across the 5-minute `rollout_timeout` window — noise against the
+///    k8s API), 5s too long when a `Running`/`Ready` transition landed 200ms
+///    ago" — the exact worst-of-both failure mode the sibling
+///    `MIGRATION_JOB_POLL_BACKOFF` / `SHINKA_MIGRATION_POLL_BACKOFF` /
+///    `FLUX_POLL_BACKOFF` docstrings cite for their own pre-lift fixed /
+///    bespoke schedules. Post-lift, the first poll still waits 5s (preserving
+///    the seed verbatim), then 10s / 20s / 30s / 30s / … — ~12 iterations
+///    reach the 5-minute `rollout_timeout` under the exponential-with-cap
+///    climb rather than 60 iterations under the pre-lift flat 5s.
+/// 2. **No caller-visible schedule invariant.** The bare
+///    `Duration::from_secs(5)` literal at the poll-loop sleep carried no name
+///    a shield could pin — a future edit that changed the schedule at this
+///    site did not surface at any named-primitive audit path. The lifted
+///    `GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF` const names the (seed, factor, cap)
+///    triple a shield can cite and enforce.
+/// 3. **Schedule desync from the sibling k8s-workload-poll surfaces.**
+///    The rollout-watch poll loop observes a k8s `StatefulSet`'s per-pod
+///    status conditions; the sibling `wait_for_job` loop
+///    (`services/migration_service.rs`, ac61874) observes a k8s `Job`'s
+///    status conditions; the sibling `wait_for_shinka_migration` loop
+///    (`commands/migrations.rs`, b962db5) observes a Shinka reconciler's
+///    phase transitions. All three poll the k8s API for a workload
+///    resource's terminal transition and pre-lift each spelled its own
+///    local fixed-sleep schedule, so a future edit to one silently diverged
+///    from the others. Post-lift all three consume the same shared body via
+///    the same `RetryPolicy::network()` `(factor=2, max_backoff=30s)`
+///    reference schedule, differing only at their respective pre-lift seeds
+///    (5s here, 2s at the sibling two) each preserves verbatim.
+///
+/// `max_attempts: u32::MAX` is a placeholder — the rollout-watch loop is
+/// bounded by wall-clock via the local `rollout_timeout` (5 minutes,
+/// `Instant::now().duration_since(start_time) > rollout_timeout` at loop
+/// head), not by attempt count — and consumes only [`RetryPolicy::compute_delay`]
+/// from this policy, not [`RetryPolicy::max_attempts`]. The `max_attempts`
+/// field is unconsulted at this consumption site.
+const GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: u32::MAX,
+    initial_backoff: Duration::from_secs(5),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between StatefulSet rollout-watch pod-status-poll iterations, given
+/// a 0-indexed local `attempt` counter (the `loop { ... }` shape in
+/// [`execute`]'s `--watch` branch drives increments once per non-terminal
+/// iteration).
+///
+/// Maps the local 0-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(2)`:
+/// local `attempt == 0` (the sleep after the first non-terminal poll)
+/// reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff = 5s`; local `attempt == 1` reads as `compute_delay(3)
+/// = 10s`; local `attempt == 2` reads as `compute_delay(4) = 20s`; local
+/// `attempt >= 3` reads as `compute_delay(>=5) = 30s` (cap) — preserves
+/// the pre-lift `sleep(Duration::from_secs(5))` seed verbatim at the first
+/// poll and strictly diverges upward at every later poll.
+///
+/// The `saturating_add` clamp forecloses the `u32` overflow class at the
+/// bridge — a rollout-watch loop that reaches `attempt == u32::MAX` reads
+/// as `compute_delay(u32::MAX)`, which itself saturates to
+/// [`GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF::max_backoff`] via the
+/// `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
+/// without panic.
+fn github_runner_rollout_poll_delay(attempt: u32) -> Duration {
+    GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
+}
 
 /// Check if SAFE mode is enabled (retry on errors)
 /// Default: true (retries enabled by default)
@@ -428,6 +518,7 @@ pub async fn execute(
         let rollout_timeout = tokio::time::Duration::from_secs(300); // 5 minutes
         let start_time = tokio::time::Instant::now();
         let mut last_check = None;
+        let mut backoff_attempt: u32 = 0;
 
         loop {
             // Check for timeout
@@ -616,8 +707,12 @@ pub async fn execute(
                 }
             }
 
-            // Wait before next check
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            // Wait before next check — schedule owned by
+            // `GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF` +
+            // `github_runner_rollout_poll_delay` (both grounding through
+            // `RetryPolicy::compute_delay`).
+            tokio::time::sleep(github_runner_rollout_poll_delay(backoff_attempt)).await;
+            backoff_attempt = backoff_attempt.saturating_add(1);
         }
 
         // Verify the new image is deployed
@@ -750,9 +845,9 @@ async fn push_with_retry(
 
     // doca takes --registry/--image separately; a base with no '/' is refused
     // rather than guessed, since a wrong split pushes to the wrong repository.
-    let (host, image) = registry
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("registry {registry:?} has no '/', cannot split host from image"))?;
+    let (host, image) = registry.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!("registry {registry:?} has no '/', cannot split host from image")
+    })?;
     let host = host.to_string();
     let image = image.to_string();
 
@@ -1095,8 +1190,7 @@ mod tests {
         // 8-space-indented `//` comments (never at column 0), this
         // predicate fires solely on an actual module-level
         // definition — not on documentation drift.
-        let retired_helper_marker =
-            concat!("\n", "async fn ", "attic_command_with_retry");
+        let retired_helper_marker = concat!("\n", "async fn ", "attic_command_with_retry");
         assert!(
             !source.contains(retired_helper_marker),
             "the domain-agnostic `attic_command_with_retry` helper was \
@@ -1202,6 +1296,238 @@ mod tests {
             "execute() must delegate every kubectl spawn to \
              `kubectl_command_async()` — the delegation string was not \
              found in execute()."
+        );
+    }
+
+    use super::{github_runner_rollout_poll_delay, GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF};
+    use crate::retry::RetryPolicy;
+    use crate::test_support::code_line_hits;
+    use std::time::Duration;
+
+    /// The `(initial_backoff, factor, max_backoff)` shape of the
+    /// StatefulSet rollout-watch poll backoff policy is a load-bearing
+    /// invariant shared with the sibling k8s-workload-poll surfaces at
+    /// `services/migration_service.rs::MIGRATION_JOB_POLL_BACKOFF` (ac61874,
+    /// differing only in the 2s-vs-5s initial-backoff kept to preserve each
+    /// pre-lift schedule verbatim) and
+    /// `commands/migrations.rs::SHINKA_MIGRATION_POLL_BACKOFF` (b962db5,
+    /// differing only in the 2s-vs-5s initial-backoff for the same reason)
+    /// and pinned here so a future silent-desync at the const site (a factor
+    /// bump, a cap change) is caught at a named test rather than silently
+    /// across the two consumption sites (`github_runner_rollout_poll_delay`
+    /// + the loop body). Sibling of
+    ///   `test_migration_job_poll_backoff_policy_shape` at
+    ///   `services/migration_service.rs::tests` (ac61874),
+    ///   `test_shinka_migration_poll_backoff_policy_shape` at
+    ///   `commands/migrations.rs::tests` (b962db5), and
+    ///   `test_health_endpoint_backoff_policy_shape` at
+    ///   `commands/post_deploy_verification.rs::tests` (b5db3b6).
+    #[test]
+    fn test_github_runner_rollout_poll_backoff_policy_shape() {
+        assert_eq!(
+            GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.initial_backoff,
+            Duration::from_secs(5),
+            "GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.initial_backoff must be 5s \
+             — preserves the pre-lift bare `sleep(Duration::from_secs(5))` \
+             seed verbatim at the rollout-watch loop's first sleep.",
+        );
+        assert_eq!(
+            GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.factor, 2,
+            "GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.factor must be 2 \
+             — matches the Bazel/Buck2/SLSA-frontier factor=2 reference \
+             the sibling `RetryPolicy::network()` cites.",
+        );
+        assert_eq!(
+            GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.max_backoff must be 30s \
+             — matches the Bazel/Buck2/SLSA-frontier 30s cap reference \
+             the sibling `RetryPolicy::network()` cites.",
+        );
+    }
+
+    /// Pre-lift the rollout-watch loop's every iteration emitted
+    /// `sleep(5s)` via the bare `Duration::from_secs(5)` literal. The
+    /// lift's 0-indexed `attempt` counter must preserve that 5s seed
+    /// verbatim at the first sleep and strictly diverge upward at every
+    /// later sleep under the exponential-with-cap climb.
+    #[test]
+    fn test_github_runner_rollout_poll_delay_matches_pre_lift_seed_and_climbs() {
+        assert_eq!(
+            github_runner_rollout_poll_delay(0),
+            Duration::from_secs(5),
+            "iter 0 must sleep 5s — matches pre-lift \
+             `sleep(Duration::from_secs(5))` seed at the first poll.",
+        );
+        assert_eq!(
+            github_runner_rollout_poll_delay(1),
+            Duration::from_secs(10),
+            "iter 1 must sleep 10s — `5s * 2^1 = 10s` under the \
+             exponential climb, strictly better than pre-lift's flat 5s.",
+        );
+        assert_eq!(
+            github_runner_rollout_poll_delay(2),
+            Duration::from_secs(20),
+            "iter 2 must sleep 20s — `5s * 2^2 = 20s`.",
+        );
+    }
+
+    /// Iterations past the cap must all emit `max_backoff = 30s` —
+    /// under `factor=2` and `initial_backoff=5s` the cap fires at iter 3
+    /// (`5s * 2^3 = 40s → capped to 30s`) and every subsequent iter
+    /// stays at the ceiling.
+    #[test]
+    fn test_github_runner_rollout_poll_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            github_runner_rollout_poll_delay(3),
+            Duration::from_secs(30),
+            "iter 3 must sleep 30s (cap) — `5s * 2^3 = 40s` exceeds \
+             the 30s cap.",
+        );
+        assert_eq!(
+            github_runner_rollout_poll_delay(4),
+            Duration::from_secs(30),
+            "iter 4 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            github_runner_rollout_poll_delay(50),
+            Duration::from_secs(30),
+            "iter 50 must sleep 30s (cap) — rollout-watch loops can \
+             ride the full 5-minute `rollout_timeout` window on slow \
+             pod pull/start cycles, so beyond-cap iterations must stay \
+             at the ceiling rather than growing unboundedly.",
+        );
+    }
+
+    /// The rollout-watch loop is bounded by the local `rollout_timeout`
+    /// wall-clock (5 minutes) rather than by attempt count, so
+    /// `backoff_attempt` can in principle reach any `u32` value in a
+    /// pathological future where the timeout is lifted or extended.
+    /// The `saturating_add(2)` bridge inside
+    /// `github_runner_rollout_poll_delay` bounds the argument to
+    /// `RetryPolicy::compute_delay`, whose `checked_pow`-then-cap body
+    /// itself saturates without panic. This test pins that composition:
+    /// an `attempt == u32::MAX` argument returns a bounded delay rather
+    /// than panicking.
+    #[test]
+    fn test_github_runner_rollout_poll_delay_saturates_without_panic_at_arbitrarily_large_attempt()
+    {
+        assert_eq!(
+            github_runner_rollout_poll_delay(u32::MAX),
+            Duration::from_secs(30),
+            "attempt=u32::MAX must saturate to max_backoff without \
+             panic — the `saturating_add(2)` bridge + \
+             `RetryPolicy::compute_delay`'s `checked_pow` cap close \
+             the u32 overflow class by construction.",
+        );
+        assert_eq!(
+            github_runner_rollout_poll_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "attempt=u32::MAX - 1 must also saturate to max_backoff \
+             — the bridge `saturating_add(2)` returns u32::MAX, still \
+             far past the cap.",
+        );
+    }
+
+    /// [`RetryPolicy::network`]'s `factor == 2` and
+    /// `max_backoff == 30s` are the Bazel/Buck2/SLSA-frontier reference
+    /// schedule the retry module cites in its constructor docstrings.
+    /// The rollout-watch poll policy consumes the same
+    /// `(factor, max_backoff)` pair, diverging only at `initial_backoff`
+    /// (5s vs 250ms) to preserve the pre-lift rollout-watch loop
+    /// schedule verbatim. Pin the shared invariants so a future
+    /// refinement to the retry module's reference schedule surfaces the
+    /// intentional 5s-seed divergence as a named test failure rather
+    /// than silently propagating. Sibling of
+    /// `test_migration_job_poll_backoff_shares_network_factor_and_cap`
+    /// at `services/migration_service.rs::tests` (ac61874) and
+    /// `test_shinka_migration_poll_backoff_shares_network_factor_and_cap`
+    /// at `commands/migrations.rs::tests` (b962db5).
+    #[test]
+    fn test_github_runner_rollout_poll_backoff_shares_network_factor_and_cap() {
+        let network = RetryPolicy::network();
+        assert_eq!(
+            GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.factor, network.factor,
+            "GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.factor must match \
+             RetryPolicy::network().factor — both consume the \
+             Bazel/Buck2/SLSA-frontier factor=2 reference.",
+        );
+        assert_eq!(
+            GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.max_backoff, network.max_backoff,
+            "GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.max_backoff must match \
+             RetryPolicy::network().max_backoff — both consume the \
+             Bazel/Buck2/SLSA-frontier 30s cap reference.",
+        );
+    }
+
+    /// The rollout-watch loop-body shape MUST consume the typed
+    /// primitive at `github_runner_rollout_poll_delay(backoff_attempt)`
+    /// rather than the pre-lift bare-literal
+    /// `sleep(Duration::from_secs(5))` shape. A future refactor that
+    /// re-fuses the bare literal at the poll-loop sleep site (see
+    /// `GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF`'s docstring for the three
+    /// structural defects the lift closed) fails here, not silently in
+    /// production. Uses the `code_line_hits` helper
+    /// (`test_support.rs`) so the shield does not false-positive on
+    /// `GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF`'s own docstring, which cites
+    /// the pre-lift shape as context for the three defects it
+    /// forecloses. The forbidden literal is reconstructed at test time
+    /// via `format!` and the diagnostic prose refers to it only via
+    /// the reconstructed `bespoke_needle` (never the fused literal),
+    /// so the assert message body itself stays unmatchable. Whole-module
+    /// boundary discipline sibling of
+    /// `test_wait_for_job_consumes_typed_poll_delay_not_bare_fixed_sleep`
+    /// at `services/migration_service.rs::tests` (ac61874),
+    /// `test_wait_for_shinka_migration_consumes_typed_poll_delay_not_mut_backoff_secs`
+    /// at `commands/migrations.rs::tests` (b962db5),
+    /// `test_flux_polling_loops_consume_typed_poll_delay_not_bespoke_backoff_struct`
+    /// at `commands/flux.rs::tests` (65de62f), and
+    /// `test_helm_dependency_update_consumes_typed_retry_delay_not_bespoke_linear_sleep`
+    /// at `commands/helm.rs::tests` (0a087de).
+    #[test]
+    fn test_execute_consumes_typed_rollout_poll_delay_not_bare_fixed_sleep() {
+        let source = include_str!("github_runner_ci.rs");
+        let tests_marker = "\n#[cfg(test)]\n";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\n` marker must follow the module body — \
+             the shield's slice boundary relies on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        // Reconstruct the forbidden bare-literal at test time so this
+        // shield's own body does not carry the fused literal — mirrors
+        // the anti-self-match discipline the sibling lifts established.
+        let bespoke_needle = format!(
+            "tokio::time::sleep(tokio::time::Duration::from_secs({}))",
+            5
+        );
+
+        // Code-line filter (via `code_line_hits`) skips docstring /
+        // prose-comment lines, so the shield does not false-positive on
+        // `GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF`'s own docstring above
+        // (which cites the pre-lift bare-literal shape as context for
+        // the three defects it forecloses).
+        let bespoke_hits = code_line_hits(module_body, &bespoke_needle);
+        assert!(
+            bespoke_hits.is_empty(),
+            "github_runner_ci.rs must NOT re-fuse the pre-lift bare \
+             `{}` literal at the rollout-watch poll-loop sleep site — \
+             the schedule lives at `GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF` \
+             + `github_runner_rollout_poll_delay`, both grounding \
+             through `RetryPolicy::compute_delay`. Found code-line \
+             hits: {:#?}",
+            bespoke_needle,
+            bespoke_hits,
+        );
+        let delegation_hits = code_line_hits(
+            module_body,
+            "github_runner_rollout_poll_delay(backoff_attempt)",
+        );
+        assert!(
+            !delegation_hits.is_empty(),
+            "github_runner_ci.rs must consume the typed poll-delay \
+             helper at the rollout-watch loop's sleep site — the \
+             canonical delegation call was not found at any code line.",
         );
     }
 }
