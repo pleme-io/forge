@@ -183,6 +183,90 @@ fn post_deployment_readiness_poll_delay(backoff_attempt: u32) -> Duration {
     POST_DEPLOYMENT_READINESS_POLL_BACKOFF.compute_delay(backoff_attempt.saturating_add(2))
 }
 
+/// The typed exponential-backoff policy for
+/// [`execute_pre_deployment_tests`]'s between-retry sleeps —
+/// `initial_backoff` 2s × `factor` 2 capped at `max_backoff` 30s.
+/// Consumes the pre-existing typed primitive at
+/// [`crate::retry::RetryPolicy`] so the per-attempt delay lands at
+/// [`RetryPolicy::compute_delay`], whose docstring names its raison
+/// d'être: "the pre-existing fixed `sleep(2s)` schedule ... is the
+/// worst of both worlds ... Exponential backoff (Bazel-style: 250ms ×
+/// factor=2 capped at 30s) covers both regimes by construction."
+///
+/// Pre-lift the bare `sleep(Duration::from_secs(2)).await` at the
+/// pre-deployment-test-suite retry loop's between-attempt sleep site
+/// carried three defects the typed-primitive body forecloses, exactly
+/// the sibling shape the `INTEGRATION_TEST_RETRY_BACKOFF` docstring
+/// above (this same module) and the `TEST_RETRY_BACKOFF` docstring at
+/// `commands/test.rs::run_test_suite` (commit 9fd38d3) each cite for
+/// their own test-suite retry-loop lifts:
+///
+/// 1. **Fixed 2s schedule.** A flat `sleep(2s)` between attempts is
+///    "too short when it's a 30-second upstream incident, 28 minutes
+///    too long when the retry loop drives its full `max_retries`
+///    budget against a real pre-deployment test flake that needs the
+///    upstream to recover" — the exact failure mode the Bazel /
+///    Buck2 / BuildKit frontier hermetic-build systems close under an
+///    exponential-with-cap schedule.
+/// 2. **No caller-visible schedule invariant.** The bare
+///    `Duration::from_secs(2)` literal at the sleep site carried no
+///    name a shield could pin — a future edit that changed the
+///    schedule at this site did not surface at any named-primitive
+///    audit path. The lifted `PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF`
+///    const names the (seed, factor, cap) triple a shield can cite
+///    and enforce.
+/// 3. **Schedule desync from the sibling test-suite retry surface.**
+///    The pre-deployment-test-suite retry loop drives an identical
+///    `loop { attempts += 1; ... if attempts < max_attempts { sleep;
+///    } }` shape to `execute_suite`'s post-deployment retry loop
+///    (this same module, `INTEGRATION_TEST_RETRY_BACKOFF`) and
+///    `run_test_suite`'s web-test-suite retry loop
+///    (`commands/test.rs`, `TEST_RETRY_BACKOFF`, commit 9fd38d3).
+///    Pre-lift each spelled its own local fixed-sleep schedule (5s /
+///    5s / 2s), so a future edit to one silently diverged from the
+///    others. Post-lift all three consume the same shared body via
+///    the same `RetryPolicy::network()` `(factor=2, max_backoff=30s)`
+///    reference schedule; only the seeds diverge, preserved per site
+///    at the named const.
+///
+/// `max_attempts: 1` is a placeholder — the retry loop drives its own
+/// attempt budget through the caller-supplied `suite.max_retries`
+/// pre-deployment-tests config field and consumes only
+/// [`RetryPolicy::compute_delay`] from this policy, not
+/// [`RetryPolicy::max_attempts`]. The `max_attempts` field is
+/// unconsulted at this consumption site.
+const PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: 1,
+    initial_backoff: Duration::from_secs(2),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between pre-deployment test-suite retries, given the
+/// 1-indexed local `attempts` counter of the attempt that just failed
+/// (the `loop { attempts += 1; ... }` shape
+/// [`execute_pre_deployment_tests`] drives).
+///
+/// Maps the local 1-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(1)`:
+/// local `attempts == 1` (the pre-retry sleep after the first failed
+/// call) reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff = 2s`; local `attempts == 2` reads as
+/// `compute_delay(3) = 4s`; `attempts == 3` reads as
+/// `compute_delay(4) = 8s`; `attempts == 4` reads as
+/// `compute_delay(5) = 16s`; `attempts >= 5` reads as
+/// `compute_delay(>=6) = 30s` (cap). The `saturating_add` clamp
+/// forecloses the `u32` overflow class at the bridge — an
+/// unlikely-but-possible `attempts == u32::MAX` from a pathological
+/// `suite.max_retries` reads as `compute_delay(u32::MAX)`, which
+/// itself saturates to
+/// [`PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF::max_backoff`] via the
+/// `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
+/// without panic.
+fn pre_deployment_test_suite_retry_delay(attempts: u32) -> Duration {
+    PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.compute_delay(attempts.saturating_add(1))
+}
+
 /// Integration test suite configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestSuite {
@@ -1396,7 +1480,7 @@ pub async fn execute_pre_deployment_tests(
                 break result;
             } else if attempts < max_attempts {
                 warn!("   ⚠️  Attempt {} failed, retrying...", attempts);
-                sleep(Duration::from_secs(2)).await;
+                sleep(pre_deployment_test_suite_retry_delay(attempts)).await;
             } else {
                 break result;
             }
@@ -2029,11 +2113,14 @@ mod post_deployment_readiness_poll_backoff_tests {
     ///
     /// The scan is bounded strictly to the `pub async fn execute(` body
     /// (from its signature through the next top-level function's
-    /// signature `async fn prepare_environment`) — the module also
-    /// carries an unrelated pre-existing `sleep(Duration::from_secs(2))`
-    /// site in `execute_manual`'s test-suite retry loop (line ~1304)
-    /// which is out of scope for this lift and out of scope for this
-    /// shield. Uses the [`crate::test_support::code_line_hits`] helper
+    /// signature `async fn prepare_environment`) — the sibling
+    /// pre-deployment-test-suite retry-loop sleep site in
+    /// `execute_pre_deployment_tests` (2s seed, lifted onto its own
+    /// `PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF` +
+    /// `pre_deployment_test_suite_retry_delay(attempts)` typed pair)
+    /// lives outside this function-scoped slice and is pinned by its
+    /// own dedicated shield module below. Uses the
+    /// [`crate::test_support::code_line_hits`] helper
     /// so the shield does not false-positive on any comment or
     /// docstring text inside the function body. The forbidden literal
     /// is reconstructed at test time via [`format!`] and the diagnostic
@@ -2083,6 +2170,257 @@ mod post_deployment_readiness_poll_backoff_tests {
              typed readiness-poll-delay helper at the poll loop's sleep \
              site — the canonical delegation call was not found at any \
              code line inside `pub async fn execute`.",
+        );
+    }
+}
+
+#[cfg(test)]
+mod pre_deployment_test_suite_retry_backoff_tests {
+    use super::*;
+
+    // ====================================================================
+    // pre-deployment test-suite retry backoff —
+    // PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF + helper
+    // ====================================================================
+    //
+    // These pin the `RetryPolicy`-consuming replacement of the pre-lift
+    // bare fixed `sleep(Duration::from_secs(2)).await` at the
+    // between-attempt sleep site of `execute_pre_deployment_tests`'s
+    // test-suite retry loop that runs suite by suite before push/deploy.
+    // Sibling of the `INTEGRATION_TEST_RETRY_BACKOFF` shields at
+    // `commands/integration_tests.rs::integration_test_retry_backoff_tests`
+    // (the twin 5s-seed post-deployment retry surface, this same module)
+    // and the `TEST_RETRY_BACKOFF` shields at
+    // `commands/test.rs::tests` (commit 9fd38d3) — same const- +
+    // delegation-helper shape, same six-test pattern (policy-shape /
+    // in-cap-schedule / past-cap-cap / saturating-no-panic /
+    // shared-factor-and-cap / function-body-scoped no-re-fusion).
+
+    /// The `PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF` const's
+    /// `(initial_backoff, factor, max_backoff)` triple is the
+    /// load-bearing invariant every consumption site (the
+    /// `execute_pre_deployment_tests` retry loop, plus any future
+    /// retry-loop consumer that reads the same schedule) shares. Pinned
+    /// here so a future edit at the const's site is caught at a named
+    /// test rather than silently across the consumption site and the
+    /// delegation helper.
+    #[test]
+    fn test_pre_deployment_test_suite_retry_backoff_policy_shape() {
+        assert_eq!(
+            PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.initial_backoff,
+            Duration::from_secs(2),
+            "PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.initial_backoff must be 2s \
+             — preserves the pre-lift bare `sleep(Duration::from_secs(2))` \
+             seed verbatim at the retry loop's first between-attempt sleep.",
+        );
+        assert_eq!(
+            PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.factor, 2,
+            "PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.factor must be 2 \
+             — Bazel-style doubling climb between retries.",
+        );
+        assert_eq!(
+            PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.max_backoff must be 30s \
+             — the shared cap every sibling RetryPolicy-consumer \
+             (INTEGRATION_TEST_RETRY_BACKOFF, TEST_RETRY_BACKOFF, \
+             POST_DEPLOYMENT_READINESS_POLL_BACKOFF, \
+             HEALTH_ENDPOINT_BACKOFF) also names.",
+        );
+    }
+
+    /// Pre-lift the first between-retry sleep emitted
+    /// `sleep(Duration::from_secs(2))` verbatim; the lift's 1-indexed
+    /// `attempts` counter must reproduce that seed at
+    /// `attempts == 1` via `pre_deployment_test_suite_retry_delay(1)`.
+    /// The subsequent within-cap attempts (2/3/4) must emit the
+    /// Bazel-style doubling climb (4s / 8s / 16s), strictly better than
+    /// the pre-lift flat-2s schedule at every retry past the first.
+    #[test]
+    fn test_pre_deployment_test_suite_retry_delay_matches_pre_lift_seed_and_climbs_at_in_cap_attempts()
+     {
+        assert_eq!(
+            pre_deployment_test_suite_retry_delay(1),
+            Duration::from_secs(2),
+            "attempts=1 must sleep 2s — matches pre-lift \
+             `sleep(Duration::from_secs(2))` seed verbatim.",
+        );
+        assert_eq!(
+            pre_deployment_test_suite_retry_delay(2),
+            Duration::from_secs(4),
+            "attempts=2 must sleep 4s — Bazel-style `2s * 2 = 4s`.",
+        );
+        assert_eq!(
+            pre_deployment_test_suite_retry_delay(3),
+            Duration::from_secs(8),
+            "attempts=3 must sleep 8s — Bazel-style `4s * 2 = 8s`.",
+        );
+        assert_eq!(
+            pre_deployment_test_suite_retry_delay(4),
+            Duration::from_secs(16),
+            "attempts=4 must sleep 16s — Bazel-style `8s * 2 = 16s`.",
+        );
+    }
+
+    /// Attempts past the cap must all emit `max_backoff = 30s` —
+    /// `(16s * 2).min(30s) = 30s` at attempts=5 and every subsequent
+    /// attempt. `suite.max_retries` is a user-supplied pre-deployment-
+    /// tests config field with no upper bound in the schema, so
+    /// beyond-cap attempts must stay at the ceiling rather than climb
+    /// past it and stretch a single suite's total retry wall-clock
+    /// into hours.
+    #[test]
+    fn test_pre_deployment_test_suite_retry_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            pre_deployment_test_suite_retry_delay(5),
+            Duration::from_secs(30),
+            "attempts=5 must sleep 30s (cap) — `(16s * 2).min(30s) = 30s`.",
+        );
+        assert_eq!(
+            pre_deployment_test_suite_retry_delay(6),
+            Duration::from_secs(30),
+            "attempts=6 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            pre_deployment_test_suite_retry_delay(50),
+            Duration::from_secs(30),
+            "attempts=50 must sleep 30s (cap) — a pathological \
+             `suite.max_retries` cannot stretch a single sleep past \
+             the ceiling.",
+        );
+    }
+
+    /// The retry loop's `attempts` counter is a `u32` bounded only by
+    /// the caller-supplied `suite.max_retries + 1`, so a pathological
+    /// config with `max_retries: u32::MAX` could in principle drive
+    /// `pre_deployment_test_suite_retry_delay(u32::MAX)`. Pre-lift the
+    /// fixed `Duration::from_secs(2)` literal never panicked at any
+    /// attempt; post-lift `saturating_add(1)` inside
+    /// `pre_deployment_test_suite_retry_delay` bounds the argument to
+    /// `RetryPolicy::compute_delay`, whose `checked_pow`-then-cap body
+    /// itself saturates without panic. This test pins that
+    /// composition: an `attempts == u32::MAX` argument returns a
+    /// bounded delay rather than panicking.
+    #[test]
+    fn test_pre_deployment_test_suite_retry_delay_saturates_without_panic_at_arbitrarily_large_attempt()
+     {
+        assert_eq!(
+            pre_deployment_test_suite_retry_delay(u32::MAX),
+            Duration::from_secs(30),
+            "attempts=u32::MAX must saturate to max_backoff without \
+             panic — the `saturating_add(1)` bridge + \
+             `RetryPolicy::compute_delay`'s `checked_pow` cap close \
+             the u32 overflow class by construction.",
+        );
+        assert_eq!(
+            pre_deployment_test_suite_retry_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "attempts=u32::MAX - 1 must also saturate to max_backoff \
+             — the bridge `saturating_add(1)` returns u32::MAX, still \
+             far past the cap.",
+        );
+    }
+
+    /// The pre-deployment-test-suite retry policy shares
+    /// `(factor, max_backoff)` with the canonical
+    /// [`RetryPolicy::network()`] reference schedule; only
+    /// `initial_backoff` diverges (2s vs 250ms) to preserve the
+    /// pre-lift bare `sleep(Duration::from_secs(2))` seed verbatim.
+    /// Pin the shared invariants so a future refinement to the retry
+    /// module's reference schedule surfaces the intentional 2s-seed
+    /// divergence as a named failure rather than a silent per-consumer
+    /// drift.
+    #[test]
+    fn test_pre_deployment_test_suite_retry_backoff_shares_network_factor_and_cap() {
+        let net = RetryPolicy::network();
+        assert_eq!(
+            PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.factor, net.factor,
+            "PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.factor must match \
+             RetryPolicy::network().factor — the Bazel-style doubling \
+             climb is the shared invariant across every RetryPolicy \
+             consumer.",
+        );
+        assert_eq!(
+            PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.max_backoff, net.max_backoff,
+            "PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF.max_backoff must match \
+             RetryPolicy::network().max_backoff — the 30s ceiling is the \
+             shared invariant across every RetryPolicy consumer.",
+        );
+    }
+
+    /// The `execute_pre_deployment_tests` retry loop MUST consume the
+    /// typed primitive at
+    /// `pre_deployment_test_suite_retry_delay(attempts)` rather than
+    /// re-fusing the pre-lift bare-literal
+    /// `sleep(Duration::from_secs(2))` shape (see
+    /// `PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF`'s docstring for the
+    /// three structural defects the lift closed). A future refactor
+    /// that reintroduces a flat schedule at this site fails here, not
+    /// silently in production. Whole-function-body boundary discipline
+    /// sibling of
+    /// `test_execute_readiness_poll_consumes_typed_delay_not_bare_fixed_sleep`
+    /// at this same module and
+    /// `test_execute_suite_consumes_typed_retry_delay_not_bare_fixed_sleep`
+    /// at this same module.
+    ///
+    /// The scan is bounded strictly to the
+    /// `pub async fn execute_pre_deployment_tests(` body (from its
+    /// signature through EOF, since it is the last top-level function
+    /// in the module before the test modules). Uses the
+    /// [`crate::test_support::code_line_hits`] helper so the shield
+    /// does not false-positive on any comment or docstring text inside
+    /// the function body. The forbidden literal is reconstructed at
+    /// test time via [`format!`] off the const's `initial_backoff`
+    /// field, so the assert message body itself stays unmatchable.
+    #[test]
+    fn test_execute_pre_deployment_tests_retry_consumes_typed_delay_not_bare_fixed_sleep() {
+        let source = include_str!("integration_tests.rs");
+        let fn_marker = "pub async fn execute_pre_deployment_tests(";
+        let fn_start = source.find(fn_marker).expect(
+            "the `pub async fn execute_pre_deployment_tests(` \
+             signature must exist — the shield's slice boundary \
+             relies on this signature.",
+        );
+        // Bound the slice at the first `#[cfg(test)]` (start of the
+        // test-module block that follows the last runtime function)
+        // so the shield does not scan its own docstring text below.
+        let tests_marker = "\n#[cfg(test)]\n";
+        let fn_body_rel = source[fn_start..].find(tests_marker).expect(
+            "the `#[cfg(test)]` test-module block must follow \
+             `execute_pre_deployment_tests` — the shield's slice \
+             boundary relies on this ordering.",
+        );
+        let fn_body = &source[fn_start..fn_start + fn_body_rel];
+
+        let bespoke_needle = format!(
+            "sleep(Duration::from_secs({}))",
+            PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF
+                .initial_backoff
+                .as_secs(),
+        );
+        let bespoke_hits = crate::test_support::code_line_hits(fn_body, &bespoke_needle);
+        assert!(
+            bespoke_hits.is_empty(),
+            "commands/integration_tests.rs::execute_pre_deployment_tests \
+             must NOT re-fuse the pre-lift bare fixed sleep at the \
+             retry loop — the schedule lives at \
+             `PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF` + \
+             `pre_deployment_test_suite_retry_delay`, both grounding \
+             through `RetryPolicy::compute_delay`. Found code-line \
+             hits: {:#?}",
+            bespoke_hits,
+        );
+        let delegation_hits = crate::test_support::code_line_hits(
+            fn_body,
+            "pre_deployment_test_suite_retry_delay(attempts)",
+        );
+        assert!(
+            !delegation_hits.is_empty(),
+            "commands/integration_tests.rs::execute_pre_deployment_tests \
+             must consume the typed retry-delay helper at the retry \
+             loop's sleep site — the canonical delegation call was not \
+             found at any code line inside \
+             `pub async fn execute_pre_deployment_tests`.",
         );
     }
 }
