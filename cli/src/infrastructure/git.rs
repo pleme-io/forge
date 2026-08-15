@@ -118,6 +118,74 @@ impl GitClient {
             .unwrap_or_else(|| get_tool_path(tools::GIT))
     }
 
+    /// Build a fresh `tokio::process::Command` targeting the resolved
+    /// `git` binary and — if this client is scoped to a working
+    /// directory — anchor its `current_dir` to that path. Callers chain
+    /// `.args(...)` (or `.arg(...)`) to compose the operation-specific
+    /// argv.
+    ///
+    /// # Why this primitive
+    ///
+    /// Six methods on `GitClient` — [`Self::is_clean`], [`Self::add`],
+    /// [`Self::commit`], [`Self::push`], [`Self::push_to`], and
+    /// [`Self::has_staged_changes`] — each spelled the identical
+    /// four-line preamble verbatim:
+    ///
+    /// ```text
+    /// let mut cmd = Command::new(self.resolve_git_bin());
+    /// cmd.args([...]);
+    /// if let Some(ref dir) = self.working_dir {
+    ///     cmd.current_dir(dir);
+    /// }
+    /// ```
+    ///
+    /// The `Command::new(self.resolve_git_bin())` construction and the
+    /// `if let Some(ref dir) = self.working_dir { cmd.current_dir(dir); }`
+    /// workdir-application stanza were each authored six times — well
+    /// past THEORY §VI.1's three-is-a-law threshold ("two occurrences is
+    /// a coincidence; three is a law"). This primitive is the
+    /// law-redeeming consolidation: the binary-resolution + workdir-
+    /// application pair lives at ONE body, and each consumer method
+    /// composes only its own argv.
+    ///
+    /// # What compounds
+    ///
+    /// Two structural properties this primitive owns at ONE body
+    /// instead of at six independent literal positions:
+    ///
+    /// 1. **Binary-resolution.** A future edit that widens
+    ///    [`Self::resolve_git_bin`] (adding a per-spawn env-injection
+    ///    hook, a substrate-path validation step, or a telemetry sigil
+    ///    on the resolved path) lands at one caller instead of six —
+    ///    silently degrading one site's resolution without the other
+    ///    five noticing is impossible post-lift.
+    /// 2. **Working-directory application.** A future refactor that
+    ///    changes the `working_dir` type (e.g., `Option<String>` →
+    ///    `Option<PathBuf>`) or the `current_dir` application semantics
+    ///    (canonicalizing before spawn, guarding against dangling
+    ///    symlinks) lands at this body. Pre-lift, the `if let Some(ref
+    ///    dir) = self.working_dir { cmd.current_dir(dir); }` stanza
+    ///    was authored six times with a `ref` binding that a future
+    ///    type migration would need to touch at every site or risk
+    ///    silently dropping the working-directory anchor on the sites
+    ///    the edit missed.
+    ///
+    /// The `resolve_git_bin` + `working_dir` invariants themselves are
+    /// unchanged by this lift — the end-to-end `GIT_BIN`-routing
+    /// contract is pinned by
+    /// [`tests::test_git_client_no_bin_surface_routes_through_git_bin_env_var`]
+    /// and the workdir-anchoring contract by each consumer's own
+    /// hermetic test. This primitive is a pure duplication-collapse
+    /// carve-out: the compound behavior at every consumer site is
+    /// byte-identical pre- and post-lift.
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(self.resolve_git_bin());
+        if let Some(ref dir) = self.working_dir {
+            cmd.current_dir(dir);
+        }
+        cmd
+    }
+
     /// Check if working tree is clean.
     ///
     /// Spawn-vs-op dispatch flows through the canonical
@@ -142,12 +210,8 @@ impl GitClient {
     /// surfaces the typed error verbatim instead of folding it into a
     /// silent skip.
     pub async fn is_clean(&self) -> Result<bool, GitError> {
-        let mut cmd = Command::new(self.resolve_git_bin());
+        let mut cmd = self.command();
         cmd.args(["status", "--porcelain"]);
-
-        if let Some(ref dir) = self.working_dir {
-            cmd.current_dir(dir);
-        }
 
         let output = GitError::from_capture(cmd.output().await, "status --porcelain")?;
 
@@ -164,13 +228,9 @@ impl GitClient {
     /// record), carrying the exit code that the pre-migration
     /// `bail!("git add failed")` dropped.
     pub async fn add(&self, paths: &[&str]) -> Result<()> {
-        let mut cmd = Command::new(self.resolve_git_bin());
+        let mut cmd = self.command();
         cmd.arg("add");
         cmd.args(paths);
-
-        if let Some(ref dir) = self.working_dir {
-            cmd.current_dir(dir);
-        }
 
         crate::retry::run_inherited_status(cmd, "git add")
             .await
@@ -186,12 +246,8 @@ impl GitClient {
     /// `commands/push.rs:194-204` which keeps warn-on-failure because its
     /// caller does NOT pre-check is_clean).
     pub async fn commit(&self, message: &str) -> Result<()> {
-        let mut cmd = Command::new(self.resolve_git_bin());
+        let mut cmd = self.command();
         cmd.args(["commit", "-m", message]);
-
-        if let Some(ref dir) = self.working_dir {
-            cmd.current_dir(dir);
-        }
 
         crate::retry::run_inherited_status(cmd, "git commit")
             .await
@@ -206,12 +262,8 @@ impl GitClient {
     /// with the sibling GitOps publish path migrated in fe3b1bc
     /// (`commands/push.rs::update_kustomization`).
     pub async fn push(&self) -> Result<()> {
-        let mut cmd = Command::new(self.resolve_git_bin());
+        let mut cmd = self.command();
         cmd.arg("push");
-
-        if let Some(ref dir) = self.working_dir {
-            cmd.current_dir(dir);
-        }
 
         crate::retry::run_inherited_status(cmd, "git push")
             .await
@@ -229,12 +281,8 @@ impl GitClient {
     /// failure record carries the exit code that the pre-migration
     /// `bail!("Failed to push release to git")` sites dropped.
     pub async fn push_to(&self, remote: &str, branch: &str) -> Result<()> {
-        let mut cmd = Command::new(self.resolve_git_bin());
+        let mut cmd = self.command();
         cmd.args(["push", remote, branch]);
-
-        if let Some(ref dir) = self.working_dir {
-            cmd.current_dir(dir);
-        }
 
         crate::retry::run_inherited_status(cmd, "git push")
             .await
@@ -263,12 +311,8 @@ impl GitClient {
     /// `Ok(false)` the way a pre-migration body that ignored
     /// `output.status` would have done.
     pub async fn has_staged_changes(&self) -> Result<bool, GitError> {
-        let mut cmd = Command::new(self.resolve_git_bin());
+        let mut cmd = self.command();
         cmd.args(["diff", "--cached", "--name-only"]);
-
-        if let Some(ref dir) = self.working_dir {
-            cmd.current_dir(dir);
-        }
 
         let output = GitError::from_capture(cmd.output().await, "diff --cached --name-only")?;
 
@@ -813,6 +857,178 @@ mod tests {
              found in the module. A regression that removed it would \
              silently downgrade the fixture-side git spawn to the raw \
              literal it was lifted from."
+        );
+    }
+
+    /// [`GitClient::command`] MUST target the resolved `git` binary
+    /// (`self.resolve_git_bin()`). Reads the returned `Command`'s
+    /// program directly via [`std::process::Command::get_program`]
+    /// (through `tokio::process::Command::as_std`) and asserts it
+    /// equals the shim's absolute path when `with_git_bin` binds it.
+    /// A regression that swapped the helper body for a raw
+    /// `Command::new("git")` (silently bypassing `GIT_BIN`) would
+    /// surface here as a mismatched program path — never as a silent-
+    /// PATH-fallback bug at deploy time. Runs hermetically: no spawn,
+    /// no process creation, no env-var mutation.
+    #[test]
+    fn test_command_helper_program_equals_resolve_git_bin() {
+        let shim = "/nonexistent/hermetic/shim/git";
+        let client = GitClient::new().with_git_bin(shim);
+        let cmd = client.command();
+        assert_eq!(
+            cmd.as_std().get_program(),
+            std::ffi::OsStr::new(shim),
+            "GitClient::command() must resolve the program through \
+             `self.resolve_git_bin()`, not hardcode `git`. Got \
+             program={:?}, expected {shim}",
+            cmd.as_std().get_program()
+        );
+    }
+
+    /// [`GitClient::command`] MUST apply the client's `working_dir` to
+    /// the returned `Command`'s `current_dir` when set. Pre-lift the
+    /// `if let Some(ref dir) = self.working_dir { cmd.current_dir(dir); }`
+    /// stanza was authored six times across the consumer methods; the
+    /// lift moves that application to ONE body and this shield pins the
+    /// application-when-set half of the contract by reading
+    /// [`std::process::Command::get_current_dir`] on the returned
+    /// `Command`. A regression that dropped the `current_dir` call
+    /// inside the helper would surface here as `None` on a scoped
+    /// client — never as a silent CWD-drift bug at deploy time.
+    #[test]
+    fn test_command_helper_applies_working_dir_when_set() {
+        let dir = "/nonexistent/hermetic/workdir/anchor";
+        let client = GitClient::in_dir(dir).with_git_bin("git");
+        let cmd = client.command();
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            Some(std::path::Path::new(dir)),
+            "GitClient::command() must apply `self.working_dir` to \
+             `Command::current_dir` when set. Got current_dir={:?}, \
+             expected Some({dir})",
+            cmd.as_std().get_current_dir()
+        );
+    }
+
+    /// [`GitClient::command`] MUST leave `current_dir` UNSET on the
+    /// returned `Command` when the client has no `working_dir` — i.e.
+    /// the caller inherits the process CWD, matching the
+    /// pre-lift behavior of the six consumer methods when the client
+    /// was constructed via [`GitClient::new`] rather than
+    /// [`GitClient::in_dir`]. Pins the "no-op-when-None" half of the
+    /// `working_dir` application contract. A regression that
+    /// unconditionally called `cmd.current_dir(...)` inside the helper
+    /// (e.g. `.current_dir(self.working_dir.clone().unwrap_or_default())`)
+    /// would break process-CWD-relative git spawns and surface here as
+    /// `Some(<empty>)` where `None` is required.
+    #[test]
+    fn test_command_helper_leaves_current_dir_unset_when_working_dir_absent() {
+        let client = GitClient::new().with_git_bin("git");
+        let cmd = client.command();
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            None,
+            "GitClient::command() must leave `current_dir` unset when \
+             `self.working_dir` is None so the spawn inherits the \
+             process CWD. Got current_dir={:?}, expected None",
+            cmd.as_std().get_current_dir()
+        );
+    }
+
+    /// Whole-module shield: the `Command::new(self.resolve_git_bin())`
+    /// spawn shape MUST appear at exactly one code line in this
+    /// module — the [`GitClient::command`] helper body. Every consumer
+    /// method ([`GitClient::is_clean`], [`GitClient::add`],
+    /// [`GitClient::commit`], [`GitClient::push`],
+    /// [`GitClient::push_to`], [`GitClient::has_staged_changes`])
+    /// MUST route through `self.command()` instead of respelling the
+    /// `Command::new(self.resolve_git_bin())` invocation inline. Pre-
+    /// lift the six consumer methods each carried the invocation
+    /// verbatim; the lift collapses them onto the helper and this
+    /// shield forbids re-fusion so the "binary-resolution +
+    /// working-directory application" pair stays authored at ONE body.
+    ///
+    /// Routes through [`crate::test_support::code_line_hits`] so this
+    /// shield's own docstring prose (which quotes the forbidden
+    /// literal for narrative purposes) does not self-match. The
+    /// needle is reconstructed via [`format!`] from its two lexical
+    /// halves so the shield's own executable body does not false-fire
+    /// against itself. A future consumer method that needs a
+    /// per-spawn cwd override (a shape the helper does not currently
+    /// support) either extends the helper's signature or spells the
+    /// invocation inline — either way this shield forces a deliberate
+    /// choice at review time rather than silently drifting.
+    ///
+    /// Sibling shield to [`test_command_helper_program_equals_resolve_git_bin`]
+    /// / [`test_command_helper_applies_working_dir_when_set`] /
+    /// [`test_command_helper_leaves_current_dir_unset_when_working_dir_absent`]:
+    /// the three unit tests pin the helper's own contract (program +
+    /// current_dir application); this shield pins the "no consumer
+    /// bypasses the helper" contract across the whole module.
+    #[test]
+    fn test_command_new_resolve_git_bin_is_only_at_the_command_helper_body() {
+        const SOURCE: &str = include_str!("git.rs");
+
+        // Match the executable spawn shape (semicolon-terminated
+        // statement) rather than the bare invocation — the bare form
+        // appears in string-literal continuations inside sibling
+        // shields' assertion messages (a code line that is not a
+        // comment, so `code_line_hits` does not filter it out). The
+        // helper body's executable statement lands on ONE
+        // semicolon-terminated line; the shield-message continuations
+        // never carry the semicolon.
+        let needle = format!("Command::new(self.{}());", "resolve_git_bin");
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the git-binary construction statement must appear at \
+             exactly one code line in `cli/src/infrastructure/git.rs` \
+             — the `GitClient::command` helper body. Every consumer \
+             method must route through `self.command()` instead of \
+             respelling the invocation inline. Found {} hit(s): \
+             {hits:#?}",
+            hits.len()
+        );
+    }
+
+    /// Whole-module shield: the
+    /// `if let Some(ref dir) = self.working_dir { cmd.current_dir(dir); }`
+    /// working-directory-application stanza MUST appear at exactly one
+    /// code line in this module — inside [`GitClient::command`]. Pre-
+    /// lift the stanza was authored six times across the consumer
+    /// methods (verbatim, modulo their local `cmd` binding names); a
+    /// factor-out edit that reshaped it (e.g. adding a
+    /// canonicalization step, migrating `working_dir` from
+    /// `Option<String>` to `Option<PathBuf>`) at pre-lift had six
+    /// literal positions to keep in sync and a drop-and-typo bug at
+    /// one site would silently drop the workdir anchor without the
+    /// other five noticing. Post-lift the stanza lives at one site.
+    ///
+    /// The needle is `"if let Some(ref dir) = self.working_dir"`,
+    /// which matches the executable stanza whether followed by a
+    /// same-line `{` or a next-line one. Routes through
+    /// [`crate::test_support::code_line_hits`] so this shield's own
+    /// docstring narration does not self-match. Sibling of
+    /// [`test_command_new_resolve_git_bin_is_only_at_the_command_helper_body`]:
+    /// the two shields together pin the two halves the [`GitClient::command`]
+    /// primitive collapses — binary-resolution AND working-directory
+    /// application — as belonging to exactly one body each.
+    #[test]
+    fn test_working_dir_apply_stanza_is_only_at_the_command_helper_body() {
+        const SOURCE: &str = include_str!("git.rs");
+
+        let needle = format!("if let Some(ref dir) = self.{}", "working_dir");
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the working-directory-application stanza must appear at \
+             exactly one code line in `cli/src/infrastructure/git.rs` \
+             — the `GitClient::command` helper body. Every consumer \
+             method must route through `self.command()` instead of \
+             respelling the stanza inline. Found {} hit(s): {hits:#?}",
+            hits.len()
         );
     }
 }
