@@ -3,6 +3,7 @@
 //! Provides lint, package, push, deploy, release, template, and bump operations
 //! for pleme-io Helm charts distributed via OCI registries.
 
+use crate::retry::RetryPolicy;
 use crate::version;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -21,8 +22,95 @@ use tracing::{info, warn};
 /// and continues past.
 const DEP_TIMEOUT_SECS: u64 = 240;
 /// Extra attempts after the first (so `DEP_RETRIES + 1` total) — absorbs
-/// transient upstream slowness / index flakiness with linear backoff.
+/// transient upstream slowness / index flakiness with exponential-with-cap
+/// backoff (see [`HELM_DEP_UPDATE_RETRY_BACKOFF`]).
 const DEP_RETRIES: u32 = 1;
+
+/// The typed exponential-backoff policy for [`helm_dependency_update`]'s
+/// between-retry sleeps — `initial_backoff` 5s × `factor` 2 capped at
+/// `max_backoff` 30s. Consumes the pre-existing typed primitive at
+/// [`crate::retry::RetryPolicy`] so the per-attempt delay lands at
+/// [`RetryPolicy::compute_delay`], whose docstring names its raison
+/// d'être: "the pre-existing fixed `sleep(2s)` schedule ... is the
+/// worst of both worlds ... Exponential backoff (Bazel-style: 250ms ×
+/// factor=2 capped at 30s) covers both regimes by construction."
+///
+/// Pre-lift the between-retry sleep spelled
+/// `sleep(Duration::from_secs(5 * u64::from(attempt)))` — a linear
+/// 5s × attempt schedule — inline at [`helm_dependency_update`]'s
+/// backoff site. That shape carried three structural defects the typed-
+/// primitive body forecloses:
+///
+/// 1. **Linear (unbounded-growth) schedule.** `5s * attempt` grows
+///    without a ceiling: at `attempt == 10` the pre-lift schedule
+///    sleeps 50s; at `attempt == 100` (a pathological but structurally
+///    reachable `DEP_RETRIES` budget), 500s of wall-clock evaporate on
+///    ONE inter-attempt gap. Post-lift, the exponential schedule
+///    doubles until the shared `max_backoff` cap and then plateaus —
+///    the same bounded-tail discipline every sibling `RetryPolicy`-
+///    consumer (`TEST_RETRY_BACKOFF` at `commands/test.rs`,
+///    `FLUX_POLL_BACKOFF` at `commands/flux.rs`) already reads.
+/// 2. **Bespoke arithmetic at the sleep site.** The pre-lift
+///    `5 * u64::from(attempt)` bakes the (seed, growth-shape) tuple
+///    into the sleep call itself — no named surface a shield or a
+///    future factor edit could pin. The lifted
+///    `HELM_DEP_UPDATE_RETRY_BACKOFF` const names the (seed, factor,
+///    cap) triple at one load-bearing structural surface.
+/// 3. **Divergence from every sibling forge retry surface.** The five
+///    sibling between-attempt-sleep surfaces already lifted (health-
+///    endpoint b5db3b6, Shinka reconcile-poll b962db5, flux polling
+///    65de62f, web-test-suite 9fd38d3, integration-test-suite e22b0a2)
+///    consume `RetryPolicy::compute_delay` — a schedule discipline
+///    edit (e.g. changing the cap, or the saturating-math semantics)
+///    that landed at the typed primitive did not reach this one
+///    bypasser. Post-lift, every hand-rolled between-attempt-sleep
+///    site in the forge tree reads through the same primitive.
+///
+/// The `factor: 2` climb reproduces the pre-lift 5s → 10s schedule
+/// verbatim at the currently-reachable attempts (`compute_delay(2) =
+/// 5s * 2^0 = 5s` matches `5 * 1 = 5`; `compute_delay(3) = 5s * 2^1 =
+/// 10s` matches `5 * 2 = 10`), then diverges strictly under the cap
+/// discipline at every deeper retry.
+///
+/// `max_attempts: 1` is a placeholder — the retry loop drives its own
+/// attempt budget through the top-of-module [`DEP_RETRIES`] constant
+/// and consumes only [`RetryPolicy::compute_delay`] from this policy,
+/// not [`RetryPolicy::max_attempts`]. The `max_attempts` field is
+/// unconsulted at this consumption site. Sibling shape of the
+/// placeholder-`max_attempts` idiom `TEST_RETRY_BACKOFF` (9fd38d3),
+/// `INTEGRATION_TEST_RETRY_BACKOFF` (e22b0a2), `FLUX_POLL_BACKOFF`
+/// (65de62f), `SHINKA_MIGRATION_POLL_BACKOFF` (b962db5), and
+/// `HEALTH_ENDPOINT_BACKOFF` (b5db3b6) all use for the same reason.
+const HELM_DEP_UPDATE_RETRY_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: 1,
+    initial_backoff: Duration::from_secs(5),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between `helm dependency update` retries, given the 1-indexed
+/// local `attempt` counter of the attempt that just failed (the
+/// `for attempt in 1..=(DEP_RETRIES + 1)` shape
+/// [`helm_dependency_update`] drives).
+///
+/// Maps the local 1-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(1)`:
+/// local `attempt == 1` (the pre-retry sleep after the first failed
+/// call) reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff = 5s`, matching the pre-lift `5 * 1 = 5s` seed
+/// verbatim; local `attempt == 2` reads as `compute_delay(3) =
+/// initial_backoff * factor^1 = 10s`, matching the pre-lift `5 * 2 =
+/// 10s` verbatim; and every deeper retry diverges strictly under the
+/// exponential-with-cap discipline. The `saturating_add` clamp
+/// forecloses the `u32` overflow class at the bridge — an
+/// unlikely-but-possible `attempt == u32::MAX` from a pathological
+/// `DEP_RETRIES` budget reads as `compute_delay(u32::MAX)`, which
+/// itself saturates to [`HELM_DEP_UPDATE_RETRY_BACKOFF::max_backoff`]
+/// via the `checked_pow`-then-cap body inside
+/// [`RetryPolicy::compute_delay`] without panic.
+fn helm_dep_update_retry_delay(attempt: u32) -> Duration {
+    HELM_DEP_UPDATE_RETRY_BACKOFF.compute_delay(attempt.saturating_add(1))
+}
 
 /// A digest-pinned placeholder image tag for lint/template validation. Charts
 /// under a fedramp-high (or stricter) compliance baseline `fail()` rendering
@@ -182,11 +270,13 @@ mod capture_tests {
 }
 
 /// `helm dependency update` for a chart, bounded by [`DEP_TIMEOUT_SECS`] and
-/// retried [`DEP_RETRIES`] times with linear backoff. A genuinely unreachable
-/// dependency surfaces as a typed error (so the chart is marked failed rather
-/// than shipped against unresolved deps); the caller (`release_all`/`lint_all`)
-/// records the failure and proceeds to the next chart. file://-only charts
-/// resolve offline and exit 0 even when an unrelated repo index is unreachable.
+/// retried [`DEP_RETRIES`] times with exponential-with-cap backoff (see
+/// [`HELM_DEP_UPDATE_RETRY_BACKOFF`] + [`helm_dep_update_retry_delay`]). A
+/// genuinely unreachable dependency surfaces as a typed error (so the chart
+/// is marked failed rather than shipped against unresolved deps); the caller
+/// (`release_all`/`lint_all`) records the failure and proceeds to the next
+/// chart. file://-only charts resolve offline and exit 0 even when an
+/// unrelated repo index is unreachable.
 fn helm_dependency_update(chart_dir: &str) -> Result<()> {
     let timeout = Duration::from_secs(DEP_TIMEOUT_SECS);
     let mut last = String::new();
@@ -204,7 +294,7 @@ fn helm_dependency_update(chart_dir: &str) -> Result<()> {
                 chart_dir,
                 last
             );
-            sleep(Duration::from_secs(5 * u64::from(attempt)));
+            sleep(helm_dep_update_retry_delay(attempt));
         }
     }
     bail!(
@@ -2084,6 +2174,211 @@ mod helm_bin_routing_tests {
             "`helm_bin()` must delegate to \
              `crate::tools::get_tool_path(crate::tools::tools::HELM)` \
              — the canonical lookup was not found in the module."
+        );
+    }
+}
+
+// ============================================================================
+// helm_dependency_update retry backoff — HELM_DEP_UPDATE_RETRY_BACKOFF + helper
+// ============================================================================
+//
+// These pin the `RetryPolicy`-consuming replacement of the pre-lift
+// bespoke `sleep(Duration::from_secs(5 * u64::from(attempt)))` linear
+// backoff at `helm_dependency_update`'s between-retry sleep site.
+// Sibling of the `TEST_RETRY_BACKOFF` shields at `commands/test.rs`
+// (commit 9fd38d3), the `INTEGRATION_TEST_RETRY_BACKOFF` shields at
+// `commands/integration_tests.rs` (commit e22b0a2), the
+// `FLUX_POLL_BACKOFF` shields at `commands/flux.rs` (commit 65de62f),
+// the `SHINKA_MIGRATION_POLL_BACKOFF` shields at
+// `commands/migrations.rs` (commit b962db5), and the
+// `HEALTH_ENDPOINT_BACKOFF` shields at
+// `commands/post_deploy_verification.rs` (commit b5db3b6) — same const-
+// plus-delegation-helper shape, same four-test pattern (policy-shape /
+// in-cap-schedule / past-cap-cap / saturating-no-panic), same
+// whole-module boundary shield that forbids re-fusing the pre-lift
+// bespoke-arithmetic linear-backoff shape.
+#[cfg(test)]
+mod dep_update_retry_backoff_tests {
+    use super::{helm_dep_update_retry_delay, HELM_DEP_UPDATE_RETRY_BACKOFF};
+    use std::time::Duration;
+
+    /// The `HELM_DEP_UPDATE_RETRY_BACKOFF` const's `(initial_backoff,
+    /// factor, max_backoff)` triple is the load-bearing invariant every
+    /// consumption site shares. Pinned here so a future edit at the
+    /// const's site is caught at a named test rather than silently at
+    /// the consumption site and the delegation helper.
+    #[test]
+    fn test_helm_dep_update_retry_backoff_policy_shape() {
+        assert_eq!(
+            HELM_DEP_UPDATE_RETRY_BACKOFF.initial_backoff,
+            Duration::from_secs(5),
+            "HELM_DEP_UPDATE_RETRY_BACKOFF.initial_backoff must be 5s \
+             — preserves the pre-lift `5 * 1 = 5s` first-retry seed \
+             verbatim.",
+        );
+        assert_eq!(
+            HELM_DEP_UPDATE_RETRY_BACKOFF.factor, 2,
+            "HELM_DEP_UPDATE_RETRY_BACKOFF.factor must be 2 \
+             — Bazel-style doubling climb between retries.",
+        );
+        assert_eq!(
+            HELM_DEP_UPDATE_RETRY_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "HELM_DEP_UPDATE_RETRY_BACKOFF.max_backoff must be 30s \
+             — the shared cap every sibling RetryPolicy-consumer \
+             (TEST_RETRY_BACKOFF, INTEGRATION_TEST_RETRY_BACKOFF, \
+             FLUX_POLL_BACKOFF, SHINKA_MIGRATION_POLL_BACKOFF, \
+             HEALTH_ENDPOINT_BACKOFF) also names.",
+        );
+    }
+
+    /// Pre-lift the between-retry sleep emitted `5 * u64::from(attempt)`
+    /// seconds verbatim; the lift's 1-indexed `attempt` counter must
+    /// reproduce that at `attempt == 1` (5s) AND `attempt == 2` (10s),
+    /// preserving the currently-reachable pre-lift schedule at the
+    /// currently-configured `DEP_RETRIES = 1` budget and any 2-retry
+    /// bump. Subsequent within-cap attempts (3/4) must emit the
+    /// Bazel-style doubling climb (20s/30s-cap), strictly stronger
+    /// than the pre-lift 15s/20s linear at every retry past the
+    /// second.
+    #[test]
+    fn test_helm_dep_update_retry_delay_matches_pre_lift_seed_and_climbs_at_in_cap_attempts() {
+        assert_eq!(
+            helm_dep_update_retry_delay(1),
+            Duration::from_secs(5),
+            "attempt=1 must sleep 5s — matches pre-lift `5 * 1 = 5s` \
+             seed verbatim.",
+        );
+        assert_eq!(
+            helm_dep_update_retry_delay(2),
+            Duration::from_secs(10),
+            "attempt=2 must sleep 10s — matches pre-lift `5 * 2 = 10s` \
+             at the second retry AND coincides with the Bazel-style \
+             `5s * 2 = 10s` doubling.",
+        );
+        assert_eq!(
+            helm_dep_update_retry_delay(3),
+            Duration::from_secs(20),
+            "attempt=3 must sleep 20s — Bazel-style `10s * 2 = 20s`, \
+             strictly stronger than the pre-lift `5 * 3 = 15s` linear.",
+        );
+    }
+
+    /// Attempts past the cap must all emit `max_backoff = 30s` —
+    /// `(20s * 2).min(30s) = 30s` at attempt=4 and `(30s * 2).min(30s)
+    /// = 30s` at every subsequent attempt. `DEP_RETRIES` is a
+    /// top-of-module const with no upper bound on the type, so a
+    /// future edit that raises the retry budget must not stretch a
+    /// single inter-attempt sleep past the ceiling — the pre-lift
+    /// linear `5 * attempt` schedule reached 500s at attempt=100; the
+    /// post-lift schedule plateaus at 30s.
+    #[test]
+    fn test_helm_dep_update_retry_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            helm_dep_update_retry_delay(4),
+            Duration::from_secs(30),
+            "attempt=4 must sleep 30s (cap) — `(20s * 2).min(30s) = 30s`.",
+        );
+        assert_eq!(
+            helm_dep_update_retry_delay(5),
+            Duration::from_secs(30),
+            "attempt=5 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            helm_dep_update_retry_delay(100),
+            Duration::from_secs(30),
+            "attempt=100 must sleep 30s (cap) — a pathological \
+             `DEP_RETRIES` budget cannot stretch a single sleep past \
+             the ceiling.",
+        );
+    }
+
+    /// The retry loop's `attempt` counter is a `u32` bounded only by
+    /// the top-of-module `DEP_RETRIES + 1`, so a pathological future
+    /// edit with `DEP_RETRIES: u32 = u32::MAX - 1` could in principle
+    /// drive `helm_dep_update_retry_delay(u32::MAX)`. Pre-lift the
+    /// `5 * u64::from(attempt)` arithmetic never panicked (it silently
+    /// overflowed into a huge sleep at high `attempt`); post-lift the
+    /// `saturating_add(1)` bridge inside `helm_dep_update_retry_delay`
+    /// bounds the argument to `RetryPolicy::compute_delay`, whose
+    /// `checked_pow`-then-cap body itself saturates without panic.
+    /// This test pins that composition: an `attempt == u32::MAX`
+    /// argument returns a bounded delay rather than panicking.
+    #[test]
+    fn test_helm_dep_update_retry_delay_saturates_without_panic_at_arbitrarily_large_attempt() {
+        assert_eq!(
+            helm_dep_update_retry_delay(u32::MAX),
+            Duration::from_secs(30),
+            "attempt=u32::MAX must saturate to max_backoff without \
+             panic — the `saturating_add(1)` bridge + \
+             `RetryPolicy::compute_delay`'s `checked_pow` cap close \
+             the u32 overflow class by construction.",
+        );
+        assert_eq!(
+            helm_dep_update_retry_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "attempt=u32::MAX - 1 must also saturate to max_backoff \
+             — the bridge `saturating_add(1)` returns u32::MAX, still \
+             far past the cap.",
+        );
+    }
+
+    /// Whole-module boundary shield: the `helm_dependency_update`
+    /// retry loop MUST consume the typed primitive at
+    /// `helm_dep_update_retry_delay` rather than re-fusing the
+    /// pre-lift bespoke-arithmetic
+    /// `sleep(Duration::from_secs(5 * u64::from(attempt)))` shape
+    /// (or any sibling `5 * u64::from(attempt)`-in-a-`sleep`-call
+    /// linear-growth schedule). A future refactor that reintroduces
+    /// the bespoke arithmetic at the sleep site — or grows a second
+    /// backoff surface and copies the pre-lift shape — fails here,
+    /// not silently in production. Whole-module boundary discipline
+    /// sibling of
+    /// `test_run_test_suite_consumes_typed_retry_delay_not_bare_fixed_sleep`
+    /// at `commands/test.rs::tests` (9fd38d3) and
+    /// `test_flux_polling_loops_consume_typed_poll_delay_not_bespoke_backoff_struct`
+    /// at `commands/flux.rs::tests` (65de62f).
+    ///
+    /// Code-line filter (via [`crate::test_support::code_line_hits`])
+    /// skips docstring / prose-comment lines, so the shield does not
+    /// false-positive on `HELM_DEP_UPDATE_RETRY_BACKOFF`'s own
+    /// docstring (which cites the pre-lift shape as context for the
+    /// three defects it forecloses).
+    #[test]
+    fn test_helm_dependency_update_consumes_typed_retry_delay_not_bespoke_linear_sleep() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        // The forbidden bespoke-arithmetic shape is reconstructed at
+        // test time via `format!` so this shield's own source text does
+        // not false-match itself when the whole-module scan runs. The
+        // diagnostic prose below refers to the shape only via the
+        // reconstructed `bespoke_needle` (never the fused literal), so
+        // the assert message body stays unmatchable too.
+        let bespoke_needle = format!(
+            "sleep(Duration::from_secs({} * u64::from(attempt)))",
+            5
+        );
+        let bespoke_hits = crate::test_support::code_line_hits(SOURCE, &bespoke_needle);
+        assert!(
+            bespoke_hits.is_empty(),
+            "commands/helm.rs must NOT drive the retry loop through \
+             a bespoke `{}` linear schedule — the sleep site must \
+             consume `helm_dep_update_retry_delay(attempt)`, grounding \
+             through `RetryPolicy::compute_delay`. Found code-line \
+             hits: {:#?}",
+            bespoke_needle,
+            bespoke_hits,
+        );
+        let delegation_hits = crate::test_support::code_line_hits(
+            SOURCE,
+            "helm_dep_update_retry_delay(attempt)",
+        );
+        assert!(
+            !delegation_hits.is_empty(),
+            "commands/helm.rs must consume the typed retry-delay \
+             helper at the `helm_dependency_update` between-retry \
+             sleep site — the canonical delegation call was not \
+             found at any code line.",
         );
     }
 }
