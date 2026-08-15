@@ -217,9 +217,76 @@ fn format_failure_summary(failed: &[(String, String)]) -> String {
         .join("\n")
 }
 
+/// Boundary-classify a captured `helm` (or peer) [`std::process::Output`]
+/// as a typed `Ok(())` / [`bail!`] result: return `Ok(())` when the
+/// exit status is a success, or bail with the SPECIFIC per-chart reason
+/// `"<context>: <last_reason_line(stdout, stderr)>"` when it is not.
+///
+/// This is the shared typed primitive the four `if !x_output.status.
+/// success() { bail!("{}: {}", <context>, last_reason_line(&x_output.
+/// stdout, &x_output.stderr)); }` sites at [`lint`] (both the `helm
+/// lint` post-check and the `helm template` post-check), [`package`],
+/// and [`push`] collapse onto — four consumers past the ≥3
+/// three-times-rule threshold ([THEORY §VI.1](): "two occurrences is
+/// a coincidence; three is a law"), so the shape is a law-redeeming
+/// consolidation rather than a coincidence.
+///
+/// Two structural properties the primitive owns at ONE body instead of
+/// at four sibling literal positions:
+///
+/// 1. **Diagnostic prose authorship.** The exact `"<context>: <reason>"`
+///    format string lives here (ONE `bail!` body); a future edit that
+///    reshapes the separator (`" | "` instead of `": "`) or introduces
+///    named args (`{context}` / `{reason}`) lands at one call site and
+///    reaches every consumer without drift. Pre-lift, the same three-arg
+///    `bail!("{}: {}", <context>, last_reason_line(&x_output.stdout,
+///    &x_output.stderr))` shape was authored at four independent literal
+///    positions that a factor-out edit or a reason-line refactor would
+///    silently diverge across.
+/// 2. **Reason-line composition.** Every consumer routes the same
+///    `(stdout, stderr)` byte-slice pair through the same
+///    [`last_reason_line`] reader — pre-lift, one site's `.stderr`
+///    typo (swapping `&x_output.stderr` for `&x_output.stdout`, or
+///    losing the trailing `&x_output.stderr` argument to
+///    `last_reason_line`) would silently degrade that site's failure
+///    diagnostic to the wrong stream without any of the other three
+///    sibling sites noticing. Post-lift the composition is authored
+///    once at this body and impossible to typo at the consumer side.
+///
+/// Sibling primitive to [`last_reason_line`] (the reason-line composer)
+/// and [`format_failure_summary`] (the batch-summary composer) at the
+/// same "helm output → diagnostic prose" surface — this primitive
+/// closes the "exit-status → typed Result" boundary at the same surface,
+/// so the three helpers together own the whole "helm output → typed
+/// per-chart Result" pipeline the four consumer sites drive.
+fn ensure_helm_success(output: &std::process::Output, context: &str) -> Result<()> {
+    if !output.status.success() {
+        bail!(
+            "{}: {}",
+            context,
+            last_reason_line(&output.stdout, &output.stderr)
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod capture_tests {
-    use super::{format_failure_summary, last_reason_line};
+    use super::{ensure_helm_success, format_failure_summary, last_reason_line};
+
+    // Build a synthetic `std::process::Output` with the given exit
+    // status and captured streams. Used by the `ensure_helm_success`
+    // shields; centralized here so the four shields share one builder
+    // and a future reshape of the shape (adding a captured signal,
+    // widening to `ExitStatusExt`) lands at one place.
+    fn make_output(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if success { 0 } else { 1 << 8 }),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
 
     #[test]
     fn last_reason_line_prefers_final_nonblank_stderr_line() {
@@ -265,6 +332,137 @@ mod capture_tests {
         assert_eq!(
             out,
             "  - pitr-forge: push: 403 permission_denied: write_package\n  - lareira-camelot: lint: pleme-lib:0.36.0 not found"
+        );
+    }
+
+    /// `Ok(())` on a success-status output — the four consumer sites
+    /// (`lint`'s `helm lint` post-check, `lint`'s `helm template`
+    /// post-check, `package`'s `helm package` post-check, `push`'s
+    /// `helm push` post-check) must all pass through unchanged when the
+    /// captured process succeeded, regardless of what non-empty stdout
+    /// or stderr the process happened to emit.
+    #[test]
+    fn ensure_helm_success_returns_ok_on_success_status_regardless_of_output_streams() {
+        // Empty streams.
+        assert!(ensure_helm_success(&make_output(true, b"", b""), "ctx").is_ok());
+        // Non-empty stdout only (helm often prints "Manifest generated" on stdout even on success).
+        assert!(
+            ensure_helm_success(
+                &make_output(true, b"Manifest generated\n", b""),
+                "chart-dir"
+            )
+            .is_ok()
+        );
+        // Non-empty stderr only (helm dep update chatter often lands on stderr even on success).
+        assert!(
+            ensure_helm_success(
+                &make_output(true, b"", b"Getting updates for unmanaged Helm repositories...\n"),
+                "chart-dir"
+            )
+            .is_ok()
+        );
+        // Both streams non-empty (the typical successful case).
+        assert!(
+            ensure_helm_success(
+                &make_output(
+                    true,
+                    b"Successfully packaged chart\n",
+                    b"Saving 2 charts\nDeleting outdated charts\n"
+                ),
+                "chart-dir (helm package)"
+            )
+            .is_ok()
+        );
+    }
+
+    /// The exact bail-string preservation shield: a failed output must
+    /// bail with the SAME prose the pre-lift `bail!("{}: {}", <context>,
+    /// last_reason_line(&x_output.stdout, &x_output.stderr))` shape
+    /// emitted at each of the four consumer sites, so downstream
+    /// operator-facing greps, log-based alert regexes, and typed-error
+    /// prose-matching stay stable across the lift. Fail-before-pass-
+    /// after: any drift in the format string (a swapped separator, a
+    /// reordered `{context}`/`{reason}` position, a stray colon) trips
+    /// this shield.
+    #[test]
+    fn ensure_helm_success_bails_with_exact_pre_lift_prose_on_failure() {
+        let out = make_output(
+            false,
+            b"",
+            b"Error: failed to perform \"Push\" on destination: 403: denied: permission_denied: write_package\n",
+        );
+        let err = ensure_helm_success(&out, "my-chart").expect_err(
+            "a non-success output must bail",
+        );
+        assert_eq!(
+            err.to_string(),
+            "my-chart: Error: failed to perform \"Push\" on destination: 403: denied: permission_denied: write_package",
+        );
+    }
+
+    /// The reason-line composition shield: the primitive routes
+    /// `(stdout, stderr)` through [`last_reason_line`] verbatim
+    /// (stderr-first, stdout-fallback), so a `stderr`-empty output
+    /// falls back to stdout at exactly the same discipline the sibling
+    /// [`last_reason_line`] shields pin. Closes the "wrong-stream typo"
+    /// class of defect the pre-lift 4× duplication would have silently
+    /// admitted.
+    #[test]
+    fn ensure_helm_success_reason_line_composition_matches_last_reason_line_discipline() {
+        // stderr-empty → stdout fallback.
+        let stdout_only = make_output(false, b"final stdout diagnostic\n", b"");
+        let err = ensure_helm_success(&stdout_only, "ctx-a")
+            .expect_err("a non-success output must bail");
+        assert_eq!(err.to_string(), "ctx-a: final stdout diagnostic");
+
+        // both empty → "(no output captured)" sentinel.
+        let both_empty = make_output(false, b"", b"");
+        let err = ensure_helm_success(&both_empty, "ctx-b")
+            .expect_err("a non-success output must bail");
+        assert_eq!(err.to_string(), "ctx-b: (no output captured)");
+
+        // both non-empty → stderr wins.
+        let both = make_output(false, b"stdout line\n", b"stderr line\n");
+        let err = ensure_helm_success(&both, "ctx-c").expect_err("a non-success output must bail");
+        assert_eq!(err.to_string(), "ctx-c: stderr line");
+    }
+
+    /// Whole-module production-slice re-fusion shield: post-lift, the
+    /// production slice of this module must not contain any bare
+    /// `if !x.status.success() { bail!("{}: {}", ..., last_reason_line
+    /// (...)) }` shape — every helm-output success/bail check must
+    /// consume [`ensure_helm_success`] instead. Slices `SOURCE` at the
+    /// `\n#[cfg(test)]\n` marker so this shield's own literal-string
+    /// needles (living in `#[cfg(test)]` code below the marker) do not
+    /// self-match, and filters `///`/`//!` doc-comment lines that
+    /// legitimately name the pre-lift shape as prose so the
+    /// `ensure_helm_success` docstring above does not false-fire.
+    #[test]
+    fn ensure_helm_success_is_the_only_consumer_of_last_reason_line_at_the_bail_site() {
+        const SOURCE: &str = include_str!("helm.rs");
+        let production = SOURCE
+            .split_once("\n#[cfg(test)]\n")
+            .map(|(prod, _)| prod)
+            .unwrap_or(SOURCE);
+        let hits: Vec<(usize, &str)> = production
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("///") && !trimmed.starts_with("//!")
+            })
+            // Match call sites (`last_reason_line(&<expr>.stdout, ...)`),
+            // not the definition (`fn last_reason_line(stdout: &[u8],
+            // ...) -> ...`): consumer call sites always start with `&`.
+            .filter(|(_, line)| line.contains("last_reason_line(&"))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "post-lift, `last_reason_line(..)` must be called exactly \
+             once in the production slice of helm.rs (inside \
+             `ensure_helm_success`). Found {} hit(s): {hits:#?}",
+            hits.len(),
         );
     }
 }
@@ -357,13 +555,7 @@ pub fn lint(chart_dir: &str) -> Result<()> {
         .context("Failed to run helm lint")?;
     print_captured_output(&lint_output.stdout, &lint_output.stderr);
 
-    if !lint_output.status.success() {
-        bail!(
-            "{}: {}",
-            chart_dir,
-            last_reason_line(&lint_output.stdout, &lint_output.stderr)
-        );
-    }
+    ensure_helm_success(&lint_output, chart_dir)?;
 
     // helm template (validation) — skip for library charts. Discard rendered
     // stdout (keep stderr for errors): this is an exit-code validation, not a
@@ -389,13 +581,7 @@ pub fn lint(chart_dir: &str) -> Result<()> {
             .context("Failed to run helm template")?;
         print_captured_output(&[], &template_output.stderr);
 
-        if !template_output.status.success() {
-            bail!(
-                "{} (helm template): {}",
-                chart_dir,
-                last_reason_line(&template_output.stdout, &template_output.stderr)
-            );
-        }
+        ensure_helm_success(&template_output, &format!("{} (helm template)", chart_dir))?;
     }
 
     info!("Lint passed: {}", chart_dir);
@@ -496,13 +682,7 @@ pub fn package(chart_dir: &str, output: &str, version: Option<&str>) -> Result<S
         .context("Failed to run helm package")?;
     print_captured_output(&pkg_output.stdout, &pkg_output.stderr);
 
-    if !pkg_output.status.success() {
-        bail!(
-            "{}: {}",
-            chart_dir,
-            last_reason_line(&pkg_output.stdout, &pkg_output.stderr)
-        );
-    }
+    ensure_helm_success(&pkg_output, chart_dir)?;
 
     // Find the generated tarball — use name from Chart.yaml, not the directory
     // basename (which may contain a Nix store hash prefix).
@@ -537,13 +717,7 @@ pub fn push(chart: &str, registry: &str) -> Result<()> {
         .context("Failed to run helm push")?;
     print_captured_output(&output.stdout, &output.stderr);
 
-    if !output.status.success() {
-        bail!(
-            "{}: {}",
-            chart,
-            last_reason_line(&output.stdout, &output.stderr)
-        );
-    }
+    ensure_helm_success(&output, chart)?;
 
     info!("Push succeeded");
     Ok(())
