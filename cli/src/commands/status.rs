@@ -372,33 +372,16 @@ async fn fetch_deployment(namespace: &str, deployment_name: &str) -> Result<Depl
     // Extract image info from ghcr.io container
     let (image, tag) = extract_main_image(&deployment);
 
-    let status = deployment.get("status").unwrap_or(&serde_json::Value::Null);
-
     Ok(DeploymentInfo {
         name: deployment_name.to_string(),
         image,
         tag,
         replicas: ReplicaStatus {
-            desired: deployment
-                .pointer("/spec/replicas")
-                .and_then(|r| r.as_i64())
-                .unwrap_or(0) as i32,
-            ready: status
-                .get("readyReplicas")
-                .and_then(|r| r.as_i64())
-                .unwrap_or(0) as i32,
-            available: status
-                .get("availableReplicas")
-                .and_then(|r| r.as_i64())
-                .unwrap_or(0) as i32,
-            updated: status
-                .get("updatedReplicas")
-                .and_then(|r| r.as_i64())
-                .unwrap_or(0) as i32,
-            unavailable: status
-                .get("unavailableReplicas")
-                .and_then(|r| r.as_i64())
-                .unwrap_or(0) as i32,
+            desired: replica_count(&deployment, "/spec/replicas") as i32,
+            ready: replica_count(&deployment, "/status/readyReplicas") as i32,
+            available: replica_count(&deployment, "/status/availableReplicas") as i32,
+            updated: replica_count(&deployment, "/status/updatedReplicas") as i32,
+            unavailable: replica_count(&deployment, "/status/unavailableReplicas") as i32,
         },
         conditions: extract_conditions(&deployment),
         strategy: deployment
@@ -410,8 +393,8 @@ async fn fetch_deployment(namespace: &str, deployment_name: &str) -> Result<Depl
             .pointer("/metadata/creationTimestamp")
             .and_then(|t| t.as_str())
             .map(String::from),
-        last_updated: status
-            .get("conditions")
+        last_updated: deployment
+            .pointer("/status/conditions")
             .and_then(|c| c.as_array())
             .and_then(|arr| {
                 arr.iter()
@@ -885,12 +868,13 @@ fn kubectl_get_item(
 /// `"Ready"` (ready == desired) / `"NotReady"` (otherwise) status
 /// string.
 ///
-/// Both slots read `/status/readyReplicas` and `/spec/replicas` via
-/// JSON pointers, treating a missing / malformed field as `0` — the
-/// discipline every pre-lift consumer applied verbatim through
-/// `.and_then(|r| r.as_i64()).unwrap_or(0)`. The ready == desired
-/// equality — rather than a threshold or a `>=` — matches the pre-lift
-/// consumers' behavior byte-for-byte: an over-provisioned pod count
+/// Both slots route through [`replica_count`] so the
+/// `/status/readyReplicas` and `/spec/replicas` JSON-pointer reads
+/// share the lenient-typing discipline (missing / malformed field
+/// treated as `0`) with the wider [`fetch_deployment`] consumer at ONE
+/// body rather than one-per-site. The `ready == desired` equality —
+/// rather than a threshold or a `>=` — matches the pre-lift consumers'
+/// behavior byte-for-byte: an over-provisioned pod count
 /// (readyReplicas > replicas, transient during scale-down) surfaces as
 /// `"NotReady"`, matching the pre-lift semantics rather than silently
 /// promoting it to `"Ready"`.
@@ -908,32 +892,62 @@ fn kubectl_get_item(
 /// (`ensure_success` + `format_failure`), list-shaped fetch
 /// (`kubectl_get_items`), and single-object fetch (`kubectl_get_item`)
 /// sibling lifts on the prior claude-routine chain.
-///
-/// # Why not extended to [`fetch_deployment`]
-///
-/// The sibling `fetch_deployment` at this module extracts the same
-/// `/status/readyReplicas` and `/spec/replicas` fields but folds them
-/// into the wider [`ReplicaStatus`] struct (also carrying
-/// `availableReplicas`, `updatedReplicas`, `unavailableReplicas`) as
-/// `i32`s rather than the display pair emitted here. That is a
-/// distinct extraction shape whose lift is a future concern; this
-/// primitive owns the `(ratio_display, ready_or_not_display)` pair the
-/// three simpler `fetch_*` sites emit.
 fn replica_readiness_display(doc: &serde_json::Value) -> (String, String) {
-    let ready = doc
-        .pointer("/status/readyReplicas")
-        .and_then(|r| r.as_i64())
-        .unwrap_or(0);
-    let desired = doc
-        .pointer("/spec/replicas")
-        .and_then(|r| r.as_i64())
-        .unwrap_or(0);
+    let ready = replica_count(doc, "/status/readyReplicas");
+    let desired = replica_count(doc, "/spec/replicas");
     let status = if ready == desired {
         "Ready".to_string()
     } else {
         "NotReady".to_string()
     };
     (format!("{}/{}", ready, desired), status)
+}
+
+/// Read a replica-count field from a workload document (Deployment or
+/// StatefulSet) via JSON pointer with the lenient-typing discipline
+/// every pre-lift consumer applied verbatim:
+/// `.pointer(ptr).and_then(|r| r.as_i64()).unwrap_or(0)`. A missing
+/// pointer, a wrong-typed value (a string, a float, a null), and an
+/// absent intermediate object all collapse to `0` rather than
+/// propagating a type error the fetch site cannot recover from.
+///
+/// Load-bearing: kubectl's Deployment status shape omits
+/// `readyReplicas` when it is zero, and a fresh Deployment whose
+/// controller has not yet populated `/status` reports the absent
+/// intermediate. Both cases must surface as `0`, not as an error.
+///
+/// # Consumers
+///
+/// - [`replica_readiness_display`] — twice, for `/status/readyReplicas` and `/spec/replicas`
+/// - [`fetch_deployment`] — five times, driving [`ReplicaStatus`] via `as i32` narrowing
+///
+/// Seven sibling call sites past the "two is a coincidence; three is a
+/// law" threshold — see the retry-schedule
+/// (`RetryPolicy::compute_delay`), helm-error-branch
+/// (`ensure_helm_success`), release-tracker HTTP-error
+/// (`ensure_success` + `format_failure`), list-shaped fetch
+/// (`kubectl_get_items`), single-object fetch (`kubectl_get_item`),
+/// and readiness-display (`replica_readiness_display`) sibling lifts on
+/// the prior claude-routine chain. Closes the "future concern" the
+/// sibling `replica_readiness_display` doc noted at cd1cb10: the
+/// discipline the display-pair primitive owned at two sites now
+/// composes at the wider [`fetch_deployment`] five-slot extraction
+/// via this shared reader, so a future edit to the lenient-typing
+/// arm (adding a `debug!` on the wrong-typed branch, tightening to
+/// `.as_u64()` for non-negative counts, or switching to a typed
+/// error) lands at ONE body across all seven pre-lift sites.
+///
+/// # Why an `i64` return
+///
+/// `serde_json::Value::as_i64` is the widest lenient extraction the
+/// pre-lift consumers used: both the two display-pair sites and the
+/// five `fetch_deployment` sites spelled `.as_i64().unwrap_or(0)`
+/// verbatim. Returning `i64` preserves that width at the primitive
+/// and pushes any narrowing (the `as i32` cast the [`ReplicaStatus`]
+/// slots apply) to the caller boundary — which matches the pre-lift
+/// shape byte-for-byte.
+fn replica_count(doc: &serde_json::Value, ptr: &str) -> i64 {
+    doc.pointer(ptr).and_then(|r| r.as_i64()).unwrap_or(0)
 }
 
 async fn fetch_secrets(namespace: &str, deployment_name: &str) -> Result<Vec<String>> {
@@ -2192,6 +2206,173 @@ mod tests {
              discipline across the primitive and the re-fused site. \
              Expected exactly one hit (the primitive body itself). \
              Found: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn replica_count_returns_i64_on_present_integer_field() {
+        // The golden path every pre-lift consumer exercised: kubectl
+        // populates `/status/readyReplicas` (and the four other
+        // replica-count slots at `fetch_deployment`) with an integer,
+        // and the extraction yields that integer verbatim. Pinned as a
+        // discrete shield so a regression that widened the primitive
+        // to (say) return `Option<i64>` and forgot to `.unwrap_or(0)`
+        // at the site fails here rather than surfacing as an
+        // `unwrap_or(0)` at the caller.
+        let doc = serde_json::json!({
+            "spec": { "replicas": 3 },
+            "status": { "readyReplicas": 2 },
+        });
+        assert_eq!(super::replica_count(&doc, "/spec/replicas"), 3);
+        assert_eq!(super::replica_count(&doc, "/status/readyReplicas"), 2);
+    }
+
+    #[test]
+    fn replica_count_treats_missing_leaf_field_as_zero() {
+        // Pre-lift the two display-pair sites and the five
+        // `fetch_deployment` sites all spelled `.and_then(|r| r.
+        // as_i64()).unwrap_or(0)` verbatim — a missing leaf field
+        // (kubectl's Deployment status shape omits `readyReplicas`
+        // when its value is zero, and analogously for the other
+        // conditional replica counters) MUST collapse to `0` rather
+        // than propagating a type error the fetch site cannot
+        // recover from. Pins the primitive owns that discipline at
+        // ONE body across all seven pre-lift consumer sites.
+        let doc = serde_json::json!({
+            "spec": { "replicas": 3 },
+            "status": {},
+        });
+        assert_eq!(super::replica_count(&doc, "/status/readyReplicas"), 0);
+        assert_eq!(super::replica_count(&doc, "/status/availableReplicas"), 0);
+    }
+
+    #[test]
+    fn replica_count_treats_missing_intermediate_object_as_zero() {
+        // The fresh-object-just-after-create window the sibling
+        // `replica_readiness_display_treats_both_missing_as_zero_ready`
+        // shield pins for the display-pair primitive, re-asserted at
+        // the underlying reader: a Deployment document whose
+        // controller has not yet populated `/status` at all (the
+        // intermediate object is absent, not just the leaf) still
+        // yields `0` at the reader. Load-bearing: `.pointer("/status/
+        // readyReplicas")` returns `None` when `/status` is absent
+        // *or* when `/status` is present but `readyReplicas` is not,
+        // and both routes MUST collapse to `0` through the same
+        // `.unwrap_or(0)` arm at the primitive rather than diverging.
+        let doc = serde_json::json!({ "spec": { "replicas": 3 } });
+        assert_eq!(super::replica_count(&doc, "/status/readyReplicas"), 0);
+        assert_eq!(super::replica_count(&doc, "/status/availableReplicas"), 0);
+        assert_eq!(super::replica_count(&doc, "/status/updatedReplicas"), 0);
+        assert_eq!(super::replica_count(&doc, "/status/unavailableReplicas"), 0);
+    }
+
+    #[test]
+    fn replica_count_treats_wrong_typed_leaf_as_zero() {
+        // Pre-lift the seven consumer sites all guarded the
+        // extraction with `.and_then(|r| r.as_i64())` — a
+        // well-formed JSON with a non-integer value at the pointer
+        // (a string, a float, a null, a bool) MUST collapse to `0`
+        // rather than propagating a type error. Preserves the
+        // lenient-typing discipline verbatim: a manifest that
+        // spelled `replicas: "3"` (string) or `readyReplicas: null`
+        // yields `0` at the primitive, mirroring the shield the
+        // sibling `replica_readiness_display_ignores_non_integer_field_types`
+        // pins for the display-pair caller.
+        let doc = serde_json::json!({
+            "spec": { "replicas": "3" },
+            "status": {
+                "readyReplicas": null,
+                "availableReplicas": 1.5,
+                "updatedReplicas": true,
+            },
+        });
+        assert_eq!(super::replica_count(&doc, "/spec/replicas"), 0);
+        assert_eq!(super::replica_count(&doc, "/status/readyReplicas"), 0);
+        assert_eq!(super::replica_count(&doc, "/status/availableReplicas"), 0);
+        assert_eq!(super::replica_count(&doc, "/status/updatedReplicas"), 0);
+    }
+
+    /// Regression shield: `replica_count` is the ONLY consumer of the
+    /// pre-lift `.pointer("/…").and_then(|r| r.as_i64()).unwrap_or(0)`
+    /// stanza in `commands/status.rs`. Pre-lift the two
+    /// `replica_readiness_display` slots spelled the pointer-based
+    /// shape directly (`.pointer("/status/readyReplicas") \n .and_then
+    /// (|r| r.as_i64()) \n .unwrap_or(0)`), and the five
+    /// `fetch_deployment` slots spelled the semantically-equivalent
+    /// two-step `deployment.get("status").unwrap_or(&Null).get(
+    /// "readyReplicas").and_then(|r| r.as_i64()).unwrap_or(0)` shape.
+    /// Both shapes reduce to the same lenient-typed i64 read; the
+    /// post-lift primitive owns the canonical pointer-based spelling
+    /// so any future consumer of a replica-count field lands on the
+    /// same shape. Seven consumer sites past THEORY.md §VI.1's
+    /// three-times threshold. A future regression that re-fused the
+    /// pre-lift stanza at one of the seven sites (or at a new eighth
+    /// replica-count consumer of the same shape) would silently split
+    /// the lenient-typing discipline across the primitive and the
+    /// re-fused site, re-introducing the "extract an i64 replica
+    /// count per site" duplication this lift redeems.
+    ///
+    /// The shield pins the discipline at ONE code line — the
+    /// primitive body itself — by asserting the compound needle
+    /// `.and_then(|r| r.as_i64()).unwrap_or(0)` appears at exactly
+    /// ONE code line in the module's non-test body, further filtered
+    /// to lines that also spell `.pointer(` on the same code line
+    /// (the primitive's `doc.pointer(ptr).and_then(...)` shape). The
+    /// tightening excludes the orthogonal container-status
+    /// restart-count extraction at `fetch_pods_json` (`cs.get(
+    /// "restartCount").and_then(|r| r.as_i64()).unwrap_or(0)`) whose
+    /// `.get("restartCount")`-based two-step extraction against a
+    /// container-status object is a distinct shape from this
+    /// primitive's pointer-based extraction against a workload
+    /// document. The scan is bounded strictly to the module's
+    /// non-test body via the `\n#[cfg(test)]\nmod tests {` marker
+    /// (same slice boundary the sibling
+    /// `replica_readiness_display_is_only_ready_equals_desired_conditional_at_fetch_helpers`
+    /// and `kubectl_get_items_is_only_json_items_parse_at_the_fetch_helper_bail_surface`
+    /// shields use) so this shield's own docstring mention of the
+    /// needle stays out of scope. And routes through
+    /// [`crate::test_support::code_line_hits`] so `///`-prefixed
+    /// doc-comment mentions in the module body's fn docs — the
+    /// primitive's own docstring references the `.and_then(|r| r.
+    /// as_i64()).unwrap_or(0)` shape in prose — do not self-match as
+    /// phantom hits, the same code-line-filter discipline the sibling
+    /// `code_line_hits` consumers established at prior claude-routine
+    /// commits (ab06395 / a7d5375 / fa2c702 / fd02aa6 / cc81215 /
+    /// 3e26bbc / 4163c7e / ffa5271 / 8eed602 / f6b4229 / 59c3391 /
+    /// 695a8cc / cd1cb10).
+    #[test]
+    fn replica_count_is_only_pointer_as_i64_unwrap_or_zero_at_the_replica_reader_surface() {
+        let source = include_str!("status.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let tail_hits = crate::test_support::code_line_hits(
+            module_body,
+            ".and_then(|r| r.as_i64()).unwrap_or(0)",
+        );
+        let compound_hits: Vec<String> = tail_hits
+            .into_iter()
+            .filter(|l| l.contains(".pointer("))
+            .collect();
+        assert_eq!(
+            compound_hits.len(),
+            1,
+            "status.rs must route every replica-count extraction \
+             through `replica_count(&doc, \"/…\")` so a future \
+             regression that re-fuses the pre-lift `.pointer(\"/…\")\
+             .and_then(|r| r.as_i64()).unwrap_or(0)` stanza at any \
+             of the seven pre-lift consumer sites (two in \
+             `replica_readiness_display`, five in `fetch_deployment`) \
+             or at a new eighth replica-count consumer of the same \
+             shape fails here rather than silently splitting the \
+             lenient-typing discipline across the primitive and the \
+             re-fused site. Expected exactly one hit (the primitive \
+             body itself). Found: {compound_hits:?}"
         );
     }
 }
