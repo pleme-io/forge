@@ -12,10 +12,35 @@ use tokio::process::Command;
 
 use crate::repo::get_tool_path;
 
+/// Resolve the `cargo` binary via the `CARGO` env override, falling
+/// back to PATH. Every `cargo` spawn in this module reads through this
+/// sigil so the resolve happens in exactly one place — mirrors the
+/// `cargo_bin()` sigil at `commands/test_ci.rs:28` (916f1a4) and
+/// `commands/prerelease.rs:109` (79e03a5), and the sibling
+/// `crossplane_bin()` / `cosign_bin()` / `jsonnet_bin()` sigil
+/// discipline on other command modules (6b3ac16 / a070a3c / a826ac0).
+/// Solve-once at the sigil (THEORY §I.5 — duplication budget zero;
+/// every recurring shape becomes a helper before it becomes duplicated
+/// code) means a future added `cargo` spawn cannot silently re-copy
+/// the two-argument resolve and drift away from the `CARGO` override
+/// at exactly the tier the hermetic-runner contract binds. The
+/// whole-module shield below asserts three invariants: no bare
+/// cargo-literal spawn in the body (already landed at 8687093),
+/// `fn cargo_bin()` is defined, and the two-argument resolve appears
+/// in EXACTLY one place — only the sigil body — so a future added
+/// spawn cannot silently re-copy the resolve inline. Pre-lift the
+/// nine consumer sites (`rust_test`, `rust_lint`, `rust_fmt`,
+/// `rust_fmt_check`, `rust_extract_schema`, `rust_update_cargo_nix`,
+/// `rust_regenerate`, `rust_cargo_update`, `rust_dev`) each spelled
+/// the two-argument resolve verbatim.
+fn cargo_bin() -> String {
+    get_tool_path("CARGO", "cargo")
+}
+
 /// Run Rust unit tests
 pub async fn rust_test(service: String) -> Result<()> {
     println!("🧪 Running unit tests for {}...", service.cyan());
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.args(&["test", "--lib", "--bins"]);
     crate::retry::run_inherited_status(cmd, "cargo test").await
@@ -24,7 +49,7 @@ pub async fn rust_test(service: String) -> Result<()> {
 /// Run Rust clippy linter
 pub async fn rust_lint(service: String) -> Result<()> {
     println!("🔍 Running clippy linter for {}...", service.cyan());
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.args(&[
         "clippy",
@@ -40,7 +65,7 @@ pub async fn rust_lint(service: String) -> Result<()> {
 /// Format Rust code with rustfmt
 pub async fn rust_fmt(service: String) -> Result<()> {
     println!("✨ Formatting code for {}...", service.cyan());
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.args(&["fmt", "--all"]);
     crate::retry::run_inherited_status(cmd, "cargo fmt").await
@@ -49,7 +74,7 @@ pub async fn rust_fmt(service: String) -> Result<()> {
 /// Check Rust code formatting
 pub async fn rust_fmt_check(service: String) -> Result<()> {
     println!("🔍 Checking code formatting for {}...", service.cyan());
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.args(&["fmt", "--all", "--", "--check"]);
     crate::retry::run_inherited_status(cmd, "cargo fmt --check").await
@@ -66,7 +91,7 @@ pub async fn rust_extract_schema(service: String) -> Result<()> {
     for bin_name in &bin_names {
         let bin_path = format!("src/bin/{}.rs", bin_name);
         if Path::new(&bin_path).exists() {
-            let cargo = get_tool_path("CARGO", "cargo");
+            let cargo = cargo_bin();
             let mut cmd = Command::new(&cargo);
             cmd.args(&["run", "--bin", bin_name]);
             crate::retry::run_inherited_status(cmd, &format!("cargo run --bin {}", bin_name))
@@ -92,7 +117,7 @@ pub async fn rust_update_cargo_nix(service: String) -> Result<()> {
 
     // Update Cargo.lock
     println!("Updating Cargo.lock...");
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.arg("update");
     crate::retry::run_inherited_status(cmd, "cargo update")
@@ -209,7 +234,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         "Generating new Cargo.lock".bold(),
         "(cargo generate-lockfile)".dimmed()
     );
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.arg("generate-lockfile");
     crate::retry::run_inherited_status(cmd, "cargo generate-lockfile")
@@ -299,7 +324,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         "Updating dependencies".bold(),
         "(cargo update)".dimmed()
     );
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.arg("update");
     crate::retry::run_inherited_status(cmd, "cargo update")
@@ -533,7 +558,7 @@ pub async fn rust_dev(
     );
     println!();
 
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.arg("run");
 
@@ -781,6 +806,32 @@ mod tests {
              `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
              A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
              contract substrate's mkRuntimeToolsEnv exports."
+        );
+        // Sigil sibling: after the cargo_bin() lift, every consumer routes
+        // through the sigil, so `fn cargo_bin()` must be defined AND the
+        // two-argument resolve string must appear in EXACTLY one place —
+        // only the sigil body — so a future added spawn cannot silently
+        // re-copy the resolve inline and drift away from the sigil's
+        // single point of truth. Mirrors the sibling `cargo_bin()` shield
+        // pair on `commands/test_ci.rs::test_test_ci_routes_cargo_through_cargo_bin_sigil_not_raw_command`
+        // (916f1a4). THEORY §I.5: duplication budget zero.
+        assert!(
+            body.contains("fn cargo_bin()"),
+            "commands/developer_tools.rs must define `cargo_bin()` — the \
+             sigil function that resolves the tools-registry `CARGO` \
+             override for every cargo spawn. Mirrors the `cargo_bin()` \
+             sigil at `commands/test_ci.rs:28` and \
+             `commands/prerelease.rs:109`."
+        );
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("CARGO", "cargo");
+        let resolve_count = body.matches(two_arg_needle.as_str()).count();
+        assert_eq!(
+            resolve_count, 1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the `cargo_bin()` \
+             sigil), not {resolve_count} times — every consumer must route \
+             through `cargo_bin()`, not re-copy the resolve inline"
         );
     }
 
