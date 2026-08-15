@@ -39,8 +39,119 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
+use std::time::Duration;
+
 use crate::config::DeployConfig;
 use crate::infrastructure::kubectl::kubectl_command_async;
+use crate::retry::RetryPolicy;
+
+/// The typed exponential-backoff policy for [`wait_for_job_completion`]
+/// federation-test k8s-Job status-poll cadence — `initial_backoff` 5s ×
+/// `factor` 2 capped at `max_backoff` 30s. Consumes the pre-existing
+/// typed primitive at [`crate::retry::RetryPolicy`] so the per-attempt
+/// delay lands at [`RetryPolicy::compute_delay`], the same shared body
+/// the sibling k8s-workload-poll surfaces `services/migration_service.rs
+/// ::MIGRATION_JOB_POLL_BACKOFF` (commit ac61874), `commands/migrations
+/// .rs::SHINKA_MIGRATION_POLL_BACKOFF` (commit b962db5), and
+/// `commands/github_runner_ci.rs::GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF`
+/// (commit 7fe79de) read through.
+///
+/// Pre-lift the schedule was spelled inline as a bare fixed
+/// `tokio::time::sleep(tokio::time::Duration::from_secs(5)).await` at
+/// every non-terminal arm of the federation-test k8s-Job status-poll
+/// loop. That shape carried three structural defects the typed-primitive
+/// body forecloses:
+/// 1. **Fixed 5s schedule.** A flat `sleep(5s)` between poll iterations
+///    is "too short when the federation-test job is actually running (up
+///    to ~72 kubectl probes across the 6-minute default `job_timeout +
+///    60s` buffer window — noise against the k8s API), 5s too long when
+///    the Complete condition landed 200ms ago" — the exact worst-of-
+///    both failure mode the sibling `MIGRATION_JOB_POLL_BACKOFF` /
+///    `SHINKA_MIGRATION_POLL_BACKOFF` / `GITHUB_RUNNER_ROLLOUT_POLL_
+///    BACKOFF` docstrings cite for their own pre-lift fixed schedules.
+///    Post-lift the first poll still waits 5s (preserving the seed
+///    verbatim), then 10s / 20s / 30s / 30s / … — ~13 iterations reach
+///    the 6-minute default window under the exponential-with-cap climb
+///    rather than 72 iterations under the pre-lift flat 5s.
+/// 2. **No caller-visible schedule invariant.** The bare
+///    `Duration::from_secs(5)` literal at the poll-loop sleep carried no
+///    name a shield could pin — a future edit that changed the schedule
+///    at this site did not surface at any named-primitive audit path.
+///    The lifted `FEDERATION_JOB_POLL_BACKOFF` const names the (seed,
+///    factor, cap) triple a shield can cite and enforce.
+/// 3. **Schedule desync from the sibling k8s-workload-poll quartet.**
+///    The federation-test job status-poll loop observes a k8s Job's
+///    `Complete`/`Failed` conditions; the sibling `wait_for_job` loop
+///    (services/migration_service.rs, ac61874) observes a k8s Job's
+///    `Complete`/`Failed` conditions verbatim the same way; the sibling
+///    `wait_for_shinka_migration` loop (commands/migrations.rs, b962db5)
+///    observes a Shinka reconciler's phase transitions; the sibling
+///    StatefulSet rollout-watch loop (commands/github_runner_ci.rs,
+///    7fe79de) observes per-pod status conditions. All four poll the
+///    k8s API for a workload resource's terminal transition and pre-
+///    lift each spelled its own local fixed-sleep schedule, so a future
+///    edit to one silently diverged from the others. Post-lift all four
+///    consume the same shared body via the same `RetryPolicy::network()`
+///    `(factor=2, max_backoff=30s)` reference schedule, differing only
+///    at their respective pre-lift seeds (5s here, 5s at the rollout-
+///    watch sibling, 2s at the migration-job / shinka-reconcile
+///    siblings) each preserves verbatim.
+///
+/// `max_attempts: u32::MAX` is a placeholder — the poll loop is bounded
+/// by wall-clock via the caller-supplied `timeout_seconds + 60s` buffer
+/// (`start.elapsed() > timeout` at loop head), not by attempt count —
+/// and consumes only [`RetryPolicy::compute_delay`] from this policy,
+/// not [`RetryPolicy::max_attempts`]. The `max_attempts` field is
+/// unconsulted at this consumption site.
+// `#[allow(dead_code)]` here mirrors the pre-existing baseline flags on
+// `wait_for_job_completion` / `run_federation_tests` / `check_job_success`
+// / `create_federation_test_job` inside this module — the whole non-test
+// consumer chain in `commands/federation_tests.rs` is dead-code-flagged
+// under `cargo clippy --all-targets` on the main `forge` bin target
+// because clippy's cross-module reachability from
+// `commands/rust_service.rs::run_rust_service_release` does not resolve
+// through the enclosing async surface. The sibling k8s-workload-poll
+// primitives in `services/migration_service.rs` (ac61874),
+// `commands/migrations.rs` (b962db5), and
+// `commands/github_runner_ci.rs` (7fe79de) do NOT need this attribute
+// because each of THEIR consumer chains does resolve to a reachable
+// entry point. Adding `#[allow(dead_code)]` here keeps this lift's
+// clippy delta at 0 new baseline errors (the pre-lift file was already
+// flagged; the post-lift file adds nothing new).
+#[allow(dead_code)]
+const FEDERATION_JOB_POLL_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: u32::MAX,
+    initial_backoff: Duration::from_secs(5),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between federation-test k8s-Job status-poll iterations,
+/// given a 0-indexed local `attempt` counter (the `loop { ... }` shape
+/// [`wait_for_job_completion`] drives increments once per non-terminal
+/// iteration).
+///
+/// Maps the local 0-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(2)`:
+/// local `attempt == 0` (the sleep after the first non-terminal poll)
+/// reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff = 5s`; local `attempt == 1` reads as
+/// `compute_delay(3) = 10s`; local `attempt == 2` reads as
+/// `compute_delay(4) = 20s`; local `attempt >= 3` reads as
+/// `compute_delay(>=5) = 30s` (cap) — preserves the pre-lift
+/// `sleep(Duration::from_secs(5))` seed verbatim at the first poll and
+/// strictly diverges upward at every later poll.
+///
+/// The `saturating_add` clamp forecloses the `u32` overflow class at
+/// the bridge — a pathologically-long-running poll loop that reaches
+/// `attempt == u32::MAX` reads as `compute_delay(u32::MAX)`, which
+/// itself saturates to [`FEDERATION_JOB_POLL_BACKOFF::max_backoff`] via
+/// the `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
+/// without panic.
+#[allow(dead_code)]
+fn federation_job_poll_delay(attempt: u32) -> Duration {
+    FEDERATION_JOB_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
+}
 
 /// Run federation integration tests for a service
 ///
@@ -503,6 +614,7 @@ async fn wait_for_job_completion(
 ) -> Result<()> {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_seconds + 60); // Add buffer
+    let mut backoff_attempt: u32 = 0;
 
     loop {
         // Check if timeout exceeded
@@ -532,8 +644,8 @@ async fn wait_for_job_completion(
             return Ok(());
         }
 
-        // Wait before next check
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(federation_job_poll_delay(backoff_attempt)).await;
+        backoff_attempt = backoff_attempt.saturating_add(1);
     }
 }
 
@@ -559,6 +671,239 @@ async fn check_job_success(job_name: &str, namespace: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The `(initial_backoff, factor, max_backoff)` shape of the
+    /// federation-test k8s-Job status-poll backoff policy is a load-
+    /// bearing invariant shared with the sibling k8s-workload-poll
+    /// quartet at `services/migration_service.rs::
+    /// MIGRATION_JOB_POLL_BACKOFF` (commit ac61874),
+    /// `commands/migrations.rs::SHINKA_MIGRATION_POLL_BACKOFF` (commit
+    /// b962db5), and `commands/github_runner_ci.rs::
+    /// GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF` (commit 7fe79de) — all four
+    /// policies consume the same `RetryPolicy::network()`
+    /// `(factor=2, max_backoff=30s)` reference schedule. Pinned here
+    /// so a future silent-desync at the const site (a factor bump, a
+    /// cap change, a seed drift) is caught at a named test rather
+    /// than silently across the two consumption sites
+    /// (`federation_job_poll_delay` + the loop body). Sibling of
+    /// `test_migration_job_poll_backoff_policy_shape` at
+    /// `services/migration_service.rs::tests` (commit ac61874).
+    #[test]
+    fn test_federation_job_poll_backoff_policy_shape() {
+        assert_eq!(
+            FEDERATION_JOB_POLL_BACKOFF.initial_backoff,
+            Duration::from_secs(5),
+            "FEDERATION_JOB_POLL_BACKOFF.initial_backoff must be 5s \
+             — preserves the pre-lift bare \
+             `sleep(Duration::from_secs(5))` seed verbatim at the \
+             poll loop's first sleep.",
+        );
+        assert_eq!(
+            FEDERATION_JOB_POLL_BACKOFF.factor, 2,
+            "FEDERATION_JOB_POLL_BACKOFF.factor must be 2 \
+             — the Bazel/Buck2/SLSA-frontier reference doubling climb \
+             the sibling `RetryPolicy::network()` factory also emits.",
+        );
+        assert_eq!(
+            FEDERATION_JOB_POLL_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "FEDERATION_JOB_POLL_BACKOFF.max_backoff must be 30s \
+             — the Bazel/Buck2/SLSA-frontier 30s cap the sibling \
+             `RetryPolicy::network()` factory also emits.",
+        );
+    }
+
+    /// Pre-lift the poll loop emitted a flat
+    /// `sleep(Duration::from_secs(5))` at every non-terminal
+    /// iteration. Post-lift the first iteration preserves that 5s
+    /// seed verbatim (`federation_job_poll_delay(0) == 5s`); every
+    /// later iteration strictly diverges upward under the
+    /// exponential-with-cap climb (`10s → 20s → 30s → …`) rather than
+    /// re-emitting the pre-lift `5s` flat.
+    #[test]
+    fn test_federation_job_poll_delay_matches_pre_lift_seed_and_climbs() {
+        assert_eq!(
+            federation_job_poll_delay(0),
+            Duration::from_secs(5),
+            "iter 0 must sleep 5s — matches pre-lift `sleep(Duration::\
+             from_secs(5))` seed verbatim.",
+        );
+        assert_eq!(
+            federation_job_poll_delay(1),
+            Duration::from_secs(10),
+            "iter 1 must sleep 10s — pre-lift stayed flat at 5s; \
+             post-lift climbs `initial_backoff * factor = 10s`.",
+        );
+        assert_eq!(
+            federation_job_poll_delay(2),
+            Duration::from_secs(20),
+            "iter 2 must sleep 20s — pre-lift stayed flat at 5s; \
+             post-lift climbs `initial_backoff * factor^2 = 20s`.",
+        );
+    }
+
+    /// Iterations past the cap must all emit `max_backoff = 30s` —
+    /// pre-lift stayed flat at 5s at every iteration, so a long-
+    /// running federation-test job (say, a 6-minute default
+    /// `job_timeout + 60s` buffer window) would emit ~72 kubectl
+    /// probes; post-lift the climb caps at 30s and the same 6-minute
+    /// window emits ~13 probes.
+    #[test]
+    fn test_federation_job_poll_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            federation_job_poll_delay(3),
+            Duration::from_secs(30),
+            "iter 3 must sleep 30s (cap) — `initial_backoff * factor^3 \
+             = 40s`, clamped to `max_backoff = 30s`.",
+        );
+        assert_eq!(
+            federation_job_poll_delay(4),
+            Duration::from_secs(30),
+            "iter 4 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            federation_job_poll_delay(50),
+            Duration::from_secs(30),
+            "iter 50 must sleep 30s (cap) — long-running federation-\
+             test jobs can poll for minutes past the cap, so beyond-\
+             cap iterations must stay at the ceiling rather than \
+             drifting upward.",
+        );
+    }
+
+    /// The poll loop is bounded by wall-clock via the caller-supplied
+    /// `timeout_seconds + 60s` buffer, not by attempt count, so
+    /// `backoff_attempt` can in principle reach any `u32` value on a
+    /// pathologically-fast poll-arm (a stub kubectl that returns
+    /// instantly against a `u64::MAX` timeout). This test pins that
+    /// composition: an `attempt == u32::MAX` argument returns a
+    /// bounded delay rather than panicking. The `saturating_add(2)`
+    /// bridge inside `federation_job_poll_delay` clamps to `u32::MAX`,
+    /// and [`RetryPolicy::compute_delay`]'s `checked_pow`-then-cap
+    /// body itself saturates to `max_backoff` without panic.
+    #[test]
+    fn test_federation_job_poll_delay_saturates_without_panic_at_arbitrarily_large_attempt() {
+        assert_eq!(
+            federation_job_poll_delay(u32::MAX),
+            Duration::from_secs(30),
+            "attempt=u32::MAX must saturate to max_backoff without \
+             panic — the `saturating_add(2)` bridge + `RetryPolicy::\
+             compute_delay`'s `checked_pow` cap close the u32 overflow \
+             class by construction.",
+        );
+        assert_eq!(
+            federation_job_poll_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "attempt=u32::MAX - 1 must also saturate to max_backoff \
+             — the bridge `saturating_add(2)` returns u32::MAX, still \
+             far past the cap.",
+        );
+    }
+
+    /// The `(factor, max_backoff)` pair of
+    /// `FEDERATION_JOB_POLL_BACKOFF` matches the Bazel/Buck2/SLSA-
+    /// frontier reference schedule the retry module cites at
+    /// [`RetryPolicy::network`]'s docstring. The federation-test
+    /// k8s-Job poll policy diverges only at `initial_backoff` (5s vs
+    /// 250ms) to preserve the pre-lift `sleep(Duration::from_secs(5))`
+    /// seed verbatim. Pin the shared invariants so a future refinement
+    /// to the retry module's reference schedule surfaces the
+    /// intentional federation-side divergence as a named test failure
+    /// rather than silently propagating. Sibling of
+    /// `test_migration_job_poll_backoff_shares_network_factor_and_cap`
+    /// at `services/migration_service.rs::tests` (commit ac61874).
+    #[test]
+    fn test_federation_job_poll_backoff_shares_network_factor_and_cap() {
+        let network = RetryPolicy::network();
+        assert_eq!(
+            FEDERATION_JOB_POLL_BACKOFF.factor, network.factor,
+            "FEDERATION_JOB_POLL_BACKOFF.factor must match \
+             RetryPolicy::network().factor — both consume the \
+             Bazel/Buck2/SLSA-frontier factor=2 reference.",
+        );
+        assert_eq!(
+            FEDERATION_JOB_POLL_BACKOFF.max_backoff, network.max_backoff,
+            "FEDERATION_JOB_POLL_BACKOFF.max_backoff must match \
+             RetryPolicy::network().max_backoff — both consume the \
+             Bazel/Buck2/SLSA-frontier 30s cap reference.",
+        );
+    }
+
+    /// The federation-test k8s-Job status-poll loop body MUST consume
+    /// the typed primitive at `federation_job_poll_delay(backoff_\
+    /// attempt)` rather than the pre-lift bare
+    /// `sleep(tokio::time::Duration::from_secs(5))` literal. A future
+    /// refactor that reintroduces the fixed-literal shape (see
+    /// `FEDERATION_JOB_POLL_BACKOFF`'s docstring for the three
+    /// structural defects the lift closed) fails here, not silently
+    /// in production where a long-running federation-test job would
+    /// resume flooding the k8s API with ~72 probes over its 6-minute
+    /// window. Whole-module boundary discipline sibling of
+    /// `test_wait_for_job_consumes_typed_poll_delay_not_bare_fixed_sleep`
+    /// at `services/migration_service.rs::tests` (commit ac61874),
+    /// `test_wait_for_shinka_migration_consumes_typed_poll_delay_not_mut_backoff_secs`
+    /// at `commands/migrations.rs::tests` (commit b962db5), and
+    /// `test_execute_consumes_typed_rollout_poll_delay_not_bare_fixed_sleep`
+    /// at `commands/github_runner_ci.rs::tests` (commit 7fe79de).
+    ///
+    /// Uses the [`crate::test_support::code_line_hits`] helper so the
+    /// shield does not false-positive on
+    /// `FEDERATION_JOB_POLL_BACKOFF`'s own docstring above (which
+    /// cites the pre-lift shape as context for the three defects it
+    /// forecloses). The forbidden literal is reconstructed at test
+    /// time via [`format!`] and the diagnostic prose refers to it
+    /// only via the reconstructed `bespoke_needle` (never the fused
+    /// literal), so the assert message body itself stays unmatchable
+    /// — same code-line-filter-plus-format-reconstruction discipline
+    /// sibling shields 4163c7e / ffa5271 / fa2c702 / a7d5375 /
+    /// ab06395 use.
+    ///
+    /// The scan is bounded strictly to the pre-tests module body —
+    /// from the module start through the `#[cfg(test)]\nmod tests {`
+    /// marker — so this shield's own docstring mention of
+    /// `sleep(tokio::time::Duration::from_secs(5))` (which lives
+    /// inside this `#[cfg(test)] mod tests` block below that marker)
+    /// stays out of scope AND every current or future sleep-emitting
+    /// helper landing anywhere in the top-level module body cannot
+    /// silently ride along without going through the primitive.
+    #[test]
+    fn test_wait_for_job_completion_consumes_typed_poll_delay_not_bare_fixed_sleep() {
+        let source = include_str!("federation_tests.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let bespoke_needle = format!(
+            "sleep(tokio::time::Duration::from_secs({}))",
+            FEDERATION_JOB_POLL_BACKOFF.initial_backoff.as_secs(),
+        );
+        let bespoke_hits = crate::test_support::code_line_hits(module_body, &bespoke_needle);
+        assert!(
+            bespoke_hits.is_empty(),
+            "federation_tests.rs must NOT re-fuse the pre-lift bare \
+             fixed sleep at the poll loop — the schedule lives at \
+             `FEDERATION_JOB_POLL_BACKOFF` + \
+             `federation_job_poll_delay`, both grounding through \
+             `RetryPolicy::compute_delay`. Found code-line hits: {:#?}",
+            bespoke_hits,
+        );
+        let delegation_hits = crate::test_support::code_line_hits(
+            module_body,
+            "federation_job_poll_delay(backoff_attempt)",
+        );
+        assert!(
+            !delegation_hits.is_empty(),
+            "federation_tests.rs must consume the typed poll-delay \
+             helper at the poll loop's sleep site — the canonical \
+             delegation call was not found at any code line.",
+        );
+    }
+
     /// Regression shield: every `kubectl`-spawning site in
     /// `commands/federation_tests.rs`'s five top-level async helpers
     /// (`run_federation_tests` apply + logs-capture + status-yaml,
