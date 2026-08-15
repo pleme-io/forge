@@ -346,13 +346,10 @@ crate::impl_probe_outcome!(PodHealthOutcome, ProbeAbsent);
 /// pattern-match the typed three-arm enum.
 #[allow(dead_code)]
 pub fn parse_pod_health(json_text: &str) -> PodHealthOutcome {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+    let Some(items) = crate::probe_outcome::parse_kubectl_list_items(json_text) else {
         return PodHealthOutcome::ProbeAbsent;
     };
-    let Some(items) = value.get("items").and_then(|i| i.as_array()) else {
-        return PodHealthOutcome::ProbeAbsent;
-    };
-    for item in items {
+    for item in &items {
         let Some(status) = item.get("status") else {
             return PodHealthOutcome::UnhealthyPods;
         };

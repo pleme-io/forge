@@ -288,10 +288,7 @@ crate::impl_probe_outcome!(PodListingOutcome, ProbeAbsent);
 /// length; downstream consumers pattern-match the typed two-arm enum.
 #[allow(dead_code)]
 pub fn parse_pod_list(json_text: &str) -> PodListingOutcome {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
-        return PodListingOutcome::ProbeAbsent;
-    };
-    let Some(items) = value.get("items").and_then(|items| items.as_array()) else {
+    let Some(items) = crate::probe_outcome::parse_kubectl_list_items(json_text) else {
         return PodListingOutcome::ProbeAbsent;
     };
     PodListingOutcome::Counted { count: items.len() }

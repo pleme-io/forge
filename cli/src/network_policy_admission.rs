@@ -334,16 +334,13 @@ crate::impl_verified_outcome!(NetworkPolicyAdmissionOutcome);
 /// downstream consumers pattern-match the typed three-arm enum.
 #[allow(dead_code)]
 pub fn parse_networkpolicy_list(json_text: &str) -> NetworkPolicyAdmissionOutcome {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
-        return NetworkPolicyAdmissionOutcome::ProbeAbsent;
-    };
-    let Some(items) = value.get("items").and_then(|i| i.as_array()) else {
+    let Some(items) = crate::probe_outcome::parse_kubectl_list_items(json_text) else {
         return NetworkPolicyAdmissionOutcome::ProbeAbsent;
     };
     if items.is_empty() {
         return NetworkPolicyAdmissionOutcome::VerifyFailed;
     }
-    for item in items {
+    for item in &items {
         let has_pod_selector = item
             .get("spec")
             .and_then(|s| s.get("podSelector"))

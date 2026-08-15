@@ -82,6 +82,74 @@
 //! macro body, and the absent variant name is the only piece supplied
 //! by the caller.
 
+/// Extract the `items[]` array from a kubectl `-o json` list-shaped
+/// document, given the pre-captured stdout text. Both defects — JSON
+/// parse failure OR missing/non-array `.items` — collapse to `None`;
+/// every typed probe-outcome `parse_*_list` consumer maps `None ->
+/// *Outcome::ProbeAbsent`, preserving the load-bearing discriminator
+/// "did a probe run and produce a well-formed list document?" at ONE
+/// authoritative body.
+///
+/// # String-input peer of the [`Output`]-input primitive
+///
+/// This is the string-input peer of the [`Output`]-input
+/// [`crate::commands::status::kubectl_get_items`] primitive:
+/// - [`crate::commands::status::kubectl_get_items`] takes a captured
+///   [`std::process::Output`], short-circuits on non-success exit
+///   status, and propagates a JSON parse error through `?` — for use
+///   inside async fetch helpers whose direct caller owns a captured
+///   process handle and routes shape-domain errors via
+///   [`anyhow::Result`].
+/// - [`parse_kubectl_list_items`] takes pre-captured JSON text and
+///   collapses both parse failure and missing/non-array `.items` to a
+///   single `None` — for use inside typed probe-outcome parsers whose
+///   caller maps every defect to the shared `ProbeAbsent` variant.
+///
+/// [`Output`]: std::process::Output
+///
+/// # Consumers
+///
+/// - [`crate::pod_health::parse_pod_health`]
+/// - [`crate::network_policy_admission::parse_networkpolicy_list`]
+/// - [`crate::helm_release_signature::parse_helmrelease_list`]
+/// - [`crate::pod_listing::parse_pod_list`]
+///
+/// Four sibling call sites past THEORY §VI.1's "two is a coincidence;
+/// three is a law" threshold. Each pre-lift site spelled the verbatim
+/// five-line stanza:
+/// ```text
+/// let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+///     return *Outcome::ProbeAbsent;
+/// };
+/// let Some(items) = value.get("items").and_then(|i| i.as_array()) else {
+///     return *Outcome::ProbeAbsent;
+/// };
+/// ```
+/// where the two defect arms both return the same `ProbeAbsent`
+/// variant. Post-lift the parse-then-extract shape is authored at ONE
+/// body inside [`parse_kubectl_list_items`], and every consumer's
+/// call site collapses to `let Some(items) =
+/// crate::probe_outcome::parse_kubectl_list_items(json_text) else {
+/// return *Outcome::ProbeAbsent; };`.
+///
+/// # Ownership
+///
+/// Returns an owned [`Vec<serde_json::Value>`] (via `std::mem::take`
+/// on the parsed array — O(1) in the item count, no `.cloned()`
+/// deep-copy of the nested heap allocations). The parsed
+/// [`serde_json::Value`] parse tree is dropped after extraction, and
+/// consumers iterate freshly-owned array items via `for item in
+/// &items` without a borrow-lifetime dance around the pre-lift
+/// `.and_then(|i| i.as_array())` borrow of the transient parse tree.
+/// Mirrors the ownership discipline of the sibling
+/// [`crate::commands::status::kubectl_get_items`] primitive
+/// (`std::mem::take` on the parsed array; owned-Vec return).
+pub fn parse_kubectl_list_items(json_text: &str) -> Option<Vec<serde_json::Value>> {
+    let mut value: serde_json::Value = serde_json::from_str(json_text).ok()?;
+    let items = value.get_mut("items")?.as_array_mut()?;
+    Some(std::mem::take(items))
+}
+
 /// Common contract every typed probe outcome in forge's attestation
 /// pipeline implements. The single `is_probe_absent` method names the
 /// load-bearing structural discriminator the typed-primitive family
@@ -39658,6 +39726,193 @@ mod tests {
                     "reverse-direction PartialEq<AdmissionTier> for &[u8] must agree with forward-direction PartialEq<&[u8]> for AdmissionTier at ({tier:?}, {label:?})",
                 );
             }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // `parse_kubectl_list_items` — the string-input peer of
+    // `commands::status::kubectl_get_items` — pins for the shape every
+    // typed probe-outcome `parse_*_list` consumer routes through post-
+    // lift. Both defects (invalid JSON, missing/non-array `.items`)
+    // collapse to `None`; consumers map `None -> *Outcome::ProbeAbsent`.
+    // ---------------------------------------------------------------
+
+    /// Invalid JSON collapses to `None`. Pre-lift the four consumer
+    /// sites (`pod_health::parse_pod_health`,
+    /// `network_policy_admission::parse_networkpolicy_list`,
+    /// `helm_release_signature::parse_helmrelease_list`,
+    /// `pod_listing::parse_pod_list`) each spelled `let Ok(value) =
+    /// serde_json::from_str::<serde_json::Value>(json_text) else {
+    /// return *Outcome::ProbeAbsent; };` verbatim — this shield pins
+    /// the primitive collapses the parse-failure world to the same
+    /// `None` at ONE body. A truncated / corrupt kubectl `-o json`
+    /// stdout (network glitch, RBAC-denied stderr echoed onto stdout,
+    /// mid-stream disconnect) is one of the two "no evidence collected"
+    /// worlds every pre-lift consumer mapped to `ProbeAbsent`.
+    #[test]
+    fn parse_kubectl_list_items_returns_none_on_invalid_json() {
+        assert!(super::parse_kubectl_list_items("not json at all").is_none());
+        assert!(super::parse_kubectl_list_items(r#"{"items":[}"#).is_none());
+        assert!(super::parse_kubectl_list_items("").is_none());
+    }
+
+    /// Missing `.items` field collapses to `None`. Pre-lift the four
+    /// consumer sites spelled `let Some(items) = value.get("items")
+    /// .and_then(|i| i.as_array()) else { return *Outcome::ProbeAbsent;
+    /// };` — this shield pins the primitive treats a valid JSON
+    /// document without an `.items` key as the same `None` world every
+    /// consumer collapsed to `ProbeAbsent`. Matches kubectl's error
+    /// document shape: a permission-denied / not-found `get -o json`
+    /// returns a `{"kind":"Status","status":"Failure","message":"..."}`
+    /// document with no `.items` field.
+    #[test]
+    fn parse_kubectl_list_items_returns_none_when_items_field_missing() {
+        assert!(super::parse_kubectl_list_items(r#"{}"#).is_none());
+        assert!(super::parse_kubectl_list_items(
+            r#"{"kind":"Status","status":"Failure","message":"forbidden"}"#
+        )
+        .is_none());
+        assert!(
+            super::parse_kubectl_list_items(r#"{"metadata":{"resourceVersion":"1"}}"#).is_none()
+        );
+    }
+
+    /// A `.items` field whose value is present but not an array
+    /// collapses to `None`. Pre-lift consumers' `.and_then(|i|
+    /// i.as_array())` guard mapped `null` / string / object at the
+    /// `.items` position to the same "no evidence" world as a
+    /// missing key — this shield pins the primitive preserves that
+    /// lenient-typing discipline. A future regression that swapped
+    /// `as_array_mut` for `as_object_mut` (or dropped the array-type
+    /// check) would silently accept a scalar `.items` value the four
+    /// pre-lift consumers all rejected.
+    #[test]
+    fn parse_kubectl_list_items_returns_none_when_items_field_is_not_an_array() {
+        assert!(super::parse_kubectl_list_items(r#"{"items":null}"#).is_none());
+        assert!(super::parse_kubectl_list_items(r#"{"items":"not-an-array"}"#).is_none());
+        assert!(super::parse_kubectl_list_items(r#"{"items":{"nested":"object"}}"#).is_none());
+        assert!(super::parse_kubectl_list_items(r#"{"items":42}"#).is_none());
+    }
+
+    /// A valid JSON document with an empty `.items` array returns
+    /// `Some(vec![])`. Structurally distinct from `None`: a probe RAN
+    /// and observed zero items (e.g., a namespace with no pods) versus
+    /// a probe that could not be classified. The `network_policy_admission`
+    /// consumer at `parse_networkpolicy_list` branches on
+    /// `items.is_empty()` to map to `VerifyFailed` — the "probe ran,
+    /// observed zero NetworkPolicies" world — which is distinct from
+    /// `ProbeAbsent`. This shield pins the empty-array discrimination
+    /// survives the lift; a regression that folded empty-array to
+    /// `None` would silently reclassify a probe-ran-with-zero-items
+    /// world as a probe-absent world at that consumer.
+    #[test]
+    fn parse_kubectl_list_items_returns_empty_vec_when_items_is_empty_array() {
+        let items = super::parse_kubectl_list_items(r#"{"items":[]}"#)
+            .expect("valid JSON with an empty `.items` array must be Some(empty), not None");
+        assert!(items.is_empty());
+    }
+
+    /// Items are returned in document order. All four pre-lift
+    /// consumer bodies iterated `for item in items` over the borrowed
+    /// `&Vec<Value>` — document order. This shield pins the owned-Vec
+    /// return preserves that order; a regression that reversed the
+    /// iteration (or shuffled via a HashMap intermediate) would
+    /// silently swap "first N HelmRelease" for "last N" at the
+    /// `helm_release_signature` consumer, or invert the pod-health
+    /// short-circuit at the first-unhealthy pod at `pod_health`.
+    #[test]
+    fn parse_kubectl_list_items_returns_items_in_document_order() {
+        let doc = r#"{
+            "items": [
+                {"metadata":{"name":"alpha"}},
+                {"metadata":{"name":"beta"}},
+                {"metadata":{"name":"gamma"}}
+            ]
+        }"#;
+        let items =
+            super::parse_kubectl_list_items(doc).expect("well-formed items array must be Some");
+        let names: Vec<&str> = items
+            .iter()
+            .filter_map(|it| {
+                it.get("metadata")
+                    .and_then(|m| m.get("name"))
+                    .and_then(|n| n.as_str())
+            })
+            .collect();
+        assert_eq!(names, ["alpha", "beta", "gamma"]);
+    }
+
+    /// Regression shield: `crate::probe_outcome::parse_kubectl_list_items`
+    /// is the ONLY consumer of the pre-lift five-line parse-and-extract
+    /// stanza across the four typed probe-outcome `parse_*_list`
+    /// consumers. Pre-lift each of the four sites (`pod_health`,
+    /// `network_policy_admission`, `helm_release_signature`,
+    /// `pod_listing`) spelled the verbatim stanza:
+    /// ```text
+    /// let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+    ///     return *Outcome::ProbeAbsent;
+    /// };
+    /// let Some(items) = value.get("items").and_then(|i| i.as_array()) else {
+    ///     return *Outcome::ProbeAbsent;
+    /// };
+    /// ```
+    /// A future regression that re-fused the pre-lift stanza at one of
+    /// the four sites (or at a new fifth `parse_*_list` consumer) would
+    /// silently split the "no well-formed items list → ProbeAbsent"
+    /// discipline across the primitive and the re-fused site. The
+    /// shield pins the discipline at ONE call site — the primitive
+    /// itself — by asserting the load-bearing unique needle
+    /// `serde_json::from_str::<serde_json::Value>(json_text)` (present
+    /// at exactly zero sites post-lift; the primitive spells the
+    /// generic `serde_json::from_str(json_text)` without the explicit
+    /// turbofish, and no other production body across the four files
+    /// uses `json_text` as the parse-input identifier) appears zero
+    /// times in each consumer's non-test body.
+    ///
+    /// Routes through [`crate::test_support::code_line_hits`] so
+    /// `///`-prefixed doc-comment mentions in fn docs (should any
+    /// future doc reference the pre-lift shape as prose) do not
+    /// self-match as phantom hits, the same code-line-filter
+    /// discipline the sibling `code_line_hits` consumers established
+    /// across prior claude-routine commits (ab06395 / a7d5375 /
+    /// fa2c702 / fd02aa6 / cc81215 / 3e26bbc / 4163c7e / ffa5271 /
+    /// 8eed602 / 59c3391). Slices each source at the
+    /// `\n#[cfg(test)]\nmod tests {` marker so the shield's own
+    /// docstring-embedded needle stays out of scope.
+    #[test]
+    fn parse_kubectl_list_items_is_only_json_items_parse_across_typed_probe_outcome_consumers() {
+        let needle = "serde_json::from_str::<serde_json::Value>(json_text)";
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+
+        for (path, source) in [
+            ("pod_health.rs", include_str!("pod_health.rs")),
+            (
+                "network_policy_admission.rs",
+                include_str!("network_policy_admission.rs"),
+            ),
+            (
+                "helm_release_signature.rs",
+                include_str!("helm_release_signature.rs"),
+            ),
+            ("pod_listing.rs", include_str!("pod_listing.rs")),
+        ] {
+            let body_end = source.find(tests_marker).unwrap_or(source.len());
+            let module_body = &source[..body_end];
+            let hits = crate::test_support::code_line_hits(module_body, needle);
+            assert!(
+                hits.is_empty(),
+                "{path} must route its `parse_*_list` consumer's \
+                 parse-and-extract stanza through \
+                 `crate::probe_outcome::parse_kubectl_list_items(json_text)` \
+                 so a future regression that re-fuses the pre-lift \
+                 `let Ok(value) = serde_json::from_str::<serde_json::Value>\
+                 (json_text) else {{ return *Outcome::ProbeAbsent; }}; \
+                 let Some(items) = value.get(\"items\").and_then(|i| \
+                 i.as_array()) else {{ return *Outcome::ProbeAbsent; }};` \
+                 stanza fails here rather than silently splitting the \
+                 discipline across the primitive and the re-fused site. \
+                 Found: {hits:?}"
+            );
         }
     }
 }

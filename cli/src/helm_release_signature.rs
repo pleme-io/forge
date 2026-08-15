@@ -340,13 +340,10 @@ crate::impl_verified_outcome!(HelmReleaseSignatureOutcome);
 /// claim.
 #[allow(dead_code)]
 pub fn parse_helmrelease_list(json_text: &str) -> HelmReleaseSignatureOutcome {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+    let Some(items) = crate::probe_outcome::parse_kubectl_list_items(json_text) else {
         return HelmReleaseSignatureOutcome::ProbeAbsent;
     };
-    let Some(items) = value.get("items").and_then(|i| i.as_array()) else {
-        return HelmReleaseSignatureOutcome::ProbeAbsent;
-    };
-    for item in items {
+    for item in &items {
         let signed = item
             .get("metadata")
             .and_then(|m| m.get("annotations"))
