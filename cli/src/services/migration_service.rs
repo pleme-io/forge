@@ -7,6 +7,88 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::domain::migration::{DatabaseType, MigrationConfig, MigrationResult};
+use crate::retry::RetryPolicy;
+
+/// The typed exponential-backoff policy for [`MigrationService::wait_for_job`]
+/// k8s-Job status-poll cadence — `initial_backoff` 2s × `factor` 2 capped at
+/// `max_backoff` 30s. Consumes the pre-existing typed primitive at
+/// [`crate::retry::RetryPolicy`] so the per-attempt delay lands at
+/// [`RetryPolicy::compute_delay`], the same shared body the sibling
+/// reconcile-poll surface `commands/migrations.rs::
+/// SHINKA_MIGRATION_POLL_BACKOFF` (commit b962db5), the flux polling-loops
+/// surface `commands/flux.rs::FLUX_POLL_BACKOFF` (commit 65de62f), the
+/// health-endpoint retry surface `commands/post_deploy_verification.rs::
+/// HEALTH_ENDPOINT_BACKOFF` (commit b5db3b6), and the web / integration
+/// test-suite retry surfaces (commits 9fd38d3 / e22b0a2) read through.
+///
+/// Pre-lift the schedule was spelled inline as a bare fixed
+/// `tokio::time::sleep(Duration::from_secs(2)).await` at every non-terminal
+/// arm of the k8s-Job status-poll loop. That shape carried three structural
+/// defects the typed-primitive body forecloses:
+/// 1. **Fixed 2s schedule.** A flat `sleep(2s)` between poll iterations is
+///    "too short when the migration is actually running (150 kubectl probes
+///    over a 5-minute job — noise against the k8s API), 2s too long when
+///    the Complete condition landed 100ms ago" — the exact worst-of-both
+///    failure mode the sibling `TEST_RETRY_BACKOFF` / `INTEGRATION_TEST_
+///    RETRY_BACKOFF` / `FLUX_POLL_BACKOFF` docstrings cite for their own
+///    pre-lift fixed / bespoke schedules. Post-lift, the first poll still
+///    waits 2s (preserving the seed verbatim), then 4s / 8s / 16s / 30s /
+///    30s / … — 13 iterations reach the 5-minute default timeout under the
+///    exponential-with-cap climb rather than 150 iterations under the
+///    pre-lift flat 2s.
+/// 2. **No caller-visible schedule invariant.** The bare
+///    `Duration::from_secs(2)` literal at the poll-loop sleep carried no
+///    name a shield could pin — a future edit that changed the schedule at
+///    this site did not surface at any named-primitive audit path. The
+///    lifted `MIGRATION_JOB_POLL_BACKOFF` const names the (seed, factor,
+///    cap) triple a shield can cite and enforce.
+/// 3. **Schedule desync from the sibling reconcile-poll surface.**
+///    The Shinka reconcile-poll loop and the k8s-Job status-poll loop
+///    poll the same class of resource (a k8s migration surface) with the
+///    same 2s seed — pre-lift each spelled its own local, so a future edit
+///    to one silently diverged from the other. Post-lift both consume the
+///    same shared body via the same `RetryPolicy::network()`
+///    `(factor=2, max_backoff=30s)` reference schedule, differing only at
+///    the shared 2s seed both preserve verbatim from their pre-lift shapes.
+///
+/// `max_attempts: u32::MAX` is a placeholder — the poll loop is bounded by
+/// wall-clock via [`MigrationService::timeout`] (`start.elapsed() > self.
+/// timeout` at loop head), not by attempt count — and consumes only
+/// [`RetryPolicy::compute_delay`] from this policy, not
+/// [`RetryPolicy::max_attempts`]. The `max_attempts` field is unconsulted
+/// at this consumption site.
+const MIGRATION_JOB_POLL_BACKOFF: RetryPolicy = RetryPolicy {
+    max_attempts: u32::MAX,
+    initial_backoff: Duration::from_secs(2),
+    factor: 2,
+    max_backoff: Duration::from_secs(30),
+};
+
+/// Backoff between k8s-Job status-poll iterations, given a 0-indexed local
+/// `attempt` counter (the `loop { ... }` shape
+/// [`MigrationService::wait_for_job`] drives increments once per
+/// non-terminal iteration).
+///
+/// Maps the local 0-indexed counter to the 1-indexed
+/// [`RetryPolicy::compute_delay`] attempt axis via `saturating_add(2)`:
+/// local `attempt == 0` (the sleep after the first non-terminal poll)
+/// reads as `compute_delay(2) = initial_backoff * factor^0 =
+/// initial_backoff = 2s`; local `attempt == 1` reads as `compute_delay(3)
+/// = 4s`; local `attempt == 2` reads as `compute_delay(4) = 8s`; local
+/// `attempt == 3` reads as `compute_delay(5) = 16s`; local `attempt >= 4`
+/// reads as `compute_delay(>=6) = 30s` (cap) — preserves the pre-lift
+/// `sleep(Duration::from_secs(2))` seed verbatim at the first poll and
+/// strictly diverges upward at every later poll.
+///
+/// The `saturating_add` clamp forecloses the `u32` overflow class at the
+/// bridge — a pathologically-long-running poll loop that reaches
+/// `attempt == u32::MAX` reads as `compute_delay(u32::MAX)`, which itself
+/// saturates to [`MIGRATION_JOB_POLL_BACKOFF::max_backoff`] via the
+/// `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
+/// without panic.
+fn migration_job_poll_delay(attempt: u32) -> Duration {
+    MIGRATION_JOB_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
+}
 
 /// Service for running database migrations
 pub struct MigrationService {
@@ -196,6 +278,7 @@ spec:
 
     async fn wait_for_job(&self, name: &str, namespace: &str) -> Result<()> {
         let start = Instant::now();
+        let mut backoff_attempt: u32 = 0;
 
         loop {
             if start.elapsed() > self.timeout {
@@ -241,7 +324,8 @@ spec:
                 anyhow::bail!("Migration job failed");
             }
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(migration_job_poll_delay(backoff_attempt)).await;
+            backoff_attempt = backoff_attempt.saturating_add(1);
         }
     }
 
@@ -276,6 +360,228 @@ mod tests {
     fn test_migration_service_with_timeout() {
         let service = MigrationService::with_timeout(Duration::from_secs(600));
         assert_eq!(service.timeout, Duration::from_secs(600));
+    }
+
+    /// The `(initial_backoff, factor, max_backoff)` shape of the k8s-Job
+    /// status-poll backoff policy is a load-bearing invariant shared with
+    /// the sibling reconcile-poll surface at `commands/migrations.rs::
+    /// SHINKA_MIGRATION_POLL_BACKOFF` — both policies consume the same
+    /// `RetryPolicy::network()` `(factor=2, max_backoff=30s)` reference
+    /// schedule and the same 2s seed. Pinned here so a future silent-
+    /// desync at the const site (a factor bump, a cap change, a seed
+    /// drift) is caught at a named test rather than silently across the
+    /// two consumption sites (`migration_job_poll_delay` + the loop
+    /// body). Sibling of `test_shinka_migration_poll_backoff_policy_shape`
+    /// at `commands/migrations.rs::tests` (commit b962db5).
+    #[test]
+    fn test_migration_job_poll_backoff_policy_shape() {
+        assert_eq!(
+            MIGRATION_JOB_POLL_BACKOFF.initial_backoff,
+            Duration::from_secs(2),
+            "MIGRATION_JOB_POLL_BACKOFF.initial_backoff must be 2s \
+             — preserves the pre-lift bare `sleep(Duration::from_secs(2))` \
+             seed verbatim at the poll loop's first sleep.",
+        );
+        assert_eq!(
+            MIGRATION_JOB_POLL_BACKOFF.factor, 2,
+            "MIGRATION_JOB_POLL_BACKOFF.factor must be 2 \
+             — the Bazel/Buck2/SLSA-frontier reference doubling climb \
+             the sibling `RetryPolicy::network()` factory also emits.",
+        );
+        assert_eq!(
+            MIGRATION_JOB_POLL_BACKOFF.max_backoff,
+            Duration::from_secs(30),
+            "MIGRATION_JOB_POLL_BACKOFF.max_backoff must be 30s \
+             — the Bazel/Buck2/SLSA-frontier 30s cap the sibling \
+             `RetryPolicy::network()` factory also emits.",
+        );
+    }
+
+    /// Pre-lift the poll loop emitted a flat `sleep(Duration::from_secs(2))`
+    /// at every non-terminal iteration. Post-lift the first iteration
+    /// preserves that 2s seed verbatim (`migration_job_poll_delay(0) ==
+    /// 2s`); every later iteration strictly diverges upward under the
+    /// exponential-with-cap climb (`4s → 8s → 16s → 30s → …`) rather than
+    /// re-emitting the pre-lift `2s` flat.
+    #[test]
+    fn test_migration_job_poll_delay_matches_pre_lift_seed_and_climbs() {
+        assert_eq!(
+            migration_job_poll_delay(0),
+            Duration::from_secs(2),
+            "iter 0 must sleep 2s — matches pre-lift `sleep(Duration::\
+             from_secs(2))` seed verbatim.",
+        );
+        assert_eq!(
+            migration_job_poll_delay(1),
+            Duration::from_secs(4),
+            "iter 1 must sleep 4s — pre-lift stayed flat at 2s; \
+             post-lift climbs `initial_backoff * factor = 4s`.",
+        );
+        assert_eq!(
+            migration_job_poll_delay(2),
+            Duration::from_secs(8),
+            "iter 2 must sleep 8s — pre-lift stayed flat at 2s; \
+             post-lift climbs `initial_backoff * factor^2 = 8s`.",
+        );
+        assert_eq!(
+            migration_job_poll_delay(3),
+            Duration::from_secs(16),
+            "iter 3 must sleep 16s — pre-lift stayed flat at 2s; \
+             post-lift climbs `initial_backoff * factor^3 = 16s`.",
+        );
+    }
+
+    /// Iterations past the cap must all emit `max_backoff = 30s` — pre-lift
+    /// stayed flat at 2s at every iteration, so a long-running migration
+    /// (say, a 5-minute Databend backfill against the default
+    /// [`MigrationService::new`] `timeout: 300s`) would emit ~150 kubectl
+    /// probes; post-lift the climb caps at 30s and the same 5-minute window
+    /// emits ~13 probes.
+    #[test]
+    fn test_migration_job_poll_delay_caps_at_max_backoff_past_the_cap() {
+        assert_eq!(
+            migration_job_poll_delay(4),
+            Duration::from_secs(30),
+            "iter 4 must sleep 30s (cap) — `initial_backoff * factor^4 \
+             = 32s`, clamped to `max_backoff = 30s`.",
+        );
+        assert_eq!(
+            migration_job_poll_delay(5),
+            Duration::from_secs(30),
+            "iter 5 must sleep 30s (cap).",
+        );
+        assert_eq!(
+            migration_job_poll_delay(50),
+            Duration::from_secs(30),
+            "iter 50 must sleep 30s (cap) — long-running migrations can \
+             poll for minutes past the cap, so beyond-cap iterations must \
+             stay at the ceiling rather than drifting upward.",
+        );
+    }
+
+    /// The poll loop is bounded by wall-clock via
+    /// [`MigrationService::timeout`], not by attempt count, so
+    /// `backoff_attempt` can in principle reach any `u32` value on a
+    /// pathologically-fast poll-arm (a stub kubectl that returns instantly
+    /// against a `with_timeout(Duration::MAX)` service). This test pins
+    /// that composition: an `attempt == u32::MAX` argument returns a
+    /// bounded delay rather than panicking. The `saturating_add(2)` bridge
+    /// inside `migration_job_poll_delay` clamps to `u32::MAX`, and
+    /// [`RetryPolicy::compute_delay`]'s `checked_pow`-then-cap body itself
+    /// saturates to `max_backoff` without panic.
+    #[test]
+    fn test_migration_job_poll_delay_saturates_without_panic_at_arbitrarily_large_attempt() {
+        assert_eq!(
+            migration_job_poll_delay(u32::MAX),
+            Duration::from_secs(30),
+            "attempt=u32::MAX must saturate to max_backoff without panic \
+             — the `saturating_add(2)` bridge + `RetryPolicy::compute_\
+             delay`'s `checked_pow` cap close the u32 overflow class by \
+             construction.",
+        );
+        assert_eq!(
+            migration_job_poll_delay(u32::MAX - 1),
+            Duration::from_secs(30),
+            "attempt=u32::MAX - 1 must also saturate to max_backoff — \
+             the bridge `saturating_add(2)` returns u32::MAX, still far \
+             past the cap.",
+        );
+    }
+
+    /// The `(factor, max_backoff)` pair of `MIGRATION_JOB_POLL_BACKOFF`
+    /// matches the Bazel/Buck2/SLSA-frontier reference schedule the retry
+    /// module cites at [`RetryPolicy::network`]'s docstring. The k8s-Job
+    /// poll policy diverges only at `initial_backoff` (2s vs 250ms) to
+    /// preserve the pre-lift `sleep(Duration::from_secs(2))` seed
+    /// verbatim. Pin the shared invariants so a future refinement to the
+    /// retry module's reference schedule surfaces the intentional
+    /// k8s-Job-side divergence as a named test failure rather than
+    /// silently propagating. Sibling of
+    /// `test_shinka_migration_poll_backoff_shares_network_factor_and_cap`
+    /// at `commands/migrations.rs::tests` (commit b962db5).
+    #[test]
+    fn test_migration_job_poll_backoff_shares_network_factor_and_cap() {
+        let network = RetryPolicy::network();
+        assert_eq!(
+            MIGRATION_JOB_POLL_BACKOFF.factor, network.factor,
+            "MIGRATION_JOB_POLL_BACKOFF.factor must match \
+             RetryPolicy::network().factor — both consume the \
+             Bazel/Buck2/SLSA-frontier factor=2 reference.",
+        );
+        assert_eq!(
+            MIGRATION_JOB_POLL_BACKOFF.max_backoff, network.max_backoff,
+            "MIGRATION_JOB_POLL_BACKOFF.max_backoff must match \
+             RetryPolicy::network().max_backoff — both consume the \
+             Bazel/Buck2/SLSA-frontier 30s cap reference.",
+        );
+    }
+
+    /// The k8s-Job status-poll loop body MUST consume the typed primitive
+    /// at `migration_job_poll_delay(backoff_attempt)` rather than the
+    /// pre-lift bare `sleep(Duration::from_secs(2))` literal. A future
+    /// refactor that reintroduces the fixed-literal shape (see
+    /// `MIGRATION_JOB_POLL_BACKOFF`'s docstring for the three structural
+    /// defects the lift closed) fails here, not silently in production
+    /// where a long-running migration would resume flooding the k8s API
+    /// with ~150 probes over its 5-minute window. Whole-module boundary
+    /// discipline sibling of
+    /// `test_wait_for_shinka_migration_consumes_typed_poll_delay_not_mut_backoff_secs`
+    /// at `commands/migrations.rs::tests` (commit b962db5).
+    ///
+    /// Uses the [`crate::test_support::code_line_hits`] helper so the
+    /// shield does not false-positive on `MIGRATION_JOB_POLL_BACKOFF`'s
+    /// own docstring above (which cites the pre-lift shape as context
+    /// for the three defects it forecloses). The forbidden literal is
+    /// reconstructed at test time via [`format!`] and the diagnostic
+    /// prose refers to it only via the reconstructed `bespoke_needle`
+    /// (never the fused literal), so the assert message body itself stays
+    /// unmatchable — same code-line-filter-plus-format-reconstruction
+    /// discipline sibling shields 4163c7e / ffa5271 / fa2c702 / a7d5375 /
+    /// ab06395 use.
+    ///
+    /// The scan is bounded strictly to the pre-tests module body — from
+    /// the module start through the `#[cfg(test)]\nmod tests {` marker —
+    /// so this shield's own docstring mention of `sleep(Duration::from_\
+    /// secs(2))` (which lives inside this `#[cfg(test)] mod tests` block
+    /// below that marker) stays out of scope AND every current or future
+    /// sleep-emitting helper landing anywhere in the top-level module
+    /// body cannot silently ride along without going through the
+    /// primitive.
+    #[test]
+    fn test_wait_for_job_consumes_typed_poll_delay_not_bare_fixed_sleep() {
+        let source = include_str!("migration_service.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let bespoke_needle = format!(
+            "sleep(Duration::from_secs({}))",
+            MIGRATION_JOB_POLL_BACKOFF.initial_backoff.as_secs(),
+        );
+        let bespoke_hits = crate::test_support::code_line_hits(module_body, &bespoke_needle);
+        assert!(
+            bespoke_hits.is_empty(),
+            "migration_service.rs must NOT re-fuse the pre-lift bare \
+             fixed sleep at the poll loop — the schedule lives at \
+             `MIGRATION_JOB_POLL_BACKOFF` + `migration_job_poll_delay`, \
+             both grounding through `RetryPolicy::compute_delay`. Found \
+             code-line hits: {:#?}",
+            bespoke_hits,
+        );
+        let delegation_hits = crate::test_support::code_line_hits(
+            module_body,
+            "migration_job_poll_delay(backoff_attempt)",
+        );
+        assert!(
+            !delegation_hits.is_empty(),
+            "migration_service.rs must consume the typed poll-delay \
+             helper at the poll loop's sleep site — the canonical \
+             delegation call was not found at any code line.",
+        );
     }
 
     /// Shield: every `kubectl` spawn inside `impl MigrationService`
