@@ -212,11 +212,12 @@ pub async fn execute(
     // Load deploy.yaml - check deploy/{service_name}.yaml first (outside Nix source tree),
     // then fall back to service_dir/deploy.yaml for backward compatibility.
     let service_dir_path = PathBuf::from(service_dir);
-    let deploy_yaml_path = if let Some(product_dir) = find_product_dir_from_service(&service_dir_path) {
-        crate::config::resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
-    } else {
-        service_dir_path.join("deploy.yaml")
-    };
+    let deploy_yaml_path =
+        if let Some(product_dir) = find_product_dir_from_service(&service_dir_path) {
+            crate::config::resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
+        } else {
+            service_dir_path.join("deploy.yaml")
+        };
     if !deploy_yaml_path.exists() {
         anyhow::bail!("No deploy.yaml found at: {}", deploy_yaml_path.display());
     }
@@ -681,11 +682,7 @@ async fn fetch_statefulset(namespace: &str, name: &str) -> Result<StatefulSetInf
         .output()
         .await?;
 
-    if !output.status.success() {
-        anyhow::bail!("StatefulSet not found");
-    }
-
-    let sts: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let sts = kubectl_get_item(&output, "StatefulSet not found")?;
     let status = sts.get("status").unwrap_or(&serde_json::Value::Null);
 
     let ready = status
@@ -725,11 +722,7 @@ async fn fetch_redis(namespace: &str, name: &str) -> Result<ResourceInfo> {
         .output()
         .await?;
 
-    if !output.status.success() {
-        anyhow::bail!("Redis deployment not found");
-    }
-
-    let dep: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let dep = kubectl_get_item(&output, "Redis deployment not found")?;
     let status = dep.get("status").unwrap_or(&serde_json::Value::Null);
 
     let ready = status
@@ -762,11 +755,7 @@ async fn fetch_redis_statefulset(namespace: &str, name: &str) -> Result<Resource
         .output()
         .await?;
 
-    if !output.status.success() {
-        anyhow::bail!("Redis statefulset not found");
-    }
-
-    let sts: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let sts = kubectl_get_item(&output, "Redis statefulset not found")?;
     let status = sts.get("status").unwrap_or(&serde_json::Value::Null);
 
     let ready = status
@@ -799,11 +788,7 @@ async fn fetch_configmap(namespace: &str, name: &str) -> Result<ConfigMapInfo> {
         .output()
         .await?;
 
-    if !output.status.success() {
-        anyhow::bail!("ConfigMap not found");
-    }
-
-    let cm: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let cm = kubectl_get_item(&output, "ConfigMap not found")?;
     let data = cm.get("data").and_then(|d| d.as_object());
 
     let keys: Vec<String> = data
@@ -866,6 +851,71 @@ fn kubectl_get_items(output: &std::process::Output) -> Result<Vec<serde_json::Va
         Some(serde_json::Value::Array(arr)) => std::mem::take(arr),
         _ => vec![],
     })
+}
+
+/// Parse a `kubectl get <resource> <name> -o json` single-object output
+/// into its JSON document, bailing with `not_found_msg` on a non-success
+/// exit.
+///
+/// # Single-object peer of the list-shaped primitive
+///
+/// Sibling primitive to [`kubectl_get_items`] on the list-shaped
+/// surface. The two primitives split by consumer-side default
+/// discipline:
+///
+/// - [`kubectl_get_items`] collapses kubectl unavailability to
+///   `Ok(vec![])` — list-shaped consumers (`fetch_secrets`,
+///   `fetch_k8s_services`, `fetch_migrations`, `fetch_events`) treat a
+///   missing collection as an empty result summary because the whole
+///   status render must survive a `kubectl get secrets` RBAC-denial or
+///   missing-CRD without failing the sibling fetches.
+/// - [`kubectl_get_item`] collapses kubectl unavailability to
+///   `Err(not_found_msg)` — single-object consumers use the fetched
+///   document as an unconditional dependency for downstream field
+///   extraction, so a missing document is a bail-out error, not an
+///   empty-doc default that would surface a fabricated
+///   `{readyReplicas: 0, replicas: 0} → "Ready"` summary in place of
+///   the "the resource does not exist" world.
+///
+/// # Cases
+///
+/// - **Non-success exit** — bails with `not_found_msg` verbatim. The
+///   four pre-lift consumer sites each spelled `if
+///   !output.status.success() { anyhow::bail!("<caller-specific
+///   msg>"); }` verbatim. Even when stdout carries a nominally valid
+///   JSON document, a non-success exit MUST short-circuit before the
+///   parse: kubectl's error-document shape can appear on stdout while
+///   the exit status carries the real result.
+/// - **Success + valid JSON** — returns the parsed
+///   [`serde_json::Value`]. Consumers extract fields via `.get`,
+///   `.pointer`, etc.
+/// - **Success + invalid JSON** — propagates the [`serde_json::Error`]
+///   through `?`. Mirrors the [`kubectl_get_items`] discipline: a
+///   corrupt/truncated stdout under a success exit is an error at the
+///   fetch site, not a silent empty document.
+///
+/// # Consumers
+///
+/// - [`fetch_statefulset`] — bails `"StatefulSet not found"`
+/// - [`fetch_redis`] — bails `"Redis deployment not found"`
+/// - [`fetch_redis_statefulset`] — bails `"Redis statefulset not found"`
+/// - [`fetch_configmap`] — bails `"ConfigMap not found"`
+///
+/// Four sibling call sites past the "two is a coincidence; three is a
+/// law" threshold — see the retry-schedule
+/// (`RetryPolicy::compute_delay`), helm-error-branch
+/// (`ensure_helm_success`), release-tracker HTTP-error
+/// (`ensure_success` + `format_failure`), and list-shaped fetch
+/// (`kubectl_get_items`) sibling lifts on the prior claude-routine
+/// chain.
+fn kubectl_get_item(
+    output: &std::process::Output,
+    not_found_msg: &str,
+) -> Result<serde_json::Value> {
+    if !output.status.success() {
+        anyhow::bail!("{}", not_found_msg);
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
 }
 
 async fn fetch_secrets(namespace: &str, deployment_name: &str) -> Result<Vec<String>> {
@@ -1749,6 +1799,177 @@ mod tests {
              fifth list-shaped helper) fails here rather than silently \
              splitting the discipline across the primitive and the \
              re-fused site. Found: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn kubectl_get_item_bails_with_msg_on_non_success_exit_status() {
+        // Pre-lift the four `fetch_*` single-object consumer sites
+        // (`fetch_statefulset`, `fetch_redis`, `fetch_redis_statefulset`,
+        // `fetch_configmap`) each spelled `if !output.status.success() {
+        // anyhow::bail!("<msg>"); }` verbatim before the JSON parse.
+        // This shield pins the primitive bails with the caller-supplied
+        // message verbatim on non-success exit — a downstream operator's
+        // grep target ("StatefulSet not found" in the render error stream)
+        // survives the lift byte-for-byte.
+        let out = make_output(false, b"", b"kubectl error");
+        let err = super::kubectl_get_item(&out, "StatefulSet not found")
+            .expect_err("non-success exit must bail");
+        assert_eq!(err.to_string(), "StatefulSet not found");
+    }
+
+    #[test]
+    fn kubectl_get_item_bails_ignoring_stdout_bytes_on_non_success_exit_status() {
+        // The pre-lift consumers all discarded stdout when exit was
+        // non-success: the `if !output.status.success() { bail!(); }`
+        // arm short-circuits BEFORE the `serde_json::from_slice` parse.
+        // This shield pins that: even when stdout carries a nominally
+        // valid single-object JSON document (the fabricated shape a
+        // kubectl-server-side error might leak alongside a non-zero
+        // exit — a "success"-shaped body with a failure exit), the
+        // primitive MUST bail with the caller message rather than
+        // parse-and-return the stdout doc. A caller that saw the
+        // stdout-emitted `readyReplicas: 999` payload would silently
+        // surface a stale kubectl response as if the resource were
+        // healthy.
+        let out = make_output(
+            false,
+            br#"{"status":{"readyReplicas":999,"replicas":999}}"#,
+            b"",
+        );
+        let err = super::kubectl_get_item(&out, "Redis deployment not found")
+            .expect_err("non-success exit must bail regardless of stdout payload");
+        assert_eq!(err.to_string(), "Redis deployment not found");
+    }
+
+    #[test]
+    fn kubectl_get_item_returns_parsed_json_on_success_with_valid_json() {
+        // Pre-lift the four consumer sites all spelled `let X:
+        // serde_json::Value = serde_json::from_slice(&output.stdout)?;`
+        // immediately after the success guard. This shield pins the
+        // primitive returns the parsed document verbatim so downstream
+        // `.get("status")`, `.pointer("/spec/replicas")`, and `.as_object()`
+        // extractions the four consumers apply post-lift compose
+        // identically against the returned `serde_json::Value`.
+        let out = make_output(
+            true,
+            br#"{"metadata":{"name":"cache"},"status":{"readyReplicas":3,"replicas":3}}"#,
+            b"",
+        );
+        let doc = super::kubectl_get_item(&out, "unused not-found msg")
+            .expect("success + valid JSON is Ok(doc)");
+        assert_eq!(
+            doc.pointer("/status/readyReplicas")
+                .and_then(|v| v.as_i64()),
+            Some(3)
+        );
+        assert_eq!(
+            doc.pointer("/metadata/name").and_then(|v| v.as_str()),
+            Some("cache")
+        );
+    }
+
+    #[test]
+    fn kubectl_get_item_propagates_parse_error_on_invalid_json_with_success_exit() {
+        // Pre-lift the four consumer sites all spelled the parse as
+        // `serde_json::from_slice(&output.stdout)?` — a corrupt or
+        // truncated stdout under a success exit propagates the parse
+        // error through `?` to the caller. This shield pins that
+        // discipline at the primitive: a kubectl that exits 0 but
+        // emits invalid JSON (a shellshock-style scenario, or a
+        // truncated read from a slow kubectl-proxy) surfaces at the
+        // fetch site as a parse error, NOT as the caller-supplied
+        // `not_found_msg` (which would mislead the operator into
+        // believing the resource is absent when it is actually present
+        // with a corrupt response payload). Symmetric to the
+        // `kubectl_get_items_propagates_parse_error_on_invalid_json`
+        // shield the sibling list-shaped primitive carries.
+        let out = make_output(true, b"this is not json {{[", b"");
+        let err = super::kubectl_get_item(&out, "ConfigMap not found")
+            .expect_err("success + invalid JSON must propagate parse error");
+        // The parse error must NOT be the caller's not-found message;
+        // distinguishing the two failure modes is load-bearing for
+        // operator diagnosis.
+        assert_ne!(err.to_string(), "ConfigMap not found");
+    }
+
+    /// Regression shield: `kubectl_get_item` is the ONLY consumer of
+    /// the pre-lift `if !output.status.success() { anyhow::bail!("<X>
+    /// not found"); } let <var>: serde_json::Value = serde_json::
+    /// from_slice(&output.stdout)?;` stanza in `commands/status.rs`.
+    /// Pre-lift the four `fetch_*` single-object consumer sites
+    /// (`fetch_statefulset`, `fetch_redis`, `fetch_redis_statefulset`,
+    /// `fetch_configmap`) each spelled the verbatim four-line stanza:
+    /// ```text
+    /// if !output.status.success() {
+    ///     anyhow::bail!("<caller-specific msg>");
+    /// }
+    ///
+    /// let X: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    /// ```
+    /// where the two lines differ only in the `<caller-msg>` literal
+    /// and the pre-parse `let X` binding name. A future regression
+    /// that re-fused the pre-lift stanza at one of the four sites (or
+    /// at a new fifth single-object fetch helper) would silently
+    /// split the "kubectl unavailability → bail with a caller-visible
+    /// diagnostic" discipline across the primitive and the re-fused
+    /// site, re-introducing the "four-line stanza per site"
+    /// duplication this lift redeems. The shield pins the discipline
+    /// at ONE call site — the primitive itself — by asserting no code
+    /// line in the module body spells both `anyhow::bail!("` (the
+    /// one-line bail! literal invocation form) and `not found");` (the
+    /// pre-lift caller-visible diagnostic suffix). The one existing
+    /// `bail!(` at [`fetch_deployment`] uses the multi-line
+    /// `bail!(\n"Failed to get deployment '{}' in namespace '{}': {}"`
+    /// form whose `bail!(` opener has no `"` immediately after so
+    /// falls outside the compound needle, and whose diagnostic
+    /// carries `stderr` rather than `not found` so is orthogonal to
+    /// the lifted shape.
+    ///
+    /// The scan is bounded strictly to the module's non-test body via
+    /// the `\n#[cfg(test)]\nmod tests {` marker (same slice boundary
+    /// the sibling
+    /// `kubectl_get_items_is_only_json_items_parse_at_the_fetch_helper_bail_surface`
+    /// shield uses) so this shield's own docstring mention of
+    /// `anyhow::bail!("<X> not found");` stays out of scope. And
+    /// routes through [`crate::test_support::code_line_hits`] so
+    /// `///`-prefixed doc-comment mentions in the module body's fn
+    /// docs — should any future doc reference the pre-lift shape as
+    /// prose — do not self-match as phantom hits, the same
+    /// code-line-filter discipline the sibling `code_line_hits`
+    /// consumers established at prior claude-routine commits
+    /// (ab06395 / a7d5375 / fa2c702 / fd02aa6 / cc81215 / 3e26bbc /
+    /// 4163c7e / ffa5271 / 8eed602 / f6b4229 / 59c3391).
+    #[test]
+    fn kubectl_get_item_is_only_bail_not_found_parse_stanza_at_the_single_item_fetch_helper_surface(
+    ) {
+        let source = include_str!("status.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = source.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &source[..body_end];
+
+        let bail_hits = crate::test_support::code_line_hits(module_body, "anyhow::bail!(\"");
+        let compound_hits: Vec<String> = bail_hits
+            .into_iter()
+            .filter(|l| l.contains("not found\");"))
+            .collect();
+        assert!(
+            compound_hits.is_empty(),
+            "status.rs must route every single-object fetch helper's \
+             `if !output.status.success() {{ bail!(\"<X> not found\"); }} \
+             let <var>: serde_json::Value = serde_json::from_slice\
+             (&output.stdout)?;` stanza through `kubectl_get_item\
+             (&output, \"<X> not found\")?` so a future regression \
+             that re-fuses the pre-lift stanza at any of the four \
+             `fetch_*` single-object consumer sites (or at a new \
+             fifth single-object fetch helper) fails here rather than \
+             silently splitting the bail-with-diagnostic discipline \
+             across the primitive and the re-fused site. Found: \
+             {compound_hits:?}"
         );
     }
 }
