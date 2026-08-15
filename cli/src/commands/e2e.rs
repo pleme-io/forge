@@ -6,7 +6,7 @@
 //! - Integration: auto-starts Docker on macOS if not running
 //! - E2E: auto-builds and loads images if missing
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -63,6 +63,30 @@ fn docker_bin() -> String {
 /// this module observes, without an ambient-PATH intermediary.
 fn open_bin() -> String {
     get_tool_path("OPEN_BIN", "open")
+}
+
+/// Resolve the `cargo` binary via the `CARGO` env override, falling back
+/// to `cargo` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
+/// the canonical env-var-or-PATH lookup every cargo-invocation site in
+/// forge honors. Fourth landing of the `cargo_bin()` sigil after
+/// `commands/test_ci.rs:28` (916f1a4), `commands/prerelease.rs:109`
+/// (79e03a5), and `commands/developer_tools.rs:36` (534ef48) — the
+/// pattern is proven; `commands/e2e.rs` was the outlier still respelling
+/// the two-argument resolve at every consumer. Solve-once at the sigil
+/// (THEORY §I.5 — duplication budget zero; every recurring shape becomes
+/// a helper before it becomes duplicated code) means a future added
+/// `cargo` spawn in this module cannot silently re-copy the two-argument
+/// resolve and drift away from the `CARGO` override at exactly the tier
+/// the hermetic-runner contract binds. The `cargo_env_routing_tests`
+/// shield below asserts three invariants: no bare cargo-literal spawn in
+/// the module body (already landed pre-lift), `fn cargo_bin()` is
+/// defined, and the two-argument resolve appears in EXACTLY one place —
+/// only the sigil body — so a future added spawn cannot silently
+/// re-copy the resolve inline. Pre-lift the three consumer sites
+/// (`run_backend_unit_tests`, `run_backend_integration_tests`,
+/// `run_e2e_tests`) each spelled the two-argument resolve verbatim.
+fn cargo_bin() -> String {
+    get_tool_path("CARGO", "cargo")
 }
 
 /// The typed exponential-backoff policy for [`ensure_docker_running`]'s
@@ -364,7 +388,7 @@ fn ensure_test_suite_success(status: std::process::ExitStatus, suite: &str) -> R
 fn run_backend_unit_tests(backend_dir: &str, filter: Option<&str>) -> Result<()> {
     ui::print_info("Running cargo test --lib");
 
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.current_dir(backend_dir).arg("test").arg("--lib");
 
@@ -482,7 +506,7 @@ fn run_backend_integration_tests(backend_dir: &str, filter: Option<&str>) -> Res
     ui::print_info(&format!("Running cargo {}", args.join(" ")));
 
     let start = Instant::now();
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let status = Command::new(&cargo)
         .current_dir(backend_dir)
         .args(&args)
@@ -610,7 +634,7 @@ pub fn run_e2e_tests(
 
     let start = Instant::now();
 
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.current_dir(&backend_dir).args(&args);
 
@@ -1519,11 +1543,31 @@ mod cargo_env_routing_tests {
              A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
              contract substrate's mkRuntimeToolsEnv exports."
         );
+        // Sigil sibling: after the cargo_bin() lift, every consumer routes
+        // through the sigil, so `fn cargo_bin()` must be defined AND the
+        // two-argument resolve string must appear in EXACTLY one place —
+        // only the sigil body — so a future added spawn cannot silently
+        // re-copy the resolve inline and drift away from the sigil's
+        // single point of truth. Mirrors the sibling `cargo_bin()` shield
+        // pair on `commands/developer_tools.rs::test_developer_tools_routes_cargo_through_cargo_env_not_raw_command`
+        // (534ef48). THEORY §I.5: duplication budget zero.
         assert!(
-            body.contains("get_tool_path(\"CARGO\", \"cargo\")"),
-            "commands/e2e.rs must resolve the cargo binary via \
-             `get_tool_path(\"CARGO\", \"cargo\")` — the canonical \
-             lookup was not found in the module body."
+            body.contains("fn cargo_bin()"),
+            "commands/e2e.rs must define `cargo_bin()` — the sigil \
+             function that resolves the tools-registry `CARGO` override \
+             for every cargo spawn. Mirrors the `cargo_bin()` sigil at \
+             `commands/test_ci.rs:28`, `commands/prerelease.rs:109`, and \
+             `commands/developer_tools.rs:36`."
+        );
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("CARGO", "cargo");
+        let resolve_count = body.matches(two_arg_needle.as_str()).count();
+        assert_eq!(
+            resolve_count, 1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the `cargo_bin()` \
+             sigil), not {resolve_count} times — every consumer must route \
+             through `cargo_bin()`, not re-copy the resolve inline"
         );
     }
 }
