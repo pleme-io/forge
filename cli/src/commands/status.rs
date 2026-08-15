@@ -794,6 +794,74 @@ async fn kubectl_get_object(
         .with_context(|| format!("Failed to execute kubectl get {kind} {name} -n {namespace}"))
 }
 
+/// Spawn `kubectl` with the given `argv` and parse the resulting
+/// `-o json` list-shaped output into its `.items[]` array via the
+/// sibling [`kubectl_get_items`] primitive.
+///
+/// # Invocation-layer peer of `kubectl_get_object`
+///
+/// Owns the "spawn `kubectl_command_async().args(argv).output().await?`,
+/// then `kubectl_get_items(&output)?`" two-step composition every
+/// list-shaped `fetch_*` consumer site in this module drove verbatim.
+/// Four pre-lift call sites past THEORY.md §VI.1's three-times
+/// threshold:
+///
+/// - [`fetch_secrets`] — 6-arg `["get", "secrets", "-n", <ns>, "-o", "json"]`
+///   (unfiltered namespace list).
+/// - [`fetch_k8s_services`] — 8-arg with `-l app=<deployment>`.
+/// - [`fetch_migrations`] — 9-arg with `-l app=<deployment>` +
+///   `--sort-by=.metadata.creationTimestamp`.
+/// - [`fetch_events`] — 9-arg with `--field-selector=involvedObject.name=<X>`
+///   + `--sort-by=.lastTimestamp`.
+///
+/// # Why an invocation-layer primitive rather than a fully-fused
+/// `kubectl_list_items(kind, namespace, selector, ...) -> Vec<Value>`
+///
+/// The four call sites' argv shapes drift on three orthogonal axes:
+/// filtered vs unfiltered, label-selector vs field-selector, and
+/// sorted vs unsorted. A fully-fused helper would either force every
+/// site onto one shape (losing per-caller flexibility) or fork the
+/// primitive into four nearly-identical `kubectl_list_<flavor>`
+/// helpers. The invocation-layer split — `argv: &[&str]` as the sole
+/// input — keeps ONE body for the spawn + I/O + parse composition
+/// while letting each caller spell its own argv. Same
+/// invocation-vs-parsing-layer split discipline
+/// [`kubectl_get_object`] applies on the single-object surface.
+///
+/// # Context wrapper
+///
+/// A `.with_context(|| format!("Failed to execute kubectl {}", argv.join(" ")))`
+/// wraps the `.output().await` I/O error at ONE body — pre-lift the
+/// four sites carried a bare `?` with no spawn-failure context, so a
+/// PATH-lookup failure or process-limit exhaustion surfaced as an
+/// opaque `no such file or directory (os error 2)` at the fetch site,
+/// with no indication of which kubectl invocation failed (`fetch_secrets`
+/// and `fetch_events` fire the same second in `forge status`; a single
+/// opaque IO error offered no discrimination). Post-lift every
+/// spawn-failure at any of the four sites surfaces with the exact
+/// kubectl argv at the site of failure — a "sharpen the existing
+/// promise: error fidelity" pass parallel to [`kubectl_get_object`]'s
+/// context wrapper.
+///
+/// # Composition
+///
+/// Composes downstream through the parse-layer sibling
+/// [`kubectl_get_items`], which owns the "non-success exit collapses
+/// to `Ok(vec![])`, success + JSON with `.items[]` returns the moved
+/// array via `std::mem::take`, success + JSON without `.items[]`
+/// collapses to `Ok(vec![])`, success + invalid JSON propagates the
+/// parse error" branch matrix. This helper adds nothing to that
+/// matrix beyond the I/O `?` — the failure classification remains
+/// exactly the discipline the four pre-lift sites already honored.
+async fn kubectl_list_items(argv: &[&str]) -> Result<Vec<serde_json::Value>> {
+    let output = kubectl_command_async()
+        .args(argv)
+        .output()
+        .await
+        .with_context(|| format!("Failed to execute kubectl {}", argv.join(" ")))?;
+    kubectl_get_items(&output)
+}
+
 /// Parse a `kubectl get ... -o json` list-shaped output into its
 /// `.items[]` array, extracted as an owned `Vec<serde_json::Value>` so
 /// the caller can iterate/filter/map without threading a borrow of the
@@ -998,12 +1066,7 @@ fn replica_count(doc: &serde_json::Value, ptr: &str) -> i64 {
 }
 
 async fn fetch_secrets(namespace: &str, deployment_name: &str) -> Result<Vec<String>> {
-    let output = kubectl_command_async()
-        .args(["get", "secrets", "-n", namespace, "-o", "json"])
-        .output()
-        .await?;
-
-    let items = kubectl_get_items(&output)?;
+    let items = kubectl_list_items(&["get", "secrets", "-n", namespace, "-o", "json"]).await?;
 
     Ok(items
         .iter()
@@ -1014,21 +1077,17 @@ async fn fetch_secrets(namespace: &str, deployment_name: &str) -> Result<Vec<Str
 }
 
 async fn fetch_k8s_services(namespace: &str, deployment_name: &str) -> Result<Vec<ServiceInfo>> {
-    let output = kubectl_command_async()
-        .args([
-            "get",
-            "services",
-            "-n",
-            namespace,
-            "-l",
-            &format!("app={}", deployment_name),
-            "-o",
-            "json",
-        ])
-        .output()
-        .await?;
-
-    let items = kubectl_get_items(&output)?;
+    let items = kubectl_list_items(&[
+        "get",
+        "services",
+        "-n",
+        namespace,
+        "-l",
+        &format!("app={}", deployment_name),
+        "-o",
+        "json",
+    ])
+    .await?;
 
     Ok(items
         .iter()
@@ -1071,22 +1130,18 @@ async fn fetch_k8s_services(namespace: &str, deployment_name: &str) -> Result<Ve
 }
 
 async fn fetch_migrations(namespace: &str, deployment_name: &str) -> Result<Vec<MigrationInfo>> {
-    let output = kubectl_command_async()
-        .args([
-            "get",
-            "jobs",
-            "-n",
-            namespace,
-            "-l",
-            &format!("app={}", deployment_name),
-            "-o",
-            "json",
-            "--sort-by=.metadata.creationTimestamp",
-        ])
-        .output()
-        .await?;
-
-    let items = kubectl_get_items(&output)?;
+    let items = kubectl_list_items(&[
+        "get",
+        "jobs",
+        "-n",
+        namespace,
+        "-l",
+        &format!("app={}", deployment_name),
+        "-o",
+        "json",
+        "--sort-by=.metadata.creationTimestamp",
+    ])
+    .await?;
 
     // Take last 5 jobs
     Ok(items
@@ -1141,22 +1196,18 @@ async fn fetch_migrations(namespace: &str, deployment_name: &str) -> Result<Vec<
 }
 
 async fn fetch_events(namespace: &str, deployment_name: &str) -> Result<Vec<EventInfo>> {
-    let output = kubectl_command_async()
-        .args([
-            "get",
-            "events",
-            "-n",
-            namespace,
-            "--field-selector",
-            &format!("involvedObject.name={}", deployment_name),
-            "-o",
-            "json",
-            "--sort-by=.lastTimestamp",
-        ])
-        .output()
-        .await?;
-
-    let items = kubectl_get_items(&output)?;
+    let items = kubectl_list_items(&[
+        "get",
+        "events",
+        "-n",
+        namespace,
+        "--field-selector",
+        &format!("involvedObject.name={}", deployment_name),
+        "-o",
+        "json",
+        "--sort-by=.lastTimestamp",
+    ])
+    .await?;
 
     // Take last 5 events
     Ok(items
