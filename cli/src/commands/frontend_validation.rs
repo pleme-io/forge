@@ -17,6 +17,40 @@ use crate::repo::get_tool_path;
 
 use crate::config::FrontendGatesConfig;
 
+/// Resolve the `bun` binary via the `BUN_BIN` env override, falling
+/// back to PATH. Every `bun` spawn in this module reads through this
+/// sigil so the resolve happens in exactly one place — mirrors the
+/// `cargo_bin()` sigil at `commands/test_ci.rs:28` (916f1a4),
+/// `commands/prerelease.rs:109` (79e03a5),
+/// `commands/developer_tools.rs:36` (534ef48), and
+/// `commands/e2e.rs:87` (170ecac), and the sibling `docker_bin()` /
+/// `crossplane_bin()` / `cosign_bin()` / `jsonnet_bin()` sigil
+/// discipline on other command modules (23241a6 / 6b3ac16 /
+/// a070a3c / a826ac0). Solve-once at the sigil (THEORY §I.5 —
+/// duplication budget zero; every recurring shape becomes a helper
+/// before it becomes duplicated code) means a future added `bun`
+/// spawn cannot silently re-copy the two-argument resolve and drift
+/// away from the `BUN_BIN` override at exactly the tier the
+/// hermetic-runner contract binds — the surface `forge prerelease`
+/// invokes on every pre-release run to type-check / lint / test the
+/// frontend, where a wrong-`bun` resolve produces a G* verdict
+/// attributed to whichever `bun` PATH resolved first rather than to
+/// the substrate-pinned `bun` derivation the flake declared.
+///
+/// Pre-lift the five consumer sites — `run_type_check`, ESLint arm
+/// of `run_lint_with_config`, `run_biome_lint` (auto-fix + verify
+/// share one `let bun = ...` binding), `run_unit_tests`, and
+/// `validate_frontend_with_config`'s `bun install --frozen-lockfile`
+/// preamble — each spelled the two-argument resolve verbatim,
+/// ignoring `BUN_BIN` at every one had a future edit ever needed to
+/// widen the resolve (a per-spawn env-injection hook, a
+/// substrate-path validation step, or a telemetry sigil on the
+/// resolved path). Post-lift each site collapses to `let bun =
+/// bun_bin();` and the resolve appears exactly once.
+fn bun_bin() -> String {
+    get_tool_path("BUN_BIN", "bun")
+}
+
 /// Result of frontend validation
 #[derive(Debug)]
 pub struct FrontendValidationResult {
@@ -53,7 +87,7 @@ pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
     let start = Instant::now();
 
     // Try bun run type-check first (defined in package.json)
-    let bun = get_tool_path("BUN_BIN", "bun");
+    let bun = bun_bin();
     let output = Command::new(&bun)
         .args(["run", "type-check"])
         .current_dir(web_dir)
@@ -127,7 +161,7 @@ pub async fn run_lint_with_config(web_dir: &Path, linter: &str) -> Result<(bool,
     }
 
     // ESLint: run via package.json script
-    let bun = get_tool_path("BUN_BIN", "bun");
+    let bun = bun_bin();
     let output = Command::new(&bun)
         .args(["run", "lint"])
         .current_dir(web_dir)
@@ -185,7 +219,7 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
 
     // First, run biome auto-fix (safe fixes only by default)
     println!("   Running Biome auto-fix...");
-    let bun = get_tool_path("BUN_BIN", "bun");
+    let bun = bun_bin();
     let fix_output = Command::new(&bun)
         .args(["x", "biome", "check", "--write", "src"])
         .current_dir(web_dir)
@@ -277,7 +311,7 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
     println!("{}", "Running unit tests...".bold());
     let start = Instant::now();
 
-    let bun = get_tool_path("BUN_BIN", "bun");
+    let bun = bun_bin();
     let output = Command::new(&bun)
         .args(["run", "test", "--", "--run"]) // --run for non-watch mode
         .current_dir(web_dir)
@@ -396,7 +430,7 @@ pub async fn validate_frontend_with_config(
 
     // Ensure dependencies are installed
     println!("{}", "Ensuring dependencies are installed...".bold());
-    let bun = get_tool_path("BUN_BIN", "bun");
+    let bun = bun_bin();
     let install = Command::new(&bun)
         .args(["install", "--frozen-lockfile"])
         .current_dir(web_dir)
@@ -475,6 +509,89 @@ pub async fn validate_frontend_with_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whole-module shield: no raw `Command::new("bun")` may live in
+    /// this module's non-test body, `fn bun_bin()` must be defined,
+    /// and the two-argument resolve
+    /// `get_tool_path("BUN_BIN", "bun")` must appear exactly ONCE
+    /// (only in the sigil body).
+    ///
+    /// Pre-lift the five consumer sites — `run_type_check`, ESLint
+    /// arm of `run_lint_with_config`, `run_biome_lint` (auto-fix +
+    /// verify share one binding), `run_unit_tests`, and
+    /// `validate_frontend_with_config`'s `bun install
+    /// --frozen-lockfile` preamble — each spelled `let bun =
+    /// get_tool_path("BUN_BIN", "bun");` verbatim. Post-lift each
+    /// consumer routes through `bun_bin()` and the two-argument
+    /// resolve appears in exactly ONE place (the sigil body). The
+    /// `resolve_count == 1` assertion fails-before at 5,
+    /// passes-after at 1 — the canonical fail-before-pass-after arc
+    /// matching the sibling `cargo_bin()` shield discipline landed
+    /// on `commands/developer_tools.rs` (534ef48),
+    /// `commands/prerelease.rs` (79e03a5), `commands/test_ci.rs`
+    /// (916f1a4), and `commands/e2e.rs` (170ecac).
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the `\n#[cfg(test)]\nmod tests {` marker above) so
+    /// this shield's own docstring mentions of the forbidden literal
+    /// stay out of scope AND every current or future bun-spawning
+    /// helper landing anywhere in the top-level module body cannot
+    /// silently ride along without going through `bun_bin()`.
+    /// Mirrors the whole-module-boundary scan discipline pioneered
+    /// on `commands/supergraph_verification.rs` (65283fb) and
+    /// replicated across the `cargo_bin()` shield family. The
+    /// two-argument-resolve needle is reconstructed via `format!`
+    /// inside
+    /// [`crate::test_support::get_tool_path_two_arg_call_needle`],
+    /// so this shield's own source never contains the literal
+    /// `get_tool_path("BUN_BIN", "bun")` string and cannot
+    /// false-match itself on the count-eq-1 assertion.
+    ///
+    /// A Nix-hermetic runner whose derivation exports
+    /// `BUN_BIN=/nix/store/…-bun/bin/bun` but omits `bun` from PATH
+    /// silently fell through to whatever `bun` was first on PATH at
+    /// each pre-lift site — every pre-release frontend verdict
+    /// (type-check, lint, tests, install) was attributed to whichever
+    /// `bun` PATH resolved first, not to the substrate-pinned bun
+    /// derivation the flake declared. Same silent-PATH-fallback bug
+    /// class the sibling `CARGO` / `DOCKER_BIN` / `KUBECTL_BIN` /
+    /// `GIT_BIN` / `NIX_BIN` / `HELM_BIN` migrations closed on their
+    /// respective spawn surfaces.
+    #[test]
+    fn test_frontend_validation_routes_bun_through_bun_bin_sigil_not_raw_command() {
+        const SOURCE: &str = include_str!("frontend_validation.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
+            "frontend_validation.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"bun\")"),
+            "commands/frontend_validation.rs must not spawn `bun` via the bare \
+             literal — every `bun` spawn must resolve `BUN_BIN` via `bun_bin()` \
+             first. A raw `Command::new(\"bun\")` bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports."
+        );
+        assert!(
+            body.contains("fn bun_bin()"),
+            "commands/frontend_validation.rs must define `bun_bin()` — the \
+             sigil function that resolves the tools-registry `BUN_BIN` \
+             override for every bun spawn. Mirrors the `cargo_bin()` sigil \
+             discipline at `commands/test_ci.rs:28`, \
+             `commands/prerelease.rs:109`, `commands/developer_tools.rs:36`, \
+             and `commands/e2e.rs:87`."
+        );
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("BUN_BIN", "bun");
+        let resolve_count = body.matches(two_arg_needle.as_str()).count();
+        assert_eq!(
+            resolve_count, 1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the `bun_bin()` \
+             sigil), not {resolve_count} times — every consumer must route \
+             through `bun_bin()`, not re-copy the resolve inline"
+        );
+    }
 
     #[test]
     fn test_parse_test_count() {
