@@ -60,6 +60,33 @@ fn nix_bin() -> String {
     get_tool_path("NIX_BIN", "nix")
 }
 
+/// Resolve the `docker-compose` binary via the `DOCKER_COMPOSE_BIN`
+/// env override, falling back to PATH. Every `docker-compose` spawn
+/// in this module reads through this sigil so the two-argument
+/// resolve happens in exactly one place — mirrors the sibling
+/// `cargo_bin()` / `nix_bin()` sigils above on this same module
+/// (534ef48 / a12c172) and the broader `<tool>_bin()` sigil family
+/// across the CARGO / NIX_BIN / ATTIC_BIN / BUN_BIN / CRATE2NIX /
+/// DOCA_BIN / FLUX_BIN / NC_BIN surfaces (559adae / 6b2ea15 /
+/// 9986f11 / 7561329 / 868b2ad / ba3e615 / b5e632a). Solve-once at
+/// the sigil (THEORY §I.5 — duplication budget zero; every
+/// recurring shape becomes a helper before it becomes duplicated
+/// code) means a future added `docker-compose` spawn cannot
+/// silently re-copy the two-argument resolve and drift away from
+/// the `DOCKER_COMPOSE_BIN` override at exactly the tier the
+/// hermetic-runner contract binds. The whole-module shield below
+/// asserts three invariants: no bare docker-compose-literal spawn
+/// in the body (already landed), `fn docker_compose_bin()` is
+/// defined, and the two-argument resolve appears in EXACTLY one
+/// place — only the sigil body — so a future added spawn cannot
+/// silently re-copy the resolve inline. Pre-lift the two consumer
+/// sites (`rust_dev`'s docker-compose-up in Step 1, `rust_dev_down`'s
+/// docker-compose-down) each spelled the two-argument resolve
+/// verbatim.
+fn docker_compose_bin() -> String {
+    get_tool_path("DOCKER_COMPOSE_BIN", "docker-compose")
+}
+
 /// Run Rust unit tests
 pub async fn rust_test(service: String) -> Result<()> {
     println!("🧪 Running unit tests for {}...", service.cyan());
@@ -456,7 +483,7 @@ pub async fn rust_dev(
                 .dimmed()
             );
 
-            let docker_compose = get_tool_path("DOCKER_COMPOSE_BIN", "docker-compose");
+            let docker_compose = docker_compose_bin();
             let mut cmd = Command::new(&docker_compose);
             cmd.args(&["-f", compose_path.to_str().unwrap(), "up", "-d"]);
             crate::retry::run_inherited_status(cmd, "docker-compose up")
@@ -620,7 +647,7 @@ pub async fn rust_dev_down(service: String) -> Result<()> {
     let compose_file = find_compose_file(service_path)?;
 
     if let Some(compose_path) = compose_file {
-        let docker_compose = get_tool_path("DOCKER_COMPOSE_BIN", "docker-compose");
+        let docker_compose = docker_compose_bin();
         let mut cmd = Command::new(&docker_compose);
         cmd.args(&["-f", compose_path.to_str().unwrap(), "down"]);
         crate::retry::run_inherited_status(cmd, "docker-compose down")
@@ -932,6 +959,53 @@ mod tests {
              `crate::repo::get_tool_path(\"DOCKER_COMPOSE_BIN\", \"docker-compose\")` first. \
              A raw `Command::new(\"docker-compose\")` bypasses the hermetic-runner \
              contract substrate's mkRuntimeToolsEnv exports."
+        );
+        // Sigil sibling: after the `docker_compose_bin()` lift, every consumer
+        // routes through the sigil, so `fn docker_compose_bin()` must be
+        // defined AND the two-argument resolve string must appear in EXACTLY
+        // one place — only the sigil body — so a future added spawn cannot
+        // silently re-copy the resolve inline and drift away from the sigil's
+        // single point of truth. Mirrors the sibling `nix_bin()` /
+        // `cargo_bin()` shields above on this same module, and the broader
+        // `<tool>_bin()` sigil-shield family across the CARGO / NIX_BIN /
+        // ATTIC_BIN / DOCA_BIN / FLUX_BIN / NC_BIN surfaces. Both needles are
+        // reconstructed via `format!` through `test_support::{
+        // sigil_bin_fn_definition_needle, get_tool_path_two_arg_call_needle}`
+        // so this assertion pair cannot false-match its own source text on
+        // either needle, and both hits route through
+        // `test_support::code_line_hits` for anti-docstring-self-match
+        // discipline. THEORY §I.5: duplication budget zero.
+        let sigil_needle =
+            crate::test_support::sigil_bin_fn_definition_needle("docker_compose_bin");
+        let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);
+        assert!(
+            !sigil_hits.is_empty(),
+            "commands/developer_tools.rs must define `docker_compose_bin()` \
+             at a code line — the sigil function that resolves the \
+             tools-registry `DOCKER_COMPOSE_BIN` override for every \
+             `docker-compose` spawn. Mirrors the sibling `nix_bin()` / \
+             `cargo_bin()` sigils above on this same module and the broader \
+             `<tool>_bin()` sigil family."
+        );
+        let two_arg_needle = crate::test_support::get_tool_path_two_arg_call_needle(
+            "DOCKER_COMPOSE_BIN",
+            "docker-compose",
+        );
+        let resolve_hits = crate::test_support::code_line_hits(body, &two_arg_needle);
+        assert_eq!(
+            resolve_hits.len(),
+            1,
+            "the two-argument resolve `{two_arg_needle}` must appear at \
+             exactly ONE code line in the module body (only in the \
+             `docker_compose_bin()` sigil), not {} — every consumer must \
+             route through `docker_compose_bin()`, not re-copy the resolve \
+             inline. A future edit to the resolve contract (a substrate-path \
+             validation step, a per-spawn env-injection hook, a telemetry \
+             sigil on the resolved path) must land at the sigil body once, \
+             not at each drifted call site. Found {} code-line hit(s): \
+             {resolve_hits:#?}",
+            resolve_hits.len(),
+            resolve_hits.len()
         );
     }
 }
