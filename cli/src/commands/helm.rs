@@ -3,6 +3,7 @@
 //! Provides lint, package, push, deploy, release, template, and bump operations
 //! for pleme-io Helm charts distributed via OCI registries.
 
+use crate::repo::get_tool_path;
 use crate::retry::RetryPolicy;
 use crate::version;
 use anyhow::{Context, Result, bail};
@@ -149,19 +150,46 @@ fn run_program_timed(program: &str, args: &[&str], timeout: Duration) -> Result<
 }
 
 /// Resolve the `helm` binary path via `HELM_BIN`, falling back to `helm`
-/// on `PATH`. Wired through [`crate::tools::get_tool_path`] so a
-/// Nix-hermetic runner's substrate-derived `HELM_BIN` lands at every
-/// helm-spawning site in this module. Mirrors the sibling
+/// on `PATH`. Wired through the canonical two-argument
+/// [`crate::repo::get_tool_path`]`("HELM_BIN", "helm")` call — the
+/// audit-visible env-var-or-fallback lookup every sibling
+/// `<tool>_bin()` sigil across forge routes through (`docker_bin` at
+/// `infrastructure/docker.rs` 9b1924d, `attic_bin` at
+/// `infrastructure/attic.rs` 559adae, `doca_bin` at
+/// `infrastructure/registry.rs` 868b2ad, `nix_bin` at `cli/src/nix.rs`
+/// 6b2ea15, `cargo_bin` at `commands/comprehensive_release.rs`
+/// fceeecc, `nc_bin` at `commands/nix_builder.rs` b5e632a, and the
+/// broader `<tool>_bin()` sigil family across the CARGO / NIX_BIN /
+/// DOCKER_BIN / BUN_BIN / CRATE2NIX / DOCA_BIN / FLUX_BIN /
+/// DOCKER_COMPOSE_BIN surfaces). Mirrors the sibling
 /// `git_command_sync` / `kubectl_command_async` / `flux_bin` /
 /// `nix_bin` / `attic_bin` primitives — the one bridge between the
 /// forge helm surface and the substrate-`mkRuntimeToolsEnv`-exported
-/// binary path. The pre-lift shape spelled `"helm"` bare at every call
-/// site (5 `Command::new` spawns + 4 `run_program_timed` spawns +
-/// `run_helm_timed`'s own body); each bypassed the env override, so a
-/// Nix-hermetic runner's `HELM_BIN` lost to whatever `helm` was first
-/// on PATH.
+/// binary path.
+///
+/// Pre-lift the sigil body itself spelled the ONE-argument deriving
+/// [`crate::tools::get_tool_path`]`(crate::tools::tools::HELM)` form
+/// — the constant-driven variant of the same shape pinned as the
+/// silent-PATH-fallback bug at
+/// [`crate::tools::tests::doca_resolves_from_doca_bin_and_the_deriving_lookup_does_not`].
+/// The deriving form maps the constant `tools::HELM` (value `"helm"`)
+/// to the env var `HELM_BIN` by uppercase+underscore rule, so for
+/// this tool the deriving form happens to resolve the SAME env var
+/// as the canonical two-argument form — but the abstraction that
+/// decides which env var to read is one hop removed from the
+/// audit-visible env-var literal. A fleet-wide `HELM_BIN` grep audit
+/// misses this site under the deriving form; a substrate rename of
+/// `HELM_BIN` cannot be found mechanically because the string never
+/// appears in the source. Migrating the sigil body onto the two-arg
+/// form pins the audit-visible literal once at this body and lets
+/// the module join the fleet-wide `<tool>_bin()` sigil convention.
+/// The pre-lift shape at every call site spelled `"helm"` bare
+/// (5 `Command::new` spawns + 4 `run_program_timed` spawns +
+/// `run_helm_timed`'s own body); each bypassed the env override, so
+/// a Nix-hermetic runner's `HELM_BIN` lost to whatever `helm` was
+/// first on PATH.
 fn helm_bin() -> String {
-    crate::tools::get_tool_path(crate::tools::tools::HELM)
+    get_tool_path("HELM_BIN", "helm")
 }
 
 /// Run `helm <args>` with a hard wall-clock timeout (see [`run_program_timed`]).
@@ -2311,6 +2339,48 @@ mod helm_bin_routing_tests {
     /// [`crate::tools::tests::test_uppercase_conversion`]; this
     /// shield only certifies that every helm-spawning site in this
     /// module reads through `helm_bin()`.
+    ///
+    /// Beyond the spawn-shape invariants, this shield also pins the
+    /// SIGIL BODY's own resolve shape onto the canonical two-argument
+    /// [`crate::repo::get_tool_path`]`("HELM_BIN", "helm")` form — the
+    /// audit-visible env-var-or-fallback lookup every sibling
+    /// `<tool>_bin()` sigil across forge routes through
+    /// (`infrastructure/docker.rs::docker_bin` 9b1924d,
+    /// `infrastructure/attic.rs::attic_bin` 559adae,
+    /// `infrastructure/registry.rs::doca_bin` 868b2ad,
+    /// `commands/comprehensive_release.rs::cargo_bin` fceeecc,
+    /// `cli/src/nix.rs::nix_bin` 6b2ea15,
+    /// `commands/nix_builder.rs::nc_bin` b5e632a). Pre-lift the sigil
+    /// body itself spelled the ONE-argument constant-driven deriving
+    /// form (`crate::tools::get_tool_path(crate::tools::tools::HELM)`)
+    /// — the exact abstraction pinned as the silent-PATH-fallback bug
+    /// at
+    /// [`crate::tools::tests::doca_resolves_from_doca_bin_and_the_deriving_lookup_does_not`]:
+    /// the tool-name constant's VALUE derived the env var by
+    /// uppercase+underscore rule, so a fleet-wide `HELM_BIN` grep
+    /// audit missed the site and a substrate rename could not be found
+    /// mechanically because the string never appeared in source.
+    /// Post-lift the sigil body reads
+    /// `crate::repo::get_tool_path("HELM_BIN", "helm")`, the two-arg
+    /// needle appears at EXACTLY ONE code line in the whole file
+    /// (only the sigil body), and neither pre-lift deriving form
+    /// (constant-driven nor literal-string) may reappear at any
+    /// code line — so a future "tidy" back to either deriving shape
+    /// fails the shield rather than silently re-hiding the `HELM_BIN`
+    /// literal from audits and re-opening the silent-PATH-fallback
+    /// class. All positive/negative needles are reconstructed via
+    /// [`format!`] through the `test_support` needle constructors
+    /// ([`crate::test_support::get_tool_path_two_arg_call_needle`],
+    /// [`crate::test_support::deriving_one_arg_sigil_needle_constant`],
+    /// [`crate::test_support::deriving_one_arg_sigil_needle_literal`],
+    /// [`crate::test_support::sigil_bin_fn_definition_needle`]) so
+    /// this shield's own source text cannot false-match itself on any
+    /// concrete substitution, and every hit routes through
+    /// [`crate::test_support::code_line_hits`] for
+    /// anti-docstring-self-match discipline. Mirrors the sibling
+    /// `<tool>_bin()` sigil-shield family landed across
+    /// `infrastructure/{docker,attic,registry}.rs` and
+    /// `commands/{comprehensive_release,nix_builder}.rs`.
     #[test]
     fn test_helm_spawns_route_through_helm_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("helm.rs");
@@ -2343,11 +2413,42 @@ mod helm_bin_routing_tests {
             "HELM_BIN",
             "helm",
         );
-        assert!(
-            SOURCE.contains("crate::tools::get_tool_path(crate::tools::tools::HELM)"),
-            "`helm_bin()` must delegate to \
-             `crate::tools::get_tool_path(crate::tools::tools::HELM)` \
-             — the canonical lookup was not found in the module."
+
+        // Sigil-body invariants: two-arg resolve appears at exactly
+        // ONE code line (only the sigil body), neither deriving form
+        // reappears at any code line. All needles reconstructed via
+        // `format!` through `test_support` — no concrete literal of
+        // any forbidden shape appears in this shield's source.
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("HELM_BIN", "helm");
+        let resolve_hits = crate::test_support::code_line_hits(SOURCE, &two_arg_needle);
+        assert_eq!(
+            resolve_hits.len(),
+            1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             at exactly ONE code line in `commands/helm.rs` (only in \
+             the `helm_bin()` sigil), not {} — every consumer must \
+             route through `helm_bin()`, not re-copy the resolve \
+             inline. A future edit to the resolve contract (a \
+             substrate-path validation step, a per-spawn env-injection \
+             hook, a telemetry sigil on the resolved path) must land \
+             at the sigil body once, not at each drifted call site. \
+             Found {} code-line hit(s): {resolve_hits:#?}",
+            resolve_hits.len(),
+            resolve_hits.len()
+        );
+        crate::test_support::assert_source_forbids_deriving_one_arg_sigil_constant_form(
+            SOURCE,
+            "commands/helm.rs",
+            "HELM_BIN",
+            "helm",
+            "HELM",
+        );
+        crate::test_support::assert_source_forbids_deriving_one_arg_sigil_literal_form(
+            SOURCE,
+            "commands/helm.rs",
+            "HELM_BIN",
+            "helm",
         );
     }
 }
