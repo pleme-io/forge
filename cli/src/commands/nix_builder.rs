@@ -12,6 +12,39 @@ use crate::commands::push;
 use crate::commands::release_commit::commit_cluster_overlay_release;
 use crate::repo::get_tool_path;
 
+/// Resolve the `nc` binary path via the canonical two-argument
+/// [`crate::repo::get_tool_path`] `("NC_BIN", "nc")` call — the
+/// module-scoped sigil every `nc` network-probe spawn in this module
+/// routes through.
+///
+/// Pre-lift two consumer sites in this module (`verify_k8s_service` at
+/// the in-cluster reachability probe and `verify_external` at the
+/// external L4 reachability probe) each spelled
+/// `get_tool_path("NC_BIN", "nc")` verbatim, silently bypassing any
+/// single-point-of-truth for `nc` resolution: a future edit to the
+/// resolve contract at either site (a substrate-path validation step,
+/// a per-spawn env-injection hook, a telemetry sigil on the resolved
+/// path) would have left the other stranded at the pre-edit form.
+/// Post-lift each consumer routes through this sigil, the deriving
+/// pre-lift respells are gone from the module body, and the two-arg
+/// resolve appears at ONE code line.
+///
+/// Sibling of the `<tool>_bin()` sigils landed on the CARGO surface
+/// across `commands/{test_ci,prerelease,developer_tools,tool,e2e,
+/// comprehensive_release}.rs`, the NIX_BIN surface across
+/// `commands/{build,developer_tools,rust_service,nix_builder,e2e,
+/// tool}.rs`, the DOCKER_BIN / BUN_BIN / CRATE2NIX / ATTIC_BIN
+/// surfaces, the `commands/helm.rs::helm_bin()` sigil, and the
+/// `flux_reconcile.rs::flux_bin()` / `flux_get.rs::flux_bin()` /
+/// `infrastructure/attic.rs::attic_bin()` / `nix.rs::nix_bin()`
+/// sibling sigils — the same per-module single-point-of-truth
+/// discipline applied to the NC_BIN surface here. THEORY §I.5
+/// (Generation over composition, duplication budget zero) and §VI.1
+/// (three-times rule).
+fn nc_bin() -> String {
+    get_tool_path("NC_BIN", "nc")
+}
+
 /// Verify nix-builder service is accessible
 pub async fn verify(
     hostname: String,
@@ -126,7 +159,7 @@ async fn verify_k8s_service(service: &str, namespace: &str, port: u16) -> Result
     );
 
     // Use netcat to check if port is accessible
-    let nc_check = Command::new(get_tool_path("NC_BIN", "nc"))
+    let nc_check = Command::new(nc_bin())
         .args(&[
             "-zv",
             &format!("{}.{}.svc.cluster.local", service, namespace),
@@ -165,7 +198,7 @@ async fn verify_external(hostname: &str, port: u16) -> Result<()> {
 
     // Check TCP connectivity with timeout
     info!("Checking TCP connectivity to {}:{}", hostname, port);
-    let nc_check = Command::new(get_tool_path("NC_BIN", "nc"))
+    let nc_check = Command::new(nc_bin())
         .args(&["-zv", "-G", "5", hostname, &port.to_string()])
         .output()
         .context("Failed to execute netcat check")?;
@@ -646,5 +679,92 @@ mod nix_bin_routing_tests {
                 canonical = canonical
             );
         }
+    }
+
+    /// Whole-module shield: `fn nc_bin()` — the module-scoped sigil
+    /// that resolves the `nc` binary via the canonical two-argument
+    /// [`crate::repo::get_tool_path`] `("NC_BIN", "nc")` call — MUST
+    /// be defined at a code line in this module, AND the two-arg
+    /// resolve MUST appear at exactly ONE code line in the module
+    /// body (only in the sigil definition).
+    ///
+    /// Pre-lift the module carried two respells of the canonical
+    /// two-arg form — one per `nc` network-probe entry point
+    /// (`verify_k8s_service`'s in-cluster reachability probe and
+    /// `verify_external`'s external L4 reachability probe) — silently
+    /// bypassing any single-point-of-truth for `nc` tool resolution: a
+    /// future edit to the resolve contract at either entry point
+    /// would have left the other stranded at the pre-edit form. Post-
+    /// lift each consumer routes through `nc_bin()` and the two-arg
+    /// resolve appears in exactly ONE place (the sigil body). The
+    /// `resolve_count == 1` assertion fails-before at 2 (the two
+    /// pre-lift respells) and passes-after at 1 — canonical
+    /// fail-before-pass-after arc matching the sibling `<tool>_bin()`
+    /// shield discipline landed on `flux_reconcile.rs::flux_bin`
+    /// (ba3e615), `flux_get.rs::flux_bin` (5ad341e),
+    /// `infrastructure/attic.rs::attic_bin` (559adae),
+    /// `commands/comprehensive_release.rs::cargo_bin` (fceeecc),
+    /// `cli/src/nix.rs::nix_bin` (6b2ea15), and the broader
+    /// `<tool>_bin()` sigil family.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the first `\n#[cfg(test)]\n` marker — the sibling
+    /// NIX_BIN shield's `mod nix_bin_routing_tests` block opener) so
+    /// this shield's own docstring mentions of the canonical form —
+    /// living inside the `#[cfg(test)]` block below that marker —
+    /// stay out of scope AND every current or future nc-spawning
+    /// helper landing anywhere in the top-level module body cannot
+    /// silently ride along without going through `nc_bin()`.
+    ///
+    /// Both needles are reconstructed via `format!` inside
+    /// [`crate::test_support::sigil_bin_fn_definition_needle`] and
+    /// [`crate::test_support::get_tool_path_two_arg_call_needle`], so
+    /// this shield's own source never contains a concrete
+    /// `get_tool_path("NC_BIN", "nc")` or `fn nc_bin()` literal and
+    /// cannot false-match itself on any assertion. Both assertions
+    /// route through [`crate::test_support::code_line_hits`] to
+    /// preserve the anti-docstring-self-match discipline — existing
+    /// `///` and `//!` prose in the module that legitimately quotes
+    /// the pre-lift or canonical shape for narrative purposes does
+    /// not count against the sigil-body or resolve assertions.
+    #[test]
+    fn test_nix_builder_routes_nc_through_nc_bin_sigil_not_raw_resolve() {
+        const SOURCE: &str = include_str!("nix_builder.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "nix_builder.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+
+        let sigil_needle = crate::test_support::sigil_bin_fn_definition_needle("nc_bin");
+        let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);
+        assert!(
+            !sigil_hits.is_empty(),
+            "commands/nix_builder.rs must define `nc_bin()` at a code line \
+             in the module body — the sigil function that resolves the \
+             `NC_BIN` override for every `nc` network-probe spawn at the \
+             two consumer sites (`verify_k8s_service`, `verify_external`). \
+             Mirrors the sibling `<tool>_bin()` sigils across the CARGO / \
+             NIX_BIN / DOCKER_BIN / BUN_BIN / CRATE2NIX / ATTIC_BIN / \
+             FLUX_BIN surfaces."
+        );
+
+        let two_arg_needle = crate::test_support::get_tool_path_two_arg_call_needle("NC_BIN", "nc");
+        let resolve_hits = crate::test_support::code_line_hits(body, &two_arg_needle);
+        assert_eq!(
+            resolve_hits.len(),
+            1,
+            "the canonical two-argument resolve `{two_arg_needle}` must \
+             appear at exactly ONE code line in the module body (only in \
+             the `nc_bin()` sigil), not {} — every consumer must route \
+             through `nc_bin()`, not re-copy the resolve inline. A future \
+             edit to the resolve contract (a substrate-path validation \
+             step, a per-spawn env-injection hook, a telemetry sigil on \
+             the resolved path) must land at the sigil body once, not at \
+             each drifted call site. Found {} code-line hit(s): \
+             {resolve_hits:#?}",
+            resolve_hits.len(),
+            resolve_hits.len()
+        );
     }
 }
