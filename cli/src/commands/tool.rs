@@ -15,6 +15,28 @@ use crate::repo::get_tool_path;
 use crate::store_path::StorePath;
 use crate::version;
 
+/// Resolve the `cargo` binary via the `CARGO` env override, falling
+/// back to PATH. Every `cargo` spawn in this module reads through this
+/// sigil so the resolve happens in exactly one place — mirrors the
+/// `cargo_bin()` sigil at `commands/test_ci.rs:28` (916f1a4),
+/// `commands/prerelease.rs:109` (79e03a5),
+/// `commands/developer_tools.rs:36` (534ef48), and
+/// `commands/e2e.rs:87` (170ecac), and the sibling `bun_bin()` /
+/// `crossplane_bin()` / `cosign_bin()` / `jsonnet_bin()` sigil
+/// discipline on other command modules (9986f11 / 6b3ac16 / a070a3c /
+/// a826ac0). Solve-once at the sigil (THEORY §I.5 — duplication budget
+/// zero; every recurring shape becomes a helper before it becomes
+/// duplicated code) means a future added `cargo` spawn cannot silently
+/// re-copy the two-argument resolve and drift away from the `CARGO`
+/// override at exactly the tier the hermetic-runner contract binds.
+/// Pre-lift the four consumer sites (`bump`'s `cargo set-version
+/// --bump <level>`, `check`'s `cargo fmt --check` + `cargo test`,
+/// `lock`'s `cargo test --quiet`, and `run_clippy`'s `cargo clippy --
+/// -D warnings`) each spelled the two-argument resolve verbatim.
+fn cargo_bin() -> String {
+    get_tool_path("CARGO", "cargo")
+}
+
 /// Release a tool: read version, verify clean tree, build targets, tag, push, create GitHub release.
 pub async fn release(
     name: &str,
@@ -154,7 +176,7 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
     match language {
         "rust" => {
             // Use cargo set-version for Rust
-            let cargo = get_tool_path("CARGO", "cargo");
+            let cargo = cargo_bin();
             let status = Command::new(&cargo)
                 .args(["set-version", "--bump", level])
                 .current_dir(dir)
@@ -212,7 +234,7 @@ pub fn check(name: &str, language: &str, working_dir: &str) -> Result<()> {
 
     match language {
         "rust" => {
-            let cargo = get_tool_path("CARGO", "cargo");
+            let cargo = cargo_bin();
             info!("{}: running cargo fmt --check...", name);
             run_cmd(dir, &cargo, &["fmt", "--check"])?;
 
@@ -301,7 +323,7 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
     info!("[2/3] Testing...");
     let test_result = match language {
         "rust" => {
-            let cargo = get_tool_path("CARGO", "cargo");
+            let cargo = cargo_bin();
             run_cmd(dir, &cargo, &["test", "--quiet"])?;
             "pass"
         }
@@ -523,7 +545,7 @@ fn write_fleet_clippy_conf() -> Result<tempfile::TempDir> {
 
 /// Run `cargo clippy -- -D warnings`, optionally pointing it at `conf_dir`.
 fn run_clippy(dir: &Path, conf_dir: Option<&Path>) -> Result<()> {
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.args(["clippy", "--", "-D", "warnings"])
         .current_dir(dir);
@@ -986,11 +1008,44 @@ mod tests {
              A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
              contract substrate's mkRuntimeToolsEnv exports."
         );
+        // Sigil sibling: after the cargo_bin() lift, every consumer routes
+        // through the sigil, so `fn cargo_bin()` must be defined AND the
+        // two-argument resolve string must appear in EXACTLY one place —
+        // only the sigil body — so a future added spawn cannot silently
+        // re-copy the resolve inline and drift away from the sigil's
+        // single point of truth. Mirrors the sibling `cargo_bin()` shield
+        // pairs on `commands/test_ci.rs` (916f1a4),
+        // `commands/developer_tools.rs` (534ef48), `commands/e2e.rs`
+        // (170ecac), and the `bun_bin()` sibling on
+        // `commands/frontend_validation.rs` (9986f11). THEORY §I.5:
+        // duplication budget zero.
         assert!(
-            body.contains("get_tool_path(\"CARGO\", \"cargo\")"),
-            "commands/tool.rs must resolve the `cargo` binary via \
-             `get_tool_path(\"CARGO\", \"cargo\")` — the canonical lookup \
-             was not found in the module body."
+            body.contains("fn cargo_bin()"),
+            "commands/tool.rs must define `cargo_bin()` — the sigil \
+             function that resolves the tools-registry `CARGO` override \
+             for every cargo spawn. Mirrors the `cargo_bin()` sigil at \
+             `commands/test_ci.rs:28`, `commands/prerelease.rs:109`, \
+             `commands/developer_tools.rs:36`, and `commands/e2e.rs:87`."
+        );
+        // The needle is reconstructed via `format!` inside
+        // `get_tool_path_two_arg_call_needle`, so this shield's own
+        // source never contains the literal `get_tool_path("CARGO",
+        // "cargo")` string and cannot false-match itself on the
+        // count-eq-1 assertion. Filtering through `code_line_hits`
+        // suppresses any future `///` doc-comment mention of the
+        // canonical form landing above the cutoff.
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("CARGO", "cargo");
+        let resolve_hits = crate::test_support::code_line_hits(body, &two_arg_needle);
+        assert_eq!(
+            resolve_hits.len(),
+            1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the `cargo_bin()` \
+             sigil), not {} times — every consumer must route through \
+             `cargo_bin()`, not re-copy the resolve inline. Hits: {:?}",
+            resolve_hits.len(),
+            resolve_hits
         );
     }
 
