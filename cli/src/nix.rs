@@ -14,6 +14,69 @@ use crate::repo::get_tool_path;
 use crate::retry::{classify_capture, classify_capture_query};
 use crate::store_path::StorePath;
 
+/// Resolve the `nix` binary via the `NIX_BIN` env override, falling
+/// back to `nix` on `PATH`. Wired through [`crate::repo::get_tool_path`]
+/// — the canonical env-var-or-PATH lookup every other nix-invocation
+/// site in the workspace honors (`commands/build.rs::execute`,
+/// `commands/tool.rs::build_lock_target`,
+/// `commands/rust_service.rs::nix_bin` 63d4fe7,
+/// `nix_hooks.rs::NixHooks::build_and_get_path`,
+/// `commands/developer_tools.rs::nix_bin` a12c172, and the sibling
+/// `<tool>_bin()` sigil discipline the CARGO / BUN_BIN / NIX_BIN /
+/// CRATE2NIX surfaces across forge already carry). Every `nix` spawn
+/// this module drives reads through this sigil so the resolve happens
+/// in exactly one place.
+///
+/// Seventh landing of the `<tool>_bin()` sigil pattern on the NIX_BIN
+/// surface after `commands/rust_service.rs::nix_bin` (63d4fe7),
+/// `commands/developer_tools.rs::nix_bin` (a12c172), and the sibling
+/// `commands/comprehensive_release.rs::nix_bin` — first landing on the
+/// core `cli/src/nix.rs` module, the highest-traffic nix-invocation
+/// surface in forge and the primitive layer every command-module nix
+/// build ultimately routes through (`build_flake_attr` / `build_flake_attr_in`
+/// / `build_docker_image` / `build_docker_image_from_dir` /
+/// `path_info_recursive`). Pre-lift the three consumer sites —
+/// [`build_flake_attr_in`]'s primary `nix build` invocation,
+/// [`build_docker_image_from_dir`]'s sub-flake `nix build`, and
+/// [`path_info_recursive`]'s `nix path-info --recursive` closure probe
+/// — each spelled the two-argument resolve verbatim, so a future
+/// widening of the resolve (a per-spawn env-injection hook, a
+/// substrate-path validation step, or a telemetry sigil on the
+/// resolved path) had three sites to edit and could silently drift out
+/// of sync at any of them. Post-lift each site collapses to `let
+/// nix_bin = nix_bin();` and the resolve appears in exactly one place
+/// — the sigil body.
+///
+/// A Nix-hermetic runner whose derivation exports
+/// `NIX_BIN=/nix/store/…-nix/bin/nix` but omits `nix` from PATH
+/// silently fell through to whatever `nix` was first on PATH at each
+/// pre-lift site — every root-flake build / sub-flake build / closure-
+/// enumeration verdict flowing through this module was attributed to
+/// whichever `nix` PATH resolved first, not to the substrate-pinned
+/// nix derivation the flake declared. This is especially load-bearing
+/// on this module because `nix.rs` is what `commands/local.rs::up`,
+/// `commands/bootstrap.rs::push_bootstrap_binary`,
+/// `commands/image_release.rs::build_nix_image`,
+/// `commands/pangea.rs::build_component_image`, and
+/// `commands/tool.rs::release` all reach into for their build
+/// primitive — a wrong-nix here compromises the store-path grammar
+/// oracle at [`StorePath::parse`], the SLSA provenance gate at
+/// `commands/attestation.rs::build_slsa_level`, and every downstream
+/// Attic push / GHCR push / kubernetes deploy reads back through.
+///
+/// [`run_nix_build_typed`] and [`path_info_recursive_with_bin`] keep
+/// their `nix_bin: &str` parameter unchanged — the resolution split
+/// stays intact so `#[tokio::test]` on this module can point at a
+/// hermetic shim without mutating the process-wide `NIX_BIN`
+/// environment variable and run concurrent tests without racing on
+/// env-var writes (the discipline documented at
+/// [`path_info_recursive_with_bin`]'s docstring). The sigil owns the
+/// public-caller side of the split; the primitive owns the test-
+/// injection side.
+fn nix_bin() -> String {
+    get_tool_path("NIX_BIN", "nix")
+}
+
 /// Result of a Nix build operation.
 ///
 /// `store_path` is a validated [`StorePath`] — the parse discipline
@@ -181,7 +244,7 @@ pub async fn build_flake_attr(flake_attr: &str) -> Result<NixBuildResult> {
 ///
 /// Lifts the verbatim 13-line pattern
 /// ```text
-/// let output = tokio::process::Command::new("nix")
+/// let output = tokio::process::Command::new(<bare-nix-literal>)
 ///     .args(["build", &flake_attr, "--no-link", "--print-out-paths", "--impure"])
 ///     .current_dir(dir)              // optional
 ///     .output().await
@@ -231,7 +294,7 @@ pub async fn build_flake_attr_in(
 
     // --impure required for path inputs like substrate in the root flake
     // and the sub-flake builds the migrated sites drive.
-    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let nix_bin = nix_bin();
     let store_path = run_nix_build_typed(
         &nix_bin,
         &[
@@ -312,7 +375,7 @@ pub async fn build_docker_image_from_dir(
     );
     debug!("Flake reference: {}", flake_ref);
 
-    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let nix_bin = nix_bin();
     let store_path = run_nix_build_typed(
         &nix_bin,
         &["build", &flake_ref, "--no-link", "--print-out-paths"],
@@ -407,7 +470,7 @@ pub struct NixClosureInfo {
 ///
 /// Lifts the verbatim ~18-line stanza
 /// ```text
-/// let path_info_output = Command::new("nix")
+/// let path_info_output = Command::new(<bare-nix-literal>)
 ///     .args(&["path-info", "--recursive", <output_link>])
 ///     .output().await
 ///     .context("Failed to run nix path-info")?;
@@ -429,12 +492,12 @@ pub struct NixClosureInfo {
 /// threshold (PRIME DIRECTIVE: duplication budget is zero) consolidate
 /// onto this typed primitive. Three load-bearing properties this
 /// primitive owns that the pre-lift raw-spawn stanzas dropped:
-/// 1. **`NIX_BIN` env override.** Pre-lift each site spelled
-///    `Command::new("nix")`, ignoring the env var every other nix-
-///    invocation site in the workspace honors via
-///    `get_tool_path("NIX_BIN", "nix")` — so a Nix-hermetic runner with
-///    a store-path `nix` binary would fall through to whatever `nix`
-///    was first on PATH at these three sites specifically.
+/// 1. **`NIX_BIN` env override.** Pre-lift each site spawned the
+///    bare `nix` literal, ignoring the env var every other nix-
+///    invocation site in the workspace honors via the [`nix_bin`]
+///    sigil — so a Nix-hermetic runner with a store-path `nix` binary
+///    would fall through to whatever `nix` was first on PATH at these
+///    three sites specifically.
 /// 2. **Typed error dispatch.** Pre-lift a spawn failure landed on the
 ///    fatal `?` path via anyhow context; a nonzero exit collapsed into
 ///    a bare `warn!("⚠️ Failed to get closure info (non-fatal)")` that
@@ -480,7 +543,7 @@ pub struct NixClosureInfo {
 /// caller that wants the fatal contract composes `?`; a caller that
 /// wants the non-fatal contract composes `.ok()` and its own log.
 pub async fn path_info_recursive(output_link: &str) -> Result<NixClosureInfo, NixBuildError> {
-    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let nix_bin = nix_bin();
     path_info_recursive_with_bin(&nix_bin, output_link).await
 }
 
@@ -918,5 +981,92 @@ mod tests {
             "empty stdout must yield closure_size 0"
         );
         assert!(info.stdout.is_empty(), "stdout must be empty bytes");
+    }
+}
+
+#[cfg(test)]
+mod nix_bin_routing_tests {
+    /// Whole-module shield: no raw `Command::new("nix")` may live in
+    /// `cli/src/nix.rs`'s non-test body, `fn nix_bin()` must be
+    /// defined, and the two-argument NIX_BIN resolve must appear
+    /// exactly ONCE in the module body (only in the sigil body).
+    ///
+    /// Pre-lift the three public-caller sites — [`super::build_flake_attr_in`]'s
+    /// primary `nix build` invocation, [`super::build_docker_image_from_dir`]'s
+    /// sub-flake `nix build`, and [`super::path_info_recursive`]'s
+    /// `nix path-info --recursive` closure probe — each spelled the
+    /// two-argument NIX_BIN resolve verbatim at each consumer.
+    /// Post-lift each site collapses to `let nix_bin = nix_bin();` and
+    /// the resolve appears in exactly ONE place (the sigil body). The
+    /// `resolve_count == 1` assertion fails-before at 3, passes-after
+    /// at 1 — the canonical fail-before-pass-after arc matching the
+    /// sibling `<tool>_bin()` shield discipline landed on
+    /// `commands/rust_service.rs::nix_bin` (63d4fe7),
+    /// `commands/developer_tools.rs::nix_bin` (a12c172),
+    /// `commands/frontend_validation.rs::bun_bin` (9986f11), and the
+    /// broader CARGO / BUN_BIN / CRATE2NIX sigil family.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\n` marker in source order,
+    /// which lands at the sibling `mod tests` block above) so this
+    /// shield's own docstring mentions of the forbidden literal —
+    /// living in a `#[cfg(test)]` block below that first marker — stay
+    /// out of scope AND every current or future nix-spawning helper
+    /// landing anywhere in the top-level module body cannot silently
+    /// ride along without going through `nix_bin()`.
+    ///
+    /// The two-argument-resolve needle is reconstructed via `format!`
+    /// inside [`crate::test_support::get_tool_path_two_arg_call_needle`],
+    /// so this shield's own source never contains the literal
+    /// two-argument NIX_BIN resolve string and cannot false-match
+    /// itself on the count-eq-1 assertion. The [`super::path_info_recursive`]
+    /// primitive-docstring paragraph that pre-lift quoted the resolve
+    /// verbatim (`nix.rs:432-437`) is paraphrased to reference the
+    /// [`super::nix_bin`] sigil instead, so no docstring literal
+    /// contributes to the count either.
+    ///
+    /// The `run_nix_build_typed(nix_bin: &str, ...)` and
+    /// `path_info_recursive_with_bin(nix_bin: &str, ...)` primitives
+    /// keep their `nix_bin: &str` parameter unchanged — the
+    /// resolution split stays intact so `#[tokio::test]` on this
+    /// module can point at a hermetic shim without mutating the
+    /// process-wide env variable. The sigil owns the public-caller
+    /// side of the split; the primitives own the test-injection side.
+    #[test]
+    fn test_nix_routes_nix_through_nix_bin_sigil_not_raw_command() {
+        const SOURCE: &str = include_str!("nix.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "cli/src/nix.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"nix\")"),
+            "cli/src/nix.rs must not spawn `nix` via the bare \
+             literal — every `nix` spawn must resolve `NIX_BIN` via \
+             `nix_bin()` first. A raw `Command::new(\"nix\")` bypasses \
+             the hermetic-runner contract substrate's mkRuntimeToolsEnv \
+             exports."
+        );
+        assert!(
+            body.contains("fn nix_bin()"),
+            "cli/src/nix.rs must define `nix_bin()` — the sigil \
+             function that resolves the tools-registry `NIX_BIN` \
+             override for every nix spawn. Mirrors the sibling \
+             `nix_bin()` sigils at `commands/rust_service.rs` \
+             (63d4fe7), `commands/developer_tools.rs` (a12c172), \
+             `commands/comprehensive_release.rs:59`, and the broader \
+             `<tool>_bin()` sigil discipline across the fleet."
+        );
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("NIX_BIN", "nix");
+        let resolve_count = body.matches(two_arg_needle.as_str()).count();
+        assert_eq!(
+            resolve_count, 1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the `nix_bin()` \
+             sigil), not {resolve_count} times — every consumer must \
+             route through `nix_bin()`, not re-copy the resolve inline"
+        );
     }
 }
