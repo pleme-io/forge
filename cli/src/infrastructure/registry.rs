@@ -15,6 +15,48 @@ use crate::retry::{
     retry_command, CommandAttemptFailure, RetryPolicy,
 };
 
+/// Module-scoped sigil: resolve the `oci-push` (`doca`) binary via the
+/// canonical two-argument `DOCA_BIN`-first / `oci-push`-fallback
+/// lookup. Every production site in `infrastructure/registry.rs` that
+/// spawns `doca` — the `push_with_retries` retry-loop body and the
+/// `verify_tag_exists` capture — routes through this sigil, so the
+/// substrate-exported `DOCA_BIN` env-var contract is honored at
+/// exactly ONE code line in the module.
+///
+/// Pre-lift the module carried two respells of the two-argument
+/// resolve, one inside the `retry_command` closure of
+/// [`RegistryClient::push_with_retries`] and one inside
+/// [`RegistryClient::verify_tag_exists`]. That was 2 occurrences —
+/// THEORY §VI.1's coincidence tier — and the second respell silently
+/// bypassed the module's own single-point-of-truth for tool
+/// resolution: a future edit to the resolve contract at the push site
+/// would have left the verify site stranded at the pre-edit form. The
+/// sibling `<tool>_bin()` sigil family — `attic_bin()`
+/// (`infrastructure/attic.rs`, 559adae), `cargo_bin()`
+/// (`commands/comprehensive_release.rs`, fceeecc), `nc_bin()`
+/// (`commands/nix_builder.rs`, b5e632a), `flux_bin()` (flux_get /
+/// flux_reconcile, 5ad341e / ba3e615), plus the broader CARGO /
+/// NIX_BIN / DOCKER_BIN / BUN_BIN / CRATE2NIX surfaces — has already
+/// crossed the three-times threshold on the sigil discipline itself,
+/// so lifting `DOCA_BIN` here now brings the last production `doca`
+/// spawn family in `infrastructure/*` under the same discipline.
+///
+/// The lift is load-bearing beyond deduplication: `DOCA_BIN` names
+/// [the doca RFC bug that shipped and hid for a release cycle]
+/// (`cli/src/tools.rs::doca_resolves_from_doca_bin_and_the_deriving_lookup_does_not`)
+/// — `tools::DOCA`'s value is `"oci-push"`, so the one-argument
+/// deriving `get_tool_path(tools::DOCA)` reads `OCI_PUSH_BIN` which
+/// nothing exports. Routing every consumer through this sigil pins
+/// the two-argument form at a single named site, so a future
+/// "tidy-up" to the deriving form cannot silently re-open the
+/// silent-PATH-fallback bug on both `push` and `verify`.
+///
+/// THEORY §I.5 (Generation over composition, duplication budget
+/// zero); THEORY §VI.1 (three-times rule at the sigil-pattern level).
+fn doca_bin() -> String {
+    get_tool_path("DOCA_BIN", "oci-push")
+}
+
 /// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
 /// `RegistryError` variant whose structural shape matches the captured
 /// failure. Spawn-failure (skopeo not on PATH) routes to `ExecFailed`
@@ -235,7 +277,7 @@ impl RegistryClient {
             let host = host.clone();
             let image = image.clone();
             async move {
-                let doca = get_tool_path("DOCA_BIN", "oci-push");
+                let doca = doca_bin();
                 // ── CREDENTIALS BY ENV, NEVER ARGV. ─────────────────────────
                 // This previously passed `--dest-creds=<org>:<token>` on the
                 // command line. /proc/<pid>/cmdline is world-readable, so on a
@@ -298,7 +340,7 @@ impl RegistryClient {
         registry: &str,
         tag: &str,
     ) -> Result<String, RegistryError> {
-        let doca = get_tool_path("DOCA_BIN", "oci-push");
+        let doca = doca_bin();
         // CREDENTIALS BY ENV, NEVER ARGV — `--creds=<org>:<token>` put the
         // token in /proc/<pid>/cmdline, readable by any co-tenant process on a
         // shared runner. doca reads INPUT_USER / INPUT_PASS from the
@@ -924,6 +966,106 @@ mod tests {
             "infrastructure/registry.rs",
             "GH_BIN",
             "gh",
+        );
+    }
+
+    /// Whole-module shield: `fn doca_bin()` — the module-scoped
+    /// sigil that resolves the `oci-push` (`doca`) binary via the
+    /// canonical two-argument `DOCA_BIN`-first / `oci-push`-fallback
+    /// call — MUST be defined at a code line in this module AND the
+    /// two-argument resolve MUST appear at exactly ONE code line in
+    /// the module body (only in the sigil definition).
+    ///
+    /// Pre-lift the module carried two respells of the two-argument
+    /// resolve — one inside the `retry_command` closure of
+    /// [`RegistryClient::push_with_retries`] (the push retry-loop
+    /// body's `Command::new(&doca)` invocation) and one inside
+    /// [`RegistryClient::verify_tag_exists`] (the capture-shape
+    /// digest probe). The second respell silently bypassed the
+    /// module's own single-point-of-truth: a future edit to the
+    /// resolve contract at the push site would have left the verify
+    /// site stranded at the pre-edit form and vice versa. Post-lift
+    /// each consumer routes through `doca_bin()` and the resolve
+    /// appears at exactly ONE place (the sigil body). The
+    /// `resolve_count == 1` assertion fails-before at 2, passes-after
+    /// at 1 — the canonical fail-before-pass-after arc matching the
+    /// sibling `<tool>_bin()` shield discipline landed on
+    /// `infrastructure/attic.rs::attic_bin` (559adae),
+    /// `commands/comprehensive_release.rs::cargo_bin` (fceeecc),
+    /// `cli/src/nix.rs::nix_bin` (6b2ea15),
+    /// `commands/rust_service.rs::nix_bin` (63d4fe7),
+    /// `commands/tool.rs::{cargo,crate2nix}_bin` (9f6046b / 7561329),
+    /// `commands/nix_builder.rs::nc_bin` (b5e632a),
+    /// `commands/flux_{get,reconcile}.rs::flux_bin` (5ad341e /
+    /// ba3e615), and the broader `<tool>_bin()` sigil family.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\nmod tests {` marker in
+    /// source order — the outer test module's opener at line 599 in
+    /// the current layout) so this shield's own docstring mentions of
+    /// the two-argument resolve form — living inside the
+    /// `#[cfg(test)]` block below that marker — stay out of scope
+    /// AND every current or future `doca`-spawning helper landing
+    /// anywhere in the top-level module body cannot silently ride
+    /// along without going through `doca_bin()`.
+    ///
+    /// The two-argument-resolve needle is reconstructed via `format!`
+    /// inside [`crate::test_support::get_tool_path_two_arg_call_needle`]
+    /// and the sigil-definition needle via
+    /// [`crate::test_support::sigil_bin_fn_definition_needle`], so
+    /// this shield's own source never contains a concrete
+    /// `get_tool_path("DOCA_BIN", "oci-push")` or `fn doca_bin()`
+    /// literal at a code line and cannot false-match itself on either
+    /// assertion. Both positive assertions route through
+    /// [`crate::test_support::code_line_hits`] to preserve the
+    /// anti-docstring-self-match discipline.
+    #[test]
+    fn test_registry_routes_doca_through_doca_bin_sigil_not_raw_resolve() {
+        const SOURCE: &str = include_str!("registry.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
+            "infrastructure/registry.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+
+        let sigil_needle = crate::test_support::sigil_bin_fn_definition_needle("doca_bin");
+        let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);
+        assert!(
+            !sigil_hits.is_empty(),
+            "infrastructure/registry.rs must define `doca_bin()` at a \
+             code line in the module body — the sigil function that \
+             resolves the substrate-exported `DOCA_BIN` override for \
+             every `doca`/`oci-push` binary lookup (both the push \
+             retry-loop body in `push_with_retries` and the capture \
+             probe in `verify_tag_exists`). Mirrors the sibling \
+             `<tool>_bin()` sigils across the ATTIC_BIN / CARGO / \
+             NIX_BIN / DOCKER_BIN / BUN_BIN / CRATE2NIX / FLUX_BIN / \
+             NC_BIN surfaces."
+        );
+
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("DOCA_BIN", "oci-push");
+        let resolve_hits = crate::test_support::code_line_hits(body, &two_arg_needle);
+        assert_eq!(
+            resolve_hits.len(),
+            1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             at exactly ONE code line in the module body (only in the \
+             `doca_bin()` sigil), not {} — every consumer must route \
+             through `doca_bin()`, not re-copy the resolve inline. A \
+             future edit to the resolve contract (a substrate-path \
+             validation step, a per-spawn env-injection hook, a \
+             telemetry sigil on the resolved path) must land at the \
+             sigil body once, not at each drifted call site. \
+             `DOCA_BIN` is doubly load-bearing: the deriving-form \
+             lookup `get_tool_path(tools::DOCA)` would read \
+             `OCI_PUSH_BIN` which nothing exports (see \
+             `tools.rs::doca_resolves_from_doca_bin_and_the_deriving_lookup_does_not`), \
+             so any drift here silently re-opens the shipped-and-hid \
+             image-release bug. Found {} code-line hit(s): \
+             {resolve_hits:#?}",
+            resolve_hits.len(),
+            resolve_hits.len()
         );
     }
 }
