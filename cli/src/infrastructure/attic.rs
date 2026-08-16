@@ -17,6 +17,37 @@ use crate::retry::{
     CommandAttemptFailure, RetryPolicy,
 };
 
+/// Module-scoped sigil: resolve the `attic` binary via the canonical
+/// two-argument `get_tool_path("ATTIC_BIN", "attic")` call. Every
+/// production site in `infrastructure/attic.rs` that needs the
+/// resolved binary path (with no `with_attic_bin` test override in
+/// play) routes through this sigil, so the substrate-exported
+/// `ATTIC_BIN` env-var contract is honored at exactly ONE code line
+/// in the module regardless of whether the caller has `&self` (the
+/// `resolve_attic_bin` fallback) or not (the static `is_available`
+/// probe).
+///
+/// Pre-lift the module carried two respells of the two-argument
+/// resolve — one in [`AtticClient::resolve_attic_bin`]'s fallback
+/// branch, one in [`AtticClient::is_available`]'s inline probe.
+/// Post-lift both consumers route through this sigil, so a future
+/// widening of the resolve contract (e.g., a substrate-path
+/// validation step, a per-spawn env-injection hook, or a telemetry
+/// sigil on the resolved path) lands at ONE body and cannot silently
+/// degrade one site's resolution without the other noticing.
+///
+/// Sibling of the `<tool>_bin()` sigils landed on the CARGO surface
+/// across `commands/{test_ci,prerelease,developer_tools,tool,e2e,
+/// comprehensive_release}.rs`, the NIX_BIN surface across
+/// `commands/{build,developer_tools,rust_service,nix_builder,e2e,
+/// tool}.rs`, and the DOCKER_BIN / BUN_BIN / CRATE2NIX surfaces —
+/// the same per-module single-point-of-truth discipline applied to
+/// the ATTIC surface here. THEORY §I.5 (Generation over composition,
+/// duplication budget zero) and §VI.1 (three-times rule).
+fn attic_bin() -> String {
+    get_tool_path("ATTIC_BIN", "attic")
+}
+
 /// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
 /// `AtticError` variant whose structural shape matches the captured
 /// failure. Spawn-failure (attic not on PATH) routes to `ExecFailed`
@@ -132,9 +163,7 @@ impl AtticClient {
     }
 
     fn resolve_attic_bin(&self) -> String {
-        self.attic_bin
-            .clone()
-            .unwrap_or_else(|| get_tool_path("ATTIC_BIN", "attic"))
+        self.attic_bin.clone().unwrap_or_else(attic_bin)
     }
 
     /// Build a fresh `tokio::process::Command` targeting the resolved
@@ -667,8 +696,7 @@ impl AtticClient {
 
     /// Check if attic CLI is available
     pub async fn is_available() -> bool {
-        let attic_bin = get_tool_path("ATTIC_BIN", "attic");
-        Command::new(&attic_bin)
+        Command::new(attic_bin())
             .arg("--version")
             .output()
             .await
@@ -1988,6 +2016,106 @@ mod tests {
              let mut cmd = Command::new(&attic_bin);` preamble inline. \
              Found {} hit(s): {hits:#?}",
             hits.len()
+        );
+    }
+
+    /// Whole-module shield: `fn attic_bin()` — the module-scoped
+    /// sigil that resolves the `attic` binary via the canonical
+    /// two-argument `get_tool_path("ATTIC_BIN", "attic")` call — MUST
+    /// be defined at a code line in this module AND the two-argument
+    /// resolve MUST appear at exactly ONE code line in the module
+    /// body (only in the sigil definition).
+    ///
+    /// Pre-lift the module carried two respells of the two-argument
+    /// resolve — one in [`AtticClient::resolve_attic_bin`]'s fallback
+    /// branch (`self.attic_bin.clone().unwrap_or_else(|| get_tool_path(
+    /// "ATTIC_BIN", "attic"))`), one in [`AtticClient::is_available`]'s
+    /// inline probe (`let attic_bin = get_tool_path("ATTIC_BIN",
+    /// "attic"); Command::new(&attic_bin).arg("--version")…`). The
+    /// second respell silently bypassed the module's own
+    /// single-point-of-truth for tool resolution: a future edit to
+    /// the resolve contract at `resolve_attic_bin` would have left
+    /// `is_available` stranded at the pre-edit form. Post-lift each
+    /// consumer routes through `attic_bin()` and the resolve appears
+    /// in exactly ONE place (the sigil body). The `resolve_count == 1`
+    /// assertion fails-before at 2, passes-after at 1 — the canonical
+    /// fail-before-pass-after arc matching the sibling `<tool>_bin()`
+    /// shield discipline landed on
+    /// `commands/comprehensive_release.rs::cargo_bin` (fceeecc),
+    /// `cli/src/nix.rs::nix_bin` (6b2ea15),
+    /// `commands/rust_service.rs::nix_bin` (63d4fe7),
+    /// `commands/tool.rs::{cargo,crate2nix}_bin` (9f6046b / 7561329),
+    /// and the broader `<tool>_bin()` sigil family. The mixed
+    /// direct-`&self` / static-associated-fn shape asymmetry
+    /// (`resolve_attic_bin` needs `&self` to honor the
+    /// `with_attic_bin` test override; `is_available` is a static
+    /// availability probe with no client instance) is exactly what
+    /// motivates the free-function sigil: the shared resolve contract
+    /// factors out of the `impl` block so both call shapes can route
+    /// through it.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\nmod tests {` marker in
+    /// source order — the outer test module's opener at line ~680 in
+    /// the current layout) so this shield's own docstring mentions of
+    /// `get_tool_path("ATTIC_BIN", "attic")` — living inside the
+    /// `#[cfg(test)]` block below that marker — stay out of scope
+    /// AND every current or future attic-spawning helper landing
+    /// anywhere in the top-level module body cannot silently ride
+    /// along without going through `attic_bin()`.
+    ///
+    /// The two-argument-resolve needle is reconstructed via `format!`
+    /// inside [`crate::test_support::get_tool_path_two_arg_call_needle`]
+    /// and the sigil-definition needle via
+    /// [`crate::test_support::sigil_bin_fn_definition_needle`], so
+    /// this shield's own source never contains a concrete
+    /// `get_tool_path("ATTIC_BIN", "attic")` or `fn attic_bin()`
+    /// literal and cannot false-match itself on either assertion.
+    /// Both positive assertions route through
+    /// [`crate::test_support::code_line_hits`] to preserve the
+    /// anti-docstring-self-match discipline.
+    #[test]
+    fn test_attic_routes_attic_bin_through_attic_bin_sigil_not_raw_resolve() {
+        const SOURCE: &str = include_str!("attic.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
+            "infrastructure/attic.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+
+        let sigil_needle = crate::test_support::sigil_bin_fn_definition_needle("attic_bin");
+        let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);
+        assert!(
+            !sigil_hits.is_empty(),
+            "infrastructure/attic.rs must define `attic_bin()` at a \
+             code line in the module body — the sigil function that \
+             resolves the tools-registry `ATTIC_BIN` override for \
+             every `attic` binary lookup (both the `&self` \
+             `resolve_attic_bin` fallback and the static \
+             `is_available` probe). Mirrors the sibling `<tool>_bin()` \
+             sigils across the CARGO surface (test_ci, prerelease, \
+             developer_tools, tool, e2e, comprehensive_release), the \
+             NIX_BIN surface (build, developer_tools, rust_service, \
+             nix_builder, e2e, tool), and the broader sigil family."
+        );
+
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("ATTIC_BIN", "attic");
+        let resolve_hits = crate::test_support::code_line_hits(body, &two_arg_needle);
+        assert_eq!(
+            resolve_hits.len(),
+            1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             at exactly ONE code line in the module body (only in the \
+             `attic_bin()` sigil), not {} — every consumer must route \
+             through `attic_bin()`, not re-copy the resolve inline. \
+             A future edit to the resolve contract (a substrate-path \
+             validation step, a per-spawn env-injection hook, a \
+             telemetry sigil on the resolved path) must land at the \
+             sigil body once, not at each drifted call site. Found \
+             {} code-line hit(s): {resolve_hits:#?}",
+            resolve_hits.len(),
+            resolve_hits.len()
         );
     }
 }
