@@ -89,6 +89,39 @@ fn cargo_bin() -> String {
     get_tool_path("CARGO", "cargo")
 }
 
+/// Resolve the `bun` binary via the `BUN_BIN` env override, falling back
+/// to `bun` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
+/// the canonical env-var-or-PATH lookup every bun-invocation site in
+/// forge honors. Second landing of the `bun_bin()` sigil after the
+/// initial `commands/frontend_validation.rs::bun_bin` lift (9986f11) —
+/// the pattern is proven; `commands/e2e.rs` was the remaining
+/// bun-spawning outlier still respelling the two-argument resolve at
+/// every consumer. Solve-once at the sigil (THEORY §I.5 — duplication
+/// budget zero; every recurring shape becomes a helper before it
+/// becomes duplicated code) means a future added `bun` spawn in this
+/// module cannot silently re-copy the two-argument resolve and drift
+/// away from the `BUN_BIN` override at exactly the tier the
+/// hermetic-runner contract binds. The `bun_env_routing_tests` shield
+/// below asserts three invariants: no bare bun-literal spawn in the
+/// module body (already landed pre-lift), `fn bun_bin()` is defined,
+/// and the two-argument resolve appears in EXACTLY one place — only
+/// the sigil body — so a future added spawn cannot silently re-copy
+/// the resolve inline. Pre-lift the two consumer sites
+/// (`run_frontend_unit_tests`'s live-output + JSON-report branch and
+/// its console-reporter fallback) each spelled the two-argument
+/// resolve verbatim, so a Nix-hermetic runner whose derivation exports
+/// `BUN_BIN=/nix/store/…-bun/bin/bun` but omits `bun` from PATH
+/// silently fell through to whatever `bun` was first on PATH at each
+/// site — the E2E frontend-unit-test verdict was attributed to
+/// whichever `bun` PATH resolved first, not to the substrate-pinned
+/// bun derivation the flake declared. Same silent-PATH-fallback bug
+/// class the sibling `docker_bin` (23241a6), `open_bin` (8f4c717),
+/// and `cargo_bin` (170ecac) sigils on this same module already
+/// close for their respective spawn surfaces.
+fn bun_bin() -> String {
+    get_tool_path("BUN_BIN", "bun")
+}
+
 /// The typed exponential-backoff policy for [`ensure_docker_running`]'s
 /// macOS Docker Desktop startup-poll cadence — `initial_backoff` 2s ×
 /// `factor` 2 capped at `max_backoff` 30s. Consumes the pre-existing
@@ -428,7 +461,7 @@ fn run_frontend_unit_tests(
 
         // Use BOTH default reporter (for terminal) AND json reporter (for file)
         // This gives live feedback while still generating a machine-readable report
-        let bun = get_tool_path("BUN_BIN", "bun");
+        let bun = bun_bin();
         let mut cmd = Command::new(&bun);
         cmd.current_dir(web_dir)
             .arg("run")
@@ -462,7 +495,7 @@ fn run_frontend_unit_tests(
     } else {
         ui::print_info("Running bun run test");
 
-        let bun = get_tool_path("BUN_BIN", "bun");
+        let bun = bun_bin();
         let mut cmd = Command::new(&bun);
         cmd.current_dir(web_dir)
             .arg("run")
@@ -1568,6 +1601,95 @@ mod cargo_env_routing_tests {
              exactly ONCE in the module body (only in the `cargo_bin()` \
              sigil), not {resolve_count} times — every consumer must route \
              through `cargo_bin()`, not re-copy the resolve inline"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bun_env_routing_tests {
+    /// Whole-module shield: no raw `Command::new("bun")` may live in
+    /// `commands/e2e.rs`'s non-test body, `fn bun_bin()` must be
+    /// defined, and the two-argument resolve
+    /// `get_tool_path("BUN_BIN", "bun")` must appear exactly ONCE
+    /// (only in the sigil body).
+    ///
+    /// Pre-lift the two consumer sites — `run_frontend_unit_tests`'
+    /// live-output + JSON-report branch at line 464 and its
+    /// console-reporter fallback at line 498 — each spelled
+    /// `let bun = get_tool_path("BUN_BIN", "bun");` verbatim. Post-lift
+    /// each consumer routes through `bun_bin()` and the two-argument
+    /// resolve appears in exactly ONE place (the sigil body). The
+    /// `resolve_count == 1` assertion fails-before at 2, passes-after
+    /// at 1 — the canonical fail-before-pass-after arc matching the
+    /// sibling `<tool>_bin()` shield discipline landed on this same
+    /// module for `docker_bin` (23241a6), `open_bin` (8f4c717), and
+    /// `cargo_bin` (170ecac), and on the sibling
+    /// `commands/frontend_validation.rs::bun_bin` first landing
+    /// (9986f11).
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\n` marker in source order,
+    /// which lands at the sibling
+    /// `resolve_repo_root_git_bin_routing_tests` block near the end of
+    /// the module body) so this shield's own docstring mentions of the
+    /// forbidden literal — living in a `#[cfg(test)]` block below that
+    /// first marker — stay out of scope AND every current or future
+    /// bun-spawning helper landing anywhere in the top-level module
+    /// body cannot silently ride along without going through
+    /// `bun_bin()`. Mirrors the sibling whole-module shields on the
+    /// same module (`cargo_env_routing_tests`, `docker_bin_routing_tests`,
+    /// `open_bin_routing_tests`).
+    ///
+    /// The two-argument-resolve needle is reconstructed via `format!`
+    /// inside [`crate::test_support::get_tool_path_two_arg_call_needle`],
+    /// so this shield's own source never contains the literal
+    /// `get_tool_path("BUN_BIN", "bun")` string and cannot false-match
+    /// itself on the count-eq-1 assertion.
+    ///
+    /// A Nix-hermetic runner whose derivation exports
+    /// `BUN_BIN=/nix/store/…-bun/bin/bun` but omits `bun` from PATH
+    /// silently fell through to whatever `bun` was first on PATH at
+    /// each pre-lift site — the E2E frontend-unit-test verdict was
+    /// attributed to whichever `bun` PATH resolved first, not to the
+    /// substrate-pinned bun derivation the flake declared. Same
+    /// silent-PATH-fallback bug class the sibling
+    /// `commands/frontend_validation.rs::bun_bin` shield closes for the
+    /// pre-release frontend-validation surface, here closed for the
+    /// E2E frontend-unit-test surface.
+    #[test]
+    fn test_e2e_routes_bun_through_bun_bin_sigil_not_raw_command() {
+        const SOURCE: &str = include_str!("e2e.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+            "e2e.rs must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+        assert!(
+            !body.contains("Command::new(\"bun\")"),
+            "commands/e2e.rs must not spawn `bun` via the bare \
+             literal — every `bun` spawn must resolve `BUN_BIN` via \
+             `bun_bin()` first. A raw `Command::new(\"bun\")` bypasses \
+             the hermetic-runner contract substrate's mkRuntimeToolsEnv \
+             exports."
+        );
+        assert!(
+            body.contains("fn bun_bin()"),
+            "commands/e2e.rs must define `bun_bin()` — the sigil \
+             function that resolves the tools-registry `BUN_BIN` \
+             override for every bun spawn. Mirrors the `bun_bin()` \
+             sigil at `commands/frontend_validation.rs:50` (9986f11) \
+             and the sibling `cargo_bin()` / `docker_bin()` / \
+             `open_bin()` sigils on this same module."
+        );
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("BUN_BIN", "bun");
+        let resolve_count = body.matches(two_arg_needle.as_str()).count();
+        assert_eq!(
+            resolve_count, 1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the `bun_bin()` \
+             sigil), not {resolve_count} times — every consumer must \
+             route through `bun_bin()`, not re-copy the resolve inline"
         );
     }
 }
