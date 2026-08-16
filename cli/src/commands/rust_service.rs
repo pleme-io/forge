@@ -72,6 +72,52 @@ fn ps_bin() -> String {
     get_tool_path("PS_BIN", "ps")
 }
 
+/// Resolve the `nix` binary path via `NIX_BIN`, falling back to `nix` on
+/// `PATH`. Wired through [`crate::repo::get_tool_path`] — the canonical
+/// env-var-or-PATH lookup every other nix-invocation site in forge honors
+/// (`commands/build.rs::execute` d8ef0d5,
+/// `commands/tool.rs::build_lock_target`,
+/// `nix.rs::build_flake_attr_in`,
+/// `nix.rs::build_docker_image_from_dir`,
+/// `nix.rs::path_info_recursive`,
+/// `nix_hooks.rs::NixHooks::build_and_get_path`,
+/// `commands/developer_tools.rs::rust_update_cargo_nix` and siblings
+/// 4dfb2b3).
+///
+/// Sixth landing of the `<tool>_bin()` sigil pattern after
+/// `commands/test_ci.rs:28` (916f1a4),
+/// `commands/prerelease.rs:109` (79e03a5),
+/// `commands/developer_tools.rs:36` (534ef48),
+/// `commands/e2e.rs:87` (170ecac),
+/// `commands/tool.rs:37` (9f6046b) — CARGO surface — and
+/// `commands/frontend_validation.rs` (9986f11) — BUN_BIN surface. First
+/// landing on the NIX_BIN surface. `rust_service.rs` was the biggest
+/// remaining nix-spawning outlier still respelling the two-argument
+/// resolve at every consumer — three live sites (the
+/// `check_cross_compilation_available` `show-config` probe, the
+/// `build_rust_service` primary `nix build .#<pkg>` AMD64 site, and the
+/// `release_rust_service` federation-tests `nix run .#release` site)
+/// plus one dead sibling inside a TODO block comment, all pre-lift
+/// respelling the two-argument `NIX_BIN` resolve verbatim at each
+/// consumer. The pre-existing whole-module bare-literal-spawn
+/// shield closed the raw-literal-spawn class; this sigil closes the
+/// re-copied-resolve class by pinning the two-argument resolve at
+/// exactly one place — the sigil body — and adding a count-eq-1
+/// assertion the sibling `cargo_bin` / `bun_bin` sigil family already
+/// carries.
+///
+/// A Nix-hermetic runner whose derivation exports
+/// `NIX_BIN=/nix/store/…/bin/nix` but omits `nix` from `PATH` silently
+/// fell through to whatever `nix` was first on `PATH` at each pre-lift
+/// site — every cross-compilation-probe / crate-build / federation-tests
+/// release verdict was attributed to whichever `nix` PATH resolved
+/// first, not to the substrate-pinned nix derivation the flake
+/// declared. Post-lift every site observes the same substrate-declared
+/// path every other nix-invocation site in forge observes.
+fn nix_bin() -> String {
+    get_tool_path("NIX_BIN", "nix")
+}
+
 /// Compute the tag to use for deployment.
 ///
 /// In normal mode: `tag_suffix` is a raw git SHA, deploy tag is `{arch}-{sha}`
@@ -237,7 +283,7 @@ fn check_cross_compilation_available() -> bool {
     }
 
     // Check for aarch64-linux in Nix remote builders
-    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let nix_bin = nix_bin();
     if let Ok(output) = std::process::Command::new(&nix_bin)
         .args(&["show-config"])
         .output()
@@ -365,7 +411,7 @@ pub async fn build_rust_service(
 
     // Root flake pattern: Simple nix build from repo root
     // No --override-input needed, no service flake complexity
-    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let nix_bin = nix_bin();
     let mut cmd = Command::new(&nix_bin);
     cmd.args(&[
         "build",
@@ -474,7 +520,7 @@ pub async fn build_rust_service(
         /*
         let package_attr_arm64 = format!(".#{}-{}-arm64", deploy_config.product.name, service);
 
-        let nix_bin = get_tool_path("NIX_BIN", "nix");
+        let nix_bin = nix_bin();
         let mut arm64_cmd = Command::new(&nix_bin);
         arm64_cmd.args(&[
             "build",
@@ -2543,7 +2589,7 @@ pub async fn release_rust_service(
         println!("   📁 Federation tests: {}", federation_tests_dir.display());
 
         // Run nix run .#release from the federation-tests directory
-        let nix_bin = get_tool_path("NIX_BIN", "nix");
+        let nix_bin = nix_bin();
         let status = std::process::Command::new(&nix_bin)
             .args(&["run", ".#release"])
             .current_dir(&federation_tests_dir)
@@ -2896,15 +2942,30 @@ mod nix_bin_routing_tests {
             !body.contains("Command::new(\"nix\")"),
             "commands/rust_service.rs must not spawn `nix` via the bare \
              literal — every `nix` spawn must resolve `NIX_BIN` via \
-             `crate::repo::get_tool_path(\"NIX_BIN\", \"nix\")` first. \
-             A raw `Command::new(\"nix\")` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
+             `nix_bin()` first. A raw `Command::new(\"nix\")` bypasses \
+             the hermetic-runner contract substrate's mkRuntimeToolsEnv \
+             exports."
         );
         assert!(
-            body.contains("get_tool_path(\"NIX_BIN\", \"nix\")"),
-            "commands/rust_service.rs must resolve the nix binary via \
-             `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical \
-             lookup was not found in the module body."
+            body.contains("fn nix_bin()"),
+            "commands/rust_service.rs must define `nix_bin()` — the \
+             sigil function that resolves the tools-registry `NIX_BIN` \
+             override for every nix spawn. Mirrors the `cargo_bin()` \
+             sigil discipline at `commands/test_ci.rs:28`, \
+             `commands/prerelease.rs:109`, \
+             `commands/developer_tools.rs:36`, `commands/e2e.rs:87`, \
+             `commands/tool.rs:37`, and the `bun_bin()` sigil at \
+             `commands/frontend_validation.rs`."
+        );
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("NIX_BIN", "nix");
+        let resolve_count = body.matches(two_arg_needle.as_str()).count();
+        assert_eq!(
+            resolve_count, 1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the `nix_bin()` \
+             sigil), not {resolve_count} times — every consumer must \
+             route through `nix_bin()`, not re-copy the resolve inline"
         );
     }
 }
