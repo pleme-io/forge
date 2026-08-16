@@ -25,7 +25,45 @@
 //!   (async) split this module's `kubectl.rs` sibling already
 //!   carries.
 
-use crate::tools::get_tool_path;
+use crate::repo::get_tool_path;
+
+/// Module-scoped sigil that resolves the `docker` binary via the
+/// canonical two-argument [`crate::repo::get_tool_path`]`("DOCKER_BIN",
+/// "docker")` call — the audit-visible env-var-or-fallback lookup every
+/// sibling `<tool>_bin()` sigil across forge routes through
+/// (`commands/e2e.rs::docker_bin` 23241a6, `commands/prerelease.rs::docker_bin`
+/// 41c62dc, `commands/local.rs::docker_bin`, `commands/infra.rs::docker_bin`,
+/// and the broader `<tool>_bin()` sigil family across the
+/// CARGO / NIX_BIN / ATTIC_BIN / BUN_BIN / CRATE2NIX / DOCA_BIN /
+/// FLUX_BIN / NC_BIN / DOCKER_COMPOSE_BIN surfaces —
+/// c0eba89 / 868b2ad / b5e632a / ba3e615 / 5ad341e / 559adae / fceeecc /
+/// 6b2ea15 / 34118d9 / 423fb5a / a12c172 / 7561329 / 63d4fe7 / 9f6046b /
+/// 9986f11 / 170ecac / 534ef48).
+///
+/// Pre-lift both `find_first_image_id_by_name{,_async}` production sites
+/// resolved via the ONE-argument deriving [`crate::tools::get_tool_path`]`("docker")`
+/// form — the same shape pinned as the silent-PATH-fallback bug at
+/// [`crate::tools::tests::doca_resolves_from_doca_bin_and_the_deriving_lookup_does_not`].
+/// The deriving form maps the tool-name string `"docker"` to the env var
+/// `DOCKER_BIN` by uppercase+underscore rule, so for this tool the
+/// deriving form happens to resolve the SAME env var as the canonical
+/// two-argument form — but the abstraction that decides which env var to
+/// read is one hop removed from the audit-visible env-var literal. A
+/// fleet-wide `DOCKER_BIN` grep audit misses these sites entirely under
+/// the deriving form; a substrate rename of `DOCKER_BIN` cannot be found
+/// mechanically because the string never appears in the source. Migrating
+/// both sites onto the two-argument form pins the audit-visible literal
+/// once at the sigil body and lets the module join the fleet-wide
+/// `<tool>_bin()` sigil convention. The whole-module shield below asserts
+/// four invariants: `fn docker_bin()` is defined, the two-argument resolve
+/// appears at EXACTLY one code line (only the sigil body), and neither
+/// pre-lift deriving form (constant `crate::tools::get_tool_path(crate::tools::tools::DOCKER)`
+/// nor literal `crate::tools::get_tool_path("docker")`) reappears at a
+/// code line — so a future "tidy" back to the deriving form fails the
+/// shield rather than silently re-hiding the env-var literal from audits.
+fn docker_bin() -> String {
+    get_tool_path("DOCKER_BIN", "docker")
+}
 
 /// Canonical docker argv that fetches the IDs of local images matching
 /// a name reference: `docker images -q <name>`. Centralized so the
@@ -113,14 +151,15 @@ fn classify_first_image_id(output: &std::process::Output) -> Option<String> {
 ///
 /// # Binary resolution
 ///
-/// `docker` is resolved via [`crate::tools::get_tool_path`] — the
-/// canonical `DOCKER_BIN`-or-PATH lookup forge uses for every
-/// shell-out binary. Tests drive the underlying
-/// [`find_first_image_id_by_name_with_bin`] directly with an
-/// absolute shim path to avoid global-env mutation under
+/// `docker` is resolved via the module-scoped [`docker_bin`] sigil,
+/// which delegates to [`crate::repo::get_tool_path`] on the canonical
+/// two-argument `("DOCKER_BIN", "docker")` env-var override every
+/// sibling `<tool>_bin()` sigil across forge honors. Tests drive the
+/// underlying [`find_first_image_id_by_name_with_bin`] directly with
+/// an absolute shim path to avoid global-env mutation under
 /// `cargo test`'s parallel runner.
 pub fn find_first_image_id_by_name(name: &str) -> Option<String> {
-    let bin = get_tool_path("docker");
+    let bin = docker_bin();
     find_first_image_id_by_name_with_bin(&bin, name)
 }
 
@@ -160,7 +199,7 @@ pub(crate) fn find_first_image_id_by_name_with_bin(bin: &str, name: &str) -> Opt
 /// `classify_first_image_id` so a regression on either shape is
 /// still a one-site fix.
 pub async fn find_first_image_id_by_name_async(name: &str) -> Option<String> {
-    let bin = get_tool_path("docker");
+    let bin = docker_bin();
     find_first_image_id_by_name_async_with_bin(&bin, name).await
 }
 
@@ -394,5 +433,123 @@ mod tests {
         let missing = "/nonexistent/forge-test-shim-must-not-exist-docker-async";
         let got = find_first_image_id_by_name_async_with_bin(missing, "any-name").await;
         assert!(got.is_none(), "spawn against nonexistent path must be None");
+    }
+
+    // ---------------------------------------------------------------
+    // whole-module routing shield — docker_bin sigil
+    // ---------------------------------------------------------------
+
+    /// Whole-module shield: `fn docker_bin()` — the module-scoped sigil
+    /// that resolves `DOCKER_BIN` via
+    /// [`crate::repo::get_tool_path`]`("DOCKER_BIN", "docker")` — MUST
+    /// be the ONLY code-line site in this module's production body that
+    /// spells the two-argument resolve, AND neither pre-lift ONE-argument
+    /// deriving form ([`crate::tools::get_tool_path`]`(crate::tools::tools::DOCKER)`
+    /// nor [`crate::tools::get_tool_path`]`("docker")`) may reappear at
+    /// any production code line. Every future `docker` resolve landing
+    /// in `infrastructure/docker.rs` (a new probe primitive, a follow-on
+    /// image-inspect / image-tag helper) must delegate through
+    /// `docker_bin()`, and every future "tidy" back to the deriving
+    /// abstraction — the exact shape [`crate::tools::tests::doca_resolves_from_doca_bin_and_the_deriving_lookup_does_not`]
+    /// pinned as the silent-PATH-fallback bug — fails the shield rather
+    /// than silently re-hiding the `DOCKER_BIN` env-var literal from a
+    /// fleet-wide audit.
+    ///
+    /// Scan bounds on the whole-module boundary — from the file start to
+    /// the FIRST `\n#[cfg(test)]\nmod tests {` marker in source order —
+    /// so this shield's own docstring mentions of the sigil signature
+    /// and the resolve string, living inside the `#[cfg(test)]` block
+    /// below that marker, stay out of scope AND every current or future
+    /// helper landing anywhere in the top-level module body cannot
+    /// silently ride along without going through `docker_bin()`.
+    ///
+    /// All positive/negative needles are reconstructed via `format!`
+    /// through
+    /// [`crate::test_support::sigil_bin_fn_definition_needle`],
+    /// [`crate::test_support::get_tool_path_two_arg_call_needle`],
+    /// [`crate::test_support::deriving_one_arg_sigil_needle_constant`],
+    /// and
+    /// [`crate::test_support::deriving_one_arg_sigil_needle_literal`],
+    /// so this shield's own source text does not false-match itself on
+    /// any concrete substitution, and all hits route through
+    /// [`crate::test_support::code_line_hits`] for
+    /// anti-docstring-self-match discipline. Mirrors the sibling
+    /// `<tool>_bin()` shield family across
+    /// `commands/developer_tools.rs::docker_compose_bin` (c0eba89),
+    /// `infrastructure/registry.rs::doca_bin` (868b2ad),
+    /// `commands/nix_builder.rs::nc_bin` (b5e632a),
+    /// `infrastructure/attic.rs::attic_bin` (559adae),
+    /// `commands/comprehensive_release.rs::cargo_bin` (fceeecc),
+    /// `cli/src/nix.rs::nix_bin` (6b2ea15), and every other
+    /// fail-before-pass-after sigil-shield lift on `main`.
+    ///
+    /// Pre-lift the two production sites in this module each spelled
+    /// the deriving `crate::tools::get_tool_path("docker")` form — the
+    /// silent-PATH-fallback anti-shape — so the shield fails-before at
+    /// 2 (both sites) on the deriving-forbid arm and 0 on the two-arg
+    /// arm, and passes-after at 1 (only the sigil body) on the two-arg
+    /// arm and 0 on the deriving-forbid arm.
+    #[test]
+    fn test_infrastructure_docker_routes_docker_through_docker_bin_sigil_not_raw_resolve() {
+        const SOURCE: &str = include_str!("docker.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
+            "infrastructure/docker.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+
+        // (a) The sigil definition itself must be present at a code line.
+        let sigil_needle = crate::test_support::sigil_bin_fn_definition_needle("docker_bin");
+        let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);
+        assert!(
+            !sigil_hits.is_empty(),
+            "infrastructure/docker.rs must define `docker_bin()` at a code \
+             line — the sigil function that resolves the substrate-exported \
+             `DOCKER_BIN` env override for every `docker` spawn in this \
+             module. Mirrors the fleet-wide `<tool>_bin()` sigil family."
+        );
+
+        // (b) The canonical two-argument resolve must appear at EXACTLY
+        //     one code line — only the sigil body — so a future added
+        //     spawn cannot silently re-copy the resolve inline and drift
+        //     away from the sigil's single point of truth.
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("DOCKER_BIN", "docker");
+        let resolve_hits = crate::test_support::code_line_hits(body, &two_arg_needle);
+        assert_eq!(
+            resolve_hits.len(),
+            1,
+            "the two-argument resolve `{two_arg_needle}` must appear at \
+             exactly ONE code line in the module body (only in the \
+             `docker_bin()` sigil), not {} — every consumer must route \
+             through `docker_bin()`, not re-copy the resolve inline. A \
+             future edit to the resolve contract (a substrate-path \
+             validation step, a per-spawn env-injection hook, a telemetry \
+             sigil on the resolved path) must land at the sigil body \
+             once, not at each drifted call site. Found {} code-line \
+             hit(s): {resolve_hits:#?}",
+            resolve_hits.len(),
+            resolve_hits.len()
+        );
+
+        // (c) Neither pre-lift deriving one-arg form may reappear at any
+        //     code line — a "tidy" back to `crate::tools::get_tool_path`
+        //     hides the `DOCKER_BIN` literal from fleet-wide grep audits
+        //     and re-opens the silent-PATH-fallback class the DOCA_BIN
+        //     bug (see `crate::tools::tests::doca_resolves_from_doca_bin_and_the_deriving_lookup_does_not`)
+        //     already burned once at the image-release surface.
+        crate::test_support::assert_source_forbids_deriving_one_arg_sigil_constant_form(
+            body,
+            "infrastructure/docker.rs",
+            "DOCKER_BIN",
+            "docker",
+            "DOCKER",
+        );
+        crate::test_support::assert_source_forbids_deriving_one_arg_sigil_literal_form(
+            body,
+            "infrastructure/docker.rs",
+            "DOCKER_BIN",
+            "docker",
+        );
     }
 }
