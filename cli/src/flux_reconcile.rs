@@ -61,7 +61,40 @@ use thiserror::Error;
 use tokio::process::Command;
 
 use crate::retry::classify_capture;
-use crate::tools::get_tool_path;
+
+/// Module-scoped sigil: resolve the `flux` binary via the canonical
+/// two-argument [`crate::repo::get_tool_path`] `("FLUX_BIN", "flux")`
+/// call. Both production entry points in `flux_reconcile.rs` that need
+/// the resolved binary path — the two `_with_bin`-fronting entry points
+/// [`reconcile_kustomization`] and [`reconcile_source_git`] — route
+/// through this sigil, so the substrate-exported `FLUX_BIN` env-var
+/// contract is honored at exactly ONE code line in the module regardless
+/// of which entry point the caller drives.
+///
+/// Pre-lift the module carried two respells of the deriving-one-arg
+/// [`crate::tools::get_tool_path`] `("flux")` shape — one per entry
+/// point — that a fleet-wide `FLUX_BIN`-literal audit could not see
+/// (a regression that dropped the env var at either of the two sites
+/// would silently fall through to whatever `flux` was first on PATH
+/// on a Nix-hermetic runner). Post-lift both consumers route through
+/// this sigil, the deriving one-arg form is absent from the module,
+/// and a future widening of the resolve contract (a substrate-path
+/// validation step, a per-spawn env-injection hook, a telemetry sigil
+/// on the resolved path) lands at ONE body.
+///
+/// Sibling of the `<tool>_bin()` sigils landed on the CARGO surface
+/// across `commands/{test_ci,prerelease,developer_tools,tool,e2e,
+/// comprehensive_release}.rs`, the NIX_BIN surface across
+/// `commands/{build,developer_tools,rust_service,nix_builder,e2e,
+/// tool}.rs`, the DOCKER_BIN / BUN_BIN / CRATE2NIX / ATTIC_BIN
+/// surfaces, the `commands/helm.rs::helm_bin()` sigil, and the sibling
+/// `flux_get.rs::flux_bin()` sigil (5ad341e) — the same per-module
+/// single-point-of-truth discipline applied to the FLUX-reconcile
+/// surface here. THEORY §I.5 (Generation over composition, duplication
+/// budget zero) and §VI.1 (three-times rule).
+fn flux_bin() -> String {
+    crate::repo::get_tool_path("FLUX_BIN", "flux")
+}
 
 /// Why a `flux reconcile kustomization <kustomization> -n <namespace>`
 /// invocation failed to drive the reconcile to success. Carries the
@@ -143,7 +176,7 @@ pub async fn reconcile_kustomization(
     namespace: &str,
     with_source: bool,
 ) -> Result<(), FluxReconcileError> {
-    let flux = get_tool_path("flux");
+    let flux = flux_bin();
     reconcile_kustomization_with_bin(&flux, kustomization, namespace, with_source).await
 }
 
@@ -261,7 +294,7 @@ pub async fn reconcile_source_git(
     source_name: &str,
     namespace: &str,
 ) -> Result<(), FluxSourceGitReconcileError> {
-    let flux = get_tool_path("flux");
+    let flux = flux_bin();
     reconcile_source_git_with_bin(&flux, source_name, namespace).await
 }
 
@@ -914,6 +947,119 @@ mod tests {
                 FluxSourceGitReconcileError::SpawnFailed { .. }
             ),
             "recovered variant must be SpawnFailed, got: {spawn_recovered:?}"
+        );
+    }
+
+    /// Whole-module shield: `fn flux_bin()` — the module-scoped sigil
+    /// that resolves the `flux` binary via the canonical two-argument
+    /// [`crate::repo::get_tool_path`] `("FLUX_BIN", "flux")` call —
+    /// MUST be defined at a code line in this module, AND the two-arg
+    /// resolve MUST appear at exactly ONE code line in the module
+    /// body (only in the sigil definition), AND the pre-lift deriving-
+    /// one-arg [`crate::tools::get_tool_path`] `("flux")` shape MUST
+    /// NOT appear at any code line.
+    ///
+    /// Pre-lift the module carried two respells of the deriving
+    /// one-arg form — one per public entry point
+    /// ([`reconcile_kustomization`], [`reconcile_source_git`]) —
+    /// silently bypassing the module's own single-point-of-truth for
+    /// tool resolution: a future edit to the resolve contract at
+    /// either entry point would have left the other stranded at the
+    /// pre-edit form, AND the deriving-one-arg shape hid the
+    /// `FLUX_BIN` env-var literal from a fleet-wide audit. Post-lift
+    /// each consumer routes through `flux_bin()` and the two-arg
+    /// resolve appears in exactly ONE place (the sigil body). The
+    /// `resolve_count == 1` assertion fails-before at 0 (the canonical
+    /// two-arg form did not exist in the module pre-lift) and passes-
+    /// after at 1 — canonical fail-before-pass-after arc matching the
+    /// sibling `<tool>_bin()` shield discipline landed on
+    /// `flux_get.rs::flux_bin` (5ad341e),
+    /// `infrastructure/attic.rs::attic_bin` (559adae),
+    /// `commands/comprehensive_release.rs::cargo_bin` (fceeecc),
+    /// `cli/src/nix.rs::nix_bin` (6b2ea15), and the broader
+    /// `<tool>_bin()` sigil family. The deriving-one-arg negative
+    /// shield closes the audit-visibility loophole: a regression that
+    /// reintroduces `crate::tools::get_tool_path("flux")` at any code
+    /// line panics with a code-line hits diagnostic rather than
+    /// silently passing.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\nmod tests {` marker in
+    /// source order — the outer test module's opener) so this
+    /// shield's own docstring mentions of the pre-lift and canonical
+    /// forms — living inside the `#[cfg(test)]` block below that
+    /// marker — stay out of scope AND every current or future
+    /// flux-spawning helper landing anywhere in the top-level module
+    /// body cannot silently ride along without going through
+    /// `flux_bin()`.
+    ///
+    /// All three needles are reconstructed via `format!` inside
+    /// [`crate::test_support::sigil_bin_fn_definition_needle`],
+    /// [`crate::test_support::canonical_two_arg_sigil_needle`], and
+    /// [`crate::test_support::deriving_one_arg_sigil_needle_literal`],
+    /// so this shield's own source never contains a concrete
+    /// `crate::repo::get_tool_path("FLUX_BIN", "flux")`,
+    /// `crate::tools::get_tool_path("flux")`, or `fn flux_bin()`
+    /// literal and cannot false-match itself on any assertion. All
+    /// three assertions route through
+    /// [`crate::test_support::code_line_hits`] to preserve the
+    /// anti-docstring-self-match discipline — the existing `///` and
+    /// `//!` prose in the module that legitimately quotes the
+    /// pre-lift shape for narrative purposes does not count against
+    /// the sigil-body or deriving-form assertions.
+    #[test]
+    fn test_flux_reconcile_routes_flux_bin_through_flux_bin_sigil_not_raw_resolve() {
+        const SOURCE: &str = include_str!("flux_reconcile.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
+            "flux_reconcile.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+
+        let sigil_needle = crate::test_support::sigil_bin_fn_definition_needle("flux_bin");
+        let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);
+        assert!(
+            !sigil_hits.is_empty(),
+            "flux_reconcile.rs must define `flux_bin()` at a code line in \
+             the module body — the sigil function that resolves the \
+             tools-registry `FLUX_BIN` override for every `flux` binary \
+             lookup at the two `_with_bin`-fronting entry points \
+             (`reconcile_kustomization`, `reconcile_source_git`). \
+             Mirrors the sibling `<tool>_bin()` sigils across the CARGO / \
+             NIX_BIN / DOCKER_BIN / BUN_BIN / CRATE2NIX / ATTIC_BIN / \
+             FLUX surfaces."
+        );
+
+        let two_arg_needle =
+            crate::test_support::canonical_two_arg_sigil_needle("FLUX_BIN", "flux");
+        let resolve_hits = crate::test_support::code_line_hits(body, &two_arg_needle);
+        assert_eq!(
+            resolve_hits.len(),
+            1,
+            "the canonical two-argument resolve `{two_arg_needle}` \
+             must appear at exactly ONE code line in the module body \
+             (only in the `flux_bin()` sigil), not {} — every consumer \
+             must route through `flux_bin()`, not re-copy the resolve \
+             inline. A future edit to the resolve contract (a \
+             substrate-path validation step, a per-spawn env-injection \
+             hook, a telemetry sigil on the resolved path) must land \
+             at the sigil body once, not at each drifted call site. \
+             Found {} code-line hit(s): {resolve_hits:#?}",
+            resolve_hits.len(),
+            resolve_hits.len()
+        );
+
+        let deriving_needle = crate::test_support::deriving_one_arg_sigil_needle_literal("flux");
+        let deriving_hits = crate::test_support::code_line_hits(body, &deriving_needle);
+        assert!(
+            deriving_hits.is_empty(),
+            "flux_reconcile.rs must not resolve `flux` via the pre-lift \
+             deriving one-arg literal-string form `{deriving_needle}` \
+             at any code line — a `FLUX_BIN`-literal audit would \
+             miss the site. Every `flux` binary lookup must route \
+             through the `flux_bin()` sigil which delegates to the \
+             canonical two-arg `crate::repo::get_tool_path(\"FLUX_BIN\", \"flux\")` \
+             form the sibling sigils honor. Code-line hits: {deriving_hits:#?}"
         );
     }
 }
