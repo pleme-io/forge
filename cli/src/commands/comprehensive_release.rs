@@ -109,6 +109,38 @@ fn services_healthy_poll_delay(attempt: u32) -> Duration {
     SERVICES_HEALTHY_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
 }
 
+/// Resolve the `cargo` binary via the `CARGO` env override, falling
+/// back to `cargo` on PATH. Every `cargo` spawn in this module reads
+/// through this sigil so the resolve happens in exactly one place —
+/// mirrors the `cargo_bin()` sigil at `commands/test_ci.rs:28`
+/// (916f1a4), `commands/prerelease.rs:109` (79e03a5),
+/// `commands/developer_tools.rs:36` (534ef48),
+/// `commands/tool.rs:36` (9f6046b), and `commands/e2e.rs:88`
+/// (170ecac), and the sibling `bun_bin()` / `crate2nix_bin()` /
+/// `nix_bin()` sigil discipline every substrate-`<TOOL>` /
+/// `<TOOL>_BIN`-routed spawn surface in forge with more than one
+/// consumer site honors. Solve-once at the sigil (THEORY §I.5 —
+/// duplication budget zero; every recurring shape becomes a helper
+/// before it becomes duplicated code) means a future added `cargo`
+/// spawn cannot silently re-copy the two-argument resolve and drift
+/// away from the `CARGO` override at exactly the tier the
+/// hermetic-runner contract binds.
+///
+/// Pre-lift the two consumer sites in [`execute`] — the Step 1/5
+/// unit-test spawn (`cargo test --lib --bins`) and the Step 3/5
+/// integration-test spawn (`cargo test --test * -- --ignored
+/// --test-threads=1`) — each spelled the two-argument resolve
+/// verbatim. Post-lift each site collapses to `let cargo =
+/// cargo_bin();` and the resolve appears in exactly ONE place (the
+/// sigil body). A Nix-hermetic runner exporting `CARGO=/nix/store/
+/// …/bin/cargo` while omitting `cargo` from PATH would previously
+/// make each consumer re-derive the same two-argument resolve
+/// independently, so a future edit to the override contract would
+/// have to touch each site rather than one.
+fn cargo_bin() -> String {
+    get_tool_path("CARGO", "cargo")
+}
+
 /// Comprehensive release workflow with full testing
 ///
 /// Workflow:
@@ -238,14 +270,15 @@ pub async fn execute(
         spinner.set_message("Running cargo test --lib --bins...");
         spinner.enable_steady_tick(Duration::from_millis(100));
 
-        // Resolve the `cargo` binary path via `CARGO`, falling back to
-        // `cargo` on `PATH`. Matches the sibling `CARGO` sigil
-        // discipline in `commands/test_ci.rs` (e1677d3) and
-        // `commands/developer_tools.rs` (8687093) — a Nix-hermetic
-        // runner's substrate-derived `CARGO` lands at the unit-test
-        // gate that decides whether the comprehensive release proceeds
-        // past Step 1/5.
-        let cargo = get_tool_path("CARGO", "cargo");
+        // Resolve the `cargo` binary path via the `cargo_bin()` sigil,
+        // which routes through `CARGO` (falling back to `cargo` on
+        // PATH) at a single point of truth. Matches the sibling
+        // `cargo_bin()` sigil discipline in `commands/test_ci.rs`
+        // (916f1a4) and `commands/developer_tools.rs` (534ef48) — a
+        // Nix-hermetic runner's substrate-derived `CARGO` lands at the
+        // unit-test gate that decides whether the comprehensive
+        // release proceeds past Step 1/5.
+        let cargo = cargo_bin();
 
         let test_result = Command::new(&cargo)
             .current_dir(&working_dir)
@@ -526,14 +559,15 @@ pub async fn execute(
                 info!("🧪 Running integration tests...");
                 println!();
 
-                // Resolve the `cargo` binary path via `CARGO` for the
-                // integration-test spawn — shares the sibling sigil
-                // discipline of `commands/test_ci.rs` (e1677d3) and
-                // `commands/developer_tools.rs` (8687093) so the
-                // integration-test invocation and the unit-test
-                // invocation above both name the same substrate-derived
-                // cargo derivation on a Nix-hermetic runner.
-                let cargo = get_tool_path("CARGO", "cargo");
+                // Resolve the `cargo` binary path via the `cargo_bin()`
+                // sigil for the integration-test spawn — shares the
+                // sibling sigil discipline of `commands/test_ci.rs`
+                // (916f1a4) and `commands/developer_tools.rs`
+                // (534ef48) so the integration-test invocation and the
+                // unit-test invocation above both name the same
+                // substrate-derived cargo derivation on a Nix-hermetic
+                // runner via the module's single point of truth.
+                let cargo = cargo_bin();
 
                 let integration_test_result = Command::new(&cargo)
                     .current_dir(&working_dir)
@@ -1126,26 +1160,34 @@ mod tests {
         );
     }
 
-    /// Whole-module shield: no raw `Command::new("cargo")` may live in
-    /// this module's non-test body. Every `cargo` spawn in
-    /// `commands/comprehensive_release.rs` must first resolve `CARGO`
-    /// via [`crate::repo::get_tool_path`] — the canonical env-var
-    /// override idiom every sibling cargo-consuming surface honors
-    /// (`commands/test_ci.rs` four cargo sites at e1677d3;
-    /// `commands/developer_tools.rs` nine cargo sites at 8687093).
+    /// Whole-module shield: no raw `Command::new("cargo")` may live
+    /// in this module's non-test body, `fn cargo_bin()` must be
+    /// defined, and the two-argument `CARGO` resolve must appear
+    /// exactly ONCE in the module body (only in the sigil body).
     ///
     /// Pre-lift the two consumer sites in `execute` — the Step 1/5
     /// unit-test spawn (`cargo test --lib --bins`) and the Step 3/5
     /// integration-test spawn (`cargo test --test * -- --ignored
-    /// --test-threads=1`) — each spelled `Command::new("cargo")`
-    /// verbatim, ignoring `CARGO` at both sites. A Nix-hermetic
-    /// runner with a store-path `cargo` binary silently fell through
-    /// to whatever `cargo` was first on PATH — the same
-    /// silent-PATH-fallback bug class the sibling `commands/test_ci.rs`
-    /// shield closed at e1677d3 and `commands/developer_tools.rs`
-    /// shield closed at 8687093, and the sibling `DOCKER_BIN` /
-    /// `DOCKER_COMPOSE_BIN` shields above closed for the docker
-    /// surface in this same file.
+    /// --test-threads=1`) — each spelled the two-argument resolve
+    /// verbatim at each consumer. Post-lift each site collapses to
+    /// `let cargo = cargo_bin();` and the resolve appears in exactly
+    /// ONE place (the sigil body). The `resolve_count == 1`
+    /// assertion fails-before at 2, passes-after at 1 — the canonical
+    /// fail-before-pass-after arc matching the sibling `<tool>_bin()`
+    /// shield discipline landed on `commands/test_ci.rs::cargo_bin`
+    /// (916f1a4), `commands/developer_tools.rs::cargo_bin` (534ef48),
+    /// `commands/tool.rs::cargo_bin` (9f6046b),
+    /// `commands/e2e.rs::cargo_bin` (170ecac),
+    /// `commands/frontend_validation.rs::bun_bin` (9986f11), and the
+    /// broader NIX_BIN / CRATE2NIX / BUN_BIN sigil family. A
+    /// Nix-hermetic runner with a store-path `cargo` binary that
+    /// pre-lift silently fell through to whatever `cargo` was first
+    /// on PATH — the same silent-PATH-fallback bug class the sibling
+    /// `commands/test_ci.rs` shield closed at 916f1a4 and
+    /// `commands/developer_tools.rs` shield closed at 534ef48, and
+    /// the sibling `DOCKER_BIN` / `DOCKER_COMPOSE_BIN` shields above
+    /// closed for the docker surface in this same file — is now
+    /// closed by construction on the cargo surface too.
     ///
     /// The scan bounds on the whole-module boundary (from the file
     /// start to the FIRST `\n#[cfg(test)]\nmod tests {` marker in
@@ -1156,11 +1198,17 @@ mod tests {
     /// below that first marker — stay out of scope AND every current
     /// or future cargo-spawning helper landing anywhere in the
     /// top-level module body cannot silently ride along without going
-    /// through `CARGO`. Mirrors the whole-module-boundary scan
+    /// through `cargo_bin()`. Mirrors the whole-module-boundary scan
     /// discipline of the sibling docker / docker-compose shields
     /// above and the lineage traced there.
+    ///
+    /// The two-argument-resolve needle is reconstructed via `format!`
+    /// inside [`crate::test_support::get_tool_path_two_arg_call_needle`],
+    /// so this shield's own source never contains the literal
+    /// two-argument CARGO resolve string and cannot false-match
+    /// itself on the count-eq-1 assertion.
     #[test]
-    fn test_comprehensive_release_routes_cargo_through_cargo_env_not_raw_command() {
+    fn test_comprehensive_release_routes_cargo_through_cargo_bin_sigil_not_raw_command() {
         let source = include_str!("comprehensive_release.rs");
         let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
             "comprehensive_release.rs must have a `#[cfg(test)] mod tests {` marker \
@@ -1170,16 +1218,32 @@ mod tests {
         assert!(
             !body.contains("Command::new(\"cargo\")"),
             "commands/comprehensive_release.rs must not spawn `cargo` via the bare literal — \
-             every `cargo` spawn must resolve `CARGO` via \
-             `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
-             A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
+             every `cargo` spawn must resolve `CARGO` via the \
+             `cargo_bin()` sigil first. A raw `Command::new(\"cargo\")` \
+             bypasses the hermetic-runner contract substrate's \
+             mkRuntimeToolsEnv exports."
         );
         assert!(
-            body.contains("get_tool_path(\"CARGO\", \"cargo\")"),
-            "commands/comprehensive_release.rs must resolve the `cargo` binary via \
-             `get_tool_path(\"CARGO\", \"cargo\")` — the canonical lookup \
-             was not found in the module body."
+            body.contains("fn cargo_bin()"),
+            "commands/comprehensive_release.rs must define `cargo_bin()` \
+             — the sigil function that resolves the tools-registry \
+             `CARGO` override for every cargo spawn. Mirrors the \
+             sibling `cargo_bin()` sigils at `commands/test_ci.rs` \
+             (916f1a4), `commands/developer_tools.rs` (534ef48), \
+             `commands/tool.rs` (9f6046b), `commands/e2e.rs` (170ecac), \
+             and the broader `<tool>_bin()` sigil discipline across \
+             the fleet."
+        );
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("CARGO", "cargo");
+        let resolve_count = body.matches(two_arg_needle.as_str()).count();
+        assert_eq!(
+            resolve_count, 1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the \
+             `cargo_bin()` sigil), not {resolve_count} times — every \
+             consumer must route through `cargo_bin()`, not re-copy \
+             the resolve inline"
         );
     }
 
