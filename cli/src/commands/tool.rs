@@ -37,6 +37,41 @@ fn cargo_bin() -> String {
     get_tool_path("CARGO", "cargo")
 }
 
+/// Resolve the `crate2nix` binary via the `CRATE2NIX` env override,
+/// falling back to `crate2nix` on PATH. Every `crate2nix` spawn AND
+/// every `which::which(&crate2nix)` probe in this module reads through
+/// this sigil so the resolve happens in exactly one place — mirrors
+/// the sibling `cargo_bin()` sigil above and the `<tool>_bin()` sigil
+/// discipline every substrate-`<TOOL>` / `<TOOL>_BIN`-routed spawn
+/// surface in forge with more than one consumer site honors
+/// (`commands/test_ci.rs:28` per 916f1a4, `commands/prerelease.rs:109`
+/// per 79e03a5, `commands/developer_tools.rs:36` per 534ef48,
+/// `commands/e2e.rs:87` per 170ecac, the `bun_bin()` sibling on
+/// `commands/frontend_validation.rs` per 9986f11, and the `nix_bin()`
+/// sibling on `commands/rust_service.rs` per 63d4fe7). Solve-once at
+/// the sigil (THEORY §I.5 — duplication budget zero; every recurring
+/// shape becomes a helper before it becomes duplicated code) means a
+/// future added `crate2nix` spawn cannot silently re-copy the two-
+/// argument resolve and drift away from the `CRATE2NIX` override at
+/// exactly the tier the hermetic-runner contract binds.
+///
+/// Pre-lift the two consumer sites — `bump`'s optional Cargo.nix
+/// regeneration (both the `which::which` probe and the subsequent
+/// `Command::new` spawn) and `regenerate`'s explicit `crate2nix
+/// generate` invocation (via `run_cmd`) — each spelled the two-
+/// argument resolve verbatim. A Nix-hermetic runner exporting
+/// `CRATE2NIX=/nix/store/…/bin/crate2nix` while omitting `crate2nix`
+/// from PATH would previously make each consumer re-derive the same
+/// two-argument resolve independently, so a future edit to the
+/// override contract (say, switching to a derived `CRATE2NIX_BIN`
+/// spelling) would have to touch each site rather than one. The
+/// probe-and-spawn pair inside `bump` now share the same resolved
+/// path by construction: no risk of the probe passing against one
+/// binary and the spawn racing against another.
+fn crate2nix_bin() -> String {
+    get_tool_path("CRATE2NIX", "crate2nix")
+}
+
 /// Release a tool: read version, verify clean tree, build targets, tag, push, create GitHub release.
 pub async fn release(
     name: &str,
@@ -195,7 +230,7 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
             // `crate2nix` from PATH. `which::which` accepts absolute paths
             // and checks executability, so a single sigil-form probe
             // covers both the substrate-exported path and the PATH-fallback.
-            let crate2nix = get_tool_path("CRATE2NIX", "crate2nix");
+            let crate2nix = crate2nix_bin();
             if which::which(&crate2nix).is_ok() {
                 info!("Regenerating Cargo.nix...");
                 let status = Command::new(&crate2nix)
@@ -273,7 +308,7 @@ pub fn regenerate(language: &str, working_dir: &str) -> Result<()> {
 
     match language {
         "rust" => {
-            let crate2nix = get_tool_path("CRATE2NIX", "crate2nix");
+            let crate2nix = crate2nix_bin();
             info!("Running crate2nix generate...");
             run_cmd(dir, &crate2nix, &["generate"])?;
             info!("Cargo.nix regenerated");
@@ -1059,23 +1094,31 @@ mod tests {
     ///
     /// Pre-lift the two consumer sites — `bump`'s optional Cargo.nix
     /// regeneration and `regenerate`'s explicit `crate2nix generate`
-    /// invocation (via `run_cmd`) — each spelled the bare literal
-    /// verbatim, ignoring `CRATE2NIX` at both sites. The
-    /// `which::which` probe in `bump` also probed the bare literal,
-    /// so a Nix-hermetic runner exporting `CRATE2NIX=/nix/store/…/bin/
-    /// crate2nix` while omitting `crate2nix` from PATH silently
-    /// skipped the regeneration step entirely — a substrate-derived
-    /// path that was declared but never invoked. Post-lift both the
-    /// probe and the spawn resolve through the same sigil, so the
-    /// substrate-exported path fully governs whether regeneration
-    /// runs and, if so, which binary runs it.
+    /// invocation (via `run_cmd`) — each spelled the two-argument
+    /// resolve verbatim, respelling `get_tool_path("CRATE2NIX",
+    /// "crate2nix")` at every consumer. The `which::which` probe in
+    /// `bump` also spelled the same resolve inline, so a Nix-hermetic
+    /// runner exporting `CRATE2NIX=/nix/store/…/bin/crate2nix` while
+    /// omitting `crate2nix` from PATH previously required the probe
+    /// and the spawn to independently agree — post-lift both the probe
+    /// and the spawn resolve through the same [`crate2nix_bin`] sigil,
+    /// so the substrate-exported path fully governs whether
+    /// regeneration runs and, if so, which binary runs it.
     ///
     /// Scan bounds on the whole-module boundary — same discipline as
     /// the sibling `cargo` shield above and the `comprehensive_release
     /// .rs` `sqlx` shield (ecace0a) lineage. The forbidden
     /// `Command::new("crate2nix")` shape is not reconstructed via
     /// `format!` because scan-bounding already excludes this shield's
-    /// own docstring from the search.
+    /// own docstring from the search. The sigil-body count-eq-1
+    /// assertion is reconstructed via `format!` inside
+    /// [`crate::test_support::get_tool_path_two_arg_call_needle`], so
+    /// this shield's own source never contains the literal
+    /// `get_tool_path("CRATE2NIX", "crate2nix")` string and cannot
+    /// false-match itself on the count-eq-1 assertion. Filtering
+    /// through [`crate::test_support::code_line_hits`] suppresses any
+    /// future `///` doc-comment mention of the canonical form landing
+    /// above the cutoff.
     #[test]
     fn test_crate2nix_spawn_routes_through_crate2nix_env_not_raw_literal() {
         let source = include_str!("tool.rs");
@@ -1092,11 +1135,43 @@ mod tests {
              A raw `Command::new(\"crate2nix\")` bypasses the hermetic-runner \
              contract substrate's mkRuntimeToolsEnv exports."
         );
+        // Sigil sibling: after the crate2nix_bin() lift, every consumer
+        // routes through the sigil, so `fn crate2nix_bin()` must be
+        // defined AND the two-argument resolve string must appear in
+        // EXACTLY one place — only the sigil body — so a future added
+        // spawn or probe cannot silently re-copy the resolve inline and
+        // drift away from the sigil's single point of truth. Mirrors
+        // the sibling `cargo_bin()` count-eq-1 shield above and the
+        // fleet-wide `<tool>_bin()` shield discipline landed at 9f6046b
+        // / 9986f11 / 170ecac / 534ef48 / 63d4fe7. THEORY §I.5:
+        // duplication budget zero.
         assert!(
-            body.contains("get_tool_path(\"CRATE2NIX\", \"crate2nix\")"),
-            "commands/tool.rs must resolve the `crate2nix` binary via \
-             `get_tool_path(\"CRATE2NIX\", \"crate2nix\")` — the canonical \
-             lookup was not found in the module body."
+            body.contains("fn crate2nix_bin()"),
+            "commands/tool.rs must define `crate2nix_bin()` — the sigil \
+             function that resolves the tools-registry `CRATE2NIX` override \
+             for every crate2nix spawn AND probe. Mirrors the `cargo_bin()` \
+             sigil at `commands/tool.rs:36` and the sibling `<tool>_bin()` \
+             sigil discipline every substrate-exported spawn surface with \
+             more than one consumer site honors."
+        );
+        // Reconstruct via `format!` so this shield's own source never
+        // contains the literal `get_tool_path("CRATE2NIX", "crate2nix")`
+        // string and cannot false-match itself on the count-eq-1
+        // assertion. `code_line_hits` filters `///` doc-comment mentions
+        // out of scope so a future narrative aside mentioning the
+        // canonical form does not silently loosen the shield.
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("CRATE2NIX", "crate2nix");
+        let resolve_hits = crate::test_support::code_line_hits(body, &two_arg_needle);
+        assert_eq!(
+            resolve_hits.len(),
+            1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the `crate2nix_bin()` \
+             sigil), not {} times — every consumer must route through \
+             `crate2nix_bin()`, not re-copy the resolve inline. Hits: {:?}",
+            resolve_hits.len(),
+            resolve_hits
         );
     }
 }
