@@ -15,6 +15,48 @@ use tokio::process::Command;
 
 use crate::repo::get_tool_path;
 
+/// Resolve the `crate2nix` binary via the `CRATE2NIX` env override,
+/// falling back to `crate2nix` on PATH. Every `crate2nix` spawn in this
+/// module reads through this sigil so the resolve happens in exactly one
+/// place — mirrors the sibling `crate2nix_bin()` sigil on
+/// `commands/tool.rs` (7561329) and the `<tool>_bin()` sigil discipline
+/// every substrate-`<TOOL>` / `<TOOL>_BIN`-routed spawn surface in forge
+/// with more than one consumer site honors
+/// (`commands/test_ci.rs:28` per 916f1a4, `commands/prerelease.rs:109`
+/// per 79e03a5, `commands/developer_tools.rs:36` per 534ef48,
+/// `commands/e2e.rs:87` per 170ecac, the `bun_bin()` sibling on
+/// `commands/frontend_validation.rs` per 9986f11, the `nix_bin()`
+/// sibling on `commands/rust_service.rs` per 63d4fe7, and the
+/// `nix_bin()` sibling on `commands/developer_tools.rs` per a12c172).
+/// Solve-once at the sigil (THEORY §I.5 — duplication budget zero;
+/// every recurring shape becomes a helper before it becomes duplicated
+/// code) means a future added `crate2nix` spawn cannot silently re-copy
+/// the two-argument resolve and drift away from the `CRATE2NIX`
+/// override at exactly the tier the hermetic-runner contract binds.
+///
+/// Pre-lift the two consumer sites — `web_regenerate`'s Hanabi
+/// `Cargo.nix` regeneration (both the resolved value flowed into the
+/// `--crate2nix` arg-value passed to `pleme-linker regen` AND the
+/// subsequent `Command::new(&crate2nix).arg("generate")` spawn on the
+/// Hanabi directory) and `web_cargo_update`'s post-update Hanabi
+/// `Cargo.nix` regeneration — each spelled the two-argument resolve
+/// verbatim, respelling `get_tool_path("CRATE2NIX", "crate2nix")` at
+/// every consumer. A Nix-hermetic runner exporting
+/// `CRATE2NIX=/nix/store/…/bin/crate2nix` while omitting `crate2nix`
+/// from PATH would previously make each consumer re-derive the same
+/// two-argument resolve independently, so a future edit to the override
+/// contract (say, switching to a derived `CRATE2NIX_BIN` spelling)
+/// would have to touch each site rather than one. The `--crate2nix`
+/// arg-value passed to `pleme-linker regen` and the direct
+/// `Command::new(&crate2nix)` spawn on the sibling `web_regenerate`
+/// path now share the same resolved path by construction: no risk of
+/// the outer pleme-linker inner spawn racing against a different
+/// crate2nix than the sibling `Command::new(&crate2nix)` spawn in the
+/// same function.
+fn crate2nix_bin() -> String {
+    get_tool_path("CRATE2NIX", "crate2nix")
+}
+
 /// Regenerate deps.nix for web frontend + Cargo.nix for Hanabi (shared BFF)
 ///
 /// This command:
@@ -71,7 +113,7 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     }
 
     let pleme_linker = get_tool_path("PLEME_LINKER_BIN", "pleme-linker");
-    let crate2nix = get_tool_path("CRATE2NIX", "crate2nix");
+    let crate2nix = crate2nix_bin();
 
     println!("📂 Service: {}", service_dir.display());
     println!("📂 Hanabi: {}", hanabi_dir.display());
@@ -172,7 +214,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     }
 
     let cargo = get_tool_path("CARGO", "cargo");
-    let crate2nix = get_tool_path("CRATE2NIX", "crate2nix");
+    let crate2nix = crate2nix_bin();
 
     println!("📂 Hanabi: {}", hanabi_dir.display());
     println!();
@@ -291,5 +333,45 @@ mod tests {
                 bare,
             );
         }
+
+        // Sigil sibling: after the `crate2nix_bin()` lift, both
+        // consumer sites (`web_regenerate`'s Hanabi Cargo.nix
+        // regeneration and `web_cargo_update`'s post-update Hanabi
+        // Cargo.nix regeneration) route through the sigil, so
+        // `fn crate2nix_bin()` must be defined AND the two-argument
+        // resolve string must appear in EXACTLY one place — only the
+        // sigil body — so a future added spawn cannot silently re-copy
+        // the resolve inline and drift away from the sigil's single
+        // point of truth. Mirrors the `crate2nix_bin()` sigil
+        // count-eq-1 shield on `commands/tool.rs` (7561329) and the
+        // fleet-wide `<tool>_bin()` shield discipline landed at
+        // 9f6046b / 9986f11 / 170ecac / 534ef48 / 63d4fe7 / 7561329 /
+        // a12c172. THEORY §I.5: duplication budget zero.
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/web_service.rs",
+            "crate2nix_bin",
+            "CRATE2NIX",
+            "crate2nix",
+        );
+        // Reconstruct via `format!` so this shield's own source never
+        // contains the literal `get_tool_path("CRATE2NIX", "crate2nix")`
+        // string and cannot false-match itself on the count-eq-1
+        // assertion. `code_line_hits` filters `///` / `//!` / `//`
+        // comments out of scope so a future narrative aside mentioning
+        // the canonical form does not silently loosen the shield.
+        let crate2nix_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("CRATE2NIX", "crate2nix");
+        let crate2nix_resolve_hits = crate::test_support::code_line_hits(SOURCE, &crate2nix_needle);
+        assert_eq!(
+            crate2nix_resolve_hits.len(),
+            1,
+            "the two-argument resolve `{crate2nix_needle}` must appear \
+             exactly ONCE in the module (only in the `crate2nix_bin()` \
+             sigil), not {} times — every consumer must route through \
+             `crate2nix_bin()`, not re-copy the resolve inline. Hits: {:?}",
+            crate2nix_resolve_hits.len(),
+            crate2nix_resolve_hits
+        );
     }
 }
