@@ -37,6 +37,29 @@ fn cargo_bin() -> String {
     get_tool_path("CARGO", "cargo")
 }
 
+/// Resolve the `nix` binary via the `NIX_BIN` env override, falling
+/// back to PATH. Every `nix` spawn in this module reads through this
+/// sigil so the two-argument resolve happens in exactly one place —
+/// mirrors the `nix_bin()` sigil on `commands/rust_service.rs:117`
+/// (63d4fe7) and the sibling `cargo_bin()` sigil above (534ef48),
+/// converging every substrate-declared `<TOOL>_BIN` resolve on this
+/// module onto the fleet-wide `<tool>_bin()` idiom. Solve-once at the
+/// sigil (THEORY §I.5 — duplication budget zero; every recurring shape
+/// becomes a helper before it becomes duplicated code) means a future
+/// added `nix` spawn cannot silently re-copy the two-argument resolve
+/// and drift away from the `NIX_BIN` override at exactly the tier the
+/// hermetic-runner contract binds. The whole-module shield below
+/// asserts three invariants: no bare nix-literal spawn in the body
+/// (already landed at 4dfb2b3), `fn nix_bin()` is defined, and the
+/// two-argument NIX_BIN resolve appears in EXACTLY one place — only
+/// the sigil body — so a future added spawn cannot silently re-copy
+/// the resolve inline. Pre-lift the three consumer sites
+/// (`rust_update_cargo_nix`, `rust_regenerate`, `rust_cargo_update`)
+/// each spelled the two-argument resolve verbatim.
+fn nix_bin() -> String {
+    get_tool_path("NIX_BIN", "nix")
+}
+
 /// Run Rust unit tests
 pub async fn rust_test(service: String) -> Result<()> {
     println!("🧪 Running unit tests for {}...", service.cyan());
@@ -127,7 +150,7 @@ pub async fn rust_update_cargo_nix(service: String) -> Result<()> {
     // Generate Cargo.nix
     println!();
     println!("Generating Cargo.nix...");
-    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let nix_bin = nix_bin();
     let mut cmd = Command::new(&nix_bin);
     cmd.args(&["run", "nixpkgs#crate2nix", "--", "generate"]);
     crate::retry::run_inherited_status(cmd, "crate2nix generate")
@@ -249,7 +272,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         "Generating Cargo.nix".bold(),
         "(crate2nix generate)".dimmed()
     );
-    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let nix_bin = nix_bin();
     let mut cmd = Command::new(&nix_bin);
     cmd.args(&[
         "run",
@@ -339,7 +362,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         "Generating Cargo.nix".bold(),
         "(crate2nix generate)".dimmed()
     );
-    let nix_bin = get_tool_path("NIX_BIN", "nix");
+    let nix_bin = nix_bin();
     let mut cmd = Command::new(&nix_bin);
     cmd.args(&[
         "run",
@@ -755,9 +778,36 @@ mod tests {
             !body.contains("Command::new(\"nix\")"),
             "commands/developer_tools.rs must not spawn `nix` via the bare literal — \
              every `nix` spawn must resolve `NIX_BIN` via \
-             `crate::repo::get_tool_path(\"NIX_BIN\", \"nix\")` first. \
+             `nix_bin()` first. \
              A raw `Command::new(\"nix\")` bypasses the hermetic-runner \
              contract substrate's mkRuntimeToolsEnv exports."
+        );
+        // Sigil sibling: after the `nix_bin()` lift, every consumer routes
+        // through the sigil, so `fn nix_bin()` must be defined AND the
+        // two-argument resolve string must appear in EXACTLY one place —
+        // only the sigil body — so a future added spawn cannot silently
+        // re-copy the resolve inline and drift away from the sigil's
+        // single point of truth. Mirrors the sibling `nix_bin()` shield on
+        // `commands/rust_service.rs::test_rust_service_routes_nix_through_nix_bin_not_raw_command`
+        // (63d4fe7) and the sibling `cargo_bin()` shield below on this
+        // same module. THEORY §I.5: duplication budget zero.
+        assert!(
+            body.contains("fn nix_bin()"),
+            "commands/developer_tools.rs must define `nix_bin()` — the \
+             sigil function that resolves the tools-registry `NIX_BIN` \
+             override for every nix spawn. Mirrors the `nix_bin()` sigil \
+             at `commands/rust_service.rs:117` and the sibling \
+             `cargo_bin()` sigil above on this same module."
+        );
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("NIX_BIN", "nix");
+        let resolve_count = body.matches(two_arg_needle.as_str()).count();
+        assert_eq!(
+            resolve_count, 1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the `nix_bin()` \
+             sigil), not {resolve_count} times — every consumer must \
+             route through `nix_bin()`, not re-copy the resolve inline"
         );
     }
 
