@@ -9801,21 +9801,182 @@ pub fn next_free_version(
     )
 }
 
-/// Read the version from a Cargo.toml file.
+/// The structural shape of a Cargo.toml, as it bears on WHERE its version
+/// lives. Rust is the fleet's largest ecosystem by 16x (648 root manifests
+/// measured 2026-08-17), and a bumper has to route on this before it can read
+/// anything — the five arms are the five real populations, not hypotheticals:
+///   500 `[package]` and no `[workspace]`      -> SingleCrate
+///    49 both                                  -> HybridRoot
+///    99 `[workspace]` and no `[package]`      -> WorkspaceShared / Virtual…
+///    33 roots with no version at all          -> NoVersion
+///   534 files carrying `version.workspace`    -> MemberInheriting
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CargoShape {
+    /// `[package].version` literal, no `[workspace]` table.
+    SingleCrate(String),
+    /// A root that is BOTH a package and a workspace (sui / thiserror shape).
+    HybridRoot(String),
+    /// `[workspace.package].version` — the shared version members inherit.
+    WorkspaceShared(String),
+    /// `[workspace]` with no shared version and no root package: members each
+    /// carry their own, so a root-level bump has nothing to write.
+    VirtualWorkspaceNoVersion,
+    /// `version.workspace = true` — this manifest DEFERS to its root, so the
+    /// version must be read (and written) there, never here.
+    MemberInheriting,
+    /// No version discoverable. A refusal, never a default.
+    NoVersion,
+}
+
+/// Remove every space and tab from a TOML key, so an ALIGNED dotted key still
+/// compares equal. `version      .workspace` and `version.workspace` are the
+/// same key to TOML and must be the same key here.
+///
+/// Measured: 101 lines across 8 fleet repos pad that key, and the sibling tlisp
+/// reader was blind to 54 of them (padding before the dot), which made
+/// rust-workspace-bump skip its pin rewrite silently (fixed in actions@04f47f3).
+/// A hyphen is not whitespace, so this cannot turn `rust-version` into
+/// `version` — the trap below stays closed.
+fn toml_key_normalize(s: &str) -> String {
+    s.chars().filter(|c| *c != ' ' && *c != '\t').collect()
+}
+
+/// Lines belonging to the body of `[section]` — after that EXACT header, up to
+/// the next header.
+///
+/// The header is byte-compared after trimming, so `[package.metadata.docs.rs]`
+/// does NOT count as `[package]`. Without that, a `version` under a metadata
+/// table would be read as the package's.
+fn toml_section_body<'a>(content: &'a str, section: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            inside = t == section;
+            continue;
+        }
+        if inside {
+            out.push(line);
+        }
+    }
+    out
+}
+
+/// The value assigned to `key` within already-sliced section `lines`.
+///
+/// Whitespace-normalizes the key on both sides, strips a trailing `#` comment
+/// (22 fleet manifests write `version = "0.1.13"  #:version`), and unquotes
+/// either quote style. Returns the RAW value string — a prerelease or
+/// build-metadata version is returned as-is rather than rejected, because
+/// READING and deciding-whether-to-bump are different jobs.
+fn toml_value_in(lines: &[&str], key: &str) -> Option<String> {
+    let want = toml_key_normalize(key);
+    for line in lines {
+        // `continue`, NOT `?`. A `?` here returns None from the whole function
+        // on the first line lacking an `=` — a blank line or a comment above
+        // `version` would abort the search and read as "no version field".
+        let Some((lhs, rhs)) = line.split_once('=') else {
+            continue;
+        };
+        if toml_key_normalize(lhs) != want {
+            continue;
+        }
+        let mut v = rhs.trim();
+        // Strip a trailing comment, but only OUTSIDE the quoted value.
+        if let Some(q) = v.strip_prefix('"').and_then(|r| r.split_once('"')) {
+            return Some(q.0.to_string());
+        }
+        if let Some(q) = v.strip_prefix('\'').and_then(|r| r.split_once('\'')) {
+            return Some(q.0.to_string());
+        }
+        if let Some(h) = v.find('#') {
+            v = v[..h].trim();
+        }
+        return Some(v.to_string());
+    }
+    None
+}
+
+/// Classify a Cargo.toml's version shape. Pure — takes the content, so it is
+/// testable without a filesystem.
+pub fn classify_cargo(content: &str) -> CargoShape {
+    let has_workspace = content
+        .lines()
+        .any(|l| l.trim() == "[workspace]" || l.trim().starts_with("[workspace."));
+    let pkg = toml_section_body(content, "[package]");
+    let ws_pkg = toml_section_body(content, "[workspace.package]");
+
+    // ORDER IS THE WHOLE CORRECTNESS ARGUMENT, and an earlier draft had it
+    // wrong. Checking inheritance FIRST misclassified 3 of 648 fleet roots —
+    // mirante, sui and pauta — which are hybrid roots holding
+    // `[workspace.package].version` while their own `[package]` says
+    // `version.workspace = true`. That is legal and common: the root package
+    // inherits the shared version. Answering MemberInheriting there made the
+    // reader REFUSE on sui, the fleet keystone, with "read the root instead" —
+    // while pointing at the very file it was already reading.
+    //
+    // So: an own literal, then a shared version IN THIS FILE, and only then
+    // inheritance — which by that point genuinely defers to a DIFFERENT file.
+    if let Some(v) = toml_value_in(&pkg, "version") {
+        return if has_workspace {
+            CargoShape::HybridRoot(v)
+        } else {
+            CargoShape::SingleCrate(v)
+        };
+    }
+    if let Some(v) = toml_value_in(&ws_pkg, "version") {
+        return CargoShape::WorkspaceShared(v);
+    }
+    if let Some(v) = toml_value_in(&pkg, "version.workspace") {
+        if v.trim() == "true" {
+            return CargoShape::MemberInheriting;
+        }
+    }
+    if has_workspace {
+        return CargoShape::VirtualWorkspaceNoVersion;
+    }
+    CargoShape::NoVersion
+}
+
+/// Read the authoritative version from a Cargo.toml.
+///
+/// Section-scoped, replacing a per-line first-hit `^\s*version\s*=\s*"X.Y.Z"`.
+/// Measured over all 648 fleet root manifests before changing it: the old regex
+/// returned a WRONG version in **0** cases (the dependency-sub-table risk is
+/// real in principle and absent in practice), but found NOTHING in **24** where
+/// a version exists — every one of them a `0.19.0-dev` prerelease its
+/// `\d+\.\d+\.\d+"` could not match. So this is a coverage fix, not a
+/// correctness rescue, and the honest framing matters: the 24 are exactly the
+/// caixa-bevy workspace-member family.
+///
+/// A `MemberInheriting` manifest is a REFUSAL rather than a fallback: its
+/// version genuinely lives in the workspace root, and quietly returning
+/// something else is how a bumper writes the wrong file.
 pub fn read_cargo_version(path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
 
-    let re = regex::Regex::new(r#"^\s*version\s*=\s*"(\d+\.\d+\.\d+)""#)
-        .context("Failed to compile Cargo.toml version regex")?;
-
-    for line in content.lines() {
-        if let Some(caps) = re.captures(line) {
-            return Ok(caps[1].to_string());
+    match classify_cargo(&content) {
+        CargoShape::SingleCrate(v)
+        | CargoShape::HybridRoot(v)
+        | CargoShape::WorkspaceShared(v) => Ok(v),
+        CargoShape::MemberInheriting => bail!(
+            "{} inherits its version from the workspace root \
+             (`version.workspace = true`) — read the root's \
+             [workspace.package].version instead",
+            path.display()
+        ),
+        CargoShape::VirtualWorkspaceNoVersion => bail!(
+            "{} is a virtual workspace root with no [workspace.package].version \
+             — its members each carry their own version, so there is nothing to \
+             read here",
+            path.display()
+        ),
+        CargoShape::NoVersion => {
+            bail!("No version field found in {}", path.display())
         }
     }
-
-    bail!("No version field found in {}", path.display())
 }
 
 /// Read the version from a build.zig.zon file.
@@ -21605,5 +21766,246 @@ mod seeding_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cargo_shape_tests {
+    use super::{classify_cargo, CargoShape};
+
+    #[test]
+    fn classifies_the_five_real_fleet_populations() {
+        assert_eq!(
+            classify_cargo("[package]\nname = \"a\"\nversion = \"1.2.3\"\n"),
+            CargoShape::SingleCrate("1.2.3".into())
+        );
+        assert_eq!(
+            classify_cargo("[package]\nname = \"a\"\nversion = \"1.2.3\"\n\n[workspace]\nmembers = [\"m\"]\n"),
+            CargoShape::HybridRoot("1.2.3".into())
+        );
+        assert_eq!(
+            classify_cargo("[workspace]\nmembers = [\"m\"]\n\n[workspace.package]\nversion = \"0.4.0\"\n"),
+            CargoShape::WorkspaceShared("0.4.0".into())
+        );
+        assert_eq!(
+            classify_cargo("[workspace]\nmembers = [\"m\"]\n"),
+            CargoShape::VirtualWorkspaceNoVersion
+        );
+        assert_eq!(
+            classify_cargo("[package]\nname = \"m\"\nversion.workspace = true\n"),
+            CargoShape::MemberInheriting
+        );
+        assert_eq!(
+            classify_cargo("[package]\nname = \"a\"\nedition = \"2021\"\n"),
+            CargoShape::NoVersion
+        );
+    }
+
+    #[test]
+    fn rust_version_is_never_read_as_the_version() {
+        // THE fleet's worst trap: `rust-version = "1.97.0"` CONTAINS
+        // `version = "1.97.0"`. 455 occurrences sit in
+        // [package]/[workspace.package], and in 25 of 648 root manifests the
+        // rust-version line comes FIRST. Writing there raises the declared MSRV,
+        // and under resolver="3" cargo then REFUSES the package.
+        assert_eq!(
+            classify_cargo("[package]\nname = \"a\"\nrust-version = \"1.97.0\"\nversion = \"0.2.0\"\n"),
+            CargoShape::SingleCrate("0.2.0".into()),
+            "must skip rust-version even when it precedes the real key"
+        );
+        // …and its dotted inheritance form must not be read as inheritance.
+        assert_eq!(
+            classify_cargo("[package]\nname = \"a\"\nrust-version.workspace = true\nversion = \"0.2.0\"\n"),
+            CargoShape::SingleCrate("0.2.0".into())
+        );
+        assert_eq!(
+            classify_cargo("[package]\nname = \"a\"\nrust-version = \"1.97.0\"\n"),
+            CargoShape::NoVersion,
+            "rust-version ALONE is not a version"
+        );
+    }
+
+    #[test]
+    fn a_metadata_subtable_is_not_the_package_section() {
+        // `[package.metadata.docs.rs]` must not count as `[package]`.
+        assert_eq!(
+            classify_cargo("[package]\nname = \"a\"\n\n[package.metadata.docs.rs]\nversion = \"9.9.9\"\n"),
+            CargoShape::NoVersion,
+            "a metadata table's version is not the package's"
+        );
+    }
+
+    #[test]
+    fn dependency_tables_are_never_the_source() {
+        // 2199 fleet [dependencies] version keys, 924 in [workspace.dependencies],
+        // and 58 column-0 version lines live in dependency SUB-tables whose
+        // values are RANGES (">=0.52, <0.62", "=0.8.34", "2").
+        let c = "[dependencies.clap]\nversion = \"4.5.0\"\n\n[package]\nname = \"a\"\nversion = \"0.1.0\"\n";
+        assert_eq!(classify_cargo(c), CargoShape::SingleCrate("0.1.0".into()));
+        let ranges = "[dependencies.windows-sys]\nversion = \">=0.52, <0.62\"\n\n[package]\nname = \"a\"\nversion = \"0.1.0\"\n";
+        assert_eq!(classify_cargo(ranges), CargoShape::SingleCrate("0.1.0".into()));
+    }
+
+    #[test]
+    fn aligned_and_commented_forms_are_read() {
+        // 11 fleet manifests align the value; 22 carry a trailing comment;
+        // 101 lines pad the dotted inheritance key.
+        assert_eq!(
+            classify_cargo("[package]\nname = \"a\"\nversion       = \"1.2.1\"\n"),
+            CargoShape::SingleCrate("1.2.1".into())
+        );
+        assert_eq!(
+            classify_cargo("[package]\nname = \"a\"\nversion = \"0.1.13\"  #:version\n"),
+            CargoShape::SingleCrate("0.1.13".into())
+        );
+        assert_eq!(
+            classify_cargo("[package]\nname = \"m\"\nversion      .workspace = true\n"),
+            CargoShape::MemberInheriting,
+            "padding BEFORE the dot — 54 fleet lines"
+        );
+        assert_eq!(
+            classify_cargo("[package]\nname = \"m\"\nversion.workspace      = true\n"),
+            CargoShape::MemberInheriting,
+            "padding before = — 47 fleet lines"
+        );
+    }
+
+    #[test]
+    fn non_exact_semver_versions_are_READ_not_rejected() {
+        // Reading and deciding-whether-to-bump are different jobs. The old
+        // regex required \d+\.\d+\.\d+ and so found NOTHING in 24 fleet
+        // manifests — every one a `0.19.0-dev` prerelease (the caixa-bevy
+        // family). A reader that cannot see a version cannot even report it.
+        for v in ["0.19.0-dev", "0.4.0-alpha.0", "1.1.2+spec-1.1.0", "1.0.0-rc4"] {
+            let c = format!("[package]\nname = \"a\"\nversion = \"{v}\"\n");
+            assert_eq!(
+                classify_cargo(&c),
+                CargoShape::SingleCrate(v.into()),
+                "must read {v} verbatim"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hybrid_root_that_inherits_its_OWN_shared_version_is_readable() {
+        // The real shape of mirante / sui / pauta: [workspace.package] carries
+        // the authoritative version and [package] inherits it IN THE SAME FILE.
+        // An earlier ordering answered MemberInheriting here, so the reader
+        // refused on sui — the fleet keystone — telling the caller to "read the
+        // root" while already reading it. Found by the fleet validation, not by
+        // a unit test, which is why that ignored test exists.
+        let sui_shape = "[workspace]\nmembers = [\"m\"]\n\n[workspace.package]\nversion = \"0.1.191\"\n\n[package]\nname = \"sui\"\nversion.workspace = true\n";
+        assert_eq!(
+            classify_cargo(sui_shape),
+            CargoShape::WorkspaceShared("0.1.191".into()),
+            "the shared version is right here; inheritance does not hide it"
+        );
+        // Order-independent: the same file with [package] first.
+        let pauta_shape = "[package]\nname = \"pauta\"\nversion.workspace = true\n\n[workspace.package]\nversion = \"0.1.4\"\n";
+        assert_eq!(
+            classify_cargo(pauta_shape),
+            CargoShape::WorkspaceShared("0.1.4".into())
+        );
+        // A GENUINE member — inherits with no shared version in this file —
+        // must still refuse, because its version really is elsewhere.
+        assert_eq!(
+            classify_cargo("[package]\nname = \"m\"\nversion.workspace = true\n"),
+            CargoShape::MemberInheriting
+        );
+    }
+
+    #[test]
+    fn a_blank_or_comment_line_does_not_abort_the_search() {
+        // Regression guard for a bug found by re-reading this code: an early
+        // `?` on `split_once('=')` returned None from the whole function on the
+        // first line without an `=`, so a blank line or comment above `version`
+        // read as "no version field".
+        assert_eq!(
+            classify_cargo("[package]\n\n# the crate's own version\nname = \"a\"\n\nversion = \"3.1.4\"\n"),
+            CargoShape::SingleCrate("3.1.4".into())
+        );
+    }
+}
+
+/// Fleet-scale validation of [`classify_cargo`], `#[ignore]`d so CI stays
+/// hermetic. Run deliberately:
+///
+/// ```text
+/// FLEET_CARGO_LIST=/tmp/rootcargos.txt \
+///   cargo test --bin forge classify_every_fleet_root_manifest -- --ignored --nocapture
+/// ```
+///
+/// A unit test proves the classifier handles the shapes I THOUGHT of; this
+/// proves it handles the ones the fleet actually has.
+#[cfg(test)]
+mod fleet_cargo_validation {
+    use super::{classify_cargo, CargoShape};
+
+    #[test]
+    #[ignore = "requires FLEET_CARGO_LIST pointing at a list of real Cargo.toml paths"]
+    fn classify_every_fleet_root_manifest() {
+        let Ok(list) = std::env::var("FLEET_CARGO_LIST") else {
+            panic!("set FLEET_CARGO_LIST to a newline-separated list of paths");
+        };
+        let listing = std::fs::read_to_string(&list).expect("read the path list");
+        let paths: Vec<&str> = listing.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert!(!paths.is_empty(), "an empty list is a vacuous pass, not a success");
+
+        let mut single = 0;
+        let mut hybrid = 0;
+        let mut shared = 0;
+        let mut virt = 0;
+        let mut member = 0;
+        let mut none = 0;
+        let mut unreadable = 0;
+
+        for p in &paths {
+            let Ok(content) = std::fs::read_to_string(p) else {
+                unreadable += 1;
+                continue;
+            };
+            match classify_cargo(&content) {
+                CargoShape::SingleCrate(v) => {
+                    assert!(!v.is_empty(), "{p}: empty version");
+                    single += 1;
+                }
+                CargoShape::HybridRoot(v) => {
+                    assert!(!v.is_empty(), "{p}: empty version");
+                    hybrid += 1;
+                }
+                CargoShape::WorkspaceShared(v) => {
+                    assert!(!v.is_empty(), "{p}: empty version");
+                    shared += 1;
+                }
+                CargoShape::VirtualWorkspaceNoVersion => virt += 1,
+                CargoShape::MemberInheriting => member += 1,
+                CargoShape::NoVersion => none += 1,
+            }
+        }
+
+        let with_version = single + hybrid + shared;
+        println!(
+            "scanned {} | single {} hybrid {} shared {} => with-version {} | \
+             virtual {} member {} none {} unreadable {}",
+            paths.len(),
+            single,
+            hybrid,
+            shared,
+            with_version,
+            virt,
+            member,
+            none,
+            unreadable
+        );
+        // The denominator rides in the assertion so a discovery break cannot
+        // present as a pass: 0 scanned would fail above, and a collapse in
+        // coverage fails here.
+        assert_eq!(unreadable, 0, "every listed path must be readable");
+        assert!(
+            with_version * 100 / paths.len() >= 80,
+            "expected >=80% of root manifests to carry a readable version, got \
+             {with_version}/{}",
+            paths.len()
+        );
     }
 }
