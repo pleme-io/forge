@@ -267,3 +267,121 @@ mod tests {
         env::remove_var("FOO_BAR_BAZ_BIN");
     }
 }
+
+/// Crate-wide shield: a bare-literal subprocess spawn may SHRINK, never grow.
+///
+/// Rung 0 of the controlled-subprocess ladder
+/// (`pleme-io/docs/controlled-subprocess.md`): every spawn must resolve its
+/// binary through a `_BIN` sigil, because `Command::new("kubectl")` runs
+/// whatever `PATH` resolved first and attributes the verdict to a binary nobody
+/// declared — the silent-PATH-fallback class the sibling per-module shields in
+/// `commands/gem.rs` were written to close.
+///
+/// This generalizes those shields from one module to the crate, with a
+/// PER-TOOL baseline rather than a single total: a shrinking total would
+/// otherwise let a NEW uncontrolled tool hide behind someone else's cleanup.
+/// An unlisted tool name is a hard failure, so adding a spawn of a tool that
+/// has never been spawned bare is refused outright.
+///
+/// The counts are measured debt, not an endorsement. The path to zero is to
+/// route a call site through `get_tool_path` and lower its number here.
+#[cfg(test)]
+mod spawn_shield {
+    /// Measured 2026-08-17. SHRINK-ONLY: lower a number when you route a call
+    /// site through a sigil; never raise one.
+    const BASELINE: &[(&str, usize)] = &[
+        // Cluster / GitOps plane — the largest debt, and the highest value to
+        // route: a wrong kubectl or flux acts on whatever context PATH found.
+        ("kubectl", 43),
+        ("flux", 10),
+        ("kustomize", 3),
+        ("crossplane", 3),
+        ("helm", 2),
+        // Build / store plane.
+        ("nix", 24),
+        ("cargo", 20),
+        ("attic", 19),
+        ("crate2nix", 2),
+        ("sqlx", 4),
+        ("bun", 2),
+        // VCS + container plane.
+        ("git", 41),
+        ("docker", 7),
+        ("docker-compose", 6),
+        ("ssh", 1),
+        // Attestation / misc first-party.
+        ("kensa", 3),
+        ("rover-fhs", 1),
+        // Net probes.
+        ("dig", 1),
+        ("nc", 1),
+        // TERMINAL BY NATURE — these are not sigil candidates. An absolute
+        // /bin path is already unambiguous, `false`/`true` are exit-code
+        // fixtures, `open` is a macOS builtin, and `<bare>`/`<probe>` are test
+        // placeholder strings rather than real tools. Baselined so the tally
+        // adds up to the source rather than quietly excluding rows.
+        ("/bin/sh", 3),
+        ("/bin/true", 1),
+        ("sh", 2),
+        ("false", 2),
+        ("open", 2),
+        ("<bare>", 12),
+        ("<probe>", 3),
+    ];
+
+    fn bare_literal_spawns() -> Vec<(String, usize)> {
+        // The needle is regex-escaped (`new\(`), so this file's own pattern
+        // literal cannot match the fused shape it looks for.
+        let re = regex::Regex::new(r#"Command::new\("([^"]+)"\)"#).expect("static regex");
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut tally: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut stack = vec![src];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).expect("read src dir").flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    let text = std::fs::read_to_string(&p).unwrap_or_default();
+                    for c in re.captures_iter(&text) {
+                        *tally.entry(c[1].to_string()).or_default() += 1;
+                    }
+                }
+            }
+        }
+        tally.into_iter().collect()
+    }
+
+    #[test]
+    fn bare_literal_spawns_may_shrink_never_grow() {
+        let found = bare_literal_spawns();
+        // Anti-vacuity: a walk that finds nothing is a broken walk, not a clean
+        // crate — this shield exists because 203 such spawns were measured.
+        assert!(
+            !found.is_empty(),
+            "found zero spawn sites — the source walk is broken, which would \
+             make this shield silently vacuous"
+        );
+
+        let base: std::collections::BTreeMap<&str, usize> =
+            BASELINE.iter().copied().collect();
+        let mut grew = Vec::new();
+        let mut unlisted = Vec::new();
+        for (tool, n) in &found {
+            match base.get(tool.as_str()) {
+                Some(allowed) if n <= allowed => {}
+                Some(allowed) => grew.push(format!("{tool}: {n} > baseline {allowed}")),
+                None => unlisted.push(format!("{tool}: {n}")),
+            }
+        }
+        assert!(
+            grew.is_empty() && unlisted.is_empty(),
+            "bare-literal spawns must shrink, never grow.\n  GREW: {:?}\n  \
+             UNLISTED (a tool that has never been spawned bare — route it \
+             through get_tool_path instead): {:?}\n  ACTUAL TALLY: {:?}",
+            grew,
+            unlisted,
+            found
+        );
+    }
+}
