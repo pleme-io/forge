@@ -2011,15 +2011,83 @@ pub fn release_all(
 // --- Helpers ---
 
 /// Extract a top-level YAML field value (simple key: value parsing).
+/// Read a TOP-LEVEL scalar field out of a Chart.yaml.
+///
+/// All three callers want a chart's own `name` / `version`, which in Chart.yaml
+/// are always at column 0 — so the line must be UNINDENTED. The previous
+/// version trimmed each line before testing the prefix, which made it
+/// indentation-blind and therefore able to return a nested value from a
+/// `dependencies:` entry, whose `version:` is a RANGE (`~1.2.3`, `>=1.0.0`)
+/// rather than a version.
+///
+/// Measured 2026-08-17 before changing it, because the mechanism being wrong
+/// and the fleet being affected are different claims: over all 564 Chart.yaml
+/// in the fleet, exactly 2 would have been misread — both vendored Red Hat
+/// charts under openshift-helmchart, where an indented `version: "0.0.1"` sits
+/// at line 3 above the chart's own. The fleet's 533 dependency ranges never
+/// precede the top-level key, which is why this never presented as a bug.
+///
+/// So this is closing a LATENT trap, not an outage: any authored chart that
+/// listed `dependencies:` before `version:` would silently bump a dependency
+/// range instead of the chart. Indentation is now part of the contract.
 fn extract_yaml_field(content: &str, field: &str) -> Result<String> {
     let prefix = format!("{}: ", field);
     for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(&prefix) {
-            return Ok(trimmed[prefix.len()..].trim().trim_matches('"').to_string());
+        // Column 0 only: a leading space means this key belongs to a nested
+        // mapping (a dependency, an annotation), not to the chart.
+        if line.starts_with(&prefix) {
+            return Ok(line[prefix.len()..].trim().trim_matches('"').to_string());
         }
     }
-    bail!("Field '{}' not found", field)
+    bail!(
+        "Top-level field '{}' not found (a nested `{}:` under dependencies is \
+         deliberately NOT accepted — it is a version RANGE, not a version)",
+        field,
+        field
+    )
+}
+
+#[cfg(test)]
+mod extract_yaml_field_tests {
+    use super::extract_yaml_field;
+
+    /// The real shape of a fleet Chart.yaml that carries dependencies.
+    const CHART_WITH_DEPS: &str = "apiVersion: v2\nname: lareira-akeyless\nversion: 0.4.2\nappVersion: \"1.9.0\"\ndependencies:\n  - name: common\n    version: ~1.2.3\n";
+
+    /// The vendored shape that WOULD have been misread: an indented version
+    /// above the chart's own (openshift-helmchart redhat-mysql-persistent).
+    const CHART_DEP_FIRST: &str = "apiVersion: v2\ndependencies:\n  - name: mysql\n    version: \"0.0.1\"\nname: redhat-mysql-persistent\nversion: 0.0.3\n";
+
+    #[test]
+    fn reads_the_charts_own_version_not_a_dependency_range() {
+        assert_eq!(extract_yaml_field(CHART_WITH_DEPS, "version").unwrap(), "0.4.2");
+        assert_eq!(extract_yaml_field(CHART_WITH_DEPS, "name").unwrap(), "lareira-akeyless");
+        // appVersion must not be confused with version, in either direction.
+        assert_eq!(extract_yaml_field(CHART_WITH_DEPS, "appVersion").unwrap(), "1.9.0");
+    }
+
+    #[test]
+    fn an_indented_version_ABOVE_the_real_one_is_skipped() {
+        // The regression this fix exists for. Trim-based first-hit returned
+        // "0.0.1" — a dependency pin — as the chart's version.
+        assert_eq!(
+            extract_yaml_field(CHART_DEP_FIRST, "version").unwrap(),
+            "0.0.3",
+            "must skip the indented dependency version and find the chart's own"
+        );
+    }
+
+    #[test]
+    fn a_nested_only_field_is_refused_rather_than_returned() {
+        // If the ONLY occurrence is nested, that is not the chart's field. A
+        // range silently returned as a version is worse than a loud failure.
+        let nested_only = "apiVersion: v2\nname: x\ndependencies:\n  - name: c\n    version: \">=1.0.0\"\n";
+        let err = extract_yaml_field(nested_only, "version").unwrap_err();
+        assert!(
+            err.to_string().contains("Top-level field"),
+            "error must say the TOP-LEVEL field is missing, got: {err}"
+        );
+    }
 }
 
 fn find_latest_tgz(dir: &str, prefix: &str) -> Result<String> {
