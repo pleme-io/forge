@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
@@ -714,7 +714,7 @@ async fn fetch_secret(secret_name: &str, key: &str) -> Result<String> {
     let base64_value = String::from_utf8(output.stdout)?;
 
     // Decode base64 using the standard engine
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::{engine::general_purpose, Engine as _};
     let decoded = general_purpose::STANDARD
         .decode(base64_value.trim())
         .context("Failed to decode base64 secret")?;
@@ -1987,8 +1987,8 @@ mod post_deployment_readiness_poll_backoff_tests {
     /// strictly better than the pre-lift flat 2s schedule at every
     /// probe past the first.
     #[test]
-    fn test_post_deployment_readiness_poll_delay_matches_pre_lift_seed_and_climbs_at_in_cap_attempts()
-     {
+    fn test_post_deployment_readiness_poll_delay_matches_pre_lift_seed_and_climbs_at_in_cap_attempts(
+    ) {
         assert_eq!(
             post_deployment_readiness_poll_delay(0),
             Duration::from_secs(2),
@@ -2051,8 +2051,8 @@ mod post_deployment_readiness_poll_backoff_tests {
     /// a `backoff_attempt == u32::MAX` argument returns a bounded delay
     /// rather than panicking.
     #[test]
-    fn test_post_deployment_readiness_poll_delay_saturates_without_panic_at_arbitrarily_large_attempt()
-     {
+    fn test_post_deployment_readiness_poll_delay_saturates_without_panic_at_arbitrarily_large_attempt(
+    ) {
         assert_eq!(
             post_deployment_readiness_poll_delay(u32::MAX),
             Duration::from_secs(30),
@@ -2237,8 +2237,8 @@ mod pre_deployment_test_suite_retry_backoff_tests {
     /// Bazel-style doubling climb (4s / 8s / 16s), strictly better than
     /// the pre-lift flat-2s schedule at every retry past the first.
     #[test]
-    fn test_pre_deployment_test_suite_retry_delay_matches_pre_lift_seed_and_climbs_at_in_cap_attempts()
-     {
+    fn test_pre_deployment_test_suite_retry_delay_matches_pre_lift_seed_and_climbs_at_in_cap_attempts(
+    ) {
         assert_eq!(
             pre_deployment_test_suite_retry_delay(1),
             Duration::from_secs(2),
@@ -2302,8 +2302,8 @@ mod pre_deployment_test_suite_retry_backoff_tests {
     /// composition: an `attempts == u32::MAX` argument returns a
     /// bounded delay rather than panicking.
     #[test]
-    fn test_pre_deployment_test_suite_retry_delay_saturates_without_panic_at_arbitrarily_large_attempt()
-     {
+    fn test_pre_deployment_test_suite_retry_delay_saturates_without_panic_at_arbitrarily_large_attempt(
+    ) {
         assert_eq!(
             pre_deployment_test_suite_retry_delay(u32::MAX),
             Duration::from_secs(30),

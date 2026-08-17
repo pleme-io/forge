@@ -428,10 +428,7 @@ pub fn list_binaries() {
         "forge".bright_cyan()
     );
     println!("   {} bootstrap push-all", "forge".bright_cyan());
-    println!(
-        "   {} bootstrap push-all --parallel",
-        "forge".bright_cyan()
-    );
+    println!("   {} bootstrap push-all --parallel", "forge".bright_cyan());
     println!();
 }
 
@@ -714,6 +711,9 @@ mod tests {
         }
 
         assert!(url.ends_with("/test-bootstrap"), "url was {url:?}");
-        assert!(url.starts_with("ghcr.io/pleme-io"), "must honour the env var: {url:?}");
+        assert!(
+            url.starts_with("ghcr.io/pleme-io"),
+            "must honour the env var: {url:?}"
+        );
     }
 }

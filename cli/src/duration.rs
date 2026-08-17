@@ -381,7 +381,9 @@ mod tests {
     /// arrived as an `&str` (via [`parse_timeout_field`]) or a `u64` field.
     #[test]
     fn reject_zero_timeout_secs_error_shape_matches_reject_zero_timeout() {
-        let secs_err = reject_zero_timeout_secs(0, "field").unwrap_err().to_string();
+        let secs_err = reject_zero_timeout_secs(0, "field")
+            .unwrap_err()
+            .to_string();
         let dur_err = reject_zero_timeout(Duration::ZERO, "field")
             .unwrap_err()
             .to_string();

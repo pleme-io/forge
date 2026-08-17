@@ -310,7 +310,11 @@ mod tests {
     fn test_effective_environments_with_active() {
         let config = ReleaseConfig {
             active_environments: Some(vec!["staging".to_string(), "production".to_string()]),
-            environment_order: vec!["staging".to_string(), "production".to_string(), "production-b".to_string()],
+            environment_order: vec![
+                "staging".to_string(),
+                "production".to_string(),
+                "production-b".to_string(),
+            ],
             ..Default::default()
         };
         assert_eq!(config.effective_environments(), &["staging", "production"]);
@@ -433,11 +437,14 @@ mod tests {
     #[test]
     fn test_environments_config_get_direct() {
         let mut envs = EnvironmentsConfig::default();
-        envs.environments.insert("staging".to_string(), EnvironmentConfig {
-            cluster: "primary".to_string(),
-            namespace: "ns".to_string(),
-            architectures: vec!["amd64".to_string()],
-        });
+        envs.environments.insert(
+            "staging".to_string(),
+            EnvironmentConfig {
+                cluster: "primary".to_string(),
+                namespace: "ns".to_string(),
+                architectures: vec!["amd64".to_string()],
+            },
+        );
         let aliases = HashMap::new();
         assert!(envs.get("staging", &aliases).is_some());
         assert!(envs.get("production", &aliases).is_none());
@@ -446,11 +453,14 @@ mod tests {
     #[test]
     fn test_environments_config_get_with_alias() {
         let mut envs = EnvironmentsConfig::default();
-        envs.environments.insert("production-a".to_string(), EnvironmentConfig {
-            cluster: "c".to_string(),
-            namespace: "ns".to_string(),
-            architectures: vec!["amd64".to_string()],
-        });
+        envs.environments.insert(
+            "production-a".to_string(),
+            EnvironmentConfig {
+                cluster: "c".to_string(),
+                namespace: "ns".to_string(),
+                architectures: vec!["amd64".to_string()],
+            },
+        );
         let mut aliases = HashMap::new();
         aliases.insert("production".to_string(), "production-a".to_string());
         assert!(envs.get("production", &aliases).is_some());
@@ -459,11 +469,14 @@ mod tests {
     #[test]
     fn test_environments_config_names() {
         let mut envs = EnvironmentsConfig::default();
-        envs.environments.insert("staging".to_string(), EnvironmentConfig {
-            cluster: "c".to_string(),
-            namespace: "ns".to_string(),
-            architectures: vec!["amd64".to_string()],
-        });
+        envs.environments.insert(
+            "staging".to_string(),
+            EnvironmentConfig {
+                cluster: "c".to_string(),
+                namespace: "ns".to_string(),
+                architectures: vec!["amd64".to_string()],
+            },
+        );
         let names = envs.names();
         assert_eq!(names.len(), 1);
         assert!(names.contains(&"staging".to_string()));
@@ -484,12 +497,10 @@ mod tests {
     /// palindrome) so an accidental case-folding or reflection bug
     /// on the round-trip path shows up as an inequality rather than
     /// slipping past a symmetric fixture.
-    const SIGNATURE_HEX: &str =
-        "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809";
+    const SIGNATURE_HEX: &str = "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809";
     const CERTIFICATION_HEX: &str =
         "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0";
-    const COMPLIANCE_HEX: &str =
-        "0011223344556677889900112233445566778899001122334455667788990011";
+    const COMPLIANCE_HEX: &str = "0011223344556677889900112233445566778899001122334455667788990011";
 
     fn canonical_signature() -> String {
         format!("blake3:{SIGNATURE_HEX}")

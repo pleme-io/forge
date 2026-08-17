@@ -14,7 +14,7 @@ use std::io::Write;
 use crate::config::DeployConfig;
 use crate::infrastructure::registry::{extract_organization, RegistryClient};
 
-use super::product_release::{run_health_check, run_forge_subcommand};
+use super::product_release::{run_forge_subcommand, run_health_check};
 
 /// A rollback plan entry for a single service.
 struct RollbackEntry {
@@ -36,9 +36,7 @@ pub async fn execute(
     let product_config = DeployConfig::load_product_release_config(&product, &repo_root)?;
 
     if product_config.services.is_empty() {
-        bail!(
-            "No services configured in deploy.yaml release.services section."
-        );
+        bail!("No services configured in deploy.yaml release.services section.");
     }
 
     let target_env = env.as_deref().unwrap_or("staging");
@@ -175,7 +173,8 @@ pub async fn execute(
     // ─── Migration awareness ─────────────────────────────────────────────────
     // Warn about forward-only migrations (shinka never runs down())
     {
-        let product_dir = crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
+        let product_dir =
+            crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
         let seaorm_dir = product_dir.join("services/rust/migration/src");
         let deploy_yaml_path = product_dir.join("deploy/backend.yaml");
 
@@ -195,15 +194,14 @@ pub async fn execute(
             None
         };
 
-        if let Ok(rollback_result) =
-            super::migration_validation::validate_rollback_compatibility(
-                &seaorm_dir,
-                &crate::config::MigrationGatesConfig {
-                    seaorm_check_after,
-                    ..Default::default()
-                },
-            )
-            .await
+        if let Ok(rollback_result) = super::migration_validation::validate_rollback_compatibility(
+            &seaorm_dir,
+            &crate::config::MigrationGatesConfig {
+                seaorm_check_after,
+                ..Default::default()
+            },
+        )
+        .await
         {
             if rollback_result.migration_count > 0 {
                 println!(
@@ -216,13 +214,11 @@ pub async fn execute(
                 );
                 println!(
                     "{}",
-                    "   Rollback deploys older code against the current schema."
-                        .yellow()
+                    "   Rollback deploys older code against the current schema.".yellow()
                 );
                 println!(
                     "{}",
-                    "   Migrations are forward-only (shinka does not run down())."
-                        .yellow()
+                    "   Migrations are forward-only (shinka does not run down()).".yellow()
                 );
 
                 for warning in &rollback_result.warnings {
@@ -240,7 +236,8 @@ pub async fn execute(
         println!("   {} {}", ">>".dimmed(), env_name.cyan().bold());
 
         for (i, entry) in entries.iter().enumerate() {
-            let product_dir = crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
+            let product_dir =
+                crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
             let service_dir = product_dir.join(&entry.path).to_string_lossy().to_string();
 
             run_forge_subcommand(&[
@@ -272,8 +269,10 @@ pub async fn execute(
 
             // Health check (unless skipped or last service)
             if !skip_health_check {
-                if let Some(svc_config) =
-                    product_config.services.iter().find(|s| s.name == entry.name)
+                if let Some(svc_config) = product_config
+                    .services
+                    .iter()
+                    .find(|s| s.name == entry.name)
                 {
                     if let Some(hc) = &svc_config.health_check {
                         if i < entries.len() - 1 {
@@ -294,7 +293,8 @@ pub async fn execute(
     let mut modified_files = Vec::new();
 
     for entry in &entries {
-        let product_dir = crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
+        let product_dir =
+            crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
 
         let json_path = crate::config::resolve_artifact_json_path(&product_dir, &entry.name);
 
@@ -306,8 +306,8 @@ pub async fn execute(
             attestation: None, // Attestation is not preserved during rollback
         };
 
-        let json = serde_json::to_string_pretty(&artifact)
-            .context("Failed to serialize artifact info")?;
+        let json =
+            serde_json::to_string_pretty(&artifact).context("Failed to serialize artifact info")?;
         std::fs::write(&json_path, format!("{}\n", json))
             .with_context(|| format!("Failed to write {}", json_path.display()))?;
 
@@ -355,7 +355,11 @@ pub async fn execute(
             .map(|e| format!("{}:{}", e.name, e.previous_tag))
             .collect();
 
-        let commit_msg = format!("chore: rollback {} ({})", product, rolled_back_to.join(", "));
+        let commit_msg = format!(
+            "chore: rollback {} ({})",
+            product,
+            rolled_back_to.join(", ")
+        );
         let commit_status = crate::git::git_command_async()
             .args(["commit", "-m", &commit_msg])
             .status()

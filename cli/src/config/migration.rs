@@ -332,7 +332,10 @@ mod tests {
     #[test]
     fn test_validate_memory_format_gi() {
         assert_eq!(validate_memory_format("1Gi").unwrap(), 1024 * 1024 * 1024);
-        assert_eq!(validate_memory_format("2Gi").unwrap(), 2 * 1024 * 1024 * 1024);
+        assert_eq!(
+            validate_memory_format("2Gi").unwrap(),
+            2 * 1024 * 1024 * 1024
+        );
     }
 
     #[test]
@@ -430,12 +433,24 @@ mod tests {
 
     #[test]
     fn test_service_migration_config_validate_all_valid_db_types() {
-        for db_type in ["postgres", "postgresql", "databend", "clickhouse", "elasticsearch", "meilisearch", "none"] {
+        for db_type in [
+            "postgres",
+            "postgresql",
+            "databend",
+            "clickhouse",
+            "elasticsearch",
+            "meilisearch",
+            "none",
+        ] {
             let config = ServiceMigrationConfig {
                 database_type: db_type.to_string(),
                 ..ServiceMigrationConfig::default()
             };
-            assert!(config.validate().is_ok(), "Expected '{}' to be valid", db_type);
+            assert!(
+                config.validate().is_ok(),
+                "Expected '{}' to be valid",
+                db_type
+            );
         }
     }
 

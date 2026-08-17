@@ -268,8 +268,7 @@ pub fn bump(
             let max_released = crate::git::max_released_version("v", Some(dir))?;
             let tag_exists =
                 |v: &str| crate::git::tag_exists_in(&format!("v{}", v), Some(dir)).unwrap_or(false);
-            let next =
-                version::next_free_version(&old_version, level, &max_released, &tag_exists)?;
+            let next = version::next_free_version(&old_version, level, &max_released, &tag_exists)?;
             if !max_released.is_empty() {
                 info!(
                     "{}: seeding from max(manifest {}, released {}) -> {}",
@@ -660,9 +659,18 @@ mod tests {
     fn finds_every_literal_form_the_fleet_uses() {
         // 26 of 41 fleet gems use percent-freeze, 9 use quotes (2026-08-17).
         let cases = [
-            ("  VERSION = %(1.2.3).freeze", super::VersionLiteralForm::PercentFreeze),
-            ("  VERSION = \"1.2.3\"", super::VersionLiteralForm::DoubleQuoted),
-            ("  VERSION = '1.2.3'", super::VersionLiteralForm::SingleQuoted),
+            (
+                "  VERSION = %(1.2.3).freeze",
+                super::VersionLiteralForm::PercentFreeze,
+            ),
+            (
+                "  VERSION = \"1.2.3\"",
+                super::VersionLiteralForm::DoubleQuoted,
+            ),
+            (
+                "  VERSION = '1.2.3'",
+                super::VersionLiteralForm::SingleQuoted,
+            ),
         ];
         for (src, want) in cases {
             let found = super::VersionLiteral::find(src)
@@ -721,7 +729,10 @@ mod tests {
             out.push_str(&content[f.end..]);
             out
         };
-        assert!(spliced.contains("0.1.1"), "the new version is actually written");
+        assert!(
+            spliced.contains("0.1.1"),
+            "the new version is actually written"
+        );
         assert!(!spliced.contains("0.1.0"), "the old version is gone");
         assert_ne!(spliced, content, "the file genuinely changed");
     }
@@ -741,7 +752,10 @@ mod tests {
                 // A commented line DOES match -- documented, not asserted away:
                 // version.rb files do not carry commented VERSION lines in the
                 // fleet, and stripping comments would need a Ruby parser.
-                assert!(found.is_some(), "known limitation: comments are not skipped");
+                assert!(
+                    found.is_some(),
+                    "known limitation: comments are not skipped"
+                );
             } else {
                 assert!(found.is_none(), "{src:?} must not be parsed as a version");
             }

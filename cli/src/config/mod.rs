@@ -59,7 +59,9 @@ pub use product::{
 };
 pub use product_release::{HealthCheckConfig, ProductReleaseConfig, ProductServiceConfig};
 pub use registry::{CacheConfig, RegistryConfig};
-pub use release::{ArtifactInfo, AttestationInfoRecord, EnvironmentConfig, EnvironmentsConfig, ReleaseConfig};
+pub use release::{
+    ArtifactInfo, AttestationInfoRecord, EnvironmentConfig, EnvironmentsConfig, ReleaseConfig,
+};
 pub use service::{LocalConfig, ServiceConfig};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -103,8 +105,12 @@ pub fn load_product_config_from_dir(product_dir: &Path) -> Result<ProductConfig>
 /// Used by `ProductRelease` and `Rollback` when `--product` is not provided.
 pub fn auto_discover_product(repo_root: &str) -> Result<String> {
     let deploy_path = Path::new(repo_root).join("deploy.yaml");
-    let content = std::fs::read_to_string(&deploy_path)
-        .with_context(|| format!("--product not specified and no deploy.yaml found at {}", deploy_path.display()))?;
+    let content = std::fs::read_to_string(&deploy_path).with_context(|| {
+        format!(
+            "--product not specified and no deploy.yaml found at {}",
+            deploy_path.display()
+        )
+    })?;
     let yaml: serde_yaml::Value = serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse {}", deploy_path.display()))?;
     yaml.get("name")
@@ -132,8 +138,19 @@ pub fn resolve_k8s_repo_root(product_config: &ProductConfig, product_repo_root: 
 
         // Auto-clone if repo URL is configured and local path doesn't exist
         if let Some(repo_url) = &k8s.repo {
-            let clone_dir = std::env::temp_dir().join(format!("forge-k8s-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)));
-            println!("📦 Cloning k8s repo: {} → {}", repo_url, clone_dir.display());
+            let clone_dir = std::env::temp_dir().join(format!(
+                "forge-k8s-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            ));
+            println!(
+                "📦 Cloning k8s repo: {} → {}",
+                repo_url,
+                clone_dir.display()
+            );
             // Binary resolution rides `crate::git::git_command_sync()` so a
             // Nix-hermetic runner's `GIT_BIN` override wins over ambient
             // `PATH` at k8s-repo clone time — same discipline the sync
@@ -146,12 +163,26 @@ pub fn resolve_k8s_repo_root(product_config: &ProductConfig, product_repo_root: 
             // fall back to the local path on any failure via the
             // `Ok(s) if s.success()` gate below.
             let status = crate::git::git_command_sync()
-                .args(["clone", "--depth", "1", "--branch", &k8s.branch, repo_url, &clone_dir.to_string_lossy()])
+                .args([
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    &k8s.branch,
+                    repo_url,
+                    &clone_dir.to_string_lossy(),
+                ])
                 .status();
             match status {
                 Ok(s) if s.success() => return clone_dir,
-                Ok(s) => eprintln!("⚠️  k8s repo clone failed (exit {}), falling back to local path", s.code().unwrap_or(-1)),
-                Err(e) => eprintln!("⚠️  Failed to run git clone: {}, falling back to local path", e),
+                Ok(s) => eprintln!(
+                    "⚠️  k8s repo clone failed (exit {}), falling back to local path",
+                    s.code().unwrap_or(-1)
+                ),
+                Err(e) => eprintln!(
+                    "⚠️  Failed to run git clone: {}, falling back to local path",
+                    e
+                ),
             }
         }
 
@@ -167,8 +198,14 @@ pub fn resolve_k8s_repo_root(product_config: &ProductConfig, product_repo_root: 
 /// Checks `{product_dir}/deploy/{service_name}.yaml` first (new convention that
 /// keeps deploy configs outside Nix source trees), then falls back to
 /// `{service_dir}/deploy.yaml` for backward compatibility with other products.
-pub fn resolve_deploy_yaml_path(product_dir: &Path, service_name: &str, service_dir: &Path) -> PathBuf {
-    let new_path = product_dir.join("deploy").join(format!("{}.yaml", service_name));
+pub fn resolve_deploy_yaml_path(
+    product_dir: &Path,
+    service_name: &str,
+    service_dir: &Path,
+) -> PathBuf {
+    let new_path = product_dir
+        .join("deploy")
+        .join(format!("{}.yaml", service_name));
     if new_path.exists() {
         new_path
     } else {
@@ -181,11 +218,17 @@ pub fn resolve_deploy_yaml_path(product_dir: &Path, service_name: &str, service_
 /// Machine-managed file storing artifact metadata (tag, previous_tag, built_at).
 /// Located at `{product_dir}/deploy/{service_name}.artifact.json`.
 pub fn resolve_artifact_json_path(product_dir: &Path, service_name: &str) -> PathBuf {
-    product_dir.join("deploy").join(format!("{}.artifact.json", service_name))
+    product_dir
+        .join("deploy")
+        .join(format!("{}.artifact.json", service_name))
 }
 
 /// Load artifact info from the JSON file, falling back to deploy.yaml for migration.
-pub fn load_artifact_info(product_dir: &Path, service_name: &str, service_dir: &Path) -> Option<ArtifactInfo> {
+pub fn load_artifact_info(
+    product_dir: &Path,
+    service_name: &str,
+    service_dir: &Path,
+) -> Option<ArtifactInfo> {
     let json_path = resolve_artifact_json_path(product_dir, service_name);
     if json_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&json_path) {
@@ -578,8 +621,8 @@ impl DeployConfig {
 
         match yaml.get("release") {
             Some(release_val) => {
-                let mut release_config: ReleaseConfig =
-                    serde_yaml::from_value(release_val.clone()).with_context(|| {
+                let mut release_config: ReleaseConfig = serde_yaml::from_value(release_val.clone())
+                    .with_context(|| {
                         format!(
                             "Failed to parse release section in {}",
                             config_path.display()
@@ -587,8 +630,7 @@ impl DeployConfig {
                     })?;
 
                 // Override artifact from JSON file (machine-managed, takes priority)
-                if let Some(artifact) =
-                    load_artifact_info(&product_dir, service_name, &service_dir)
+                if let Some(artifact) = load_artifact_info(&product_dir, service_name, &service_dir)
                 {
                     release_config.artifact = Some(artifact);
                 }
@@ -1117,10 +1159,7 @@ mod tests {
         // Alias resolution
         assert_eq!(config.resolve_environment("production"), "production-a");
         // Unknown passes through
-        assert_eq!(
-            config.resolve_environment("production-b"),
-            "production-b"
-        );
+        assert_eq!(config.resolve_environment("production-b"), "production-b");
     }
 
     #[test]

@@ -363,8 +363,7 @@ mod spawn_shield {
              make this shield silently vacuous"
         );
 
-        let base: std::collections::BTreeMap<&str, usize> =
-            BASELINE.iter().copied().collect();
+        let base: std::collections::BTreeMap<&str, usize> = BASELINE.iter().copied().collect();
         let mut grew = Vec::new();
         let mut unlisted = Vec::new();
         for (tool, n) in &found {

@@ -56,10 +56,7 @@ pub async fn execute(
     }
 
     let next_seq = max_seq + 1;
-    let sanitized_name = name
-        .to_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_");
+    let sanitized_name = name.to_lowercase().replace('-', "_").replace(' ', "_");
 
     let migration_name = format!("{}_{:06}_{}", date_prefix, next_seq, sanitized_name);
     let migration_file = format!("{}.rs", migration_name);
@@ -72,11 +69,7 @@ pub async fn execute(
     let scaffold = generate_migration_scaffold(&migration_name);
     std::fs::write(&migration_path, &scaffold)
         .with_context(|| format!("Failed to write {}", migration_path.display()))?;
-    println!(
-        "   {} Created {}",
-        "✅".green(),
-        migration_path.display()
-    );
+    println!("   {} Created {}", "✅".green(), migration_path.display());
 
     // If --with-data, also create companion data migration
     let data_migration_name = if with_data {
@@ -88,11 +81,7 @@ pub async fn execute(
         let data_scaffold = generate_data_migration_scaffold(&data_name);
         std::fs::write(&data_path, &data_scaffold)
             .with_context(|| format!("Failed to write {}", data_path.display()))?;
-        println!(
-            "   {} Created {}",
-            "✅".green(),
-            data_path.display()
-        );
+        println!("   {} Created {}", "✅".green(), data_path.display());
 
         Some(data_name)
     } else {
@@ -124,11 +113,7 @@ pub async fn execute(
 
         std::fs::write(&manifest_path, &content)
             .with_context(|| format!("Failed to update {}", manifest_path.display()))?;
-        println!(
-            "   {} Updated {}",
-            "✅".green(),
-            manifest_path.display()
-        );
+        println!("   {} Updated {}", "✅".green(), manifest_path.display());
     } else {
         // Create new manifest
         let mut content = String::from(
@@ -143,11 +128,7 @@ pub async fn execute(
         }
         std::fs::write(&manifest_path, &content)
             .with_context(|| format!("Failed to create {}", manifest_path.display()))?;
-        println!(
-            "   {} Created {}",
-            "✅".green(),
-            manifest_path.display()
-        );
+        println!("   {} Created {}", "✅".green(), manifest_path.display());
     }
 
     // Print instructions for lib.rs registration
@@ -256,7 +237,10 @@ fn generate_manifest_entry(
     reason: Option<&str>,
     data_forward: Option<&str>,
 ) -> String {
-    let mut entry = format!("\n  {}:\n    classification: {}", migration_name, classification);
+    let mut entry = format!(
+        "\n  {}:\n    classification: {}",
+        migration_name, classification
+    );
 
     if let Some(reason) = reason {
         entry.push_str(&format!("\n    reason: \"{}\"", reason));

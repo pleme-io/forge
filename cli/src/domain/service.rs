@@ -208,9 +208,18 @@ mod tests {
         assert_eq!(ServiceType::from_str("rust"), Some(ServiceType::Rust));
         assert_eq!(ServiceType::from_str("web"), Some(ServiceType::Web));
         assert_eq!(ServiceType::from_str("wasm"), Some(ServiceType::Wasm));
-        assert_eq!(ServiceType::from_str("infrastructure"), Some(ServiceType::Infrastructure));
-        assert_eq!(ServiceType::from_str("infra"), Some(ServiceType::Infrastructure));
-        assert_eq!(ServiceType::from_str("platform"), Some(ServiceType::Platform));
+        assert_eq!(
+            ServiceType::from_str("infrastructure"),
+            Some(ServiceType::Infrastructure)
+        );
+        assert_eq!(
+            ServiceType::from_str("infra"),
+            Some(ServiceType::Infrastructure)
+        );
+        assert_eq!(
+            ServiceType::from_str("platform"),
+            Some(ServiceType::Platform)
+        );
         assert_eq!(ServiceType::from_str("unknown"), None);
         assert_eq!(ServiceType::from_str("RUST"), Some(ServiceType::Rust));
         assert_eq!(ServiceType::from_str("Web"), Some(ServiceType::Web));
@@ -221,42 +230,42 @@ mod tests {
         assert_eq!(ServiceType::Rust.default_flake_attr(), "dockerImage-amd64");
         assert_eq!(ServiceType::Web.default_flake_attr(), "dockerImage");
         assert_eq!(ServiceType::Wasm.default_flake_attr(), "dockerImage");
-        assert_eq!(ServiceType::Infrastructure.default_flake_attr(), "dockerImage");
+        assert_eq!(
+            ServiceType::Infrastructure.default_flake_attr(),
+            "dockerImage"
+        );
         assert_eq!(ServiceType::Platform.default_flake_attr(), "dockerImage");
     }
 
     #[test]
     fn test_service_definition_with_database() {
-        let service = ServiceDefinition::rust("api", "myapp")
-            .with_database(DatabaseType::ClickHouse);
+        let service =
+            ServiceDefinition::rust("api", "myapp").with_database(DatabaseType::ClickHouse);
         assert_eq!(service.database_type, DatabaseType::ClickHouse);
     }
 
     #[test]
     fn test_service_definition_with_graphql() {
-        let service = ServiceDefinition::rust("api", "myapp")
-            .with_graphql(false);
+        let service = ServiceDefinition::rust("api", "myapp").with_graphql(false);
         assert!(!service.graphql_enabled);
     }
 
     #[test]
     fn test_service_definition_with_federation() {
-        let service = ServiceDefinition::rust("api", "myapp")
-            .with_federation(false);
+        let service = ServiceDefinition::rust("api", "myapp").with_federation(false);
         assert!(!service.federation_enabled);
     }
 
     #[test]
     fn test_service_definition_with_service_dir() {
-        let service = ServiceDefinition::rust("api", "myapp")
-            .with_service_dir("custom/path");
+        let service = ServiceDefinition::rust("api", "myapp").with_service_dir("custom/path");
         assert_eq!(service.service_dir, "custom/path");
     }
 
     #[test]
     fn test_service_definition_with_registry() {
-        let service = ServiceDefinition::rust("api", "myapp")
-            .with_registry("custom-registry.io/img");
+        let service =
+            ServiceDefinition::rust("api", "myapp").with_registry("custom-registry.io/img");
         assert_eq!(service.registry, "custom-registry.io/img");
     }
 

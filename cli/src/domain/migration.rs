@@ -213,19 +213,43 @@ mod tests {
 
     #[test]
     fn test_database_type_from_str_all_variants() {
-        assert_eq!(DatabaseType::from_str("postgresql"), Some(DatabaseType::Postgres));
-        assert_eq!(DatabaseType::from_str("elasticsearch"), Some(DatabaseType::Elasticsearch));
-        assert_eq!(DatabaseType::from_str("elastic"), Some(DatabaseType::Elasticsearch));
-        assert_eq!(DatabaseType::from_str("es"), Some(DatabaseType::Elasticsearch));
-        assert_eq!(DatabaseType::from_str("databend"), Some(DatabaseType::Databend));
+        assert_eq!(
+            DatabaseType::from_str("postgresql"),
+            Some(DatabaseType::Postgres)
+        );
+        assert_eq!(
+            DatabaseType::from_str("elasticsearch"),
+            Some(DatabaseType::Elasticsearch)
+        );
+        assert_eq!(
+            DatabaseType::from_str("elastic"),
+            Some(DatabaseType::Elasticsearch)
+        );
+        assert_eq!(
+            DatabaseType::from_str("es"),
+            Some(DatabaseType::Elasticsearch)
+        );
+        assert_eq!(
+            DatabaseType::from_str("databend"),
+            Some(DatabaseType::Databend)
+        );
         assert_eq!(DatabaseType::from_str(""), Some(DatabaseType::None));
-        assert_eq!(DatabaseType::from_str("POSTGRES"), Some(DatabaseType::Postgres));
-        assert_eq!(DatabaseType::from_str("ClickHouse"), Some(DatabaseType::ClickHouse));
+        assert_eq!(
+            DatabaseType::from_str("POSTGRES"),
+            Some(DatabaseType::Postgres)
+        );
+        assert_eq!(
+            DatabaseType::from_str("ClickHouse"),
+            Some(DatabaseType::ClickHouse)
+        );
     }
 
     #[test]
     fn test_database_type_run_mode_all_variants() {
-        assert_eq!(DatabaseType::Elasticsearch.run_mode(), Some("migrate_elasticsearch"));
+        assert_eq!(
+            DatabaseType::Elasticsearch.run_mode(),
+            Some("migrate_elasticsearch")
+        );
         assert_eq!(DatabaseType::Databend.run_mode(), Some("MIGRATE"));
     }
 
@@ -240,8 +264,8 @@ mod tests {
 
     #[test]
     fn test_migration_config_image_ref_empty_tag() {
-        let config = MigrationConfig::new(DatabaseType::Postgres, "api", "ns")
-            .with_image("ghcr.io/org/img");
+        let config =
+            MigrationConfig::new(DatabaseType::Postgres, "api", "ns").with_image("ghcr.io/org/img");
         assert_eq!(config.image_ref(), "ghcr.io/org/img");
     }
 

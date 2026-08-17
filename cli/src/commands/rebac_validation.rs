@@ -417,7 +417,8 @@ async fn check_relation_hierarchy(
         let rebac_doc = docs_dir.join("security-rebac.md");
         if rebac_doc.exists() {
             let content = fs::read_to_string(&rebac_doc).await?;
-            if content.contains("owner → editor → viewer") || content.contains("owner → editor") {
+            if content.contains("owner → editor → viewer") || content.contains("owner → editor")
+            {
                 log_success(
                     config,
                     result,
@@ -742,32 +743,21 @@ mod tests {
             },
             endpoints: Default::default(),
         };
-        let config = RebacValidationConfig::from_product(
-            Path::new("/tmp/myapp"),
-            false,
-            true,
-            &product,
-        );
+        let config =
+            RebacValidationConfig::from_product(Path::new("/tmp/myapp"), false, true, &product);
         assert_eq!(
             config.backend_dir,
             Some(PathBuf::from("/tmp/myapp/services/rust/backend"))
         );
-        assert_eq!(
-            config.docs_dir,
-            Some(PathBuf::from("/tmp/myapp/docs/arch"))
-        );
+        assert_eq!(config.docs_dir, Some(PathBuf::from("/tmp/myapp/docs/arch")));
         assert!(config.check_redis);
         assert!(!config.quiet);
 
         // When dirs not configured, paths are None
         product.dirs.backend = None;
         product.dirs.docs_arch = None;
-        let config2 = RebacValidationConfig::from_product(
-            Path::new("/tmp/myapp"),
-            false,
-            false,
-            &product,
-        );
+        let config2 =
+            RebacValidationConfig::from_product(Path::new("/tmp/myapp"), false, false, &product);
         assert_eq!(config2.backend_dir, None);
         assert_eq!(config2.docs_dir, None);
     }

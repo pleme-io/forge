@@ -289,8 +289,7 @@ mod tests {
     #[test]
     fn test_release_config_with_steps() {
         let custom_steps = vec![ReleaseStep::Build, ReleaseStep::Push];
-        let config = ReleaseConfig::new("api", "myproduct", "ns")
-            .with_steps(custom_steps.clone());
+        let config = ReleaseConfig::new("api", "myproduct", "ns").with_steps(custom_steps.clone());
         assert_eq!(config.steps, custom_steps);
     }
 
@@ -393,6 +392,10 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors.len() >= 2, "Expected at least 2 errors, got {}", errors.len());
+        assert!(
+            errors.len() >= 2,
+            "Expected at least 2 errors, got {}",
+            errors.len()
+        );
     }
 }

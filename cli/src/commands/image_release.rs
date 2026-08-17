@@ -200,9 +200,9 @@ async fn build_nix_image(flake_attr: &str, working_dir: &str) -> Result<String> 
 /// split would push to the wrong repository rather than failing, which is why
 /// the missing-'/' case bails instead of guessing.
 fn push_image(doca: &str, image_path: &str, registry: &str, tag: &str) -> Result<()> {
-    let (host, image) = registry
-        .split_once('/')
-        .with_context(|| format!("registry {registry:?} has no '/', cannot split host from image"))?;
+    let (host, image) = registry.split_once('/').with_context(|| {
+        format!("registry {registry:?} has no '/', cannot split host from image")
+    })?;
 
     let status = Command::new(doca)
         .args([

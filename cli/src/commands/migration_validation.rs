@@ -134,10 +134,7 @@ impl MigrationIssue {
                 issue_type,
                 suggestion,
             } => {
-                format!(
-                    "{} - {}\n  Suggestion: {}",
-                    file, issue_type, suggestion
-                )
+                format!("{} - {}\n  Suggestion: {}", file, issue_type, suggestion)
             }
         }
     }
@@ -1036,14 +1033,12 @@ pub async fn validate_migration_manifest(
 
     // Load manifest
     let manifest = if manifest_path.exists() {
-        let content = fs::read_to_string(&manifest_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to read migration manifest: {}",
-                    manifest_path.display()
-                )
-            })?;
+        let content = fs::read_to_string(&manifest_path).await.with_context(|| {
+            format!(
+                "Failed to read migration manifest: {}",
+                manifest_path.display()
+            )
+        })?;
         serde_yaml::from_str::<MigrationManifest>(&content).with_context(|| {
             format!(
                 "Failed to parse migration manifest: {}",
@@ -1072,10 +1067,7 @@ pub async fn validate_migration_manifest(
     let mut issues = Vec::new();
 
     for file_path in &migration_files {
-        let filename = file_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         // Strip .rs extension to get the migration name
         let migration_name = filename.trim_end_matches(".rs");
 
@@ -1128,7 +1120,9 @@ pub async fn validate_migration_manifest(
                             });
                         }
                         // Check 3b: data_forward companion must be classified as data_only
-                        if let Some(companion_entry) = manifest.migrations.get(data_forward.as_str()) {
+                        if let Some(companion_entry) =
+                            manifest.migrations.get(data_forward.as_str())
+                        {
                             if companion_entry.classification != MigrationClassification::DataOnly {
                                 issues.push(MigrationIssue::DataMigrationIncomplete {
                                     file: migration_name.to_string(),
@@ -1167,7 +1161,9 @@ pub async fn validate_migration_manifest(
 
                     // Check 3c: data_backward companion (if present) must be classified as data_only
                     if let Some(ref data_backward) = entry.data_backward {
-                        if let Some(companion_entry) = manifest.migrations.get(data_backward.as_str()) {
+                        if let Some(companion_entry) =
+                            manifest.migrations.get(data_backward.as_str())
+                        {
                             if companion_entry.classification != MigrationClassification::DataOnly {
                                 issues.push(MigrationIssue::DataMigrationIncomplete {
                                     file: migration_name.to_string(),
@@ -1229,11 +1225,7 @@ pub async fn validate_migration_manifest(
             assessed_count
         );
     } else {
-        println!(
-            "   {} Found {} manifest issues",
-            "❌".red(),
-            issues.len()
-        );
+        println!("   {} Found {} manifest issues", "❌".red(), issues.len());
         for issue in &issues {
             println!("\n   {}", issue.format());
         }
@@ -1611,7 +1603,10 @@ migrations:
         assert_eq!(manifest.migrations.len(), 4);
 
         let schema_only = &manifest.migrations["m20260201_000001_fix_constraint"];
-        assert_eq!(schema_only.classification, MigrationClassification::SchemaOnly);
+        assert_eq!(
+            schema_only.classification,
+            MigrationClassification::SchemaOnly
+        );
 
         let noop = &manifest.migrations["m20260202_000001_add_field"];
         assert_eq!(noop.classification, MigrationClassification::Noop);
@@ -1689,11 +1684,7 @@ migrations:
         .unwrap();
 
         // Create a manifest that does NOT include this migration
-        std::fs::write(
-            dir.join("migration-manifest.yaml"),
-            "migrations: {}",
-        )
-        .unwrap();
+        std::fs::write(dir.join("migration-manifest.yaml"), "migrations: {}").unwrap();
 
         // Config with check_after before m20260301
         let config = MigrationGatesConfig {
@@ -1718,11 +1709,7 @@ migrations:
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(
-            dir.join("m20260301_000001_add_col.rs"),
-            "// migration",
-        )
-        .unwrap();
+        std::fs::write(dir.join("m20260301_000001_add_col.rs"), "// migration").unwrap();
 
         std::fs::write(
             dir.join("migration-manifest.yaml"),
@@ -1756,11 +1743,7 @@ migrations:
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(
-            dir.join("m20260301_000001_rename.rs"),
-            "// migration",
-        )
-        .unwrap();
+        std::fs::write(dir.join("m20260301_000001_rename.rs"), "// migration").unwrap();
 
         std::fs::write(
             dir.join("migration-manifest.yaml"),
@@ -1794,16 +1777,8 @@ migrations:
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(
-            dir.join("m20260301_000001_add_col.rs"),
-            "// migration",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("m20260301_000002_index.rs"),
-            "// migration",
-        )
-        .unwrap();
+        std::fs::write(dir.join("m20260301_000001_add_col.rs"), "// migration").unwrap();
+        std::fs::write(dir.join("m20260301_000002_index.rs"), "// migration").unwrap();
 
         std::fs::write(
             dir.join("migration-manifest.yaml"),
@@ -1837,11 +1812,7 @@ migrations:
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(
-            dir.join("m20260301_000001_rename.rs"),
-            "// migration",
-        )
-        .unwrap();
+        std::fs::write(dir.join("m20260301_000001_rename.rs"), "// migration").unwrap();
         std::fs::write(
             dir.join("m20260301_000002_rename_data.rs"),
             "// data migration",
@@ -1866,7 +1837,9 @@ migrations:
             ..Default::default()
         };
 
-        let result = validate_rollback_compatibility(&dir, &config).await.unwrap();
+        let result = validate_rollback_compatibility(&dir, &config)
+            .await
+            .unwrap();
         assert_eq!(result.warnings.len(), 1);
         assert!(result.warnings[0].contains("without data_backward"));
 
@@ -1880,11 +1853,7 @@ migrations:
         let _ = std::fs::create_dir_all(&dir);
 
         // Create the schema_and_data migration but NOT the companion file
-        std::fs::write(
-            dir.join("m20260301_000001_rename.rs"),
-            "// migration",
-        )
-        .unwrap();
+        std::fs::write(dir.join("m20260301_000001_rename.rs"), "// migration").unwrap();
 
         std::fs::write(
             dir.join("migration-manifest.yaml"),
@@ -1906,11 +1875,13 @@ migrations:
 
         let result = validate_migration_manifest(&dir, &config).await.unwrap();
         // Should have 2 issues: companion file missing + orphaned manifest entry
-        let forward_issue = result.issues.iter().any(|i| matches!(
-            i,
-            MigrationIssue::DataMigrationIncomplete { issue_type, .. }
-            if issue_type.contains("file does not exist")
-        ));
+        let forward_issue = result.issues.iter().any(|i| {
+            matches!(
+                i,
+                MigrationIssue::DataMigrationIncomplete { issue_type, .. }
+                if issue_type.contains("file does not exist")
+            )
+        });
         assert!(forward_issue, "Should detect missing companion file");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1922,16 +1893,8 @@ migrations:
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(
-            dir.join("m20260301_000001_rename.rs"),
-            "// migration",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("m20260301_000002_rename_data.rs"),
-            "// companion",
-        )
-        .unwrap();
+        std::fs::write(dir.join("m20260301_000001_rename.rs"), "// migration").unwrap();
+        std::fs::write(dir.join("m20260301_000002_rename_data.rs"), "// companion").unwrap();
 
         // Companion is classified as schema_only instead of data_only
         std::fs::write(
@@ -1954,11 +1917,13 @@ migrations:
         };
 
         let result = validate_migration_manifest(&dir, &config).await.unwrap();
-        let cross_issue = result.issues.iter().any(|i| matches!(
-            i,
-            MigrationIssue::DataMigrationIncomplete { issue_type, .. }
-            if issue_type.contains("expected data_only")
-        ));
+        let cross_issue = result.issues.iter().any(|i| {
+            matches!(
+                i,
+                MigrationIssue::DataMigrationIncomplete { issue_type, .. }
+                if issue_type.contains("expected data_only")
+            )
+        });
         assert!(cross_issue, "Should detect wrong companion classification");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1970,11 +1935,7 @@ migrations:
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(
-            dir.join("m20260301_000001_rename.rs"),
-            "// migration",
-        )
-        .unwrap();
+        std::fs::write(dir.join("m20260301_000001_rename.rs"), "// migration").unwrap();
         std::fs::write(
             dir.join("m20260301_000002_rename_data.rs"),
             "// companion file exists but not in manifest",
@@ -2000,12 +1961,17 @@ migrations:
 
         let result = validate_migration_manifest(&dir, &config).await.unwrap();
         // Two issues: companion not in manifest + migration file not assessed
-        let not_declared = result.issues.iter().any(|i| matches!(
-            i,
-            MigrationIssue::DataMigrationIncomplete { issue_type, .. }
-            if issue_type.contains("not declared in the manifest")
-        ));
-        assert!(not_declared, "Should detect companion not declared in manifest");
+        let not_declared = result.issues.iter().any(|i| {
+            matches!(
+                i,
+                MigrationIssue::DataMigrationIncomplete { issue_type, .. }
+                if issue_type.contains("not declared in the manifest")
+            )
+        });
+        assert!(
+            not_declared,
+            "Should detect companion not declared in manifest"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2017,11 +1983,7 @@ migrations:
         let _ = std::fs::create_dir_all(&dir);
 
         // Only one migration file exists
-        std::fs::write(
-            dir.join("m20260301_000001_add_col.rs"),
-            "// migration",
-        )
-        .unwrap();
+        std::fs::write(dir.join("m20260301_000001_add_col.rs"), "// migration").unwrap();
 
         // Manifest references a second migration that has no file
         std::fs::write(
@@ -2044,11 +2006,13 @@ migrations:
         };
 
         let result = validate_migration_manifest(&dir, &config).await.unwrap();
-        let orphaned = result.issues.iter().any(|i| matches!(
-            i,
-            MigrationIssue::DataMigrationIncomplete { issue_type, .. }
-            if issue_type.contains("no corresponding migration file")
-        ));
+        let orphaned = result.issues.iter().any(|i| {
+            matches!(
+                i,
+                MigrationIssue::DataMigrationIncomplete { issue_type, .. }
+                if issue_type.contains("no corresponding migration file")
+            )
+        });
         assert!(orphaned, "Should detect orphaned manifest entry");
 
         let _ = std::fs::remove_dir_all(&dir);

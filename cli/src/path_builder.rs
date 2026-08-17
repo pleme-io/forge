@@ -260,9 +260,7 @@ impl<'a> PathBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        DeployConfig, GlobalConfig, ProductConfig, ServiceConfig,
-    };
+    use crate::config::{DeployConfig, GlobalConfig, ProductConfig, ServiceConfig};
 
     fn make_config() -> DeployConfig {
         let yaml = r#"
@@ -310,7 +308,9 @@ release:
     fn test_expand_pattern_substitutes_all_variables() {
         let config = make_config();
         let builder = make_builder(&config);
-        let result = builder.expand_pattern("{product}/{service}/{cluster}/{environment}/{namespace}").unwrap();
+        let result = builder
+            .expand_pattern("{product}/{service}/{cluster}/{environment}/{namespace}")
+            .unwrap();
         assert_eq!(
             result,
             PathBuf::from("/repo/myapp/cart/primary/staging/myapp-staging")
@@ -322,7 +322,9 @@ release:
         let config = make_config();
         let builder = make_builder(&config);
         let manifest = builder.k8s_manifest().unwrap();
-        assert!(manifest.to_string_lossy().contains("nix/k8s/clusters/primary"));
+        assert!(manifest
+            .to_string_lossy()
+            .contains("nix/k8s/clusters/primary"));
         assert!(manifest.to_string_lossy().contains("myapp-staging"));
         assert!(manifest.to_string_lossy().contains("services/cart"));
         assert!(manifest.to_string_lossy().ends_with("kustomization.yaml"));
@@ -371,13 +373,16 @@ release:
         let config = make_config();
         let builder = make_builder(&config);
         let router = builder.supergraph_router().unwrap();
-        assert!(router.to_string_lossy().contains("hive-router/supergraph.graphql"));
+        assert!(router
+            .to_string_lossy()
+            .contains("hive-router/supergraph.graphql"));
     }
 
     #[test]
     fn test_supergraph_router_custom_path() {
         let mut config = make_config();
-        config.service.graphql.supergraph_router_path = Some("custom/supergraph.graphql".to_string());
+        config.service.graphql.supergraph_router_path =
+            Some("custom/supergraph.graphql".to_string());
         let builder = make_builder(&config);
         let router = builder.supergraph_router().unwrap();
         assert_eq!(router, PathBuf::from("/repo/custom/supergraph.graphql"));
@@ -388,13 +393,16 @@ release:
         let config = make_config();
         let builder = make_builder(&config);
         let dep = builder.hive_router_deployment().unwrap();
-        assert!(dep.to_string_lossy().ends_with("hive-router-deployment.yaml"));
+        assert!(dep
+            .to_string_lossy()
+            .ends_with("hive-router-deployment.yaml"));
     }
 
     #[test]
     fn test_hive_router_deployment_custom_path() {
         let mut config = make_config();
-        config.service.graphql.hive_router_deployment_path = Some("custom/deployment.yaml".to_string());
+        config.service.graphql.hive_router_deployment_path =
+            Some("custom/deployment.yaml".to_string());
         let builder = make_builder(&config);
         let dep = builder.hive_router_deployment().unwrap();
         assert_eq!(dep, PathBuf::from("/repo/custom/deployment.yaml"));
@@ -413,7 +421,10 @@ release:
         let config = make_config();
         let builder = make_builder(&config);
         let root = builder.service_root().unwrap();
-        assert_eq!(root, PathBuf::from("/repo/pkgs/products/myapp/services/rust/cart"));
+        assert_eq!(
+            root,
+            PathBuf::from("/repo/pkgs/products/myapp/services/rust/cart")
+        );
     }
 
     #[test]
@@ -485,7 +496,9 @@ release:
         let config = make_config();
         let builder = make_builder(&config);
         let cfg_path = builder.supergraph_config().unwrap();
-        assert!(cfg_path.to_string_lossy().ends_with("supergraph-config.yaml"));
+        assert!(cfg_path
+            .to_string_lossy()
+            .ends_with("supergraph-config.yaml"));
     }
 
     #[test]
@@ -510,6 +523,9 @@ release:
         let config = make_config();
         let builder = make_builder(&config);
         let dir = builder.services_dir().unwrap();
-        assert_eq!(dir, PathBuf::from("/repo/pkgs/products/myapp/services/rust"));
+        assert_eq!(
+            dir,
+            PathBuf::from("/repo/pkgs/products/myapp/services/rust")
+        );
     }
 }
