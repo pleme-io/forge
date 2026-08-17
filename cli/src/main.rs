@@ -901,8 +901,10 @@ async fn main() -> Result<()> {
                 level,
                 name,
                 set_version,
+                seed_from_tags,
             } => {
-                let (old, new) = commands::gem::bump(&working_dir, &level, name, set_version)?;
+                let (old, new) =
+                    commands::gem::bump(&working_dir, &level, name, set_version, seed_from_tags)?;
                 println!("{} → {}", old, new);
             }
             GemCommands::Build { working_dir, name } => {

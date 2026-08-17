@@ -1580,6 +1580,17 @@ pub enum GemCommands {
         #[arg(long)]
         name: Option<String>,
 
+        /// Seed the bump from released git tags, not the manifest alone.
+        ///
+        /// With this, forge reads `v*` tags itself and starts from
+        /// max(manifest, highest released), then skips any version whose tag
+        /// already exists. Without it, `--level` bumps from the manifest and a
+        /// manifest lagging its tags lands BEHIND a published release (a
+        /// 937-repo census found 527 inverted tag pairs). Off by default so no
+        /// existing release path changes behaviour without opting in.
+        #[arg(long)]
+        seed_from_tags: bool,
+
         /// Write this exact X.Y.Z instead of computing one from --level.
         ///
         /// For callers that already did the arithmetic. `--level` seeds from the

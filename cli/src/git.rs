@@ -399,6 +399,50 @@ pub fn tag_exists(tag: &str) -> Result<bool> {
     Ok(!s.trim().is_empty())
 }
 
+/// Check if a git tag exists, scoped to `workdir`.
+///
+/// Dir-scoped sibling of [`tag_exists`]. A bump runs against a caller-supplied
+/// `--working-dir`, and answering "does this tag exist" from the PROCESS's cwd
+/// instead would silently consult the wrong repository — returning false for a
+/// tag that exists, which is exactly how a release collides with its own tag.
+pub fn tag_exists_in(tag: &str, workdir: Option<&Path>) -> Result<bool> {
+    let stdout = git_capture(&["tag", "--list", tag], workdir, "tag --list")?;
+    let s = String::from_utf8_lossy(&stdout);
+    Ok(!s.trim().is_empty())
+}
+
+/// The highest already-released version, read from `<prefix>X.Y.Z` tags.
+/// Returns `""` when the repo has no such tag — a distinct answer from "0.0.0",
+/// because "nothing released yet" and "released 0.0.0" seed differently.
+///
+/// Compares NUMERICALLY via `parse_semver`, never lexicographically: `v0.10.0`
+/// outranks `v0.9.0`, and a string sort gets that backwards. Tags that do not
+/// parse as exact `X.Y.Z` (release candidates, dated tags, `v1.2`) are SKIPPED
+/// rather than failing the read — a repo is entitled to carry other tags, and
+/// refusing to bump because of one would be a false gate.
+pub fn max_released_version(prefix: &str, workdir: Option<&Path>) -> Result<String> {
+    let pattern = format!("{}*", prefix);
+    let stdout = git_capture(&["tag", "--list", &pattern], workdir, "tag --list")?;
+    let listing = String::from_utf8_lossy(&stdout);
+
+    let mut best: Option<(u64, u64, u64)> = None;
+    let mut best_str = String::new();
+    for line in listing.lines() {
+        let tag = line.trim();
+        let Some(candidate) = tag.strip_prefix(prefix) else {
+            continue;
+        };
+        let Ok(parsed) = crate::version::parse_semver(candidate) else {
+            continue;
+        };
+        if best.is_none_or(|b| parsed > b) {
+            best = Some(parsed);
+            best_str = candidate.to_string();
+        }
+    }
+    Ok(best_str)
+}
+
 /// Create an annotated git tag.
 pub fn create_tag(tag: &str, message: &str) -> Result<()> {
     git_capture(&["tag", "-a", tag, "-m", message], None, "tag -a")?;
