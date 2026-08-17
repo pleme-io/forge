@@ -223,6 +223,7 @@ pub fn bump(
     level: &str,
     name: Option<String>,
     set_version: Option<String>,
+    seed_from_tags: bool,
 ) -> Result<(String, String)> {
     let dir = Path::new(working_dir);
     if !dir.exists() {
@@ -258,6 +259,24 @@ pub fn bump(
                 bail!("--set-version must be an exact X.Y.Z semver, got: {}", v);
             }
             v
+        }
+        // Seed from released tags: forge reads the tags itself, so the caller
+        // supplies no arithmetic. This is what makes a lagging manifest safe —
+        // `--level` alone bumps from the manifest and can land behind a
+        // published release.
+        None if seed_from_tags => {
+            let max_released = crate::git::max_released_version("v", Some(dir))?;
+            let tag_exists =
+                |v: &str| crate::git::tag_exists_in(&format!("v{}", v), Some(dir)).unwrap_or(false);
+            let next =
+                version::next_free_version(&old_version, level, &max_released, &tag_exists)?;
+            if !max_released.is_empty() {
+                info!(
+                    "{}: seeding from max(manifest {}, released {}) -> {}",
+                    gem_name, old_version, max_released, next
+                );
+            }
+            next
         }
         None => version::bump_semver(&old_version, level)?,
     };
