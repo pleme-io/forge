@@ -1386,3 +1386,83 @@ mod tests {
         );
     }
 }
+
+/// Tests for the released-version reader added alongside `--seed-from-tags`.
+///
+/// These were owed: when `max_released_version` landed it was covered only by an
+/// end-to-end run against a throwaway repo, which is real evidence but does not
+/// pin the ORDERING rule or the skip rule against regression. A git shim pins
+/// both without needing a repository.
+#[cfg(test)]
+mod max_released_version_tests {
+    use super::*;
+    use crate::test_support::{make_executable_shim, GitBinScope, GIT_BIN_ENV_LOCK};
+
+    /// A fake `git` whose `tag --list` prints `listing` verbatim.
+    fn git_listing_shim(listing: &str) -> (tempfile::TempDir, String) {
+        make_executable_shim("git", &format!("#!/bin/sh\nprintf '{}'\n", listing))
+    }
+
+    #[test]
+    fn orders_numerically_not_lexicographically() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // THE rule. Lexicographically "0.3.1" > "0.10.0", so a string sort picks
+        // the wrong tag and the next release lands behind a published one.
+        let (_d, shim) = git_listing_shim("v0.3.0\\nv0.3.1\\nv0.10.0\\n");
+        let _scope = GitBinScope::set(&shim);
+        assert_eq!(max_released_version("v", None).unwrap(), "0.10.0");
+    }
+
+    #[test]
+    fn skips_tags_that_are_not_exact_semver_rather_than_failing() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // A repo is entitled to carry rc / dated / two-part tags. Refusing to
+        // bump because of one would be a false gate, so they are skipped.
+        let (_d, shim) =
+            git_listing_shim("v1.2\\nv2.0.0-rc1\\nvNOPE\\nv0.1.0\\nv0.1.0.1\\n");
+        let _scope = GitBinScope::set(&shim);
+        assert_eq!(
+            max_released_version("v", None).unwrap(),
+            "0.1.0",
+            "only the exact X.Y.Z tag counts"
+        );
+    }
+
+    #[test]
+    fn no_matching_tag_is_empty_not_zero() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // "" and "0.0.0" seed DIFFERENTLY: empty means the manifest wins
+        // outright, whereas 0.0.0 would be compared against it.
+        let (_d, shim) = git_listing_shim("");
+        let _scope = GitBinScope::set(&shim);
+        assert_eq!(max_released_version("v", None).unwrap(), "");
+
+        let (_d2, shim2) = git_listing_shim("nightly\\nlatest\\n");
+        let _scope2 = GitBinScope::set(&shim2);
+        assert_eq!(
+            max_released_version("v", None).unwrap(),
+            "",
+            "tags that do not even carry the prefix yield empty"
+        );
+    }
+
+    #[test]
+    fn strips_the_prefix_and_honours_a_non_v_prefix() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_d, shim) = git_listing_shim("release-1.4.0\\nrelease-1.10.0\\n");
+        let _scope = GitBinScope::set(&shim);
+        assert_eq!(
+            max_released_version("release-", None).unwrap(),
+            "1.10.0",
+            "the returned value is the bare version, prefix removed"
+        );
+    }
+
+    #[test]
+    fn tolerates_surrounding_whitespace_in_the_listing() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_d, shim) = git_listing_shim("  v0.2.0  \\n\\nv0.5.0\\n  \\n");
+        let _scope = GitBinScope::set(&shim);
+        assert_eq!(max_released_version("v", None).unwrap(), "0.5.0");
+    }
+}
