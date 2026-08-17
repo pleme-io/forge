@@ -210,17 +210,25 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
 
     match language {
         "rust" => {
-            // Use cargo set-version for Rust
-            let cargo = cargo_bin();
-            let status = Command::new(&cargo)
-                .args(["set-version", "--bump", level])
-                .current_dir(dir)
-                .status()
-                .context("Failed to run cargo set-version (is cargo-edit installed?)")?;
-
-            if !status.success() {
-                bail!("cargo set-version --bump {} failed", level);
-            }
+            // PORTED 1:1 off `cargo set-version` (cargo-edit) onto forge's own
+            // typed writer, 2026-08-17. Deliberately semantics-preserving: the
+            // new version is still `bump_semver(manifest, level)`, exactly what
+            // `--bump <level>` computed. Seeding from released tags is available
+            // (`version::next_free_version`) and NOT switched on here, because
+            // replacing the binary and changing the arithmetic in one diff is
+            // what makes a port unreviewable.
+            //
+            // What the port buys, beyond dropping a foreign-binary dependency:
+            //   * it works on a manifest `cargo set-version` cannot parse — the
+            //     24 fleet manifests at `0.19.0-dev` among them;
+            //   * it routes on CargoShape, so a workspace member is REFUSED
+            //     instead of being given a second source of truth;
+            //   * it preserves the author's alignment and trailing comment,
+            //     which `cargo set-version` normalizes.
+            let cargo_toml = dir.join("Cargo.toml");
+            let old_ver = version::read_cargo_version(&cargo_toml)?;
+            let target = version::bump_semver(&old_ver, level)?;
+            version::write_cargo_version(&cargo_toml, &target)?;
 
             // Regenerate Cargo.nix if crate2nix is available.
             //
