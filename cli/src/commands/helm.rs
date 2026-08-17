@@ -6,7 +6,7 @@
 use crate::repo::get_tool_path;
 use crate::retry::RetryPolicy;
 use crate::version;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread::sleep;
@@ -143,7 +143,12 @@ fn run_program_timed(program: &str, args: &[&str], timeout: Duration) -> Result<
         if start.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("{} {} timed out after {}s", program, args.join(" "), timeout.as_secs());
+            bail!(
+                "{} {} timed out after {}s",
+                program,
+                args.join(" "),
+                timeout.as_secs()
+            );
         }
         sleep(Duration::from_millis(50));
     }
@@ -374,33 +379,31 @@ mod capture_tests {
         // Empty streams.
         assert!(ensure_helm_success(&make_output(true, b"", b""), "ctx").is_ok());
         // Non-empty stdout only (helm often prints "Manifest generated" on stdout even on success).
-        assert!(
-            ensure_helm_success(
-                &make_output(true, b"Manifest generated\n", b""),
-                "chart-dir"
-            )
-            .is_ok()
-        );
+        assert!(ensure_helm_success(
+            &make_output(true, b"Manifest generated\n", b""),
+            "chart-dir"
+        )
+        .is_ok());
         // Non-empty stderr only (helm dep update chatter often lands on stderr even on success).
-        assert!(
-            ensure_helm_success(
-                &make_output(true, b"", b"Getting updates for unmanaged Helm repositories...\n"),
-                "chart-dir"
-            )
-            .is_ok()
-        );
+        assert!(ensure_helm_success(
+            &make_output(
+                true,
+                b"",
+                b"Getting updates for unmanaged Helm repositories...\n"
+            ),
+            "chart-dir"
+        )
+        .is_ok());
         // Both streams non-empty (the typical successful case).
-        assert!(
-            ensure_helm_success(
-                &make_output(
-                    true,
-                    b"Successfully packaged chart\n",
-                    b"Saving 2 charts\nDeleting outdated charts\n"
-                ),
-                "chart-dir (helm package)"
-            )
-            .is_ok()
-        );
+        assert!(ensure_helm_success(
+            &make_output(
+                true,
+                b"Successfully packaged chart\n",
+                b"Saving 2 charts\nDeleting outdated charts\n"
+            ),
+            "chart-dir (helm package)"
+        )
+        .is_ok());
     }
 
     /// The exact bail-string preservation shield: a failed output must
@@ -419,9 +422,8 @@ mod capture_tests {
             b"",
             b"Error: failed to perform \"Push\" on destination: 403: denied: permission_denied: write_package\n",
         );
-        let err = ensure_helm_success(&out, "my-chart").expect_err(
-            "a non-success output must bail",
-        );
+        let err =
+            ensure_helm_success(&out, "my-chart").expect_err("a non-success output must bail");
         assert_eq!(
             err.to_string(),
             "my-chart: Error: failed to perform \"Push\" on destination: 403: denied: permission_denied: write_package",
@@ -439,14 +441,14 @@ mod capture_tests {
     fn ensure_helm_success_reason_line_composition_matches_last_reason_line_discipline() {
         // stderr-empty → stdout fallback.
         let stdout_only = make_output(false, b"final stdout diagnostic\n", b"");
-        let err = ensure_helm_success(&stdout_only, "ctx-a")
-            .expect_err("a non-success output must bail");
+        let err =
+            ensure_helm_success(&stdout_only, "ctx-a").expect_err("a non-success output must bail");
         assert_eq!(err.to_string(), "ctx-a: final stdout diagnostic");
 
         // both empty → "(no output captured)" sentinel.
         let both_empty = make_output(false, b"", b"");
-        let err = ensure_helm_success(&both_empty, "ctx-b")
-            .expect_err("a non-success output must bail");
+        let err =
+            ensure_helm_success(&both_empty, "ctx-b").expect_err("a non-success output must bail");
         assert_eq!(err.to_string(), "ctx-b: (no output captured)");
 
         // both non-empty → stderr wins.
@@ -565,8 +567,10 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     // pleme-discord-bot's botName), so a chart can keep its deploy-time guard AND
     // still lint generically.
     let mut value_args: Vec<String> = vec![
-        "--set".into(), LINT_IMAGE_REPO.into(),
-        "--set".into(), LINT_IMAGE_TAG.into(),
+        "--set".into(),
+        LINT_IMAGE_REPO.into(),
+        "--set".into(),
+        LINT_IMAGE_TAG.into(),
     ];
     let ci_values = chart_path.join("ci").join("lint-values.yaml");
     if ci_values.exists() {
@@ -594,8 +598,7 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     if is_library {
         info!("Skipping helm template for library chart");
     } else {
-        let mut tmpl_args: Vec<String> =
-            vec!["template".into(), "test".into(), chart_dir.into()];
+        let mut tmpl_args: Vec<String> = vec!["template".into(), "test".into(), chart_dir.into()];
         tmpl_args.extend(value_args.iter().cloned());
         // stdout stays null'd (never captured, never printed) — a wrapper
         // chart like lareira-vm-stack renders MEGABYTES of manifests that
@@ -620,7 +623,11 @@ pub fn lint(chart_dir: &str) -> Result<()> {
 ///
 /// If `lib_chart_dir` is provided, creates a temp workspace with the chart
 /// and its library dependency for file:// resolution.
-pub fn lint_with_lib(chart_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &str) -> Result<()> {
+pub fn lint_with_lib(
+    chart_dir: &str,
+    lib_chart_dir: Option<&str>,
+    lib_chart_name: &str,
+) -> Result<()> {
     match lib_chart_dir {
         Some(lib_dir) => {
             let chart_path = Path::new(chart_dir);
@@ -779,7 +786,11 @@ fn parse_deps(chart_yaml_content: &str) -> Vec<ChartDep> {
         .map(|c| {
             c.dependencies
                 .into_iter()
-                .map(|d| ChartDep { name: d.name, version: d.version, repository: d.repository })
+                .map(|d| ChartDep {
+                    name: d.name,
+                    version: d.version,
+                    repository: d.repository,
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -794,8 +805,12 @@ pub const PLEME_OCI_REGISTRY: &str = "oci://ghcr.io/pleme-io/charts";
 /// repo or an `oci://` repo that is NOT already the pleme-io mirror. These are
 /// the deps the mirror copies and the redirect reroutes.
 fn is_third_party_repo(repo: &str, registry: &str) -> bool {
-    let remote = repo.starts_with("http://") || repo.starts_with("https://") || repo.starts_with("oci://");
-    remote && !repo.trim_end_matches('/').starts_with(registry.trim_end_matches('/'))
+    let remote =
+        repo.starts_with("http://") || repo.starts_with("https://") || repo.starts_with("oci://");
+    remote
+        && !repo
+            .trim_end_matches('/')
+            .starts_with(registry.trim_end_matches('/'))
 }
 
 /// Mirror every third-party Helm subchart a wrapper chart depends on into the
@@ -904,7 +919,16 @@ fn mirror_one(
         run_helm_timed(&["pull", &r, "--version", version, "-d", &tmps], timeout)?
     } else {
         run_helm_timed(
-            &["pull", name, "--repo", upstream, "--version", version, "-d", &tmps],
+            &[
+                "pull",
+                name,
+                "--repo",
+                upstream,
+                "--version",
+                version,
+                "-d",
+                &tmps,
+            ],
             timeout,
         )?
     };
@@ -946,12 +970,17 @@ fn redirect_remote_deps_to_mirror(chart_dir: &Path, registry: &str) -> Result<()
         Ok(v) => v,
         Err(_) => return Ok(()), // leave unparseable Chart.yaml to helm to surface
     };
-    let Some(deps) = doc.get_mut("dependencies").and_then(|d| d.as_sequence_mut()) else {
+    let Some(deps) = doc
+        .get_mut("dependencies")
+        .and_then(|d| d.as_sequence_mut())
+    else {
         return Ok(());
     };
     let mut changed = false;
     for dep in deps.iter_mut() {
-        let Some(map) = dep.as_mapping_mut() else { continue };
+        let Some(map) = dep.as_mapping_mut() else {
+            continue;
+        };
         let repo = map
             .get(serde_yaml::Value::from("repository"))
             .and_then(|r| r.as_str())
@@ -1008,8 +1037,14 @@ pub fn deploy(
 
     // Search for the service's kustomization.yaml in the cluster overlay
     let kustomization_paths = [
-        format!("{}/clusters/{}/infrastructure/{}/kustomization.yaml", k8s_repo, cluster, service),
-        format!("{}/clusters/{}/products/{}/kustomization.yaml", k8s_repo, cluster, service),
+        format!(
+            "{}/clusters/{}/infrastructure/{}/kustomization.yaml",
+            k8s_repo, cluster, service
+        ),
+        format!(
+            "{}/clusters/{}/products/{}/kustomization.yaml",
+            k8s_repo, cluster, service
+        ),
     ];
 
     let kustomization_path = kustomization_paths
@@ -1092,7 +1127,11 @@ pub fn template(chart_dir: &str, values: Option<&str>, set_values: &[String]) ->
     // helm dependency update (bounded + retried)
     helm_dependency_update(chart_dir)?;
 
-    let mut args = vec!["template".to_string(), "test".to_string(), chart_dir.to_string()];
+    let mut args = vec![
+        "template".to_string(),
+        "test".to_string(),
+        chart_dir.to_string(),
+    ];
 
     if let Some(v) = values {
         args.push("-f".to_string());
@@ -1144,10 +1183,7 @@ pub fn bump(
 
     let lib_chart_yaml = charts_path.join(lib_chart_name).join("Chart.yaml");
     if !lib_chart_yaml.exists() {
-        bail!(
-            "Library chart not found: {}",
-            lib_chart_yaml.display()
-        );
+        bail!("Library chart not found: {}", lib_chart_yaml.display());
     }
 
     // Read current version
@@ -1202,7 +1238,9 @@ pub fn bump(
         let old_dep = format!("version: \"{}\"", old_version);
         let new_dep = format!("version: \"{}\"", new_version);
 
-        if dep_content.contains(&old_dep) && dep_content.contains(&format!("name: {}", lib_chart_name)) {
+        if dep_content.contains(&old_dep)
+            && dep_content.contains(&format!("name: {}", lib_chart_name))
+        {
             info!("Updating {}/Chart.yaml", dir_name_str);
             let updated_dep = dep_content.replace(&old_dep, &new_dep);
             std::fs::write(&dep_chart_yaml, &updated_dep)?;
@@ -1234,9 +1272,7 @@ pub fn bump(
             .output()
             .context("Failed to run git rev-parse")?;
 
-        let repo_root = String::from_utf8(repo_root.stdout)?
-            .trim()
-            .to_string();
+        let repo_root = String::from_utf8(repo_root.stdout)?.trim().to_string();
 
         let status = crate::git::git_command_sync()
             .args(["add", &format!("{}/*/Chart.yaml", charts_dir)])
@@ -1373,8 +1409,7 @@ fn release_lib_chart(
 /// docs describing a second, imaginary one.
 fn chart_published(reg: &str, name: &str, version: &str, timeout: Duration) -> bool {
     let oci_ref = format!("{reg}/{name}");
-    run_helm_timed(&["show", "chart", &oci_ref, "--version", version], timeout)
-        .unwrap_or(false)
+    run_helm_timed(&["show", "chart", &oci_ref, "--version", version], timeout).unwrap_or(false)
 }
 
 /// Should an already-published `(name, version)` be pushed over?
@@ -1477,7 +1512,9 @@ fn prepare_chart_workspace(
     // with "directory .../pleme-lareira not found". The lib chart + the chart
     // itself are already staged, so seed `copied` with them to avoid re-copy / loops.
     let mut copied: std::collections::HashSet<String> =
-        [chart_name.to_string(), lib_chart_name.to_string()].into_iter().collect();
+        [chart_name.to_string(), lib_chart_name.to_string()]
+            .into_iter()
+            .collect();
     stage_file_sibling_deps(&src_chart, tmp_path, &mut copied)?;
 
     // Hermetic supply-chain law: reroute any third-party subchart deps in the
@@ -1523,7 +1560,8 @@ mod file_dep_tests {
 
     #[test]
     fn parses_block_and_flow_dependency_styles() {
-        let block = "dependencies:\n  - name: pleme-lareira\n    repository: \"file://../pleme-lareira\"\n";
+        let block =
+            "dependencies:\n  - name: pleme-lareira\n    repository: \"file://../pleme-lareira\"\n";
         assert_eq!(file_dep_paths(block), vec!["file://../pleme-lareira"]);
 
         let flow = "dependencies:\n  - {name: pleme-lareira, version: \"~0.1.0\", repository: \"file://../pleme-lareira\"}\n";
@@ -1550,7 +1588,10 @@ mod release_publish_tests {
             "apiVersion: v2\nname: pleme-lib\ntype: library\nversion: 0.42.0\n",
         )
         .unwrap();
-        assert_eq!(chart_version_at(&dir.path().to_string_lossy()).unwrap(), "0.42.0");
+        assert_eq!(
+            chart_version_at(&dir.path().to_string_lossy()).unwrap(),
+            "0.42.0"
+        );
     }
 
     #[test]
@@ -1576,7 +1617,10 @@ mod release_publish_tests {
         unsafe { std::env::set_var("FORGE_HELM_REPUBLISH", "0") };
         assert!(!republish_enabled(), "=0 must NOT enable");
         unsafe { std::env::set_var("FORGE_HELM_REPUBLISH", "yes") };
-        assert!(!republish_enabled(), "an unrecognised value must NOT enable");
+        assert!(
+            !republish_enabled(),
+            "an unrecognised value must NOT enable"
+        );
 
         match prev {
             Some(v) => unsafe { std::env::set_var("FORGE_HELM_REPUBLISH", v) },
@@ -1616,7 +1660,10 @@ mod release_publish_tests {
             "apiVersion: v2\nname: pleme-lib\ntype: library\nversion: 0.42.0\n",
         )
         .unwrap();
-        assert!(!chart_oci_auto_release_disabled(&lib2), "default must publish");
+        assert!(
+            !chart_oci_auto_release_disabled(&lib2),
+            "default must publish"
+        );
     }
 
     #[test]
@@ -1628,10 +1675,12 @@ mod release_publish_tests {
             std::fs::write(d.join("Chart.yaml"), format!("name: {c}\nversion: 0.1.0\n")).unwrap();
         }
         let found = discover_charts(&dir.path().to_string_lossy(), "pleme-lib").unwrap();
-        assert!(!found.contains(&"pleme-lib".to_string()), "lib must not be a dependent");
+        assert!(
+            !found.contains(&"pleme-lib".to_string()),
+            "lib must not be a dependent"
+        );
         assert_eq!(found.len(), 2);
     }
-
 }
 
 #[cfg(test)]
@@ -1656,9 +1705,15 @@ dependencies:
 ";
         let deps = parse_deps(cy);
         assert_eq!(deps.len(), 2);
-        let vm = deps.iter().find(|d| d.name == "victoria-metrics-k8s-stack").unwrap();
+        let vm = deps
+            .iter()
+            .find(|d| d.name == "victoria-metrics-k8s-stack")
+            .unwrap();
         assert_eq!(vm.version, "0.39.0");
-        assert_eq!(vm.repository, "https://victoriametrics.github.io/helm-charts/");
+        assert_eq!(
+            vm.repository,
+            "https://victoriametrics.github.io/helm-charts/"
+        );
         // flow style + a v-prefixed version (cert-manager shape) parses too.
         let flow = "dependencies:\n  - {name: cert-manager, version: \"v1.17.1\", repository: \"https://charts.jetstack.io\"}\n";
         let d = parse_deps(flow);
@@ -1680,7 +1735,10 @@ mod hermetic_mirror_tests {
         // third-party: any http(s) repo, or an oci repo that is NOT the mirror.
         assert!(is_third_party_repo("https://charts.jetstack.io", reg));
         assert!(is_third_party_repo("http://example.com/charts", reg));
-        assert!(is_third_party_repo("oci://ghcr.io/actions/actions-runner-controller-charts", reg));
+        assert!(is_third_party_repo(
+            "oci://ghcr.io/actions/actions-runner-controller-charts",
+            reg
+        ));
         // NOT third-party: file:// siblings, and the mirror itself (with/without slash).
         assert!(!is_third_party_repo("file://../pleme-lib", reg));
         assert!(!is_third_party_repo("oci://ghcr.io/pleme-io/charts", reg));
@@ -1704,7 +1762,10 @@ mod hermetic_mirror_tests {
         let out = std::fs::read_to_string(chart.join("Chart.yaml")).unwrap();
         let deps = super::parse_deps(&out);
         let lib = deps.iter().find(|d| d.name == "pleme-lib").unwrap();
-        let vm = deps.iter().find(|d| d.name == "victoria-metrics-k8s-stack").unwrap();
+        let vm = deps
+            .iter()
+            .find(|d| d.name == "victoria-metrics-k8s-stack")
+            .unwrap();
         // file:// dep is left untouched; the third-party dep is rerouted to the mirror.
         assert_eq!(lib.repository, "file://../pleme-lib");
         assert_eq!(vm.repository, PLEME_OCI_REGISTRY);
@@ -1724,7 +1785,10 @@ mod hermetic_mirror_tests {
         std::fs::write(chart.join("Chart.lock"), "keep\n").unwrap();
         redirect_remote_deps_to_mirror(chart, PLEME_OCI_REGISTRY).unwrap();
         // nothing rerouted ⇒ the lock is preserved.
-        assert_eq!(std::fs::read_to_string(chart.join("Chart.lock")).unwrap(), "keep\n");
+        assert_eq!(
+            std::fs::read_to_string(chart.join("Chart.lock")).unwrap(),
+            "keep\n"
+        );
     }
 }
 
@@ -1833,19 +1897,15 @@ pub fn lint_all(charts_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &
         // Workspace prep is isolated too — a single chart's copy/stage/
         // redirect failure must not `?`-abort the remaining charts, same as
         // the lint step below.
-        let (_tmpdir, chart_path) = match prepare_chart_workspace(
-            chart_name,
-            charts_dir,
-            lib_chart_dir,
-            lib_chart_name,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("FAIL: {} workspace prep — {}", chart_name, e);
-                failed.push((chart_name.clone(), format!("workspace prep: {e}")));
-                continue;
-            }
-        };
+        let (_tmpdir, chart_path) =
+            match prepare_chart_workspace(chart_name, charts_dir, lib_chart_dir, lib_chart_name) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("FAIL: {} workspace prep — {}", chart_name, e);
+                    failed.push((chart_name.clone(), format!("workspace prep: {e}")));
+                    continue;
+                }
+            };
 
         match lint(&chart_path) {
             Ok(()) => println!("PASS: {}", chart_name),
@@ -1905,7 +1965,13 @@ pub fn release_all(
     // 0.16.0 fork.
     //
     // It goes first because dependents resolve against it.
-    match release_lib_chart(charts_dir, lib_chart_dir, lib_chart_name, registry, output_dir) {
+    match release_lib_chart(
+        charts_dir,
+        lib_chart_dir,
+        lib_chart_name,
+        registry,
+        output_dir,
+    ) {
         Ok(Some(v)) => released.push(format!("{lib_chart_name} (library) {v}")),
         Ok(None) => skipped.push(format!("{lib_chart_name} (library, already published)")),
         Err(e) => {
@@ -1927,19 +1993,15 @@ pub fn release_all(
         // GHCR permission gap or bad dependency version must never prevent
         // an unrelated, already-clean chart later in the list from
         // publishing (task pleme-io/helmworks-akeyless#143).
-        let (_tmpdir, chart_path) = match prepare_chart_workspace(
-            chart_name,
-            charts_dir,
-            lib_chart_dir,
-            lib_chart_name,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("FAIL: {} workspace prep — {}", chart_name, e);
-                failed.push((chart_name.clone(), format!("workspace prep: {e}")));
-                continue;
-            }
-        };
+        let (_tmpdir, chart_path) =
+            match prepare_chart_workspace(chart_name, charts_dir, lib_chart_dir, lib_chart_name) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("FAIL: {} workspace prep — {}", chart_name, e);
+                    failed.push((chart_name.clone(), format!("workspace prep: {e}")));
+                    continue;
+                }
+            };
 
         // Lint
         println!("--- Lint ---");
@@ -1970,7 +2032,12 @@ pub fn release_all(
         let version = chart_version_at(&chart_path).unwrap_or_default();
         if !version.is_empty()
             && !republish_enabled()
-            && chart_published(registry, chart_name, &version, Duration::from_secs(DEP_TIMEOUT_SECS))
+            && chart_published(
+                registry,
+                chart_name,
+                &version,
+                Duration::from_secs(DEP_TIMEOUT_SECS),
+            )
         {
             println!("SKIP: {chart_name} {version} already published (immutable)");
             skipped.push(format!("{chart_name} {version}"));
@@ -1987,7 +2054,11 @@ pub fn release_all(
     }
 
     println!();
-    info!("Released {} chart(s); skipped {} already-published", released.len(), skipped.len());
+    info!(
+        "Released {} chart(s); skipped {} already-published",
+        released.len(),
+        skipped.len()
+    );
     // No silent caps: every skip is named, so "nothing shipped" is never
     // indistinguishable from "everything was already current".
     if !skipped.is_empty() {
@@ -2060,10 +2131,19 @@ mod extract_yaml_field_tests {
 
     #[test]
     fn reads_the_charts_own_version_not_a_dependency_range() {
-        assert_eq!(extract_yaml_field(CHART_WITH_DEPS, "version").unwrap(), "0.4.2");
-        assert_eq!(extract_yaml_field(CHART_WITH_DEPS, "name").unwrap(), "lareira-akeyless");
+        assert_eq!(
+            extract_yaml_field(CHART_WITH_DEPS, "version").unwrap(),
+            "0.4.2"
+        );
+        assert_eq!(
+            extract_yaml_field(CHART_WITH_DEPS, "name").unwrap(),
+            "lareira-akeyless"
+        );
         // appVersion must not be confused with version, in either direction.
-        assert_eq!(extract_yaml_field(CHART_WITH_DEPS, "appVersion").unwrap(), "1.9.0");
+        assert_eq!(
+            extract_yaml_field(CHART_WITH_DEPS, "appVersion").unwrap(),
+            "1.9.0"
+        );
     }
 
     #[test]
@@ -2081,7 +2161,8 @@ mod extract_yaml_field_tests {
     fn a_nested_only_field_is_refused_rather_than_returned() {
         // If the ONLY occurrence is nested, that is not the chart's field. A
         // range silently returned as a version is worse than a loud failure.
-        let nested_only = "apiVersion: v2\nname: x\ndependencies:\n  - name: c\n    version: \">=1.0.0\"\n";
+        let nested_only =
+            "apiVersion: v2\nname: x\ndependencies:\n  - name: c\n    version: \">=1.0.0\"\n";
         let err = extract_yaml_field(nested_only, "version").unwrap_err();
         assert!(
             err.to_string().contains("Top-level field"),
@@ -2158,10 +2239,7 @@ mod bump_routing_tests {
         let lib_name = "pleme-lib";
         let chart_dir = dir.path().join(lib_name);
         std::fs::create_dir(&chart_dir).unwrap();
-        let chart_yaml = format!(
-            "apiVersion: v2\nname: {}\nversion: {}\n",
-            lib_name, version
-        );
+        let chart_yaml = format!("apiVersion: v2\nname: {}\nversion: {}\n", lib_name, version);
         std::fs::write(chart_dir.join("Chart.yaml"), chart_yaml).unwrap();
         (dir, lib_name.to_string())
     }
@@ -2697,10 +2775,7 @@ mod dep_update_retry_backoff_tests {
         // diagnostic prose below refers to the shape only via the
         // reconstructed `bespoke_needle` (never the fused literal), so
         // the assert message body stays unmatchable too.
-        let bespoke_needle = format!(
-            "sleep(Duration::from_secs({} * u64::from(attempt)))",
-            5
-        );
+        let bespoke_needle = format!("sleep(Duration::from_secs({} * u64::from(attempt)))", 5);
         let bespoke_hits = crate::test_support::code_line_hits(SOURCE, &bespoke_needle);
         assert!(
             bespoke_hits.is_empty(),
@@ -2712,10 +2787,8 @@ mod dep_update_retry_backoff_tests {
             bespoke_needle,
             bespoke_hits,
         );
-        let delegation_hits = crate::test_support::code_line_hits(
-            SOURCE,
-            "helm_dep_update_retry_delay(attempt)",
-        );
+        let delegation_hits =
+            crate::test_support::code_line_hits(SOURCE, "helm_dep_update_retry_delay(attempt)");
         assert!(
             !delegation_hits.is_empty(),
             "commands/helm.rs must consume the typed retry-delay \

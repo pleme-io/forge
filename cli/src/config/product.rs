@@ -78,7 +78,8 @@ pub struct DirsConfig {
 ///     health: "https://api.myapp.io/health"
 ///     graphql: "https://api.myapp.io/graphql"
 /// ```
-pub type EndpointsConfig = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
+pub type EndpointsConfig =
+    std::collections::HashMap<String, std::collections::HashMap<String, String>>;
 
 /// Configuration for a separate K8s manifests repository.
 ///
@@ -238,7 +239,11 @@ impl ProductConfig {
 
     /// Resolve a configured directory path relative to a root.
     /// Returns None if the path is not configured.
-    pub fn resolve_dir(&self, root: &std::path::Path, path: Option<&str>) -> Option<std::path::PathBuf> {
+    pub fn resolve_dir(
+        &self,
+        root: &std::path::Path,
+        path: Option<&str>,
+    ) -> Option<std::path::PathBuf> {
         path.map(|p| {
             let p = std::path::Path::new(p);
             if p.is_absolute() {
@@ -451,7 +456,10 @@ mod tests {
         let p = make_product("myapp");
         let root = std::path::Path::new("/repo");
         let result = p.resolve_dir(root, Some("services/rust/backend"));
-        assert_eq!(result.unwrap(), std::path::PathBuf::from("/repo/services/rust/backend"));
+        assert_eq!(
+            result.unwrap(),
+            std::path::PathBuf::from("/repo/services/rust/backend")
+        );
     }
 
     #[test]
@@ -466,9 +474,15 @@ mod tests {
     fn test_endpoint_url_found() {
         let mut p = make_product("myapp");
         let mut staging = std::collections::HashMap::new();
-        staging.insert("health".to_string(), "https://api.staging.myapp.io/health".to_string());
+        staging.insert(
+            "health".to_string(),
+            "https://api.staging.myapp.io/health".to_string(),
+        );
         p.endpoints.insert("staging".to_string(), staging);
-        assert_eq!(p.endpoint_url("staging", "health"), Some("https://api.staging.myapp.io/health"));
+        assert_eq!(
+            p.endpoint_url("staging", "health"),
+            Some("https://api.staging.myapp.io/health")
+        );
     }
 
     #[test]

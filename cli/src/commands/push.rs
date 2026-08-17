@@ -537,9 +537,9 @@ pub async fn push_with_retry(
     // doca wants --registry/--image separately where skopeo took one composed
     // reference. Split on the FIRST '/', and REFUSE a base with none: a wrong
     // split pushes to the wrong repository rather than failing.
-    let (host, image) = registry
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("registry {registry:?} has no '/', cannot split host from image"))?;
+    let (host, image) = registry.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!("registry {registry:?} has no '/', cannot split host from image")
+    })?;
     let host = host.to_string();
     let image = image.to_string();
 

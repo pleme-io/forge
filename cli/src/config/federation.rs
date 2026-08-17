@@ -461,7 +461,10 @@ mod tests {
     #[test]
     fn test_federation_tests_job_name_default() {
         let config = ServiceFederationTestsConfig::default();
-        assert_eq!(config.job_name("myapp", "cart", "staging"), "myapp-cart-federation-tests");
+        assert_eq!(
+            config.job_name("myapp", "cart", "staging"),
+            "myapp-cart-federation-tests"
+        );
     }
 
     #[test]
@@ -470,7 +473,10 @@ mod tests {
             job_name_pattern: Some("tests-{product}-{service}-{environment}".to_string()),
             ..ServiceFederationTestsConfig::default()
         };
-        assert_eq!(config.job_name("myapp", "cart", "staging"), "tests-myapp-cart-staging");
+        assert_eq!(
+            config.job_name("myapp", "cart", "staging"),
+            "tests-myapp-cart-staging"
+        );
     }
 
     #[test]

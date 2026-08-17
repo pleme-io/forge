@@ -9754,7 +9754,11 @@ pub fn bump_seed<'a>(manifest_version: &'a str, max_released: &'a str) -> Result
     }
     let m = parse_semver(manifest_version)?;
     let r = parse_semver(max_released)?;
-    Ok(if r > m { max_released } else { manifest_version })
+    Ok(if r > m {
+        max_released
+    } else {
+        manifest_version
+    })
 }
 
 /// The next version that is both release-monotone AND not already tagged.
@@ -10100,9 +10104,9 @@ pub fn read_cargo_version(path: &Path) -> Result<String> {
         .with_context(|| format!("Failed to read {}", path.display()))?;
 
     match classify_cargo(&content) {
-        CargoShape::SingleCrate(v)
-        | CargoShape::HybridRoot(v)
-        | CargoShape::WorkspaceShared(v) => Ok(v),
+        CargoShape::SingleCrate(v) | CargoShape::HybridRoot(v) | CargoShape::WorkspaceShared(v) => {
+            Ok(v)
+        }
         CargoShape::MemberInheriting => bail!(
             "{} inherits its version from the workspace root \
              (`version.workspace = true`) — read the root's \
@@ -21841,11 +21845,23 @@ mod seeding_tests {
     #[test]
     fn seed_prefers_whichever_is_higher() {
         assert_eq!(bump_seed("0.2.5", "0.3.1").unwrap(), "0.3.1", "tags ahead");
-        assert_eq!(bump_seed("0.4.0", "0.3.1").unwrap(), "0.4.0", "manifest ahead");
+        assert_eq!(
+            bump_seed("0.4.0", "0.3.1").unwrap(),
+            "0.4.0",
+            "manifest ahead"
+        );
         assert_eq!(bump_seed("0.3.1", "0.3.1").unwrap(), "0.3.1", "level");
-        assert_eq!(bump_seed("0.1.0", "").unwrap(), "0.1.0", "nothing released yet");
+        assert_eq!(
+            bump_seed("0.1.0", "").unwrap(),
+            "0.1.0",
+            "nothing released yet"
+        );
         // Numeric, not lexicographic: 0.10.0 outranks 0.9.0.
-        assert_eq!(bump_seed("0.9.0", "0.10.0").unwrap(), "0.10.0", "numeric ordering");
+        assert_eq!(
+            bump_seed("0.9.0", "0.10.0").unwrap(),
+            "0.10.0",
+            "numeric ordering"
+        );
     }
 
     #[test]
@@ -21863,8 +21879,14 @@ mod seeding_tests {
     fn a_healthy_repo_is_unchanged_by_seeding() {
         // The regression guard: when the manifest is at or above the tags, the
         // answer must be exactly the plain bump.
-        assert_eq!(next_free_version("0.4.0", "patch", "0.3.1", &no_tags).unwrap(), "0.4.1");
-        assert_eq!(next_free_version("0.1.0", "patch", "", &no_tags).unwrap(), "0.1.1");
+        assert_eq!(
+            next_free_version("0.4.0", "patch", "0.3.1", &no_tags).unwrap(),
+            "0.4.1"
+        );
+        assert_eq!(
+            next_free_version("0.1.0", "patch", "", &no_tags).unwrap(),
+            "0.1.1"
+        );
     }
 
     #[test]
@@ -21902,9 +21924,15 @@ mod seeding_tests {
             for level in ["patch", "minor", "major"] {
                 let got = next_free_version(manifest, level, released, &no_tags).unwrap();
                 let g = super::parse_semver(&got).unwrap();
-                assert!(g > super::parse_semver(manifest).unwrap(), "{got} > manifest {manifest}");
+                assert!(
+                    g > super::parse_semver(manifest).unwrap(),
+                    "{got} > manifest {manifest}"
+                );
                 if !released.is_empty() {
-                    assert!(g > super::parse_semver(released).unwrap(), "{got} > released {released}");
+                    assert!(
+                        g > super::parse_semver(released).unwrap(),
+                        "{got} > released {released}"
+                    );
                 }
             }
         }
@@ -21922,11 +21950,15 @@ mod cargo_shape_tests {
             CargoShape::SingleCrate("1.2.3".into())
         );
         assert_eq!(
-            classify_cargo("[package]\nname = \"a\"\nversion = \"1.2.3\"\n\n[workspace]\nmembers = [\"m\"]\n"),
+            classify_cargo(
+                "[package]\nname = \"a\"\nversion = \"1.2.3\"\n\n[workspace]\nmembers = [\"m\"]\n"
+            ),
             CargoShape::HybridRoot("1.2.3".into())
         );
         assert_eq!(
-            classify_cargo("[workspace]\nmembers = [\"m\"]\n\n[workspace.package]\nversion = \"0.4.0\"\n"),
+            classify_cargo(
+                "[workspace]\nmembers = [\"m\"]\n\n[workspace.package]\nversion = \"0.4.0\"\n"
+            ),
             CargoShape::WorkspaceShared("0.4.0".into())
         );
         assert_eq!(
@@ -21951,13 +21983,17 @@ mod cargo_shape_tests {
         // rust-version line comes FIRST. Writing there raises the declared MSRV,
         // and under resolver="3" cargo then REFUSES the package.
         assert_eq!(
-            classify_cargo("[package]\nname = \"a\"\nrust-version = \"1.97.0\"\nversion = \"0.2.0\"\n"),
+            classify_cargo(
+                "[package]\nname = \"a\"\nrust-version = \"1.97.0\"\nversion = \"0.2.0\"\n"
+            ),
             CargoShape::SingleCrate("0.2.0".into()),
             "must skip rust-version even when it precedes the real key"
         );
         // …and its dotted inheritance form must not be read as inheritance.
         assert_eq!(
-            classify_cargo("[package]\nname = \"a\"\nrust-version.workspace = true\nversion = \"0.2.0\"\n"),
+            classify_cargo(
+                "[package]\nname = \"a\"\nrust-version.workspace = true\nversion = \"0.2.0\"\n"
+            ),
             CargoShape::SingleCrate("0.2.0".into())
         );
         assert_eq!(
@@ -21971,7 +22007,9 @@ mod cargo_shape_tests {
     fn a_metadata_subtable_is_not_the_package_section() {
         // `[package.metadata.docs.rs]` must not count as `[package]`.
         assert_eq!(
-            classify_cargo("[package]\nname = \"a\"\n\n[package.metadata.docs.rs]\nversion = \"9.9.9\"\n"),
+            classify_cargo(
+                "[package]\nname = \"a\"\n\n[package.metadata.docs.rs]\nversion = \"9.9.9\"\n"
+            ),
             CargoShape::NoVersion,
             "a metadata table's version is not the package's"
         );
@@ -21985,7 +22023,10 @@ mod cargo_shape_tests {
         let c = "[dependencies.clap]\nversion = \"4.5.0\"\n\n[package]\nname = \"a\"\nversion = \"0.1.0\"\n";
         assert_eq!(classify_cargo(c), CargoShape::SingleCrate("0.1.0".into()));
         let ranges = "[dependencies.windows-sys]\nversion = \">=0.52, <0.62\"\n\n[package]\nname = \"a\"\nversion = \"0.1.0\"\n";
-        assert_eq!(classify_cargo(ranges), CargoShape::SingleCrate("0.1.0".into()));
+        assert_eq!(
+            classify_cargo(ranges),
+            CargoShape::SingleCrate("0.1.0".into())
+        );
     }
 
     #[test]
@@ -22018,7 +22059,12 @@ mod cargo_shape_tests {
         // regex required \d+\.\d+\.\d+ and so found NOTHING in 24 fleet
         // manifests — every one a `0.19.0-dev` prerelease (the caixa-bevy
         // family). A reader that cannot see a version cannot even report it.
-        for v in ["0.19.0-dev", "0.4.0-alpha.0", "1.1.2+spec-1.1.0", "1.0.0-rc4"] {
+        for v in [
+            "0.19.0-dev",
+            "0.4.0-alpha.0",
+            "1.1.2+spec-1.1.0",
+            "1.0.0-rc4",
+        ] {
             let c = format!("[package]\nname = \"a\"\nversion = \"{v}\"\n");
             assert_eq!(
                 classify_cargo(&c),
@@ -22063,7 +22109,9 @@ mod cargo_shape_tests {
         // first line without an `=`, so a blank line or comment above `version`
         // read as "no version field".
         assert_eq!(
-            classify_cargo("[package]\n\n# the crate's own version\nname = \"a\"\n\nversion = \"3.1.4\"\n"),
+            classify_cargo(
+                "[package]\n\n# the crate's own version\nname = \"a\"\n\nversion = \"3.1.4\"\n"
+            ),
             CargoShape::SingleCrate("3.1.4".into())
         );
     }
@@ -22091,7 +22139,10 @@ mod fleet_cargo_validation {
         };
         let listing = std::fs::read_to_string(&list).expect("read the path list");
         let paths: Vec<&str> = listing.lines().filter(|l| !l.trim().is_empty()).collect();
-        assert!(!paths.is_empty(), "an empty list is a vacuous pass, not a success");
+        assert!(
+            !paths.is_empty(),
+            "an empty list is a vacuous pass, not a success"
+        );
 
         let mut single = 0;
         let mut hybrid = 0;
@@ -22180,8 +22231,14 @@ mod cargo_writer_tests {
         // the line would normalize the first and DROP the second.
         for (src, old) in [
             ("[package]\nname = \"a\"\nversion = \"1.2.3\"\n", "1.2.3"),
-            ("[package]\nname = \"a\"\nversion       = \"1.2.1\"\n", "1.2.1"),
-            ("[package]\nname = \"a\"\nversion = \"0.1.13\"  #:version\n", "0.1.13"),
+            (
+                "[package]\nname = \"a\"\nversion       = \"1.2.1\"\n",
+                "1.2.1",
+            ),
+            (
+                "[package]\nname = \"a\"\nversion = \"0.1.13\"  #:version\n",
+                "0.1.13",
+            ),
             ("[package]\nname = \"a\"\n  version = \"0.2.0\"\n", "0.2.0"),
         ] {
             let (_d, p) = write_tmp(src);
@@ -22197,7 +22254,10 @@ mod cargo_writer_tests {
         let (_d, p) = write_tmp(src);
         write_cargo_version(&p, "0.5.0").unwrap();
         let after = std::fs::read_to_string(&p).unwrap();
-        assert_eq!(classify_cargo(&after), CargoShape::WorkspaceShared("0.5.0".into()));
+        assert_eq!(
+            classify_cargo(&after),
+            CargoShape::WorkspaceShared("0.5.0".into())
+        );
         assert_only_value_changed(src, &after, "0.4.0", "0.5.0");
     }
 
@@ -22215,14 +22275,20 @@ mod cargo_writer_tests {
             after.contains("rust-version = \"1.2.3\""),
             "rust-version must be untouched even when it shares the version's value: {after}"
         );
-        assert!(after.contains("version = \"1.2.4\""), "the real version moved: {after}");
+        assert!(
+            after.contains("version = \"1.2.4\""),
+            "the real version moved: {after}"
+        );
 
         let rv_first = "[package]\nrust-version = \"1.97.0\"\nname = \"a\"\nversion = \"0.2.0\"\n";
         let (_d2, p2) = write_tmp(rv_first);
         write_cargo_version(&p2, "0.2.1").unwrap();
         let after2 = std::fs::read_to_string(&p2).unwrap();
         assert!(after2.contains("rust-version = \"1.97.0\""), "{after2}");
-        assert_eq!(classify_cargo(&after2), CargoShape::SingleCrate("0.2.1".into()));
+        assert_eq!(
+            classify_cargo(&after2),
+            CargoShape::SingleCrate("0.2.1".into())
+        );
     }
 
     #[test]
@@ -22238,7 +22304,10 @@ mod cargo_writer_tests {
             after.contains("[dependencies.serde]\nversion = \"1.0.0\""),
             "the dependency pin must be untouched: {after}"
         );
-        assert_eq!(classify_cargo(&after), CargoShape::SingleCrate("1.0.1".into()));
+        assert_eq!(
+            classify_cargo(&after),
+            CargoShape::SingleCrate("1.0.1".into())
+        );
     }
 
     #[test]
@@ -22246,12 +22315,18 @@ mod cargo_writer_tests {
         // A member's version lives in its root. Writing here would make two.
         let (_d, p) = write_tmp("[package]\nname = \"m\"\nversion.workspace = true\n");
         let err = write_cargo_version(&p, "1.0.0").unwrap_err();
-        assert!(format!("{err:#}").contains("workspace ROOT"), "got: {err:#}");
+        assert!(
+            format!("{err:#}").contains("workspace ROOT"),
+            "got: {err:#}"
+        );
 
         // A virtual root has no single version — refuse, do not no-op.
         let (_d2, p2) = write_tmp("[workspace]\nmembers = [\"m\"]\n");
         let err2 = write_cargo_version(&p2, "1.0.0").unwrap_err();
-        assert!(format!("{err2:#}").contains("virtual workspace"), "got: {err2:#}");
+        assert!(
+            format!("{err2:#}").contains("virtual workspace"),
+            "got: {err2:#}"
+        );
     }
 
     #[test]
@@ -22301,14 +22376,19 @@ mod fleet_cargo_write_validation {
         let list = std::env::var("FLEET_CARGO_LIST").expect("set FLEET_CARGO_LIST");
         let listing = std::fs::read_to_string(&list).expect("read the path list");
         let paths: Vec<&str> = listing.lines().filter(|l| !l.trim().is_empty()).collect();
-        assert!(!paths.is_empty(), "an empty list is a vacuous pass, not a success");
+        assert!(
+            !paths.is_empty(),
+            "an empty list is a vacuous pass, not a success"
+        );
 
         const NEW: &str = "99.98.97";
         let mut planned = 0;
         let mut refused = 0;
 
         for p in &paths {
-            let Ok(before) = std::fs::read_to_string(p) else { continue };
+            let Ok(before) = std::fs::read_to_string(p) else {
+                continue;
+            };
             let old = match classify_cargo(&before) {
                 CargoShape::SingleCrate(v)
                 | CargoShape::HybridRoot(v)
@@ -22337,10 +22417,14 @@ mod fleet_cargo_write_validation {
             );
             // INVARIANT 2 — every rust-version line is byte-identical. This is
             // the one whose violation makes cargo REFUSE the package.
-            let rv_before: Vec<&str> =
-                before.lines().filter(|l| l.trim_start().starts_with("rust-version")).collect();
-            let rv_after: Vec<&str> =
-                after.lines().filter(|l| l.trim_start().starts_with("rust-version")).collect();
+            let rv_before: Vec<&str> = before
+                .lines()
+                .filter(|l| l.trim_start().starts_with("rust-version"))
+                .collect();
+            let rv_after: Vec<&str> = after
+                .lines()
+                .filter(|l| l.trim_start().starts_with("rust-version"))
+                .collect();
             assert_eq!(rv_before, rv_after, "{p}: a rust-version line changed");
             // INVARIANT 3 — the line COUNT is unchanged: no line added or lost.
             assert_eq!(
@@ -22360,8 +22444,18 @@ mod fleet_cargo_write_validation {
             planned += 1;
         }
 
-        println!("dry-run: {planned} planned, {refused} correctly refused, {} scanned", paths.len());
-        assert_eq!(planned + refused, paths.len(), "every manifest must be accounted for");
-        assert!(planned >= 600, "expected >=600 writable manifests, got {planned}");
+        println!(
+            "dry-run: {planned} planned, {refused} correctly refused, {} scanned",
+            paths.len()
+        );
+        assert_eq!(
+            planned + refused,
+            paths.len(),
+            "every manifest must be accounted for"
+        );
+        assert!(
+            planned >= 600,
+            "expected >=600 writable manifests, got {planned}"
+        );
     }
 }

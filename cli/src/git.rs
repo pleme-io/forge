@@ -1418,8 +1418,7 @@ mod max_released_version_tests {
         let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // A repo is entitled to carry rc / dated / two-part tags. Refusing to
         // bump because of one would be a false gate, so they are skipped.
-        let (_d, shim) =
-            git_listing_shim("v1.2\\nv2.0.0-rc1\\nvNOPE\\nv0.1.0\\nv0.1.0.1\\n");
+        let (_d, shim) = git_listing_shim("v1.2\\nv2.0.0-rc1\\nvNOPE\\nv0.1.0\\nv0.1.0.1\\n");
         let _scope = GitBinScope::set(&shim);
         assert_eq!(
             max_released_version("v", None).unwrap(),

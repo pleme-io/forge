@@ -2,7 +2,7 @@
 //!
 //! Replaces product-sdlc.nix::test:ci.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 use tracing::info;
@@ -57,7 +57,10 @@ pub fn execute(working_dir: &str, threads: u32) -> Result<()> {
             bail!("cargo nextest run failed");
         }
     } else {
-        info!("cargo-nextest not found, falling back to cargo test (threads={})...", threads);
+        info!(
+            "cargo-nextest not found, falling back to cargo test (threads={})...",
+            threads
+        );
         let status = Command::new(&cargo)
             .args([
                 "test",
@@ -100,7 +103,10 @@ pub fn coverage(working_dir: &str, format: &str) -> Result<()> {
         }
     }
 
-    info!("Running coverage with cargo tarpaulin (format={})...", format);
+    info!(
+        "Running coverage with cargo tarpaulin (format={})...",
+        format
+    );
     let status = Command::new(&cargo)
         .args(["tarpaulin", "--out", format])
         .current_dir(dir)
@@ -192,9 +198,7 @@ mod tests {
         // drift away from the sigil's single point of truth. Every
         // consumer must read through `cargo_bin()`. THEORY §I.5:
         // duplication budget zero.
-        let resolve_count = body
-            .matches("get_tool_path(\"CARGO\", \"cargo\")")
-            .count();
+        let resolve_count = body.matches("get_tool_path(\"CARGO\", \"cargo\")").count();
         assert_eq!(
             resolve_count, 1,
             "the two-argument resolve `get_tool_path(\"CARGO\", \"cargo\")` \

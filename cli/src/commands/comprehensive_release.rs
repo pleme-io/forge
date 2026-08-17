@@ -787,7 +787,7 @@ pub async fn execute(
 #[cfg(test)]
 mod tests {
     use super::{
-        SERVICES_HEALTHY_POLL_BACKOFF, SERVICES_HEALTHY_TIMEOUT, services_healthy_poll_delay,
+        services_healthy_poll_delay, SERVICES_HEALTHY_POLL_BACKOFF, SERVICES_HEALTHY_TIMEOUT,
     };
     use crate::retry::RetryPolicy;
     use std::time::Duration;

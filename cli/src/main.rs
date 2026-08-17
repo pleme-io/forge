@@ -82,8 +82,8 @@ mod ui;
 mod test_support;
 
 use cli::{
-    BootstrapCommands, Cli, Commands, CrossplaneCommands, GemCommands, HelmCommands, InfraCommands, LocalCommands,
-    PangeaCommands, PangeaInfraCommands, ToolCommands, TypescriptCommands,
+    BootstrapCommands, Cli, Commands, CrossplaneCommands, GemCommands, HelmCommands, InfraCommands,
+    LocalCommands, PangeaCommands, PangeaInfraCommands, ToolCommands, TypescriptCommands,
 };
 use commands::{
     bootstrap, build, comprehensive_release, deploy, federation, github_runner_ci,
@@ -1128,7 +1128,12 @@ async fn main() -> Result<()> {
                 package,
                 tag,
             } => {
-                commands::crossplane::function_release(&package_root, &runtime_image, &package, &tag)?;
+                commands::crossplane::function_release(
+                    &package_root,
+                    &runtime_image,
+                    &package,
+                    &tag,
+                )?;
             }
             CrossplaneCommands::ConfigurationRelease {
                 package_root,
@@ -1143,9 +1148,17 @@ async fn main() -> Result<()> {
                 functions,
                 observed,
             } => {
-                commands::crossplane::render(&composite, &composition, &functions, observed.as_deref())?;
+                commands::crossplane::render(
+                    &composite,
+                    &composition,
+                    &functions,
+                    observed.as_deref(),
+                )?;
             }
-            CrossplaneCommands::Validate { extensions, resources } => {
+            CrossplaneCommands::Validate {
+                extensions,
+                resources,
+            } => {
                 commands::crossplane::validate(&extensions, &resources)?;
             }
         },

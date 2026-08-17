@@ -112,8 +112,7 @@ pub async fn execute(working_dir: &Path, check_only: bool) -> Result<DashboardRe
 
     info!(
         "Starting dashboard sync for {} (check_only: {})",
-        product.name,
-        check_only
+        product.name, check_only
     );
 
     let config = DashboardConfig {
@@ -436,7 +435,11 @@ fn generate_entity_dashboard(
     entity: &serde_json::Value,
     config: &DashboardConfig,
 ) -> serde_json::Value {
-    let title = format!("{}: {} Operations", config.dashboard_folder, name.to_uppercase());
+    let title = format!(
+        "{}: {} Operations",
+        config.dashboard_folder,
+        name.to_uppercase()
+    );
     let metric_prefix = &config.metric_prefix;
     let product_name = &config.product_name;
     let _metrics = entity["metrics"].as_array().cloned().unwrap_or_default();

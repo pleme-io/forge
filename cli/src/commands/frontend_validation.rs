@@ -242,7 +242,10 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
             for line in stderr.lines().take(5) {
                 println!("   {}", line);
             }
-            return Ok((false, stderr.lines().take(5).map(|l| l.to_string()).collect()));
+            return Ok((
+                false,
+                stderr.lines().take(5).map(|l| l.to_string()).collect(),
+            ));
         }
         // Otherwise, continue to check step - unfixable issues will be caught there
     }
@@ -374,10 +377,7 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
                 duration.as_secs_f64()
             );
             let details: Vec<String> = combined.lines().take(10).map(|l| l.to_string()).collect();
-            println!(
-                "   {}",
-                details.join("\n   ")
-            );
+            println!("   {}", details.join("\n   "));
             Ok((false, test_count, details))
         }
     }
