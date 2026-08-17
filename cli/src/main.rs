@@ -900,8 +900,9 @@ async fn main() -> Result<()> {
                 working_dir,
                 level,
                 name,
+                set_version,
             } => {
-                let (old, new) = commands::gem::bump(&working_dir, &level, name)?;
+                let (old, new) = commands::gem::bump(&working_dir, &level, name, set_version)?;
                 println!("{} → {}", old, new);
             }
             GemCommands::Build { working_dir, name } => {
