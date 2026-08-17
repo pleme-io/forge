@@ -9898,6 +9898,148 @@ fn toml_value_in(lines: &[&str], key: &str) -> Option<String> {
     None
 }
 
+/// Byte range of the VALUE INSIDE its quotes, for `key` within `[section]`.
+///
+/// This is what makes the writer form-preserving in the strongest sense: only
+/// the value bytes move, so leading indentation, the author's `=` alignment
+/// (11 fleet manifests write `version       = "1.2.1"`), the quote style and a
+/// trailing comment (22 write `version = "0.1.13"  #:version`) all survive
+/// byte-for-byte. Re-rendering the whole line would silently normalize
+/// alignment and DROP the comment — losing information as a side effect of a
+/// version bump.
+fn value_span(content: &str, section: &str, key: &str) -> Option<std::ops::Range<usize>> {
+    let want = toml_key_normalize(key);
+    let mut inside = false;
+    let mut offset = 0usize;
+    for line in content.split('\n') {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            inside = t == section;
+        } else if inside {
+            if let Some((lhs, rhs)) = line.split_once('=') {
+                if toml_key_normalize(lhs) == want {
+                    // `rhs` starts just after the '='. Find the opening quote,
+                    // then its matching close.
+                    let rhs_at = offset + lhs.len() + 1;
+                    for q in ['"', '\''] {
+                        if let Some(open) = rhs.find(q) {
+                            if let Some(len) = rhs[open + 1..].find(q) {
+                                let start = rhs_at + open + 1;
+                                return Some(start..start + len);
+                            }
+                        }
+                    }
+                    return None; // key present but no quoted value
+                }
+            }
+        }
+        offset += line.len() + 1; // + the '\n' that split consumed
+    }
+    None
+}
+
+/// Which section holds the authoritative version for this shape, or an error
+/// naming why there is nothing to write.
+fn writable_section(shape: &CargoShape) -> Result<&'static str> {
+    match shape {
+        CargoShape::SingleCrate(_) | CargoShape::HybridRoot(_) => Ok("[package]"),
+        CargoShape::WorkspaceShared(_) => Ok("[workspace.package]"),
+        CargoShape::MemberInheriting => bail!(
+            "this manifest inherits its version (`version.workspace = true`) — \
+             write the workspace ROOT's [workspace.package].version instead. \
+             Writing here would create a second source of truth"
+        ),
+        CargoShape::VirtualWorkspaceNoVersion => bail!(
+            "virtual workspace root with no [workspace.package].version — its \
+             members each carry their own, so there is no single version to \
+             write. Bump the members (cargo-publish-each-member shape)"
+        ),
+        CargoShape::NoVersion => bail!("no version field to write"),
+    }
+}
+
+/// Replace the authoritative version in a Cargo.toml, in place.
+///
+/// Routes on [`CargoShape`], so a member is REFUSED rather than given a second
+/// source of truth, and a virtual workspace root is refused rather than
+/// silently no-op'd.
+///
+/// Splices the value's byte span — never a `format!`-rebuilt needle handed to
+/// `content.replace`, which is the shape that silently no-ops on whitespace
+/// variation while reporting success (measured on gem, where
+/// `VERSION= %(0.1.0).freeze` matched, replaced nothing, and logged the bump).
+///
+/// Verified before returning: the file is re-classified and must report the new
+/// version at the same shape. A mutation that reports success without changing
+/// the file is the failure mode this whole family exists to prevent.
+pub fn write_cargo_version(path: &Path, new_version: &str) -> Result<()> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let updated = plan_cargo_version_write(&content, new_version)
+        .with_context(|| format!("cannot write a version to {}", path.display()))?;
+    std::fs::write(path, &updated)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
+/// The PURE core of [`write_cargo_version`]: content in, new content out.
+///
+/// Split out so the rewrite can be dry-run over every real manifest in the
+/// fleet without touching a byte on disk — which is how its invariants get
+/// tested against shapes nobody thought to write a unit test for.
+pub fn plan_cargo_version_write(content: &str, new_version: &str) -> Result<String> {
+    if !SEMVER_LIKE.is_match(new_version) {
+        bail!(
+            "refusing to write {:?} — a version must start X.Y.Z (a prerelease \
+             or build suffix is allowed after it)",
+            new_version
+        );
+    }
+    let shape = classify_cargo(content);
+    let section = writable_section(&shape)?;
+
+    let span = value_span(content, section, "version").with_context(|| {
+        format!(
+            "classified as {shape:?} but no quoted `version` value found in \
+             {section} — refusing to guess"
+        )
+    })?;
+
+    let mut updated = String::with_capacity(content.len() + new_version.len());
+    updated.push_str(&content[..span.start]);
+    updated.push_str(new_version);
+    updated.push_str(&content[span.end..]);
+
+    // The verified-mutation seal: prove the intended change happened, and that
+    // it is the ONLY change, before reporting success.
+    let after = classify_cargo(&updated);
+    let got = match &after {
+        CargoShape::SingleCrate(v) | CargoShape::HybridRoot(v) | CargoShape::WorkspaceShared(v) => {
+            v.as_str()
+        }
+        other => bail!("rewrite changed the manifest SHAPE ({shape:?} -> {other:?})"),
+    };
+    if got != new_version {
+        bail!("rewrite did not take — expected {new_version}, re-read {got}");
+    }
+    let expected_len = content.len() + new_version.len() - (span.end - span.start);
+    if updated.len() != expected_len {
+        bail!(
+            "rewrite changed more bytes than the version value ({} vs {expected_len})",
+            updated.len()
+        );
+    }
+    Ok(updated)
+}
+
+/// `X.Y.Z` with an optional prerelease/build suffix. Looser than
+/// [`SEMVER_EXACT`] on purpose: 24 fleet manifests legitimately carry
+/// `0.19.0-dev`, and a writer must be able to REPLACE such a value even though
+/// `next_free_version` will only ever produce an exact one.
+static SEMVER_LIKE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^\d+\.\d+\.\d+([-+][0-9A-Za-z.\-+]*)?$").expect("static regex")
+});
+
 /// Classify a Cargo.toml's version shape. Pure — takes the content, so it is
 /// testable without a filesystem.
 pub fn classify_cargo(content: &str) -> CargoShape {
@@ -22007,5 +22149,219 @@ mod fleet_cargo_validation {
              {with_version}/{}",
             paths.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod cargo_writer_tests {
+    use super::{classify_cargo, write_cargo_version, CargoShape};
+
+    fn write_tmp(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("Cargo.toml");
+        std::fs::write(&p, content).unwrap();
+        (dir, p)
+    }
+
+    /// The writer's core invariant: EVERY byte except the version value is
+    /// unchanged. Asserted structurally rather than by eyeballing a diff.
+    fn assert_only_value_changed(before: &str, after: &str, old_v: &str, new_v: &str) {
+        assert_eq!(
+            before.replacen(old_v, new_v, 1),
+            after,
+            "exactly one occurrence of the version may change, nothing else"
+        );
+    }
+
+    #[test]
+    fn preserves_alignment_quote_style_and_trailing_comment() {
+        // The author's form IS the alignment and the comment. 11 fleet
+        // manifests align the value; 22 carry a trailing comment. Re-rendering
+        // the line would normalize the first and DROP the second.
+        for (src, old) in [
+            ("[package]\nname = \"a\"\nversion = \"1.2.3\"\n", "1.2.3"),
+            ("[package]\nname = \"a\"\nversion       = \"1.2.1\"\n", "1.2.1"),
+            ("[package]\nname = \"a\"\nversion = \"0.1.13\"  #:version\n", "0.1.13"),
+            ("[package]\nname = \"a\"\n  version = \"0.2.0\"\n", "0.2.0"),
+        ] {
+            let (_d, p) = write_tmp(src);
+            write_cargo_version(&p, "9.9.9").unwrap();
+            let after = std::fs::read_to_string(&p).unwrap();
+            assert_only_value_changed(src, &after, old, "9.9.9");
+        }
+    }
+
+    #[test]
+    fn writes_the_workspace_shared_version_for_a_workspace_root() {
+        let src = "[workspace]\nmembers = [\"m\"]\n\n[workspace.package]\nversion = \"0.4.0\"\nedition = \"2024\"\n";
+        let (_d, p) = write_tmp(src);
+        write_cargo_version(&p, "0.5.0").unwrap();
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(classify_cargo(&after), CargoShape::WorkspaceShared("0.5.0".into()));
+        assert_only_value_changed(src, &after, "0.4.0", "0.5.0");
+    }
+
+    #[test]
+    fn NEVER_touches_rust_version() {
+        // THE fleet's worst trap. 455 rust-version lines sit in
+        // [package]/[workspace.package]; writing there raises the declared MSRV
+        // and under resolver="3" cargo REFUSES the package. Both orderings, and
+        // the case where the two share a VALUE (the substring-replace killer).
+        let same_value = "[package]\nname = \"a\"\nrust-version = \"1.2.3\"\nversion = \"1.2.3\"\n";
+        let (_d, p) = write_tmp(same_value);
+        write_cargo_version(&p, "1.2.4").unwrap();
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            after.contains("rust-version = \"1.2.3\""),
+            "rust-version must be untouched even when it shares the version's value: {after}"
+        );
+        assert!(after.contains("version = \"1.2.4\""), "the real version moved: {after}");
+
+        let rv_first = "[package]\nrust-version = \"1.97.0\"\nname = \"a\"\nversion = \"0.2.0\"\n";
+        let (_d2, p2) = write_tmp(rv_first);
+        write_cargo_version(&p2, "0.2.1").unwrap();
+        let after2 = std::fs::read_to_string(&p2).unwrap();
+        assert!(after2.contains("rust-version = \"1.97.0\""), "{after2}");
+        assert_eq!(classify_cargo(&after2), CargoShape::SingleCrate("0.2.1".into()));
+    }
+
+    #[test]
+    fn never_touches_a_dependency_pin_that_shares_the_value() {
+        // 2199 fleet [dependencies] version keys. A substring replace would
+        // rewrite a dependency requirement that happens to equal the package
+        // version — changing what the crate DEPENDS ON as a side effect.
+        let src = "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[dependencies.serde]\nversion = \"1.0.0\"\n";
+        let (_d, p) = write_tmp(src);
+        write_cargo_version(&p, "1.0.1").unwrap();
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            after.contains("[dependencies.serde]\nversion = \"1.0.0\""),
+            "the dependency pin must be untouched: {after}"
+        );
+        assert_eq!(classify_cargo(&after), CargoShape::SingleCrate("1.0.1".into()));
+    }
+
+    #[test]
+    fn refuses_rather_than_creating_a_second_source_of_truth() {
+        // A member's version lives in its root. Writing here would make two.
+        let (_d, p) = write_tmp("[package]\nname = \"m\"\nversion.workspace = true\n");
+        let err = write_cargo_version(&p, "1.0.0").unwrap_err();
+        assert!(format!("{err:#}").contains("workspace ROOT"), "got: {err:#}");
+
+        // A virtual root has no single version — refuse, do not no-op.
+        let (_d2, p2) = write_tmp("[workspace]\nmembers = [\"m\"]\n");
+        let err2 = write_cargo_version(&p2, "1.0.0").unwrap_err();
+        assert!(format!("{err2:#}").contains("virtual workspace"), "got: {err2:#}");
+    }
+
+    #[test]
+    fn refuses_a_value_that_is_not_a_version() {
+        let (_d, p) = write_tmp("[package]\nname = \"a\"\nversion = \"1.0.0\"\n");
+        for bad in ["1.2", "not-a-version", "", ">=1.0.0", "1.2.3.4"] {
+            assert!(
+                write_cargo_version(&p, bad).is_err(),
+                "must refuse to write {bad:?}"
+            );
+        }
+        // The file must be untouched after every refusal.
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "[package]\nname = \"a\"\nversion = \"1.0.0\"\n"
+        );
+    }
+
+    #[test]
+    fn replaces_a_prerelease_value_in_place() {
+        // 24 fleet manifests carry 0.19.0-dev. The writer must be able to
+        // replace such a value even though next_free_version never emits one.
+        let src = "[package]\nname = \"bevy_window\"\nversion = \"0.19.0-dev\"\n";
+        let (_d, p) = write_tmp(src);
+        write_cargo_version(&p, "0.19.1").unwrap();
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert_only_value_changed(src, &after, "0.19.0-dev", "0.19.1");
+    }
+}
+
+/// Fleet-scale DRY RUN of the writer, `#[ignore]`d so CI stays hermetic:
+///
+/// ```text
+/// FLEET_CARGO_LIST=/tmp/rootcargos.txt \
+///   cargo test --bin forge dry_run_write_over_every_fleet_manifest -- --ignored --nocapture
+/// ```
+///
+/// Unit tests prove the shapes I thought of. This proves the invariants hold on
+/// every shape the fleet actually has — without touching a byte on disk.
+#[cfg(test)]
+mod fleet_cargo_write_validation {
+    use super::{classify_cargo, plan_cargo_version_write, CargoShape};
+
+    #[test]
+    #[ignore = "requires FLEET_CARGO_LIST pointing at a list of real Cargo.toml paths"]
+    fn dry_run_write_over_every_fleet_manifest() {
+        let list = std::env::var("FLEET_CARGO_LIST").expect("set FLEET_CARGO_LIST");
+        let listing = std::fs::read_to_string(&list).expect("read the path list");
+        let paths: Vec<&str> = listing.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert!(!paths.is_empty(), "an empty list is a vacuous pass, not a success");
+
+        const NEW: &str = "99.98.97";
+        let mut planned = 0;
+        let mut refused = 0;
+
+        for p in &paths {
+            let Ok(before) = std::fs::read_to_string(p) else { continue };
+            let old = match classify_cargo(&before) {
+                CargoShape::SingleCrate(v)
+                | CargoShape::HybridRoot(v)
+                | CargoShape::WorkspaceShared(v) => v,
+                // Refusals are the CORRECT outcome for these shapes; assert the
+                // writer actually refuses rather than silently no-op'ing.
+                _ => {
+                    assert!(
+                        plan_cargo_version_write(&before, NEW).is_err(),
+                        "{p}: a shape with no single version must be REFUSED"
+                    );
+                    refused += 1;
+                    continue;
+                }
+            };
+
+            let after = plan_cargo_version_write(&before, NEW)
+                .unwrap_or_else(|e| panic!("{p}: plan failed: {e:#}"));
+
+            // INVARIANT 1 — exactly one occurrence of the old version changed,
+            // and nothing else in the file moved.
+            assert_eq!(
+                before.replacen(&old, NEW, 1),
+                after,
+                "{p}: more than the version value changed"
+            );
+            // INVARIANT 2 — every rust-version line is byte-identical. This is
+            // the one whose violation makes cargo REFUSE the package.
+            let rv_before: Vec<&str> =
+                before.lines().filter(|l| l.trim_start().starts_with("rust-version")).collect();
+            let rv_after: Vec<&str> =
+                after.lines().filter(|l| l.trim_start().starts_with("rust-version")).collect();
+            assert_eq!(rv_before, rv_after, "{p}: a rust-version line changed");
+            // INVARIANT 3 — the line COUNT is unchanged: no line added or lost.
+            assert_eq!(
+                before.lines().count(),
+                after.lines().count(),
+                "{p}: line count changed"
+            );
+            // INVARIANT 4 — re-reading yields the new version at the same shape.
+            match classify_cargo(&after) {
+                CargoShape::SingleCrate(v)
+                | CargoShape::HybridRoot(v)
+                | CargoShape::WorkspaceShared(v) => {
+                    assert_eq!(v, NEW, "{p}: re-read did not see the new version")
+                }
+                other => panic!("{p}: shape changed to {other:?}"),
+            }
+            planned += 1;
+        }
+
+        println!("dry-run: {planned} planned, {refused} correctly refused, {} scanned", paths.len());
+        assert_eq!(planned + refused, paths.len(), "every manifest must be accounted for");
+        assert!(planned >= 600, "expected >=600 writable manifests, got {planned}");
     }
 }
