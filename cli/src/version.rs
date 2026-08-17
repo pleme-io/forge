@@ -9737,6 +9737,70 @@ pub fn bump_semver(version: &str, level: &str) -> Result<String> {
     bump_semver_typed(version, typed)
 }
 
+/// Pick the version a bump should START from: the higher of the manifest's
+/// version and the highest already-released one.
+///
+/// `max_released` empty means nothing has been released yet, so the manifest
+/// wins by default.
+///
+/// WHY THIS EXISTS. Bumping from the MANIFEST alone walks a release backward
+/// whenever the manifest lags its tags: a manifest at 0.2.5 with v0.3.1 already
+/// published yields 0.2.6, which is behind. A 937-repo census (2026-07-27) found
+/// 527 inverted tag pairs on linear history, so this is the fleet's normal
+/// state, not an edge case.
+pub fn bump_seed<'a>(manifest_version: &'a str, max_released: &'a str) -> Result<&'a str> {
+    if max_released.is_empty() {
+        return Ok(manifest_version);
+    }
+    let m = parse_semver(manifest_version)?;
+    let r = parse_semver(max_released)?;
+    Ok(if r > m { max_released } else { manifest_version })
+}
+
+/// The next version that is both release-monotone AND not already tagged.
+///
+/// THE seeding decision for every ecosystem, in ONE place. It is pure and takes
+/// tag existence as an injected predicate, so it is testable without a git
+/// repository — the mockable-`Environment` seam the TYPED-SPEC triplet asks for.
+///
+/// Two steps, and both are load-bearing:
+///   1. seed from `max(manifest, max_released)` via [`bump_seed`], so the result
+///      cannot land behind a published release;
+///   2. advance while the candidate's tag already exists, so a version whose tag
+///      was cut but whose manifest never landed does not collide.
+///
+/// WHY IT BELONGS HERE AND NOT IN A CI ACTION. This arithmetic was implemented
+/// twice in tlisp — `cargo-bump`'s `bump-target` (seed only) and
+/// `rust-workspace-bump`'s `next-free-version` (seed + collision) — and not at
+/// all for the other five bumpers, so 4 of 7 ecosystems could release backward.
+/// Two independent derivations of one decision is the signal to extract it; SDLC
+/// arithmetic is forge's job, and a CI action's job is to CALL this.
+pub fn next_free_version(
+    manifest_version: &str,
+    level: &str,
+    max_released: &str,
+    tag_exists: &dyn Fn(&str) -> bool,
+) -> Result<String> {
+    let seed = bump_seed(manifest_version, max_released)?;
+    let mut candidate = bump_semver(seed, level)?;
+    // Bounded rather than `loop`: a predicate that answers "exists" for
+    // everything would otherwise hang a release job forever. 1024 is far above
+    // any real tag run and small enough to fail fast.
+    for _ in 0..1024 {
+        if !tag_exists(&candidate) {
+            return Ok(candidate);
+        }
+        candidate = bump_semver(&candidate, "patch")?;
+    }
+    bail!(
+        "could not find a free version after 1024 patch bumps from {} \
+         (manifest {}, max released {}) — refusing to loop",
+        seed,
+        manifest_version,
+        max_released
+    )
+}
+
 /// Read the version from a Cargo.toml file.
 pub fn read_cargo_version(path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(path)
@@ -21457,6 +21521,88 @@ mod tests {
                     <BumpLevel as PartialEq<&[u8]>>::eq(&level, &label_ref),
                     "reverse-direction PartialEq<BumpLevel> for &[u8] must agree with forward-direction PartialEq<&[u8]> for BumpLevel at ({level:?}, {label:?})",
                 );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod seeding_tests {
+    use super::{bump_seed, next_free_version};
+
+    /// No tag exists — isolates the seeding half.
+    fn no_tags(_v: &str) -> bool {
+        false
+    }
+
+    #[test]
+    fn seed_prefers_whichever_is_higher() {
+        assert_eq!(bump_seed("0.2.5", "0.3.1").unwrap(), "0.3.1", "tags ahead");
+        assert_eq!(bump_seed("0.4.0", "0.3.1").unwrap(), "0.4.0", "manifest ahead");
+        assert_eq!(bump_seed("0.3.1", "0.3.1").unwrap(), "0.3.1", "level");
+        assert_eq!(bump_seed("0.1.0", "").unwrap(), "0.1.0", "nothing released yet");
+        // Numeric, not lexicographic: 0.10.0 outranks 0.9.0.
+        assert_eq!(bump_seed("0.9.0", "0.10.0").unwrap(), "0.10.0", "numeric ordering");
+    }
+
+    #[test]
+    fn a_lagging_manifest_never_bumps_backward() {
+        // THE defect this exists for: manifest 0.2.5, v0.3.1 released. Bumping
+        // from the manifest gives 0.2.6 — behind what is already published.
+        for (level, want) in [("patch", "0.3.2"), ("minor", "0.4.0"), ("major", "1.0.0")] {
+            let got = next_free_version("0.2.5", level, "0.3.1", &no_tags).unwrap();
+            assert_eq!(got, want, "{level} from a lagging manifest");
+            assert_ne!(got, "0.2.6", "must not bump from the manifest");
+        }
+    }
+
+    #[test]
+    fn a_healthy_repo_is_unchanged_by_seeding() {
+        // The regression guard: when the manifest is at or above the tags, the
+        // answer must be exactly the plain bump.
+        assert_eq!(next_free_version("0.4.0", "patch", "0.3.1", &no_tags).unwrap(), "0.4.1");
+        assert_eq!(next_free_version("0.1.0", "patch", "", &no_tags).unwrap(), "0.1.1");
+    }
+
+    #[test]
+    fn advances_past_versions_whose_tag_already_exists() {
+        // A tag cut without its manifest landing must not collide.
+        let taken = |v: &str| matches!(v, "0.1.1" | "0.1.2");
+        assert_eq!(
+            next_free_version("0.1.0", "patch", "", &taken).unwrap(),
+            "0.1.3",
+            "skips both taken tags"
+        );
+    }
+
+    #[test]
+    fn refuses_to_loop_when_every_version_is_taken() {
+        // A predicate answering "exists" for everything would otherwise hang a
+        // release job forever. Bounded, and the error names the seed.
+        let all_taken = |_v: &str| true;
+        let err = next_free_version("0.1.0", "patch", "", &all_taken).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("refusing to loop"), "got: {msg}");
+        assert!(msg.contains("0.1.0"), "names the seed: {msg}");
+    }
+
+    #[test]
+    fn whatever_it_returns_is_strictly_above_the_highest_release() {
+        // The property, over the shapes the fleet actually has.
+        for (manifest, released) in [
+            ("0.2.5", "0.3.1"),
+            ("0.4.0", "0.3.1"),
+            ("0.1.0", ""),
+            ("0.9.0", "0.10.0"),
+            ("1.0.0", "1.0.0"),
+        ] {
+            for level in ["patch", "minor", "major"] {
+                let got = next_free_version(manifest, level, released, &no_tags).unwrap();
+                let g = super::parse_semver(&got).unwrap();
+                assert!(g > super::parse_semver(manifest).unwrap(), "{got} > manifest {manifest}");
+                if !released.is_empty() {
+                    assert!(g > super::parse_semver(released).unwrap(), "{got} > released {released}");
+                }
             }
         }
     }
