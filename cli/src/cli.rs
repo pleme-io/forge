@@ -1579,6 +1579,17 @@ pub enum GemCommands {
         /// Gem name (auto-detected from gemspec if omitted)
         #[arg(long)]
         name: Option<String>,
+
+        /// Write this exact X.Y.Z instead of computing one from --level.
+        ///
+        /// For callers that already did the arithmetic. `--level` seeds from the
+        /// MANIFEST alone and cannot see released git tags, so a manifest
+        /// lagging its tags bumps into already-published territory and the
+        /// release walks backward. A caller that consults the tags (the CI
+        /// bumper does) computes the monotone target once and writes it here, so
+        /// that decision lives in one place rather than per ecosystem.
+        #[arg(long, conflicts_with = "level")]
+        set_version: Option<String>,
     },
 
     /// Build and push a gem to RubyGems.org

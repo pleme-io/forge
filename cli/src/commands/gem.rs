@@ -130,11 +130,100 @@ fn find_version_file(dir: &Path, gem_name: &str) -> Result<std::path::PathBuf> {
 
 // Version parsing and bumping delegated to crate::version module.
 
-/// Bump the version in a gem's version.rb file.
+/// Exact `X.Y.Z`. Deliberately not a loose semver: every fleet gem uses three
+/// numeric components, and accepting a prerelease here would let a tag that
+/// sorts unexpectedly reach a published gem.
+static SEMVER_EXACT: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^\d+\.\d+\.\d+$").expect("static regex"));
+
+/// Which literal form a gem's `version.rb` uses for its `VERSION` constant.
 ///
-/// Finds `VERSION = %(X.Y.Z).freeze` and updates it.
-/// Returns (old_version, new_version).
-pub fn bump(working_dir: &str, level: &str, name: Option<String>) -> Result<(String, String)> {
+/// A CLOSED enum on purpose: these are the three forms present across the
+/// fleet's 41 root-gemspec repos (26 percent-freeze, 9 quoted, measured
+/// 2026-08-17), and a form absent from this enum has no write path — so an
+/// unsupported convention is a loud error at detection rather than a silent
+/// no-op at write time. Adding a fourth form is one variant plus one arm,
+/// which is the parameterization that lets ONE expression serve every gem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionLiteralForm {
+    /// `VERSION = %(1.2.3).freeze` — the substrate ruby-gem-flake convention.
+    PercentFreeze,
+    /// `VERSION = "1.2.3"`
+    DoubleQuoted,
+    /// `VERSION = '1.2.3'`
+    SingleQuoted,
+}
+
+impl VersionLiteralForm {
+    /// Render this form with a new version. The inverse of the pattern that
+    /// detected it, so detect→render round-trips by construction.
+    fn render(self, version: &str) -> String {
+        match self {
+            Self::PercentFreeze => format!("VERSION = %({}).freeze", version),
+            Self::DoubleQuoted => format!("VERSION = \"{}\"", version),
+            Self::SingleQuoted => format!("VERSION = '{}'", version),
+        }
+    }
+
+    fn pattern(self) -> &'static str {
+        match self {
+            Self::PercentFreeze => r"VERSION\s*=\s*%\((\d+\.\d+\.\d+)\)\.freeze",
+            Self::DoubleQuoted => r#"VERSION\s*=\s*"(\d+\.\d+\.\d+)""#,
+            Self::SingleQuoted => r"VERSION\s*=\s*'(\d+\.\d+\.\d+)'",
+        }
+    }
+
+    /// Every form, in match priority order. Percent-freeze first because it is
+    /// the substrate convention and the majority of the fleet.
+    const ALL: [Self; 3] = [Self::PercentFreeze, Self::DoubleQuoted, Self::SingleQuoted];
+}
+
+/// A located `VERSION` assignment: which form, what version, and the exact byte
+/// span it occupies — the span is what makes the rewrite splice-safe.
+struct VersionLiteral {
+    form: VersionLiteralForm,
+    version: String,
+    start: usize,
+    end: usize,
+}
+
+impl VersionLiteral {
+    fn find(content: &str) -> Option<Self> {
+        for form in VersionLiteralForm::ALL {
+            let re = regex::Regex::new(form.pattern()).expect("static regex");
+            if let Some(caps) = re.captures(content) {
+                let whole = caps.get(0)?;
+                return Some(Self {
+                    form,
+                    version: caps.get(1)?.as_str().to_string(),
+                    start: whole.start(),
+                    end: whole.end(),
+                });
+            }
+        }
+        None
+    }
+}
+
+/// Bump the version in a gem's `version.rb`. Returns `(old, new)`.
+///
+/// THE one expression for writing a gem's version. It is parameterized on the
+/// two axes that actually vary, so no sibling implementation is needed:
+///
+///   * the LITERAL FORM (`VersionLiteralForm`) — percent-freeze, double- or
+///     single-quoted — detected from the file and preserved on write;
+///   * the TARGET — `set_version` for a caller that already computed a monotone
+///     version from released tags, or `level` to compute one from the manifest.
+///
+/// `level` seeds from the manifest ALONE and cannot see git tags, so a manifest
+/// lagging its tags bumps into published territory. Callers that care pass
+/// `set_version`.
+pub fn bump(
+    working_dir: &str,
+    level: &str,
+    name: Option<String>,
+    set_version: Option<String>,
+) -> Result<(String, String)> {
     let dir = Path::new(working_dir);
     if !dir.exists() {
         bail!("Working directory not found: {}", working_dir);
@@ -149,25 +238,53 @@ pub fn bump(working_dir: &str, level: &str, name: Option<String>) -> Result<(Str
     let content = std::fs::read_to_string(&version_file)
         .with_context(|| format!("Failed to read {}", version_file.display()))?;
 
-    // Match VERSION = %(X.Y.Z).freeze
-    let re = regex::Regex::new(r#"VERSION\s*=\s*%\((\d+\.\d+\.\d+)\)\.freeze"#)
-        .context("Failed to compile version regex")?;
-
-    let caps = re.captures(&content).with_context(|| {
+    let found = VersionLiteral::find(&content).with_context(|| {
         format!(
-            "No VERSION = %(X.Y.Z).freeze found in {}",
+            "No VERSION assignment found in {}. Expected one of: \
+             `VERSION = %(X.Y.Z).freeze`, `VERSION = \"X.Y.Z\"`, \
+             `VERSION = 'X.Y.Z'`",
             version_file.display()
         )
     })?;
 
-    let old_version = caps[1].to_string();
-    let new_version = version::bump_semver(&old_version, level)?;
+    let old_version = found.version.clone();
+    let new_version = match set_version {
+        // An explicit target: the CALLER did the arithmetic. This exists so the
+        // seeding decision (which must consider released git tags, something
+        // this function cannot see) lives in exactly one place instead of being
+        // re-derived per ecosystem. `--level` remains for standalone use.
+        Some(v) => {
+            if !SEMVER_EXACT.is_match(&v) {
+                bail!("--set-version must be an exact X.Y.Z semver, got: {}", v);
+            }
+            v
+        }
+        None => version::bump_semver(&old_version, level)?,
+    };
 
-    // Replace in file
-    let new_content = content.replace(
-        &format!("VERSION = %({}).freeze", old_version),
-        &format!("VERSION = %({}).freeze", new_version),
-    );
+    // Splice over the MATCHED SPAN, and render in the form we found.
+    //
+    // Two bugs fixed at once, both of which reported success while doing
+    // nothing:
+    //
+    // 1. FORM. This used to match only `%(X.Y.Z).freeze`, so 9 of the fleet's
+    //    41 root-gemspec repos — boreal, pangea-{akeyless,dashboards,datadog,
+    //    grafana,kubernetes,splunk,spot,tailscale} — could not be bumped at
+    //    all. Measured 2026-08-17; verified by running this command against
+    //    both forms. The author's convention is PRESERVED rather than
+    //    normalized: a bump should change a version and nothing else.
+    //
+    // 2. SPAN. The replacement used to be rebuilt as a literal
+    //    `format!("VERSION = %({}).freeze", old)` and passed to
+    //    `content.replace`. The regex tolerates `\s*` around `=`, so a file
+    //    written `VERSION= %(0.1.0).freeze` MATCHED but the reconstructed
+    //    needle was absent — `replace` found nothing, wrote the file back
+    //    byte-identical, and returned Ok with a log line claiming the bump.
+    //    Splicing the captured range cannot drift from what matched.
+    let mut new_content = String::with_capacity(content.len() + 8);
+    new_content.push_str(&content[..found.start]);
+    new_content.push_str(&found.form.render(&new_version));
+    new_content.push_str(&content[found.end..]);
 
     std::fs::write(&version_file, &new_content)
         .with_context(|| format!("Failed to write {}", version_file.display()))?;
@@ -513,5 +630,102 @@ mod tests {
             "BUNDLE_BIN",
             "bundle",
         );
+    }
+
+    // ── VERSION literal form: detect, render, splice ────────────────────
+    //
+    // These cover the two bugs the form-parameterization fixed, both of which
+    // previously reported SUCCESS while changing nothing.
+
+    #[test]
+    fn finds_every_literal_form_the_fleet_uses() {
+        // 26 of 41 fleet gems use percent-freeze, 9 use quotes (2026-08-17).
+        let cases = [
+            ("  VERSION = %(1.2.3).freeze", super::VersionLiteralForm::PercentFreeze),
+            ("  VERSION = \"1.2.3\"", super::VersionLiteralForm::DoubleQuoted),
+            ("  VERSION = '1.2.3'", super::VersionLiteralForm::SingleQuoted),
+        ];
+        for (src, want) in cases {
+            let found = super::VersionLiteral::find(src)
+                .unwrap_or_else(|| panic!("no VERSION found in {src:?}"));
+            assert_eq!(found.form, want, "form for {src:?}");
+            assert_eq!(found.version, "1.2.3", "version for {src:?}");
+        }
+    }
+
+    #[test]
+    fn render_preserves_the_authors_form() {
+        // A bump must change a version and NOTHING else. Normalizing quotes to
+        // percent-freeze would rewrite 9 repos' convention behind their backs.
+        assert_eq!(
+            super::VersionLiteralForm::PercentFreeze.render("2.0.0"),
+            "VERSION = %(2.0.0).freeze"
+        );
+        assert_eq!(
+            super::VersionLiteralForm::DoubleQuoted.render("2.0.0"),
+            "VERSION = \"2.0.0\""
+        );
+        assert_eq!(
+            super::VersionLiteralForm::SingleQuoted.render("2.0.0"),
+            "VERSION = '2.0.0'"
+        );
+    }
+
+    #[test]
+    fn detect_then_render_round_trips_for_every_form() {
+        // The property that makes ONE expression safe for every gem: whatever
+        // was detected can be re-rendered, so no form is write-only.
+        for src in [
+            "VERSION = %(0.4.1).freeze",
+            "VERSION = \"0.4.1\"",
+            "VERSION = '0.4.1'",
+        ] {
+            let f = super::VersionLiteral::find(src).expect("found");
+            assert_eq!(f.form.render(&f.version), src, "round-trip for {src:?}");
+        }
+    }
+
+    #[test]
+    fn span_splice_survives_nonstandard_spacing() {
+        // THE SILENT-SUCCESS BUG. The old code rebuilt the needle as
+        // `format!("VERSION = %({}).freeze", old)` and called `content.replace`.
+        // The regex tolerates `\s*` around `=`, so `VERSION=` matched, the
+        // reconstructed needle was absent, replace did nothing, and the file was
+        // written back byte-identical with a log line claiming the bump.
+        let content = "module D\n  VERSION= %(0.1.0).freeze\nend\n";
+        let f = super::VersionLiteral::find(content).expect("matches despite spacing");
+        assert_eq!(f.version, "0.1.0");
+        let spliced = {
+            let mut out = String::new();
+            out.push_str(&content[..f.start]);
+            out.push_str(&f.form.render("0.1.1"));
+            out.push_str(&content[f.end..]);
+            out
+        };
+        assert!(spliced.contains("0.1.1"), "the new version is actually written");
+        assert!(!spliced.contains("0.1.0"), "the old version is gone");
+        assert_ne!(spliced, content, "the file genuinely changed");
+    }
+
+    #[test]
+    fn unsupported_shapes_are_not_found_rather_than_mis_parsed() {
+        // Absence must be loud at DETECTION, never a silent no-op at write.
+        for src in [
+            "VERSION = 1.2.3",             // bare, unquoted
+            "VERSION = %(1.2).freeze",     // two components
+            "VERSION = \"1.2.3-pre\"",     // prerelease
+            "# VERSION = %(1.2.3).freeze", // commented out is still a match candidate
+            "module Demo\nend\n",
+        ] {
+            let found = super::VersionLiteral::find(src);
+            if src.starts_with('#') {
+                // A commented line DOES match -- documented, not asserted away:
+                // version.rb files do not carry commented VERSION lines in the
+                // fleet, and stripping comments would need a Ruby parser.
+                assert!(found.is_some(), "known limitation: comments are not skipped");
+            } else {
+                assert!(found.is_none(), "{src:?} must not be parsed as a version");
+            }
+        }
     }
 }
