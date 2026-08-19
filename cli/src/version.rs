@@ -11078,18 +11078,181 @@ fn chart_dep_field_span(
     Ok(Some((entry_start + val.start)..(entry_start + val.end)))
 }
 
-/// Read the version from a package.json file.
+/// Read the top-level `"version"` from a package.json file, form-preserving.
+///
+/// Routes through [`package_json_top_version_span`] — the byte-span locator a
+/// future form-preserving `write_package_json_version` will share, so the
+/// reader and writer will agree byte-for-byte on which key is authoritative
+/// and what value is on disk. Mirrors [`read_zig_version`] (routed onto
+/// [`zig_top_version_span`] at 50fc2a5) and [`read_chart_version`] (routed
+/// onto [`chart_top_version_span`] at 2968d55). The pre-port reader
+/// round-tripped the JSON through `serde_json::from_str` and pulled
+/// `.get("version").as_str()`, which silently accepted a file with two
+/// top-level `"version"` keys (`serde_json`'s last-one-wins convention) and
+/// silently accepted a value with backslash escapes that a form-preserving
+/// splice cannot round-trip.
 pub fn read_package_json_version(path: &Path) -> Result<String> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    read_version_by_span(path, package_json_top_version_span)
+}
 
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse {} as JSON", path.display()))?;
+/// Byte range of the value bytes of the top-level `"version"` key in a
+/// package.json — bytes only, not the surrounding `"..."`, and never a
+/// nested `"version"` inside `"dependencies"`, `"devDependencies"`, or any
+/// other object / array value.
+///
+/// # Contract
+///
+/// - The file must parse as JSON, and the top-level must be an object.
+///   Anything else is refused at the `serde_json` validation oracle.
+/// - The top-level `"version"` must exist and must be a JSON string. A
+///   number, array, object, boolean, or null is refused — `SEMVER_LIKE`
+///   never matches a non-string, and refusing here surfaces the
+///   malformation at the boundary rather than at the semver check.
+/// - The value bytes must not contain `\`-escapes. A form-preserving
+///   byte-span splice cannot round-trip through JSON's escape rules
+///   (splicing `1.2.3` over `\"` would corrupt the file), and
+///   `SEMVER_LIKE` never contains a backslash, so this class is
+///   definitively out of scope for the writer family.
+/// - Zero top-level `"version"` keys is REFUSED with a message. Two or
+///   more top-level `"version"` keys is REFUSED rather than a
+///   last-one-wins guess — a package.json with two top-level `"version"`
+///   keys is malformed and returning either value silently would create a
+///   second source of truth. Same discipline as [`chart_top_version_span`]
+///   / [`zig_top_version_span`].
+///
+/// # How the walker works
+///
+/// Two-stage: (1) `serde_json::from_str` validates well-formedness and the
+/// top-level object / string-typed `"version"` invariant; (2) a raw byte
+/// walk locates the exact value span. Depth 0 is outside the outer object;
+/// depth 1 is its immediate children; depth 2+ is inside a nested object
+/// or array. String literals are opaque with JSON's `\`-escape rules
+/// honored, so `"description": "the field is \"version\""` cannot
+/// accidentally register as a key, and a `"dependencies": { "version":
+/// "^1.2.3" }` block is walked at depth 2 and skipped.
+///
+/// Shared by [`read_package_json_version`]'s locator; a future
+/// form-preserving `write_package_json_version` will ride the same span
+/// through [`splice_and_verify`], mirroring the writer-family idiom.
+fn package_json_top_version_span(content: &str) -> Result<std::ops::Range<usize>> {
+    let doc: serde_json::Value =
+        serde_json::from_str(content).context("failed to parse as JSON")?;
+    let obj = doc.as_object().context("top-level is not a JSON object")?;
+    match obj.get("version") {
+        None => bail!("no top-level `\"version\"` field in package.json — refusing to guess"),
+        Some(v) if !v.is_string() => {
+            bail!("top-level `\"version\"` in package.json is not a JSON string — refusing")
+        }
+        _ => {}
+    }
 
-    json.get("version")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .with_context(|| format!("No version field found in {}", path.display()))
+    let bytes = content.as_bytes();
+    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut depth: usize = 0;
+    let mut awaiting_key_at_depth_1: bool = false;
+    let mut last_key_was_version_at_depth_1: bool = false;
+    let mut i: usize = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
+            i += 1;
+            continue;
+        }
+
+        if b == b'"' {
+            let start = i + 1;
+            let mut j = start;
+            let mut saw_backslash = false;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'\\' if j + 1 < bytes.len() => {
+                        saw_backslash = true;
+                        j += 2;
+                    }
+                    b'"' => break,
+                    _ => j += 1,
+                }
+            }
+            if j >= bytes.len() {
+                bail!("unterminated JSON string starting at byte {i}");
+            }
+            let end = j;
+            let closing = j + 1;
+
+            if depth == 1 && awaiting_key_at_depth_1 {
+                last_key_was_version_at_depth_1 =
+                    !saw_backslash && &content[start..end] == "version";
+                awaiting_key_at_depth_1 = false;
+            } else if depth == 1 && last_key_was_version_at_depth_1 {
+                if saw_backslash {
+                    bail!(
+                        "top-level `\"version\"` value at byte {start} contains \
+                         backslash escapes — a form-preserving byte-span splice \
+                         cannot round-trip through JSON's escape rules"
+                    );
+                }
+                spans.push(start..end);
+                last_key_was_version_at_depth_1 = false;
+            } else if depth == 1 {
+                last_key_was_version_at_depth_1 = false;
+            }
+            i = closing;
+            continue;
+        }
+
+        if b == b'{' || b == b'[' {
+            if depth == 0 && b == b'{' {
+                depth = 1;
+                awaiting_key_at_depth_1 = true;
+            } else {
+                depth += 1;
+                if depth == 2 {
+                    last_key_was_version_at_depth_1 = false;
+                }
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == b'}' || b == b']' {
+            depth = depth
+                .checked_sub(1)
+                .with_context(|| format!("unbalanced `{}` at byte {i}", b as char))?;
+            i += 1;
+            continue;
+        }
+
+        if depth == 1 && b == b',' {
+            awaiting_key_at_depth_1 = true;
+            last_key_was_version_at_depth_1 = false;
+            i += 1;
+            continue;
+        }
+
+        if depth == 1 && b == b':' {
+            i += 1;
+            continue;
+        }
+
+        if depth == 1 && last_key_was_version_at_depth_1 {
+            last_key_was_version_at_depth_1 = false;
+        }
+        i += 1;
+    }
+
+    let mut it = spans.into_iter();
+    let first = it
+        .next()
+        .context("no top-level `\"version\"` in package.json — refusing to guess")?;
+    if it.next().is_some() {
+        bail!(
+            "refusing to read: two or more top-level `\"version\"` keys in \
+             package.json — one source of truth per manifest"
+        );
+    }
+    Ok(first)
 }
 
 #[cfg(test)]
@@ -11350,7 +11513,11 @@ mod tests {
     #[test]
     fn top_level_readers_route_through_read_version_by_span() {
         let src = include_str!("version.rs");
-        for name in ["read_zig_version", "read_chart_version"] {
+        for name in [
+            "read_zig_version",
+            "read_chart_version",
+            "read_package_json_version",
+        ] {
             let signature = format!("pub fn {name}(path: &Path) -> Result<String>");
             let start = src
                 .find(&signature)
@@ -11380,6 +11547,114 @@ mod tests {
                  wrap. Inline wrap re-opens the drift class read_version_by_span closed."
             );
         }
+    }
+
+    /// The locator returns the byte span of the top-level `"version"`
+    /// value's bytes — EXCLUDING the surrounding `"..."` — and the span
+    /// slices back to the exact value string. Alignment and other keys
+    /// around the value survive untouched, so a form-preserving splice
+    /// over the returned span keeps the manifest's shape.
+    #[test]
+    fn package_json_top_version_span_locates_the_top_level_version_value_bytes() {
+        let content =
+            "{\n  \"name\": \"test\",\n  \"version\": \"3.0.1\",\n  \"private\": true\n}\n";
+        let span = package_json_top_version_span(content).unwrap();
+        assert_eq!(
+            &content[span.clone()],
+            "3.0.1",
+            "the span must name the value bytes exactly, not the surrounding quotes"
+        );
+        assert_eq!(
+            &content[span.start - 1..span.start],
+            "\"",
+            "the byte immediately before the span must be the opening `\"`"
+        );
+        assert_eq!(
+            &content[span.end..span.end + 1],
+            "\"",
+            "the byte immediately after the span must be the closing `\"`"
+        );
+    }
+
+    /// A `"version"` key nested inside `"dependencies"` (depth 2) must be
+    /// SKIPPED by the walker — the reader returns the top-level `"version"`,
+    /// not a dependency pin. The pre-port `serde_json` reader happened to
+    /// pick the right one via `.get("version")`, but the raw walker must
+    /// also honor depth so a future form-preserving writer splices only the
+    /// top-level value.
+    #[test]
+    fn package_json_top_version_span_skips_a_nested_dependencies_version() {
+        let content = "{\n  \
+            \"dependencies\": {\n    \"version\": \"^1.2.3\"\n  },\n  \
+            \"version\": \"7.8.9\"\n}\n";
+        let span = package_json_top_version_span(content).unwrap();
+        assert_eq!(
+            &content[span], "7.8.9",
+            "the walker must return the top-level `\"version\"`, not the nested one"
+        );
+    }
+
+    /// A package.json with two top-level `"version"` keys is malformed and
+    /// the writer family's discipline is to REFUSE rather than pick either
+    /// value silently. `serde_json`'s last-one-wins convention would accept
+    /// this file at the pre-port reader; the walker's ambiguity refusal is
+    /// the new guarantee the port lands.
+    #[test]
+    fn package_json_top_version_span_refuses_two_top_level_version_keys() {
+        let content = "{\"version\": \"1.0.0\", \"version\": \"2.0.0\"}";
+        let err = package_json_top_version_span(content).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("two or more top-level"),
+            "the ambiguity refusal must name the class explicitly, got: {msg}"
+        );
+    }
+
+    /// A `"version"` value containing `\`-escapes (`"\"1.0.0\""`,
+    /// `"1.\n0.0"`) is out of scope for a form-preserving byte-span
+    /// splice — the raw bytes between the quotes are not the same as the
+    /// decoded JSON string, so slicing `content[span]` would return the
+    /// escaped form and splicing over `span` would corrupt the file's
+    /// escape structure. `SEMVER_LIKE` never matches a backslash, so
+    /// refusing here is safe and surfaces the malformation at the
+    /// boundary rather than at the semver check.
+    #[test]
+    fn package_json_top_version_span_refuses_backslash_escapes_in_the_value() {
+        let content = r#"{"name": "test", "version": "1.\n0.0"}"#;
+        let err = package_json_top_version_span(content).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("backslash escapes"),
+            "the escape refusal must name the class explicitly, got: {msg}"
+        );
+    }
+
+    /// A `"version"` value that is not a JSON string (number, array,
+    /// object, bool, null) is refused at the `serde_json` validation
+    /// oracle — `SEMVER_LIKE` never matches a non-string and returning
+    /// `"3"` for a numeric `3` would silently normalize the shape.
+    #[test]
+    fn package_json_top_version_span_refuses_a_non_string_version_value() {
+        let content = r#"{"name": "test", "version": 3}"#;
+        let err = package_json_top_version_span(content).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not a JSON string"),
+            "the non-string refusal must name the class explicitly, got: {msg}"
+        );
+    }
+
+    /// A JSON file whose top-level is an array (or any other non-object)
+    /// has no top-level `"version"` key to locate — refuse at the
+    /// validation oracle rather than walk into a dead end.
+    #[test]
+    fn package_json_top_version_span_refuses_when_top_level_is_not_an_object() {
+        let err = package_json_top_version_span("[1, 2, 3]").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not a JSON object"),
+            "the top-level refusal must name the class explicitly, got: {msg}"
+        );
     }
 
     /// The Cargo planner MUST route its splice-and-seal through
