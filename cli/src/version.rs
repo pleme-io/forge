@@ -10181,6 +10181,138 @@ pub fn read_chart_version(path: &Path) -> Result<String> {
     bail!("No version field found in {}", path.display())
 }
 
+/// Column-0 top-level `version:` line in a Chart.yaml, with the value's
+/// bytes captured separately from any surrounding quotes.
+///
+/// - `(?m)^version:` anchors at line start, so a nested
+///   `dependencies:\n  - version: ~1.2.3` is skipped — that value is a
+///   version RANGE, not a version. Same discipline as
+///   `commands/helm.rs::extract_yaml_field`, closed on 93c3818 against a
+///   trim-blind first-hit that read a dependency pin as a chart version.
+/// - The value form is enumerated by three alternatives, one per shape
+///   observed in the fleet: double-quoted (`version: "0.0.3"` — the
+///   vendored openshift-helmchart family), single-quoted, and unquoted
+///   (`version: 0.4.2` — the vast majority of authored charts). Exactly
+///   ONE of the three captures fires per match, and [`chart_value_span`]
+///   picks the one that did. Splitting the alternatives (rather than
+///   using a `(quote)…\1` backreference — Rust's `regex` crate is
+///   linear-time and does not support backreferences) keeps the match
+///   quote-balanced by construction: a mismatched `"1.2.3'` cannot
+///   satisfy any single alternative.
+/// - The winning capture holds the version value BYTES ONLY (never the
+///   quotes or a trailing `#` comment). Its byte span is what the writer
+///   splices, so alignment, quote style, and comments survive the
+///   mutation.
+static CHART_TOP_VERSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"(?m)^version:[ \t]*(?:"([^"\n]+)"|'([^'\n]+)'|([^\s#]+))"#)
+        .expect("static regex")
+});
+
+/// Byte span of the version-value bytes in a [`CHART_TOP_VERSION`] match.
+///
+/// Exactly one of capture groups 1 (double-quoted), 2 (single-quoted), 3
+/// (unquoted) is present per match; the span of the present one is what
+/// the writer splices over.
+fn chart_value_span(caps: &regex::Captures<'_>) -> std::ops::Range<usize> {
+    caps.get(1)
+        .or_else(|| caps.get(2))
+        .or_else(|| caps.get(3))
+        .expect("one of the three alternatives fires per match")
+        .range()
+}
+
+/// Write a new version into a Chart.yaml (in-place, form-preserving).
+///
+/// Thin IO shell over [`plan_chart_version_write`], mirroring
+/// [`write_cargo_version`] / [`plan_cargo_version_write`]. The pure core
+/// takes content in, content out, so a rewrite is dry-runnable over any
+/// real Chart.yaml without touching a byte on disk.
+///
+/// # Compounding
+///
+/// The next commit routes `commands/helm.rs::bump`'s
+/// `content.replace(&format!("version: {}", old), &format!("version: {}", new))`
+/// through this primitive. That call site is exactly the CLAUDE.md trap #3
+/// shape: a `format!`-rebuilt needle handed to `content.replace`
+/// hardcodes a single space between `version:` and the value, so a
+/// Chart.yaml written as `version:  0.4.2` (two spaces) or `version:"0.4.2"`
+/// (quoted, no space) reads fine through the whitespace-tolerant reader
+/// and then silently no-ops on write while reporting success.
+pub fn write_chart_version(path: &Path, new_version: &str) -> Result<()> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let updated = plan_chart_version_write(&content, new_version)
+        .with_context(|| format!("cannot write a version to {}", path.display()))?;
+    std::fs::write(path, &updated)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
+/// The PURE core of [`write_chart_version`]: content in, new content out.
+///
+/// # Contract
+///
+/// 1. `new_version` must match [`SEMVER_LIKE`] (same acceptance the Cargo
+///    writer honors — 3-part semver with an optional prerelease/build
+///    suffix, so `0.4.3` and `0.19.0-dev` both pass).
+/// 2. Exactly one top-level `version:` line must exist at column 0. Zero
+///    matches is REFUSED with a message. Two or more matches is REFUSED
+///    rather than a first-hit guess, because a Chart.yaml with two
+///    top-level `version:` lines is malformed and writing either one
+///    silently would create a second source of truth.
+/// 3. The splice replaces ONLY the value bytes (capture 2 of
+///    [`CHART_TOP_VERSION`]) — the `version:` key, the whitespace after
+///    it, any surrounding quotes, and any trailing `#` comment survive
+///    the mutation byte-for-byte.
+/// 4. The verified-mutation seal (same shape the Cargo writer carries):
+///    re-run the regex, confirm the new value at the same span, and
+///    prove the byte-length delta equals the value-length delta. A
+///    rewrite that reports success without changing the file is the
+///    failure mode this whole family exists to prevent.
+pub fn plan_chart_version_write(content: &str, new_version: &str) -> Result<String> {
+    if !SEMVER_LIKE.is_match(new_version) {
+        bail!(
+            "refusing to write {:?} — a version must start X.Y.Z (a prerelease \
+             or build suffix is allowed after it)",
+            new_version
+        );
+    }
+
+    let mut matches = CHART_TOP_VERSION.captures_iter(content);
+    let first = matches
+        .next()
+        .context("no top-level `version:` line at column 0 — refusing to guess")?;
+    if matches.next().is_some() {
+        bail!(
+            "refusing to write: two or more top-level `version:` lines at \
+             column 0 — Chart.yaml carries exactly one chart-own version"
+        );
+    }
+
+    let span = chart_value_span(&first);
+
+    let mut updated = String::with_capacity(content.len() + new_version.len());
+    updated.push_str(&content[..span.start]);
+    updated.push_str(new_version);
+    updated.push_str(&content[span.end..]);
+
+    let after = CHART_TOP_VERSION
+        .captures(&updated)
+        .context("verified-mutation seal: post-write regex found no version — refusing")?;
+    let got = &updated[chart_value_span(&after)];
+    if got != new_version {
+        bail!("rewrite did not take — expected {new_version}, re-read {got}");
+    }
+    let expected_len = content.len() + new_version.len() - (span.end - span.start);
+    if updated.len() != expected_len {
+        bail!(
+            "rewrite changed more bytes than the version value ({} vs {expected_len})",
+            updated.len()
+        );
+    }
+    Ok(updated)
+}
+
 /// Read the version from a package.json file.
 pub fn read_package_json_version(path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(path)
@@ -10355,6 +10487,156 @@ mod tests {
         let path = dir.path().join("Chart.yaml");
         std::fs::write(&path, "apiVersion: v2\nname: mychart\ntype: application\n").unwrap();
         assert!(read_chart_version(&path).is_err());
+    }
+
+    /// The unquoted fleet shape (`version: 0.4.2`) — the vast majority of
+    /// authored Chart.yaml carry it.
+    #[test]
+    fn plan_chart_write_splices_unquoted() {
+        let content = "apiVersion: v2\nname: mychart\nversion: 0.4.2\nappVersion: \"1.9.0\"\n";
+        let out = plan_chart_version_write(content, "0.4.3").unwrap();
+        assert_eq!(
+            out,
+            "apiVersion: v2\nname: mychart\nversion: 0.4.3\nappVersion: \"1.9.0\"\n"
+        );
+    }
+
+    /// The `format!`-then-`content.replace` shape at
+    /// `commands/helm.rs::bump` hardcodes a single space between
+    /// `version:` and the value and would silently no-op on this input.
+    /// The splice-over-matched-byte-span writer must handle it.
+    #[test]
+    fn plan_chart_write_preserves_double_space_alignment() {
+        let content = "apiVersion: v2\nname: mychart\nversion:  0.4.2\n";
+        let out = plan_chart_version_write(content, "0.4.3").unwrap();
+        assert_eq!(
+            out, "apiVersion: v2\nname: mychart\nversion:  0.4.3\n",
+            "the two-space gap between the key and the value must survive"
+        );
+    }
+
+    /// Tab-separated `version:\t1.2.3`. Same trap #3 class — the
+    /// format!-rebuilt needle would use a single space and miss.
+    #[test]
+    fn plan_chart_write_preserves_tab_separator() {
+        let content = "apiVersion: v2\nname: c\nversion:\t1.2.3\n";
+        let out = plan_chart_version_write(content, "1.2.4").unwrap();
+        assert_eq!(out, "apiVersion: v2\nname: c\nversion:\t1.2.4\n");
+    }
+
+    /// Double-quoted value (`version: "0.0.3"`) — the vendored Red Hat
+    /// chart shape at `openshift-helmchart/redhat-mysql-persistent`
+    /// (measured 2026-08-17, cited at `commands/helm.rs::extract_yaml_field`).
+    /// The quotes must survive.
+    #[test]
+    fn plan_chart_write_preserves_double_quotes() {
+        let content = "apiVersion: v2\nname: c\nversion: \"0.0.3\"\n";
+        let out = plan_chart_version_write(content, "0.0.4").unwrap();
+        assert_eq!(out, "apiVersion: v2\nname: c\nversion: \"0.0.4\"\n");
+    }
+
+    /// Single-quoted value.
+    #[test]
+    fn plan_chart_write_preserves_single_quotes() {
+        let content = "apiVersion: v2\nname: c\nversion: '1.2.3'\n";
+        let out = plan_chart_version_write(content, "1.2.4").unwrap();
+        assert_eq!(out, "apiVersion: v2\nname: c\nversion: '1.2.4'\n");
+    }
+
+    /// A prerelease suffix (`0.19.0-dev`) — 24 fleet Cargo manifests
+    /// carry it, and any Chart.yaml family that adopted the same idiom
+    /// must be REPLACEABLE. `SEMVER_LIKE` accepts the value on the
+    /// input side; the writer must splice it on the output side.
+    #[test]
+    fn plan_chart_write_accepts_prerelease_source_and_target() {
+        let content = "apiVersion: v2\nname: c\nversion: 0.19.0-dev\n";
+        let out = plan_chart_version_write(content, "0.19.1-dev").unwrap();
+        assert_eq!(out, "apiVersion: v2\nname: c\nversion: 0.19.1-dev\n");
+    }
+
+    /// A trailing `# …` comment on the version line survives the splice.
+    /// Comments here are how release notes get pinned inline.
+    #[test]
+    fn plan_chart_write_preserves_trailing_comment() {
+        let content = "apiVersion: v2\nname: c\nversion: 1.2.3  # release note\n";
+        let out = plan_chart_version_write(content, "1.2.4").unwrap();
+        assert_eq!(
+            out, "apiVersion: v2\nname: c\nversion: 1.2.4  # release note\n",
+            "the trailing comment (and its two-space gap) must survive"
+        );
+    }
+
+    /// The regression 93c3818 closed on the READER side, closed again
+    /// on the WRITER side: an indented `version:` under `dependencies:`
+    /// above the chart's own top-level `version:` must not be spliced.
+    /// The writer must find the chart's own value at column 0.
+    #[test]
+    fn plan_chart_write_skips_indented_dependency_version() {
+        let content = "apiVersion: v2\ndependencies:\n  - name: c\n    version: \"0.0.1\"\nname: rmp\nversion: 0.0.3\n";
+        let out = plan_chart_version_write(content, "0.0.4").unwrap();
+        assert_eq!(
+            out,
+            "apiVersion: v2\ndependencies:\n  - name: c\n    version: \"0.0.1\"\nname: rmp\nversion: 0.0.4\n",
+            "the indented dependency pin must be untouched; only the \
+             top-level version at column 0 bumps"
+        );
+    }
+
+    /// A file with NO top-level `version:` (only a nested one) is
+    /// REFUSED rather than silently no-op'd or misapplied.
+    #[test]
+    fn plan_chart_write_refuses_nested_only() {
+        let content =
+            "apiVersion: v2\nname: c\ndependencies:\n  - name: d\n    version: \">=1.0.0\"\n";
+        let err = plan_chart_version_write(content, "1.2.4").unwrap_err();
+        assert!(
+            err.to_string().contains("no top-level"),
+            "must refuse a nested-only match, got: {err}"
+        );
+    }
+
+    /// Two top-level `version:` lines are malformed; the writer refuses
+    /// rather than silently pick the first one. Silent pick would create
+    /// two sources of truth for the chart's version.
+    #[test]
+    fn plan_chart_write_refuses_two_top_level_versions() {
+        let content = "apiVersion: v2\nname: c\nversion: 1.2.3\nversion: 4.5.6\n";
+        let err = plan_chart_version_write(content, "9.9.9").unwrap_err();
+        assert!(
+            err.to_string().contains("two or more top-level"),
+            "must refuse a duplicated top-level version, got: {err}"
+        );
+    }
+
+    /// A value that is not a version (garbage, empty, ranges) is refused
+    /// on the way in — `SEMVER_LIKE` gates the write.
+    #[test]
+    fn plan_chart_write_refuses_non_semver_new_version() {
+        let content = "apiVersion: v2\nname: c\nversion: 1.2.3\n";
+        assert!(plan_chart_version_write(content, "not-a-version").is_err());
+        assert!(plan_chart_version_write(content, "").is_err());
+        assert!(plan_chart_version_write(content, "^1.2.3").is_err());
+    }
+
+    /// End-to-end IO shell test: [`write_chart_version`] over the real
+    /// filesystem preserves the file's exact byte layout apart from the
+    /// version value itself.
+    #[test]
+    fn write_chart_version_preserves_file_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        let content = "apiVersion: v2\nname: mychart\nversion:  0.4.2  # pinned\nappVersion: \"1.9.0\"\ndependencies:\n  - name: common\n    version: ~1.2.3\n";
+        std::fs::write(&path, content).unwrap();
+
+        write_chart_version(&path, "0.4.3").unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after,
+            "apiVersion: v2\nname: mychart\nversion:  0.4.3  # pinned\nappVersion: \"1.9.0\"\ndependencies:\n  - name: common\n    version: ~1.2.3\n",
+            "alignment, comment, appVersion, and the dependency pin must \
+             all survive the mutation"
+        );
     }
 
     #[test]
