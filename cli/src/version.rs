@@ -12838,6 +12838,63 @@ mod tests {
         assert_eq!(read_package_json_version(&path).unwrap(), "0.0.4");
     }
 
+    /// Round-trip: for every writable Cargo shape
+    /// ([`CargoShape::SingleCrate`], [`CargoShape::HybridRoot`],
+    /// [`CargoShape::WorkspaceShared`]) the reader must return exactly
+    /// the value the writer spliced. The fourth sibling of the
+    /// reader/writer-agree seals, closing coverage across every
+    /// ecosystem the reader family serves — the chart arm at
+    /// [`read_chart_version_agrees_with_writer_after_bump`], the
+    /// package.json arm at
+    /// [`read_package_json_version_agrees_with_writer_after_bump`],
+    /// the zig arm at [`test_write_zig_version`] (an in-place
+    /// `write_zig_version` + `read_zig_version` round trip on one
+    /// shape). Pre-lift the reader-agreement discipline held on three
+    /// of four family readers; post-lift it holds on all four.
+    ///
+    /// Cargo is uniquely multi-shape: [`write_cargo_version`] routes
+    /// through [`writable_section`] — `[package]` for SingleCrate and
+    /// HybridRoot, `[workspace.package]` for WorkspaceShared — while
+    /// [`read_cargo_version`] routes through [`classify_cargo`]'s own
+    /// arm order. A future edit that changes one side's shape
+    /// dispatch without changing the other would let a bump land in
+    /// one section and read back a stale value from the other — a
+    /// silent knowledge lie about which version the file now
+    /// carries. Every writable shape runs here, so a single-shape
+    /// round trip cannot present as coverage.
+    #[test]
+    fn read_cargo_version_agrees_with_writer_after_bump() {
+        let dir = tempfile::tempdir().unwrap();
+        for (shape_label, src, new) in [
+            (
+                "SingleCrate",
+                "[package]\nname = \"a\"\nversion = \"0.0.3\"\nedition = \"2024\"\n",
+                "0.0.4",
+            ),
+            (
+                "HybridRoot",
+                "[workspace]\nmembers = [\"m\"]\n\n\
+                 [package]\nname = \"root\"\nversion = \"0.4.0\"\nedition = \"2024\"\n",
+                "0.5.0",
+            ),
+            (
+                "WorkspaceShared",
+                "[workspace]\nmembers = [\"m\"]\n\n\
+                 [workspace.package]\nversion = \"1.2.3\"\nedition = \"2024\"\n",
+                "1.2.4",
+            ),
+        ] {
+            let path = dir.path().join(format!("Cargo-{shape_label}.toml"));
+            std::fs::write(&path, src).unwrap();
+            write_cargo_version(&path, new).expect(shape_label);
+            assert_eq!(
+                read_cargo_version(&path).expect(shape_label),
+                new,
+                "reader must return exactly what the writer spliced for {shape_label}"
+            );
+        }
+    }
+
     #[test]
     fn test_parse_semver_non_numeric_component() {
         assert!(parse_semver("1.a.3").is_err());
