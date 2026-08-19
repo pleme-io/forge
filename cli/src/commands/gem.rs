@@ -205,6 +205,30 @@ impl VersionLiteral {
     }
 }
 
+/// Locate the byte span of the first VERSION assignment in `content`.
+///
+/// The reverify callback shape the version-writer family's
+/// [`crate::version::splice_and_verify`] seal expects. Ports the ergonomic
+/// `Option<VersionLiteral>` shape of [`VersionLiteral::find`] into the
+/// `Result<Range<usize>>` shape every sibling ecosystem locator
+/// (`zig_top_version_span`, `chart_top_version_span`,
+/// `package_json_top_version_span`) already honors, so the gem writer
+/// rides the same seal contract as the rest of the family.
+///
+/// The returned span covers the WHOLE matched form (e.g., the entire
+/// `VERSION = %(1.2.3).freeze` bytes, not just the `1.2.3` inside) —
+/// gem's `render` re-emits the assignment as a canonical form-preserving
+/// unit, so what gets spliced and what gets reverified is the whole
+/// rendered assignment.
+fn version_literal_span(content: &str) -> anyhow::Result<std::ops::Range<usize>> {
+    let found = VersionLiteral::find(content).context(
+        "No VERSION assignment found. Expected one of: \
+         `VERSION = %(X.Y.Z).freeze`, `VERSION = \"X.Y.Z\"`, \
+         `VERSION = 'X.Y.Z'`",
+    )?;
+    Ok(found.start..found.end)
+}
+
 /// Bump the version in a gem's `version.rb`. Returns `(old, new)`.
 ///
 /// THE one expression for writing a gem's version. It is parameterized on the
@@ -299,10 +323,27 @@ pub fn bump(
     //    needle was absent — `replace` found nothing, wrote the file back
     //    byte-identical, and returned Ok with a log line claiming the bump.
     //    Splicing the captured range cannot drift from what matched.
-    let mut new_content = String::with_capacity(content.len() + 8);
-    new_content.push_str(&content[..found.start]);
-    new_content.push_str(&found.form.render(&new_version));
-    new_content.push_str(&content[found.end..]);
+    //
+    // The splice-and-seal rides the version-writer family's shared
+    // `splice_and_verify` primitive: the same three-step seal every
+    // sibling form-preserving writer (Cargo, Zig, Chart top-level, Chart
+    // dep-version, Chart dep-repository, package.json) shares — a raw
+    // splice, a re-locate-and-reread equality check, and a byte-length-
+    // delta arithmetic seal. What lands in the file is the rendered
+    // assignment (e.g. `VERSION = %(0.1.1).freeze`) spliced over the
+    // whole matched form's byte span; the reverify callback re-runs the
+    // same locator on the updated content and the seal proves the new
+    // form reads back at the same span byte-for-byte. A rewrite that
+    // reports success without actually changing the file is refused by
+    // the seal — the exact class the writer family exists to close.
+    let new_form = found.form.render(&new_version);
+    let new_content = crate::version::splice_and_verify(
+        &content,
+        found.start..found.end,
+        &new_form,
+        "VERSION",
+        version_literal_span,
+    )?;
 
     std::fs::write(&version_file, &new_content)
         .with_context(|| format!("Failed to write {}", version_file.display()))?;
@@ -760,5 +801,124 @@ mod tests {
                 assert!(found.is_none(), "{src:?} must not be parsed as a version");
             }
         }
+    }
+
+    // ── Bump splice-and-seal: the family's shared seal, not a local one ─
+    //
+    // The `bump` body was the LAST hand-rolled splice site in the forge
+    // writer surface — a three-line `push_str(&content[..found.start]) +
+    // push_str(&found.form.render(...)) + push_str(&content[found.end..])`
+    // shape sitting outside the version-writer family's shared
+    // `crate::version::splice_and_verify` seal. Every sibling ecosystem
+    // writer (Cargo, Zig, Chart top-level, Chart dep-version, Chart
+    // dep-repository, package.json) already routes its splice-and-seal
+    // through that primitive, so a future edit to any of the three seals
+    // it carries (splice arithmetic, reread-equals-new-value, byte-length-
+    // delta) lands in exactly one place — and used to skip gem, whose
+    // local splice re-opened the class the family's shield refuses. The
+    // port closes the outlier; the two shields below refuse its regrowth.
+
+    /// `bump` MUST route its splice-and-seal through
+    /// [`crate::version::splice_and_verify`] — the one seal every
+    /// form-preserving splice writer in the forge writer surface now
+    /// shares. A hand-rolled
+    /// `push_str(&content[..found.start]) + push_str(&content[found.end..])`
+    /// splice re-opens the local-seal outlier the port closed, so a
+    /// future family-wide seal enhancement (say, a checksum on the
+    /// pre-splice bytes or an idempotence assertion under a second
+    /// splice) would silently skip gem while every sibling ecosystem
+    /// inherited it.
+    ///
+    /// Fail-before-pass-after: with the pre-port `let mut new_content =
+    /// String::with_capacity(...); new_content.push_str(&content[..found.start]);
+    /// new_content.push_str(&found.form.render(&new_version));
+    /// new_content.push_str(&content[found.end..]);` body restored, the
+    /// `contains("crate::version::splice_and_verify(")` assertion below
+    /// fires. Restoring the delegation returns the shield to green.
+    #[test]
+    fn bump_routes_through_splice_and_verify_not_a_local_splice() {
+        const SOURCE: &str = include_str!("gem.rs");
+        let signature = "pub fn bump(";
+        let start = SOURCE
+            .find(signature)
+            .expect("must find the public signature of gem::bump");
+        let after_brace = SOURCE[start..]
+            .find(" {\n")
+            .map(|o| start + o + 3)
+            .expect("must find the opening brace for gem::bump");
+        let body_end = SOURCE[after_brace..]
+            .find("\n}\n")
+            .map(|o| after_brace + o)
+            .expect("must find the closing brace for gem::bump");
+        let body = &SOURCE[after_brace..body_end];
+
+        assert!(
+            body.contains("crate::version::splice_and_verify("),
+            "gem::bump must route its splice-and-seal through \
+             crate::version::splice_and_verify — the one seal the whole \
+             forge writer family shares. Got body: {body:?}"
+        );
+
+        // Guard against the pre-port local splice regrowing. The three
+        // `push_str(...)` calls that hand-roll the splice — head, rendered
+        // form, tail — are the exact shape splice_and_verify subsumes.
+        // Presence of the head or tail push in the bump body re-opens the
+        // outlier.
+        assert!(
+            !body.contains("push_str(&content[..found.start]"),
+            "gem::bump must NOT hand-roll the splice head — \
+             crate::version::splice_and_verify owns that. Got body: {body:?}"
+        );
+        assert!(
+            !body.contains("push_str(&content[found.end..]"),
+            "gem::bump must NOT hand-roll the splice tail — \
+             crate::version::splice_and_verify owns that. Got body: {body:?}"
+        );
+    }
+
+    /// End-to-end round-trip: [`super::bump`] with `set_version` (no git,
+    /// no gemspec-detection) rewrites a version.rb from `0.1.0` to a
+    /// caller-supplied `0.1.1`, and the file on disk reads back with the
+    /// new version at the same form, every surrounding byte unchanged.
+    ///
+    /// Pins the port's behavioral contract on the IO side: the
+    /// [`crate::version::splice_and_verify`] seal fires against a real
+    /// on-disk file, the returned `(old, new)` pair reflects what
+    /// happened, and the file's form (`VERSION = %(X.Y.Z).freeze`) is
+    /// preserved through the round-trip. A regression that hand-rolls
+    /// the splice would still pass this test (the behavior is
+    /// unchanged), but a regression that misuses the seal (wrong
+    /// reverify callback, wrong new_value shape) would surface here as
+    /// a seal-failure error rather than a silent success.
+    #[test]
+    fn bump_rewrites_version_rb_end_to_end_through_the_shared_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib").join("gem_under_test");
+        std::fs::create_dir_all(&lib).unwrap();
+        let version_file = lib.join("version.rb");
+        let before = "module GemUnderTest\n  VERSION = %(0.1.0).freeze\nend\n";
+        std::fs::write(&version_file, before).unwrap();
+
+        let (old, new) = super::bump(
+            dir.path().to_str().unwrap(),
+            "patch",
+            Some("gem_under_test".to_string()),
+            Some("0.1.1".to_string()),
+            false,
+        )
+        .expect("bump must succeed against a well-formed version.rb");
+
+        assert_eq!(
+            old, "0.1.0",
+            "returned old version must match the file's pre-bump value"
+        );
+        assert_eq!(new, "0.1.1", "returned new version must match set_version");
+
+        let after = std::fs::read_to_string(&version_file).unwrap();
+        assert_eq!(
+            after, "module GemUnderTest\n  VERSION = %(0.1.1).freeze\nend\n",
+            "the file's post-bump bytes must be the pre-bump bytes with the version \
+             spliced — every surrounding byte unchanged"
+        );
     }
 }

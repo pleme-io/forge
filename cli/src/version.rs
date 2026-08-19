@@ -10566,7 +10566,21 @@ fn chart_top_version_span(content: &str) -> Result<std::ops::Range<usize>> {
 ///
 /// `field_label` names the field in error messages (`"version"`,
 /// `"repository"`) so a seal failure surfaces which write went wrong.
-fn splice_and_verify<F>(
+///
+/// # Visibility
+///
+/// `pub(crate)` so sibling writer surfaces outside `version.rs` can ride
+/// the same seal. The first out-of-module rider is `commands/gem.rs::bump`
+/// (the Ruby `version.rb` writer), whose pre-lift local splice was the
+/// last hand-rolled `push_str(&content[..start]) + push_str(&new_form) +
+/// push_str(&content[end..])` shape in the forge writer surface — the
+/// exact class this seal exists to close. A future ecosystem writer
+/// living in its own module (a `commands/npm.rs::bump`, a
+/// `commands/gemspec.rs::bump`, etc.) inherits the same three seals
+/// (splice-arithmetic, reread-equality, byte-length-delta) by one line
+/// of delegation, at the same crate-boundary the reader family already
+/// crosses through `read_version_by_span`.
+pub(crate) fn splice_and_verify<F>(
     content: &str,
     span: std::ops::Range<usize>,
     new_value: &str,
