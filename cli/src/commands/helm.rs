@@ -960,43 +960,48 @@ fn mirror_one(
 /// rerouted. A no-op when there are no third-party deps. Requires the subchart to
 /// have been mirrored first (the `mirror` step / `helm-mirror` action runs ahead
 /// of the release).
+///
+/// Every splice rides `version::plan_chart_dependency_repository_write` — the
+/// same form-preserving discipline the top-level and dep-pin version writers
+/// carry (splice over the matched byte span, verified-mutation seal). The
+/// pre-port shape was a whole-file `serde_yaml::from_str` → mutate →
+/// `serde_yaml::to_string` round-trip that silently NORMALIZED the file's
+/// form (comments dropped, quote styles collapsed, key order shuffled,
+/// alignment evened out) while reporting `Ok(())` — a different flavor of the
+/// same trap the writer family exists to close. The released tarball's
+/// Chart.yaml is now byte-identical to the source except for the redirected
+/// URL bytes themselves.
 fn redirect_remote_deps_to_mirror(chart_dir: &Path, registry: &str) -> Result<()> {
     let chart_yaml = chart_dir.join("Chart.yaml");
     if !chart_yaml.exists() {
         return Ok(());
     }
     let original = std::fs::read_to_string(&chart_yaml)?;
-    let mut doc: serde_yaml::Value = match serde_yaml::from_str(&original) {
-        Ok(v) => v,
-        Err(_) => return Ok(()), // leave unparseable Chart.yaml to helm to surface
-    };
-    let Some(deps) = doc
-        .get_mut("dependencies")
-        .and_then(|d| d.as_sequence_mut())
-    else {
+    // Enumerate (name, repository) with serde_yaml — same discipline
+    // parse_deps carries. An unparseable Chart.yaml surfaces as an empty
+    // dep list and we leave the file to helm to complain about (retains
+    // the pre-port tolerance).
+    let deps = parse_deps(&original);
+    if deps.is_empty() {
         return Ok(());
-    };
+    }
+
     let mut changed = false;
-    for dep in deps.iter_mut() {
-        let Some(map) = dep.as_mapping_mut() else {
+    for d in &deps {
+        if !is_third_party_repo(&d.repository, registry) {
             continue;
-        };
-        let repo = map
-            .get(serde_yaml::Value::from("repository"))
-            .and_then(|r| r.as_str())
-            .unwrap_or("")
-            .to_string();
-        if is_third_party_repo(&repo, registry) {
-            map.insert(
-                serde_yaml::Value::from("repository"),
-                serde_yaml::Value::from(registry),
-            );
+        }
+        // The IO shell reads the (already-mutated) on-disk file each
+        // time, so successive splices compose naturally over the same
+        // Chart.yaml. `false` means "no matching dep" — cannot happen
+        // after `parse_deps` enumerated it, but treat defensively.
+        let wrote =
+            crate::version::write_chart_dependency_repository(&chart_yaml, &d.name, registry)?;
+        if wrote {
             changed = true;
         }
     }
     if changed {
-        let rendered = serde_yaml::to_string(&doc).context("re-serialize redirected Chart.yaml")?;
-        std::fs::write(&chart_yaml, rendered).context("write redirected Chart.yaml")?;
         // A stale Chart.lock would now disagree with the rerouted deps; drop it so
         // `helm dependency update` regenerates it against the mirror.
         let lock = chart_dir.join("Chart.lock");
@@ -1830,6 +1835,96 @@ mod hermetic_mirror_tests {
         assert_eq!(
             std::fs::read_to_string(chart.join("Chart.lock")).unwrap(),
             "keep\n"
+        );
+    }
+
+    /// The port's smoking-gun regression: inline `# ...` comments on
+    /// the Chart.yaml survive the redirect. The pre-port shape ran
+    /// `serde_yaml::from_str` → mutate → `serde_yaml::to_string` and
+    /// DROPPED every comment on the way through (a released tarball
+    /// carrying "why does this dep exist" comments would lose them).
+    /// This is the specific defect the form-preserving splice closes.
+    #[test]
+    fn redirect_preserves_comments_and_quote_style() {
+        let dir = tempfile::tempdir().unwrap();
+        let chart = dir.path();
+        let src = "# release-time redirect target: pleme mirror\n\
+                   apiVersion: v2\n\
+                   name: w  # wrapper\n\
+                   version: 0.1.0\n\
+                   dependencies:\n  \
+                   - name: pleme-lib  # our library\n    \
+                     version: \">=0.18.1 <0.19.0\"\n    \
+                     repository: \"file://../pleme-lib\"\n  \
+                   - name: victoria-metrics-k8s-stack  # upstream metrics stack\n    \
+                     version: \"0.39.0\"\n    \
+                     repository: \"https://victoriametrics.github.io/helm-charts/\"  # third-party\n";
+        std::fs::write(chart.join("Chart.yaml"), src).unwrap();
+
+        redirect_remote_deps_to_mirror(chart, PLEME_OCI_REGISTRY).unwrap();
+
+        let after = std::fs::read_to_string(chart.join("Chart.yaml")).unwrap();
+        let expected = "# release-time redirect target: pleme mirror\n\
+                        apiVersion: v2\n\
+                        name: w  # wrapper\n\
+                        version: 0.1.0\n\
+                        dependencies:\n  \
+                        - name: pleme-lib  # our library\n    \
+                          version: \">=0.18.1 <0.19.0\"\n    \
+                          repository: \"file://../pleme-lib\"\n  \
+                        - name: victoria-metrics-k8s-stack  # upstream metrics stack\n    \
+                          version: \"0.39.0\"\n    \
+                          repository: \"oci://ghcr.io/pleme-io/charts\"  # third-party\n";
+        assert_eq!(
+            after, expected,
+            "every comment (leading, inline on `name:`, inline on the \
+             redirected `repository:` line) and the double-quoted \
+             version-range must survive the redirect byte-for-byte"
+        );
+    }
+
+    /// Unquoted third-party `repository:` URLs are the fleet-majority
+    /// shape (helm's own examples emit them unquoted). The pre-port
+    /// round-trip would NORMALIZE these — usually into unquoted form
+    /// too, but the ordering of keys, alignment of siblings, and any
+    /// trailing comment would move. The splice preserves everything
+    /// but the target URL bytes.
+    #[test]
+    fn redirect_handles_unquoted_third_party_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let chart = dir.path();
+        let src = "apiVersion: v2\nname: w\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository: https://victoriametrics.github.io/helm-charts/\n";
+        std::fs::write(chart.join("Chart.yaml"), src).unwrap();
+
+        redirect_remote_deps_to_mirror(chart, PLEME_OCI_REGISTRY).unwrap();
+
+        let after = std::fs::read_to_string(chart.join("Chart.yaml")).unwrap();
+        assert_eq!(
+            after,
+            "apiVersion: v2\nname: w\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository: oci://ghcr.io/pleme-io/charts\n",
+            "the unquoted URL must be spliced without gaining quotes"
+        );
+    }
+
+    /// Multiple third-party deps in one Chart.yaml — the redirect
+    /// walks them in order and every third-party `repository:` is
+    /// rerouted; a `file://` sibling in between is left untouched.
+    /// Every splice preserves the file's byte layout.
+    #[test]
+    fn redirect_reroutes_every_third_party_dep_in_one_chart() {
+        let dir = tempfile::tempdir().unwrap();
+        let chart = dir.path();
+        let src = "apiVersion: v2\nname: w\nversion: 0.1.0\ndependencies:\n  - name: cert-manager\n    version: \"v1.17.1\"\n    repository: \"https://charts.jetstack.io\"\n  - name: pleme-lib\n    version: \"~0.4.0\"\n    repository: file://../pleme-lib\n  - name: vm\n    version: \"0.39.0\"\n    repository: \"https://victoriametrics.github.io/helm-charts/\"\n";
+        std::fs::write(chart.join("Chart.yaml"), src).unwrap();
+
+        redirect_remote_deps_to_mirror(chart, PLEME_OCI_REGISTRY).unwrap();
+
+        let after = std::fs::read_to_string(chart.join("Chart.yaml")).unwrap();
+        assert_eq!(
+            after,
+            "apiVersion: v2\nname: w\nversion: 0.1.0\ndependencies:\n  - name: cert-manager\n    version: \"v1.17.1\"\n    repository: \"oci://ghcr.io/pleme-io/charts\"\n  - name: pleme-lib\n    version: \"~0.4.0\"\n    repository: file://../pleme-lib\n  - name: vm\n    version: \"0.39.0\"\n    repository: \"oci://ghcr.io/pleme-io/charts\"\n",
+            "cert-manager and vm must be rerouted; the file:// sibling \
+             and the exact quote style of every version pin must survive"
         );
     }
 }
