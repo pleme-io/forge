@@ -12838,6 +12838,32 @@ mod tests {
         assert_eq!(read_package_json_version(&path).unwrap(), "0.0.4");
     }
 
+    /// Two top-level `"version"` keys is a malformed package.json.
+    /// `serde_json` would silently accept it (last-one-wins), but the
+    /// walker refuses the ambiguity — the writer already proves this via
+    /// [`plan_package_json_write_refuses_two_top_level_versions`] and
+    /// [`package_json_top_version_span_refuses_two_top_level_version_keys`].
+    /// The reader must apply the same discipline —
+    /// [`read_package_json_version`] routes through the same
+    /// [`package_json_top_version_span`] locator the writer rides, so a
+    /// caller reading and then writing gets a uniform refusal at either
+    /// boundary rather than a last-one-wins read colliding with a
+    /// refusing write. The sibling of
+    /// [`read_chart_version_refuses_two_top_level_versions`] for the
+    /// package.json arm.
+    #[test]
+    fn read_package_json_version_refuses_two_top_level_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        std::fs::write(&path, "{\"version\": \"1.0.0\", \"version\": \"2.0.0\"}").unwrap();
+        let err = read_package_json_version(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("two or more"),
+            "the ambiguity refusal must name the class explicitly, got: {msg}"
+        );
+    }
+
     /// Round-trip: for every writable Cargo shape
     /// ([`CargoShape::SingleCrate`], [`CargoShape::HybridRoot`],
     /// [`CargoShape::WorkspaceShared`]) the reader must return exactly
@@ -13107,6 +13133,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_zig_version(&path).unwrap(), "0.3.1");
+    }
+
+    /// Two top-level `.version = "..."` lines is a malformed build.zig.zon
+    /// and the writer refuses it via
+    /// [`plan_zig_write_refuses_two_top_level_versions`]. The reader must
+    /// apply the same discipline — [`read_zig_version`] routes through the
+    /// same [`zig_top_version_span`] locator the writer rides, so a caller
+    /// reading and then writing gets a uniform refusal at either boundary
+    /// rather than a first-hit read colliding with a refusing write. The
+    /// sibling of [`read_chart_version_refuses_two_top_level_versions`] for
+    /// the zig arm; pre-commit the read-side ambiguity discipline was held
+    /// on one of four family members (chart) and inferred by construction
+    /// on the other three, post-commit it holds by direct proof on the
+    /// zig arm too.
+    #[test]
+    fn read_zig_version_refuses_two_top_level_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build.zig.zon");
+        std::fs::write(
+            &path,
+            ".{\n    .version = \"0.1.0\",\n    .version = \"0.2.0\",\n}\n",
+        )
+        .unwrap();
+        let err = read_zig_version(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("two or more"),
+            "the ambiguity refusal must name the class explicitly, got: {msg}"
+        );
     }
 
     #[test]
