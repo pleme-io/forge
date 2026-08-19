@@ -10313,6 +10313,274 @@ pub fn plan_chart_version_write(content: &str, new_version: &str) -> Result<Stri
     Ok(updated)
 }
 
+/// A `version:` line inside a Chart.yaml dependency entry — same
+/// three-alternative value shape as [`CHART_TOP_VERSION`] but indented
+/// (a dep entry's fields live under a `- name: X` list-item marker) or
+/// carrying the list-item marker inline (`- version: X`, when `version`
+/// is the first field of the entry). Splits by quote style so the
+/// writer can splice the value bytes only, leaving quotes, alignment,
+/// and trailing `#` comments intact.
+static CHART_DEP_ENTRY_VERSION: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?m)^[ \t]*(?:-[ \t]+)?version:[ \t]*(?:"([^"\n]+)"|'([^'\n]+)'|([^\s#]+))"#,
+        )
+        .expect("static regex")
+    });
+
+/// Column-0 `dependencies:` header — the top-level Chart.yaml key whose
+/// value is a list of dependency entries. Matches the header only; the
+/// caller walks the body by indent from the line after it.
+static CHART_DEPS_HEADER: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?m)^dependencies:").expect("static regex"));
+
+/// Byte span of the version-value bytes in a [`CHART_DEP_ENTRY_VERSION`]
+/// match. Exactly one of capture groups 1 (double-quoted), 2 (single-quoted),
+/// 3 (unquoted) is present per match; the span of the present one is what
+/// the writer splices over.
+fn chart_dep_value_span(caps: &regex::Captures<'_>) -> std::ops::Range<usize> {
+    caps.get(1)
+        .or_else(|| caps.get(2))
+        .or_else(|| caps.get(3))
+        .expect("one of the three alternatives fires per match")
+        .range()
+}
+
+/// Write a new version onto a specific entry in a Chart.yaml's
+/// `dependencies:` list — the sibling of [`write_chart_version`] for the
+/// nested dependency pin. Thin IO shell over
+/// [`plan_chart_dependency_version_write`].
+///
+/// Returns `Ok(true)` when the write took, `Ok(false)` when no dependency
+/// named `dep_name` exists in the file (dependent-chart iteration passes
+/// most charts through as a no-op). Any structural error (malformed YAML,
+/// two entries share `dep_name`, the matching entry lacks a `version:`
+/// line, verified-mutation seal failure) is a hard error.
+///
+/// # Compounding
+///
+/// `commands/helm.rs::bump` walks the sibling directories of the library
+/// chart and updates every dependent chart pinned to the library's old
+/// version. Its pre-port shape was
+/// `dep_content.replace(&format!("version: \"{}\"", old), ...)` — the CSE
+/// trap-3 shape the crate's `CLAUDE.md` names: the `format!`-rebuilt
+/// needle hardcoded a double-quoted single-space form, so a chart
+/// authored as `version: 0.4.2` (unquoted), `version:  "0.4.2"` (aligned),
+/// or `version: '0.4.2'` (single-quoted) silently skipped on write while
+/// the caller reported `Ok`. The typed writer splices the value bytes at
+/// the matched span and carries a verified-mutation seal, closing the
+/// trap structurally. The sibling top-level writer [`write_chart_version`]
+/// closed the same trap for the chart's own version at 3bc0885 / eb10657;
+/// this commit closes it for the nested dependency pin.
+pub fn write_chart_dependency_version(
+    path: &Path,
+    dep_name: &str,
+    new_version: &str,
+) -> Result<bool> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    match plan_chart_dependency_version_write(&content, dep_name, new_version).with_context(
+        || {
+            format!(
+                "cannot write dependency {dep_name} version to {}",
+                path.display()
+            )
+        },
+    )? {
+        Some(updated) => {
+            std::fs::write(path, &updated)
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// PURE core of [`write_chart_dependency_version`]: content in,
+/// `Some(new content)` out for a successful splice, `None` when the
+/// dependency `dep_name` is not present in `dependencies:` (a legal
+/// no-op for the fleet iteration case that `commands/helm.rs::bump`
+/// drives). Structural malformation (YAML that fails to parse, two
+/// entries share `dep_name`, the matching entry lacks a `version:`
+/// line) is a hard error.
+///
+/// # Contract
+///
+/// 1. `new_version` must match [`SEMVER_LIKE`] (same acceptance the
+///    top-level [`plan_chart_version_write`] honors).
+/// 2. The YAML must parse and expose a `dependencies:` sequence. A
+///    Chart.yaml with no `dependencies:` key returns `None`.
+/// 3. If exactly one dependency entry's `name:` equals `dep_name`, its
+///    `version:` value bytes are spliced. Zero matches → `None`. Two or
+///    more matches → hard error (ambiguous, refusing to guess).
+/// 4. The splice preserves the value's surrounding quotes, whitespace,
+///    and trailing `#` comment byte-for-byte — only the value bytes
+///    move.
+/// 5. Verified-mutation seal: after the splice, the re-run locator
+///    finds the same entry and reads back exactly `new_version`, and
+///    the byte-length delta equals the value-length delta.
+pub fn plan_chart_dependency_version_write(
+    content: &str,
+    dep_name: &str,
+    new_version: &str,
+) -> Result<Option<String>> {
+    if !SEMVER_LIKE.is_match(new_version) {
+        bail!(
+            "refusing to write {:?} — a version must start X.Y.Z (a prerelease \
+             or build suffix is allowed after it)",
+            new_version
+        );
+    }
+
+    let Some(span) = chart_dep_version_span(content, dep_name)? else {
+        return Ok(None);
+    };
+
+    let mut updated = String::with_capacity(content.len() + new_version.len());
+    updated.push_str(&content[..span.start]);
+    updated.push_str(new_version);
+    updated.push_str(&content[span.end..]);
+
+    let after = chart_dep_version_span(&updated, dep_name)?
+        .context("verified-mutation seal: post-write dep version span not found — refusing")?;
+    let got = &updated[after];
+    if got != new_version {
+        bail!("rewrite did not take — expected {new_version}, re-read {got}");
+    }
+    let expected_len = content.len() + new_version.len() - (span.end - span.start);
+    if updated.len() != expected_len {
+        bail!(
+            "rewrite changed more bytes than the version value ({} vs {expected_len})",
+            updated.len()
+        );
+    }
+    Ok(Some(updated))
+}
+
+/// Locate the byte span of the `version:` value in the `dependencies:`
+/// list entry whose `name:` field equals `dep_name`. Returns `Ok(None)`
+/// when the Chart.yaml has no `dependencies:` key or no matching entry.
+///
+/// The two-stage discipline mirrors the CSE reader half at
+/// `commands/helm.rs::parse_deps` (serde_yaml over the parsed structure)
+/// paired with the raw-content byte walk `write_chart_version` uses: serde
+/// validates the STRUCTURE (a `dependencies:` sequence exists, exactly one
+/// entry matches the name, the entry has a version), and the raw walk
+/// locates the byte SPAN so the splice preserves form. A structure-only
+/// rewrite would round-trip through serde and normalize quotes,
+/// alignment, and comments — the very failure this writer family exists
+/// to prevent.
+fn chart_dep_version_span(content: &str, dep_name: &str) -> Result<Option<std::ops::Range<usize>>> {
+    #[derive(serde::Deserialize)]
+    struct MinDep {
+        name: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct MinChart {
+        dependencies: Option<Vec<MinDep>>,
+    }
+    let parsed: MinChart = serde_yaml::from_str(content)
+        .context("cannot parse Chart.yaml as YAML — refusing to guess")?;
+    let deps = match parsed.dependencies {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    let matches: Vec<usize> = deps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| (d.name == dep_name).then_some(i))
+        .collect();
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    if matches.len() > 1 {
+        bail!(
+            "two or more dependencies named {:?} in Chart.yaml — ambiguous, \
+             refusing to write",
+            dep_name
+        );
+    }
+    let target_index = matches[0];
+
+    let deps_hdr = CHART_DEPS_HEADER
+        .find(content)
+        .context("`dependencies:` header not located in raw content — refusing")?;
+    let mut cursor = deps_hdr.end();
+    while cursor < content.len() && content.as_bytes()[cursor] != b'\n' {
+        cursor += 1;
+    }
+    if cursor < content.len() {
+        cursor += 1;
+    }
+
+    let mut entry_starts: Vec<usize> = Vec::new();
+    let mut list_indent: Option<usize> = None;
+    let mut deps_end = content.len();
+
+    let mut i = cursor;
+    while i < content.len() {
+        let nl = content[i..]
+            .find('\n')
+            .map(|n| i + n)
+            .unwrap_or(content.len());
+        let line = &content[i..nl];
+        let indent = line
+            .bytes()
+            .take_while(|&b| b == b' ' || b == b'\t')
+            .count();
+        let rest = &line[indent..];
+        let is_blank_or_comment = rest.chars().all(|c| c.is_whitespace()) || rest.starts_with('#');
+
+        if !is_blank_or_comment && indent == 0 {
+            deps_end = i;
+            break;
+        }
+        let starts_list = rest.starts_with('-')
+            && (rest.len() == 1 || rest.as_bytes()[1] == b' ' || rest.as_bytes()[1] == b'\t');
+        if starts_list {
+            match list_indent {
+                None => {
+                    list_indent = Some(indent);
+                    entry_starts.push(i);
+                }
+                Some(li) if indent == li => entry_starts.push(i),
+                _ => {}
+            }
+        }
+        i = if nl < content.len() { nl + 1 } else { nl };
+    }
+
+    if target_index >= entry_starts.len() {
+        bail!(
+            "internal: serde parsed {} dependency entries but raw scan located {}",
+            deps.len(),
+            entry_starts.len()
+        );
+    }
+    let entry_start = entry_starts[target_index];
+    let entry_end = entry_starts
+        .get(target_index + 1)
+        .copied()
+        .unwrap_or(deps_end);
+    let entry_body = &content[entry_start..entry_end];
+
+    let mut caps_iter = CHART_DEP_ENTRY_VERSION.captures_iter(entry_body);
+    let first = caps_iter.next().with_context(|| {
+        format!(
+            "dependency {:?} has no `version:` field — malformed, refusing",
+            dep_name
+        )
+    })?;
+    if caps_iter.next().is_some() {
+        bail!(
+            "dependency {:?} has two or more `version:` fields — malformed, refusing",
+            dep_name
+        );
+    }
+    let val = chart_dep_value_span(&first);
+    Ok(Some((entry_start + val.start)..(entry_start + val.end)))
+}
+
 /// Read the version from a package.json file.
 pub fn read_package_json_version(path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(path)
@@ -10616,6 +10884,249 @@ mod tests {
         assert!(plan_chart_version_write(content, "not-a-version").is_err());
         assert!(plan_chart_version_write(content, "").is_err());
         assert!(plan_chart_version_write(content, "^1.2.3").is_err());
+    }
+
+    // ========================================================================
+    // Chart.yaml dependency-pin writer — sibling of the top-level writer for
+    // the nested `dependencies:` entry. Same three-alternative form coverage
+    // (unquoted / single-quoted / double-quoted / aligned) plus a set of
+    // structural preconditions particular to a list of dependencies:
+    // uniqueness of the name across entries, presence of a version line,
+    // and no-op when no entry matches (the fleet iteration case).
+    // ========================================================================
+
+    /// The unquoted dep-pin form (`version: 0.4.2` inside a dependency
+    /// entry) — the majority shape across authored Chart.yaml. The pre-port
+    /// `format!("version: \"{}\"", old)` needle at `commands/helm.rs::bump`
+    /// silently skipped this form ENTIRELY (the pre-`contains` guard
+    /// suppressed the write).
+    #[test]
+    fn plan_chart_dep_write_splices_unquoted_dep_version() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: 0.4.2\n    repository: file://../pleme-lib\n";
+        let out = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out,
+            "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: 0.4.3\n    repository: file://../pleme-lib\n",
+            "unquoted dep pin must splice; the wrapper's own version and the \
+             `repository:` line must survive byte-for-byte"
+        );
+    }
+
+    /// Double-quoted dep-pin form (`version: "0.4.2"`) — the openshift-
+    /// helmchart vendored family and the shape the pre-port needle
+    /// happened to match by hardcoding double quotes and one space. The
+    /// port must keep handling this form.
+    #[test]
+    fn plan_chart_dep_write_preserves_double_quotes_on_dep_version() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: \"0.4.2\"\n";
+        let out = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3")
+            .unwrap()
+            .unwrap();
+        assert!(
+            out.contains("version: \"0.4.3\""),
+            "double-quoted dep pin must retain its quotes; got: {out:?}"
+        );
+        assert!(
+            !out.contains("0.4.2"),
+            "old value bytes must not survive: {out:?}"
+        );
+    }
+
+    /// Single-quoted dep-pin form (`version: '0.4.2'`) — the pre-port
+    /// needle hardcoded double quotes, so this shape silently skipped
+    /// on write.
+    #[test]
+    fn plan_chart_dep_write_preserves_single_quotes_on_dep_version() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: '0.4.2'\n";
+        let out = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3")
+            .unwrap()
+            .unwrap();
+        assert!(
+            out.contains("version: '0.4.3'"),
+            "single-quoted dep pin must retain its quotes; got: {out:?}"
+        );
+    }
+
+    /// Aligned dep-pin form (`version:  "0.4.2"`, two spaces) — the
+    /// pre-port needle hardcoded one space, so this shape silently
+    /// skipped on write.
+    #[test]
+    fn plan_chart_dep_write_preserves_aligned_dep_version() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version:  \"0.4.2\"\n";
+        let out = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3")
+            .unwrap()
+            .unwrap();
+        assert!(
+            out.contains("version:  \"0.4.3\""),
+            "the double-space alignment between `version:` and the value \
+             must survive the mutation; got: {out:?}"
+        );
+    }
+
+    /// A trailing `# ...` comment on the dep version line survives the
+    /// mutation — only the value bytes move. Mirrors the top-level
+    /// writer's comment-preservation seal.
+    #[test]
+    fn plan_chart_dep_write_preserves_trailing_comment() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: 0.4.2  # do not touch\n";
+        let out = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3")
+            .unwrap()
+            .unwrap();
+        assert!(
+            out.contains("version: 0.4.3  # do not touch"),
+            "trailing comment on dep version line must survive: {out:?}"
+        );
+    }
+
+    /// Only the MATCHING dep's version moves. Another dependency
+    /// pinned to the same version must be left untouched — the
+    /// pre-port `content.replace` did a global replace and would
+    /// mutate both.
+    #[test]
+    fn plan_chart_dep_write_touches_only_the_matching_dep() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: 0.4.2\n  - name: other-lib\n    version: 0.4.2\n";
+        let out = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out,
+            "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: 0.4.3\n  - name: other-lib\n    version: 0.4.2\n",
+            "only the matching dep's version must move; the sibling entry \
+             pinned to the same value must survive verbatim"
+        );
+    }
+
+    /// A dep entry whose `version:` line precedes its `name:` line
+    /// (legal YAML) still splices correctly — we rely on serde to
+    /// find the entry INDEX and the raw walk to locate the entry
+    /// BLOCK, never assuming `name:` is first.
+    #[test]
+    fn plan_chart_dep_write_handles_name_after_version() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - version: 0.4.2\n    name: pleme-lib\n";
+        let out = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3")
+            .unwrap()
+            .unwrap();
+        assert!(
+            out.contains("version: 0.4.3\n    name: pleme-lib"),
+            "must locate the version line by entry block, not by \
+             assuming `name:` is first: {out:?}"
+        );
+    }
+
+    /// No `dependencies:` in the file → `Ok(None)`. The dependent-
+    /// chart iteration case treats this as a legal no-op.
+    #[test]
+    fn plan_chart_dep_write_returns_none_for_no_dependencies_section() {
+        let content = "apiVersion: v2\nname: solo\nversion: 0.1.0\n";
+        let out = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3").unwrap();
+        assert!(
+            out.is_none(),
+            "no dependencies section → None, got: {out:?}"
+        );
+    }
+
+    /// `dependencies:` exists but no entry matches the name → `Ok(None)`.
+    #[test]
+    fn plan_chart_dep_write_returns_none_when_no_matching_dep() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: other-lib\n    version: 1.0.0\n";
+        let out = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3").unwrap();
+        assert!(out.is_none(), "no matching dep → None, got: {out:?}");
+    }
+
+    /// Two dependencies share the target name → ambiguous, hard error.
+    /// A silent-pick-first would create two sources of truth for the
+    /// pin — refuse, and let the caller resolve.
+    #[test]
+    fn plan_chart_dep_write_refuses_ambiguous_duplicate_name() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: 0.4.2\n  - name: pleme-lib\n    version: 0.4.2\n";
+        let err = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3").unwrap_err();
+        assert!(
+            err.to_string().contains("two or more dependencies named"),
+            "must refuse a duplicated dep name, got: {err}"
+        );
+    }
+
+    /// The matching entry has no `version:` field → hard error rather
+    /// than silent no-op.
+    #[test]
+    fn plan_chart_dep_write_refuses_entry_with_no_version() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    repository: file://../pleme-lib\n";
+        let err = plan_chart_dependency_version_write(content, "pleme-lib", "0.4.3").unwrap_err();
+        assert!(
+            err.to_string().contains("has no `version:` field"),
+            "must refuse an entry missing its version, got: {err}"
+        );
+    }
+
+    /// A value that is not a version (empty, range, garbage) is refused
+    /// on the way in — `SEMVER_LIKE` gates the write, same discipline as
+    /// the top-level writer.
+    #[test]
+    fn plan_chart_dep_write_refuses_non_semver_new_version() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: 0.4.2\n";
+        assert!(plan_chart_dependency_version_write(content, "pleme-lib", "").is_err());
+        assert!(plan_chart_dependency_version_write(content, "pleme-lib", "^1.2.3").is_err());
+        assert!(
+            plan_chart_dependency_version_write(content, "pleme-lib", "not-a-version").is_err()
+        );
+    }
+
+    /// Prerelease suffixes on the new version pass through — 24 fleet
+    /// manifests carry `0.19.0-dev`. Same acceptance the top-level
+    /// writer and Cargo writer honor.
+    #[test]
+    fn plan_chart_dep_write_accepts_prerelease_target() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: 0.4.2\n";
+        let out = plan_chart_dependency_version_write(content, "pleme-lib", "0.19.0-dev")
+            .unwrap()
+            .unwrap();
+        assert!(
+            out.contains("version: 0.19.0-dev"),
+            "prerelease target must splice: {out:?}"
+        );
+    }
+
+    /// End-to-end IO shell test: [`write_chart_dependency_version`] over
+    /// the real filesystem returns `true` when the write took, `false`
+    /// when the chart has no matching dep, and preserves the file's exact
+    /// byte layout apart from the target dep's version value.
+    #[test]
+    fn write_chart_dep_version_returns_true_on_write_and_preserves_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: \"0.4.2\"\n    repository: file://../pleme-lib\n  - name: other-lib\n    version: 1.0.0\n";
+        std::fs::write(&path, content).unwrap();
+
+        let written = write_chart_dependency_version(&path, "pleme-lib", "0.4.3").unwrap();
+        assert!(written, "write over a matching dep must return true");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after,
+            "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: pleme-lib\n    version: \"0.4.3\"\n    repository: file://../pleme-lib\n  - name: other-lib\n    version: 1.0.0\n",
+            "quotes, repository line, wrapper's own version, and the sibling \
+             `other-lib` pin (also at 1.0.0 by coincidence with nothing) must \
+             all survive byte-for-byte"
+        );
+    }
+
+    /// End-to-end IO shell test: no matching dep → `false`, file
+    /// unchanged. This is the fleet-iteration case the caller passes
+    /// through as a legitimate no-op.
+    #[test]
+    fn write_chart_dep_version_returns_false_when_no_matching_dep() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        let content = "apiVersion: v2\nname: solo\nversion: 0.1.0\n";
+        std::fs::write(&path, content).unwrap();
+
+        let written = write_chart_dependency_version(&path, "pleme-lib", "0.4.3").unwrap();
+        assert!(!written, "no matching dep → false");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, content, "file must be untouched when no dep matches");
     }
 
     /// End-to-end IO shell test: [`write_chart_version`] over the real
