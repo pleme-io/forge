@@ -1205,12 +1205,28 @@ pub fn bump(
 
     // Update library chart
     info!("Updating {}/Chart.yaml", lib_chart_name);
-    let updated = content.replace(
-        &format!("version: {}", old_version),
-        &format!("version: {}", new_version),
-    );
-    std::fs::write(&lib_chart_yaml, &updated)
-        .with_context(|| format!("Failed to write {}", lib_chart_yaml.display()))?;
+    // Ported off the `format!`-rebuilt-needle + `content.replace` shape onto
+    // `version::write_chart_version` — the splice-over-matched-byte-span
+    // Chart.yaml writer landed at 3bc0885, whose contract is the CSE
+    // trap-3 rule in this crate's CLAUDE.md (§ "Version bumping"): never
+    // rebuild the needle with `format!` and pass it to `content.replace`,
+    // because the reader tolerates whitespace and quotes the reconstruction
+    // does not, so the write silently no-ops AND reports success.
+    //
+    // The specific pre-port trap this site carried: `format!("version: {}",
+    // old_version)` hardcodes ONE space between `version:` and the value
+    // and drops any surrounding quotes, so a Chart.yaml authored as
+    // `version: "0.4.2"` (fleet-observed on the openshift-helmchart
+    // vendored family — 93c3818's population) or `version:  0.4.2`
+    // (aligned) reads fine through `extract_yaml_field` (which
+    // `.trim_matches('"').trim()`s on the way in) and then silently
+    // no-ops on write while returning `Ok`. The typed writer splices
+    // only the value bytes at the matched span and carries a
+    // verified-mutation seal, so the mutation cannot report success
+    // without changing the file. The two `bump_routing_tests` regression
+    // seals below pin both fleet-observed shapes.
+    version::write_chart_version(&lib_chart_yaml, &new_version)
+        .with_context(|| format!("Failed to write version to {}", lib_chart_yaml.display()))?;
 
     // Update all dependent charts
     let mut updated_count = 0u32;
@@ -2277,6 +2293,75 @@ mod bump_routing_tests {
             err.to_string()
                 .contains("Invalid bump level 'xyz' — use patch, minor, or major"),
             "got: {err}"
+        );
+    }
+
+    /// Build a `<charts_dir>/<lib_chart_name>/Chart.yaml` with a caller-
+    /// authored `version:` line, so the writer can be exercised over the
+    /// same fleet-observed shapes the port at 3bc0885's next-commit body
+    /// names — quoted, aligned, single-quoted — that the pre-port
+    /// `format!`-rebuilt-needle + `content.replace` sequence silently
+    /// no-op'd on while still reporting `Ok(("...", "..."))`.
+    fn build_solo_lib_chart_with_version_line(version_line: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_name = "pleme-lib";
+        let chart_dir = dir.path().join(lib_name);
+        std::fs::create_dir(&chart_dir).unwrap();
+        let chart_yaml = format!("apiVersion: v2\nname: {}\n{}\n", lib_name, version_line);
+        std::fs::write(chart_dir.join("Chart.yaml"), chart_yaml).unwrap();
+        (dir, lib_name.to_string())
+    }
+
+    /// Regression seal for the port off `content.replace(&format!("version:
+    /// {}", old), &format!("version: {}", new))` onto
+    /// [`crate::version::write_chart_version`]. The pre-port needle
+    /// hardcoded a single space and no quotes, so a Chart.yaml authored
+    /// as `version: "0.4.2"` — the vendored openshift-helmchart family's
+    /// shape, the population 93c3818 measured against — read fine through
+    /// [`super::extract_yaml_field`] (which `.trim_matches('"').trim()`s on
+    /// the way in) and then silently no-op'd on write while `bump`
+    /// returned `Ok(("0.4.2", "0.4.3"))`. The typed writer splices the
+    /// value bytes at the matched span and carries a verified-mutation
+    /// seal, so both the file and the return value now agree.
+    #[test]
+    fn helm_bump_writes_through_a_double_quoted_lib_version_and_preserves_the_quotes() {
+        let (dir, lib_name) = build_solo_lib_chart_with_version_line("version: \"0.4.2\"");
+        let (old, new) = bump(dir.path().to_str().unwrap(), &lib_name, "patch", false).unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("0.4.2", "0.4.3"));
+        let after = std::fs::read_to_string(dir.path().join(&lib_name).join("Chart.yaml")).unwrap();
+        assert!(
+            after.contains("version: \"0.4.3\""),
+            "pre-port trap-3: content.replace over a `format!`-rebuilt \
+             `version: 0.4.2` needle silently no-op'd on the quoted form \
+             AND reported success — file now reads: {after:?}"
+        );
+        assert!(
+            !after.contains("version: \"0.4.2\""),
+            "the old version bytes must not survive; file now reads: {after:?}"
+        );
+    }
+
+    /// Regression seal for the aligned form: `version:  0.4.2` (two
+    /// spaces after the colon), which the pre-port needle
+    /// `format!("version: {}", old)` (one space) failed to locate — a
+    /// second flavor of trap-3 that the splice-over-matched-span writer
+    /// closes structurally. Reading through [`super::extract_yaml_field`]
+    /// still works because `.trim()` on the value tolerates the extra
+    /// leading space; the trap was write-side only.
+    #[test]
+    fn helm_bump_writes_through_an_aligned_padded_lib_version_and_preserves_the_padding() {
+        let (dir, lib_name) = build_solo_lib_chart_with_version_line("version:  0.4.2");
+        let (old, new) = bump(dir.path().to_str().unwrap(), &lib_name, "major", false).unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("0.4.2", "1.0.0"));
+        let after = std::fs::read_to_string(dir.path().join(&lib_name).join("Chart.yaml")).unwrap();
+        assert!(
+            after.contains("version:  1.0.0"),
+            "padding between `version:` and the value must survive the \
+             mutation; file now reads: {after:?}"
+        );
+        assert!(
+            !after.contains("0.4.2"),
+            "the old version bytes must not survive anywhere; file now reads: {after:?}"
         );
     }
 }
