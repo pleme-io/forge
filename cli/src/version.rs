@@ -10125,43 +10125,245 @@ pub fn read_cargo_version(path: &Path) -> Result<String> {
     }
 }
 
-/// Read the version from a build.zig.zon file.
+/// Read the top-level `.version` value from a build.zig.zon file.
 ///
-/// Matches `.version = "X.Y.Z"` in the zon format.
+/// Structural: reads the `.version = "..."` field of the OUTER
+/// anonymous struct only, ignoring any `.version` field nested inside a
+/// dependency entry (`.dependencies = .{ .foo = .{ .version = "..." } }`)
+/// or hidden inside a string literal / line comment. The pre-port
+/// reader was a first-hit `.version\s*=\s*"(\d+\.\d+\.\d+)"` regex that
+/// picked up whichever `.version` appeared first in the file — which
+/// happened to be the package version by ZON convention but silently
+/// returned a dep-pin whenever a dep listed before the top-level
+/// carried one. Same trap 93c3818 closed on the Chart.yaml reader.
 pub fn read_zig_version(path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-
-    let re = regex::Regex::new(r#"\.version\s*=\s*"(\d+\.\d+\.\d+)""#)
-        .context("Failed to compile zig version regex")?;
-
-    let caps = re
-        .captures(&content)
-        .with_context(|| format!("No .version field found in {}", path.display()))?;
-
-    Ok(caps[1].to_string())
+    let span = zig_top_version_span(&content)
+        .with_context(|| format!("cannot read a version from {}", path.display()))?;
+    Ok(content[span].to_string())
 }
 
-/// Write a new version into a build.zig.zon file (in-place replacement).
-pub fn write_zig_version(path: &Path, version: &str) -> Result<()> {
+/// Write a new version into a build.zig.zon file (in-place,
+/// form-preserving).
+///
+/// Thin IO shell over [`plan_zig_version_write`], mirroring
+/// [`write_chart_version`] / [`write_cargo_version`]. The pure core
+/// takes content in, content out, so a rewrite is dry-runnable over
+/// any real build.zig.zon without touching a byte on disk.
+pub fn write_zig_version(path: &Path, new_version: &str) -> Result<()> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
+    let updated = plan_zig_version_write(&content, new_version)
+        .with_context(|| format!("cannot write a version to {}", path.display()))?;
+    std::fs::write(path, &updated)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
 
-    let re = regex::Regex::new(r#"(\.version\s*=\s*")(\d+\.\d+\.\d+)(")"#)
-        .context("Failed to compile zig version regex")?;
-
-    if !re.is_match(&content) {
-        bail!("No .version field found in {}", path.display());
+/// The PURE core of [`write_zig_version`]: content in, new content out.
+///
+/// # Contract
+///
+/// 1. `new_version` must match [`SEMVER_LIKE`] (same acceptance the
+///    Cargo and Chart.yaml writers honor — 3-part semver with an
+///    optional prerelease/build suffix, so `0.4.3` and `0.19.0-dev`
+///    both pass).
+/// 2. Exactly one top-level `.version = "..."` field must exist in the
+///    outer anonymous struct. Zero matches is REFUSED. Two or more
+///    matches is REFUSED rather than a first-hit guess, because a
+///    build.zig.zon carries exactly one package version and rewriting
+///    either half of an ambiguous pair silently would create a second
+///    source of truth.
+/// 3. The splice replaces ONLY the value bytes between the double
+///    quotes. The `.version` key, the whitespace around `=`, the
+///    surrounding quotes, and any trailing `,` or `// comment` survive
+///    byte-for-byte.
+/// 4. The verified-mutation seal (via [`splice_and_verify`]): the
+///    post-write locator re-runs, reads back exactly `new_version` at
+///    the same span, and the byte-length delta equals the value-length
+///    delta. A rewrite that reports success without changing the file
+///    is the failure mode this whole writer family exists to prevent.
+///
+/// # Compounding
+///
+/// This is the last of the fleet's version writers to lose the
+/// pre-port `.replace(&content, format!(...))` shape CLAUDE.md rule #3
+/// names — the last `regex::Regex::replace` fed a `format!`-rendered
+/// substitution in production. The writer family (Cargo, Ruby,
+/// Chart.yaml top-level, Chart.yaml dep-version, Chart.yaml
+/// dep-repository) now rides one seal at
+/// [`splice_and_verify`]; the zig arm was the odd one out and this
+/// port closes it.
+pub fn plan_zig_version_write(content: &str, new_version: &str) -> Result<String> {
+    if !SEMVER_LIKE.is_match(new_version) {
+        bail!(
+            "refusing to write {:?} — a version must start X.Y.Z (a prerelease \
+             or build suffix is allowed after it)",
+            new_version
+        );
     }
 
-    let new_content = re
-        .replace(&content, format!("${{1}}{}${{3}}", version))
-        .to_string();
+    let span = zig_top_version_span(content)?;
+    splice_and_verify(content, span, new_version, "version", zig_top_version_span)
+}
 
-    std::fs::write(path, &new_content)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
+/// Byte range of the value bytes of the top-level `.version` field in a
+/// build.zig.zon file — bytes only, not the surrounding `"..."`, and
+/// definitely not the trailing `,` or `// comment`.
+///
+/// Walks the content once, tracking brace-nesting depth so that a
+/// `.version` inside a dependency entry (`.dependencies = .{ .foo = .{
+/// .version = ... } }` — depth 3 by the time the walker reaches it) is
+/// SKIPPED and only the outer struct's `.version` (depth exactly 1) is
+/// spliced. String literals and `//` line comments are opaque to the
+/// walker — a URL carrying `?.version=1.0.0` inside a `.url = "..."`
+/// value or a `// .version = ...` comment cannot accidentally register
+/// as a field.
+///
+/// Refuses zero matches ("no top-level `.version`") and two-or-more
+/// matches ("ambiguous top-level `.version` pair") the same way
+/// [`chart_top_version_span`] does — silent first-hit is the trap this
+/// family exists to close, not a fallback the walker rides.
+///
+/// Shared by [`plan_zig_version_write`]'s pre-splice locator and its
+/// post-splice verified-mutation seal, so both halves see the same span
+/// shape and any post-splice ambiguity (e.g. the splice somehow
+/// introducing a second top-level `.version`) surfaces at the seal.
+fn zig_top_version_span(content: &str) -> Result<std::ops::Range<usize>> {
+    let bytes = content.as_bytes();
+    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut depth: usize = 0;
+    let mut i: usize = 0;
 
-    Ok(())
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        // Line comment `//` — opaque to end of line.
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Raw-string line `\\...\n` — opaque to end of line. Two-byte
+        // sentinel outside a regular string is only ever the start of
+        // a Zig / ZON raw-string continuation line.
+        if b == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Regular double-quoted string literal — opaque to closing `"`,
+        // honoring `\`-escapes so `"\""` is one string, not two.
+        if b == b'"' {
+            let mut j = i + 1;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'\\' if j + 1 < bytes.len() => j += 2,
+                    b'"' => {
+                        j += 1;
+                        break;
+                    }
+                    _ => j += 1,
+                }
+            }
+            i = j;
+            continue;
+        }
+
+        if b == b'{' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if b == b'}' {
+            depth = depth.checked_sub(1).with_context(|| {
+                format!("unbalanced `}}` at byte {i} in build.zig.zon — refusing to guess")
+            })?;
+            i += 1;
+            continue;
+        }
+
+        // `.version` field — only at depth exactly 1 (immediate child
+        // of the outer `.{ ... }`). The `boundary_before` check keeps
+        // `foo.version` and `_version` from firing; `boundary_after`
+        // keeps `.versions` from firing.
+        if depth == 1 && b == b'.' && content[i..].starts_with(".version") {
+            let after = i + ".version".len();
+            let boundary_after =
+                after >= bytes.len() || matches!(bytes[after], b' ' | b'\t' | b'\r' | b'\n' | b'=');
+            let boundary_before =
+                i == 0 || matches!(bytes[i - 1], b'{' | b',' | b' ' | b'\t' | b'\r' | b'\n');
+            if boundary_after && boundary_before {
+                // Advance past `.version`, then any whitespace, then the
+                // required `=`, then any whitespace, then the required
+                // opening `"`. ZON requires strings to be double-quoted,
+                // so an unquoted or single-quoted value is a hard error
+                // rather than a silent splice through the wrong shape.
+                let mut k = after;
+                while k < bytes.len() && matches!(bytes[k], b' ' | b'\t') {
+                    k += 1;
+                }
+                if k >= bytes.len() || bytes[k] != b'=' {
+                    bail!(
+                        "top-level `.version` at byte {i} is not followed by \
+                         `=` — refusing to guess"
+                    );
+                }
+                k += 1;
+                while k < bytes.len() && matches!(bytes[k], b' ' | b'\t') {
+                    k += 1;
+                }
+                if k >= bytes.len() || bytes[k] != b'"' {
+                    bail!(
+                        "top-level `.version` at byte {i} is not \
+                         double-quoted — build.zig.zon requires \
+                         `.version = \"X.Y.Z\"`"
+                    );
+                }
+                let start = k + 1;
+                let mut m = start;
+                while m < bytes.len() {
+                    match bytes[m] {
+                        b'\\' if m + 1 < bytes.len() => m += 2,
+                        b'"' => break,
+                        b'\n' => bail!(
+                            "top-level `.version` value opened at byte {start} \
+                             is not closed with `\"` before end of line"
+                        ),
+                        _ => m += 1,
+                    }
+                }
+                if m >= bytes.len() {
+                    bail!(
+                        "top-level `.version` value opened at byte {start} is \
+                         not closed with `\"` before end of file"
+                    );
+                }
+                spans.push(start..m);
+                i = m + 1;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    let mut it = spans.into_iter();
+    let first = it
+        .next()
+        .context("no top-level `.version = \"...\"` field in build.zig.zon — refusing to guess")?;
+    if it.next().is_some() {
+        bail!(
+            "refusing to write: two or more top-level `.version = \"...\"` \
+             fields — build.zig.zon carries exactly one package version"
+        );
+    }
+    Ok(first)
 }
 
 /// Read the version from a Chart.yaml file.
@@ -10907,6 +11109,167 @@ mod tests {
         let path = dir.path().join("build.zig.zon");
         std::fs::write(&path, ".{\n    .name = \"test\",\n}\n").unwrap();
         assert!(write_zig_version(&path, "1.0.0").is_err());
+    }
+
+    #[test]
+    fn plan_zig_write_splices_top_level_version() {
+        let content = ".{\n    .name = \"test\",\n    .version = \"0.3.1\",\n}\n";
+        let out = plan_zig_version_write(content, "0.4.0").unwrap();
+        assert_eq!(
+            out,
+            ".{\n    .name = \"test\",\n    .version = \"0.4.0\",\n}\n"
+        );
+    }
+
+    /// The pre-port trap the structural walker closes: the first-hit
+    /// `\.version\s*=\s*"..."` regex would rewrite the dep-scoped
+    /// `.version` here (the FIRST `.version` textually) and leave the
+    /// top-level unchanged, while reporting a successful bump. The
+    /// structural walker refuses that by construction — a `.version`
+    /// inside `.dependencies = .{ .foo = .{ ... } }` sits at brace
+    /// depth 3 and is skipped.
+    #[test]
+    fn plan_zig_write_skips_dependency_scoped_version() {
+        let content = ".{\n    .name = \"test\",\n    .dependencies = .{\n        .foo = .{\n            .url = \"https://example.com/foo.tar.gz\",\n            .version = \"1.0.0\",\n        },\n    },\n    .version = \"0.3.1\",\n}\n";
+        let out = plan_zig_version_write(content, "0.4.0").unwrap();
+        assert!(
+            out.contains("            .version = \"1.0.0\","),
+            "dep-scoped .version must survive: {out}"
+        );
+        assert!(
+            out.contains("    .version = \"0.4.0\","),
+            "top-level .version must update: {out}"
+        );
+    }
+
+    /// The pre-port writer's `\d+\.\d+\.\d+"` regex refused to match
+    /// any prerelease source, so a build.zig.zon carrying
+    /// `.version = "0.19.0-dev"` bailed as "no .version field found"
+    /// — a coverage bug that hit the Cargo reader too before the
+    /// SEMVER_LIKE fix.
+    #[test]
+    fn plan_zig_write_preserves_prerelease_source() {
+        let content = ".{\n    .name = \"test\",\n    .version = \"0.19.0-dev\",\n}\n";
+        let out = plan_zig_version_write(content, "0.20.0").unwrap();
+        assert_eq!(
+            out,
+            ".{\n    .name = \"test\",\n    .version = \"0.20.0\",\n}\n"
+        );
+    }
+
+    #[test]
+    fn plan_zig_write_accepts_prerelease_target() {
+        let content = ".{\n    .version = \"0.1.0\",\n}\n";
+        let out = plan_zig_version_write(content, "0.20.0-dev").unwrap();
+        assert_eq!(out, ".{\n    .version = \"0.20.0-dev\",\n}\n");
+    }
+
+    #[test]
+    fn plan_zig_write_preserves_whitespace_variance() {
+        let content = ".{\n    .version    =   \"0.3.1\",\n}\n";
+        let out = plan_zig_version_write(content, "0.4.0").unwrap();
+        assert_eq!(out, ".{\n    .version    =   \"0.4.0\",\n}\n");
+    }
+
+    #[test]
+    fn plan_zig_write_preserves_trailing_comment() {
+        let content = ".{\n    .version = \"0.3.1\", // pinned per ADR-42\n}\n";
+        let out = plan_zig_version_write(content, "0.4.0").unwrap();
+        assert_eq!(
+            out,
+            ".{\n    .version = \"0.4.0\", // pinned per ADR-42\n}\n"
+        );
+    }
+
+    #[test]
+    fn plan_zig_write_refuses_two_top_level_versions() {
+        let content = ".{\n    .version = \"0.1.0\",\n    .version = \"0.2.0\",\n}\n";
+        let err = plan_zig_version_write(content, "0.4.0").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("two or more"), "got {msg}");
+    }
+
+    #[test]
+    fn plan_zig_write_refuses_missing_version() {
+        let content = ".{\n    .name = \"test\",\n}\n";
+        let err = plan_zig_version_write(content, "0.4.0").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no top-level"), "got {msg}");
+    }
+
+    #[test]
+    fn plan_zig_write_refuses_non_semver_target() {
+        let content = ".{\n    .version = \"0.1.0\",\n}\n";
+        let err = plan_zig_version_write(content, "not-a-version").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("refusing to write"), "got {msg}");
+    }
+
+    /// A `.version` substring living INSIDE a string literal must not
+    /// be misread as a field. `.url` here carries `.version=1.0.0` as
+    /// query-string text — the pre-port regex bypasses it because
+    /// there is no `"` between `=` and the value, but the walker
+    /// closes the whole shape by construction: any `.version` occurring
+    /// while a `"` is unclosed is opaque, so even an adversarial
+    /// `"...\.version = \"9.9.9\"..."` (had it survived Rust escape
+    /// processing to reach the raw bytes) would be skipped.
+    #[test]
+    fn plan_zig_write_ignores_version_inside_string_literal() {
+        let content = ".{\n    .name = \"test\",\n    .paths = .{ \"src\", \"build.zig\" },\n    .fingerprint_hint = \"?.version=1.0.0\",\n    .version = \"0.3.1\",\n}\n";
+        let out = plan_zig_version_write(content, "0.4.0").unwrap();
+        assert!(out.contains(".version = \"0.4.0\","));
+        assert!(out.contains("?.version=1.0.0"));
+    }
+
+    /// Zig raw-string continuation lines (`\\...\n`) are opaque to the
+    /// walker, so a documentation block that literally quotes an
+    /// example `.version = "1.2.3"` cannot register as a second
+    /// top-level field. The pre-port regex would match it (there is no
+    /// escape sequence needed inside a raw string, so the literal
+    /// bytes are `.version = "1.2.3"` on disk) and `Regex::replace`
+    /// would silently rewrite the DOCUMENTATION rather than the real
+    /// package version.
+    #[test]
+    fn plan_zig_write_ignores_version_inside_raw_string_lines() {
+        let content = ".{\n    .description =\n        \\\\Example:\n        \\\\  .version = \"1.2.3\"\n    ,\n    .version = \"0.3.1\",\n}\n";
+        let out = plan_zig_version_write(content, "0.4.0").unwrap();
+        assert!(
+            out.contains("\\\\  .version = \"1.2.3\""),
+            "raw-string documentation must survive: {out}"
+        );
+        assert!(
+            out.contains("    .version = \"0.4.0\","),
+            "top-level .version must update: {out}"
+        );
+    }
+
+    /// A `.version` phrase inside a `//` line comment is opaque to the
+    /// walker — otherwise a stale "TODO bump `.version = \"9.9.9\"`"
+    /// note would silently be picked up as a second top-level
+    /// definition and refused as ambiguous.
+    #[test]
+    fn plan_zig_write_ignores_version_inside_line_comment() {
+        let content = ".{\n    // .version = \"9.9.9\",\n    .version = \"0.3.1\",\n}\n";
+        let out = plan_zig_version_write(content, "0.4.0").unwrap();
+        assert_eq!(
+            out,
+            ".{\n    // .version = \"9.9.9\",\n    .version = \"0.4.0\",\n}\n"
+        );
+    }
+
+    /// The pre-port reader's first-hit regex would silently return the
+    /// dep-scoped `.version = "1.0.0"` here as the package version. The
+    /// structural reader returns the top-level one.
+    #[test]
+    fn read_zig_version_returns_top_level_not_dep() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build.zig.zon");
+        std::fs::write(
+            &path,
+            ".{\n    .dependencies = .{\n        .foo = .{ .version = \"1.0.0\" },\n    },\n    .version = \"0.3.1\",\n}\n",
+        )
+        .unwrap();
+        assert_eq!(read_zig_version(&path).unwrap(), "0.3.1");
     }
 
     #[test]
