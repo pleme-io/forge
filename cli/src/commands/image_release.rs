@@ -792,7 +792,8 @@ mod tests {
             h.set_size(manifest.len() as u64);
             h.set_mode(0o644);
             h.set_cksum();
-            b.append_data(&mut h, "manifest.json", &manifest[..]).unwrap();
+            b.append_data(&mut h, "manifest.json", &manifest[..])
+                .unwrap();
             b.finish().unwrap();
         }
         let mut gz = GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -804,8 +805,8 @@ mod tests {
         let path = tmp.path().to_string_lossy().to_string();
 
         // The gzip wrapper must be transparent: the manifest parses.
-        let manifest = read_docker_archive_manifest(&path)
-            .expect("a gzipped docker-archive must be readable");
+        let manifest =
+            read_docker_archive_manifest(&path).expect("a gzipped docker-archive must be readable");
         assert_eq!(manifest.layers, vec!["l/layer.tar".to_string()]);
     }
 
