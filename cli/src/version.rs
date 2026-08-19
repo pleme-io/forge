@@ -10152,6 +10152,61 @@ fn ensure_writable_semver(new_version: &str) -> Result<()> {
     Ok(())
 }
 
+/// The PURE core shared by every top-level version planner whose shape is
+/// "acceptance guard → locator-owned byte span → verified-mutation seal
+/// re-running the same locator." Runs [`ensure_writable_semver`] on
+/// `new_version`, locates the value's byte span via `locator`, then
+/// rides [`splice_and_verify`] with `locator` itself as the reverify
+/// callback so the seal sees the same span shape the pre-splice locator
+/// produced.
+///
+/// # Compounding
+///
+/// Three planners now share this body —
+/// `plan_zig_version_write`, `plan_chart_version_write`, and
+/// `plan_package_json_version_write`. The pre-lift shape was three
+/// byte-identical bodies:
+///
+/// ```ignore
+/// pub fn plan_<eco>_version_write(content: &str, new_version: &str) -> Result<String> {
+///     ensure_writable_semver(new_version)?;
+///     let span = <eco>_top_version_span(content)?;
+///     splice_and_verify(content, span, new_version, "version", <eco>_top_version_span)
+/// }
+/// ```
+///
+/// differing ONLY in which `_top_version_span` locator they named. Every
+/// invariant these planners honor (the acceptance guard, the pre-splice
+/// locate, the post-splice reverify, the byte-length-delta seal, the
+/// uniform `"version"` field label in seal errors) now lives in one
+/// place, so a fourth ecosystem whose top-level version reads through a
+/// value-bytes-only span locator (a `pyproject_top_version_span`, a
+/// `gemspec_top_version_span`) becomes a one-line delegation rather than
+/// a copy of the seven-line shape — the same lift class the reader
+/// family got from [`read_version_by_span`] and the top-level writer IO
+/// shells got from [`apply_version_write`].
+///
+/// `locator` is called TWICE (pre-splice locate and post-splice
+/// reverify) so its type is `Fn`, not `FnOnce`. Every current caller
+/// passes a bare function pointer, which is `Copy`, so the shape
+/// carries no capture cost.
+///
+/// A planner that hand-rolls the three-line body re-opens the exact
+/// three-replica duplication this helper closed — the shield
+/// [`tests::planners_route_semver_guard_through_ensure_writable_semver`]
+/// requires every lifted planner's body to open with a bare
+/// `plan_top_version_by_span(content, new_version, <locator>)` call, so
+/// the hand-rolled `ensure_writable_semver` + local `let span =` +
+/// `splice_and_verify(...)` shape is refused at source-scan time.
+fn plan_top_version_by_span<F>(content: &str, new_version: &str, locator: F) -> Result<String>
+where
+    F: Fn(&str) -> Result<std::ops::Range<usize>>,
+{
+    ensure_writable_semver(new_version)?;
+    let span = locator(content)?;
+    splice_and_verify(content, span, new_version, "version", locator)
+}
+
 /// Classify a Cargo.toml's version shape. Pure — takes the content, so it is
 /// testable without a filesystem.
 pub fn classify_cargo(content: &str) -> CargoShape {
@@ -10294,9 +10349,7 @@ pub fn write_zig_version(path: &Path, new_version: &str) -> Result<()> {
 /// [`splice_and_verify`]; the zig arm was the odd one out and this
 /// port closes it.
 pub fn plan_zig_version_write(content: &str, new_version: &str) -> Result<String> {
-    ensure_writable_semver(new_version)?;
-    let span = zig_top_version_span(content)?;
-    splice_and_verify(content, span, new_version, "version", zig_top_version_span)
+    plan_top_version_by_span(content, new_version, zig_top_version_span)
 }
 
 /// Byte range of the value bytes of the top-level `.version` field in a
@@ -10655,15 +10708,7 @@ pub fn write_chart_version(path: &Path, new_version: &str) -> Result<()> {
 ///    rewrite that reports success without changing the file is the
 ///    failure mode this whole family exists to prevent.
 pub fn plan_chart_version_write(content: &str, new_version: &str) -> Result<String> {
-    ensure_writable_semver(new_version)?;
-    let span = chart_top_version_span(content)?;
-    splice_and_verify(
-        content,
-        span,
-        new_version,
-        "version",
-        chart_top_version_span,
-    )
+    plan_top_version_by_span(content, new_version, chart_top_version_span)
 }
 
 /// A `version:` line inside a Chart.yaml dependency entry — same
@@ -11166,15 +11211,7 @@ pub fn write_package_json_version(path: &Path, new_version: &str) -> Result<()> 
 ///    delta. A rewrite that reports success without changing the file
 ///    is the failure mode this whole writer family exists to prevent.
 pub fn plan_package_json_version_write(content: &str, new_version: &str) -> Result<String> {
-    ensure_writable_semver(new_version)?;
-    let span = package_json_top_version_span(content)?;
-    splice_and_verify(
-        content,
-        span,
-        new_version,
-        "version",
-        package_json_top_version_span,
-    )
+    plan_top_version_by_span(content, new_version, package_json_top_version_span)
 }
 
 /// Byte range of the value bytes of the top-level `"version"` key in a
@@ -11486,6 +11523,99 @@ mod tests {
                  Direct write re-opens the three-replica duplication apply_version_write closed."
             );
         }
+    }
+
+    /// The shared top-version planner must hand the ecosystem's `locator`
+    /// the raw content bytes, splice `new_version` over the byte span the
+    /// locator names, and return the byte-identical updated content. This
+    /// pins the delegation contract directly rather than inferring it
+    /// from the three per-ecosystem round-trip tests on
+    /// `plan_zig_version_write` / `plan_chart_version_write` /
+    /// `plan_package_json_version_write`.
+    ///
+    /// Fixture uses a form-independent locator (the bytes BETWEEN the
+    /// two `|` sentinels) so it locates BOTH the original value and the
+    /// spliced-in `new_version` — the post-splice reverify call the
+    /// underlying `splice_and_verify` seal makes would otherwise fail on
+    /// a fixture whose sentinel disappeared after the write, obscuring
+    /// the delegation shape this test pins.
+    #[test]
+    fn plan_top_version_by_span_delegates_to_locator_and_returns_splice() {
+        let content = "prefix|XX|suffix\n";
+        let seen: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let locator = |c: &str| -> Result<std::ops::Range<usize>> {
+            seen.borrow_mut().push(c.to_string());
+            let start = c
+                .find('|')
+                .context("locator: opening `|` sentinel not present")?;
+            let end = c[start + 1..]
+                .find('|')
+                .map(|o| start + 1 + o)
+                .context("locator: closing `|` sentinel not present")?;
+            Ok((start + 1)..end)
+        };
+        let updated = plan_top_version_by_span(content, "1.2.3", locator).unwrap();
+        assert_eq!(
+            updated, "prefix|1.2.3|suffix\n",
+            "the helper must splice `new_version` over exactly the locator's span"
+        );
+        let calls = seen.into_inner();
+        assert_eq!(
+            calls.len(),
+            2,
+            "the locator must run twice — pre-splice locate AND post-splice reverify, \
+             the `splice_and_verify` seal. Got calls: {calls:?}"
+        );
+        assert_eq!(
+            calls[0], content,
+            "the first (pre-splice) locator call must see the caller's content verbatim"
+        );
+        assert_eq!(
+            calls[1], updated,
+            "the second (post-splice) locator call must see the spliced content"
+        );
+    }
+
+    /// A `new_version` that fails [`SEMVER_LIKE`] must be refused BEFORE
+    /// the locator runs — the acceptance guard is the first line of the
+    /// helper's body, so a bad version never touches the locator's own
+    /// error surface. Pins the shared-guard contract that lets every
+    /// ecosystem planner inherit uniform refusal messages by delegation.
+    #[test]
+    fn plan_top_version_by_span_refuses_bad_semver_before_locator_runs() {
+        let called: std::cell::Cell<bool> = std::cell::Cell::new(false);
+        let locator = |_c: &str| -> Result<std::ops::Range<usize>> {
+            called.set(true);
+            Ok(0..0)
+        };
+        let err = plan_top_version_by_span("prefix|XX|suffix\n", "not-a-semver", locator)
+            .expect_err("bad semver must refuse");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("refusing to write"),
+            "the acceptance guard's refusal message must surface, got: {chain}"
+        );
+        assert!(
+            !called.get(),
+            "the locator must NOT run when the acceptance guard refused"
+        );
+    }
+
+    /// A locator that returns `Err` MUST bubble up through the helper
+    /// unchanged — the helper adds no context of its own on the locator
+    /// error path so per-ecosystem locator errors surface at the caller
+    /// without a layer of paraphrase.
+    #[test]
+    fn plan_top_version_by_span_bubbles_locator_error() {
+        let locator =
+            |_c: &str| -> Result<std::ops::Range<usize>> { bail!("synthetic locator refusal") };
+        let err = plan_top_version_by_span("bytes\n", "1.2.3", locator)
+            .expect_err("locator refusal must propagate");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("synthetic locator refusal"),
+            "the locator's own error message must survive into the caller's chain, got: {chain}"
+        );
     }
 
     /// The IO read-shell must fire the ecosystem's `locator` with the
@@ -12068,36 +12198,78 @@ mod tests {
              bare check re-opens the four-replica duplication the helper closed."
         );
 
-        // The delegation shield: every planner body starts with the
-        // guard call, so a new ecosystem planner inherits the acceptance
-        // contract by construction rather than by cargo-cult copy.
+        // The delegation shield: every planner body either opens with
+        // the guard call directly, or opens with a call to
+        // `plan_top_version_by_span(content, new_version, …)` — the
+        // shared helper whose own body opens with the guard. Both routes
+        // inherit the acceptance contract by construction rather than by
+        // cargo-cult copy. `visibility` is the planner's Rust visibility
+        // — `pub` for the top-level writers' pure cores, `fn` for the
+        // module-private helper — so both surfaces are held to the same
+        // acceptance-guard invariant.
+        //
+        // The `Delegated` planners open with a bare
+        // `plan_top_version_by_span(content, new_version, ` prefix so
+        // no per-ecosystem body can slip a divergent argument shape
+        // between the delegation call and the guard.
+        enum Route<'a> {
+            Direct,
+            Delegated(&'a str),
+        }
         let planners = [
             (
+                "pub fn",
                 "plan_cargo_version_write",
-                "content: &str, new_version: &str",
+                "(content: &str, new_version: &str",
+                Route::Direct,
             ),
-            ("plan_zig_version_write", "content: &str, new_version: &str"),
             (
+                "fn",
+                "plan_top_version_by_span",
+                "<F>(content: &str, new_version: &str, locator: F",
+                Route::Direct,
+            ),
+            (
+                "pub fn",
+                "plan_zig_version_write",
+                "(content: &str, new_version: &str",
+                Route::Delegated("zig_top_version_span"),
+            ),
+            (
+                "pub fn",
                 "plan_chart_version_write",
-                "content: &str, new_version: &str",
+                "(content: &str, new_version: &str",
+                Route::Delegated("chart_top_version_span"),
             ),
             (
+                "pub fn",
                 "plan_package_json_version_write",
-                "content: &str, new_version: &str",
+                "(content: &str, new_version: &str",
+                Route::Delegated("package_json_top_version_span"),
             ),
             (
+                "pub fn",
                 "plan_chart_dependency_version_write",
-                "\n    content: &str,\n    dep_name: &str,\n    new_version: &str,\n",
+                "(\n    content: &str,\n    dep_name: &str,\n    new_version: &str,\n",
+                Route::Direct,
             ),
         ];
-        for (name, sig_tail) in planners {
-            let signature = format!("pub fn {name}({sig_tail}");
+        for (visibility, name, sig_tail, route) in planners {
+            let signature = format!("{visibility} {name}{sig_tail}");
             let start = src.find(&signature).unwrap_or_else(|| {
                 panic!("must find the public signature of {name} — signature drift?")
             });
+            // The opening brace is either at end of the signature line
+            // (` {\n`) or on its own line after a `where` clause
+            // (`\n{\n`). `plan_top_version_by_span` carries the `where
+            // F: Fn(...)` form; the older planners in this shield do not.
             let after_brace = src[start..]
                 .find(" {\n")
-                .map(|o| start + o + 3)
+                .map(|o| (o, 3))
+                .into_iter()
+                .chain(src[start..].find("\n{\n").map(|o| (o, 2)))
+                .min_by_key(|(o, _)| *o)
+                .map(|(o, w)| start + o + w)
                 .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
             let body_end = src[after_brace..]
                 .find("\n}\n")
@@ -12105,11 +12277,23 @@ mod tests {
                 .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
             let body = src[after_brace..body_end].trim();
 
-            assert!(
-                body.starts_with("ensure_writable_semver(new_version)?;"),
-                "{name} must open with `ensure_writable_semver(new_version)?;` — \
-                 the writer family's uniform acceptance contract. Got body: {body:?}"
-            );
+            match route {
+                Route::Direct => assert!(
+                    body.starts_with("ensure_writable_semver(new_version)?;"),
+                    "{name} must open with `ensure_writable_semver(new_version)?;` — \
+                     the writer family's uniform acceptance contract. Got body: {body:?}"
+                ),
+                Route::Delegated(locator) => {
+                    let expected =
+                        format!("plan_top_version_by_span(content, new_version, {locator})");
+                    assert!(
+                        body.starts_with(&expected),
+                        "{name} must open with `{expected}` — the shared \
+                         top-version planner that owns the acceptance guard, the \
+                         locate, and the seal. Got body: {body:?}"
+                    );
+                }
+            }
         }
     }
 
