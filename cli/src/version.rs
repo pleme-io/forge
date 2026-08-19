@@ -10208,9 +10208,11 @@ static CHART_TOP_VERSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLoc
         .expect("static regex")
 });
 
-/// Byte span of the version-value bytes in a [`CHART_TOP_VERSION`] match.
-///
-/// Exactly one of capture groups 1 (double-quoted), 2 (single-quoted), 3
+/// Byte span of the value bytes in a three-alternative Chart.yaml value
+/// capture — [`CHART_TOP_VERSION`], [`CHART_DEP_ENTRY_VERSION`], and
+/// [`CHART_DEP_ENTRY_REPOSITORY`] share the same
+/// `(?:"([^"\n]+)"|'([^'\n]+)'|([^\s#]+))` shape at their tail. Exactly
+/// one of capture groups 1 (double-quoted), 2 (single-quoted), 3
 /// (unquoted) is present per match; the span of the present one is what
 /// the writer splices over.
 fn chart_value_span(caps: &regex::Captures<'_>) -> std::ops::Range<usize> {
@@ -10219,6 +10221,78 @@ fn chart_value_span(caps: &regex::Captures<'_>) -> std::ops::Range<usize> {
         .or_else(|| caps.get(3))
         .expect("one of the three alternatives fires per match")
         .range()
+}
+
+/// Byte span of the top-level `version:` value in a Chart.yaml.
+///
+/// Runs the exactly-one-match enforcement — zero matches and two-or-more
+/// matches are both hard errors, because a Chart.yaml carries exactly one
+/// chart-own version and a silent first-hit guess against a malformed file
+/// would create a second source of truth. Shared by
+/// [`plan_chart_version_write`]'s pre-splice locator and its post-splice
+/// verified-mutation seal, so both halves see the same span shape.
+fn chart_top_version_span(content: &str) -> Result<std::ops::Range<usize>> {
+    let mut matches = CHART_TOP_VERSION.captures_iter(content);
+    let first = matches
+        .next()
+        .context("no top-level `version:` line at column 0 — refusing to guess")?;
+    if matches.next().is_some() {
+        bail!(
+            "refusing to write: two or more top-level `version:` lines at \
+             column 0 — Chart.yaml carries exactly one chart-own version"
+        );
+    }
+    Ok(chart_value_span(&first))
+}
+
+/// Splice `new_value` over `span` in `content`, then run the
+/// verified-mutation seal: (a) `reverify` re-locates the target field's
+/// value span in the updated content and it MUST read back exactly
+/// `new_value`; (b) the total byte-length delta MUST equal
+/// `new_value.len() - span.len()` — so no byte outside the target moved.
+///
+/// This is the seal that every form-preserving splice writer in this
+/// module rides. The failure mode it exists to prevent is a rewrite that
+/// reports success without changing the file (or that changes more than
+/// the intended bytes) — measured on Ruby (`content.replace` silently
+/// no-oping while logging the bump) and on Chart.yaml (`serde_yaml`
+/// round-trip silently normalizing comments and quote styles). Passing
+/// the callback rather than a regex lets each writer plug in whatever
+/// locator it already has — a captures-per-match regex, a two-stage
+/// serde + raw-walk, or a shape classifier.
+///
+/// `field_label` names the field in error messages (`"version"`,
+/// `"repository"`) so a seal failure surfaces which write went wrong.
+fn splice_and_verify<F>(
+    content: &str,
+    span: std::ops::Range<usize>,
+    new_value: &str,
+    field_label: &str,
+    reverify: F,
+) -> Result<String>
+where
+    F: FnOnce(&str) -> Result<std::ops::Range<usize>>,
+{
+    let mut updated = String::with_capacity(content.len() + new_value.len());
+    updated.push_str(&content[..span.start]);
+    updated.push_str(new_value);
+    updated.push_str(&content[span.end..]);
+
+    let after = reverify(&updated).with_context(|| {
+        format!("verified-mutation seal: post-write {field_label} span not found — refusing")
+    })?;
+    let got = &updated[after];
+    if got != new_value {
+        bail!("rewrite did not take — expected {new_value}, re-read {got}");
+    }
+    let expected_len = content.len() + new_value.len() - (span.end - span.start);
+    if updated.len() != expected_len {
+        bail!(
+            "rewrite changed more bytes than the {field_label} value ({} vs {expected_len})",
+            updated.len()
+        );
+    }
+    Ok(updated)
 }
 
 /// Write a new version into a Chart.yaml (in-place, form-preserving).
@@ -10278,39 +10352,14 @@ pub fn plan_chart_version_write(content: &str, new_version: &str) -> Result<Stri
         );
     }
 
-    let mut matches = CHART_TOP_VERSION.captures_iter(content);
-    let first = matches
-        .next()
-        .context("no top-level `version:` line at column 0 — refusing to guess")?;
-    if matches.next().is_some() {
-        bail!(
-            "refusing to write: two or more top-level `version:` lines at \
-             column 0 — Chart.yaml carries exactly one chart-own version"
-        );
-    }
-
-    let span = chart_value_span(&first);
-
-    let mut updated = String::with_capacity(content.len() + new_version.len());
-    updated.push_str(&content[..span.start]);
-    updated.push_str(new_version);
-    updated.push_str(&content[span.end..]);
-
-    let after = CHART_TOP_VERSION
-        .captures(&updated)
-        .context("verified-mutation seal: post-write regex found no version — refusing")?;
-    let got = &updated[chart_value_span(&after)];
-    if got != new_version {
-        bail!("rewrite did not take — expected {new_version}, re-read {got}");
-    }
-    let expected_len = content.len() + new_version.len() - (span.end - span.start);
-    if updated.len() != expected_len {
-        bail!(
-            "rewrite changed more bytes than the version value ({} vs {expected_len})",
-            updated.len()
-        );
-    }
-    Ok(updated)
+    let span = chart_top_version_span(content)?;
+    splice_and_verify(
+        content,
+        span,
+        new_version,
+        "version",
+        chart_top_version_span,
+    )
 }
 
 /// A `version:` line inside a Chart.yaml dependency entry — same
@@ -10347,18 +10396,6 @@ static CHART_DEP_ENTRY_REPOSITORY: std::sync::LazyLock<regex::Regex> =
 /// caller walks the body by indent from the line after it.
 static CHART_DEPS_HEADER: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"(?m)^dependencies:").expect("static regex"));
-
-/// Byte span of the version-value bytes in a [`CHART_DEP_ENTRY_VERSION`]
-/// match. Exactly one of capture groups 1 (double-quoted), 2 (single-quoted),
-/// 3 (unquoted) is present per match; the span of the present one is what
-/// the writer splices over.
-fn chart_dep_value_span(caps: &regex::Captures<'_>) -> std::ops::Range<usize> {
-    caps.get(1)
-        .or_else(|| caps.get(2))
-        .or_else(|| caps.get(3))
-        .expect("one of the three alternatives fires per match")
-        .range()
-}
 
 /// Write a new version onto a specific entry in a Chart.yaml's
 /// `dependencies:` list — the sibling of [`write_chart_version`] for the
@@ -10450,25 +10487,10 @@ pub fn plan_chart_dependency_version_write(
         return Ok(None);
     };
 
-    let mut updated = String::with_capacity(content.len() + new_version.len());
-    updated.push_str(&content[..span.start]);
-    updated.push_str(new_version);
-    updated.push_str(&content[span.end..]);
-
-    let after = chart_dep_version_span(&updated, dep_name)?
-        .context("verified-mutation seal: post-write dep version span not found — refusing")?;
-    let got = &updated[after];
-    if got != new_version {
-        bail!("rewrite did not take — expected {new_version}, re-read {got}");
-    }
-    let expected_len = content.len() + new_version.len() - (span.end - span.start);
-    if updated.len() != expected_len {
-        bail!(
-            "rewrite changed more bytes than the version value ({} vs {expected_len})",
-            updated.len()
-        );
-    }
-    Ok(Some(updated))
+    splice_and_verify(content, span, new_version, "version", |u| {
+        chart_dep_version_span(u, dep_name)?.context("post-write dep version span not found")
+    })
+    .map(Some)
 }
 
 /// Write a new repository URL onto a specific entry in a Chart.yaml's
@@ -10565,25 +10587,10 @@ pub fn plan_chart_dependency_repository_write(
         return Ok(None);
     };
 
-    let mut updated = String::with_capacity(content.len() + new_repository.len());
-    updated.push_str(&content[..span.start]);
-    updated.push_str(new_repository);
-    updated.push_str(&content[span.end..]);
-
-    let after = chart_dep_repository_span(&updated, dep_name)?
-        .context("verified-mutation seal: post-write dep repository span not found — refusing")?;
-    let got = &updated[after];
-    if got != new_repository {
-        bail!("rewrite did not take — expected {new_repository}, re-read {got}");
-    }
-    let expected_len = content.len() + new_repository.len() - (span.end - span.start);
-    if updated.len() != expected_len {
-        bail!(
-            "rewrite changed more bytes than the repository value ({} vs {expected_len})",
-            updated.len()
-        );
-    }
-    Ok(Some(updated))
+    splice_and_verify(content, span, new_repository, "repository", |u| {
+        chart_dep_repository_span(u, dep_name)?.context("post-write dep repository span not found")
+    })
+    .map(Some)
 }
 
 /// Locate the byte span of the `version:` value in the `dependencies:`
@@ -10736,7 +10743,7 @@ fn chart_dep_field_span(
             field_label
         );
     }
-    let val = chart_dep_value_span(&first);
+    let val = chart_value_span(&first);
     Ok(Some((entry_start + val.start)..(entry_start + val.end)))
 }
 
@@ -11506,6 +11513,108 @@ mod tests {
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, content, "file must be untouched when no dep matches");
+    }
+
+    // ========================================================================
+    // Shared splice-and-verify seal — the invariant every form-preserving
+    // Chart.yaml writer rides. Exercised INDIRECTLY through the writers'
+    // form-preservation tests above, and DIRECTLY here so a future writer
+    // adopting the helper does not have to re-derive its contract. The seal
+    // exists to catch the two silent-success failure modes measured on this
+    // family: a rewrite that reports success without changing the target
+    // bytes (the pre-port `content.replace` shape) and a rewrite that moves
+    // bytes outside the target span (the pre-port `serde_yaml` round-trip
+    // shape, which normalized comments and quote style).
+    // ========================================================================
+
+    /// Positive: a well-behaved locator (identity-style — the value bytes
+    /// occupy the same span before and after) round-trips through the seal
+    /// and produces the expected splice.
+    #[test]
+    fn splice_and_verify_produces_the_spliced_content() {
+        let content = "version: 0.4.2\n";
+        let span = 9..14;
+        let out = splice_and_verify(content, span, "0.4.3", "version", |u| {
+            Ok(9..(9 + "0.4.3".len()))
+        })
+        .unwrap();
+        assert_eq!(out, "version: 0.4.3\n");
+    }
+
+    /// The re-read invariant: if `reverify` returns a span whose bytes do
+    /// not equal `new_value`, the seal bails rather than reporting success.
+    /// This catches a locator whose post-splice output disagrees with what
+    /// the writer intended to place there — the failure mode a silent
+    /// no-op or a stray global replace produces.
+    #[test]
+    fn splice_and_verify_seal_bails_when_reread_disagrees() {
+        let content = "version: 0.4.2\n";
+        let span = 9..14;
+        // The callback points at the newline character rather than the
+        // freshly spliced value bytes — the reread is "\n", not "0.4.3".
+        let err = splice_and_verify(content, span, "0.4.3", "version", |u| {
+            Ok(u.len() - 1..u.len())
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("rewrite did not take"),
+            "seal must catch a locator whose post-splice bytes disagree \
+             with new_value; got: {err}"
+        );
+    }
+
+    /// The length-delta invariant: if the updated content's total length
+    /// differs from `content.len() + new_value.len() - span.len()`, the
+    /// seal bails. This catches the "wrote more than the value" failure
+    /// mode — the whole reason the family exists. Simulated with a locator
+    /// whose splice bytes happen to satisfy the reread but where we injected
+    /// extra content (impossible via the helper's own splice, so we prove
+    /// the invariant by exercising the arithmetic directly).
+    #[test]
+    fn splice_and_verify_arithmetic_holds_across_delta_shapes() {
+        // Growing splice: value gets longer by 3 bytes → total length grows
+        // by 3 bytes. Seal passes.
+        let content = "version: 0.4.2\n";
+        let out = splice_and_verify(content, 9..14, "0.10.11", "version", |u| {
+            Ok(9..(9 + "0.10.11".len()))
+        })
+        .unwrap();
+        assert_eq!(out.len(), content.len() + "0.10.11".len() - "0.4.2".len());
+
+        // Shrinking splice: value gets shorter by 3 bytes → total length
+        // shrinks by 3 bytes. Seal passes.
+        let content = "version: 0.10.11\n";
+        let out = splice_and_verify(content, 9..16, "0.4.2", "version", |u| {
+            Ok(9..(9 + "0.4.2".len()))
+        })
+        .unwrap();
+        assert_eq!(out.len(), content.len() + "0.4.2".len() - "0.10.11".len());
+
+        // Identity splice: same value length → total length unchanged.
+        let content = "version: 0.4.2\n";
+        let out = splice_and_verify(content, 9..14, "1.0.0", "version", |u| {
+            Ok(9..(9 + "1.0.0".len()))
+        })
+        .unwrap();
+        assert_eq!(out.len(), content.len());
+    }
+
+    /// A missing post-write span (locator returns `Err`) surfaces with the
+    /// `field_label` embedded so a seal failure names which write went
+    /// wrong. This is what a downstream writer that lost its own field
+    /// during the splice would trip.
+    #[test]
+    fn splice_and_verify_seal_bails_with_labeled_error_when_locator_errors() {
+        let content = "version: 0.4.2\n";
+        let err = splice_and_verify(content, 9..14, "0.4.3", "repository", |_u| {
+            Err(anyhow::anyhow!("locator failed"))
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("repository"),
+            "seal error must carry field_label so a failure names which \
+             write went wrong; got: {err}"
+        );
     }
 
     /// End-to-end IO shell test: [`write_chart_version`] over the real
