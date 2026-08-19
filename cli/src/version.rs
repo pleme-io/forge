@@ -10152,6 +10152,39 @@ fn ensure_writable_semver(new_version: &str) -> Result<()> {
     Ok(())
 }
 
+/// The pre-write acceptance guard the Chart.yaml dep-`repository:` writer
+/// honors: `new_repository` must be a non-empty string free of whitespace
+/// and `#` characters — the same acceptance the unquoted alternative of
+/// [`CHART_DEP_ENTRY_REPOSITORY`] would parse, so what we splice is
+/// guaranteed to round-trip through the reader.
+///
+/// # Compounding
+///
+/// Sibling of [`ensure_writable_semver`] one level down the writer
+/// family: the same "one guard, one place, one refusal message" shape.
+/// [`plan_chart_dependency_repository_write`] rides this guard through
+/// [`plan_optional_dep_by_span`]'s `accept` callback, so the refusal
+/// message and the invariant it names stay defined in one place — a
+/// caller pattern-matching on the message (`err.contains("must be a
+/// non-empty URL")`) gets a uniform answer across every dep-repository
+/// call site. A future dep-repository sibling (a `values.yaml` chart
+/// override, a Kustomize registry pin) inherits the guard by one line of
+/// delegation.
+fn ensure_writable_repository_url(new_repository: &str) -> Result<()> {
+    if new_repository.is_empty()
+        || new_repository
+            .chars()
+            .any(|c| c.is_whitespace() || c == '#')
+    {
+        bail!(
+            "refusing to write {:?} — a repository must be a non-empty URL free \
+             of whitespace and `#`",
+            new_repository
+        );
+    }
+    Ok(())
+}
+
 /// The PURE core shared by every top-level version planner whose shape is
 /// "acceptance guard → locator-owned byte span → verified-mutation seal
 /// re-running the same locator." Runs [`ensure_writable_semver`] on
@@ -10205,6 +10238,87 @@ where
     ensure_writable_semver(new_version)?;
     let span = locator(content)?;
     splice_and_verify(content, span, new_version, "version", locator)
+}
+
+/// The PURE core shared by every Chart.yaml dependency-entry planner
+/// whose shape is "acceptance guard → optional-span locator (`None` on a
+/// missing dep, `Err` on structural malformation) → verified-mutation
+/// seal re-running the same locator." Runs `accept` on `new_value`,
+/// locates the value's byte span via `locator` (short-circuiting to
+/// `Ok(None)` when the dep is absent — the legal fleet-iteration no-op
+/// `commands/helm.rs::bump` / `redirect_remote_deps_to_mirror` depend
+/// on), then rides [`splice_and_verify`] with a re-locate that turns a
+/// post-splice `Ok(None)` into a `verified-mutation seal: post-write dep
+/// <field_label> span not found` refusal so the whole error-shape story
+/// stays uniform across every dep-field caller.
+///
+/// # Compounding
+///
+/// Two planners now share this body —
+/// `plan_chart_dependency_version_write` and
+/// `plan_chart_dependency_repository_write`. The pre-lift shape was two
+/// byte-identical bodies:
+///
+/// ```ignore
+/// pub fn plan_chart_dependency_<field>_write(
+///     content: &str,
+///     dep_name: &str,
+///     new_<value>: &str,
+/// ) -> Result<Option<String>> {
+///     <accept>(new_<value>)?;
+///     let Some(span) = chart_dep_<field>_span(content, dep_name)? else {
+///         return Ok(None);
+///     };
+///     splice_and_verify(content, span, new_<value>, "<field>", |u| {
+///         chart_dep_<field>_span(u, dep_name)?
+///             .context("post-write dep <field> span not found")
+///     })
+///     .map(Some)
+/// }
+/// ```
+///
+/// differing ONLY in which `chart_dep_<field>_span` locator they named,
+/// which acceptance guard they honored, and the field-label string. The
+/// dep-writer half of the writer family now sits on the same "acceptance
+/// guard → locator → seal" algebra `plan_top_version_by_span` lifted for
+/// the top-level half — a fourth ecosystem whose entry-field write reads
+/// through an optional-span locator (a `values.yaml` override, a
+/// Kustomize registry pin) becomes a one-line delegation rather than a
+/// copy of the eight-line shape, and any drift in what the composition
+/// guarantees lands in exactly one place.
+///
+/// `locator` is called TWICE (pre-splice locate and post-splice
+/// reverify) so its type is `Fn`, not `FnOnce`. The two current callers
+/// each pass a `|c| chart_dep_<field>_span(c, dep_name)` closure that
+/// captures `dep_name` by reference — cheap, and the same shape both
+/// sides of the seal already used.
+///
+/// A planner that hand-rolls the eight-line body re-opens the exact
+/// two-replica duplication this helper closed — the shield
+/// [`tests::dep_planners_route_through_plan_optional_dep_by_span`]
+/// requires every lifted dep planner's body to open with a bare
+/// `plan_optional_dep_by_span(...)` call naming the exact field label,
+/// guard, and locator, so a hand-rolled `accept` + local `let Some(span)
+/// = …` + `splice_and_verify(...)` shape is refused at source-scan time.
+fn plan_optional_dep_by_span<G, F>(
+    content: &str,
+    new_value: &str,
+    field_label: &str,
+    accept: G,
+    locator: F,
+) -> Result<Option<String>>
+where
+    G: Fn(&str) -> Result<()>,
+    F: Fn(&str) -> Result<Option<std::ops::Range<usize>>>,
+{
+    accept(new_value)?;
+    let Some(span) = locator(content)? else {
+        return Ok(None);
+    };
+    splice_and_verify(content, span, new_value, field_label, |u| {
+        locator(u)?.with_context(|| format!("post-write dep {field_label} span not found"))
+    })
+    .map(Some)
 }
 
 /// Classify a Cargo.toml's version shape. Pure — takes the content, so it is
@@ -10886,15 +11000,13 @@ pub fn plan_chart_dependency_version_write(
     dep_name: &str,
     new_version: &str,
 ) -> Result<Option<String>> {
-    ensure_writable_semver(new_version)?;
-    let Some(span) = chart_dep_version_span(content, dep_name)? else {
-        return Ok(None);
-    };
-
-    splice_and_verify(content, span, new_version, "version", |u| {
-        chart_dep_version_span(u, dep_name)?.context("post-write dep version span not found")
-    })
-    .map(Some)
+    plan_optional_dep_by_span(
+        content,
+        new_version,
+        "version",
+        ensure_writable_semver,
+        |c| chart_dep_version_span(c, dep_name),
+    )
 }
 
 /// Write a new repository URL onto a specific entry in a Chart.yaml's
@@ -10965,26 +11077,13 @@ pub fn plan_chart_dependency_repository_write(
     dep_name: &str,
     new_repository: &str,
 ) -> Result<Option<String>> {
-    if new_repository.is_empty()
-        || new_repository
-            .chars()
-            .any(|c| c.is_whitespace() || c == '#')
-    {
-        bail!(
-            "refusing to write {:?} — a repository must be a non-empty URL free \
-             of whitespace and `#`",
-            new_repository
-        );
-    }
-
-    let Some(span) = chart_dep_repository_span(content, dep_name)? else {
-        return Ok(None);
-    };
-
-    splice_and_verify(content, span, new_repository, "repository", |u| {
-        chart_dep_repository_span(u, dep_name)?.context("post-write dep repository span not found")
-    })
-    .map(Some)
+    plan_optional_dep_by_span(
+        content,
+        new_repository,
+        "repository",
+        ensure_writable_repository_url,
+        |c| chart_dep_repository_span(c, dep_name),
+    )
 }
 
 /// Locate the byte span of the `version:` value in the `dependencies:`
@@ -11618,6 +11717,121 @@ mod tests {
         );
     }
 
+    /// The dep-planner helper must (a) run the acceptance guard first,
+    /// (b) invoke the locator on the caller's bytes verbatim, (c) run
+    /// the locator a SECOND time from inside the `splice_and_verify`
+    /// reverify closure on the spliced bytes, and (d) return
+    /// `Ok(Some(new_bytes))` whose non-target bytes are byte-identical
+    /// to the caller's. Uses a synthetic `|X|` sentinel locator with a
+    /// no-op guard so the delegation shape is proven directly rather
+    /// than inferred from the two ecosystem round-trip tests on
+    /// `plan_chart_dependency_version_write` /
+    /// `plan_chart_dependency_repository_write`. Same discipline
+    /// `plan_top_version_by_span_delegates_to_locator_and_returns_splice`
+    /// pins for the top-level half of the writer family.
+    #[test]
+    fn plan_optional_dep_by_span_delegates_to_locator_and_returns_splice() {
+        let content = "prefix|XX|suffix\n";
+        let seen: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let accept = |_v: &str| -> Result<()> { Ok(()) };
+        let locator = |c: &str| -> Result<Option<std::ops::Range<usize>>> {
+            seen.borrow_mut().push(c.to_string());
+            let start = c
+                .find('|')
+                .context("locator: opening `|` sentinel not present")?;
+            let end = c[start + 1..]
+                .find('|')
+                .map(|o| start + 1 + o)
+                .context("locator: closing `|` sentinel not present")?;
+            Ok(Some((start + 1)..end))
+        };
+        let updated = plan_optional_dep_by_span(content, "1.2.3", "version", accept, locator)
+            .unwrap()
+            .expect("Some(...) — the locator returned a span");
+        assert_eq!(
+            updated, "prefix|1.2.3|suffix\n",
+            "the helper must splice `new_value` over exactly the locator's span"
+        );
+        let calls = seen.into_inner();
+        assert_eq!(
+            calls.len(),
+            2,
+            "the locator must run twice — pre-splice locate AND post-splice reverify, \
+             the `splice_and_verify` seal. Got calls: {calls:?}"
+        );
+        assert_eq!(
+            calls[0], content,
+            "the first (pre-splice) locator call must see the caller's content verbatim"
+        );
+        assert_eq!(
+            calls[1], updated,
+            "the second (post-splice) locator call must see the spliced content"
+        );
+    }
+
+    /// A locator that returns `Ok(None)` at the pre-splice call MUST
+    /// short-circuit the helper to `Ok(None)` — the fleet-iteration
+    /// no-op contract `commands/helm.rs::bump` /
+    /// `redirect_remote_deps_to_mirror` depend on. The seal must NOT
+    /// run, and the acceptance guard MUST still have run first (a bad
+    /// value on a file that happens to lack the dep is still a caller
+    /// bug worth surfacing).
+    #[test]
+    fn plan_optional_dep_by_span_missing_dep_short_circuits_to_none() {
+        let accept_called: std::cell::Cell<bool> = std::cell::Cell::new(false);
+        let locator_calls: std::cell::Cell<usize> = std::cell::Cell::new(0);
+        let accept = |_v: &str| -> Result<()> {
+            accept_called.set(true);
+            Ok(())
+        };
+        let locator = |_c: &str| -> Result<Option<std::ops::Range<usize>>> {
+            locator_calls.set(locator_calls.get() + 1);
+            Ok(None)
+        };
+        let out = plan_optional_dep_by_span("bytes\n", "1.2.3", "version", accept, locator)
+            .expect("Ok(None) short-circuit is not an error");
+        assert!(
+            out.is_none(),
+            "a pre-splice `Ok(None)` locator must short-circuit the helper to Ok(None)"
+        );
+        assert!(
+            accept_called.get(),
+            "the acceptance guard must still have run — a bad value is a caller bug \
+             even when the dep is absent"
+        );
+        assert_eq!(
+            locator_calls.get(),
+            1,
+            "the locator must run exactly ONCE on the Ok(None) arm — the seal must NOT run"
+        );
+    }
+
+    /// A `new_value` that fails `accept` must be refused BEFORE the
+    /// locator runs — mirrors
+    /// `plan_top_version_by_span_refuses_bad_semver_before_locator_runs`
+    /// for the dep-planner half of the writer family.
+    #[test]
+    fn plan_optional_dep_by_span_refuses_bad_value_before_locator_runs() {
+        let called: std::cell::Cell<bool> = std::cell::Cell::new(false);
+        let accept = |_v: &str| -> Result<()> { bail!("synthetic accept refusal") };
+        let locator = |_c: &str| -> Result<Option<std::ops::Range<usize>>> {
+            called.set(true);
+            Ok(None)
+        };
+        let err =
+            plan_optional_dep_by_span("prefix|XX|suffix\n", "bad", "version", accept, locator)
+                .expect_err("accept refusal must propagate");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("synthetic accept refusal"),
+            "the acceptance guard's refusal must surface unchanged, got: {chain}"
+        );
+        assert!(
+            !called.get(),
+            "the locator must NOT run when the acceptance guard refused"
+        );
+    }
+
     /// The IO read-shell must fire the ecosystem's `locator` with the
     /// file bytes it read and return the byte slice the locator names.
     /// This test hands `read_version_by_span` a fake locator that
@@ -12122,6 +12336,110 @@ mod tests {
         }
     }
 
+    /// The two Chart.yaml dependency-field PURE planners MUST delegate
+    /// their entire body through `plan_optional_dep_by_span`, naming the
+    /// exact field label, acceptance guard, and per-field span locator.
+    /// The pre-lift shape was two byte-identical eight-line bodies —
+    /// `<accept>?; let Some(span) = <field>_span(...)? else { return
+    /// Ok(None); }; splice_and_verify(...).map(Some)` — differing only
+    /// in the field, guard, and locator name they mentioned. Any body
+    /// that re-grows the local `Ok(None)` short-circuit, hand-rolls the
+    /// `splice_and_verify(...).map(Some)` call, or names either
+    /// per-field guard bare inside the planner (`SEMVER_LIKE.is_match`
+    /// or the ad-hoc `.is_empty() || .chars().any(...)` shape) re-opens
+    /// the two-replica duplication this helper closed and lets the seal
+    /// contract drift between the two dep fields.
+    ///
+    /// Two shields compose here:
+    ///
+    /// 1. The delegation shield: each planner's body opens with the
+    ///    exact `plan_optional_dep_by_span(content, <value>, "<label>",
+    ///    <guard>, |c| chart_dep_<field>_span(c, dep_name),)` prefix so
+    ///    no per-field body can slip a divergent argument shape between
+    ///    the delegation call and any of its five bound choices.
+    /// 2. The tally shield: the module's non-comment surface carries
+    ///    exactly ONE executable occurrence of the repository-URL
+    ///    acceptance shape (`new_repository.is_empty()`), the one inside
+    ///    `ensure_writable_repository_url` itself — the sibling
+    ///    invariant `planners_route_semver_guard_through_ensure_writable_semver`
+    ///    pins on the semver side.
+    ///
+    /// Fail-before-pass-after: with either dep planner reverted to its
+    /// pre-lift eight-line body, the `.starts_with(...)` assertion on
+    /// that planner's slice fires; with the repository guard inlined
+    /// into `plan_chart_dependency_repository_write`, the tally
+    /// assertion fires. Restoring the delegations returns both shields
+    /// to green.
+    #[test]
+    fn dep_planners_route_through_plan_optional_dep_by_span() {
+        let src = include_str!("version.rs");
+
+        let planners = [
+            (
+                "plan_chart_dependency_version_write",
+                "new_version",
+                "\"version\"",
+                "ensure_writable_semver",
+                "chart_dep_version_span",
+            ),
+            (
+                "plan_chart_dependency_repository_write",
+                "new_repository",
+                "\"repository\"",
+                "ensure_writable_repository_url",
+                "chart_dep_repository_span",
+            ),
+        ];
+        for (name, value_ident, label, guard, locator) in planners {
+            let signature = format!(
+                "pub fn {name}(\n    content: &str,\n    dep_name: &str,\n    {value_ident}: &str,\n) -> Result<Option<String>>"
+            );
+            let start = src.find(&signature).unwrap_or_else(|| {
+                panic!("must find the public signature of {name} — signature drift?")
+            });
+            let after_brace = src[start..]
+                .find(" {\n")
+                .map(|o| start + o + 3)
+                .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
+            let body_end = src[after_brace..]
+                .find("\n}\n")
+                .map(|o| after_brace + o)
+                .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
+            let body = src[after_brace..body_end].trim();
+
+            let expected = format!(
+                "plan_optional_dep_by_span(\n        content,\n        {value_ident},\n        {label},\n        {guard},\n        |c| {locator}(c, dep_name),\n    )"
+            );
+            assert!(
+                body.starts_with(&expected),
+                "{name} must delegate its body through plan_optional_dep_by_span with the \
+                 exact field label, guard, and locator — got body: {body:?}"
+            );
+        }
+
+        // Tally: exactly ONE executable occurrence of the
+        // repository-URL acceptance shape lives in the module — the
+        // one inside `ensure_writable_repository_url` itself. Comment
+        // mentions of the pattern (in doc comments describing the
+        // guard) are stripped before counting so prose about the
+        // discipline does not spend the budget.
+        let needle = concat!("new_repository", ".is_empty()");
+        let live_hits: usize = src
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !(trimmed.starts_with("//") || trimmed.starts_with("///"))
+            })
+            .map(|line| line.matches(needle).count())
+            .sum();
+        assert_eq!(
+            live_hits, 1,
+            "the whole module must carry exactly ONE executable \
+             {needle} — inside `ensure_writable_repository_url`. A planner with its own \
+             bare check re-opens the pre-lift duplication the helper closed."
+        );
+    }
+
     /// The pre-write acceptance guard MUST accept the shapes the
     /// SEMVER_LIKE regex admits (`X.Y.Z` and `X.Y.Z-prerelease`), and
     /// MUST reject anything that would enter the splice as a non-semver
@@ -12246,12 +12564,6 @@ mod tests {
                 "plan_package_json_version_write",
                 "(content: &str, new_version: &str",
                 Route::Delegated("package_json_top_version_span"),
-            ),
-            (
-                "pub fn",
-                "plan_chart_dependency_version_write",
-                "(\n    content: &str,\n    dep_name: &str,\n    new_version: &str,\n",
-                Route::Direct,
             ),
         ];
         for (visibility, name, sig_tail, route) in planners {
