@@ -10328,6 +10328,20 @@ static CHART_DEP_ENTRY_VERSION: std::sync::LazyLock<regex::Regex> =
         .expect("static regex")
     });
 
+/// A `repository:` line inside a Chart.yaml dependency entry — the
+/// sibling of [`CHART_DEP_ENTRY_VERSION`] for the URL that names where
+/// the subchart is fetched from. Same three-alternative shape (a URL
+/// contains no whitespace and no `#`, so `[^\s#]+` covers the unquoted
+/// form for every scheme the fleet uses: `oci://`, `https://`, `http://`,
+/// and `file://`).
+static CHART_DEP_ENTRY_REPOSITORY: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?m)^[ \t]*(?:-[ \t]+)?repository:[ \t]*(?:"([^"\n]+)"|'([^'\n]+)'|([^\s#]+))"#,
+        )
+        .expect("static regex")
+    });
+
 /// Column-0 `dependencies:` header — the top-level Chart.yaml key whose
 /// value is a list of dependency entries. Matches the header only; the
 /// caller walks the body by indent from the line after it.
@@ -10457,20 +10471,164 @@ pub fn plan_chart_dependency_version_write(
     Ok(Some(updated))
 }
 
+/// Write a new repository URL onto a specific entry in a Chart.yaml's
+/// `dependencies:` list — the sibling of [`write_chart_dependency_version`]
+/// for the repository URL. Thin IO shell over
+/// [`plan_chart_dependency_repository_write`].
+///
+/// Returns `Ok(true)` when the write took, `Ok(false)` when no dependency
+/// named `dep_name` exists in the file (fleet iteration passes most
+/// entries through as a no-op). Any structural error (malformed YAML,
+/// two entries share `dep_name`, the matching entry lacks a `repository:`
+/// line, verified-mutation seal failure) is a hard error.
+///
+/// # Compounding
+///
+/// `commands/helm.rs::redirect_remote_deps_to_mirror` rewrites the
+/// `repository:` field of every third-party dep to route through the
+/// pleme-io OCI mirror at release time (the hermetic supply-chain law).
+/// Its pre-port shape was a whole-file `serde_yaml` round-trip:
+/// `serde_yaml::from_str` → mutate → `serde_yaml::to_string` → write.
+/// The round-trip is a different flavor of the same trap the writer
+/// family closes: it silently NORMALIZES the file's form — comments
+/// disappear, quote styles collapse, key order shuffles, alignment
+/// evens out — while the caller sees `Ok(())` and the rewrite reports
+/// success. The typed writer splices the value bytes at the matched
+/// span and carries a verified-mutation seal, so the rewritten
+/// Chart.yaml in the release tarball is byte-identical to the source
+/// except for the redirected URL.
+pub fn write_chart_dependency_repository(
+    path: &Path,
+    dep_name: &str,
+    new_repository: &str,
+) -> Result<bool> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    match plan_chart_dependency_repository_write(&content, dep_name, new_repository).with_context(
+        || {
+            format!(
+                "cannot write dependency {dep_name} repository to {}",
+                path.display()
+            )
+        },
+    )? {
+        Some(updated) => {
+            std::fs::write(path, &updated)
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// PURE core of [`write_chart_dependency_repository`]: content in,
+/// `Some(new content)` out for a successful splice, `None` when the
+/// dependency `dep_name` is not present in `dependencies:`. Structural
+/// malformation (YAML that fails to parse, two entries share `dep_name`,
+/// the matching entry lacks a `repository:` line) is a hard error.
+///
+/// # Contract
+///
+/// 1. `new_repository` must be a non-empty string free of whitespace
+///    and `#` characters — the same acceptance the unquoted alternative
+///    of [`CHART_DEP_ENTRY_REPOSITORY`] would parse, so what we splice
+///    is guaranteed to round-trip through the reader.
+/// 2. The YAML must parse and expose a `dependencies:` sequence. A
+///    Chart.yaml with no `dependencies:` key returns `None`.
+/// 3. If exactly one dependency entry's `name:` equals `dep_name`, its
+///    `repository:` value bytes are spliced. Zero matches → `None`.
+///    Two or more matches → hard error (ambiguous, refusing to guess).
+/// 4. The splice preserves the value's surrounding quotes, whitespace,
+///    and trailing `#` comment byte-for-byte — only the value bytes
+///    move.
+/// 5. Verified-mutation seal: after the splice, the re-run locator
+///    finds the same entry and reads back exactly `new_repository`,
+///    and the byte-length delta equals the value-length delta.
+pub fn plan_chart_dependency_repository_write(
+    content: &str,
+    dep_name: &str,
+    new_repository: &str,
+) -> Result<Option<String>> {
+    if new_repository.is_empty()
+        || new_repository
+            .chars()
+            .any(|c| c.is_whitespace() || c == '#')
+    {
+        bail!(
+            "refusing to write {:?} — a repository must be a non-empty URL free \
+             of whitespace and `#`",
+            new_repository
+        );
+    }
+
+    let Some(span) = chart_dep_repository_span(content, dep_name)? else {
+        return Ok(None);
+    };
+
+    let mut updated = String::with_capacity(content.len() + new_repository.len());
+    updated.push_str(&content[..span.start]);
+    updated.push_str(new_repository);
+    updated.push_str(&content[span.end..]);
+
+    let after = chart_dep_repository_span(&updated, dep_name)?
+        .context("verified-mutation seal: post-write dep repository span not found — refusing")?;
+    let got = &updated[after];
+    if got != new_repository {
+        bail!("rewrite did not take — expected {new_repository}, re-read {got}");
+    }
+    let expected_len = content.len() + new_repository.len() - (span.end - span.start);
+    if updated.len() != expected_len {
+        bail!(
+            "rewrite changed more bytes than the repository value ({} vs {expected_len})",
+            updated.len()
+        );
+    }
+    Ok(Some(updated))
+}
+
 /// Locate the byte span of the `version:` value in the `dependencies:`
 /// list entry whose `name:` field equals `dep_name`. Returns `Ok(None)`
 /// when the Chart.yaml has no `dependencies:` key or no matching entry.
+fn chart_dep_version_span(content: &str, dep_name: &str) -> Result<Option<std::ops::Range<usize>>> {
+    chart_dep_field_span(content, dep_name, &CHART_DEP_ENTRY_VERSION, "version")
+}
+
+/// Locate the byte span of the `repository:` value in the `dependencies:`
+/// list entry whose `name:` field equals `dep_name`. Sibling of
+/// [`chart_dep_version_span`] for the URL that names where the subchart
+/// is fetched from. Returns `Ok(None)` when the Chart.yaml has no
+/// `dependencies:` key or no matching entry.
+fn chart_dep_repository_span(
+    content: &str,
+    dep_name: &str,
+) -> Result<Option<std::ops::Range<usize>>> {
+    chart_dep_field_span(content, dep_name, &CHART_DEP_ENTRY_REPOSITORY, "repository")
+}
+
+/// Shared entry-locator underlying [`chart_dep_version_span`] and
+/// [`chart_dep_repository_span`]: locates the `dependencies:` entry
+/// whose `name:` equals `dep_name`, then runs `field_re` over that
+/// entry's raw byte range to splice the target field's value.
 ///
 /// The two-stage discipline mirrors the CSE reader half at
 /// `commands/helm.rs::parse_deps` (serde_yaml over the parsed structure)
-/// paired with the raw-content byte walk `write_chart_version` uses: serde
-/// validates the STRUCTURE (a `dependencies:` sequence exists, exactly one
-/// entry matches the name, the entry has a version), and the raw walk
-/// locates the byte SPAN so the splice preserves form. A structure-only
-/// rewrite would round-trip through serde and normalize quotes,
-/// alignment, and comments — the very failure this writer family exists
-/// to prevent.
-fn chart_dep_version_span(content: &str, dep_name: &str) -> Result<Option<std::ops::Range<usize>>> {
+/// paired with the raw-content byte walk `write_chart_version` uses:
+/// serde validates the STRUCTURE (a `dependencies:` sequence exists,
+/// exactly one entry matches the name, the entry has the target field),
+/// and the raw walk locates the byte SPAN so the splice preserves form.
+/// A structure-only rewrite would round-trip through serde and
+/// normalize quotes, alignment, and comments — the very failure this
+/// writer family exists to prevent.
+///
+/// `field_label` is the singular field name (e.g. `"version"`,
+/// `"repository"`) used in error messages so a malformed entry surfaces
+/// which field is missing.
+fn chart_dep_field_span(
+    content: &str,
+    dep_name: &str,
+    field_re: &regex::Regex,
+    field_label: &str,
+) -> Result<Option<std::ops::Range<usize>>> {
     #[derive(serde::Deserialize)]
     struct MinDep {
         name: String,
@@ -10564,17 +10722,18 @@ fn chart_dep_version_span(content: &str, dep_name: &str) -> Result<Option<std::o
         .unwrap_or(deps_end);
     let entry_body = &content[entry_start..entry_end];
 
-    let mut caps_iter = CHART_DEP_ENTRY_VERSION.captures_iter(entry_body);
+    let mut caps_iter = field_re.captures_iter(entry_body);
     let first = caps_iter.next().with_context(|| {
         format!(
-            "dependency {:?} has no `version:` field — malformed, refusing",
-            dep_name
+            "dependency {:?} has no `{}:` field — malformed, refusing",
+            dep_name, field_label
         )
     })?;
     if caps_iter.next().is_some() {
         bail!(
-            "dependency {:?} has two or more `version:` fields — malformed, refusing",
-            dep_name
+            "dependency {:?} has two or more `{}:` fields — malformed, refusing",
+            dep_name,
+            field_label
         );
     }
     let val = chart_dep_value_span(&first);
@@ -11123,6 +11282,226 @@ mod tests {
         std::fs::write(&path, content).unwrap();
 
         let written = write_chart_dependency_version(&path, "pleme-lib", "0.4.3").unwrap();
+        assert!(!written, "no matching dep → false");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, content, "file must be untouched when no dep matches");
+    }
+
+    // ========================================================================
+    // Chart.yaml dependency-repository writer — the sibling of the dep-version
+    // writer for the URL that names where the subchart is fetched from. Same
+    // three-alternative form coverage (unquoted / single-quoted / double-quoted
+    // / aligned) plus the same structural preconditions (uniqueness of the dep
+    // name, presence of a repository line). Exercises the specific fleet
+    // shapes the release-time `redirect_remote_deps_to_mirror` rerouter meets:
+    // `oci://ghcr.io/*`, `https://*.github.io/*`, and `file://` siblings the
+    // redirect must NOT touch.
+    // ========================================================================
+
+    /// The unquoted `repository:` URL form — the majority shape across
+    /// authored Chart.yaml. Pre-port `serde_yaml` round-trip would
+    /// normalize the file's form on write.
+    #[test]
+    fn plan_chart_dep_repo_write_splices_unquoted_repository() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository: https://victoriametrics.github.io/helm-charts/\n";
+        let out =
+            plan_chart_dependency_repository_write(content, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            out,
+            "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository: oci://ghcr.io/pleme-io/charts\n",
+            "unquoted URL must splice; the wrapper's own version and the \
+             sibling `version:` field must survive byte-for-byte"
+        );
+    }
+
+    /// Double-quoted `repository:` URL form — the pleme-io fleet
+    /// convention (the mirror test uses this shape). Quotes must
+    /// survive.
+    #[test]
+    fn plan_chart_dep_repo_write_preserves_double_quotes() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: \"0.39.0\"\n    repository: \"https://victoriametrics.github.io/helm-charts/\"\n";
+        let out =
+            plan_chart_dependency_repository_write(content, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap()
+                .unwrap();
+        assert!(
+            out.contains("repository: \"oci://ghcr.io/pleme-io/charts\""),
+            "double-quoted URL must retain its quotes; got: {out:?}"
+        );
+        assert!(
+            !out.contains("victoriametrics.github.io"),
+            "old URL bytes must not survive: {out:?}"
+        );
+    }
+
+    /// Single-quoted `repository:` URL form.
+    #[test]
+    fn plan_chart_dep_repo_write_preserves_single_quotes() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository: 'https://victoriametrics.github.io/helm-charts/'\n";
+        let out =
+            plan_chart_dependency_repository_write(content, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap()
+                .unwrap();
+        assert!(
+            out.contains("repository: 'oci://ghcr.io/pleme-io/charts'"),
+            "single-quoted URL must retain its quotes; got: {out:?}"
+        );
+    }
+
+    /// Aligned `repository:` field (two spaces after the key). Same
+    /// trap class as the version writer's alignment test.
+    #[test]
+    fn plan_chart_dep_repo_write_preserves_aligned_repository() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository:  https://victoriametrics.github.io/helm-charts/\n";
+        let out =
+            plan_chart_dependency_repository_write(content, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap()
+                .unwrap();
+        assert!(
+            out.contains("repository:  oci://ghcr.io/pleme-io/charts"),
+            "the two-space gap between `repository:` and the value must \
+             survive the mutation; got: {out:?}"
+        );
+    }
+
+    /// A trailing `# ...` comment on the `repository:` line survives
+    /// the mutation — only the URL bytes move. The pre-port
+    /// `serde_yaml` round-trip DROPPED all comments; this is the
+    /// smoking-gun regression the port closes.
+    #[test]
+    fn plan_chart_dep_repo_write_preserves_trailing_comment() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository: https://victoriametrics.github.io/helm-charts/  # upstream\n";
+        let out =
+            plan_chart_dependency_repository_write(content, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap()
+                .unwrap();
+        assert!(
+            out.contains("repository: oci://ghcr.io/pleme-io/charts  # upstream"),
+            "trailing comment on the repository line must survive: {out:?}"
+        );
+    }
+
+    /// Only the MATCHING dep's repository moves. A sibling dep whose
+    /// repository is coincidentally the same URL must be left untouched
+    /// — a whole-file replace (or a `content.replace` with a rebuilt
+    /// needle) would mutate both.
+    #[test]
+    fn plan_chart_dep_repo_write_touches_only_the_matching_dep() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository: https://charts.example.io/\n  - name: other\n    version: 1.0.0\n    repository: https://charts.example.io/\n";
+        let out =
+            plan_chart_dependency_repository_write(content, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            out,
+            "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository: oci://ghcr.io/pleme-io/charts\n  - name: other\n    version: 1.0.0\n    repository: https://charts.example.io/\n",
+            "only the matching dep's repository must move; the sibling \
+             entry pinned to the same URL by coincidence must survive verbatim"
+        );
+    }
+
+    /// No `dependencies:` in the file → `Ok(None)`.
+    #[test]
+    fn plan_chart_dep_repo_write_returns_none_for_no_dependencies_section() {
+        let content = "apiVersion: v2\nname: solo\nversion: 0.1.0\n";
+        let out =
+            plan_chart_dependency_repository_write(content, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap();
+        assert!(out.is_none(), "no dependencies section → None");
+    }
+
+    /// `dependencies:` exists but no entry matches the name → `Ok(None)`.
+    /// The fleet-iteration case treats this as a legal no-op.
+    #[test]
+    fn plan_chart_dep_repo_write_returns_none_when_no_matching_dep() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: other\n    version: 1.0.0\n    repository: file://../other\n";
+        let out =
+            plan_chart_dependency_repository_write(content, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap();
+        assert!(out.is_none(), "no matching dep → None");
+    }
+
+    /// Two dependencies share the target name → ambiguous, hard error.
+    #[test]
+    fn plan_chart_dep_repo_write_refuses_ambiguous_duplicate_name() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository: https://charts.example.io/\n  - name: vm\n    version: 0.40.0\n    repository: https://charts.example.io/\n";
+        let err =
+            plan_chart_dependency_repository_write(content, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("two or more dependencies named"),
+            "must refuse a duplicated dep name, got: {err}"
+        );
+    }
+
+    /// The matching entry has no `repository:` field → hard error.
+    #[test]
+    fn plan_chart_dep_repo_write_refuses_entry_with_no_repository() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n";
+        let err =
+            plan_chart_dependency_repository_write(content, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("has no `repository:` field"),
+            "must refuse an entry missing its repository, got: {err}"
+        );
+    }
+
+    /// A repository value that would not round-trip through the
+    /// unquoted alternative is refused on the way in.
+    #[test]
+    fn plan_chart_dep_repo_write_refuses_invalid_repository_value() {
+        let content = "apiVersion: v2\nname: wrapper\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: 0.39.0\n    repository: https://charts.example.io/\n";
+        // empty
+        assert!(plan_chart_dependency_repository_write(content, "vm", "").is_err());
+        // contains whitespace
+        assert!(plan_chart_dependency_repository_write(content, "vm", "oci://foo bar").is_err());
+        // contains a YAML comment marker
+        assert!(plan_chart_dependency_repository_write(content, "vm", "oci://foo#bar").is_err());
+    }
+
+    /// End-to-end IO shell test: [`write_chart_dependency_repository`]
+    /// over the real filesystem returns `true` when the write took,
+    /// preserves the file's exact byte layout apart from the target
+    /// URL, and does not touch a sibling dep whose repository is the
+    /// same URL by coincidence.
+    #[test]
+    fn write_chart_dep_repo_returns_true_on_write_and_preserves_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        let content = "apiVersion: v2\nname: wrapper  # per-fleet convention\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: \"0.39.0\"\n    repository: \"https://victoriametrics.github.io/helm-charts/\"\n  - name: pleme-lib\n    version: \">=0.18.1 <0.19.0\"\n    repository: file://../pleme-lib\n";
+        std::fs::write(&path, content).unwrap();
+
+        let written =
+            write_chart_dependency_repository(&path, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap();
+        assert!(written, "write over a matching dep must return true");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after,
+            "apiVersion: v2\nname: wrapper  # per-fleet convention\nversion: 0.1.0\ndependencies:\n  - name: vm\n    version: \"0.39.0\"\n    repository: \"oci://ghcr.io/pleme-io/charts\"\n  - name: pleme-lib\n    version: \">=0.18.1 <0.19.0\"\n    repository: file://../pleme-lib\n",
+            "the wrapper's inline comment, the file:// sibling, the \
+             double-quoted version range, and the appVersion (absent \
+             here) must all survive byte-for-byte"
+        );
+    }
+
+    /// End-to-end IO shell test: no matching dep → `false`, file
+    /// untouched.
+    #[test]
+    fn write_chart_dep_repo_returns_false_when_no_matching_dep() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        let content = "apiVersion: v2\nname: solo\nversion: 0.1.0\n";
+        std::fs::write(&path, content).unwrap();
+
+        let written =
+            write_chart_dependency_repository(&path, "vm", "oci://ghcr.io/pleme-io/charts")
+                .unwrap();
         assert!(!written, "no matching dep → false");
 
         let after = std::fs::read_to_string(&path).unwrap();
