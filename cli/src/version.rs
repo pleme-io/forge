@@ -10009,6 +10009,38 @@ where
     Ok(())
 }
 
+/// Read the manifest at `path` and hand its bytes to the ecosystem's
+/// structural `locator`; return the byte slice `locator` names, cloned
+/// as an owned `String`.
+///
+/// The read-arm sibling of [`apply_version_write`]. The two byte-
+/// identical `read → span → slice` reader shells this shell lifts
+/// (`read_chart_version` and `read_zig_version`) each wrapped their
+/// read failure with `Failed to read <path>` and their locator failure
+/// with `cannot read a version from <path>` — the two error contexts
+/// the reader family already carried verbatim, now defined in exactly
+/// one place. A new ecosystem reader (`read_package_json_version`
+/// against a `package_json_top_version_span`, a future
+/// `build.zig.zon` `.minimum_zig_version` reader) is one line
+/// (`read_version_by_span(path, X_top_version_span)`) and inherits
+/// both error contexts by construction.
+///
+/// `locator` shape mirrors [`splice_and_verify`]'s reverify callback:
+/// `FnOnce(&str) -> Result<Range<usize>>` — the same signature every
+/// form-preserving splice writer's pre-splice locator already carries,
+/// so a reader plugs into the writer's existing locator without a
+/// second definition.
+fn read_version_by_span<F>(path: &Path, locator: F) -> Result<String>
+where
+    F: FnOnce(&str) -> Result<std::ops::Range<usize>>,
+{
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let span = locator(&content)
+        .with_context(|| format!("cannot read a version from {}", path.display()))?;
+    Ok(content[span].to_string())
+}
+
 /// Replace the authoritative version in a Cargo.toml, in place.
 ///
 /// Routes on [`CargoShape`], so a member is REFUSED rather than given a second
@@ -10209,11 +10241,7 @@ pub fn read_cargo_version(path: &Path) -> Result<String> {
 /// returned a dep-pin whenever a dep listed before the top-level
 /// carried one. Same trap 93c3818 closed on the Chart.yaml reader.
 pub fn read_zig_version(path: &Path) -> Result<String> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let span = zig_top_version_span(&content)
-        .with_context(|| format!("cannot read a version from {}", path.display()))?;
-    Ok(content[span].to_string())
+    read_version_by_span(path, zig_top_version_span)
 }
 
 /// Write a new version into a build.zig.zon file (in-place,
@@ -10449,11 +10477,7 @@ fn zig_top_version_span(content: &str) -> Result<std::ops::Range<usize>> {
 ///   rather than refusing. [`chart_top_version_span`] refuses the
 ///   ambiguity, matching the discipline the writer already applies.
 pub fn read_chart_version(path: &Path) -> Result<String> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let span = chart_top_version_span(&content)
-        .with_context(|| format!("cannot read a version from {}", path.display()))?;
-    Ok(content[span].to_string())
+    read_version_by_span(path, chart_top_version_span)
 }
 
 /// Column-0 top-level `version:` line in a Chart.yaml, with the value's
@@ -11211,6 +11235,149 @@ mod tests {
                 !body.contains("std::fs::write(path"),
                 "{name} must NOT write the file directly — the IO shell owns that write. \
                  Direct write re-opens the three-replica duplication apply_version_write closed."
+            );
+        }
+    }
+
+    /// The IO read-shell must fire the ecosystem's `locator` with the
+    /// file bytes it read and return the byte slice the locator names.
+    /// This test hands `read_version_by_span` a fake locator that
+    /// records what it received and returns a synthetic span, so the
+    /// delegation is proven directly rather than inferred from the
+    /// sibling round-trip tests on `read_zig_version` /
+    /// `read_chart_version`.
+    #[test]
+    fn read_version_by_span_delegates_content_to_the_locator_and_returns_its_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Manifest.toml");
+        let file_bytes = "prefix|the-version-bytes|suffix\n";
+        std::fs::write(&path, file_bytes).unwrap();
+
+        let seen: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+        let locator = |content: &str| -> Result<std::ops::Range<usize>> {
+            *seen.borrow_mut() = Some(content.to_string());
+            let start = content
+                .find("the-version-bytes")
+                .expect("fixture bytes present");
+            Ok(start..(start + "the-version-bytes".len()))
+        };
+
+        let value = read_version_by_span(&path, locator).unwrap();
+        assert_eq!(
+            value, "the-version-bytes",
+            "the shell must return the byte slice the locator names, verbatim"
+        );
+        assert_eq!(
+            seen.into_inner(),
+            Some(file_bytes.to_string()),
+            "the locator must see the file's read bytes verbatim"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            file_bytes,
+            "the read must NOT touch the file's bytes on disk"
+        );
+    }
+
+    /// A locator that returns `Err` MUST surface through the shell wrapped
+    /// with the `cannot read a version from <path>` context — the same
+    /// context every pre-lift reader spelled verbatim.
+    #[test]
+    fn read_version_by_span_locator_error_wraps_with_read_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Manifest.toml");
+        std::fs::write(&path, "bytes\n").unwrap();
+
+        let locator = |_content: &str| -> Result<std::ops::Range<usize>> {
+            bail!("synthetic locator refusal")
+        };
+        let err = read_version_by_span(&path, locator).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("cannot read a version from"),
+            "the locator's error must be wrapped with the read-side version-context, got: {chain}"
+        );
+        assert!(
+            chain.contains(&path.display().to_string()),
+            "the wrap must name the path the read is against, got: {chain}"
+        );
+        assert!(
+            chain.contains("synthetic locator refusal"),
+            "the locator's own error message must survive into the caller's chain, got: {chain}"
+        );
+    }
+
+    /// A missing path must error at the READ half, wrapped with the
+    /// `Failed to read` context, before the locator runs at all.
+    #[test]
+    fn read_version_by_span_missing_path_errors_with_read_context() {
+        let path = std::path::Path::new(
+            "/nonexistent/manifest/for/read_version_by_span/that/does/not/exist",
+        );
+        let mut called = false;
+        let locator = |_content: &str| -> Result<std::ops::Range<usize>> {
+            called = true;
+            Ok(0..0)
+        };
+        let err = read_version_by_span(path, locator).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("Failed to read"),
+            "the read-side IO error must be wrapped with the read-context, got: {chain}"
+        );
+        assert!(
+            !called,
+            "the locator must NOT run when the read failed — no work on ghost bytes"
+        );
+    }
+
+    /// The two form-preserving top-level manifest readers MUST delegate
+    /// their entire body through `read_version_by_span`. Any direct
+    /// `std::fs::read_to_string(path)` call, any hand-rolled
+    /// `Ok(content[span].to_string())` slice, or any inline `cannot read
+    /// a version from` context wrap inside their body re-opens the
+    /// two-replica duplication this helper closed and lets the
+    /// read-side error contexts drift between ecosystems.
+    ///
+    /// Fail-before-pass-after: with either of the two readers reverted
+    /// to its pre-lift 4-line body
+    /// (`std::fs::read_to_string(path).with_context(...)?; let span =
+    /// <ecosystem>_top_version_span(&content).with_context(...)?;
+    /// Ok(content[span].to_string())`), the
+    /// `.starts_with("read_version_by_span(")` assertion on that
+    /// reader's slice fires. Restoring the delegation returns the shield
+    /// to green.
+    #[test]
+    fn top_level_readers_route_through_read_version_by_span() {
+        let src = include_str!("version.rs");
+        for name in ["read_zig_version", "read_chart_version"] {
+            let signature = format!("pub fn {name}(path: &Path) -> Result<String>");
+            let start = src
+                .find(&signature)
+                .unwrap_or_else(|| panic!("must find the public signature of {name}"));
+            let after_brace = src[start..]
+                .find(" {\n")
+                .map(|o| start + o + 3)
+                .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
+            let body_end = src[after_brace..]
+                .find("\n}\n")
+                .map(|o| after_brace + o)
+                .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
+            let body = src[after_brace..body_end].trim();
+
+            assert!(
+                body.starts_with("read_version_by_span("),
+                "{name} must delegate its body through read_version_by_span — got body: {body:?}",
+            );
+            assert!(
+                !body.contains("std::fs::read_to_string(path)"),
+                "{name} must NOT read the file directly — the IO shell owns that read. \
+                 Direct read re-opens the two-replica duplication read_version_by_span closed."
+            );
+            assert!(
+                !body.contains("cannot read a version from"),
+                "{name} must NOT spell the read-side version-context inline — the IO shell owns that \
+                 wrap. Inline wrap re-opens the drift class read_version_by_span closed."
             );
         }
     }
