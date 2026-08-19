@@ -10366,21 +10366,35 @@ fn zig_top_version_span(content: &str) -> Result<std::ops::Range<usize>> {
     Ok(first)
 }
 
-/// Read the version from a Chart.yaml file.
+/// Read the top-level `version:` from a Chart.yaml file, form-preserving.
+///
+/// Routes through [`chart_top_version_span`] — the same locator the
+/// writer family rides — so the reader and writer agree byte-for-byte on
+/// which line is authoritative and what value is on disk. Mirrors
+/// [`read_zig_version`] (routed onto [`zig_top_version_span`] at 50fc2a5)
+/// and closes three traps the pre-port line-iterating
+/// `^version:\s*(\d+\.\d+\.\d+)` regex carried:
+///
+/// - **The double-quoted fleet shape** (`version: "0.0.3"`, the vendored
+///   openshift-helmchart family named in [`CHART_TOP_VERSION`]'s doc)
+///   returned `Err("No version field found")` because `\d+` requires a
+///   digit immediately after the whitespace and the `"` broke the match.
+///   [`chart_top_version_span`]'s three-alternative shape reads all three
+///   quote forms (double, single, unquoted).
+/// - **A prerelease/build suffix** (`version: 0.19.0-dev`) was silently
+///   truncated to `0.19.0` because `\d+\.\d+\.\d+` captured only the
+///   3-part core and reported the file's version as the prefix — a
+///   knowledge lie about what is on disk. The value-bytes-only span
+///   returns `0.19.0-dev` verbatim.
+/// - **Two top-level `version:` lines** returned the first hit silently
+///   rather than refusing. [`chart_top_version_span`] refuses the
+///   ambiguity, matching the discipline the writer already applies.
 pub fn read_chart_version(path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-
-    let re = regex::Regex::new(r#"^version:\s*(\d+\.\d+\.\d+)"#)
-        .context("Failed to compile Chart.yaml version regex")?;
-
-    for line in content.lines() {
-        if let Some(caps) = re.captures(line) {
-            return Ok(caps[1].to_string());
-        }
-    }
-
-    bail!("No version field found in {}", path.display())
+    let span = chart_top_version_span(&content)
+        .with_context(|| format!("cannot read a version from {}", path.display()))?;
+    Ok(content[span].to_string())
 }
 
 /// Column-0 top-level `version:` line in a Chart.yaml, with the value's
@@ -11284,6 +11298,72 @@ mod tests {
         let path = dir.path().join("Chart.yaml");
         std::fs::write(&path, "apiVersion: v2\nname: mychart\ntype: application\n").unwrap();
         assert!(read_chart_version(&path).is_err());
+    }
+
+    /// The double-quoted fleet shape (`version: "0.0.3"`) — the vendored
+    /// openshift-helmchart family cited in [`CHART_TOP_VERSION`]'s doc.
+    /// Pre-port the line-iterating `^version:\s*(\d+\.\d+\.\d+)` returned
+    /// `Err("No version field found")` because the `"` broke the `\d+`
+    /// anchor; post-port the value-bytes-only span reads `0.0.3` verbatim.
+    #[test]
+    fn read_chart_version_reads_double_quoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        std::fs::write(&path, "apiVersion: v2\nname: c\nversion: \"0.0.3\"\n").unwrap();
+        assert_eq!(read_chart_version(&path).unwrap(), "0.0.3");
+    }
+
+    /// The single-quoted alternative. Same pre-port trap as the
+    /// double-quoted case (the `\d+` anchor fails past a `'`).
+    #[test]
+    fn read_chart_version_reads_single_quoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        std::fs::write(&path, "apiVersion: v2\nname: c\nversion: '1.2.3'\n").unwrap();
+        assert_eq!(read_chart_version(&path).unwrap(), "1.2.3");
+    }
+
+    /// A prerelease suffix (`0.19.0-dev`) — 24 fleet Cargo manifests
+    /// carry the idiom, and any Chart.yaml that adopts it must READ
+    /// as the full value. Pre-port `\d+\.\d+\.\d+` captured only the
+    /// 3-part core and returned `0.19.0`, a knowledge lie about what
+    /// is on disk. Post-port the value-bytes-only span returns the
+    /// full suffix.
+    #[test]
+    fn read_chart_version_preserves_prerelease_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        std::fs::write(&path, "apiVersion: v2\nname: c\nversion: 0.19.0-dev\n").unwrap();
+        assert_eq!(read_chart_version(&path).unwrap(), "0.19.0-dev");
+    }
+
+    /// Two top-level `version:` lines is a malformed Chart.yaml. Pre-port
+    /// the line-iterating loop returned the first hit silently. Post-port
+    /// [`chart_top_version_span`] refuses the ambiguity — the same
+    /// discipline the writer applies, so the reader and writer never
+    /// disagree about which line is authoritative.
+    #[test]
+    fn read_chart_version_refuses_two_top_level_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        std::fs::write(
+            &path,
+            "apiVersion: v2\nname: c\nversion: 1.0.0\nversion: 2.0.0\n",
+        )
+        .unwrap();
+        assert!(read_chart_version(&path).is_err());
+    }
+
+    /// The reader and the writer must agree on which bytes the version
+    /// occupies. Bump the file with the writer, read it back, and confirm
+    /// the reader returns exactly what the writer just wrote.
+    #[test]
+    fn read_chart_version_agrees_with_writer_after_bump() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        std::fs::write(&path, "apiVersion: v2\nname: c\nversion: \"0.0.3\"\n").unwrap();
+        write_chart_version(&path, "0.0.4").unwrap();
+        assert_eq!(read_chart_version(&path).unwrap(), "0.0.4");
     }
 
     /// The unquoted fleet shape (`version: 0.4.2`) — the vast majority of
