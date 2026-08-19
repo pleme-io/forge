@@ -1191,12 +1191,22 @@ pub fn bump(
         bail!("Library chart not found: {}", lib_chart_yaml.display());
     }
 
-    // Read current version
-    let content = std::fs::read_to_string(&lib_chart_yaml)
-        .with_context(|| format!("Failed to read {}", lib_chart_yaml.display()))?;
-
-    let old_version = extract_yaml_field(&content, "version")
-        .context("Failed to read version from Chart.yaml")?;
+    // Read current version. Routed through `version::read_chart_version` —
+    // the family's shared form-preserving reader that mirrors the writer
+    // `write_chart_version` this bump already rides. The pre-lift shape
+    // read the file with a bare `std::fs::read_to_string` and then handed
+    // its content to the module-local `extract_yaml_field(_, "version")`,
+    // which (a) hardcodes a single space after the colon and (b)
+    // `.trim_matches('"')` only, so a single-quoted `version: '0.4.2'`
+    // read back as the literal `"'0.4.2'"` and the immediately-following
+    // `bump_semver` would refuse it as unparseable — a silent knowledge
+    // lie about what is on disk. `read_chart_version` reads all three
+    // fleet-observed quote shapes (double, single, unquoted) via the
+    // same CHART_TOP_VERSION locator the write half already uses, and
+    // refuses a Chart.yaml with two top-level `version:` lines rather
+    // than returning the first hit — the same discipline the writer
+    // half applies.
+    let old_version = version::read_chart_version(&lib_chart_yaml)?;
 
     info!("Current version: {}", old_version);
 
@@ -1366,9 +1376,22 @@ pub fn bump(
 
 /// Read `version:` from a chart directory's `Chart.yaml`.
 fn chart_version_at(chart_dir: &str) -> Result<String> {
-    let content = std::fs::read_to_string(Path::new(chart_dir).join("Chart.yaml"))
-        .with_context(|| format!("read Chart.yaml in {chart_dir}"))?;
-    extract_yaml_field(&content, "version")
+    // Read the chart's own top-level `version:` through the family's
+    // shared form-preserving reader — the sibling lift the `helm::bump`
+    // read half already made. Pre-lift this site opened its own
+    // read-to-string and handed the content to `extract_yaml_field(_,
+    // "version")`, which silently accepted the malformation
+    // `read_chart_version` refuses (two top-level `version:` lines) and
+    // returned `"'0.4.2'"` for a single-quoted value, so the two
+    // consumer sites — `release_lib_chart` (whose `version` field is
+    // used as an OCI tag: single quotes in a tag are silently escaped
+    // by skopeo but round-trip through the release-notes commit
+    // message as `''`) and `release_all`'s `chart_published` probe
+    // (whose HEAD manifest lookup against `oci://…:'0.4.2'` would 404
+    // and re-push the chart, defeating the immutability seal
+    // `republish_enabled` exists to guard) both silently ate the
+    // wrong shape.
+    crate::version::read_chart_version(&Path::new(chart_dir).join("Chart.yaml"))
 }
 
 /// Package + push the library chart itself.
@@ -2610,6 +2633,159 @@ mod bump_routing_tests {
             after.contains("version:  \"0.4.3\""),
             "the double-space alignment between `version:` and the value \
              must survive the mutation; file now reads: {after:?}"
+        );
+    }
+
+    /// Fail-before-pass-after seal for the read-half port off
+    /// `extract_yaml_field` onto `version::read_chart_version`. The
+    /// pre-lift reader `.trim_matches('"')`d on the way in, so a
+    /// single-quoted `version: '0.4.2'` read back as the literal
+    /// `"'0.4.2'"`; the immediately-following `bump_semver` would
+    /// then bail with a semver-parse error — silent knowledge lie
+    /// about what is on disk, escalated to a hard failure at the
+    /// bump step. Post-lift the CHART_TOP_VERSION locator's
+    /// three-alternative shape (double / single / unquoted) reads
+    /// the value bytes only, so `read_chart_version` returns
+    /// `"0.4.2"` and the bump completes end-to-end. Written to fail
+    /// against the pre-lift `extract_yaml_field(_, "version")` body
+    /// and pass against the current lift; the sibling
+    /// [`helm_bump_updates_single_quoted_dependent_chart_pin`] seals
+    /// the DEP-pin single-quote form on the write half, and this
+    /// seal closes the same trap on the LIB's own read half.
+    #[test]
+    fn helm_bump_reads_a_single_quoted_lib_version_through_the_shared_reader() {
+        let (dir, lib_name) = build_solo_lib_chart_with_version_line("version: '0.4.2'");
+        let (old, new) = bump(dir.path().to_str().unwrap(), &lib_name, "patch", false).unwrap();
+        assert_eq!(
+            (old.as_str(), new.as_str()),
+            ("0.4.2", "0.4.3"),
+            "pre-lift `extract_yaml_field(_, \"version\")` returned \
+             `\"'0.4.2'\"` for the single-quoted shape and `bump_semver` \
+             then bailed at semver-parse — the value must read back as \
+             `0.4.2` through `version::read_chart_version`"
+        );
+        let after = std::fs::read_to_string(dir.path().join(&lib_name).join("Chart.yaml")).unwrap();
+        assert!(
+            after.contains("version: '0.4.3'"),
+            "the single-quoted form must survive the mutation \
+             byte-for-byte; file now reads: {after:?}"
+        );
+        assert!(
+            !after.contains("version: '0.4.2'"),
+            "the old value bytes must not survive; file now reads: {after:?}"
+        );
+    }
+
+    /// Post-lift `helm::bump` inherits the writer half's
+    /// exactly-one-top-level-`version:` refusal on the READ half too
+    /// — a Chart.yaml with two column-0 `version:` lines is a hard
+    /// error rather than a first-hit guess. Pre-lift
+    /// `extract_yaml_field` iterated lines and returned the first
+    /// match silently, so the second `version:` would silently win
+    /// or lose depending on which side of the file the caller cared
+    /// about. Sibling of the writer-half discipline at
+    /// [`crate::version::chart_top_version_span`].
+    #[test]
+    fn helm_bump_refuses_two_top_level_version_lines_on_read() {
+        let (dir, lib_name) =
+            build_solo_lib_chart_with_version_line("version: 0.4.2\nversion: 0.5.0");
+        let err = bump(dir.path().to_str().unwrap(), &lib_name, "patch", false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("two or more top-level `version:` lines"),
+            "the shared reader's exactly-one refusal must bubble up \
+             through bump() unchanged; got: {msg}"
+        );
+    }
+
+    /// Source-scan shield: `helm::bump` and `chart_version_at` — the
+    /// two module-local sites that historically opened their own
+    /// `extract_yaml_field(_, "version")` body — MUST route their
+    /// top-level `version:` READ through
+    /// [`crate::version::read_chart_version`], the family's shared
+    /// form-preserving reader.
+    ///
+    /// The pre-lift shape was two byte-similar bodies —
+    ///
+    /// ```ignore
+    /// let content = std::fs::read_to_string(&chart_yaml)
+    ///     .with_context(|| format!("..."))?;
+    /// let old_version = extract_yaml_field(&content, "version")?;
+    /// ```
+    ///
+    /// — silently accepting two malformations the sibling writer half
+    /// already refused: a single-quoted `version: '0.4.2'` read back
+    /// as the literal `"'0.4.2'"` (because `extract_yaml_field` calls
+    /// `.trim_matches('"')` only), and a Chart.yaml with two column-0
+    /// `version:` lines returned the FIRST hit (last-one-wins is
+    /// wrong for a file whose read is the input to a write). Post-lift
+    /// both sites are one line: `version::read_chart_version(&path)?`,
+    /// and the two malformations become hard errors — the same
+    /// discipline the writer half already applied.
+    ///
+    /// A regression that re-opens either body re-opens the exact class
+    /// this shield refuses. The scan checks both sites individually
+    /// so a future edit that lifts one but reverts the other still
+    /// fails here. The shield also pins a NEGATIVE invariant: neither
+    /// site may reopen `extract_yaml_field(_, "version")` — the
+    /// remaining `extract_yaml_field` callers in this module (three
+    /// `name` / `appVersion` extractors that stay outside the version
+    /// family) are unaffected, and the helper itself stays because
+    /// it still serves those non-version fields.
+    #[test]
+    fn helm_bump_and_chart_version_at_route_version_reads_through_read_chart_version() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        // Bound the scan to `pub fn bump(` .. `fn chart_version_at(`
+        // (the next top-level `fn` in source order after `bump`).
+        let bump_start = SOURCE
+            .find("pub fn bump(")
+            .expect("helm.rs must contain `pub fn bump(` — module invariant");
+        let bump_end = SOURCE[bump_start..]
+            .find("\nfn chart_version_at(")
+            .expect("helm.rs must contain `fn chart_version_at(` after `bump`");
+        let bump_body = &SOURCE[bump_start..bump_start + bump_end];
+
+        assert!(
+            bump_body.contains("version::read_chart_version(&lib_chart_yaml)"),
+            "bump() must route its top-level `version:` read through \
+             `version::read_chart_version(&lib_chart_yaml)` — the \
+             delegation string was not found in bump()."
+        );
+        assert!(
+            !bump_body.contains("extract_yaml_field(&content, \"version\")"),
+            "bump() must NOT hand-roll a `version:` read through \
+             `extract_yaml_field(&content, \"version\")` — the \
+             pre-lift body silently ate two malformations the \
+             sibling writer half already refuses (single-quoted \
+             values read back as `\"'X.Y.Z'\"`, two column-0 \
+             `version:` lines return the first hit). Route through \
+             `version::read_chart_version` instead."
+        );
+
+        // Bound the scan to `fn chart_version_at(` .. next top-level
+        // `fn` (`release_lib_chart`).
+        let cva_start = SOURCE
+            .find("\nfn chart_version_at(")
+            .expect("helm.rs must contain `fn chart_version_at(` — module invariant");
+        let cva_end = SOURCE[cva_start + 1..]
+            .find("\nfn release_lib_chart(")
+            .expect("helm.rs must contain `fn release_lib_chart(` after `chart_version_at`");
+        let cva_body = &SOURCE[cva_start..cva_start + 1 + cva_end];
+
+        assert!(
+            cva_body.contains("crate::version::read_chart_version("),
+            "chart_version_at() must route its top-level `version:` \
+             read through `crate::version::read_chart_version(...)` — \
+             the delegation string was not found in \
+             chart_version_at()."
+        );
+        assert!(
+            !cva_body.contains("extract_yaml_field(&content, \"version\")"),
+            "chart_version_at() must NOT hand-roll a `version:` read \
+             through `extract_yaml_field(&content, \"version\")` — \
+             same class the sibling bump() body just closed. Route \
+             through `crate::version::read_chart_version` instead."
         );
     }
 
