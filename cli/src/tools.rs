@@ -283,56 +283,103 @@ mod tests {
 /// An unlisted tool name is a hard failure, so adding a spawn of a tool that
 /// has never been spawned bare is refused outright.
 ///
-/// The counts are measured debt, not an endorsement. The path to zero is to
-/// route a call site through `get_tool_path` and lower its number here.
+/// # Three shapes, one tally
+///
+/// The scanner sees every shape a bare literal can reach `Command::new`
+/// through. Pre-extension the tally counted only the DIRECT shape
+/// (`Command::new("<literal>")`), so a literal flowing through a
+/// program-first helper's tail — `run_cmd(dir, "<literal>", …)` on
+/// `commands/tool.rs`, `run_program_timed("<literal>", …)` on
+/// `commands/helm.rs` — was invisible to the crate-wide tally and only
+/// caught by that module's own per-tool shield. The three pre-lift `zig`
+/// sites at `commands/tool.rs::{check,lock}` (routed at 5f898d1) were the
+/// live evidence: `zig` never appeared in this baseline yet three helper-
+/// wrapped bare spawns ran under every `forge tool check` / `forge tool
+/// lock` invocation. Extending the tally to also match the two
+/// program-first helper shapes closes that substrate hole, so a helper-
+/// wrapped literal is now caught at the crate-wide surface — a future new
+/// helper-wrapped spawn of any tool without a sigil is refused as
+/// UNLISTED even in the module that first adds the helper.
+///
+/// # Comment-blind, code-truthful
+///
+/// The scanner filters `//` / `///` / `//!` lines before applying the
+/// regexes, so a doc comment that MENTIONS the forbidden shape verbatim
+/// (`/// like `Command::new("kubectl")` — DON'T`) does not inflate the
+/// tally. Pre-extension the tally counted the shape in every prose
+/// mention: 43 for kubectl, 41 for git, 24 for nix — almost entirely doc-
+/// comment text describing the shield's own rules. After filtering, the
+/// tally reflects ACTUAL code-line spawns: 5 sites in 3 files, every one
+/// terminal by nature (`/bin/*` absolute paths, `false`/`true`/`sleep`
+/// test fixtures). A new real spawn of `kubectl` / `git` / `nix` now
+/// counts as `1` against a nonexistent baseline entry and fires
+/// UNLISTED, not `44` against a 43-slot budget hidden behind decades of
+/// prose.
 #[cfg(test)]
 mod spawn_shield {
-    /// Measured 2026-08-17. SHRINK-ONLY: lower a number when you route a call
-    /// site through a sigil; never raise one.
+    /// Measured 2026-08-19. Every entry is a REAL code-line site the
+    /// tally sees after comment filtering — a `Command::new(<literal>)`,
+    /// `run_cmd(<dir>, <literal>, …)`, or `run_program_timed(<literal>,
+    /// …)` site NOT inside a `//` / `///` / `//!` line. Every one is
+    /// TERMINAL BY NATURE: absolute `/bin/*` paths are already
+    /// unambiguous, `false`/`true`/`sleep` are exit-code and timeout
+    /// fixtures in test bodies. No sigil candidate remains under the
+    /// crate-wide surface post-comment-filter — every real tool spawn
+    /// already routes through `get_tool_path` or a `<tool>_bin()` sigil.
+    /// SHRINK-ONLY: lower a number when you route a call site through a
+    /// sigil; never raise one.
     const BASELINE: &[(&str, usize)] = &[
-        // Cluster / GitOps plane — the largest debt, and the highest value to
-        // route: a wrong kubectl or flux acts on whatever context PATH found.
-        ("kubectl", 43),
-        ("flux", 10),
-        ("kustomize", 3),
-        ("crossplane", 3),
-        ("helm", 2),
-        // Build / store plane.
-        ("nix", 24),
-        ("cargo", 20),
-        ("attic", 19),
-        ("crate2nix", 2),
-        ("sqlx", 4),
-        ("bun", 2),
-        // VCS + container plane.
-        ("git", 41),
-        ("docker", 7),
-        ("docker-compose", 6),
-        ("ssh", 1),
-        // Attestation / misc first-party.
-        ("kensa", 3),
-        ("rover-fhs", 1),
-        // Net probes.
-        ("dig", 1),
-        ("nc", 1),
-        // TERMINAL BY NATURE — these are not sigil candidates. An absolute
-        // /bin path is already unambiguous, `false`/`true` are exit-code
-        // fixtures, `open` is a macOS builtin, and `<bare>`/`<probe>` are test
-        // placeholder strings rather than real tools. Baselined so the tally
-        // adds up to the source rather than quietly excluding rows.
-        ("/bin/sh", 3),
-        ("/bin/true", 1),
-        ("sh", 2),
+        // Direct `Command::new("<literal>")` code-line sites.
+        ("/bin/sh", 3),   // retry.rs — subprocess-error primitive fixtures
+        ("/bin/true", 1), // store_path.rs — success-exit fixture
+        // `false`: 1 direct site (commands/rollout.rs) + 1 helper-wrapped
+        // (helm.rs `run_program_timed("false", …)` test fixture).
         ("false", 2),
-        ("open", 2),
-        ("<bare>", 12),
-        ("<probe>", 3),
+        // Helper-wrapped `run_program_timed(<literal>, …)` code-line
+        // sites in the `commands/helm.rs` test module — `true` and
+        // `sleep` are exit-code and timeout fixtures the tests use to
+        // exercise `run_program_timed`'s own wall-clock behavior.
+        ("true", 1),
+        ("sleep", 1),
     ];
 
+    /// Scan `source` for every bare-literal-spawn shape and tally the
+    /// captured tool names. Three regexes, one map:
+    ///
+    /// - `Command::new\("([^"]+)"\)` — the direct shape.
+    /// - `run_cmd\([^,()]+,\s*"([^"]+)"` — the two-arg helper-wrapped
+    ///   shape (first arg is a non-comma-non-paren token like `dir`,
+    ///   second arg is a bare quoted literal).
+    /// - `run_program_timed\(\s*"([^"]+)"` — the first-arg helper-
+    ///   wrapped shape.
+    ///
+    /// Every needle is regex-escaped (`new\(`, `run_cmd\(`,
+    /// `run_program_timed\(`), so this module's own regex-source literals
+    /// cannot match themselves. Lines whose trimmed prefix is `//`,
+    /// `///`, or `//!` are filtered before scanning — a doc-comment
+    /// mention of the shape is not a spawn.
+    fn tally_spawn_shapes(source: &str) -> std::collections::BTreeMap<String, usize> {
+        let direct = regex::Regex::new(r#"Command::new\("([^"]+)"\)"#).expect("static direct");
+        let run_cmd =
+            regex::Regex::new(r#"run_cmd\([^,()]+,\s*"([^"]+)""#).expect("static run_cmd");
+        let run_timed = regex::Regex::new(r#"run_program_timed\(\s*"([^"]+)""#)
+            .expect("static run_program_timed");
+        let mut tally: std::collections::BTreeMap<String, usize> = Default::default();
+        for line in source.lines() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            for re in [&direct, &run_cmd, &run_timed] {
+                for c in re.captures_iter(line) {
+                    *tally.entry(c[1].to_string()).or_default() += 1;
+                }
+            }
+        }
+        tally
+    }
+
     fn bare_literal_spawns() -> Vec<(String, usize)> {
-        // The needle is regex-escaped (`new\(`), so this file's own pattern
-        // literal cannot match the fused shape it looks for.
-        let re = regex::Regex::new(r#"Command::new\("([^"]+)"\)"#).expect("static regex");
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut tally: std::collections::BTreeMap<String, usize> = Default::default();
         let mut stack = vec![src];
@@ -343,8 +390,8 @@ mod spawn_shield {
                     stack.push(p);
                 } else if p.extension().is_some_and(|x| x == "rs") {
                     let text = std::fs::read_to_string(&p).unwrap_or_default();
-                    for c in re.captures_iter(&text) {
-                        *tally.entry(c[1].to_string()).or_default() += 1;
+                    for (k, v) in tally_spawn_shapes(&text) {
+                        *tally.entry(k).or_default() += v;
                     }
                 }
             }
@@ -356,7 +403,9 @@ mod spawn_shield {
     fn bare_literal_spawns_may_shrink_never_grow() {
         let found = bare_literal_spawns();
         // Anti-vacuity: a walk that finds nothing is a broken walk, not a clean
-        // crate — this shield exists because 203 such spawns were measured.
+        // crate — five terminal fixtures live in the tree by design (see
+        // BASELINE above), so an empty tally means the walker or the regexes
+        // are broken and the shield is silently vacuous.
         assert!(
             !found.is_empty(),
             "found zero spawn sites — the source walk is broken, which would \
@@ -381,6 +430,86 @@ mod spawn_shield {
             grew,
             unlisted,
             found
+        );
+    }
+
+    /// Pins the helper-wrapped extension: the tally MUST see a bare
+    /// literal that reaches `Command::new` through the program-first
+    /// helpers `run_cmd(dir, "<lit>", …)` and `run_program_timed("<lit>",
+    /// …)`, not only the direct `Command::new("<lit>")` shape.
+    ///
+    /// Fail-before-pass-after: with only the direct-shape regex active
+    /// (the pre-extension state at 5f898d1's substrate-hole note),
+    /// `tally_spawn_shapes` on the fixture below returned
+    /// `{"synth-direct": 1}` and both helper-wrapped keys were
+    /// absent. Post-extension all three keys appear with count 1.
+    ///
+    /// The three fixture lines are assembled via `concat!` from split
+    /// string fragments so this test's OWN source text never contains
+    /// the fused shapes — the crate-wide walker scanning
+    /// `include_str!("tools.rs")` therefore does not false-match this
+    /// fixture and inflate the real baseline.
+    #[test]
+    fn helper_wrapped_bare_literal_is_counted_toward_the_baseline() {
+        let synth_direct = concat!("    let c = Command::", "new(\"synth-direct\");\n");
+        let synth_helper_cmd =
+            concat!("    let _ = run_", "cmd(dir, \"synth-helper-cmd\", &[]);\n");
+        let synth_helper_timed = concat!(
+            "    let _ = run_",
+            "program_timed(\"synth-helper-timed\", &[], Duration::from_secs(1));\n"
+        );
+        let source = format!("{synth_direct}{synth_helper_cmd}{synth_helper_timed}");
+
+        let tally = tally_spawn_shapes(&source);
+        assert_eq!(
+            tally.get("synth-direct"),
+            Some(&1),
+            "direct `Command::new(<literal>)` shape must count. Tally: {tally:?}"
+        );
+        assert_eq!(
+            tally.get("synth-helper-cmd"),
+            Some(&1),
+            "helper-wrapped `run_cmd(<dir>, <literal>, …)` shape must count — \
+             this is the substrate hole 5f898d1's body flagged (the crate-wide \
+             regex was helper-blind, so a literal through `run_cmd`'s tail \
+             slipped past the tally). Tally: {tally:?}"
+        );
+        assert_eq!(
+            tally.get("synth-helper-timed"),
+            Some(&1),
+            "helper-wrapped `run_program_timed(<literal>, …)` shape must count — \
+             sibling of the run_cmd hole above, on the bounded-spawn helper \
+             `commands/helm.rs` exposes. Tally: {tally:?}"
+        );
+    }
+
+    /// Pins the comment-blind filter: a `//` / `///` / `//!` line
+    /// mentioning the forbidden shape verbatim (as this shield's own
+    /// docstring and the sibling per-module shields' docstrings do) must
+    /// NOT inflate the tally. Pre-extension the tally counted every doc-
+    /// comment mention as a spawn — 43 "kubectl" hits, 41 "git" hits, 24
+    /// "nix" hits — none of them real code sites, all of them prose
+    /// describing the shield's own rules. After filtering, only real
+    /// code-line spawns count.
+    ///
+    /// Fixture fragments are split via `concat!` so this test's OWN
+    /// source text never fuses the shape the regex looks for.
+    #[test]
+    fn comment_lines_do_not_inflate_the_tally() {
+        let commented = concat!(
+            "/// docstring naming Command::",
+            "new(\"comment-ghost\") — must not count\n",
+            "    // inline comment naming run_",
+            "cmd(dir, \"comment-ghost\", &[]) — must not count\n",
+            "//! module doc naming run_",
+            "program_timed(\"comment-ghost\", &[], t) — must not count\n",
+        );
+        let tally = tally_spawn_shapes(commented);
+        assert!(
+            tally.get("comment-ghost").is_none(),
+            "doc-comment mentions of any of the three spawn shapes must be \
+             filtered before scanning — a `///` / `//!` / `//` line is prose, \
+             not a spawn. Tally: {tally:?}"
         );
     }
 }
