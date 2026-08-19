@@ -1247,19 +1247,45 @@ pub fn bump(
             continue;
         }
 
-        let dep_content = std::fs::read_to_string(&dep_chart_yaml)?;
-
-        // Check if this chart depends on the library
-        // Look for: version: "X.Y.Z" under a dependency with name: lib_chart_name
-        let old_dep = format!("version: \"{}\"", old_version);
-        let new_dep = format!("version: \"{}\"", new_version);
-
-        if dep_content.contains(&old_dep)
-            && dep_content.contains(&format!("name: {}", lib_chart_name))
-        {
+        // Route the dependency-pin update through the typed writer — same
+        // trap-3 shape closed at 3bc0885 / eb10657 for the chart's OWN
+        // version, now closed for the nested pin. The pre-port form was:
+        //
+        //     let old_dep = format!("version: \"{}\"", old_version);
+        //     let new_dep = format!("version: \"{}\"", new_version);
+        //     if dep_content.contains(&old_dep)
+        //         && dep_content.contains(&format!("name: {}", lib_chart_name))
+        //     { let updated = dep_content.replace(&old_dep, &new_dep); ... }
+        //
+        // That `format!`-rebuilt needle hardcoded a double-quoted single-space
+        // shape, so `version: 0.4.2` (unquoted, the majority form),
+        // `version: '0.4.2'` (single-quoted), and `version:  "0.4.2"` (aligned)
+        // silently no-op'd on write while `bump` returned `Ok`. Worse than the
+        // top-level trap: the pre-`contains` guard suppressed the write
+        // ENTIRELY rather than merely no-op'ing after a false-hit, so a
+        // dependent chart's `updated_count += 1` never fired and the caller
+        // was told the dep was NOT PRESENT rather than that the write failed —
+        // silent-skip instead of silent-no-op-with-success. The typed writer
+        // parses the `dependencies:` list via serde_yaml (enforcing uniqueness
+        // of the name across entries) and splices the value bytes at the
+        // matched entry's version-line span, so every fleet-observed form
+        // routes through the same discipline and the verified-mutation seal
+        // proves the delta before returning. `Ok(false)` from the writer
+        // means "this chart has no dependency named `lib_chart_name`", which
+        // is the legitimate no-op the pre-port guard was trying to express;
+        // any structural error (malformed YAML, two entries share the name,
+        // the entry lacks a version field) becomes a hard error rather than
+        // a silent skip.
+        let written =
+            version::write_chart_dependency_version(&dep_chart_yaml, lib_chart_name, &new_version)
+                .with_context(|| {
+                    format!(
+                        "Failed to update dependency pin in {}",
+                        dep_chart_yaml.display()
+                    )
+                })?;
+        if written {
             info!("Updating {}/Chart.yaml", dir_name_str);
-            let updated_dep = dep_content.replace(&old_dep, &new_dep);
-            std::fs::write(&dep_chart_yaml, &updated_dep)?;
             updated_count += 1;
         }
     }
@@ -2362,6 +2388,165 @@ mod bump_routing_tests {
         assert!(
             !after.contains("0.4.2"),
             "the old version bytes must not survive anywhere; file now reads: {after:?}"
+        );
+    }
+
+    /// Build a temp charts dir carrying (a) a library chart at the given
+    /// version and (b) a dependent chart whose `dependencies:` list pins
+    /// the library at the same version via the caller-authored line.
+    /// Returns `(charts_dir, lib_name, dep_name)`.
+    ///
+    /// The `dep_version_line` argument is spliced verbatim so the port
+    /// can be exercised over every fleet-observed shape the pre-port
+    /// `format!("version: \"{}\"", old)` needle handled or silently
+    /// skipped: unquoted, single-quoted, aligned. The double-quoted
+    /// shape was the ONLY one the pre-port form matched — it is
+    /// covered by [`helm_bump_updates_double_quoted_dependent_chart_pin`]
+    /// as a no-regression seal.
+    fn build_lib_and_dependent_chart(
+        lib_version: &str,
+        dep_version_line: &str,
+    ) -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_name = "pleme-lib";
+        let dep_name = "app-wrapper";
+
+        let lib_dir = dir.path().join(lib_name);
+        std::fs::create_dir(&lib_dir).unwrap();
+        let lib_chart = format!(
+            "apiVersion: v2\nname: {}\nversion: {}\ntype: library\n",
+            lib_name, lib_version
+        );
+        std::fs::write(lib_dir.join("Chart.yaml"), lib_chart).unwrap();
+
+        let dep_dir = dir.path().join(dep_name);
+        std::fs::create_dir(&dep_dir).unwrap();
+        let dep_chart = format!(
+            "apiVersion: v2\nname: {}\nversion: 0.1.0\ndependencies:\n  - name: {}\n    {}\n    repository: file://../{}\n",
+            dep_name, lib_name, dep_version_line, lib_name
+        );
+        std::fs::write(dep_dir.join("Chart.yaml"), dep_chart).unwrap();
+
+        (dir, lib_name.to_string(), dep_name.to_string())
+    }
+
+    /// Regression seal for the DOUBLE-QUOTED dep-pin form
+    /// (`version: "0.4.2"`) — the only shape the pre-port
+    /// `format!("version: \"{}\"", old)` needle happened to match. The
+    /// port through `version::write_chart_dependency_version` must
+    /// continue to update this shape.
+    #[test]
+    fn helm_bump_updates_double_quoted_dependent_chart_pin() {
+        let (dir, lib_name, dep_name) =
+            build_lib_and_dependent_chart("0.4.2", "version: \"0.4.2\"");
+        let (old, new) = bump(dir.path().to_str().unwrap(), &lib_name, "patch", false).unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("0.4.2", "0.4.3"));
+        let after = std::fs::read_to_string(dir.path().join(&dep_name).join("Chart.yaml")).unwrap();
+        assert!(
+            after.contains("version: \"0.4.3\""),
+            "the double-quoted dep pin must move to the new version and \
+             KEEP its quotes; file now reads: {after:?}"
+        );
+        assert!(
+            !after.contains("version: \"0.4.2\""),
+            "old dep pin bytes must not survive: {after:?}"
+        );
+    }
+
+    /// Regression seal for the UNQUOTED dep-pin form
+    /// (`version: 0.4.2`) — the majority shape in the fleet. The pre-port
+    /// `content.replace` over a `format!("version: \"{}\"", old)` needle
+    /// hardcoded double quotes and one space, so the SKIP was worse than
+    /// a silent no-op: the pre-`contains` guard suppressed the write
+    /// entirely and `bump` reported the dep as NOT PRESENT rather than as
+    /// failed. The port must now update this form.
+    #[test]
+    fn helm_bump_updates_unquoted_dependent_chart_pin() {
+        let (dir, lib_name, dep_name) = build_lib_and_dependent_chart("0.4.2", "version: 0.4.2");
+        let (old, new) = bump(dir.path().to_str().unwrap(), &lib_name, "patch", false).unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("0.4.2", "0.4.3"));
+        let after = std::fs::read_to_string(dir.path().join(&dep_name).join("Chart.yaml")).unwrap();
+        assert!(
+            after.contains("version: 0.4.3"),
+            "the unquoted dep pin must move to the new version; the \
+             pre-port `format!(\"version: \\\"{{}}\\\"\", ...)` needle \
+             silently skipped this fleet-majority shape entirely — file \
+             now reads: {after:?}"
+        );
+        assert!(
+            !after.contains("version: 0.4.2"),
+            "old dep pin bytes must not survive: {after:?}"
+        );
+    }
+
+    /// Regression seal for the SINGLE-QUOTED dep-pin form
+    /// (`version: '0.4.2'`) — legal YAML that the pre-port needle's
+    /// hardcoded double quotes silently skipped on write. The port must
+    /// splice the value bytes and keep the surrounding single quotes.
+    #[test]
+    fn helm_bump_updates_single_quoted_dependent_chart_pin() {
+        let (dir, lib_name, dep_name) = build_lib_and_dependent_chart("0.4.2", "version: '0.4.2'");
+        let (old, new) = bump(dir.path().to_str().unwrap(), &lib_name, "patch", false).unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("0.4.2", "0.4.3"));
+        let after = std::fs::read_to_string(dir.path().join(&dep_name).join("Chart.yaml")).unwrap();
+        assert!(
+            after.contains("version: '0.4.3'"),
+            "the single-quoted dep pin must move to the new version and \
+             KEEP its single quotes; file now reads: {after:?}"
+        );
+        assert!(
+            !after.contains("version: '0.4.2'"),
+            "old dep pin bytes must not survive: {after:?}"
+        );
+    }
+
+    /// Regression seal for the ALIGNED dep-pin form
+    /// (`version:  "0.4.2"`, two spaces after the colon) — the pre-port
+    /// needle hardcoded ONE space, so this form silently skipped on
+    /// write. The port must preserve the alignment byte-for-byte.
+    #[test]
+    fn helm_bump_updates_aligned_dependent_chart_pin_and_keeps_the_padding() {
+        let (dir, lib_name, dep_name) =
+            build_lib_and_dependent_chart("0.4.2", "version:  \"0.4.2\"");
+        let (old, new) = bump(dir.path().to_str().unwrap(), &lib_name, "patch", false).unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("0.4.2", "0.4.3"));
+        let after = std::fs::read_to_string(dir.path().join(&dep_name).join("Chart.yaml")).unwrap();
+        assert!(
+            after.contains("version:  \"0.4.3\""),
+            "the double-space alignment between `version:` and the value \
+             must survive the mutation; file now reads: {after:?}"
+        );
+    }
+
+    /// A dependent chart that does NOT depend on the library must be
+    /// left untouched, and `bump` must still succeed. Mirrors the
+    /// pre-port skip behavior — that was the ONE thing the pre-port
+    /// `contains(name: ...)` guard got right.
+    #[test]
+    fn helm_bump_leaves_unrelated_dependent_chart_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_name = "pleme-lib";
+        let lib_dir = dir.path().join(lib_name);
+        std::fs::create_dir(&lib_dir).unwrap();
+        std::fs::write(
+            lib_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: pleme-lib\nversion: 0.4.2\ntype: library\n",
+        )
+        .unwrap();
+
+        let unrelated_dir = dir.path().join("solo");
+        std::fs::create_dir(&unrelated_dir).unwrap();
+        let unrelated_content = "apiVersion: v2\nname: solo\nversion: 1.0.0\n";
+        std::fs::write(unrelated_dir.join("Chart.yaml"), unrelated_content).unwrap();
+
+        let (old, new) = bump(dir.path().to_str().unwrap(), lib_name, "patch", false).unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("0.4.2", "0.4.3"));
+
+        let after = std::fs::read_to_string(unrelated_dir.join("Chart.yaml")).unwrap();
+        assert_eq!(
+            after, unrelated_content,
+            "a chart that does not depend on the library must be left \
+             byte-for-byte untouched"
         );
     }
 }
