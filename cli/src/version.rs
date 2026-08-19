@@ -10656,10 +10656,82 @@ static CHART_DEP_ENTRY_REPOSITORY: std::sync::LazyLock<regex::Regex> =
 static CHART_DEPS_HEADER: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"(?m)^dependencies:").expect("static regex"));
 
+/// The one IO shell every Chart.yaml dependency-field writer shares.
+///
+/// Read the manifest at `path`, hand its bytes to the ecosystem's `plan`
+/// pure core with `dep_name` and `new_value`, then either write the
+/// returned bytes back and report `Ok(true)` (splice took) or report
+/// `Ok(false)` (planner returned `None` — no entry named `dep_name` in
+/// the file, a legitimate no-op the fleet-iteration caller
+/// `commands/helm.rs::bump` / `redirect_remote_deps_to_mirror` depends
+/// on).
+///
+/// The two dep-field writers ([`write_chart_dependency_version`],
+/// [`write_chart_dependency_repository`]) delegate their entire body
+/// here — their public signatures stay
+/// `(path, dep_name, new_value) -> Result<bool>` and their per-field
+/// semantics live wholly in the pure core the closure passed to `plan`
+/// names.
+///
+/// # Contract
+///
+/// - The `Failed to read <path>` context wraps the read-side IO error.
+/// - The `cannot write dependency <dep_name> <field_label> to <path>`
+///   context wraps the pure core's error — the YAML parse / uniqueness /
+///   seal errors carry through into the caller's error chain with the
+///   dep name, field name, and path all baked in.
+/// - The `Failed to write <path>` context wraps the write-side IO error.
+/// - A pure core that returns `Ok(None)` MUST leave the file on disk
+///   byte-identical — the write only fires on the `Ok(Some(...))` arm.
+/// - A pure core that returns `Err(...)` MUST leave the file on disk
+///   byte-identical — same discipline, error arm side.
+///
+/// # Compounding
+///
+/// A future dep-field writer (e.g. a `write_chart_dependency_alias`
+/// sibling that follows the same read-plan-write shape) inherits the IO
+/// shell by delegation — one line, one pure core, three error contexts
+/// uniform across every field. The two pre-lift writers were
+/// byte-identical bodies differing only in which
+/// `plan_chart_dependency_*_write` they called and the field noun in
+/// the write-context (two replicas at 10685 / 10774 pre-lift), so the
+/// lift closes a TWO-replica duplication by construction. A new
+/// dep-field writer that lands its own IO shell by hand re-opens the
+/// same class — the shield
+/// [`tests::dep_writers_route_through_apply_optional_dep_write`]
+/// refuses that at source-scan time.
+fn apply_optional_dep_write<F>(
+    path: &Path,
+    dep_name: &str,
+    new_value: &str,
+    field_label: &str,
+    plan: F,
+) -> Result<bool>
+where
+    F: FnOnce(&str, &str, &str) -> Result<Option<String>>,
+{
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    match plan(&content, dep_name, new_value).with_context(|| {
+        format!(
+            "cannot write dependency {dep_name} {field_label} to {}",
+            path.display()
+        )
+    })? {
+        Some(updated) => {
+            std::fs::write(path, &updated)
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 /// Write a new version onto a specific entry in a Chart.yaml's
 /// `dependencies:` list — the sibling of [`write_chart_version`] for the
 /// nested dependency pin. Thin IO shell over
-/// [`plan_chart_dependency_version_write`].
+/// [`plan_chart_dependency_version_write`], routed through
+/// [`apply_optional_dep_write`].
 ///
 /// Returns `Ok(true)` when the write took, `Ok(false)` when no dependency
 /// named `dep_name` exists in the file (dependent-chart iteration passes
@@ -10687,23 +10759,13 @@ pub fn write_chart_dependency_version(
     dep_name: &str,
     new_version: &str,
 ) -> Result<bool> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    match plan_chart_dependency_version_write(&content, dep_name, new_version).with_context(
-        || {
-            format!(
-                "cannot write dependency {dep_name} version to {}",
-                path.display()
-            )
-        },
-    )? {
-        Some(updated) => {
-            std::fs::write(path, &updated)
-                .with_context(|| format!("Failed to write {}", path.display()))?;
-            Ok(true)
-        }
-        None => Ok(false),
-    }
+    apply_optional_dep_write(
+        path,
+        dep_name,
+        new_version,
+        "version",
+        plan_chart_dependency_version_write,
+    )
 }
 
 /// PURE core of [`write_chart_dependency_version`]: content in,
@@ -10776,23 +10838,13 @@ pub fn write_chart_dependency_repository(
     dep_name: &str,
     new_repository: &str,
 ) -> Result<bool> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    match plan_chart_dependency_repository_write(&content, dep_name, new_repository).with_context(
-        || {
-            format!(
-                "cannot write dependency {dep_name} repository to {}",
-                path.display()
-            )
-        },
-    )? {
-        Some(updated) => {
-            std::fs::write(path, &updated)
-                .with_context(|| format!("Failed to write {}", path.display()))?;
-            Ok(true)
-        }
-        None => Ok(false),
-    }
+    apply_optional_dep_write(
+        path,
+        dep_name,
+        new_repository,
+        "repository",
+        plan_chart_dependency_repository_write,
+    )
 }
 
 /// PURE core of [`write_chart_dependency_repository`]: content in,
@@ -11156,6 +11208,188 @@ mod tests {
                 !body.contains("std::fs::write(path"),
                 "{name} must NOT write the file directly — the IO shell owns that write. \
                  Direct write re-opens the three-replica duplication apply_version_write closed."
+            );
+        }
+    }
+
+    /// The IO shell must fire the pure core with the file bytes it read
+    /// AND `(dep_name, new_value)` verbatim, then on `Ok(Some(...))`
+    /// write the returned bytes back and report `true`. Fake planner
+    /// records what it received and returns a synthetic result, so the
+    /// delegation is proven directly rather than inferred from the
+    /// sibling round-trip tests on the two dep-field writers.
+    #[test]
+    fn apply_optional_dep_write_delegates_content_dep_and_value_to_the_planner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        std::fs::write(&path, "original bytes\n").unwrap();
+
+        let seen: std::cell::RefCell<Option<(String, String, String)>> =
+            std::cell::RefCell::new(None);
+        let plan = |content: &str, dep_name: &str, new_value: &str| -> Result<Option<String>> {
+            *seen.borrow_mut() = Some((
+                content.to_string(),
+                dep_name.to_string(),
+                new_value.to_string(),
+            ));
+            Ok(Some(format!("planner-output for {dep_name} = {new_value}")))
+        };
+
+        let wrote = apply_optional_dep_write(&path, "pleme-lib", "0.4.3", "version", plan).unwrap();
+        assert!(wrote, "Ok(Some(...)) arm must report true");
+        assert_eq!(
+            seen.into_inner(),
+            Some((
+                "original bytes\n".to_string(),
+                "pleme-lib".to_string(),
+                "0.4.3".to_string()
+            )),
+            "the planner must see the file's read bytes, dep_name, and new_value verbatim"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "planner-output for pleme-lib = 0.4.3",
+            "the file on disk must match the planner's returned Some(bytes)"
+        );
+    }
+
+    /// A planner that returns `Ok(None)` MUST report `false` AND leave
+    /// the file byte-identical on disk — the IO shell only writes on
+    /// the `Ok(Some(...))` arm. Pins the fleet-iteration no-op
+    /// contract: a caller sweeping a directory of Chart.yaml files that
+    /// mostly don't reference the target dep gets that "no matching
+    /// dep" answer from the shell's structure, not from every
+    /// per-field planner happening to no-op cleanly.
+    #[test]
+    fn apply_optional_dep_write_none_returns_false_and_leaves_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        let original = "unchanged bytes\n";
+        std::fs::write(&path, original).unwrap();
+
+        let plan = |_content: &str, _dep: &str, _new: &str| -> Result<Option<String>> { Ok(None) };
+
+        let wrote = apply_optional_dep_write(&path, "pleme-lib", "0.4.3", "version", plan).unwrap();
+        assert!(!wrote, "Ok(None) arm must report false");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "an Ok(None) planner must leave the file byte-identical — no write on the no-op arm"
+        );
+    }
+
+    /// A planner `Err(...)` MUST wrap with a context naming both the
+    /// dep and the field label, so a caller sweeping a fleet sees
+    /// `cannot write dependency pleme-lib version to <path>` rather
+    /// than a bare seal error missing which dep of which file failed.
+    /// The file on disk MUST stay byte-identical — the write only
+    /// fires on the `Ok(Some(...))` arm.
+    #[test]
+    fn apply_optional_dep_write_planner_error_wraps_with_dep_field_context_and_leaves_file_untouched(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Chart.yaml");
+        let original = "unchanged bytes\n";
+        std::fs::write(&path, original).unwrap();
+
+        let plan = |_content: &str, _dep: &str, _new: &str| -> Result<Option<String>> {
+            bail!("synthetic planner refusal")
+        };
+
+        let err =
+            apply_optional_dep_write(&path, "pleme-lib", "0.4.3", "repository", plan).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("cannot write dependency pleme-lib repository to"),
+            "the planner's error must be wrapped with the dep+field write-context, got: {chain}"
+        );
+        assert!(
+            chain.contains("synthetic planner refusal"),
+            "the planner's own error message must survive into the caller's chain, got: {chain}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "a planner Err must leave the file byte-identical — no partial or truncated write"
+        );
+    }
+
+    /// A missing path must error at the READ half, wrapped with the
+    /// "Failed to read" context, before the planner runs at all — the
+    /// same shell-level file-preservation discipline
+    /// `apply_version_write_missing_path_errors_with_read_context`
+    /// pins for the top-level writer family.
+    #[test]
+    fn apply_optional_dep_write_missing_path_errors_with_read_context() {
+        let path = std::path::Path::new("/nonexistent/chart/yaml/that/does/not/exist");
+        let mut called = false;
+        let plan = |_content: &str, _dep: &str, _new: &str| -> Result<Option<String>> {
+            called = true;
+            Ok(None)
+        };
+        let err =
+            apply_optional_dep_write(path, "pleme-lib", "0.4.3", "version", plan).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("Failed to read"),
+            "the read-side IO error must be wrapped with the read-context, got: {chain}"
+        );
+        assert!(
+            !called,
+            "the planner must NOT run when the read failed — no work on ghost bytes"
+        );
+    }
+
+    /// The two Chart.yaml dependency-field writers MUST delegate their
+    /// entire body through `apply_optional_dep_write`. Any direct
+    /// `std::fs::read_to_string(path)` / `std::fs::write(path, ...)` /
+    /// bare `plan_chart_dependency_*_write(...)` call inside their body
+    /// re-opens the pre-lift two-replica duplication that this helper
+    /// closed.
+    ///
+    /// Fail-before-pass-after: with either writer reverted to its
+    /// pre-lift 15-line match-on-Option IO body, the
+    /// `.starts_with("apply_optional_dep_write(")` assertion on that
+    /// writer's slice fires. Restoring the delegation returns the
+    /// shield to green.
+    #[test]
+    fn dep_writers_route_through_apply_optional_dep_write() {
+        let src = include_str!("version.rs");
+        let writers = [
+            ("write_chart_dependency_version", "new_version: &str"),
+            ("write_chart_dependency_repository", "new_repository: &str"),
+        ];
+        for (name, value_param) in writers {
+            let signature = format!(
+                "pub fn {name}(\n    path: &Path,\n    dep_name: &str,\n    {value_param},\n) -> Result<bool>"
+            );
+            let start = src.find(&signature).unwrap_or_else(|| {
+                panic!("must find the public signature of {name} — signature drift?")
+            });
+            let after_brace = src[start..]
+                .find(" {\n")
+                .map(|o| start + o + 3)
+                .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
+            let body_end = src[after_brace..]
+                .find("\n}\n")
+                .map(|o| after_brace + o)
+                .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
+            let body = src[after_brace..body_end].trim();
+
+            assert!(
+                body.starts_with("apply_optional_dep_write("),
+                "{name} must delegate its body through apply_optional_dep_write — \
+                 got body: {body:?}"
+            );
+            assert!(
+                !body.contains("std::fs::read_to_string(path)"),
+                "{name} must NOT read the file directly — the IO shell owns that read. \
+                 Direct read re-opens the two-replica duplication apply_optional_dep_write closed."
+            );
+            assert!(
+                !body.contains("std::fs::write(path"),
+                "{name} must NOT write the file directly — the IO shell owns that write. \
+                 Direct write re-opens the two-replica duplication apply_optional_dep_write closed."
             );
         }
     }
