@@ -106,6 +106,13 @@ uuid = { version = "1.11", features = ["serde"] }
 
 # docker-archive tarball + layer-tar walking (image-release ELF verification)
 tar = "0.4"
+# `dockerTools.buildLayeredImage` emits a GZIP-COMPRESSED tarball (its default
+# `compressor = "gz"`), so every substrate-built image reaches the ELF gate
+# gzipped and a raw-tar reader sees `archive header checksum mismatch`. Pinned
+# to the same spelling substrate's own oci-push uses (tools/oci-push/Cargo.toml)
+# so the two readers cannot diverge; `rust_backend` keeps the C zlib out of a
+# closure that has to build static.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [features]
 default = []
