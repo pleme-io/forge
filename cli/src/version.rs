@@ -10033,13 +10033,7 @@ pub fn write_cargo_version(path: &Path, new_version: &str) -> Result<()> {
 /// fleet without touching a byte on disk — which is how its invariants get
 /// tested against shapes nobody thought to write a unit test for.
 pub fn plan_cargo_version_write(content: &str, new_version: &str) -> Result<String> {
-    if !SEMVER_LIKE.is_match(new_version) {
-        bail!(
-            "refusing to write {:?} — a version must start X.Y.Z (a prerelease \
-             or build suffix is allowed after it)",
-            new_version
-        );
-    }
+    ensure_writable_semver(new_version)?;
     let shape = classify_cargo(content);
     let section = writable_section(&shape)?;
 
@@ -10084,6 +10078,40 @@ pub fn plan_cargo_version_write(content: &str, new_version: &str) -> Result<Stri
 static SEMVER_LIKE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(r"^\d+\.\d+\.\d+([-+][0-9A-Za-z.\-+]*)?$").expect("static regex")
 });
+
+/// The pre-write acceptance guard every version-writer planner in this
+/// module honors: `new_version` must match [`SEMVER_LIKE`], or the write
+/// is refused with a uniform message before a single byte is spliced.
+///
+/// # Compounding
+///
+/// Four planner bodies (`plan_cargo_version_write`,
+/// `plan_zig_version_write`, `plan_chart_version_write`,
+/// `plan_chart_dependency_version_write`) each opened with the same
+/// six-line `if !SEMVER_LIKE.is_match(new_version) { bail!(…) }` block —
+/// byte-identical modulo indentation. A fifth ecosystem planner
+/// (`plan_package_json_version_write`, or the npm/gemspec sibling that
+/// follows the same content-in / content-out shape) inherits the guard
+/// by one line of delegation rather than by cargo-cult copy — and the
+/// refusal message stays defined in one place, so a caller
+/// pattern-matching on it (`err.contains("refusing to write")`) gets a
+/// uniform answer across every ecosystem the writer family covers.
+///
+/// A planner that lands its own bare `SEMVER_LIKE.is_match(new_version)`
+/// check re-opens the four-replica duplication this helper closed — the
+/// shield
+/// [`tests::planners_route_semver_guard_through_ensure_writable_semver`]
+/// refuses that at source-scan time.
+fn ensure_writable_semver(new_version: &str) -> Result<()> {
+    if !SEMVER_LIKE.is_match(new_version) {
+        bail!(
+            "refusing to write {:?} — a version must start X.Y.Z (a prerelease \
+             or build suffix is allowed after it)",
+            new_version
+        );
+    }
+    Ok(())
+}
 
 /// Classify a Cargo.toml's version shape. Pure — takes the content, so it is
 /// testable without a filesystem.
@@ -10231,14 +10259,7 @@ pub fn write_zig_version(path: &Path, new_version: &str) -> Result<()> {
 /// [`splice_and_verify`]; the zig arm was the odd one out and this
 /// port closes it.
 pub fn plan_zig_version_write(content: &str, new_version: &str) -> Result<String> {
-    if !SEMVER_LIKE.is_match(new_version) {
-        bail!(
-            "refusing to write {:?} — a version must start X.Y.Z (a prerelease \
-             or build suffix is allowed after it)",
-            new_version
-        );
-    }
-
+    ensure_writable_semver(new_version)?;
     let span = zig_top_version_span(content)?;
     splice_and_verify(content, span, new_version, "version", zig_top_version_span)
 }
@@ -10589,14 +10610,7 @@ pub fn write_chart_version(path: &Path, new_version: &str) -> Result<()> {
 ///    rewrite that reports success without changing the file is the
 ///    failure mode this whole family exists to prevent.
 pub fn plan_chart_version_write(content: &str, new_version: &str) -> Result<String> {
-    if !SEMVER_LIKE.is_match(new_version) {
-        bail!(
-            "refusing to write {:?} — a version must start X.Y.Z (a prerelease \
-             or build suffix is allowed after it)",
-            new_version
-        );
-    }
-
+    ensure_writable_semver(new_version)?;
     let span = chart_top_version_span(content)?;
     splice_and_verify(
         content,
@@ -10720,14 +10734,7 @@ pub fn plan_chart_dependency_version_write(
     dep_name: &str,
     new_version: &str,
 ) -> Result<Option<String>> {
-    if !SEMVER_LIKE.is_match(new_version) {
-        bail!(
-            "refusing to write {:?} — a version must start X.Y.Z (a prerelease \
-             or build suffix is allowed after it)",
-            new_version
-        );
-    }
-
+    ensure_writable_semver(new_version)?;
     let Some(span) = chart_dep_version_span(content, dep_name)? else {
         return Ok(None);
     };
@@ -11149,6 +11156,123 @@ mod tests {
                 !body.contains("std::fs::write(path"),
                 "{name} must NOT write the file directly — the IO shell owns that write. \
                  Direct write re-opens the three-replica duplication apply_version_write closed."
+            );
+        }
+    }
+
+    /// The pre-write acceptance guard MUST accept the shapes the
+    /// SEMVER_LIKE regex admits (`X.Y.Z` and `X.Y.Z-prerelease`), and
+    /// MUST reject anything that would enter the splice as a non-semver
+    /// value — bare integers, two-part shapes, alphabetic garbage, an
+    /// empty string. The refusal message names the writer contract
+    /// (`refusing to write ... a version must start X.Y.Z`) so a caller
+    /// pattern-matching on the message gets one uniform answer across
+    /// every ecosystem the writer family covers.
+    #[test]
+    fn ensure_writable_semver_accepts_and_rejects_by_the_writer_contract() {
+        for ok in ["1.2.3", "0.0.0", "10.20.30", "0.19.0-dev", "1.0.0+meta"] {
+            assert!(
+                ensure_writable_semver(ok).is_ok(),
+                "the guard must accept {ok:?} — it matches SEMVER_LIKE"
+            );
+        }
+        for bad in ["", "1", "1.2", "1.2.3.4", "abc", "v1.2.3", " 1.2.3"] {
+            let err = ensure_writable_semver(bad)
+                .expect_err("the guard must refuse a non-semver-like value before the splice runs");
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains("refusing to write") && chain.contains("must start X.Y.Z"),
+                "the refusal must carry the writer-contract message so a caller \
+                 pattern-matching on it stays uniform across ecosystems, got: {chain}"
+            );
+            assert!(
+                chain.contains(&format!("{bad:?}")),
+                "the refusal must name the rejected value verbatim, got: {chain}"
+            );
+        }
+    }
+
+    /// The whole `plan_*_version_write` family MUST route its input
+    /// acceptance guard through `ensure_writable_semver`. Two shields
+    /// compose to close the four-replica duplication the helper lifted:
+    ///
+    /// 1. The module carries exactly ONE executable occurrence of
+    ///    `SEMVER_LIKE.is_match(new_version)`. A planner that lands its
+    ///    own bare check counts as a second — the shield fires with the
+    ///    exact tally.
+    /// 2. Every `plan_*_version_write*` body in this module begins with
+    ///    `ensure_writable_semver(new_version)?;` — a planner that
+    ///    silently drops the guard (or replaces it with a bespoke check
+    ///    that spells the message differently) leaves the ecosystem's
+    ///    refusal contract out of step with its siblings.
+    ///
+    /// Fail-before-pass-after: with any one of the four planners reverted
+    /// to its pre-lift inline `if !SEMVER_LIKE.is_match(new_version) {
+    /// bail!(…) }` block, the tally count assertion fires. Restoring the
+    /// delegation returns the shield to green.
+    #[test]
+    fn planners_route_semver_guard_through_ensure_writable_semver() {
+        let src = include_str!("version.rs");
+
+        // The tally shield: the module's non-comment surface carries
+        // exactly ONE `SEMVER_LIKE.is_match(new_version)` — the one
+        // inside `ensure_writable_semver` itself. Comment mentions of
+        // the pattern (in this test's doc, in the helper's doc) are
+        // stripped before counting so prose about the discipline does
+        // not spend the budget.
+        let needle = concat!("SEMVER_LIKE", ".is_match(new_version)");
+        let live_hits: usize = src
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !(trimmed.starts_with("//") || trimmed.starts_with("///"))
+            })
+            .map(|line| line.matches(needle).count())
+            .sum();
+        assert_eq!(
+            live_hits, 1,
+            "the whole module must carry exactly ONE executable \
+             {needle} — inside `ensure_writable_semver`. A planner with its own \
+             bare check re-opens the four-replica duplication the helper closed."
+        );
+
+        // The delegation shield: every planner body starts with the
+        // guard call, so a new ecosystem planner inherits the acceptance
+        // contract by construction rather than by cargo-cult copy.
+        let planners = [
+            (
+                "plan_cargo_version_write",
+                "content: &str, new_version: &str",
+            ),
+            ("plan_zig_version_write", "content: &str, new_version: &str"),
+            (
+                "plan_chart_version_write",
+                "content: &str, new_version: &str",
+            ),
+            (
+                "plan_chart_dependency_version_write",
+                "\n    content: &str,\n    dep_name: &str,\n    new_version: &str,\n",
+            ),
+        ];
+        for (name, sig_tail) in planners {
+            let signature = format!("pub fn {name}({sig_tail}");
+            let start = src.find(&signature).unwrap_or_else(|| {
+                panic!("must find the public signature of {name} — signature drift?")
+            });
+            let after_brace = src[start..]
+                .find(" {\n")
+                .map(|o| start + o + 3)
+                .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
+            let body_end = src[after_brace..]
+                .find("\n}\n")
+                .map(|o| after_brace + o)
+                .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
+            let body = src[after_brace..body_end].trim();
+
+            assert!(
+                body.starts_with("ensure_writable_semver(new_version)?;"),
+                "{name} must open with `ensure_writable_semver(new_version)?;` — \
+                 the writer family's uniform acceptance contract. Got body: {body:?}"
             );
         }
     }
