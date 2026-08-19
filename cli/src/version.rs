@@ -10032,6 +10032,23 @@ pub fn write_cargo_version(path: &Path, new_version: &str) -> Result<()> {
 /// Split out so the rewrite can be dry-run over every real manifest in the
 /// fleet without touching a byte on disk — which is how its invariants get
 /// tested against shapes nobody thought to write a unit test for.
+///
+/// # Compounding
+///
+/// Rides [`splice_and_verify`], the one seal every form-preserving splice
+/// writer in this module now shares (Zig, Chart top-level, Chart dep
+/// version, Chart dep repository, and now Cargo). The Cargo writer was the
+/// last outlier carrying a byte-identical local seal — a hand-rolled
+/// `updated.push_str(...)` splice followed by a re-classify / value / delta
+/// check that mirrored the shared seal modulo the shape-guard. Post-lift
+/// the classifier's shape-guard lives inside the reverify closure — the
+/// only Cargo-specific bit — and every other rule (post-write reread
+/// equals `new_version`, byte-length delta matches value delta, uniform
+/// `verified-mutation seal:` context wrap) is inherited by delegation. A
+/// future writer that lands its own splice+seal by hand re-opens the
+/// same class the shield
+/// [`tests::plan_cargo_version_write_routes_through_splice_and_verify`]
+/// refuses at source-scan time.
 pub fn plan_cargo_version_write(content: &str, new_version: &str) -> Result<String> {
     ensure_writable_semver(new_version)?;
     let shape = classify_cargo(content);
@@ -10044,31 +10061,17 @@ pub fn plan_cargo_version_write(content: &str, new_version: &str) -> Result<Stri
         )
     })?;
 
-    let mut updated = String::with_capacity(content.len() + new_version.len());
-    updated.push_str(&content[..span.start]);
-    updated.push_str(new_version);
-    updated.push_str(&content[span.end..]);
-
-    // The verified-mutation seal: prove the intended change happened, and that
-    // it is the ONLY change, before reporting success.
-    let after = classify_cargo(&updated);
-    let got = match &after {
-        CargoShape::SingleCrate(v) | CargoShape::HybridRoot(v) | CargoShape::WorkspaceShared(v) => {
-            v.as_str()
+    splice_and_verify(content, span, new_version, "version", |updated| {
+        let after = classify_cargo(updated);
+        match &after {
+            CargoShape::SingleCrate(_)
+            | CargoShape::HybridRoot(_)
+            | CargoShape::WorkspaceShared(_) => {}
+            other => bail!("rewrite changed the manifest SHAPE ({shape:?} -> {other:?})"),
         }
-        other => bail!("rewrite changed the manifest SHAPE ({shape:?} -> {other:?})"),
-    };
-    if got != new_version {
-        bail!("rewrite did not take — expected {new_version}, re-read {got}");
-    }
-    let expected_len = content.len() + new_version.len() - (span.end - span.start);
-    if updated.len() != expected_len {
-        bail!(
-            "rewrite changed more bytes than the version value ({} vs {expected_len})",
-            updated.len()
-        );
-    }
-    Ok(updated)
+        value_span(updated, section, "version")
+            .with_context(|| format!("post-write version value not found in {section} — refusing"))
+    })
 }
 
 /// `X.Y.Z` with an optional prerelease/build suffix. Looser than
@@ -11210,6 +11213,73 @@ mod tests {
                  Direct write re-opens the three-replica duplication apply_version_write closed."
             );
         }
+    }
+
+    /// The Cargo planner MUST route its splice-and-seal through
+    /// [`splice_and_verify`] — the one seal every form-preserving splice
+    /// writer in this module now shares. A hand-rolled
+    /// `updated.push_str(&content[..span.start])` splice or an inline
+    /// `let expected_len = content.len() + new_version.len()` byte-length
+    /// check re-opens the local-seal outlier the port closed.
+    ///
+    /// Fail-before-pass-after: with the pre-port
+    /// `updated.push_str(...) + let after = classify_cargo(&updated) + let
+    /// expected_len = ...` body restored, the `contains("splice_and_verify(")`
+    /// assertion fires. Restoring the delegation returns the shield to
+    /// green.
+    ///
+    /// This is the Cargo-arm sibling of
+    /// [`top_level_writers_route_through_apply_version_write`] (IO shell
+    /// delegation) — the port closes the last remaining local seal in the
+    /// version-writer family so the "five writers, one seal" claim in
+    /// [`plan_cargo_version_write`]'s doc actually holds by construction.
+    #[test]
+    fn plan_cargo_version_write_routes_through_splice_and_verify() {
+        let src = include_str!("version.rs");
+        let signature =
+            "pub fn plan_cargo_version_write(content: &str, new_version: &str) -> Result<String>";
+        let start = src
+            .find(signature)
+            .expect("must find the public signature of plan_cargo_version_write");
+        let after_brace = src[start..]
+            .find(" {\n")
+            .map(|o| start + o + 3)
+            .expect("must find the opening brace for plan_cargo_version_write");
+        let body_end = src[after_brace..]
+            .find("\n}\n")
+            .map(|o| after_brace + o)
+            .expect("must find the closing brace for plan_cargo_version_write");
+        let body = &src[after_brace..body_end];
+
+        assert!(
+            body.contains("splice_and_verify("),
+            "plan_cargo_version_write must route its splice-and-seal through \
+             splice_and_verify — the one seal the whole writer family shares. \
+             Got body: {body:?}"
+        );
+        // Guard against the pre-port local splice regrowing. The two-line
+        // `push_str(&content[..` + `push_str(&content[span.end..]` combo is
+        // the exact hand-rolled shape splice_and_verify subsumes; either
+        // half's presence in the planner body re-opens the outlier.
+        assert!(
+            !body.contains("push_str(&content[..span.start]"),
+            "plan_cargo_version_write must NOT hand-roll the splice head — \
+             splice_and_verify owns that. Got body: {body:?}"
+        );
+        assert!(
+            !body.contains("push_str(&content[span.end..]"),
+            "plan_cargo_version_write must NOT hand-roll the splice tail — \
+             splice_and_verify owns that. Got body: {body:?}"
+        );
+        // The byte-length-delta seal lives in splice_and_verify. A planner
+        // that re-computes `expected_len` locally re-opens the class the
+        // shared seal exists to close.
+        assert!(
+            !body.contains("let expected_len = content.len() + new_version.len()"),
+            "plan_cargo_version_write must NOT re-compute the byte-length \
+             delta locally — splice_and_verify owns that arithmetic. \
+             Got body: {body:?}"
+        );
     }
 
     /// The IO shell must fire the pure core with the file bytes it read
