@@ -9985,15 +9985,18 @@ fn writable_section(shape: &CargoShape) -> Result<&'static str> {
 ///
 /// # Compounding
 ///
-/// A future ecosystem writer (e.g. `write_package_json_version`, or the
-/// npm/gemspec/tatara-lisp sibling that follows the same read-plan-write
-/// shape) inherits the IO shell by delegation — one line, one pure core,
+/// The IO shell now carries four form-preserving writers by delegation
+/// — `write_cargo_version`, `write_zig_version`, `write_chart_version`,
+/// and `write_package_json_version`. Each is one line, one pure core,
 /// three error contexts uniform across every ecosystem. The three
 /// pre-lift writers were byte-identical bodies differing only in which
 /// `plan_*_version_write` they called (three replicas at 9979 / 10154 /
 /// 10531 pre-port), so the lift closes a THREE-replica duplication by
-/// construction. A new ecosystem that lands its own IO shell by hand
-/// re-opens the same class — the shield
+/// construction, and each new ecosystem's writer (the npm/gemspec/
+/// tatara-lisp sibling that follows the same read-plan-write shape)
+/// inherits the shell rather than re-opening the class. A new
+/// ecosystem that lands its own IO shell by hand re-opens the same
+/// class — the shield
 /// [`tests::top_level_writers_route_through_apply_version_write`] refuses
 /// that at source-scan time.
 fn apply_version_write<F>(path: &Path, new_version: &str, plan: F) -> Result<()>
@@ -10120,17 +10123,18 @@ static SEMVER_LIKE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new
 ///
 /// # Compounding
 ///
-/// Four planner bodies (`plan_cargo_version_write`,
-/// `plan_zig_version_write`, `plan_chart_version_write`,
-/// `plan_chart_dependency_version_write`) each opened with the same
-/// six-line `if !SEMVER_LIKE.is_match(new_version) { bail!(…) }` block —
-/// byte-identical modulo indentation. A fifth ecosystem planner
-/// (`plan_package_json_version_write`, or the npm/gemspec sibling that
-/// follows the same content-in / content-out shape) inherits the guard
-/// by one line of delegation rather than by cargo-cult copy — and the
-/// refusal message stays defined in one place, so a caller
-/// pattern-matching on it (`err.contains("refusing to write")`) gets a
-/// uniform answer across every ecosystem the writer family covers.
+/// Five planner bodies now share this guard —
+/// `plan_cargo_version_write`, `plan_zig_version_write`,
+/// `plan_chart_version_write`, `plan_package_json_version_write`, and
+/// `plan_chart_dependency_version_write`. The pre-lift shape opened
+/// each with the same six-line `if !SEMVER_LIKE.is_match(new_version) {
+/// bail!(…) }` block — byte-identical modulo indentation. A sixth
+/// ecosystem planner (an npm/gemspec sibling that follows the same
+/// content-in / content-out shape) inherits the guard by one line of
+/// delegation rather than by cargo-cult copy, and the refusal message
+/// stays defined in one place, so a caller pattern-matching on it
+/// (`err.contains("refusing to write")`) gets a uniform answer across
+/// every ecosystem the writer family covers.
 ///
 /// A planner that lands its own bare `SEMVER_LIKE.is_match(new_version)`
 /// check re-opens the four-replica duplication this helper closed — the
@@ -11095,6 +11099,70 @@ pub fn read_package_json_version(path: &Path) -> Result<String> {
     read_version_by_span(path, package_json_top_version_span)
 }
 
+/// Write a new version into a package.json (in-place, form-preserving).
+///
+/// Thin IO shell over [`plan_package_json_version_write`], mirroring
+/// [`write_cargo_version`] / [`write_zig_version`] /
+/// [`write_chart_version`]. The pure core takes content in, content out,
+/// so a rewrite is dry-runnable over any real package.json without
+/// touching a byte on disk.
+///
+/// # Compounding
+///
+/// The pre-writer shape a caller would reach for by default is
+/// `serde_json::from_str + edit + serde_json::to_string_pretty`, which
+/// renormalizes the entire file: it collapses two-space and four-space
+/// indent to a single serde-crate default, drops trailing commas some
+/// tooling emits, reorders keys under `object`'s alphabetization, and
+/// strips any `# comment` a preprocessor left behind. Every one of those
+/// is a "silent knowledge lie about what is on disk" of the class
+/// [`write_chart_version`]'s doc names, and the diff a version bump
+/// produces then covers hundreds of unrelated bytes — a review-cost tax
+/// on every ecosystem the tool touches. The byte-span splice rides
+/// [`splice_and_verify`], so the diff a version bump produces contains
+/// exactly the version-value bytes and nothing else.
+pub fn write_package_json_version(path: &Path, new_version: &str) -> Result<()> {
+    apply_version_write(path, new_version, plan_package_json_version_write)
+}
+
+/// The PURE core of [`write_package_json_version`]: content in, new
+/// content out.
+///
+/// # Contract
+///
+/// 1. `new_version` must match [`SEMVER_LIKE`] (same acceptance the
+///    Cargo, Zig, and Chart.yaml writers honor — 3-part semver with an
+///    optional prerelease/build suffix, so `0.4.3` and `0.19.0-dev`
+///    both pass).
+/// 2. Exactly one top-level `"version"` string field must exist in the
+///    outer JSON object. Zero matches is REFUSED. Two or more matches
+///    is REFUSED rather than a `serde_json` last-one-wins guess,
+///    because a package.json with two top-level `"version"` keys is
+///    malformed and rewriting either one silently would create a second
+///    source of truth. Same discipline as [`plan_chart_version_write`]
+///    / [`plan_zig_version_write`].
+/// 3. The splice replaces ONLY the value bytes between the surrounding
+///    `"..."`. The `"version"` key, the whitespace and `:` between key
+///    and value, the surrounding quotes, indentation on other keys,
+///    trailing commas, and any key order survive the mutation
+///    byte-for-byte.
+/// 4. The verified-mutation seal (via [`splice_and_verify`]): the
+///    post-write locator re-runs, reads back exactly `new_version` at
+///    the same span, and the byte-length delta equals the value-length
+///    delta. A rewrite that reports success without changing the file
+///    is the failure mode this whole writer family exists to prevent.
+pub fn plan_package_json_version_write(content: &str, new_version: &str) -> Result<String> {
+    ensure_writable_semver(new_version)?;
+    let span = package_json_top_version_span(content)?;
+    splice_and_verify(
+        content,
+        span,
+        new_version,
+        "version",
+        package_json_top_version_span,
+    )
+}
+
 /// Byte range of the value bytes of the top-level `"version"` key in a
 /// package.json — bytes only, not the surrounding `"..."`, and never a
 /// nested `"version"` inside `"dependencies"`, `"devDependencies"`, or any
@@ -11131,9 +11199,12 @@ pub fn read_package_json_version(path: &Path) -> Result<String> {
 /// accidentally register as a key, and a `"dependencies": { "version":
 /// "^1.2.3" }` block is walked at depth 2 and skipped.
 ///
-/// Shared by [`read_package_json_version`]'s locator; a future
-/// form-preserving `write_package_json_version` will ride the same span
-/// through [`splice_and_verify`], mirroring the writer-family idiom.
+/// Shared by [`read_package_json_version`]'s locator and by
+/// [`plan_package_json_version_write`] — the writer rides the same
+/// span through [`splice_and_verify`], so the reader and the writer
+/// agree byte-for-byte on which key is authoritative and any
+/// post-splice ambiguity (the splice somehow introducing a second
+/// top-level `"version"`) surfaces at the seal.
 fn package_json_top_version_span(content: &str) -> Result<std::ops::Range<usize>> {
     let doc: serde_json::Value =
         serde_json::from_str(content).context("failed to parse as JSON")?;
@@ -11366,6 +11437,7 @@ mod tests {
             "write_cargo_version",
             "write_zig_version",
             "write_chart_version",
+            "write_package_json_version",
         ] {
             let signature = format!("pub fn {name}(path: &Path, new_version: &str) -> Result<()>");
             let start = src
@@ -11996,6 +12068,10 @@ mod tests {
                 "content: &str, new_version: &str",
             ),
             (
+                "plan_package_json_version_write",
+                "content: &str, new_version: &str",
+            ),
+            (
                 "plan_chart_dependency_version_write",
                 "\n    content: &str,\n    dep_name: &str,\n    new_version: &str,\n",
             ),
@@ -12112,6 +12188,144 @@ mod tests {
         let path = dir.path().join("package.json");
         std::fs::write(&path, "{\"name\": \"test\", \"version\": \"3.0.1\"}").unwrap();
         assert_eq!(read_package_json_version(&path).unwrap(), "3.0.1");
+    }
+
+    /// End-to-end round trip through the IO shell: an authored
+    /// package.json with a real npm-idiomatic shape (two-space indent,
+    /// trailing newline, several sibling keys) has its version bumped
+    /// and reads back exactly what was written. The `test_write_zig_version`
+    /// / `read_chart_version_agrees_with_writer_after_bump` sibling for
+    /// the fourth top-level writer.
+    #[test]
+    fn test_write_package_json_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        std::fs::write(
+            &path,
+            "{\n  \"name\": \"test\",\n  \"version\": \"3.0.1\",\n  \"private\": true\n}\n",
+        )
+        .unwrap();
+        write_package_json_version(&path, "3.1.0").unwrap();
+        assert_eq!(read_package_json_version(&path).unwrap(), "3.1.0");
+    }
+
+    /// The pure core splices ONLY the version value bytes. Every other
+    /// byte in the file — indentation, sibling keys, trailing newline —
+    /// survives byte-for-byte, so a `git diff` of a version bump is
+    /// exactly the version-value delta and nothing else.
+    #[test]
+    fn plan_package_json_write_splices_top_level_version() {
+        let content =
+            "{\n  \"name\": \"test\",\n  \"version\": \"3.0.1\",\n  \"private\": true\n}\n";
+        let out = plan_package_json_version_write(content, "3.1.0").unwrap();
+        assert_eq!(
+            out,
+            "{\n  \"name\": \"test\",\n  \"version\": \"3.1.0\",\n  \"private\": true\n}\n"
+        );
+    }
+
+    /// A `"version"` key nested inside `"dependencies"` (depth 2) MUST
+    /// survive a top-level bump — the walker skips it by depth and the
+    /// splice lands on the top-level value. A first-hit
+    /// `.get("version")` reader happens to pick the right one, but a
+    /// hand-rolled `content.replace("\"version\": \"^1.2.3\"", ...)`
+    /// writer would corrupt the dep pin instead.
+    #[test]
+    fn plan_package_json_write_skips_nested_dependencies_version() {
+        let content = "{\n  \
+            \"dependencies\": {\n    \"version\": \"^1.2.3\"\n  },\n  \
+            \"version\": \"7.8.9\"\n}\n";
+        let out = plan_package_json_version_write(content, "7.9.0").unwrap();
+        assert!(
+            out.contains("\"dependencies\": {\n    \"version\": \"^1.2.3\"\n  }"),
+            "dep-scoped \"version\" must survive: {out}"
+        );
+        assert!(
+            out.contains("\"version\": \"7.9.0\""),
+            "top-level \"version\" must update: {out}"
+        );
+    }
+
+    /// A pre-existing prerelease-suffixed value (`0.19.0-dev`) must
+    /// read fine — [`SEMVER_LIKE`] admits the shape and the locator
+    /// captures the full value bytes. A pre-lift `\d+\.\d+\.\d+`
+    /// reader would report `0.19.0`, a knowledge lie about what is on
+    /// disk. The writer replaces the full span with any semver-shaped
+    /// target the caller hands in.
+    #[test]
+    fn plan_package_json_write_preserves_prerelease_source() {
+        let content = "{\n  \"version\": \"0.19.0-dev\"\n}\n";
+        let out = plan_package_json_version_write(content, "0.20.0").unwrap();
+        assert_eq!(out, "{\n  \"version\": \"0.20.0\"\n}\n");
+    }
+
+    /// The writer accepts a prerelease target, so a caller bumping to
+    /// `0.20.0-dev` (24 fleet manifests carry the shape — the
+    /// caixa-bevy workspace-member family named in [`SEMVER_LIKE`]'s
+    /// doc) writes the full value verbatim.
+    #[test]
+    fn plan_package_json_write_accepts_prerelease_target() {
+        let content = "{\n  \"version\": \"0.1.0\"\n}\n";
+        let out = plan_package_json_version_write(content, "0.20.0-dev").unwrap();
+        assert_eq!(out, "{\n  \"version\": \"0.20.0-dev\"\n}\n");
+    }
+
+    /// Two top-level `"version"` keys is a malformed package.json.
+    /// `serde_json` would silently accept it (last-one-wins). The
+    /// walker refuses the ambiguity, matching
+    /// [`chart_top_version_span`] / [`zig_top_version_span`] — same
+    /// discipline every top-level writer in this module honors.
+    #[test]
+    fn plan_package_json_write_refuses_two_top_level_versions() {
+        let content = "{\n  \"version\": \"1.0.0\",\n  \"version\": \"2.0.0\"\n}\n";
+        let err = plan_package_json_version_write(content, "3.0.0").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("two or more"),
+            "must refuse an ambiguous top-level version, got: {msg}"
+        );
+    }
+
+    /// Zero top-level `"version"` keys is REFUSED with a message,
+    /// same as the sibling top-level writers — never a silent write
+    /// against a manifest without a version.
+    #[test]
+    fn plan_package_json_write_refuses_missing_version() {
+        let content = "{\n  \"name\": \"test\"\n}\n";
+        let err = plan_package_json_version_write(content, "1.0.0").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no top-level"),
+            "must refuse a package.json without a top-level version, got: {msg}"
+        );
+    }
+
+    /// The pre-write acceptance guard MUST refuse a non-semver target
+    /// before a single byte is spliced. Same discipline every planner
+    /// in this family carries via [`ensure_writable_semver`].
+    #[test]
+    fn plan_package_json_write_refuses_non_semver_target() {
+        let content = "{\n  \"version\": \"0.1.0\"\n}\n";
+        let err = plan_package_json_version_write(content, "not-a-version").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("refusing to write"),
+            "must refuse a non-semver target, got: {msg}"
+        );
+    }
+
+    /// The reader and writer agree on which bytes the version occupies.
+    /// Bump the file with the writer, read it back, and confirm the
+    /// reader returns exactly what the writer just wrote — the sibling
+    /// of [`read_chart_version_agrees_with_writer_after_bump`] for the
+    /// package.json arm.
+    #[test]
+    fn read_package_json_version_agrees_with_writer_after_bump() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        std::fs::write(&path, "{\n  \"version\": \"0.0.3\"\n}\n").unwrap();
+        write_package_json_version(&path, "0.0.4").unwrap();
+        assert_eq!(read_package_json_version(&path).unwrap(), "0.0.4");
     }
 
     #[test]
