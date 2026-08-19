@@ -72,6 +72,46 @@ fn crate2nix_bin() -> String {
     get_tool_path("CRATE2NIX", "crate2nix")
 }
 
+/// Resolve the `zig` binary via the `ZIG_BIN` env override, falling
+/// back to `zig` on PATH. Every `zig` invocation in this module reads
+/// through this sigil so the resolve happens in exactly one place —
+/// mirrors the sibling `cargo_bin()` and `crate2nix_bin()` sigils
+/// above and the `<tool>_bin()` discipline every
+/// substrate-`<TOOL>_BIN`-routed spawn surface in forge with more
+/// than one consumer site honors (`cli/src/nix.rs::nix_bin` at
+/// 6b2ea15, `commands/nix_builder.rs::nc_bin` at b5e632a,
+/// `commands/flux_{get,reconcile}.rs::flux_bin` at 5ad341e / ba3e615,
+/// `infrastructure/attic.rs::attic_bin` at 559adae,
+/// `infrastructure/docker.rs::docker_bin` at 9b1924d, and
+/// `commands/helm.rs::helm_bin` at 69db535).
+///
+/// Pre-lift the three consumer sites — `check`'s two `zig build` +
+/// `zig build test` invocations and `lock`'s `zig build test`
+/// invocation, each dispatched through the sync `run_cmd` helper
+/// with a bare-literal second argument — ignored `ZIG_BIN` at every
+/// site. A Nix-hermetic runner with a store-path `zig` binary
+/// silently fell through to whatever `zig` was first on PATH at
+/// these sites specifically — the same silent-PATH-fallback bug
+/// class the sibling shields close for their respective tool
+/// surfaces.
+///
+/// The pre-lift shape carried a second, quieter defect the sigil
+/// closes: the crate-wide
+/// `bare_literal_spawns_may_shrink_never_grow` shield at
+/// `cli/src/tools.rs::spawn_shield` matches only
+/// `Command::new(<literal>)` sites, so a bare literal that flows
+/// into `Command::new` through the `run_cmd(program: &str, …)`
+/// helper's tail slips past the crate-wide tally entirely — the
+/// three pre-lift `zig` sites were live evidence: `zig` never
+/// appeared in `spawn_shield::BASELINE`, yet three unsigiled spawns
+/// ran under every `forge tool check` / `forge tool lock`
+/// invocation. The per-module shield below pins the closure for
+/// this file specifically; the crate-wide shield's helper-blindness
+/// remains a substrate hole for a future commit to generalize.
+fn zig_bin() -> String {
+    get_tool_path("ZIG_BIN", "zig")
+}
+
 /// Release a tool: read version, verify clean tree, build targets, tag, push, create GitHub release.
 pub async fn release(
     name: &str,
@@ -293,11 +333,12 @@ pub fn check(name: &str, language: &str, working_dir: &str) -> Result<()> {
             info!("{}: all checks passed", name);
         }
         "zig" => {
+            let zig = zig_bin();
             info!("{}: running zig build...", name);
-            run_cmd(dir, "zig", &["build"])?;
+            run_cmd(dir, &zig, &["build"])?;
 
             info!("{}: running zig build test...", name);
-            run_cmd(dir, "zig", &["build", "test"])?;
+            run_cmd(dir, &zig, &["build", "test"])?;
 
             info!("{}: all checks passed", name);
         }
@@ -371,7 +412,8 @@ pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str)
             "pass"
         }
         "zig" => {
-            run_cmd(dir, "zig", &["build", "test"])?;
+            let zig = zig_bin();
+            run_cmd(dir, &zig, &["build", "test"])?;
             "pass"
         }
         "nix" => {
@@ -1178,6 +1220,128 @@ mod tests {
              exactly ONCE in the module body (only in the `crate2nix_bin()` \
              sigil), not {} times — every consumer must route through \
              `crate2nix_bin()`, not re-copy the resolve inline. Hits: {:?}",
+            resolve_hits.len(),
+            resolve_hits
+        );
+    }
+
+    /// Whole-module shield: no bare-literal `zig` spawn may live in
+    /// `commands/tool.rs`'s non-test body. Every `zig` invocation in
+    /// this module must first resolve `ZIG_BIN` via [`zig_bin`] — the
+    /// sibling of the [`cargo_bin`] and [`crate2nix_bin`] sigils
+    /// above and the `<tool>_bin()` sigil discipline every
+    /// substrate-`<TOOL>_BIN`-routed spawn surface in forge honors
+    /// (`commands/nix_builder.rs::nc_bin` at b5e632a,
+    /// `commands/flux_{get,reconcile}.rs::flux_bin` at
+    /// 5ad341e / ba3e615, `infrastructure/attic.rs::attic_bin` at
+    /// 559adae, `commands/helm.rs::helm_bin` at 69db535).
+    ///
+    /// Two forbidden spawn shapes are pinned here — both would have
+    /// been caught by the sibling `cargo` / `crate2nix` shields
+    /// above for their tools, and both are enforced against `zig`
+    /// with the same discipline:
+    ///
+    /// 1. **Direct** — a raw `Command::new(<bare-zig-literal>)`
+    ///    invocation. No such site exists post-lift, and no such
+    ///    site existed pre-lift either — but pinning the shape
+    ///    forbids a future added zig spawn from landing under the
+    ///    direct form without going through `zig_bin()` first.
+    /// 2. **Helper-wrapped** `run_cmd(dir, "zig", …)`. The three
+    ///    pre-lift consumer sites (`check`'s two invocations and
+    ///    `lock`'s one) each rode this exact shape. The crate-wide
+    ///    `bare_literal_spawns_may_shrink_never_grow` shield at
+    ///    `cli/src/tools.rs::spawn_shield` scans only direct
+    ///    `Command::new(<literal>)` sites, so a bare literal that
+    ///    flows into `Command::new` through the
+    ///    `run_cmd(program: &str, …)` helper's tail slips past the
+    ///    crate-wide tally entirely — the three pre-lift `zig`
+    ///    sites were live evidence. Mirrors the sibling
+    ///    `run_program_timed(<literal>, …)` shape shield on
+    ///    `commands/helm.rs::test_helm_spawns_route_through_helm_bin_not_raw_literal`
+    ///    (69db535).
+    ///
+    /// Scan bounds on the whole-module boundary — from the file
+    /// start to the FIRST `\n#[cfg(test)]\nmod tests {` marker in
+    /// source order, matching the sibling `cargo` / `crate2nix`
+    /// shields above — so this shield's own docstring mentions of
+    /// the forbidden shapes stay out of scope AND every current or
+    /// future zig-spawning helper landing anywhere in the top-level
+    /// module body cannot silently ride along without going through
+    /// `ZIG_BIN`. Every needle is filtered through
+    /// [`crate::test_support::code_line_hits`] as belt-and-braces
+    /// against a future above-cutoff `///` mention of a forbidden
+    /// shape landing in the sigil docstring itself. The helper-shape
+    /// needle is reconstructed via [`format!`] so this shield's own
+    /// source text never contains the fused
+    /// `run_cmd(dir, "zig",` form.
+    #[test]
+    fn test_zig_spawn_routes_through_zig_bin_not_raw_literal() {
+        let source = include_str!("tool.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "commands/tool.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+
+        // (1) Direct `Command::new(<bare-zig>)` shape. The needle is
+        // reconstructed via `format!` so this shield's own source
+        // text never contains the fused literal — the crate-wide
+        // `spawn_shield` regex at `cli/src/tools.rs::spawn_shield`
+        // would otherwise capture this shield's own string constant
+        // as an unlisted `zig` spawn.
+        let raw_direct = format!("Command::new(\"{}\")", "zig");
+        let raw_direct_hits = crate::test_support::code_line_hits(body, &raw_direct);
+        assert!(
+            raw_direct_hits.is_empty(),
+            "commands/tool.rs must not spawn `zig` via the bare literal at \
+             `Command::new` — every `zig` spawn must resolve `ZIG_BIN` via \
+             `zig_bin()` first. A raw literal bypasses the hermetic-runner \
+             contract substrate's mkRuntimeToolsEnv exports. Offending \
+             code lines: {raw_direct_hits:?}"
+        );
+
+        // (2) Helper-wrapped `run_cmd(dir, "zig", …)` shape. The
+        // needle is built via `format!` so this shield's own source
+        // never contains the fused literal.
+        let raw_helper = format!("run_cmd(dir, \"{}\",", "zig");
+        let raw_helper_hits = crate::test_support::code_line_hits(body, &raw_helper);
+        assert!(
+            raw_helper_hits.is_empty(),
+            "commands/tool.rs must not spawn `zig` via the bare literal \
+             at `run_cmd` — every zig spawn must resolve `ZIG_BIN` via \
+             `zig_bin()` first, then pass the resolved path to `run_cmd`. \
+             A raw literal at the helper's second argument bypasses \
+             `ZIG_BIN` AND slips past the crate-wide `spawn_shield` regex \
+             (which sees only direct `Command::new` sites). Offending \
+             code lines: {raw_helper_hits:?}"
+        );
+
+        // Sigil sibling: `fn zig_bin()` must be defined AND the
+        // two-argument resolve must appear at EXACTLY one code line
+        // — only the sigil body — so a future added spawn cannot
+        // silently re-copy the resolve inline and drift away from
+        // the sigil's single point of truth.
+        assert!(
+            body.contains("fn zig_bin()"),
+            "commands/tool.rs must define `zig_bin()` — the sigil function \
+             that resolves the `ZIG_BIN` override for every zig spawn. \
+             Mirrors the `cargo_bin()` sigil at `commands/tool.rs:36` and \
+             the `crate2nix_bin()` sigil at `commands/tool.rs:71`."
+        );
+        // Reconstructed via `format!` inside
+        // `get_tool_path_two_arg_call_needle` so this shield's own
+        // source never contains the literal
+        // `get_tool_path("ZIG_BIN", "zig")` string.
+        let two_arg_needle =
+            crate::test_support::get_tool_path_two_arg_call_needle("ZIG_BIN", "zig");
+        let resolve_hits = crate::test_support::code_line_hits(body, &two_arg_needle);
+        assert_eq!(
+            resolve_hits.len(),
+            1,
+            "the two-argument resolve `{two_arg_needle}` must appear \
+             exactly ONCE in the module body (only in the `zig_bin()` \
+             sigil), not {} times — every consumer must route through \
+             `zig_bin()`, not re-copy the resolve inline. Hits: {:?}",
             resolve_hits.len(),
             resolve_hits
         );
