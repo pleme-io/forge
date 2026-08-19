@@ -9962,6 +9962,53 @@ fn writable_section(shape: &CargoShape) -> Result<&'static str> {
     }
 }
 
+/// The one IO shell every top-level version writer shares.
+///
+/// Read the manifest at `path`, hand its bytes to the ecosystem's `plan`
+/// pure core with `new_version`, write the returned bytes back to the same
+/// path. The three top-level writers ([`write_cargo_version`],
+/// [`write_zig_version`], [`write_chart_version`]) delegate their entire
+/// body here — their public signatures stay `(path, new_version) -> Result<()>`
+/// and their per-ecosystem semantics live wholly in the pure core the
+/// closure passed to `plan` names.
+///
+/// # Contract
+///
+/// - The `Failed to read <path>` context wraps the read-side IO error.
+/// - The `cannot write a version to <path>` context wraps the pure core's
+///   error — the classifier/locator/seal errors carry through into the
+///   caller's error chain with the path baked in.
+/// - The `Failed to write <path>` context wraps the write-side IO error.
+/// - A pure core that returns `Err(...)` MUST leave the file on disk
+///   byte-identical — the write only fires on the `Ok` arm. Pinned by
+///   [`tests::apply_version_write_planner_error_leaves_file_untouched`].
+///
+/// # Compounding
+///
+/// A future ecosystem writer (e.g. `write_package_json_version`, or the
+/// npm/gemspec/tatara-lisp sibling that follows the same read-plan-write
+/// shape) inherits the IO shell by delegation — one line, one pure core,
+/// three error contexts uniform across every ecosystem. The three
+/// pre-lift writers were byte-identical bodies differing only in which
+/// `plan_*_version_write` they called (three replicas at 9979 / 10154 /
+/// 10531 pre-port), so the lift closes a THREE-replica duplication by
+/// construction. A new ecosystem that lands its own IO shell by hand
+/// re-opens the same class — the shield
+/// [`tests::top_level_writers_route_through_apply_version_write`] refuses
+/// that at source-scan time.
+fn apply_version_write<F>(path: &Path, new_version: &str, plan: F) -> Result<()>
+where
+    F: FnOnce(&str, &str) -> Result<String>,
+{
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let updated = plan(&content, new_version)
+        .with_context(|| format!("cannot write a version to {}", path.display()))?;
+    std::fs::write(path, &updated)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
 /// Replace the authoritative version in a Cargo.toml, in place.
 ///
 /// Routes on [`CargoShape`], so a member is REFUSED rather than given a second
@@ -9977,13 +10024,7 @@ fn writable_section(shape: &CargoShape) -> Result<&'static str> {
 /// version at the same shape. A mutation that reports success without changing
 /// the file is the failure mode this whole family exists to prevent.
 pub fn write_cargo_version(path: &Path, new_version: &str) -> Result<()> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let updated = plan_cargo_version_write(&content, new_version)
-        .with_context(|| format!("cannot write a version to {}", path.display()))?;
-    std::fs::write(path, &updated)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
-    Ok(())
+    apply_version_write(path, new_version, plan_cargo_version_write)
 }
 
 /// The PURE core of [`write_cargo_version`]: content in, new content out.
@@ -10152,13 +10193,7 @@ pub fn read_zig_version(path: &Path) -> Result<String> {
 /// takes content in, content out, so a rewrite is dry-runnable over
 /// any real build.zig.zon without touching a byte on disk.
 pub fn write_zig_version(path: &Path, new_version: &str) -> Result<()> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let updated = plan_zig_version_write(&content, new_version)
-        .with_context(|| format!("cannot write a version to {}", path.display()))?;
-    std::fs::write(path, &updated)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
-    Ok(())
+    apply_version_write(path, new_version, plan_zig_version_write)
 }
 
 /// The PURE core of [`write_zig_version`]: content in, new content out.
@@ -10529,13 +10564,7 @@ where
 /// (quoted, no space) reads fine through the whitespace-tolerant reader
 /// and then silently no-ops on write while reporting success.
 pub fn write_chart_version(path: &Path, new_version: &str) -> Result<()> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let updated = plan_chart_version_write(&content, new_version)
-        .with_context(|| format!("cannot write a version to {}", path.display()))?;
-    std::fs::write(path, &updated)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
-    Ok(())
+    apply_version_write(path, new_version, plan_chart_version_write)
 }
 
 /// The PURE core of [`write_chart_version`]: content in, new content out.
@@ -10980,6 +11009,149 @@ pub fn read_package_json_version(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The IO shell must fire the pure core with the file bytes it read
+    /// AND `new_version` verbatim, then write the returned bytes back.
+    /// This test hands `apply_version_write` a fake planner that records
+    /// what it received and returns a synthetic result, so the delegation
+    /// is proven directly rather than inferred from the sibling round-trip
+    /// tests on `write_cargo_version` / `write_zig_version` /
+    /// `write_chart_version`.
+    #[test]
+    fn apply_version_write_delegates_content_and_version_to_the_planner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Manifest.toml");
+        std::fs::write(&path, "original bytes\n").unwrap();
+
+        let seen: std::cell::RefCell<Option<(String, String)>> = std::cell::RefCell::new(None);
+        let plan = |content: &str, new_version: &str| -> Result<String> {
+            *seen.borrow_mut() = Some((content.to_string(), new_version.to_string()));
+            Ok(format!("planner-output for {new_version}"))
+        };
+
+        apply_version_write(&path, "9.8.7", plan).unwrap();
+
+        assert_eq!(
+            seen.into_inner(),
+            Some(("original bytes\n".to_string(), "9.8.7".to_string())),
+            "the planner must see the file's read bytes and the caller's new_version verbatim"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "planner-output for 9.8.7",
+            "the file on disk must match the planner's returned bytes"
+        );
+    }
+
+    /// A planner that returns `Err` MUST leave the file byte-identical on
+    /// disk — the IO shell only writes on the `Ok` arm. Pins the
+    /// error-arm's file-preservation contract: a caller reasoning "the
+    /// bump refused, so the manifest is unchanged" gets that guarantee
+    /// from the shell's structure, not from every ecosystem's pure core
+    /// happening to fail cleanly.
+    #[test]
+    fn apply_version_write_planner_error_leaves_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Manifest.toml");
+        let original = "unchanged bytes\n";
+        std::fs::write(&path, original).unwrap();
+
+        let plan = |_content: &str, _new_version: &str| -> Result<String> {
+            bail!("synthetic planner refusal")
+        };
+
+        let err = apply_version_write(&path, "1.0.0", plan).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("cannot write a version to"),
+            "the planner's error must be wrapped with the write-context, got: {chain}"
+        );
+        assert!(
+            chain.contains("synthetic planner refusal"),
+            "the planner's own error message must survive into the caller's chain, got: {chain}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "a planner Err must leave the file byte-identical — no partial or truncated write"
+        );
+    }
+
+    /// A missing path must error at the READ half, wrapped with the
+    /// "Failed to read" context, before the planner runs at all.
+    #[test]
+    fn apply_version_write_missing_path_errors_with_read_context() {
+        let path = std::path::Path::new("/nonexistent/manifest/toml/that/does/not/exist");
+        let mut called = false;
+        let plan = |_content: &str, _new_version: &str| -> Result<String> {
+            called = true;
+            Ok(String::new())
+        };
+        let err = apply_version_write(path, "1.0.0", plan).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("Failed to read"),
+            "the read-side IO error must be wrapped with the read-context, got: {chain}"
+        );
+        assert!(
+            !called,
+            "the planner must NOT run when the read failed — no work on ghost bytes"
+        );
+    }
+
+    /// The three top-level manifest writers MUST delegate their entire
+    /// body through `apply_version_write`. Any direct
+    /// `std::fs::read_to_string(path)` / `std::fs::write(path, ...)` /
+    /// `plan_*_version_write` call inside their body re-opens the
+    /// pre-lift three-replica duplication that this helper closed.
+    ///
+    /// Fail-before-pass-after: with any one of the three writers reverted
+    /// to its pre-lift 4-line IO body (`std::fs::read_to_string(path)…`),
+    /// the `.starts_with("apply_version_write(")` assertion on that
+    /// writer's slice fires. Restoring the delegation returns the shield
+    /// to green.
+    #[test]
+    fn top_level_writers_route_through_apply_version_write() {
+        let src = include_str!("version.rs");
+        for name in [
+            "write_cargo_version",
+            "write_zig_version",
+            "write_chart_version",
+        ] {
+            let signature = format!("pub fn {name}(path: &Path, new_version: &str) -> Result<()>");
+            let start = src
+                .find(&signature)
+                .unwrap_or_else(|| panic!("must find the public signature of {name}"));
+            // The body opens at the `{` on the signature line and closes
+            // at the next `\n}\n` — every writer in this family is a
+            // one-statement delegation, so bounding to the enclosing
+            // `}\n` on the next line-with-only-`}` is safe.
+            let after_brace = src[start..]
+                .find(" {\n")
+                .map(|o| start + o + 3)
+                .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
+            let body_end = src[after_brace..]
+                .find("\n}\n")
+                .map(|o| after_brace + o)
+                .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
+            let body = src[after_brace..body_end].trim();
+
+            assert!(
+                body.starts_with("apply_version_write("),
+                "{name} must delegate its body through apply_version_write — got body: {body:?}",
+            );
+            assert!(
+                !body.contains("std::fs::read_to_string(path)"),
+                "{name} must NOT read the file directly — the IO shell owns that read. \
+                 Direct read re-opens the three-replica duplication apply_version_write closed."
+            );
+            assert!(
+                !body.contains("std::fs::write(path"),
+                "{name} must NOT write the file directly — the IO shell owns that write. \
+                 Direct write re-opens the three-replica duplication apply_version_write closed."
+            );
+        }
+    }
 
     #[test]
     fn test_parse_semver_valid() {
