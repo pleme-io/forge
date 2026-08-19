@@ -1,8 +1,16 @@
 {
-  "schema_version": 1,
-  "cargo_lock_sha256": "4fced8b0aadb89db9d5d1fbe0b5d8046c5c6d1350d6b6da550e35e2dc9908c08",
+  "schema_version": 2,
+  "cargo_lock_sha256": "637a59f16bdc4a47d45adaf827b2344c5bb77df7eea229d5c05ed5ce314674f8",
+  "manifest_sha256": {
+    "Cargo.toml": "81917130af4415239e09aaf1fa1c90c07163dab045848179284b957a578d3676"
+  },
   "target_resolves": {
     "base": {
+      "adler2-2.0.1": {
+        "runtime_dependencies": [],
+        "build_dependencies": [],
+        "features": []
+      },
       "ahash-0.8.12": {
         "runtime_dependencies": [
           {
@@ -802,6 +810,25 @@
           "std"
         ]
       },
+      "crc32fast-1.5.0": {
+        "runtime_dependencies": [
+          {
+            "name": "cfg_if",
+            "package_key": "cfg-if-1.0.4",
+            "kind": "normal",
+            "features": [],
+            "uses_default_features": true,
+            "optional": false,
+            "target": null,
+            "tree": "target"
+          }
+        ],
+        "build_dependencies": [],
+        "features": [
+          "default",
+          "std"
+        ]
+      },
       "crossbeam-utils-0.8.22": {
         "runtime_dependencies": [],
         "build_dependencies": [],
@@ -1247,6 +1274,52 @@
         "build_dependencies": [],
         "features": []
       },
+      "flate2-1.1.9": {
+        "runtime_dependencies": [
+          {
+            "name": "crc32fast",
+            "package_key": "crc32fast-1.5.0",
+            "kind": "normal",
+            "features": [],
+            "uses_default_features": true,
+            "optional": true,
+            "target": null,
+            "tree": "target"
+          },
+          {
+            "name": "miniz_oxide",
+            "package_key": "miniz_oxide-0.8.9",
+            "kind": "normal",
+            "features": [
+              "simd",
+              "with-alloc"
+            ],
+            "uses_default_features": false,
+            "optional": true,
+            "target": null,
+            "tree": "target"
+          },
+          {
+            "name": "miniz_oxide",
+            "package_key": "miniz_oxide-0.8.9",
+            "kind": "normal",
+            "features": [
+              "simd",
+              "with-alloc"
+            ],
+            "uses_default_features": false,
+            "optional": false,
+            "target": "cfg(all(target_arch = \"wasm32\", not(target_os = \"emscripten\")))",
+            "tree": "target"
+          }
+        ],
+        "build_dependencies": [],
+        "features": [
+          "any_impl",
+          "miniz_oxide",
+          "rust_backend"
+        ]
+      },
       "fluent-uri-0.1.4": {
         "runtime_dependencies": [
           {
@@ -1344,6 +1417,18 @@
             "kind": "normal",
             "features": [],
             "uses_default_features": true,
+            "optional": false,
+            "target": null,
+            "tree": "target"
+          },
+          {
+            "name": "flate2",
+            "package_key": "flate2-1.1.9",
+            "kind": "normal",
+            "features": [
+              "rust_backend"
+            ],
+            "uses_default_features": false,
             "optional": false,
             "target": null,
             "tree": "target"
@@ -4759,6 +4844,36 @@
         "build_dependencies": [],
         "features": []
       },
+      "miniz_oxide-0.8.9": {
+        "runtime_dependencies": [
+          {
+            "name": "adler2",
+            "package_key": "adler2-2.0.1",
+            "kind": "normal",
+            "features": [],
+            "uses_default_features": false,
+            "optional": false,
+            "target": null,
+            "tree": "target"
+          },
+          {
+            "name": "simd_adler32",
+            "package_key": "simd-adler32-0.3.10",
+            "kind": "normal",
+            "features": [],
+            "uses_default_features": false,
+            "optional": true,
+            "target": null,
+            "tree": "target"
+          }
+        ],
+        "build_dependencies": [],
+        "features": [
+          "simd",
+          "simd-adler32",
+          "with-alloc"
+        ]
+      },
       "mio-1.2.2": {
         "runtime_dependencies": [
           {
@@ -6933,6 +7048,11 @@
             "tree": "target"
           }
         ],
+        "build_dependencies": [],
+        "features": []
+      },
+      "simd-adler32-0.3.10": {
+        "runtime_dependencies": [],
         "build_dependencies": [],
         "features": []
       },
@@ -12112,6 +12232,9 @@
     }
   },
   "per_crate": {
+    "adler2-2.0.1": {
+      "edition": "2021"
+    },
     "ahash-0.8.12": {
       "edition": "2018",
       "build_script": "build.rs"
@@ -12250,6 +12373,10 @@
     "cpufeatures-0.3.0": {
       "edition": "2024"
     },
+    "crc32fast-1.5.0": {
+      "edition": "2021",
+      "build_script": "build.rs"
+    },
     "crossbeam-utils-0.8.22": {
       "edition": "2021",
       "build_script": "build.rs"
@@ -12303,6 +12430,9 @@
       "edition": "2018"
     },
     "find-msvc-tools-0.1.9": {
+      "edition": "2018"
+    },
+    "flate2-1.1.9": {
       "edition": "2018"
     },
     "fluent-uri-0.1.4": {
@@ -12542,6 +12672,9 @@
     "mime-0.3.17": {
       "edition": "2015"
     },
+    "miniz_oxide-0.8.9": {
+      "edition": "2021"
+    },
     "mio-1.2.2": {
       "edition": "2021"
     },
@@ -12773,6 +12906,9 @@
     },
     "signal-hook-registry-1.4.8": {
       "edition": "2015"
+    },
+    "simd-adler32-0.3.10": {
+      "edition": "2018"
     },
     "slab-0.4.12": {
       "edition": "2018"

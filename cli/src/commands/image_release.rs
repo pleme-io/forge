@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result};
 use std::fmt;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::Path;
 use std::process::Command;
 use tracing::info;
@@ -262,8 +262,33 @@ pub enum LoaderError {
     /// The image declares an architecture other than the tag it is about to be
     /// pushed under (e.g. an `arm64` image about to become `amd64-<sha>`).
     ArchMismatch { expected: String, found: String },
-    /// `skopeo inspect` returned no usable `Architecture` field.
+    /// `doca inspect --tarball` returned VALID JSON with no `Architecture`
+    /// key. Narrow on purpose: for two years this variant also absorbed "stdout
+    /// did not parse" and "the tarball could not be read at all", so its message
+    /// blamed doca for failures doca was never involved in. Those are now
+    /// [`LoaderError::InspectParseFailure`] and
+    /// [`LoaderError::ArchiveUnreadable`].
     MissingArchitecture,
+    /// `doca inspect --tarball` ran, but its stdout is not parseable JSON.
+    /// DISTINCT from [`LoaderError::MissingArchitecture`] (valid JSON, key
+    /// absent): doca printed nothing, printed a warning onto stdout, or
+    /// `DOCA_BIN` resolved to a different binary entirely. Carries the evidence
+    /// needed to tell those apart without re-running CI.
+    InspectParseFailure {
+        /// First [`STDOUT_EXCERPT_BYTES`] of stdout, lossily decoded so a cut
+        /// mid-codepoint cannot panic the error path.
+        stdout_excerpt: String,
+        /// Full stdout length. `0` means doca printed nothing at all.
+        stdout_len: usize,
+        /// doca's exit code; `None` means it was killed by a signal.
+        exit_code: Option<i32>,
+        /// serde_json's own message (kind, line, column).
+        parse_error: String,
+    },
+    /// The docker-archive tarball could not be read as a tar at all. Says
+    /// NOTHING about doca and NOTHING about the image's declared architecture —
+    /// which is precisely why it is its own variant.
+    ArchiveUnreadable { path: String, detail: String },
     /// A regular, executable-permission file inside the image's layers has a
     /// real ELF `e_machine` that does not match `expected_arch` — the image's
     /// OCI metadata may claim the right architecture; the actual bytes don't.
@@ -295,7 +320,35 @@ impl fmt::Display for LoaderError {
             ),
             LoaderError::MissingArchitecture => write!(
                 f,
-                "`doca inspect --tarball` returned no Architecture field — not a usable single-arch OCI image"
+                "`doca inspect --tarball` returned valid JSON with no Architecture field — not a \
+                 usable single-arch OCI image. A multi-arch OCI index legitimately has no \
+                 top-level Architecture; if that is what was handed in, verify each arch's own \
+                 tarball instead of the combined index."
+            ),
+            LoaderError::InspectParseFailure {
+                stdout_excerpt,
+                stdout_len,
+                exit_code,
+                parse_error,
+            } => write!(
+                f,
+                "`doca inspect --tarball` exited {} but its stdout is not JSON ({parse_error}). \
+                 stdout was {stdout_len} byte(s); first {} shown: {stdout_excerpt:?}. This is NOT \
+                 a missing-Architecture image — doca printed nothing, printed a warning onto \
+                 stdout, or DOCA_BIN resolved to a different binary. Reproduce with \
+                 `\"$DOCA_BIN\" inspect --tarball <image>` on this builder.",
+                match exit_code {
+                    Some(c) => c.to_string(),
+                    None => "by signal".to_string(),
+                },
+                stdout_excerpt.len(),
+            ),
+            LoaderError::ArchiveUnreadable { path, detail } => write!(
+                f,
+                "could not read {path} as a docker-archive tar: {detail}. doca was NOT involved \
+                 in this failure. `dockerTools.buildLayeredImage` emits a GZIP-COMPRESSED tarball \
+                 by default, and this reader sniffs the gzip magic — so a failure here means the \
+                 archive is neither raw tar nor gzip, or is truncated."
             ),
             LoaderError::BinaryArchMismatch {
                 path,
@@ -332,11 +385,58 @@ impl fmt::Display for LoaderError {
 
 impl std::error::Error for LoaderError {}
 
-/// Pure arch check over `skopeo inspect` JSON. Factored out from the skopeo
-/// invocation so it is unit-testable without a registry or a real tarball.
-fn check_inspect_arch(inspect_json: &[u8], expected_arch: &str) -> Result<(), LoaderError> {
-    let v: serde_json::Value =
-        serde_json::from_slice(inspect_json).map_err(|_| LoaderError::MissingArchitecture)?;
+/// How much of doca's stdout to carry in [`LoaderError::InspectParseFailure`].
+/// Enough to show a warning banner or an empty response; short enough that a
+/// binary blob on stdout does not flood the log.
+const STDOUT_EXCERPT_BYTES: usize = 200;
+
+/// Open a docker-archive tarball, transparently gunzipping when the outer
+/// wrapper is compressed.
+///
+/// `dockerTools.buildLayeredImage` gzips its output by default, so EVERY
+/// substrate-built image arrives here compressed. Detection is by the two-byte
+/// gzip magic rather than by filename, because the store path a nix build
+/// produces is `.tar.gz` while a hand-gunzipped intermediate is not — the same
+/// rule substrate's own oci-push applies (`tools/oci-push/src/main.rs`,
+/// "detect by the gzip magic, not the filename").
+fn open_docker_archive(path: &str) -> std::io::Result<tar::Archive<Box<dyn Read>>> {
+    let mut file = File::open(path)?;
+    let mut magic = [0u8; 2];
+    let n = file.read(&mut magic)?;
+    // Rewind rather than keep the two bytes: both readers below want the stream
+    // from byte zero, and a two-byte file is not a tar under either encoding.
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let reader: Box<dyn Read> = if n == 2 && magic == [0x1f, 0x8b] {
+        Box::new(flate2::read::GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    Ok(tar::Archive::new(reader))
+}
+
+/// Pure arch check over `doca inspect --tarball` JSON. Factored out from the
+/// doca invocation so it is unit-testable without a registry or a real tarball.
+///
+/// `exit_code` is carried purely for the error path: a parse failure means
+/// something ran and produced non-JSON, and which exit code it produced is the
+/// first question anyone debugging it will ask.
+fn check_inspect_arch(
+    inspect_json: &[u8],
+    expected_arch: &str,
+    exit_code: Option<i32>,
+) -> Result<(), LoaderError> {
+    let v: serde_json::Value = match serde_json::from_slice(inspect_json) {
+        Ok(v) => v,
+        Err(e) => {
+            let n = inspect_json.len().min(STDOUT_EXCERPT_BYTES);
+            return Err(LoaderError::InspectParseFailure {
+                stdout_excerpt: String::from_utf8_lossy(&inspect_json[..n]).into_owned(),
+                stdout_len: inspect_json.len(),
+                exit_code,
+                parse_error: e.to_string(),
+            });
+        }
+    };
     let found = v
         .get("Architecture")
         .and_then(|a| a.as_str())
@@ -380,7 +480,7 @@ fn verify_image_arch(doca: &str, image_path: &str, expected_arch: &str) -> Resul
         );
     }
 
-    check_inspect_arch(&output.stdout, expected_arch)
+    check_inspect_arch(&output.stdout, expected_arch, output.status.code())
         .map_err(|e| anyhow::anyhow!("{} (image: {})", e, image_path))?;
 
     verify_binary_contents_arch(image_path, expected_arch)
@@ -477,12 +577,17 @@ fn verify_binary_contents_arch(image_path: &str, expected_arch: &str) -> Result<
     let expected_em = expected_em_machine(expected_arch);
 
     let manifest =
-        read_docker_archive_manifest(image_path).map_err(|_| LoaderError::MissingArchitecture)?;
+        read_docker_archive_manifest(image_path).map_err(|e| LoaderError::ArchiveUnreadable {
+            path: image_path.to_string(),
+            detail: format!("{e:#}"),
+        })?;
 
     for layer_name in &manifest.layers {
-        let mut outer = tar::Archive::new(
-            File::open(image_path).map_err(|_| LoaderError::MissingArchitecture)?,
-        );
+        let mut outer =
+            open_docker_archive(image_path).map_err(|e| LoaderError::ArchiveUnreadable {
+                path: image_path.to_string(),
+                detail: e.to_string(),
+            })?;
         let entries = match outer.entries() {
             Ok(e) => e,
             Err(_) => continue,
@@ -562,9 +667,8 @@ struct DockerArchiveManifest {
 /// tarball (the standard `[{"Config": "...", "Layers": ["a/layer.tar", ...]}]`
 /// shape skopeo/docker produce).
 fn read_docker_archive_manifest(image_path: &str) -> Result<DockerArchiveManifest> {
-    let file = File::open(image_path)
+    let mut archive = open_docker_archive(image_path)
         .with_context(|| format!("Failed to open image tarball {}", image_path))?;
-    let mut archive = tar::Archive::new(file);
     for entry in archive.entries()?.flatten() {
         let mut entry = entry;
         let path = entry.path()?.to_string_lossy().to_string();
@@ -600,14 +704,14 @@ mod tests {
     #[test]
     fn arch_match_passes() {
         let json = br#"{"Name":"x","Architecture":"amd64","Os":"linux"}"#;
-        assert!(check_inspect_arch(json, "amd64").is_ok());
+        assert!(check_inspect_arch(json, "amd64", Some(0)).is_ok());
     }
 
     #[test]
     fn arch_mismatch_is_typed() {
         // The hanabi class: an arm64 image about to be tagged amd64-<sha>.
         let json = br#"{"Architecture":"arm64","Os":"linux"}"#;
-        let err = check_inspect_arch(json, "amd64").unwrap_err();
+        let err = check_inspect_arch(json, "amd64", Some(0)).unwrap_err();
         assert_eq!(
             err,
             LoaderError::ArchMismatch {
@@ -622,24 +726,102 @@ mod tests {
     #[test]
     fn arm64_match_passes() {
         let json = br#"{"Architecture":"arm64"}"#;
-        assert!(check_inspect_arch(json, "arm64").is_ok());
+        assert!(check_inspect_arch(json, "arm64", Some(0)).is_ok());
     }
 
     #[test]
     fn missing_architecture_field_is_typed() {
+        // Valid JSON, key absent. This — and ONLY this — is MissingArchitecture.
         let json = br#"{"Name":"x","Os":"linux"}"#;
         assert_eq!(
-            check_inspect_arch(json, "amd64").unwrap_err(),
+            check_inspect_arch(json, "amd64", Some(0)).unwrap_err(),
             LoaderError::MissingArchitecture
         );
     }
 
+    /// Regression: this test previously asserted `MissingArchitecture` for
+    /// unparseable stdout, i.e. it ENCODED the conflation rather than catching
+    /// it. Non-JSON stdout and a missing key are different causes and must not
+    /// share a message.
     #[test]
-    fn non_json_inspect_output_is_typed() {
-        assert_eq!(
-            check_inspect_arch(b"not json at all", "amd64").unwrap_err(),
-            LoaderError::MissingArchitecture
+    fn non_json_inspect_output_is_a_parse_failure_not_a_missing_architecture() {
+        let err = check_inspect_arch(b"not json at all", "amd64", Some(0)).unwrap_err();
+        assert!(
+            matches!(err, LoaderError::InspectParseFailure { .. }),
+            "expected InspectParseFailure, got {err:?}"
         );
+        assert!(!err.to_string().contains("no Architecture field"));
+    }
+
+    #[test]
+    fn empty_stdout_is_a_parse_failure_carrying_zero_length() {
+        // doca printed nothing at all — the shape a mis-resolved DOCA_BIN gives.
+        assert!(matches!(
+            check_inspect_arch(b"", "amd64", Some(0)).unwrap_err(),
+            LoaderError::InspectParseFailure { stdout_len: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn warning_polluted_stdout_carries_the_excerpt() {
+        // Valid JSON preceded by a banner: the failure mode that looks like a
+        // broken image and is actually a noisy stdout.
+        let out = b"warning: ignoring untrusted substituter\n{\"Architecture\":\"amd64\"}";
+        match check_inspect_arch(out, "amd64", Some(0)).unwrap_err() {
+            LoaderError::InspectParseFailure { stdout_excerpt, .. } => {
+                assert!(stdout_excerpt.starts_with("warning:"), "{stdout_excerpt}");
+            }
+            other => panic!("expected InspectParseFailure, got {other:?}"),
+        }
+    }
+
+    /// THE 34-DAY BUG, as a test. A gzip-compressed docker-archive — which is
+    /// exactly what `dockerTools.buildLayeredImage` emits — must be READ, not
+    /// misreported as a doca/architecture problem.
+    #[test]
+    fn a_gzipped_docker_archive_is_read_not_blamed_on_doca() {
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        // A real docker-archive: manifest.json naming one layer, plus the layer.
+        let mut inner = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut inner);
+            let manifest = br#"[{"Config":"c.json","Layers":["l/layer.tar"]}]"#;
+            let mut h = tar::Header::new_gnu();
+            h.set_size(manifest.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, "manifest.json", &manifest[..]).unwrap();
+            b.finish().unwrap();
+        }
+        let mut gz = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&inner).unwrap();
+        let gzipped = gz.finish().unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &gzipped).unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+
+        // The gzip wrapper must be transparent: the manifest parses.
+        let manifest = read_docker_archive_manifest(&path)
+            .expect("a gzipped docker-archive must be readable");
+        assert_eq!(manifest.layers, vec!["l/layer.tar".to_string()]);
+    }
+
+    /// A genuinely unreadable archive must name ITSELF, never doca.
+    #[test]
+    fn an_unreadable_archive_does_not_blame_doca() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"neither tar nor gzip, just noise").unwrap();
+        let err = verify_binary_contents_arch(&tmp.path().to_string_lossy(), "amd64").unwrap_err();
+        assert!(
+            matches!(err, LoaderError::ArchiveUnreadable { .. }),
+            "expected ArchiveUnreadable, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("doca was NOT involved"), "{msg}");
+        assert!(!msg.contains("no Architecture field"), "{msg}");
     }
 
     // --- classify_magic: pure, no I/O ---
