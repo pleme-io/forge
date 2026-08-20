@@ -11,8 +11,8 @@ use tracing::info;
 use crate::error::RegistryError;
 use crate::repo::get_tool_path;
 use crate::retry::{
-    classify_attempt_failure, classify_capture, classify_capture_query, log_retry_attempt,
-    retry_command, CommandAttemptFailure, RetryPolicy,
+    classify_attempt_failure, classify_capture, classify_capture_query, retry_command_logged,
+    CommandAttemptFailure, RetryPolicy,
 };
 
 /// Module-scoped sigil: resolve the `oci-push` (`doca`) binary via the
@@ -271,9 +271,7 @@ impl RegistryClient {
         let host = host.to_string();
         let image = image.to_string();
 
-        let result = retry_command(&policy, &op, |attempt| {
-            let op = op.clone();
-            let policy = policy.clone();
+        let result = retry_command_logged(&policy, &op, |_attempt| {
             let host = host.clone();
             let image = image.clone();
             async move {
@@ -290,7 +288,7 @@ impl RegistryClient {
                 // retry_command above, and doca's push_with_retry already backs
                 // off exponentially while distinguishing transient failures
                 // from permanent ones (a 401 does not burn the budget).
-                let outcome = Command::new(&doca)
+                Command::new(&doca)
                     .args([
                         "push",
                         "--tarball",
@@ -307,8 +305,7 @@ impl RegistryClient {
                     .stdout(Stdio::null())
                     .stderr(Stdio::piped())
                     .output()
-                    .await;
-                log_retry_attempt(outcome, &op, attempt, &policy)
+                    .await
             }
         })
         .await;

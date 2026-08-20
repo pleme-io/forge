@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::infrastructure::registry::RegistryRef;
 use crate::repo::get_tool_path;
-use crate::retry::{log_retry_attempt, retry_command, RetryPolicy};
+use crate::retry::{retry_command_logged, RetryPolicy};
 
 /// Get git SHA for tagging - Single source of truth
 ///
@@ -543,10 +543,8 @@ pub async fn push_with_retry(
     let host = host.to_string();
     let image = image.to_string();
 
-    let result = retry_command(&policy, &op, |attempt| {
+    let result = retry_command_logged(&policy, &op, |_attempt| {
         let organization = organization.clone();
-        let op = op.clone();
-        let policy = policy.clone();
         let host = host.clone();
         let image = image.clone();
         async move {
@@ -559,7 +557,7 @@ pub async fn push_with_retry(
             // nested inside retry_command above, and doca's push_with_retry
             // already backs off exponentially while telling transient failures
             // apart from permanent ones (a 401 does not burn the budget).
-            let outcome = Command::new(&doca)
+            Command::new(&doca)
                 .args([
                     "push",
                     "--tarball",
@@ -576,8 +574,7 @@ pub async fn push_with_retry(
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .output()
-                .await;
-            log_retry_attempt(outcome, &op, attempt, &policy)
+                .await
         }
     })
     .await;

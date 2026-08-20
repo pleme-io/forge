@@ -9,7 +9,7 @@ use crate::flux_reconcile;
 use crate::git;
 use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::repo::get_tool_path;
-use crate::retry::{debug_log_capture_streams, log_retry_attempt, retry_command, RetryPolicy};
+use crate::retry::{debug_log_capture_streams, retry_command_logged, RetryPolicy};
 
 /// The typed exponential-backoff policy for the StatefulSet rollout-watch
 /// pod-status-poll cadence in [`execute`]'s `--watch` branch — `initial_backoff`
@@ -847,11 +847,9 @@ async fn push_with_retry(
     let host = host.to_string();
     let image = image.to_string();
 
-    let result = retry_command(&policy, &op, |attempt| {
+    let result = retry_command_logged(&policy, &op, |attempt| {
         let doca = doca.clone();
         let organization = organization.clone();
-        let op = op.clone();
-        let policy = policy.clone();
         let host = host.clone();
         let image = image.clone();
         async move {
@@ -887,7 +885,12 @@ async fn push_with_retry(
             // the `<tool> stdout/stderr: <trimmed>` message format is
             // pinned by one test in `cli/src/retry.rs` across both
             // retry-driven CI surfaces. The success arm is
-            // domain-specific (per-call-site context).
+            // domain-specific (per-call-site context). Interleaves
+            // BEFORE the primitive's per-attempt warn dispatch —
+            // `retry_command_logged` wraps the closure's OUTPUT with
+            // [`log_retry_attempt`], not its BODY, so a per-site
+            // debug tee inside the closure fires before the retry-
+            // loop's warn arm.
             if let Ok(out) = outcome.as_ref() {
                 if out.status.success() {
                     debug!("Push successful for {}:{}", registry, tag);
@@ -895,7 +898,7 @@ async fn push_with_retry(
                     debug_log_capture_streams(out, "doca");
                 }
             }
-            log_retry_attempt(outcome, &op, attempt, &policy)
+            outcome
         }
     })
     .await;
