@@ -1308,24 +1308,25 @@ pub fn bump(
 
     if commit {
         info!("Committing changes...");
-        // Binary resolution rides `crate::git::git_command_sync()` so a
-        // Nix-hermetic runner's `GIT_BIN` override wins over ambient
-        // `PATH` — same discipline the sibling sync
-        // `commands/helm.rs::deploy` / `config/mod::resolve_k8s_repo_root`
-        // / `commands/e2e.rs::resolve_repo_root` sites honor and the
-        // same class of bug the async free-function-`git` / `GitClient`
-        // / `commands/federation.rs` / `commands/push.rs` /
-        // `commands/codegen_validation.rs` / `commands/rollback.rs`
-        // migrations at 818ed9a / badcdf4 / 8653403 / f6be190 /
-        // 81d7486 / 8a1958e redeemed on the async half. Retains the
-        // pre-migration `.status()` / `bail!`-on-failure shape verbatim.
-        // Find repo root
-        let repo_root = crate::git::git_command_sync()
-            .args(["rev-parse", "--show-toplevel"])
-            .output()
-            .context("Failed to run git rev-parse")?;
-
-        let repo_root = String::from_utf8(repo_root.stdout)?.trim().to_string();
+        // Repo-root discovery routes through the canonical
+        // [`crate::git::try_repo_root_via_rev_parse`] primitive
+        // (cli/src/git.rs) — owner of the
+        // `git rev-parse --show-toplevel` argv literal + the
+        // `GIT_BIN`-routed spawn + the trimmed-stdout decode at ONE
+        // body. Pre-lift this site inline-spelled a
+        // `git_command_sync().args(...).output().context(...)?`
+        // stanza that returned `Ok(_)` on any spawn that ran,
+        // INCLUDING a git that exited non-zero with empty stdout
+        // ("not a git repository") — the following
+        // `String::from_utf8(stdout)?.trim()` then yielded `""` and
+        // every downstream `git add`/`commit`/`tag` here ran with
+        // `current_dir("")` instead of surfacing the error.
+        // Post-lift a non-zero exit collapses to `None` and the
+        // `.context(...)?` below converts it into a loud error
+        // before any downstream spawn.
+        let repo_root =
+            crate::git::try_repo_root_via_rev_parse().context("Failed to run git rev-parse")?;
+        let repo_root = repo_root.to_string_lossy().to_string();
 
         let status = crate::git::git_command_sync()
             .args(["add", &format!("{}/*/Chart.yaml", charts_dir)])

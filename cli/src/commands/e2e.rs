@@ -822,28 +822,16 @@ fn resolve_repo_root(repo_root: Option<String>) -> Result<String> {
         return Ok(root);
     }
 
-    // Binary resolution rides `crate::git::git_command_sync()` so a
-    // Nix-hermetic runner's `GIT_BIN` override wins over ambient
-    // `PATH` at repo-root discovery time — same discipline the
-    // sibling `commands/helm.rs::deploy` (0d922f6) and
-    // `config::resolve_k8s_repo_root` (0a36ba0) sync sites honor and
-    // the async `commands/push.rs` / `commands/rollback.rs` /
-    // `commands/codegen_validation.rs` / `commands/federation.rs`
-    // sites drive through `git_command_async`. Retains the
-    // pre-migration `.output()`-then-`current_dir` fallback shape:
-    // this discovery path is advisory and callers fall back to the
-    // current directory on any non-success exit.
-    let output = crate::git::git_command_sync()
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .context("Failed to run git rev-parse")?;
-
-    if output.status.success() {
-        let root = String::from_utf8(output.stdout)
-            .context("Invalid UTF-8 in git output")?
-            .trim()
-            .to_string();
-        return Ok(root);
+    // Delegate the repo-root discovery to the canonical
+    // [`crate::git::try_repo_root_via_rev_parse`] primitive, which
+    // owns the `git rev-parse --show-toplevel` argv literal + the
+    // trimmed-stdout decode + the `GIT_BIN`-routed spawn at ONE body
+    // (cli/src/git.rs). Retains the pre-migration advisory-fallback
+    // shape: any git failure (spawn miss, non-zero exit, UTF-8
+    // decode) collapses to `None` and this site falls back to the
+    // current working directory rather than surfacing an error.
+    if let Some(root) = crate::git::try_repo_root_via_rev_parse() {
+        return Ok(root.to_string_lossy().to_string());
     }
 
     // Fall back to current directory
@@ -1232,46 +1220,47 @@ mod resolve_repo_root_git_bin_routing_tests {
     /// Regression-shield: the git-discovery spawn in
     /// [`super::resolve_repo_root`] MUST resolve `git` through
     /// [`crate::git::git_command_sync`] rather than the pre-lift
-    /// `std::process::Command::new("git")` literal. Pre-migration the
+    /// `std::process::Command::new("git")` literal. Pre-lift the
     /// single site bypassed the `GIT_BIN` env override the
     /// `tools::get_tool_path(tools::GIT)` idiom
-    /// (cli/src/tools.rs:102-105) resolves — the same class of bug
-    /// the sibling `flux` / `cargo` / `doca` / free-function-`git` /
-    /// `GitClient` / `commands/federation.rs` / `commands/push.rs` /
-    /// `commands/codegen_validation.rs` / `commands/rollback.rs` /
-    /// `commands/helm.rs::deploy` / `config::resolve_k8s_repo_root`
-    /// migrations redeemed at 621f827 / f0dfa12 / d3dd199 / 685642f /
-    /// d6f6bc7 / dd5a212 / 673e4be / b02d4eb / 54a9985 / 139b37a /
-    /// 818ed9a / badcdf4 / 8653403 / f6be190 / 81d7486 / 8a1958e /
-    /// 0d922f6 / 0a36ba0. Lifts the sync half of the routing
-    /// discipline onto the third sync consumer of
-    /// `git_command_sync` — first was `helm::deploy` at 0d922f6,
-    /// second was `config::resolve_k8s_repo_root` at 0a36ba0.
+    /// (cli/src/tools.rs:102-105) resolves; the first migration
+    /// (447cad1) routed the spawn through `git_command_sync` and
+    /// this shield certified that. The second migration lifted the
+    /// `git rev-parse --show-toplevel` argv literal + the
+    /// trimmed-stdout decode onto the canonical
+    /// [`crate::git::try_repo_root_via_rev_parse`] primitive so a
+    /// downstream consumer that ever forgot the `git_command_sync`
+    /// spawn constructor still inherits the `GIT_BIN` override by
+    /// construction (the primitive itself owns the routing at ONE
+    /// body). This shield now asserts the delegation to that
+    /// primitive rather than the inline `git_command_sync()` call
+    /// the pre-lift shape carried.
     ///
     /// This test reads this module's own source via [`include_str!`]
     /// and asserts the raw `Command::new("git")` string does not
     /// reappear in `resolve_repo_root` while the delegation to
-    /// `git_command_sync` does. A future regression that re-fuses
-    /// the raw-spawn body fails here, not silently in production
-    /// where a Nix-hermetic runner's `GIT_BIN`-provided `git` would
-    /// lose to whatever `git` is first on `PATH` at repo-root
-    /// discovery time.
+    /// `crate::git::try_repo_root_via_rev_parse()` does. A future
+    /// regression that re-fuses the raw-spawn body fails here, not
+    /// silently in production where a Nix-hermetic runner's
+    /// `GIT_BIN`-provided `git` would lose to whatever `git` is
+    /// first on `PATH` at repo-root discovery time.
     ///
     /// The check is deliberately structural (substring on the source
     /// text) rather than behavioral — the end-to-end `GIT_BIN`-
     /// routing invariant is already pinned by
     /// [`crate::git::tests::test_git_command_sync_routes_through_git_bin_env_var`]
-    /// on the primitive itself; this shield only certifies that the
-    /// `resolve_repo_root` git spawn reads through that primitive.
-    /// Mirrors the sibling shield on `config::resolve_k8s_repo_root`
-    /// and `commands/helm.rs::deploy` for the sync half of the
-    /// surface.
+    /// on the primitive itself and by the sibling primitive's own
+    /// hermetic test; this shield only certifies that the
+    /// `resolve_repo_root` git discovery reads through the canonical
+    /// primitive. Mirrors the sibling shields on
+    /// `config::resolve_k8s_repo_root` and `commands/helm.rs::deploy`
+    /// for the sync half of the surface.
     #[test]
     fn test_resolve_repo_root_routes_git_through_git_command_sync_not_raw_command() {
         const SOURCE: &str = include_str!("e2e.rs");
 
         // Bound the scan to `resolve_repo_root` — the single git
-        // spawn site lives inside it. Docstrings and sibling
+        // discovery site lives inside it. Docstrings and sibling
         // functions in this module legitimately reference the
         // pre-migration literal, so scoping the check to the target
         // function's body avoids false positives.
@@ -1290,15 +1279,15 @@ mod resolve_repo_root_git_bin_routing_tests {
         assert!(
             !fn_body.contains("Command::new(\"git\")"),
             "resolve_repo_root() must NOT spawn `git` directly — \
-             route through `crate::git::git_command_sync()` so \
-             `GIT_BIN` overrides land at the shared primitive. Found \
-             the pre-migration spawn body in resolve_repo_root()."
+             route through `crate::git::try_repo_root_via_rev_parse()` \
+             so `GIT_BIN` overrides land at the shared primitive. \
+             Found the pre-migration spawn body in resolve_repo_root()."
         );
         assert!(
-            fn_body.contains("crate::git::git_command_sync()"),
-            "resolve_repo_root() must delegate the git spawn to \
-             `crate::git::git_command_sync()` — the delegation string \
-             was not found in resolve_repo_root()."
+            fn_body.contains("crate::git::try_repo_root_via_rev_parse()"),
+            "resolve_repo_root() must delegate the git discovery to \
+             `crate::git::try_repo_root_via_rev_parse()` — the \
+             delegation string was not found in resolve_repo_root()."
         );
     }
 }
