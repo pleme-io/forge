@@ -167,12 +167,7 @@ pub async fn rust_update_cargo_nix(service: String) -> Result<()> {
 
     // Update Cargo.lock
     println!("Updating Cargo.lock...");
-    let cargo = cargo_bin();
-    let mut cmd = Command::new(&cargo);
-    cmd.arg("update");
-    crate::retry::run_inherited_status(cmd, "cargo update")
-        .await
-        .context("Failed to update Cargo.lock")?;
+    crate::nix::run_cargo_update(&cargo_bin()).await?;
 
     // Generate Cargo.nix
     println!();
@@ -374,12 +369,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         "Updating dependencies".bold(),
         "(cargo update)".dimmed()
     );
-    let cargo = cargo_bin();
-    let mut cmd = Command::new(&cargo);
-    cmd.arg("update");
-    crate::retry::run_inherited_status(cmd, "cargo update")
-        .await
-        .context("Failed to run cargo update")?;
+    crate::nix::run_cargo_update(&cargo_bin()).await?;
     println!("   ✅ Dependencies updated");
     println!();
 
@@ -1006,6 +996,77 @@ mod tests {
              {resolve_hits:#?}",
             resolve_hits.len(),
             resolve_hits.len()
+        );
+    }
+
+    /// Whole-module shield: every `cargo update` spawn in this module
+    /// must route through the canonical [`crate::nix::run_cargo_update`]
+    /// primitive, never through an inline
+    /// `Command::new(<cargo>); cmd.arg("update");
+    /// run_inherited_status(cmd, "cargo update")` triple.
+    ///
+    /// Pre-lift `rust_update_cargo_nix` and `rust_cargo_update` each
+    /// spelled the primitive's five-line body verbatim — the third and
+    /// fourth copies of the same shape after `nix::run_cargo_update`
+    /// (nix.rs:435) and its `commands/bootstrap.rs::rebuild_bootstrap_cargo_nix`
+    /// consumer (bootstrap.rs:645). Four occurrences past THEORY §VI.1's
+    /// three-times-is-a-law threshold; the primitive is the archetype
+    /// the pillar demands, and post-lift every `cargo update` spawn in
+    /// forge routes through it. A future refinement — the info!
+    /// telemetry line grows a structured field, the retry policy for
+    /// transient `Cargo.lock`-write contention gets tightened, the
+    /// bail-context prefix carries the workspace path — lands at ONE
+    /// body and reaches every consumer by construction.
+    ///
+    /// The `run_inherited_status(cmd, "cargo update")` needle catches
+    /// the failure mode a bare `!body.contains("cargo update")` scan
+    /// would miss: a caller who kept the operator-visible `println!`
+    /// prose but hand-rolled the spawn (`let mut cmd = ...; cmd.arg(...);
+    /// run_inherited_status(cmd, "cargo update")`) instead of routing
+    /// through `nix::run_cargo_update`. Routing the assertion through
+    /// [`crate::test_support::code_line_hits`] keeps this docstring's
+    /// mention of the forbidden needle from false-matching itself.
+    #[test]
+    fn test_developer_tools_cargo_update_routes_through_nix_run_cargo_update() {
+        let source = include_str!("developer_tools.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "developer_tools.rs must have a `#[cfg(test)] mod tests {` marker \
+                     — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        let forbidden = "run_inherited_status(cmd, \"cargo update\")";
+        let inline_hits = crate::test_support::code_line_hits(body, forbidden);
+        assert!(
+            inline_hits.is_empty(),
+            "commands/developer_tools.rs must not spawn `cargo update` \
+             via an inline `run_inherited_status(cmd, \"cargo update\")` \
+             triple — every `cargo update` spawn in this module must \
+             route through `crate::nix::run_cargo_update(&cargo_bin())`. \
+             Found {} inline hit(s): {inline_hits:#?}. \
+             A hand-rolled inline copy re-opens the drift class the \
+             primitive was landed to close (the info! telemetry line, \
+             the bail-on-non-zero-exit `run_inherited_status` routing, \
+             and the outer `context(\"Failed to update Cargo.lock\")` \
+             wrap all live at ONE body).",
+            inline_hits.len()
+        );
+        // Positive-side sibling: at least one consumer in this module
+        // routes through the primitive. A regression that dropped every
+        // `nix::run_cargo_update` call from this module would leave the
+        // forbidden scan trivially satisfied by absence, so pin the
+        // positive presence too — the two pre-lift sites
+        // (`rust_update_cargo_nix` and `rust_cargo_update`) each land
+        // one `crate::nix::run_cargo_update(&cargo_bin())` hit.
+        let canonical = "crate::nix::run_cargo_update(&cargo_bin())";
+        let canonical_hits = crate::test_support::code_line_hits(body, canonical);
+        assert!(
+            canonical_hits.len() >= 2,
+            "commands/developer_tools.rs must delegate `cargo update` \
+             spawns through `{canonical}` at at least two code lines \
+             (one per pre-lift consumer: `rust_update_cargo_nix`, \
+             `rust_cargo_update`). Found {} code-line hit(s): \
+             {canonical_hits:#?}.",
+            canonical_hits.len()
         );
     }
 }
