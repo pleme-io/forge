@@ -419,6 +419,40 @@ pub async fn run_crate2nix(crate2nix_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run `nix run nixpkgs#crate2nix -- generate [extra_generate_args…]` — the
+/// nix-wrapped sibling of [`run_crate2nix`] the flake-registry consumer surface
+/// uses when a direct `crate2nix` binary is not on PATH but a `nix` binary is
+/// (the substrate-declared runtime the `nix run <registry>#<attr>` idiom
+/// resolves against).
+///
+/// `nix_path` is the resolved `NIX_BIN` path (typically read through the
+/// caller's `nix_bin()` sigil); `extra_generate_args` is the tail passed after
+/// `--` to `crate2nix generate` — an empty slice for the plain-generate case,
+/// `["-f", "Cargo.toml", "-o", "Cargo.nix"]` for the explicit-in/out case the
+/// two `regenerate` command sites drive.
+///
+/// # Errors
+///
+/// Returns an error if `nix` is not found, if `nix run nixpkgs#crate2nix`
+/// cannot resolve the flake attribute, or if the wrapped `crate2nix generate`
+/// fails. Routes the bail-on-non-zero-exit shape through
+/// `retry::run_inherited_status` so the (op, exit_code) tuple is carried into
+/// the anyhow chain by construction — same canonical record-shape every other
+/// migrated status-only inherited-stdio site in forge consumes.
+pub async fn run_nix_wrapped_crate2nix(nix_path: &str, extra_generate_args: &[&str]) -> Result<()> {
+    info!("🔄 Running `nix run nixpkgs#crate2nix -- generate`...");
+
+    let mut cmd = Command::new(nix_path);
+    let mut argv: Vec<&str> = vec!["run", "nixpkgs#crate2nix", "--", "generate"];
+    argv.extend_from_slice(extra_generate_args);
+    cmd.args(&argv);
+    crate::retry::run_inherited_status(cmd, "crate2nix generate")
+        .await
+        .context("Failed to generate Cargo.nix")?;
+
+    Ok(())
+}
+
 /// Run cargo update to refresh Cargo.lock
 ///
 /// # Arguments
@@ -829,6 +863,78 @@ mod tests {
         assert!(
             chain.contains("Failed to regenerate Cargo.nix"),
             "must carry outer caller-narrative; got: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_nix_wrapped_crate2nix_nonzero_exit_carries_structural_record() {
+        // Symmetric pin for `run_nix_wrapped_crate2nix` — the `nix run
+        // nixpkgs#crate2nix -- generate` sibling of `run_crate2nix`.
+        // Shim under the basename `nix` so the producer's
+        // `Command::new(nix_path)` sees a binary that exits with a
+        // deterministic non-zero code. The migration routes the
+        // bail-on-non-zero-exit shape through `retry::run_inherited_
+        // status`, which emits `"{op} failed (exit N)"` as the
+        // canonical structural record. Pre-migration each of the three
+        // developer_tools sites hand-rolled the spawn WITHOUT the
+        // outer `context("Failed to generate Cargo.nix")` wrap
+        // reaching the operator log surface consistently, and two
+        // spelled the bail-context prefix differently (`"Failed to
+        // run crate2nix generate"` vs `"Failed to generate Cargo.
+        // nix"`); post-migration every consumer inherits ONE canonical
+        // context wrap and ONE canonical record shape from the
+        // primitive.
+        let (_dir, shim) = make_executable_shim("nix", "#!/bin/sh\nexit 11\n");
+        let err = run_nix_wrapped_crate2nix(&shim, &[])
+            .await
+            .expect_err("nonzero exit must fail");
+        let chain = format!("{:?}", err);
+        assert!(
+            chain.contains("crate2nix generate failed (exit 11)"),
+            "must carry canonical (op, exit_code) record; got: {chain}"
+        );
+        assert!(
+            chain.contains("Failed to generate Cargo.nix"),
+            "must carry outer caller-narrative; got: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_nix_wrapped_crate2nix_forwards_extra_generate_args_verbatim() {
+        // The primitive's `extra_generate_args: &[&str]` tail must
+        // land on the wrapped `crate2nix generate` argv verbatim, in
+        // order, AFTER the fixed prefix `["run", "nixpkgs#crate2nix",
+        // "--", "generate"]`. Pre-lift the two `regenerate` sites each
+        // spelled the eight-element argv literal
+        // (`["run", "nixpkgs#crate2nix", "--", "generate", "-f",
+        // "Cargo.toml", "-o", "Cargo.nix"]`) verbatim; a primitive that
+        // silently reordered or dropped the tail would break both.
+        // This shim captures its argv to `.observed-argv` and the
+        // assertion is byte-exact against the joined form the
+        // `regenerate` sites pass, so a reorder or a dropped element
+        // fails-before-passes-after.
+        let work = tempfile::tempdir().expect("temp dir");
+        let observed = work.path().join(".observed-argv");
+        let (_dir, shim) = make_executable_shim(
+            "nix",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
+                observed.display()
+            ),
+        );
+        run_nix_wrapped_crate2nix(&shim, &["-f", "Cargo.toml", "-o", "Cargo.nix"])
+            .await
+            .expect("success path");
+        let captured = std::fs::read_to_string(&observed)
+            .expect("shim must have written the observed argv line");
+        let expected = "run\nnixpkgs#crate2nix\n--\ngenerate\n-f\nCargo.toml\n-o\nCargo.nix\n";
+        assert_eq!(
+            captured, expected,
+            "the wrapped-generate argv must land at the shim verbatim: \
+             fixed prefix `run nixpkgs#crate2nix -- generate` followed \
+             by the caller's `extra_generate_args` tail in order, one \
+             element per line. A drift (reorder, dropped element, \
+             extra element) breaks both `regenerate` sites at once."
         );
     }
 

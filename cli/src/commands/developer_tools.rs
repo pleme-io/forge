@@ -172,12 +172,7 @@ pub async fn rust_update_cargo_nix(service: String) -> Result<()> {
     // Generate Cargo.nix
     println!();
     println!("Generating Cargo.nix...");
-    let nix_bin = nix_bin();
-    let mut cmd = Command::new(&nix_bin);
-    cmd.args(&["run", "nixpkgs#crate2nix", "--", "generate"]);
-    crate::retry::run_inherited_status(cmd, "crate2nix generate")
-        .await
-        .context("Failed to generate Cargo.nix")?;
+    crate::nix::run_nix_wrapped_crate2nix(&nix_bin(), &[]).await?;
 
     println!();
     println!("✅ {}", "Cargo.nix updated!".green());
@@ -294,21 +289,8 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         "Generating Cargo.nix".bold(),
         "(crate2nix generate)".dimmed()
     );
-    let nix_bin = nix_bin();
-    let mut cmd = Command::new(&nix_bin);
-    cmd.args(&[
-        "run",
-        "nixpkgs#crate2nix",
-        "--",
-        "generate",
-        "-f",
-        "Cargo.toml",
-        "-o",
-        "Cargo.nix",
-    ]);
-    crate::retry::run_inherited_status(cmd, "crate2nix generate")
-        .await
-        .context("Failed to run crate2nix generate")?;
+    crate::nix::run_nix_wrapped_crate2nix(&nix_bin(), &["-f", "Cargo.toml", "-o", "Cargo.nix"])
+        .await?;
     println!("   ✅ Cargo.nix generated");
     println!();
 
@@ -379,21 +361,8 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         "Generating Cargo.nix".bold(),
         "(crate2nix generate)".dimmed()
     );
-    let nix_bin = nix_bin();
-    let mut cmd = Command::new(&nix_bin);
-    cmd.args(&[
-        "run",
-        "nixpkgs#crate2nix",
-        "--",
-        "generate",
-        "-f",
-        "Cargo.toml",
-        "-o",
-        "Cargo.nix",
-    ]);
-    crate::retry::run_inherited_status(cmd, "crate2nix generate")
-        .await
-        .context("Failed to run crate2nix generate")?;
+    crate::nix::run_nix_wrapped_crate2nix(&nix_bin(), &["-f", "Cargo.toml", "-o", "Cargo.nix"])
+        .await?;
     println!("   ✅ Cargo.nix generated");
     println!();
 
@@ -1064,6 +1033,86 @@ mod tests {
             "commands/developer_tools.rs must delegate `cargo update` \
              spawns through `{canonical}` at at least two code lines \
              (one per pre-lift consumer: `rust_update_cargo_nix`, \
+             `rust_cargo_update`). Found {} code-line hit(s): \
+             {canonical_hits:#?}.",
+            canonical_hits.len()
+        );
+    }
+
+    /// Whole-module shield: every `nix run nixpkgs#crate2nix -- generate`
+    /// spawn in this module must route through the canonical
+    /// [`crate::nix::run_nix_wrapped_crate2nix`] primitive, never
+    /// through an inline `Command::new(<nix>); cmd.args(&["run",
+    /// "nixpkgs#crate2nix", "--", "generate", ...]); run_inherited_
+    /// status(cmd, "crate2nix generate")` triple.
+    ///
+    /// Pre-lift `rust_update_cargo_nix`, `rust_regenerate`, and
+    /// `rust_cargo_update` each spelled the eight-element argv literal
+    /// verbatim — three occurrences past THEORY §VI.1's
+    /// three-times-is-a-law threshold, extracted onto ONE archetype.
+    /// A future refinement — the info! telemetry line grows a
+    /// structured `flake_registry` field, the retry policy for
+    /// transient nixpkgs-fetch failures gets tightened, the
+    /// bail-context prefix carries the `-o Cargo.nix` target path —
+    /// lands at ONE body and reaches every consumer by construction.
+    /// The pre-lift bail-context prefix drifted (`"Failed to run
+    /// crate2nix generate"` at two sites, `"Failed to generate Cargo.
+    /// nix"` at the third) exactly because three sibling hand-rolled
+    /// stanzas each free-authored the wrap; the primitive collapses
+    /// them onto ONE canonical `"Failed to generate Cargo.nix"` wrap.
+    ///
+    /// The `"nixpkgs#crate2nix"` needle catches the failure mode a
+    /// bare `!body.contains("crate2nix generate")` scan would miss:
+    /// a caller who kept the operator-visible `println!` prose but
+    /// hand-rolled the wrapped-generate argv (`let mut cmd = ...;
+    /// cmd.args(&["run", "nixpkgs#crate2nix", "--", "generate"]);
+    /// run_inherited_status(cmd, "crate2nix generate")`) instead of
+    /// routing through `nix::run_nix_wrapped_crate2nix`. Routing the
+    /// assertion through [`crate::test_support::code_line_hits`]
+    /// keeps this docstring's mention of the forbidden flake-attr
+    /// literal from false-matching itself.
+    #[test]
+    fn test_developer_tools_wrapped_crate2nix_routes_through_nix_primitive() {
+        let source = include_str!("developer_tools.rs");
+        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
+            "developer_tools.rs must have a `#[cfg(test)] mod tests {` marker \
+                     — the shield's scan boundary depends on it",
+        );
+        let body = &source[..cutoff];
+        let forbidden = "\"nixpkgs#crate2nix\"";
+        let inline_hits = crate::test_support::code_line_hits(body, forbidden);
+        assert!(
+            inline_hits.is_empty(),
+            "commands/developer_tools.rs must not spawn `nix run \
+             nixpkgs#crate2nix -- generate` via an inline argv \
+             literal — every wrapped-crate2nix spawn in this module \
+             must route through `crate::nix::run_nix_wrapped_crate2nix\
+             (&nix_bin(), &[...])`. Found {} inline hit(s): \
+             {inline_hits:#?}. A hand-rolled inline copy re-opens the \
+             drift class the primitive was landed to close (the info! \
+             telemetry line, the eight-element argv prefix, the \
+             `retry::run_inherited_status` routing, and the outer \
+             `context(\"Failed to generate Cargo.nix\")` wrap all \
+             live at ONE body).",
+            inline_hits.len()
+        );
+        // Positive-side sibling: at least three consumers in this
+        // module route through the primitive (one per pre-lift site).
+        // A regression that dropped every
+        // `nix::run_nix_wrapped_crate2nix` call from this module would
+        // leave the forbidden scan trivially satisfied by absence, so
+        // pin the positive presence too — the three pre-lift sites
+        // (`rust_update_cargo_nix`, `rust_regenerate`,
+        // `rust_cargo_update`) each land one
+        // `crate::nix::run_nix_wrapped_crate2nix(` hit.
+        let canonical = "crate::nix::run_nix_wrapped_crate2nix(";
+        let canonical_hits = crate::test_support::code_line_hits(body, canonical);
+        assert!(
+            canonical_hits.len() >= 3,
+            "commands/developer_tools.rs must delegate wrapped \
+             `crate2nix generate` spawns through `{canonical}...)` at \
+             at least three code lines (one per pre-lift consumer: \
+             `rust_update_cargo_nix`, `rust_regenerate`, \
              `rust_cargo_update`). Found {} code-line hit(s): \
              {canonical_hits:#?}.",
             canonical_hits.len()
