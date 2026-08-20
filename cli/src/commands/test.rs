@@ -9,7 +9,7 @@
 //!
 //! Each test type has its own `enabled` flag for granular control.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -177,31 +177,11 @@ struct RawDeploymentSection {
     tests: Option<WebTestsConfig>,
 }
 
-/// Walk up from a path to find the product directory (pkgs/products/{product}).
-fn find_product_dir_from_path(start: &Path) -> Option<PathBuf> {
-    let mut current = start.to_path_buf();
-    loop {
-        if let Some(parent) = current.parent() {
-            if let Some(grandparent) = parent.parent() {
-                if parent.file_name().and_then(|n| n.to_str()) == Some("products")
-                    && grandparent.file_name().and_then(|n| n.to_str()) == Some("pkgs")
-                {
-                    return Some(current);
-                }
-            }
-        }
-        if let Some(parent) = current.parent() {
-            current = parent.to_path_buf();
-        } else {
-            return None;
-        }
-    }
-}
-
 /// Load web tests configuration from deploy.yaml
 fn load_web_tests_config(service: &str, service_dir: &str) -> Result<WebTestsConfig> {
     let service_dir_path = PathBuf::from(service_dir);
-    let deploy_yaml_path = if let Some(product_dir) = find_product_dir_from_path(&service_dir_path)
+    let deploy_yaml_path = if let Some(product_dir) =
+        crate::repo::find_product_dir(&service_dir_path, crate::repo::ProductDirLayout::Monorepo)
     {
         crate::config::resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
     } else {
