@@ -700,32 +700,18 @@ mod tests {
     fn test_rover_fhs_spawn_routes_through_rover_fhs_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("federation.rs");
 
-        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+        // Composed three-primitive stanza (`test_support.rs::
+        // assert_source_routes_bare_spawn_through_two_arg_sigil`) —
+        // dash-bearing tool name: the helper canonicalizes
+        // `rover-fhs` → `rover_fhs_bin` at the sigil-definition
+        // slot, matching the POSIX env-var canonicalization the
+        // underlying [`crate::tools::get_tool_path`] primitive
+        // already applies at the env-var surface.
+        crate::test_support::assert_source_routes_bare_spawn_through_two_arg_sigil(
             SOURCE,
             "commands/federation.rs",
             "rover-fhs",
-            "resolve `ROVER_FHS_BIN` via `rover_fhs_bin()`",
-        );
-
-        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
-            SOURCE,
-            "commands/federation.rs",
-            "rover_fhs_bin",
             "ROVER_FHS_BIN",
-            "rover-fhs",
-        );
-        // Assert the canonical two-arg sigil-delegation form appears at
-        // a code line. Pre-lift the shield's own docstring (line 690)
-        // and panic message quoted
-        // `crate::repo::get_tool_path("ROVER_FHS_BIN", "rover-fhs")`
-        // verbatim, so a regression at `commands/federation.rs:59` (the
-        // production sigil body) silently passed the naive `contains`
-        // shield. The helper's `code_line_hits` filter closes it.
-        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
-            SOURCE,
-            "commands/federation.rs",
-            "ROVER_FHS_BIN",
-            "rover-fhs",
         );
     }
 }

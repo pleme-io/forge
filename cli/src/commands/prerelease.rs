@@ -1826,35 +1826,19 @@ mod tests {
     fn test_cargo_spawn_routes_through_cargo_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("prerelease.rs");
 
-        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+        // Composed three-primitive stanza (`test_support.rs::
+        // assert_source_routes_bare_spawn_through_two_arg_sigil`) —
+        // bare-name env-var form (`CARGO`, no `_BIN` suffix) matches
+        // the substrate-exported convention every cargo-invocation
+        // site in forge honors (`commands/test_ci.rs`,
+        // `commands/developer_tools.rs`,
+        // `commands/comprehensive_release.rs`,
+        // `commands/e2e.rs`).
+        crate::test_support::assert_source_routes_bare_spawn_through_two_arg_sigil(
             SOURCE,
             "commands/prerelease.rs",
             "cargo",
-            "resolve `CARGO` via `cargo_bin()`",
-        );
-
-        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
-            SOURCE,
-            "commands/prerelease.rs",
-            "cargo_bin",
             "CARGO",
-            "cargo",
-        );
-        // Assert the canonical two-arg sigil-delegation form appears at
-        // a code line — filtered through `code_line_hits` so a
-        // docstring-only match cannot silently satisfy the shield if
-        // the production sigil body regresses. Pre-lift the shield
-        // spelled `SOURCE.contains("crate::repo::get_tool_path(\"CARGO\", \"cargo\")")`
-        // against the substituted form; the module docstring above at
-        // `commands/prerelease.rs` quotes the same form verbatim
-        // inside a `///` block, so a regression at
-        // `commands/prerelease.rs:110` would silently pass the pre-lift
-        // shield. Shared helper closes that defect.
-        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
-            SOURCE,
-            "commands/prerelease.rs",
-            "CARGO",
-            "cargo",
         );
     }
 }
