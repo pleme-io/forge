@@ -179,38 +179,22 @@ mod docker_bin_routing_tests {
     fn test_docker_spawns_route_through_docker_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("infra.rs");
 
-        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+        // Composed three-primitive stanza — bare-spawn refusal, sigil
+        // definition, canonical two-arg delegation — through the
+        // shared `assert_source_routes_bare_spawn_through_two_arg_sigil`
+        // (e108260). Sigil name (`docker_bin`) and remediation
+        // (`resolve \`DOCKER_BIN\` via \`docker_bin()\``) are derived
+        // by the helper from `bare` and `env_var`.
+        crate::test_support::assert_source_routes_bare_spawn_through_two_arg_sigil(
             SOURCE,
             "commands/infra.rs",
             "docker",
-            "resolve `DOCKER_BIN` via `docker_bin()`",
-        );
-
-        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
-            SOURCE,
-            "commands/infra.rs",
-            "docker_bin",
             "DOCKER_BIN",
-            "docker",
         );
-        // Assert the canonical two-arg sigil-delegation form appears at
-        // a code line — filtered through `code_line_hits` so a
-        // docstring-only match cannot silently satisfy the shield if
-        // the production sigil body regresses. Shared helper since the
-        // needle-construction + code-line filter pair was replicated
-        // across five shields (`local.rs`, `infra.rs`, `dashboards.rs`,
-        // and two shields in `prerelease.rs`).
-        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
-            SOURCE,
-            "commands/infra.rs",
-            "DOCKER_BIN",
-            "docker",
-        );
-        // Also assert the pre-lift deriving one-arg form does NOT
-        // reappear at any *code* line. Shared helper since the
-        // reconstruction + code-line filter + panic-message stanza
-        // was replicated verbatim across three shields (`local.rs`,
-        // `infra.rs`, `prerelease.rs`).
+        // Also assert the pre-lift deriving one-arg constant-driven
+        // form does NOT reappear at any *code* line. Sibling
+        // constant-driven check at `commands/prerelease.rs` and
+        // `commands/local.rs`.
         crate::test_support::assert_source_forbids_deriving_one_arg_sigil_constant_form(
             SOURCE,
             "commands/infra.rs",
