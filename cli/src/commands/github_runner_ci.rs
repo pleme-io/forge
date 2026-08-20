@@ -68,12 +68,8 @@ use crate::retry::{debug_log_capture_streams, log_retry_attempt, retry_command, 
 /// head), not by attempt count — and consumes only [`RetryPolicy::compute_delay`]
 /// from this policy, not [`RetryPolicy::max_attempts`]. The `max_attempts`
 /// field is unconsulted at this consumption site.
-const GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: u32::MAX,
-    initial_backoff: Duration::from_secs(5),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF: RetryPolicy =
+    RetryPolicy::wall_clock_poll(Duration::from_secs(5));
 
 /// Backoff between StatefulSet rollout-watch pod-status-poll iterations, given
 /// a 0-indexed local `attempt` counter (the `loop { ... }` shape in

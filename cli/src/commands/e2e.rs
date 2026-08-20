@@ -177,12 +177,8 @@ fn bun_bin() -> String {
 /// — and consumes only [`RetryPolicy::compute_delay`] from this policy,
 /// not [`RetryPolicy::max_attempts`]. The `max_attempts` field is
 /// unconsulted at this consumption site.
-const DOCKER_STARTUP_POLL_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: u32::MAX,
-    initial_backoff: Duration::from_secs(2),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const DOCKER_STARTUP_POLL_BACKOFF: RetryPolicy =
+    RetryPolicy::wall_clock_poll(Duration::from_secs(2));
 
 /// Wall-clock deadline for [`ensure_docker_running`]'s Docker Desktop
 /// startup poll — preserves the pre-lift 60-second bound the fixed-

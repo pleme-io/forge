@@ -9379,6 +9379,74 @@ impl RetryPolicy {
         Self::network().with_max_attempts(max_attempts)
     }
 
+    /// The wall-clock-bounded polling schedule: the canonical
+    /// [`Self::network`] exponential ceiling (`factor` 2, `max_backoff`
+    /// 30s) with a caller-supplied `initial_backoff` seed and
+    /// `max_attempts: u32::MAX` because a wall-clock-bounded poll loop
+    /// bounds itself on `start.elapsed() > self.timeout` at the loop
+    /// head, not on the attempt counter, so the attempt budget is
+    /// unconsulted at the consumption site.
+    ///
+    /// Lifts the verbatim five-line field-literal stanza
+    /// ```text
+    /// const <NAME>_POLL_BACKOFF: RetryPolicy = RetryPolicy {
+    ///     max_attempts: u32::MAX,
+    ///     initial_backoff: Duration::from_secs(N),
+    ///     factor: 2,
+    ///     max_backoff: Duration::from_secs(30),
+    /// };
+    /// ```
+    /// that seven poll-loop consumers of the shared exponential-with-
+    /// cap schedule now spell verbatim modulo the caller's `N` seed
+    /// (`services/migration_service.rs::MIGRATION_JOB_POLL_BACKOFF`,
+    /// `commands/comprehensive_release.rs::SERVICES_HEALTHY_POLL_BACKOFF`,
+    /// `commands/e2e.rs::DOCKER_STARTUP_POLL_BACKOFF`,
+    /// `commands/federation_tests.rs::FEDERATION_JOB_POLL_BACKOFF`,
+    /// `commands/flux.rs::FLUX_POLL_BACKOFF`,
+    /// `commands/github_runner_ci.rs::GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF`,
+    /// `commands/migrations.rs::SHINKA_MIGRATION_POLL_BACKOFF`).
+    /// Seven identically-shaped bodies past THEORY.md §VI.1's
+    /// three-times-is-a-law threshold — this primitive is the
+    /// law-redeeming consolidation for the wall-clock-bounded polling
+    /// shape, sibling of [`Self::network`] (the canonical schedule
+    /// whose ceiling this factory shares), [`Self::immediate`]
+    /// (the no-retry shape), [`Self::network_or_immediate`] (the
+    /// safe-mode-conditional dispatch), and
+    /// [`Self::network_with_max_attempts`] (the canonical-schedule +
+    /// caller-budget builder).
+    ///
+    /// # Why the shared ceiling is load-bearing
+    ///
+    /// A future refinement to the shared exponential ceiling
+    /// (e.g., raising the cap to 60s for long-poll surfaces, adding
+    /// a jittered backoff, changing the factor) lands at ONE
+    /// typed-primitive site here (and at [`Self::network`] for the
+    /// 250ms-seeded transient-network sibling) rather than being
+    /// retyped seven times across the poll-loop consumers. Every
+    /// site's post-lift shape is a one-line
+    /// `RetryPolicy::wall_clock_poll(Duration::from_secs(N))` with
+    /// the caller's seed as the only remaining free variable — the
+    /// shared ceiling is inherited by delegation.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason [`Self::network`] and
+    /// [`Self::immediate`] are: the constructor takes only field
+    /// literals (via a `Duration` parameter that flows straight into
+    /// the `initial_backoff` field), so the resulting policy is
+    /// constructible in `const` context — every current consumer
+    /// spells the site as `const <NAME>: RetryPolicy = RetryPolicy::
+    /// wall_clock_poll(Duration::from_secs(N));` and the const
+    /// context requires the constructor to be `const`.
+    pub const fn wall_clock_poll(initial_backoff: Duration) -> Self {
+        Self {
+            max_attempts: u32::MAX,
+            initial_backoff,
+            factor: Self::network().factor,
+            max_backoff: Self::network().max_backoff,
+        }
+    }
+
     /// True iff this policy never retries — every invocation under
     /// [`run_with_policy`] / [`run_command_with_policy`] terminates after
     /// exactly one attempt, regardless of the classifier's transient/
@@ -16034,6 +16102,136 @@ mod tests {
         assert_eq!(p.compute_delay(4), net.compute_delay(4));
         // attempt 1 is always ZERO regardless of schedule
         assert_eq!(p.compute_delay(1), Duration::ZERO);
+    }
+
+    /// [`RetryPolicy::wall_clock_poll`] emits the wall-clock-bounded
+    /// polling shape: `max_attempts: u32::MAX` (unconsulted — the
+    /// consumer bounds itself on wall-clock at the loop head), the
+    /// caller-supplied `initial_backoff`, and [`RetryPolicy::network`]'s
+    /// exponential ceiling (`factor` 2, `max_backoff` 30s) inherited
+    /// by delegation. The one-field-at-a-time pin against any
+    /// regression that perturbed the shape at exactly one field —
+    /// the load-bearing witness the seven pre-lift call-site shield
+    /// tests already carry per-site (`test_<name>_policy_shape` at
+    /// `services/migration_service.rs`, `commands/e2e.rs`,
+    /// `commands/flux.rs`, `commands/migrations.rs`,
+    /// `commands/federation_tests.rs`,
+    /// `commands/github_runner_ci.rs`,
+    /// `commands/comprehensive_release.rs`), here consolidated at the
+    /// typed-primitive surface so the shape is defined and tested in
+    /// exactly one place.
+    #[test]
+    fn test_wall_clock_poll_emits_the_polling_shape() {
+        let p = RetryPolicy::wall_clock_poll(Duration::from_secs(2));
+        assert_eq!(
+            p.max_attempts,
+            u32::MAX,
+            "max_attempts must be u32::MAX — the poll loop is wall-clock \
+             bounded, not attempt-count bounded, so the field is \
+             structurally unconsulted at the consumption site"
+        );
+        assert_eq!(
+            p.initial_backoff,
+            Duration::from_secs(2),
+            "initial_backoff must be the caller-supplied seed"
+        );
+        assert_eq!(
+            p.factor,
+            RetryPolicy::network().factor,
+            "factor must inherit network()'s ceiling — one refinement \
+             to the shared exponential factor lands at network(), not \
+             retyped per poll-loop consumer"
+        );
+        assert_eq!(
+            p.max_backoff,
+            RetryPolicy::network().max_backoff,
+            "max_backoff must inherit network()'s cap — one refinement \
+             to the shared exponential cap lands at network(), not \
+             retyped per poll-loop consumer"
+        );
+    }
+
+    /// The `initial_backoff` axis is the ONLY caller-varying field
+    /// [`RetryPolicy::wall_clock_poll`] exposes — every other field
+    /// is inherited by delegation. Pinned across the two seeds the
+    /// current seven consumers actually use (2s: five sites; 5s: two
+    /// sites) so a regression that fused `initial_backoff` with any
+    /// other field (a typo in the field assignment, an accidental
+    /// shadow) would surface at exactly one of the two seeds rather
+    /// than as a silent schedule regression at the consumption sites.
+    #[test]
+    fn test_wall_clock_poll_varies_only_the_initial_backoff() {
+        for secs in [1u64, 2, 5, 10, 60] {
+            let seed = Duration::from_secs(secs);
+            let p = RetryPolicy::wall_clock_poll(seed);
+            assert_eq!(p.initial_backoff, seed, "seed at {secs}s must round-trip");
+            // Every other field is the delegation-inherited constant.
+            assert_eq!(p.max_attempts, u32::MAX);
+            assert_eq!(p.factor, RetryPolicy::network().factor);
+            assert_eq!(p.max_backoff, RetryPolicy::network().max_backoff);
+        }
+    }
+
+    /// `wall_clock_poll` is `const fn` — the constructor is
+    /// consumable in `const` context and every current call site
+    /// spells the pattern `const <NAME>: RetryPolicy = RetryPolicy::
+    /// wall_clock_poll(Duration::from_secs(N));`. The const-context
+    /// pin against a future regression that flipped the constructor
+    /// to `fn` (e.g., a clamp against `Duration::ZERO` added
+    /// non-const-callably) would fail this pin as a compile error —
+    /// the same const-context discipline the sibling
+    /// [`Self::network`] / [`Self::immediate`] /
+    /// [`Self::network_or_immediate`] factories share.
+    #[test]
+    fn test_wall_clock_poll_is_const_fn() {
+        const POLICY: RetryPolicy = RetryPolicy::wall_clock_poll(Duration::from_secs(3));
+        assert_eq!(POLICY.max_attempts, u32::MAX);
+        assert_eq!(POLICY.initial_backoff, Duration::from_secs(3));
+        assert_eq!(POLICY.factor, 2);
+        assert_eq!(POLICY.max_backoff, Duration::from_secs(30));
+    }
+
+    /// The lifted factory produces the exact same struct value the
+    /// seven pre-lift field-literal `const` sites did. Pinned across
+    /// the two `initial_backoff` seeds the current consumers use so a
+    /// future regression that perturbed either arm (a wrong factor, a
+    /// wrong cap, a wrong `max_attempts`) would surface here as a
+    /// structural inequality against the pre-lift literal rather than
+    /// at one of the seven downstream sites. Rides the derived
+    /// [`PartialEq`] surface — the one-line `assert_eq!(lifted, literal)`
+    /// the equality derive already closes.
+    #[test]
+    fn test_wall_clock_poll_equals_pre_lift_field_literal() {
+        // Pre-lift shape at commands/e2e.rs, commands/flux.rs,
+        // commands/migrations.rs, commands/comprehensive_release.rs, and
+        // services/migration_service.rs (all 2s seed).
+        let lifted_2s = RetryPolicy::wall_clock_poll(Duration::from_secs(2));
+        let literal_2s = RetryPolicy {
+            max_attempts: u32::MAX,
+            initial_backoff: Duration::from_secs(2),
+            factor: 2,
+            max_backoff: Duration::from_secs(30),
+        };
+        assert_eq!(
+            lifted_2s, literal_2s,
+            "wall_clock_poll(2s) must equal the pre-lift field literal — \
+             the migration from field-literal to factory must not perturb \
+             the resulting struct value"
+        );
+
+        // Pre-lift shape at commands/github_runner_ci.rs and
+        // commands/federation_tests.rs (5s seed).
+        let lifted_5s = RetryPolicy::wall_clock_poll(Duration::from_secs(5));
+        let literal_5s = RetryPolicy {
+            max_attempts: u32::MAX,
+            initial_backoff: Duration::from_secs(5),
+            factor: 2,
+            max_backoff: Duration::from_secs(30),
+        };
+        assert_eq!(
+            lifted_5s, literal_5s,
+            "wall_clock_poll(5s) must equal the pre-lift field literal"
+        );
     }
 
     /// `RetryPolicy` derives [`PartialEq`] reflexively at every factory
