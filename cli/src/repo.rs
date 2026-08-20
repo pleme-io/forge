@@ -285,6 +285,70 @@ pub fn find_product_dir(start: &Path, layout: ProductDirLayout) -> Option<PathBu
     }
 }
 
+/// Activate the root-flake pattern: publish `REPO_ROOT` + `SERVICE_DIR`
+/// to the process environment and change the working directory to
+/// `repo_root`.
+///
+/// Fuses three sibling call sites that each hand-spelled the same
+/// three-line stanza verbatim:
+///
+/// - `main.rs::setup_service_directory` (the top-level CLI entry point;
+///   pre-lift `set_var("REPO_ROOT", &root); set_var("SERVICE_DIR",
+///   &dir); set_current_dir(&root)?`)
+/// - `commands/status.rs::execute` (pre-lift `set_var("REPO_ROOT",
+///   repo_root); set_var("SERVICE_DIR", service_dir);
+///   set_current_dir(repo_root)?`)
+/// - `commands/integration_tests.rs::execute_manual` (pre-lift
+///   `set_var("REPO_ROOT", repo_root); set_var("SERVICE_DIR",
+///   service_dir); set_current_dir(repo_root)?`)
+///
+/// The invariant every consumer honors — and that a fresh consumer
+/// would forget by omission — is composed at ONE surface here:
+///
+/// 1. `REPO_ROOT` is set FIRST, so every downstream reader
+///    (`repo::find_repo_root`, `git::get_repo_root`,
+///    `PathBuilder::new`, `DeployConfig::load_for_service`) sees the
+///    caller-supplied root regardless of whether the chdir succeeds.
+/// 2. `SERVICE_DIR` is set SECOND, so `DeployConfig::load_for_service`
+///    and every `commands/*::execute` that reads `SERVICE_DIR` sees the
+///    caller-supplied service directory. Omitting this line at any of
+///    the three pre-lift sites would have silently misrouted service
+///    discovery to whatever `SERVICE_DIR` the calling shell inherited
+///    from — a class of bug that structurally cannot occur post-lift.
+/// 3. The chdir targets `repo_root`, NOT `service_dir` — the root
+///    flake pattern (documented at `main.rs::setup_service_directory`)
+///    is "run `nix build` from the repo root; the SERVICE_DIR env var
+///    identifies the service to operate on." A caller that chdir'd to
+///    `service_dir` instead would break every `nix flake` invocation
+///    that follows.
+///
+/// The env vars are set BEFORE the chdir so a chdir failure still
+/// leaves them populated — every pre-lift site had this property by
+/// accident of source-order (the two `set_var` lines preceded the `?`
+/// on `set_current_dir`); the primitive preserves it by construction.
+///
+/// # Errors
+///
+/// Returns an error if `set_current_dir(repo_root)` fails (e.g. the
+/// path does not exist, the process lacks permission to enter it, or
+/// the path is not a directory).
+pub fn activate_root_flake<R, S>(repo_root: R, service_dir: S) -> Result<()>
+where
+    R: AsRef<Path>,
+    S: AsRef<Path>,
+{
+    let repo_root = repo_root.as_ref();
+    let service_dir = service_dir.as_ref();
+    std::env::set_var("REPO_ROOT", repo_root);
+    std::env::set_var("SERVICE_DIR", service_dir);
+    std::env::set_current_dir(repo_root).with_context(|| {
+        format!(
+            "Failed to change working directory to repo root: {}",
+            repo_root.display()
+        )
+    })
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -589,6 +653,268 @@ mod tests {
         std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
 
         assert!(find_product_dir(&repo_root, ProductDirLayout::Monorepo).is_none());
+    }
+
+    /// [`activate_root_flake`] publishes `REPO_ROOT` to the process
+    /// environment as its FIRST side-effect, matching the pre-lift
+    /// ordering at all three consumers (`main::setup_service_directory`,
+    /// `commands/status::execute`, `commands/integration_tests::execute_manual`).
+    /// A downstream `repo::find_repo_root` / `git::get_repo_root` /
+    /// `PathBuilder::new` reading `REPO_ROOT` after the call sees the
+    /// caller-supplied path, regardless of the chdir outcome.
+    #[test]
+    fn activate_root_flake_publishes_repo_root_env_var() {
+        let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_root = dir.path().join("repo");
+        let service_dir = dir.path().join("repo").join("services").join("api");
+        std::fs::create_dir_all(&service_dir).expect("create service dir");
+        let prior_repo = std::env::var("REPO_ROOT");
+        let prior_svc = std::env::var("SERVICE_DIR");
+        let prior_cwd = std::env::current_dir().expect("cwd");
+
+        activate_root_flake(&repo_root, &service_dir).expect("activate");
+        assert_eq!(
+            std::env::var("REPO_ROOT")
+                .ok()
+                .map(PathBuf::from)
+                .as_deref(),
+            Some(repo_root.as_path())
+        );
+
+        // Restore process-global state so unrelated tests see a clean
+        // baseline (the lock guards the observation window; restoring
+        // here narrows it further).
+        let _ = std::env::set_current_dir(&prior_cwd);
+        match prior_repo {
+            Ok(v) => std::env::set_var("REPO_ROOT", v),
+            Err(_) => std::env::remove_var("REPO_ROOT"),
+        }
+        match prior_svc {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+    }
+
+    /// [`activate_root_flake`] publishes `SERVICE_DIR` to the process
+    /// environment. Load-bearing: `DeployConfig::load_for_service`,
+    /// `commands/developer_tools`, `commands/schema_validation`,
+    /// `commands/bootstrap`, and `commands/rust_service` all read
+    /// `SERVICE_DIR` — a caller that set `REPO_ROOT` but forgot
+    /// `SERVICE_DIR` would silently misroute service discovery to
+    /// whatever `SERVICE_DIR` the calling shell inherited. Pins the
+    /// invariant that the primitive's contract makes the omission
+    /// structurally impossible.
+    #[test]
+    fn activate_root_flake_publishes_service_dir_env_var() {
+        let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_root = dir.path().join("repo");
+        let service_dir = dir.path().join("repo").join("services").join("worker");
+        std::fs::create_dir_all(&service_dir).expect("create service dir");
+        let prior_repo = std::env::var("REPO_ROOT");
+        let prior_svc = std::env::var("SERVICE_DIR");
+        let prior_cwd = std::env::current_dir().expect("cwd");
+
+        activate_root_flake(&repo_root, &service_dir).expect("activate");
+        assert_eq!(
+            std::env::var("SERVICE_DIR")
+                .ok()
+                .map(PathBuf::from)
+                .as_deref(),
+            Some(service_dir.as_path())
+        );
+
+        let _ = std::env::set_current_dir(&prior_cwd);
+        match prior_repo {
+            Ok(v) => std::env::set_var("REPO_ROOT", v),
+            Err(_) => std::env::remove_var("REPO_ROOT"),
+        }
+        match prior_svc {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+    }
+
+    /// [`activate_root_flake`] changes the process working directory to
+    /// `repo_root` — NOT `service_dir`. Load-bearing: the root-flake
+    /// pattern (documented at `main::setup_service_directory`) runs
+    /// `nix build` from the repo root, and every subsequent
+    /// path-relative read in the CLI presupposes that root is the cwd.
+    /// A migration that silently reversed the chdir target to
+    /// `service_dir` would break every `nix flake` invocation
+    /// downstream, so the test asserts the equality against `repo_root`
+    /// canonicalized to match `set_current_dir`'s canonicalization.
+    #[test]
+    fn activate_root_flake_chdirs_to_repo_root_not_service_dir() {
+        let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_root = dir.path().join("repo");
+        let service_dir = repo_root.join("services").join("api");
+        std::fs::create_dir_all(&service_dir).expect("create service dir");
+        let prior_repo = std::env::var("REPO_ROOT");
+        let prior_svc = std::env::var("SERVICE_DIR");
+        let prior_cwd = std::env::current_dir().expect("cwd");
+
+        activate_root_flake(&repo_root, &service_dir).expect("activate");
+        let observed = std::env::current_dir().expect("cwd after activate");
+        // Both sides go through canonicalize so a `/private/var/...` vs
+        // `/var/...` symlink prefix at the tempdir root does not flake
+        // the equality reading.
+        let expected = repo_root.canonicalize().expect("canonicalize repo_root");
+        let observed = observed.canonicalize().expect("canonicalize observed");
+        assert_eq!(observed, expected);
+
+        let _ = std::env::set_current_dir(&prior_cwd);
+        match prior_repo {
+            Ok(v) => std::env::set_var("REPO_ROOT", v),
+            Err(_) => std::env::remove_var("REPO_ROOT"),
+        }
+        match prior_svc {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+    }
+
+    /// [`activate_root_flake`] sets both env vars BEFORE attempting the
+    /// chdir. Load-bearing: if the chdir fails (a caller passing a
+    /// nonexistent path, a permission drop mid-pipeline), the env vars
+    /// remain populated so a downstream `?`-propagated error handler
+    /// can still read `REPO_ROOT` for its own diagnostics. Every
+    /// pre-lift consumer had this property by accident of source-order
+    /// (the two `set_var` lines preceded the `?` on `set_current_dir`);
+    /// the primitive preserves it by construction, and this test pins
+    /// it so a future rewrite that reordered the primitive's body
+    /// cannot silently regress the invariant.
+    #[test]
+    fn activate_root_flake_publishes_env_vars_even_when_chdir_fails() {
+        let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Point repo_root at a path that DOES NOT exist so
+        // set_current_dir fails; service_dir can still be any path.
+        let nonexistent_repo_root = dir.path().join("does-not-exist");
+        let service_dir = dir.path().join("service");
+        assert!(!nonexistent_repo_root.exists());
+        let prior_repo = std::env::var("REPO_ROOT");
+        let prior_svc = std::env::var("SERVICE_DIR");
+        let prior_cwd = std::env::current_dir().expect("cwd");
+
+        let result = activate_root_flake(&nonexistent_repo_root, &service_dir);
+        assert!(result.is_err(), "chdir to nonexistent path should fail");
+        // Env vars remain published despite the chdir failure.
+        assert_eq!(
+            std::env::var("REPO_ROOT")
+                .ok()
+                .map(PathBuf::from)
+                .as_deref(),
+            Some(nonexistent_repo_root.as_path())
+        );
+        assert_eq!(
+            std::env::var("SERVICE_DIR")
+                .ok()
+                .map(PathBuf::from)
+                .as_deref(),
+            Some(service_dir.as_path())
+        );
+
+        let _ = std::env::set_current_dir(&prior_cwd);
+        match prior_repo {
+            Ok(v) => std::env::set_var("REPO_ROOT", v),
+            Err(_) => std::env::remove_var("REPO_ROOT"),
+        }
+        match prior_svc {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+    }
+
+    /// The chdir-failure error surfaces `repo_root`'s path in its
+    /// context, so a `?`-propagated error the CLI prints to the
+    /// operator names the exact directory that could not be entered.
+    /// Pre-lift each consumer got a bare `std::io::Error` from
+    /// `set_current_dir` with no path context; post-lift the primitive
+    /// attaches `with_context` naming the offending path — a small
+    /// diagnostic upgrade at every consumer by construction.
+    #[test]
+    fn activate_root_flake_error_context_names_the_repo_root_path() {
+        let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nonexistent_repo_root = dir.path().join("nope");
+        let service_dir = dir.path().join("service");
+        let prior_repo = std::env::var("REPO_ROOT");
+        let prior_svc = std::env::var("SERVICE_DIR");
+        let prior_cwd = std::env::current_dir().expect("cwd");
+
+        let err = activate_root_flake(&nonexistent_repo_root, &service_dir).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&nonexistent_repo_root.display().to_string()),
+            "error should name the repo_root path; got: {msg}"
+        );
+
+        let _ = std::env::set_current_dir(&prior_cwd);
+        match prior_repo {
+            Ok(v) => std::env::set_var("REPO_ROOT", v),
+            Err(_) => std::env::remove_var("REPO_ROOT"),
+        }
+        match prior_svc {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+    }
+
+    /// The primitive accepts the caller's argument shape verbatim
+    /// (`&str`, `String`, `&Path`, `PathBuf`) via `AsRef<Path>` bounds
+    /// on both parameters. Load-bearing: the three pre-lift consumers
+    /// each spelled the arguments differently (`main` passed
+    /// `&String` from an `Option<String>` binding, `status` and
+    /// `integration_tests` passed `&str` from their `&str`
+    /// parameters). A single-type signature (e.g. `&str`-only) would
+    /// have forced boilerplate at the `main` site; the `AsRef<Path>`
+    /// bound makes every caller-shape pass by construction.
+    #[test]
+    fn activate_root_flake_accepts_str_and_string_and_path_args() {
+        let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_root = dir.path().join("repo");
+        let service_dir = repo_root.join("s");
+        std::fs::create_dir_all(&service_dir).expect("mkdir");
+        let repo_root_str: &str = repo_root.to_str().unwrap();
+        let service_dir_string: String = service_dir.display().to_string();
+        let prior_repo = std::env::var("REPO_ROOT");
+        let prior_svc = std::env::var("SERVICE_DIR");
+        let prior_cwd = std::env::current_dir().expect("cwd");
+
+        // &str for repo_root, String for service_dir.
+        activate_root_flake(repo_root_str, service_dir_string).expect("&str + String");
+        // &Path for repo_root, PathBuf for service_dir.
+        activate_root_flake(repo_root.as_path(), repo_root.join("s")).expect("&Path + PathBuf");
+        // &String for repo_root (matches the pre-lift main.rs shape),
+        // &str for service_dir (matches the pre-lift status.rs shape).
+        let repo_root_owned: String = repo_root.display().to_string();
+        activate_root_flake(&repo_root_owned, "").ok();
+
+        let _ = std::env::set_current_dir(&prior_cwd);
+        match prior_repo {
+            Ok(v) => std::env::set_var("REPO_ROOT", v),
+            Err(_) => std::env::remove_var("REPO_ROOT"),
+        }
+        match prior_svc {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
     }
 
     /// The `MonorepoOrStandalone` variant does NOT verify the `name:`
