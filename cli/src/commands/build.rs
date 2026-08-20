@@ -170,13 +170,26 @@ pub async fn execute(
         cmd.env("ATTIC_TOKEN", &attic_token);
     }
 
-    let build_result = cmd.status().await.context("Failed to run nix build")?;
+    // Route the status-only spawn through the canonical primitive so
+    // the pre-lift `.status().await.context(...)?` + `if !success()
+    // { bail! }` stanza (which dropped the exit code from the operator
+    // log line — `"Nix build failed"` carried no `code` even though
+    // `status.code()` was in scope) collapses onto
+    // `crate::retry::run_inherited_status`, and the canonical
+    // `"nix build failed (exit {code})"` envelope emerges by
+    // construction. Binding the result before the `?` propagation
+    // keeps the spinner-clear on the failure path — pre-lift the
+    // `?` on `.context("Failed to run nix build")` ran *before*
+    // `spinner.finish_and_clear()`, so a spawn error bubbled with the
+    // live spinner still animating beneath the printed error; post-
+    // lift the spinner clears on every path (success, non-zero exit,
+    // AND spawn error). Sibling of every recent status-only-spawn lift
+    // onto `run_inherited_status_sync` (a3d51eb through 6cb9442).
+    let outcome = crate::retry::run_inherited_status(cmd, "nix build").await;
 
     spinner.finish_and_clear();
 
-    if !build_result.success() {
-        anyhow::bail!("Nix build failed");
-    }
+    outcome?;
 
     // Create custom symlink if requested
     if output != "result" {
@@ -484,6 +497,64 @@ mod tests {
             "commands/build.rs must resolve the nix binary via \
              `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical \
              lookup was not found in the module body."
+        );
+    }
+
+    /// Whole-module shield: every status-only spawn in
+    /// `commands/build.rs` routes through
+    /// [`crate::retry::run_inherited_status`], never a hand-rolled
+    /// `.status().await` + `if !…success() { bail! }` stanza that
+    /// drops the exit code from the operator log line. Pre-lift the
+    /// `nix build` spawn spelled the inline stanza with an ad-hoc
+    /// `bail!("Nix build failed")` that carried no exit code — the
+    /// same exit-code-drop regression the sync sibling shields
+    /// (`commands/{crossplane, pangea_infra, gem, infra, tool}.rs`,
+    /// a3d51eb through 6cb9442) close on the sync frontier. Post-
+    /// lift the delegation call routes through the primitive and the
+    /// canonical `"nix build failed (exit {code})"` envelope emerges
+    /// at the primitive's ONE body (THEORY.md §VI.1: the three-times
+    /// rule redeemed by lifting to an archetype rather than
+    /// re-spelling the stanza).
+    ///
+    /// Negative side: the inline `.status().await` builder-terminator
+    /// must not reappear at any code line in the module body (a
+    /// re-inlined spawn would bypass the primitive and re-drop the
+    /// exit code). Positive side: the delegation call must appear at
+    /// ≥1 code line — a regression that deleted the primitive call
+    /// cannot leave the negative scan trivially satisfied by absence.
+    /// Both hits route through [`crate::test_support::code_line_hits`]
+    /// for anti-docstring-self-match discipline (`.status().await`
+    /// legitimately appears in this shield's own docstring above; the
+    /// code-line filter excludes it). Same scan boundary (first
+    /// `\n#[cfg(test)]\nmod tests {` marker) the whole-module
+    /// `NIX_BIN` shield above uses, so the two shields see identical
+    /// module-body byte spans.
+    #[test]
+    fn test_build_status_spawns_route_through_run_inherited_status() {
+        const SOURCE: &str = include_str!("build.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
+            "build.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status().await");
+        assert!(
+            inline.is_empty(),
+            "commands/build.rs must not spawn via an inline \
+             `.status().await` terminator — every status-only spawn \
+             must route through `crate::retry::run_inherited_status`, \
+             which carries the exit code into the failure envelope. \
+             Found: {inline:?}"
+        );
+
+        let delegations = crate::test_support::code_line_hits(body, "run_inherited_status(").len();
+        assert!(
+            delegations >= 1,
+            "commands/build.rs must route its nix build spawn through \
+             `run_inherited_status` — found only {delegations} \
+             delegation call(s); a dropped call would leave the \
+             negative `.status().await` scan satisfied by absence"
         );
     }
 }
