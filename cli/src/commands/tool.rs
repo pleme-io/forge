@@ -12,6 +12,7 @@ use tracing::{info, warn};
 use crate::git;
 use crate::nix::{build_flake_attr_in, run_nix_build_typed};
 use crate::repo::get_tool_path;
+use crate::retry::run_inherited_status_sync;
 use crate::store_path::StorePath;
 use crate::version;
 
@@ -222,15 +223,9 @@ pub async fn release(
     }
 
     let gh_bin = get_tool_path("GH_BIN", "gh");
-    let gh_status = Command::new(&gh_bin)
-        .args(&gh_args)
-        .current_dir(dir)
-        .status()
-        .context("Failed to run gh release create")?;
-
-    if !gh_status.success() {
-        bail!("GitHub release creation failed for {}", tag);
-    }
+    let mut cmd = Command::new(&gh_bin);
+    cmd.args(&gh_args).current_dir(dir);
+    run_inherited_status_sync(cmd, &format!("gh release create {}", tag))?;
 
     info!(
         "Released {} {} with {} artifacts",
@@ -281,15 +276,9 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
             let crate2nix = crate2nix_bin();
             if which::which(&crate2nix).is_ok() {
                 info!("Regenerating Cargo.nix...");
-                let status = Command::new(&crate2nix)
-                    .args(["generate"])
-                    .current_dir(dir)
-                    .status()
-                    .context("Failed to run crate2nix generate")?;
-
-                if !status.success() {
-                    bail!("crate2nix generate failed");
-                }
+                let mut cmd = Command::new(&crate2nix);
+                cmd.args(["generate"]).current_dir(dir);
+                run_inherited_status_sync(cmd, "crate2nix generate")?;
             }
 
             let new_ver = version::read_cargo_version(&dir.join("Cargo.toml"))?;
@@ -639,26 +628,14 @@ fn run_clippy(dir: &Path, conf_dir: Option<&Path>) -> Result<()> {
         cmd.env("CLIPPY_CONF_DIR", conf_dir);
     }
 
-    let status = cmd.status().context("Failed to run cargo clippy")?;
-    if !status.success() {
-        bail!("cargo clippy -- -D warnings failed");
-    }
-
-    Ok(())
+    run_inherited_status_sync(cmd, "cargo clippy -- -D warnings")
 }
 
 fn run_cmd(dir: &Path, program: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .with_context(|| format!("Failed to run {} {}", program, args.join(" ")))?;
-
-    if !status.success() {
-        bail!("{} {} failed", program, args.join(" "));
-    }
-
-    Ok(())
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(dir);
+    let op = format!("{} {}", program, args.join(" "));
+    run_inherited_status_sync(cmd, &op)
 }
 
 #[cfg(test)]
@@ -1344,6 +1321,96 @@ mod tests {
              `zig_bin()`, not re-copy the resolve inline. Hits: {:?}",
             resolve_hits.len(),
             resolve_hits
+        );
+    }
+}
+
+#[cfg(test)]
+mod status_spawn_routing_tests {
+    /// Whole-module shield: every status-only spawn in
+    /// `commands/tool.rs` routes through
+    /// [`crate::retry::run_inherited_status_sync`], never a hand-rolled
+    /// `.status()` + `if !status.success() { bail!(…) }` stanza that
+    /// drops the exit code from the operator log line. Pre-lift all
+    /// four spawns — `release`'s `gh release create <tag> …`
+    /// (tool.rs:225 pre-lift), `bump`'s optional `crate2nix generate`
+    /// (:284 pre-lift), `run_clippy`'s `cargo clippy -- -D warnings`
+    /// (:642 pre-lift), and the `run_cmd` helper body (:651 pre-lift)
+    /// through which `check`'s `cargo fmt --check` + `cargo test`,
+    /// `zig build` + `zig build test`, `regenerate`'s `crate2nix
+    /// generate`, and `lock`'s `cargo test --quiet` + `zig build test`
+    /// route — spelled the inline stanza with an ad-hoc failure
+    /// message that carried the phase discriminator but no exit code
+    /// (`"GitHub release creation failed for {tag}"`,
+    /// `"crate2nix generate failed"`,
+    /// `"cargo clippy -- -D warnings failed"`,
+    /// `"{program} {args} failed"`). Post-lift each is a one-line
+    /// delegation and the canonical `"{op} failed (exit {code})"`
+    /// envelope is emitted by construction at the primitive's ONE
+    /// body, with the phase discriminator folded into the `op` label
+    /// so the operator log line reads e.g. `cargo clippy -- -D
+    /// warnings failed (exit 101)` — pre-lift phase context PLUS the
+    /// exit code the canonical envelope now carries by construction.
+    ///
+    /// The `run_cmd` helper migration is the load-bearing lift: `run_cmd`
+    /// is called at seven sites in this module (`check`'s three cargo/zig
+    /// invocations, `regenerate`'s single `crate2nix generate`,
+    /// `lock`'s two `cargo`/`zig` invocations), so migrating the helper
+    /// body once rewrites every one of those seven caller sites'
+    /// terminating envelope to the canonical form without touching a
+    /// single caller — the shape THEORY §VI.1's three-times rule
+    /// prescribes when the pattern lives at a helper boundary.
+    ///
+    /// Sibling of the `commands/crossplane.rs` shield
+    /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
+    /// (6cb9442), `commands/pangea_infra.rs`'s
+    /// `test_pangea_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (a6e9b96), `commands/gem.rs`'s
+    /// `test_gem_status_spawns_route_through_run_inherited_status_sync`
+    /// (9072905), and `commands/infra.rs`'s
+    /// `test_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (27896e4). Same three-primitive discipline: negative side forbids
+    /// the inline `.status()` builder-terminator at any code line in the
+    /// module body; positive side pins that `run_inherited_status_sync(`
+    /// appears at ≥4 code lines (one per pre-lift spawn), so a regression
+    /// that dropped every delegation cannot leave the negative scan
+    /// trivially satisfied by absence. Both hits route through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-self-
+    /// match discipline. Scan bounds from file start to the FIRST
+    /// `\n#[cfg(test)]\nmod tests {` marker (the sibling opener at the
+    /// top of the pre-existing `mod tests` block — the same boundary the
+    /// sibling `cargo` / `crate2nix` / `zig` shields in this file already
+    /// use), so this shield's own body — the string literal
+    /// `".status()"` passed to `code_line_hits`, the assertion message
+    /// that names the forbidden terminator — stays out of scope.
+    #[test]
+    fn test_tool_status_spawns_route_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("tool.rs");
+        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
+            "commands/tool.rs must have a `#[cfg(test)] mod tests {` marker \
+             — the shield's scan boundary depends on it",
+        );
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status()");
+        assert!(
+            inline.is_empty(),
+            "commands/tool.rs must not spawn via an inline `.status()` \
+             terminator — every status-only spawn must route through \
+             `crate::retry::run_inherited_status_sync`, which carries \
+             the exit code into the failure envelope. Found: {inline:?}"
+        );
+
+        let delegations =
+            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
+        assert!(
+            delegations >= 4,
+            "commands/tool.rs must route all four status-only spawns \
+             (`gh release create <tag>` / `crate2nix generate` / `cargo \
+             clippy -- -D warnings` / the `run_cmd(program, args)` \
+             helper body) through `run_inherited_status_sync` — found \
+             only {delegations} delegation call(s); a dropped call would \
+             leave the negative `.status()` scan satisfied by absence"
         );
     }
 }
