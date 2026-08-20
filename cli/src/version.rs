@@ -11517,6 +11517,150 @@ fn package_json_top_version_span(content: &str) -> Result<std::ops::Range<usize>
 mod tests {
     use super::*;
 
+    /// Extract the body of the top-level `fn` item whose signature matches
+    /// `signature` in `src`. Handles both brace styles the tests-module
+    /// shields have accreted:
+    ///
+    /// - `fn foo(...) -> R {\n<body>\n}\n` — the common form, brace on the
+    ///   signature line.
+    /// - `fn foo<F>(...) -> R\n<where clause>\n{\n<body>\n}\n` — the form a
+    ///   fn with a `where F: Fn(...)` bound uses (e.g.
+    ///   [`plan_top_version_by_span`]).
+    ///
+    /// The returned slice is trimmed. Panics with a diagnostic naming
+    /// `item_name` if the signature or its braces cannot be located.
+    ///
+    /// # Compounding
+    ///
+    /// Six source-scan shields in this module used to spell this same
+    /// three-`.find(...)` extraction inline —
+    /// [`top_level_writers_route_through_apply_version_write`],
+    /// [`top_level_readers_route_through_read_version_by_span`],
+    /// [`plan_cargo_version_write_routes_through_splice_and_verify`],
+    /// [`dep_writers_route_through_apply_optional_dep_write`],
+    /// [`dep_planners_route_through_plan_optional_dep_by_span`], and
+    /// [`planners_route_semver_guard_through_ensure_writable_semver`]
+    /// (the last one owning the `\n{\n` where-clause branch inline).
+    /// Six replicas is twice over THEORY.md §VI.1's three-times-is-a-law
+    /// threshold; the helper is the "generator before pattern, pattern
+    /// before duplication" §I.5 names. A seventh shield (a future
+    /// writer/reader family member's routing assertion) inherits the
+    /// extraction by one line of delegation rather than a copy of the
+    /// pre-lift six-line shape, AND inherits where-clause support for
+    /// free — pre-lift, five of the six shields did NOT handle the
+    /// `\n{\n` branch and would panic on a fn item that grew a `where`
+    /// clause between them and the brace.
+    ///
+    /// The sibling tally shield
+    /// [`shield_body_extraction_lives_in_fn_body_after_signature`]
+    /// forbids future re-growth: any hand-rolled inline
+    /// `.find(" {\n")` / `.find("\n}\n")` / `.find("\n{\n")` in the
+    /// tests module trips its `live_hits == 1` assertion at source-scan
+    /// time.
+    fn fn_body_after_signature<'a>(src: &'a str, signature: &str, item_name: &str) -> &'a str {
+        let start = src
+            .find(signature)
+            .unwrap_or_else(|| panic!("must find the signature of {item_name} — signature drift?"));
+        let after_brace = src[start..]
+            .find(" {\n")
+            .map(|o| (o, 3))
+            .into_iter()
+            .chain(src[start..].find("\n{\n").map(|o| (o, 2)))
+            .min_by_key(|(o, _)| *o)
+            .map(|(o, w)| start + o + w)
+            .unwrap_or_else(|| panic!("must find the opening brace for {item_name}"));
+        let body_end = src[after_brace..]
+            .find("\n}\n")
+            .map(|o| after_brace + o)
+            .unwrap_or_else(|| panic!("must find the closing brace for {item_name}"));
+        src[after_brace..body_end].trim()
+    }
+
+    /// The helper extracts the trimmed bytes between the opening and
+    /// closing braces of a top-level fn item, and handles both brace
+    /// styles present in the tests-module shields — brace-on-signature
+    /// line (the common form) and brace-after-where-clause (the form
+    /// [`plan_top_version_by_span`] uses). Fixture proves the helper's
+    /// contract directly rather than inferring it from the six shields
+    /// that delegate to it.
+    #[test]
+    fn fn_body_after_signature_extracts_the_bytes_between_braces() {
+        // Common form: brace on the signature line.
+        let src = "prefix\nfn foo(x: u32) -> u32 {\n    let y = x + 1;\n    y\n}\nsuffix\n";
+        let body = fn_body_after_signature(src, "fn foo(x: u32) -> u32", "foo");
+        assert_eq!(body, "let y = x + 1;\n    y");
+
+        // Where-clause form: brace on its own line after a `where`.
+        let src =
+            "prefix\nfn foo<F>(f: F) -> u32\nwhere\n    F: Fn() -> u32,\n{\n    f()\n}\nsuffix\n";
+        let body = fn_body_after_signature(src, "fn foo<F>(f: F) -> u32", "foo");
+        assert_eq!(body, "f()");
+
+        // Both forms present: the helper takes the FIRST brace after the
+        // signature — so a fn with brace-on-signature-line whose body
+        // later mentions `\n{\n` (e.g. an inner block) does NOT confuse
+        // the walker. `min_by_key` on the two `.find()` results picks
+        // the earlier position.
+        let src = "fn foo() -> u32 {\n    let x = {\n        1\n    };\n    x\n}\n";
+        let body = fn_body_after_signature(src, "fn foo() -> u32", "foo");
+        assert_eq!(body, "let x = {\n        1\n    };\n    x");
+    }
+
+    /// The three low-level body-extraction find-strings the helper owns
+    /// — `.find(" {\n")` (brace on signature line), `.find("\n{\n")`
+    /// (brace after where clause), and `.find("\n}\n")` (closing brace)
+    /// — must appear in exactly ONE executable place each: inside
+    /// [`fn_body_after_signature`] itself. Any hand-rolled inline
+    /// extraction in a shield body re-opens the six-replica duplication
+    /// this helper closed.
+    ///
+    /// Comment mentions of the pattern (in the helper's doc, in this
+    /// test's doc, in prose about the discipline) are stripped before
+    /// counting so a future doc explaining "the helper owns `.find(\"
+    /// {\n\")`" does not spend the budget. `concat!` on the needle also
+    /// stops this test's own body from matching itself, so the tally
+    /// counts only shield-body occurrences and the helper's own.
+    ///
+    /// Fail-before-pass-after: re-grow any one shield's inline
+    /// three-line extraction and each of these three assertions fires
+    /// with `left: 2, right: 1`; restore the delegation and the shield
+    /// returns to green.
+    #[test]
+    fn shield_body_extraction_lives_in_fn_body_after_signature() {
+        let src = include_str!("version.rs");
+        let count_live = |needle: &str| -> usize {
+            src.lines()
+                .filter(|line| {
+                    let trimmed = line.trim_start();
+                    !(trimmed.starts_with("//") || trimmed.starts_with("///"))
+                })
+                .map(|line| line.matches(needle).count())
+                .sum()
+        };
+
+        // Broken up with `concat!` so this test's own executable body
+        // does not self-match — only the helper's `.find(...)` calls
+        // (and any regrown inline extraction) contribute.
+        let open_sig_line = concat!(".find(\" {", "\\n\")");
+        let open_where = concat!(".find(\"\\n{", "\\n\")");
+        let close_brace = concat!(".find(\"\\n}", "\\n\")");
+
+        for (needle, label) in [
+            (open_sig_line, "brace-on-signature-line locator"),
+            (open_where, "brace-after-where-clause locator"),
+            (close_brace, "closing-brace locator"),
+        ] {
+            let live_hits = count_live(needle);
+            assert_eq!(
+                live_hits, 1,
+                "the whole module must carry exactly ONE executable \
+                 {needle} ({label}) — inside `fn_body_after_signature`. \
+                 A shield with its own inline extraction re-opens the \
+                 six-replica duplication the helper closed."
+            );
+        }
+    }
+
     /// The IO shell must fire the pure core with the file bytes it read
     /// AND `new_version` verbatim, then write the returned bytes back.
     /// This test hands `apply_version_write` a fake planner that records
@@ -11627,22 +11771,7 @@ mod tests {
             "write_package_json_version",
         ] {
             let signature = format!("pub fn {name}(path: &Path, new_version: &str) -> Result<()>");
-            let start = src
-                .find(&signature)
-                .unwrap_or_else(|| panic!("must find the public signature of {name}"));
-            // The body opens at the `{` on the signature line and closes
-            // at the next `\n}\n` — every writer in this family is a
-            // one-statement delegation, so bounding to the enclosing
-            // `}\n` on the next line-with-only-`}` is safe.
-            let after_brace = src[start..]
-                .find(" {\n")
-                .map(|o| start + o + 3)
-                .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
-            let body_end = src[after_brace..]
-                .find("\n}\n")
-                .map(|o| after_brace + o)
-                .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
-            let body = src[after_brace..body_end].trim();
+            let body = fn_body_after_signature(src, &signature, name);
 
             assert!(
                 body.starts_with("apply_version_write("),
@@ -11998,18 +12127,7 @@ mod tests {
             "read_package_json_version",
         ] {
             let signature = format!("pub fn {name}(path: &Path) -> Result<String>");
-            let start = src
-                .find(&signature)
-                .unwrap_or_else(|| panic!("must find the public signature of {name}"));
-            let after_brace = src[start..]
-                .find(" {\n")
-                .map(|o| start + o + 3)
-                .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
-            let body_end = src[after_brace..]
-                .find("\n}\n")
-                .map(|o| after_brace + o)
-                .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
-            let body = src[after_brace..body_end].trim();
+            let body = fn_body_after_signature(src, &signature, name);
 
             assert!(
                 body.starts_with("read_version_by_span("),
@@ -12300,18 +12418,7 @@ mod tests {
         let src = include_str!("version.rs");
         let signature =
             "pub fn plan_cargo_version_write(content: &str, new_version: &str) -> Result<String>";
-        let start = src
-            .find(signature)
-            .expect("must find the public signature of plan_cargo_version_write");
-        let after_brace = src[start..]
-            .find(" {\n")
-            .map(|o| start + o + 3)
-            .expect("must find the opening brace for plan_cargo_version_write");
-        let body_end = src[after_brace..]
-            .find("\n}\n")
-            .map(|o| after_brace + o)
-            .expect("must find the closing brace for plan_cargo_version_write");
-        let body = &src[after_brace..body_end];
+        let body = fn_body_after_signature(src, signature, "plan_cargo_version_write");
 
         assert!(
             body.contains("splice_and_verify("),
@@ -12495,18 +12602,7 @@ mod tests {
             let signature = format!(
                 "pub fn {name}(\n    path: &Path,\n    dep_name: &str,\n    {value_param},\n) -> Result<bool>"
             );
-            let start = src.find(&signature).unwrap_or_else(|| {
-                panic!("must find the public signature of {name} — signature drift?")
-            });
-            let after_brace = src[start..]
-                .find(" {\n")
-                .map(|o| start + o + 3)
-                .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
-            let body_end = src[after_brace..]
-                .find("\n}\n")
-                .map(|o| after_brace + o)
-                .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
-            let body = src[after_brace..body_end].trim();
+            let body = fn_body_after_signature(src, &signature, name);
 
             assert!(
                 body.starts_with("apply_optional_dep_write("),
@@ -12584,18 +12680,7 @@ mod tests {
             let signature = format!(
                 "pub fn {name}(\n    content: &str,\n    dep_name: &str,\n    {value_ident}: &str,\n) -> Result<Option<String>>"
             );
-            let start = src.find(&signature).unwrap_or_else(|| {
-                panic!("must find the public signature of {name} — signature drift?")
-            });
-            let after_brace = src[start..]
-                .find(" {\n")
-                .map(|o| start + o + 3)
-                .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
-            let body_end = src[after_brace..]
-                .find("\n}\n")
-                .map(|o| after_brace + o)
-                .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
-            let body = src[after_brace..body_end].trim();
+            let body = fn_body_after_signature(src, &signature, name);
 
             let expected = format!(
                 "plan_optional_dep_by_span(\n        content,\n        {value_ident},\n        {label},\n        {guard},\n        |c| {locator}(c, dep_name),\n    )"
@@ -12758,26 +12843,12 @@ mod tests {
         ];
         for (visibility, name, sig_tail, route) in planners {
             let signature = format!("{visibility} {name}{sig_tail}");
-            let start = src.find(&signature).unwrap_or_else(|| {
-                panic!("must find the public signature of {name} — signature drift?")
-            });
-            // The opening brace is either at end of the signature line
-            // (` {\n`) or on its own line after a `where` clause
-            // (`\n{\n`). `plan_top_version_by_span` carries the `where
-            // F: Fn(...)` form; the older planners in this shield do not.
-            let after_brace = src[start..]
-                .find(" {\n")
-                .map(|o| (o, 3))
-                .into_iter()
-                .chain(src[start..].find("\n{\n").map(|o| (o, 2)))
-                .min_by_key(|(o, _)| *o)
-                .map(|(o, w)| start + o + w)
-                .unwrap_or_else(|| panic!("must find the opening brace for {name}"));
-            let body_end = src[after_brace..]
-                .find("\n}\n")
-                .map(|o| after_brace + o)
-                .unwrap_or_else(|| panic!("must find the closing brace for {name}"));
-            let body = src[after_brace..body_end].trim();
+            // The helper handles both brace styles — brace on the
+            // signature line (the common form) AND brace on its own line
+            // after a `where` clause (`plan_top_version_by_span` uses
+            // the `where F: Fn(...)` form; the other planners in this
+            // shield do not).
+            let body = fn_body_after_signature(src, &signature, name);
 
             match route {
                 Route::Direct => assert!(
