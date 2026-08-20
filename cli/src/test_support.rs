@@ -307,6 +307,104 @@ pub fn add_bare_origin(work_dir: &Path, bare_dir: &Path) {
     );
 }
 
+/// Clone `bare_dir` into `probe_dir` (which MUST NOT yet exist),
+/// then read and return the trimmed subject line of the resulting
+/// probe's HEAD commit via `git log -1 --pretty=%s`. Both spawns
+/// route through [`crate::git::git_command_sync`] so a `GIT_BIN`
+/// env-var override wins over ambient `PATH` — the same
+/// substrate-pinned resolution every production consumer honors.
+///
+/// # Why centralized
+///
+/// The composed shape (a fresh `git clone <bare> <probe>` immediately
+/// followed by a `git log -1 --pretty=%s` decode against the cloned
+/// probe) is the canonical round-trip verifier for every
+/// commit-and-push test in the crate. Three test modules —
+/// `cli/src/git.rs::tests::test_commit_and_push_in_lands_commit_on_origin`,
+/// `cli/src/commands/product_release.rs::tests::test_commit_artifact_tags_uses_canonical_commit_subject_format`,
+/// and `cli/src/commands/release_commit.rs::tests::test_commit_cluster_overlay_release_uses_canonical_commit_subject_format`
+/// — each re-spelled the same ten-line stanza VERBATIM:
+///
+/// ```ignore
+/// let clone = git_command_sync()
+///     .args(["clone", bare.to_str().expect(...), probe.to_str().expect(...)])
+///     .status()
+///     .expect("git clone");
+/// assert!(clone.success(), "probe clone must succeed");
+/// let subject_out = git_command_sync()
+///     .args(["log", "-1", "--pretty=%s"])
+///     .current_dir(&probe)
+///     .output()
+///     .expect("git log");
+/// let subject = String::from_utf8_lossy(&subject_out.stdout)
+///     .trim()
+///     .to_string();
+/// ```
+///
+/// Three identically-shaped copies past THEORY.md §VI.1's
+/// three-times-is-a-law threshold ("two occurrences is a coincidence;
+/// three is a law"). This helper is the law-redeeming carve-out: the
+/// `&["clone", <bare>, <probe>]` and `&["log", "-1", "--pretty=%s"]`
+/// argv literals plus the `String::from_utf8_lossy(&stdout).trim()`
+/// decode all live at one body. A future refinement (an
+/// `--depth=1` shallow-clone shortcut for the round-trip, a
+/// `--no-tags` fetch trim, a per-probe telemetry emit that reads
+/// the resolved subject, or a switch from `%s` to `%B` for the
+/// full message body) lands at this one primitive and reaches all
+/// three consumers by construction.
+///
+/// # Panics
+///
+/// Panics on any failed spawn or non-zero exit — every consumer is
+/// a `#[test]` / `#[tokio::test]` that treats these outcomes as
+/// fixture bugs. The loud panic maps to a test failure at the
+/// call site whose diagnostic names the offending path pair and,
+/// on non-zero exit, the captured stderr — giving the operator a
+/// first-class breadcrumb rather than the pre-lift silent
+/// empty-string return the three inline stanzas fell through to.
+///
+/// # Env-var lock discipline
+///
+/// Does NOT acquire [`GIT_BIN_ENV_LOCK`] internally — `std::sync::Mutex`
+/// is not re-entrant, and the three consumer sites all sit inside
+/// test bodies where the surrounding scope may already hold the
+/// lock (e.g. `cli/src/git.rs::tests::test_commit_and_push_in_lands_commit_on_origin`
+/// holds it across the whole test body). Callers running under
+/// concurrent shim tests MUST hold the lock across the call so a
+/// concurrently-running shim test cannot mutate `GIT_BIN` between
+/// the `git clone` and the `git log` spawns; the two consumers
+/// that pre-lift ran without the lock
+/// (`commands/product_release.rs`, `commands/release_commit.rs`)
+/// acquire the lock around this call as part of the migration,
+/// closing a pre-existing race hole in each.
+pub fn clone_bare_and_read_head_subject(bare_dir: &Path, probe_dir: &Path) -> String {
+    let clone = git_command_sync()
+        .args([
+            "clone",
+            bare_dir.to_str().expect("bare path utf-8"),
+            probe_dir.to_str().expect("probe path utf-8"),
+        ])
+        .status()
+        .expect("git clone spawn");
+    assert!(
+        clone.success(),
+        "git clone {bare_dir:?} -> {probe_dir:?} must succeed"
+    );
+    let subject_out = git_command_sync()
+        .args(["log", "-1", "--pretty=%s"])
+        .current_dir(probe_dir)
+        .output()
+        .expect("git log spawn");
+    assert!(
+        subject_out.status.success(),
+        "git log -1 --pretty=%s at {probe_dir:?} must succeed: stderr = {}",
+        String::from_utf8_lossy(&subject_out.stderr).trim(),
+    );
+    String::from_utf8_lossy(&subject_out.stdout)
+        .trim()
+        .to_string()
+}
+
 /// The three canonical Rust source shapes that spawn a bare tool
 /// literal — the shapes every whole-module routing shield in forge
 /// forbids.
@@ -2748,6 +2846,87 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "fake/module.rs",
             "zeta-widget",
             "ZETA_WIDGET_BIN",
+        );
+    }
+
+    /// `clone_bare_and_read_head_subject` round-trips the seed
+    /// commit's subject line end-to-end against a hermetic
+    /// `init_repo_with_one_commit` + `add_bare_origin` + `git push
+    /// origin main` fixture: the returned string MUST be exactly
+    /// `"seed"` (the canonical seed subject
+    /// [`init_repo_with_one_commit`] commits under). Pins the
+    /// composed `git clone <bare> <probe>` + `git log -1
+    /// --pretty=%s` + `String::from_utf8_lossy(&stdout).trim()`
+    /// shape end-to-end so a drift in either the argv slice
+    /// (`--pretty=%b` instead of `%s`, `-2` instead of `-1`) or
+    /// the decode (`String::from_utf8` in strict mode, forgotten
+    /// `.trim()`) flips this test red before divergence can
+    /// reach any of the three consumer sites.
+    #[test]
+    fn test_clone_bare_and_read_head_subject_round_trips_seed_commit() {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let work = parent.path().join("work");
+        let bare = parent.path().join("origin.git");
+        std::fs::create_dir(&work).expect("mkdir work");
+        std::fs::create_dir(&bare).expect("mkdir bare");
+        init_repo_with_one_commit(&work);
+        add_bare_origin(&work, &bare);
+
+        // Acquire the lock AFTER the fixture returns (which released
+        // its internal guard). We hold it across BOTH the push and the
+        // probe so a concurrently-running shim test cannot mutate
+        // `GIT_BIN` mid-round-trip.
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let push = git_command_sync()
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&work)
+            .status()
+            .expect("git push spawn");
+        assert!(push.success(), "push to bare origin must succeed");
+
+        let probe = parent.path().join("probe");
+        let subject = clone_bare_and_read_head_subject(&bare, &probe);
+        assert_eq!(
+            subject, "seed",
+            "round-trip must resolve HEAD's subject to the canonical seed"
+        );
+    }
+
+    /// `clone_bare_and_read_head_subject` returns the TRIMMED
+    /// `%s` — trailing newlines from git's output MUST NOT survive
+    /// into the returned string. Pins the `.trim()` step the three
+    /// consumer sites' `assert_eq!(subject, "…")` comparisons all
+    /// implicitly rely on. A drift that omitted the trim would
+    /// return `"seed\n"` and flip every downstream `assert_eq!`
+    /// red — but at a confusing "left doesn't match right" surface
+    /// rather than at this localized shape pin.
+    #[test]
+    fn test_clone_bare_and_read_head_subject_returns_trimmed_string() {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let work = parent.path().join("work");
+        let bare = parent.path().join("origin.git");
+        std::fs::create_dir(&work).expect("mkdir work");
+        std::fs::create_dir(&bare).expect("mkdir bare");
+        init_repo_with_one_commit(&work);
+        add_bare_origin(&work, &bare);
+
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let push = git_command_sync()
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&work)
+            .status()
+            .expect("git push spawn");
+        assert!(push.success(), "push to bare origin must succeed");
+
+        let probe = parent.path().join("probe");
+        let subject = clone_bare_and_read_head_subject(&bare, &probe);
+        assert!(
+            !subject.ends_with('\n') && !subject.ends_with(' '),
+            "returned subject must be right-trimmed, got {subject:?}"
+        );
+        assert!(
+            !subject.starts_with(' '),
+            "returned subject must be left-trimmed, got {subject:?}"
         );
     }
 
