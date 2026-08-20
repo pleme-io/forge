@@ -1344,23 +1344,7 @@ mod tests {
             .expect("commit_and_push_in must succeed");
 
         let probe = parent.path().join("probe");
-        let status = git_command_sync()
-            .args([
-                "clone",
-                bare.to_str().expect("bare utf-8"),
-                probe.to_str().expect("probe utf-8"),
-            ])
-            .status()
-            .expect("spawn git clone");
-        assert!(status.success(), "clone probe failed");
-        let subject_out = git_command_sync()
-            .args(["log", "-1", "--pretty=%s"])
-            .current_dir(&probe)
-            .output()
-            .expect("spawn git log");
-        let subject = String::from_utf8_lossy(&subject_out.stdout)
-            .trim()
-            .to_string();
+        let subject = crate::test_support::clone_bare_and_read_head_subject(&bare, &probe);
         assert_eq!(subject, "Deploy round-trip pin");
     }
 

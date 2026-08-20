@@ -135,24 +135,15 @@ mod tests {
         .expect("happy-path commit_cluster_overlay_release must succeed");
         assert_eq!(outcome, CommitPushOutcome::Pushed);
 
+        // Hold `GIT_BIN_ENV_LOCK` across the probe so a concurrently-running
+        // shim test cannot mutate `GIT_BIN` between the clone and the log
+        // spawns inside `clone_bare_and_read_head_subject` — closes a
+        // pre-lift race hole the inline probe pair carried.
         let probe = parent.path().join("probe");
-        let clone = git_command_sync()
-            .args([
-                "clone",
-                bare.to_str().expect("bare utf-8"),
-                probe.to_str().expect("probe utf-8"),
-            ])
-            .status()
-            .expect("git clone");
-        assert!(clone.success(), "probe clone must succeed");
-        let subject_out = git_command_sync()
-            .args(["log", "-1", "--pretty=%s"])
-            .current_dir(&probe)
-            .output()
-            .expect("git log");
-        let subject = String::from_utf8_lossy(&subject_out.stdout)
-            .trim()
-            .to_string();
+        let _guard = crate::test_support::GIT_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let subject = crate::test_support::clone_bare_and_read_head_subject(&bare, &probe);
         assert_eq!(
             subject, "chore(release): Update nix-builder to amd64-cafef00d",
             "commit subject must match the canonical cluster-overlay release format"
