@@ -330,7 +330,7 @@ mod spawn_shield {
     /// sigil; never raise one.
     const BASELINE: &[(&str, usize)] = &[
         // Direct `Command::new("<literal>")` code-line sites.
-        ("/bin/sh", 3),   // retry.rs — subprocess-error primitive fixtures
+        ("/bin/sh", 4),   // retry.rs — subprocess-error primitive fixtures
         ("/bin/true", 1), // store_path.rs — success-exit fixture
         // `false`: 1 direct site (commands/rollout.rs) + 1 helper-wrapped
         // (helm.rs `run_program_timed("false", …)` test fixture).
