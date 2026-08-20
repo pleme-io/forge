@@ -401,33 +401,21 @@ mod tests {
     fn test_terraform_spawn_routes_through_terraform_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("pangea_infra.rs");
 
-        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+        // Composed three-primitive stanza (`test_support.rs::
+        // assert_source_routes_bare_spawn_through_two_arg_sigil`) —
+        // no bare `terraform` spawn at any shape, `terraform_bin()`
+        // defined at a code line, and the sigil delegates via the
+        // canonical two-arg `crate::repo::get_tool_path("TERRAFORM",
+        // "terraform")` at a code line. Note the bare-name env-var
+        // form (`TERRAFORM`, no `_BIN` suffix) — pangea-infra's
+        // Terraform binary follows the Bundler/Chef-InSpec
+        // convention on this surface. Sibling shields for `bundle`
+        // and `inspec` below ride the same composed stanza.
+        crate::test_support::assert_source_routes_bare_spawn_through_two_arg_sigil(
             SOURCE,
             "commands/pangea_infra.rs",
             "terraform",
-            "resolve `TERRAFORM` via `terraform_bin()`",
-        );
-
-        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
-            SOURCE,
-            "commands/pangea_infra.rs",
-            "terraform_bin",
             "TERRAFORM",
-            "terraform",
-        );
-        // Assert the canonical two-arg sigil-delegation form appears at
-        // a code line. Pre-lift the shield's own docstring (line 390)
-        // and panic message quoted
-        // `crate::repo::get_tool_path("TERRAFORM", "terraform")`
-        // verbatim, so a regression at `commands/pangea_infra.rs:39`
-        // (the production sigil body) silently passed the naive
-        // `contains` shield. The helper's `code_line_hits` filter
-        // closes it.
-        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
-            SOURCE,
-            "commands/pangea_infra.rs",
-            "TERRAFORM",
-            "terraform",
         );
     }
 
@@ -472,31 +460,14 @@ mod tests {
     fn test_bundle_spawn_routes_through_bundle_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("pangea_infra.rs");
 
-        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+        // Composed three-primitive stanza — sibling of the
+        // `TERRAFORM` shield above and the `INSPEC_BIN` shield
+        // below.
+        crate::test_support::assert_source_routes_bare_spawn_through_two_arg_sigil(
             SOURCE,
             "commands/pangea_infra.rs",
             "bundle",
-            "resolve `BUNDLE_BIN` via `bundle_bin()`",
-        );
-
-        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
-            SOURCE,
-            "commands/pangea_infra.rs",
-            "bundle_bin",
             "BUNDLE_BIN",
-            "bundle",
-        );
-        // Same docstring-self-match defect the sibling `TERRAFORM`
-        // shield above closes: pre-lift the shield's own docstring
-        // (line 460) and panic message quoted
-        // `crate::repo::get_tool_path("BUNDLE_BIN", "bundle")` verbatim,
-        // so a regression at `commands/pangea_infra.rs:68` silently
-        // passed the naive `contains` shield.
-        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
-            SOURCE,
-            "commands/pangea_infra.rs",
-            "BUNDLE_BIN",
-            "bundle",
         );
     }
 
@@ -536,31 +507,13 @@ mod tests {
     fn test_inspec_spawn_routes_through_inspec_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("pangea_infra.rs");
 
-        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+        // Composed three-primitive stanza — sibling of the
+        // `TERRAFORM` and `BUNDLE_BIN` shields above.
+        crate::test_support::assert_source_routes_bare_spawn_through_two_arg_sigil(
             SOURCE,
             "commands/pangea_infra.rs",
             "inspec",
-            "resolve `INSPEC_BIN` via `inspec_bin()`",
-        );
-
-        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
-            SOURCE,
-            "commands/pangea_infra.rs",
-            "inspec_bin",
             "INSPEC_BIN",
-            "inspec",
-        );
-        // Same docstring-self-match defect the sibling `TERRAFORM` /
-        // `BUNDLE_BIN` shields above close: pre-lift the shield's own
-        // docstring (line 518) and panic message quoted
-        // `crate::repo::get_tool_path("INSPEC_BIN", "inspec")` verbatim,
-        // so a regression at `commands/pangea_infra.rs:98` silently
-        // passed the naive `contains` shield.
-        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
-            SOURCE,
-            "commands/pangea_infra.rs",
-            "INSPEC_BIN",
-            "inspec",
         );
     }
 }

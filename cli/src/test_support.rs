@@ -1240,6 +1240,100 @@ pub fn assert_source_probes_via_which_which_code_line(source: &str, module_path:
     );
 }
 
+/// One canonical composition for a whole-module `<tool>_bin()` sigil
+/// shield. Fuses three primitives so a shield reads as a one-line
+/// delegation instead of a three-call stanza — the shape twelve
+/// production shields carried verbatim as of `fd2f96f`.
+///
+/// # What it enforces
+///
+/// - **No bare `<bare>`-literal spawn at any of the three canonical
+///   shapes** — via [`assert_source_forbids_bare_spawn_shapes`] with
+///   the canonical remediation `"resolve \`<env_var>\` via
+///   \`<sigil_fn>()\`"`.
+/// - **The `<sigil_fn>()` definition lives at a code line** — via
+///   [`assert_source_defines_sigil_bin_fn_code_line`]. A docstring
+///   quoting the signature does not satisfy the shield.
+/// - **The sigil delegates via the canonical two-arg form** at a code
+///   line — via [`assert_source_has_canonical_two_arg_sigil_code_line`].
+///   The deriving one-arg form the DOCA bug closed is not asserted
+///   here; callers that also forbid it chain
+///   [`assert_source_forbids_deriving_one_arg_sigil_constant_form`] or
+///   [`assert_source_forbids_deriving_one_arg_sigil_literal_form`]
+///   after this composed call.
+///
+/// # Derived tokens
+///
+/// - `sigil_fn = <bare>.replace('-', '_') + "_bin"` — the fleet's
+///   universal `<tool>_bin()` naming convention, matching the
+///   dash→underscore canonicalization the underlying
+///   [`crate::tools::get_tool_path`] primitive already applies at the
+///   env-var surface (`POSTGRES-BOOTSTRAP_BIN` is not a legal POSIX
+///   env-var name, so `postgres-bootstrap` → `postgres_bootstrap_bin`
+///   is the shell-safe form the fleet already spells at every
+///   dash-bearing sigil, e.g. `rover_fhs_bin`, `redis_cli_bin`,
+///   `docker_compose_bin`).
+/// - `remediation = format!("resolve `{env_var}` via `{sigil_fn}()`")`
+///   — the phrasing every migrated shield's `bare_spawn_shapes`
+///   remediation slot uses verbatim across the family. Callers whose
+///   remediation prose reads differently (e.g., `commands/local.rs`'s
+///   `"resolve the substrate-exported \`DOCKER_BIN\` env override via
+///   \`docker_bin()\`"`) call [`assert_source_forbids_bare_spawn_shapes`]
+///   directly with their bespoke sentence.
+///
+/// # Why one canonical helper
+///
+/// The three-call sequence appears at twelve whole-module shield sites
+/// across the crate as of `fd2f96f`:
+///
+/// - `commands/gem.rs` — `gem`, `bundle`
+/// - `commands/pangea_infra.rs` — `terraform`, `bundle`, `inspec`
+/// - `commands/federation.rs` — `rover-fhs`
+/// - `commands/prerelease.rs` — `cargo`, `docker` (docker chains the
+///   deriving-form refusal after the composed call)
+/// - `commands/dashboards.rs` — `jsonnet` (chains the literal deriving
+///   refusal)
+/// - `commands/infra.rs` — `docker` (chains the constant deriving
+///   refusal)
+/// - `commands/local.rs` — `docker` (bespoke remediation prose;
+///   opts out of this composed call and spells the three primitives
+///   directly)
+/// - `infrastructure/docker.rs` — `docker`
+///
+/// Twelve occurrences is 4× THEORY §VI.1's three-times-is-a-law
+/// threshold ("two occurrences is a coincidence; three is a law").
+/// This helper is the law-redeeming consolidation: a future edit to
+/// the composition (say, adding a fourth invariant every sibling
+/// shield inherits — a "the sigil imports the two-arg
+/// `get_tool_path` short form" invariant, a per-spawn env-injection
+/// hook, a telemetry sigil) lands in one place and propagates to
+/// every shield. And a new `_BIN`-routing sigil added by a
+/// subsequent refactor inherits the shield as one call rather than
+/// the three-call stanza.
+///
+/// # Load-bearing invariants
+///
+/// The composition preserves every semantic property the three
+/// pre-lift shield calls enforced individually — the helper delegates
+/// to each primitive with the same arguments the pre-lift shield
+/// passed. The order matches every migrated site's call order
+/// (bare-literal refusal first, sigil-definition next, canonical
+/// two-arg last), so a caller that migrated its stanza onto this
+/// helper receives the same "which invariant fired first" diagnostic
+/// experience as pre-lift.
+pub fn assert_source_routes_bare_spawn_through_two_arg_sigil(
+    source: &str,
+    module_path: &str,
+    bare: &str,
+    env_var: &str,
+) {
+    let sigil_fn = format!("{}_bin", bare.replace('-', "_"));
+    let remediation = format!("resolve `{env_var}` via `{sigil_fn}()`");
+    assert_source_forbids_bare_spawn_shapes(source, module_path, bare, &remediation);
+    assert_source_defines_sigil_bin_fn_code_line(source, module_path, &sigil_fn, env_var, bare);
+    assert_source_has_canonical_two_arg_sigil_code_line(source, module_path, env_var, bare);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2505,6 +2599,135 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     /// this shield only certifies that every git-spawning site in this
     /// module reads through `git_command_sync()`.
     ///
+    /// A shape-free source that (a) omits every bare-spawn shape, (b)
+    /// defines the sigil at a code line, and (c) delegates through the
+    /// canonical two-arg form at a code line, passes the composed
+    /// shield cleanly. Pins the happy path every migrated shield
+    /// consumes: absent any regression, the helper is a no-op. The
+    /// `zeta-widget` bare is deliberately distinct from every real
+    /// shield's `bare` so a Grep of the crate for `zeta-widget`
+    /// resolves to exactly this family of pinning tests.
+    #[test]
+    fn test_assert_source_routes_bare_spawn_through_two_arg_sigil_accepts_shape_free_source() {
+        assert_source_routes_bare_spawn_through_two_arg_sigil(
+            "fn zeta_widget_bin() -> String {\n    \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")\n\
+             }\nfn call() { let _ = zeta_widget_bin(); }\n",
+            "fake/module.rs",
+            "zeta-widget",
+            "ZETA_WIDGET_BIN",
+        );
+    }
+
+    /// A source that carries a bare `Command::new("zeta-widget")` spawn
+    /// fires the composed shield's first delegated primitive
+    /// ([`assert_source_forbids_bare_spawn_shapes`]) — the invariant
+    /// this fusion exists to enforce. The panic message pins the
+    /// substituted `bare` and the derived
+    /// `remediation = "resolve \`ZETA_WIDGET_BIN\` via
+    /// \`zeta_widget_bin()\`"` so a template drift in either the
+    /// remediation format string or the delegation order would surface
+    /// here before shipping.
+    ///
+    /// The `zeta-widget` fixture is spelled inline via a `concat!`
+    /// split around `Command::` so this test's own source text never
+    /// fuses the forbidden shape and the crate-wide spawn shield's
+    /// scan across `include_str!("test_support.rs")` does not
+    /// false-match this fixture.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must not spawn `zeta-widget` via the bare literal — every zeta-widget spawn must resolve `ZETA_WIDGET_BIN` via `zeta_widget_bin()` first."
+    )]
+    fn test_assert_source_routes_bare_spawn_through_two_arg_sigil_fires_on_bare_spawn() {
+        let bare_spawn = concat!("fn call() { let _ = Command::", "new(\"zeta-widget\"); }\n");
+        assert_source_routes_bare_spawn_through_two_arg_sigil(
+            bare_spawn,
+            "fake/module.rs",
+            "zeta-widget",
+            "ZETA_WIDGET_BIN",
+        );
+    }
+
+    /// A source that omits the sigil definition fires the composed
+    /// shield's second delegated primitive
+    /// ([`assert_source_defines_sigil_bin_fn_code_line`]). Pinning the
+    /// missing-sigil regression class here certifies the composition
+    /// delegates the sigil-definition invariant with the derived
+    /// `sigil_fn = zeta_widget_bin` — a dash→underscore canonicalization
+    /// regression in the helper's derivation would surface here
+    /// (the fixture defines `zeta-widget_bin`, not `zeta_widget_bin`,
+    /// so a helper that skipped the canonicalization would silently
+    /// accept the wrong-named definition).
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must define `zeta_widget_bin()` at a code line — the sigil function that resolves the `ZETA_WIDGET_BIN` override for every zeta-widget spawn."
+    )]
+    fn test_assert_source_routes_bare_spawn_through_two_arg_sigil_fires_on_missing_sigil() {
+        assert_source_routes_bare_spawn_through_two_arg_sigil(
+            "fn other() -> String { String::new() }\n",
+            "fake/module.rs",
+            "zeta-widget",
+            "ZETA_WIDGET_BIN",
+        );
+    }
+
+    /// A source that defines the sigil but omits the canonical two-arg
+    /// delegation fires the composed shield's third delegated primitive
+    /// ([`assert_source_has_canonical_two_arg_sigil_code_line`]). Pins
+    /// the sigil-body-drift class the composed shield inherits from
+    /// its third delegated primitive: a sigil whose body regressed to
+    /// the deriving one-arg form (`crate::tools::get_tool_path("...")`)
+    /// or to a hand-rolled `env::var` lookup passes the first two
+    /// invariants and fails only at the third — this test pins that
+    /// the composition surfaces the third failure with its own
+    /// canonical-two-arg-missing diagnostic.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must delegate `zeta-widget` via the canonical two-arg `crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")` at a *code* line"
+    )]
+    fn test_assert_source_routes_bare_spawn_through_two_arg_sigil_fires_on_missing_two_arg_form() {
+        assert_source_routes_bare_spawn_through_two_arg_sigil(
+            "fn zeta_widget_bin() -> String { String::new() }\n\
+             fn call() { let _ = zeta_widget_bin(); }\n",
+            "fake/module.rs",
+            "zeta-widget",
+            "ZETA_WIDGET_BIN",
+        );
+    }
+
+    /// The sigil-name derivation canonicalizes every `-` in `bare`
+    /// into `_` before appending `_bin`, matching the underlying
+    /// [`crate::tools::get_tool_path`] primitive's own
+    /// dash→underscore canonicalization at the env-var surface
+    /// (POSIX env-var names forbid `-`, so
+    /// `POSTGRES-BOOTSTRAP_BIN` is unsettable from any shell and
+    /// `postgres-bootstrap` derives `postgres_bootstrap_bin` at the
+    /// shell-safe sigil surface). A regression here — a helper that
+    /// dropped the `.replace('-', '_')` call — would emit a
+    /// dash-bearing sigil name (`zeta-widget_bin`) that no real
+    /// production sigil across the fleet ever spells, silently
+    /// disarming every migrated dash-bearing shield
+    /// (`commands/federation.rs::rover-fhs`, and the sibling family
+    /// dash-bearing sigils listed in the helper's docstring).
+    ///
+    /// This test's fixture defines the *canonicalized* sigil name so
+    /// the composed shield passes cleanly; the sibling
+    /// [`test_assert_source_routes_bare_spawn_through_two_arg_sigil_fires_on_missing_sigil`]
+    /// pins the negative side (defining the non-canonicalized name is
+    /// still refused by the composed shield).
+    #[test]
+    fn test_assert_source_routes_bare_spawn_through_two_arg_sigil_canonicalizes_dash_to_underscore()
+    {
+        assert_source_routes_bare_spawn_through_two_arg_sigil(
+            "fn zeta_widget_bin() -> String {\n    \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\")\n\
+             }\nfn call() { let _ = zeta_widget_bin(); }\n",
+            "fake/module.rs",
+            "zeta-widget",
+            "ZETA_WIDGET_BIN",
+        );
+    }
+
     /// Sibling shield to
     /// `test_git_spawn_routes_through_git_command_sync_not_raw_literal`
     /// in `commands/release_commit.rs`, `commands/product_release.rs`,

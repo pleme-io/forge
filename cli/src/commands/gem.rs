@@ -592,38 +592,21 @@ mod tests {
     fn test_gem_spawn_routes_through_gem_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("gem.rs");
 
-        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+        // One canonical composition (per `test_support.rs::
+        // assert_source_routes_bare_spawn_through_two_arg_sigil`) fuses
+        // the three per-tool invariants — no bare `gem` spawn at any
+        // shape, `gem_bin()` defined at a code line, and the sigil
+        // delegates via the canonical two-arg
+        // `crate::repo::get_tool_path("GEM_BIN", "gem")` at a code
+        // line. Same three-primitive stanza the sibling shield family
+        // rides across `commands/pangea_infra.rs`, `commands/federation.rs`,
+        // `commands/prerelease.rs`, `commands/dashboards.rs`,
+        // `commands/infra.rs`, and `infrastructure/docker.rs`.
+        crate::test_support::assert_source_routes_bare_spawn_through_two_arg_sigil(
             SOURCE,
             "commands/gem.rs",
             "gem",
-            "resolve `GEM_BIN` via `gem_bin()`",
-        );
-
-        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
-            SOURCE,
-            "commands/gem.rs",
-            "gem_bin",
             "GEM_BIN",
-            "gem",
-        );
-        // Assert the canonical two-arg sigil-delegation form appears at
-        // a code line. Pre-lift the shield spelled
-        // `SOURCE.contains("crate::repo::get_tool_path(\"GEM_BIN\", \"gem\")")`
-        // against the substituted literal; the shield's own docstring
-        // above quotes the same form inside a `///` block and the
-        // shield's own panic message quoted it inline too, so the naive
-        // `contains` predicate always passed regardless of whether the
-        // production sigil body at `commands/gem.rs:44` was intact —
-        // deleting it would silently leave the doc/message bytes and
-        // the shield would report green. The helper rides
-        // `code_line_hits` (which filters `///`/`//!`/`//` lines) and
-        // moves the panic message into `test_support.rs` so neither
-        // narration site can satisfy the shield.
-        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
-            SOURCE,
-            "commands/gem.rs",
-            "GEM_BIN",
-            "gem",
         );
     }
 
@@ -662,32 +645,16 @@ mod tests {
     fn test_bundle_spawn_routes_through_bundle_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("gem.rs");
 
-        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+        // Sibling of the `GEM_BIN` shield above — same composed
+        // three-primitive stanza (`test_support.rs::
+        // assert_source_routes_bare_spawn_through_two_arg_sigil`)
+        // routed on `bundle` / `BUNDLE_BIN`. Same shape every
+        // migrated sibling shield rides.
+        crate::test_support::assert_source_routes_bare_spawn_through_two_arg_sigil(
             SOURCE,
             "commands/gem.rs",
             "bundle",
-            "resolve `BUNDLE_BIN` via `bundle_bin()`",
-        );
-
-        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
-            SOURCE,
-            "commands/gem.rs",
-            "bundle_bin",
             "BUNDLE_BIN",
-            "bundle",
-        );
-        // Same docstring-self-match defect the sibling `GEM_BIN`
-        // shield above closes: pre-lift the shield's own docstring
-        // (line 469) and panic message quoted
-        // `crate::repo::get_tool_path("BUNDLE_BIN", "bundle")` verbatim,
-        // so a regression at `commands/gem.rs:72` (the production
-        // sigil body) silently passed the naive `contains` shield.
-        // The helper's `code_line_hits` filter closes it.
-        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
-            SOURCE,
-            "commands/gem.rs",
-            "BUNDLE_BIN",
-            "bundle",
         );
     }
 
