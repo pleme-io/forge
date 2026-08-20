@@ -82,12 +82,8 @@ const DEP_RETRIES: u32 = 1;
 /// `INTEGRATION_TEST_RETRY_BACKOFF` (e22b0a2), `FLUX_POLL_BACKOFF`
 /// (65de62f), `SHINKA_MIGRATION_POLL_BACKOFF` (b962db5), and
 /// `HEALTH_ENDPOINT_BACKOFF` (b5db3b6) all use for the same reason.
-const HELM_DEP_UPDATE_RETRY_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: 1,
-    initial_backoff: Duration::from_secs(5),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const HELM_DEP_UPDATE_RETRY_BACKOFF: RetryPolicy =
+    RetryPolicy::caller_driven_backoff(Duration::from_secs(5));
 
 /// Backoff between `helm dependency update` retries, given the 1-indexed
 /// local `attempt` counter of the attempt that just failed (the

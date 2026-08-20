@@ -58,12 +58,8 @@ use crate::retry::RetryPolicy;
 /// deploy.yaml field and consumes only [`RetryPolicy::compute_delay`]
 /// from this policy, not [`RetryPolicy::max_attempts`]. The
 /// `max_attempts` field is unconsulted at this consumption site.
-const INTEGRATION_TEST_RETRY_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: 1,
-    initial_backoff: Duration::from_secs(5),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const INTEGRATION_TEST_RETRY_BACKOFF: RetryPolicy =
+    RetryPolicy::caller_driven_backoff(Duration::from_secs(5));
 
 /// Backoff between post-deployment integration-test-suite retries,
 /// given the 1-indexed local `attempts` counter of the attempt that
@@ -149,12 +145,8 @@ fn integration_test_retry_delay(attempts: u32) -> Duration {
 /// [`RetryPolicy::compute_delay`] from this policy, not
 /// [`RetryPolicy::max_attempts`]. The `max_attempts` field is
 /// unconsulted at this consumption site.
-const POST_DEPLOYMENT_READINESS_POLL_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: 1,
-    initial_backoff: Duration::from_secs(2),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const POST_DEPLOYMENT_READINESS_POLL_BACKOFF: RetryPolicy =
+    RetryPolicy::caller_driven_backoff(Duration::from_secs(2));
 
 /// Backoff between post-deployment readiness poll iterations, given the
 /// 0-indexed local `backoff_attempt` counter of the iteration about to
@@ -235,12 +227,8 @@ fn post_deployment_readiness_poll_delay(backoff_attempt: u32) -> Duration {
 /// [`RetryPolicy::compute_delay`] from this policy, not
 /// [`RetryPolicy::max_attempts`]. The `max_attempts` field is
 /// unconsulted at this consumption site.
-const PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: 1,
-    initial_backoff: Duration::from_secs(2),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF: RetryPolicy =
+    RetryPolicy::caller_driven_backoff(Duration::from_secs(2));
 
 /// Backoff between pre-deployment test-suite retries, given the
 /// 1-indexed local `attempts` counter of the attempt that just failed

@@ -9447,6 +9447,93 @@ impl RetryPolicy {
         }
     }
 
+    /// The caller-driven-backoff schedule: the canonical
+    /// [`Self::network`] exponential ceiling (`factor` 2, `max_backoff`
+    /// 30s) with a caller-supplied `initial_backoff` seed and
+    /// `max_attempts: 1` as a placeholder because the consumer drives
+    /// its own attempt budget through a caller-supplied `retries`
+    /// counter (e.g. `for attempt in 0..=retries`, `loop { attempts += 1;
+    /// if attempts < max_attempts { sleep; } }`) and consumes only
+    /// [`Self::compute_delay`] from the returned policy, not
+    /// [`Self::max_attempts`].
+    ///
+    /// Lifts the verbatim five-line field-literal stanza
+    /// ```text
+    /// const <NAME>_BACKOFF: RetryPolicy = RetryPolicy {
+    ///     max_attempts: 1,
+    ///     initial_backoff: Duration::from_secs(N),
+    ///     factor: 2,
+    ///     max_backoff: Duration::from_secs(30),
+    /// };
+    /// ```
+    /// that six retry-loop consumers of the shared exponential-with-
+    /// cap schedule now spell verbatim modulo the caller's `N` seed
+    /// (`commands/helm.rs::HELM_DEP_UPDATE_RETRY_BACKOFF`,
+    /// `commands/integration_tests.rs::INTEGRATION_TEST_RETRY_BACKOFF`,
+    /// `commands/integration_tests.rs::POST_DEPLOYMENT_READINESS_POLL_BACKOFF`,
+    /// `commands/integration_tests.rs::PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF`,
+    /// `commands/test.rs::TEST_RETRY_BACKOFF`,
+    /// `commands/post_deploy_verification.rs::HEALTH_ENDPOINT_BACKOFF`).
+    /// Six identically-shaped bodies past THEORY.md §VI.1's three-times-
+    /// is-a-law threshold — this primitive is the law-redeeming
+    /// consolidation for the placeholder-`max_attempts` caller-driven
+    /// polling shape, sibling of [`Self::wall_clock_poll`] (the
+    /// wall-clock-bounded variant whose consumer bounds itself on
+    /// `start.elapsed()` and pins `max_attempts: u32::MAX` for the same
+    /// unconsulted-field reason), [`Self::network`] (the canonical
+    /// schedule whose ceiling this factory shares), and
+    /// [`Self::network_with_max_attempts`] (the canonical-schedule +
+    /// caller-budget builder for surfaces that DO consult
+    /// `max_attempts`).
+    ///
+    /// # Why the placeholder `max_attempts` field is load-bearing
+    ///
+    /// The six pre-lift consumers each spelled `max_attempts: 1` and a
+    /// docstring naming it a placeholder — the retry loop drives its
+    /// own attempt budget through a caller-supplied `retries` config
+    /// field (`suite.max_retries` at the integration-tests surface,
+    /// `--retries` at the pre-deployment test-suite surface,
+    /// `DEP_RETRIES` at the helm-dependency-update surface, and so on)
+    /// and consumes only `compute_delay` from the policy. Preserving
+    /// `max_attempts: 1` at the factory (rather than unifying with
+    /// `wall_clock_poll`'s `u32::MAX`) keeps the pre-lift semantic
+    /// marker intact: `1` distinguishes the "caller-drives-attempts-
+    /// counter" shape from `wall_clock_poll`'s "caller-bounds-on-
+    /// wall-clock" shape at the typed-primitive surface, so a future
+    /// reader inspecting the const's field literals or the factory
+    /// call site sees which consumption discipline the site follows.
+    ///
+    /// # Why the shared ceiling is load-bearing
+    ///
+    /// A future refinement to the shared exponential ceiling
+    /// (e.g., raising the cap to 60s, adding a jittered backoff,
+    /// changing the factor) lands at ONE typed-primitive site
+    /// ([`Self::network`]) rather than being retyped six times across
+    /// the caller-driven-backoff consumers. Every site's post-lift
+    /// shape is a one-line `RetryPolicy::caller_driven_backoff(
+    /// Duration::from_secs(N))` with the caller's seed as the only
+    /// remaining free variable — the shared ceiling is inherited by
+    /// delegation.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason [`Self::wall_clock_poll`]
+    /// / [`Self::network`] / [`Self::immediate`] are: the constructor
+    /// takes only field literals (via a `Duration` parameter that flows
+    /// straight into the `initial_backoff` field), so the resulting
+    /// policy is constructible in `const` context — every current
+    /// consumer spells the site as `const <NAME>: RetryPolicy =
+    /// RetryPolicy::caller_driven_backoff(Duration::from_secs(N));`
+    /// and the const context requires the constructor to be `const`.
+    pub const fn caller_driven_backoff(initial_backoff: Duration) -> Self {
+        Self {
+            max_attempts: 1,
+            initial_backoff,
+            factor: Self::network().factor,
+            max_backoff: Self::network().max_backoff,
+        }
+    }
+
     /// True iff this policy never retries — every invocation under
     /// [`run_with_policy`] / [`run_command_with_policy`] terminates after
     /// exactly one attempt, regardless of the classifier's transient/
@@ -16231,6 +16318,155 @@ mod tests {
         assert_eq!(
             lifted_5s, literal_5s,
             "wall_clock_poll(5s) must equal the pre-lift field literal"
+        );
+    }
+
+    /// [`RetryPolicy::caller_driven_backoff`] emits the
+    /// placeholder-`max_attempts` caller-driven-backoff shape:
+    /// `max_attempts: 1` (unconsulted — the consumer drives its own
+    /// attempt budget through a caller-supplied `retries` counter and
+    /// consumes only `compute_delay` from the returned policy), the
+    /// caller-supplied `initial_backoff`, and [`RetryPolicy::network`]'s
+    /// exponential ceiling (`factor` 2, `max_backoff` 30s) inherited
+    /// by delegation. The one-field-at-a-time pin against any
+    /// regression that perturbed the shape at exactly one field —
+    /// the load-bearing witness the six pre-lift call-site shield
+    /// tests already carry per-site (`test_*_policy_shape` at
+    /// `commands/helm.rs`, `commands/integration_tests.rs` (×3),
+    /// `commands/test.rs`, `commands/post_deploy_verification.rs`),
+    /// here consolidated at the typed-primitive surface so the shape
+    /// is defined and tested in exactly one place.
+    #[test]
+    fn test_caller_driven_backoff_emits_the_placeholder_shape() {
+        let p = RetryPolicy::caller_driven_backoff(Duration::from_secs(2));
+        assert_eq!(
+            p.max_attempts, 1,
+            "max_attempts must be 1 — the caller drives its own attempt \
+             budget through a `retries` counter, so the field is a \
+             placeholder unconsulted at the consumption site. The literal \
+             `1` distinguishes this shape from `wall_clock_poll`'s \
+             `u32::MAX`-placeholder wall-clock-bounded sibling."
+        );
+        assert_eq!(
+            p.initial_backoff,
+            Duration::from_secs(2),
+            "initial_backoff must be the caller-supplied seed"
+        );
+        assert_eq!(
+            p.factor,
+            RetryPolicy::network().factor,
+            "factor must inherit network()'s ceiling — one refinement \
+             to the shared exponential factor lands at network(), not \
+             retyped per caller-driven-backoff consumer"
+        );
+        assert_eq!(
+            p.max_backoff,
+            RetryPolicy::network().max_backoff,
+            "max_backoff must inherit network()'s cap — one refinement \
+             to the shared exponential cap lands at network(), not \
+             retyped per caller-driven-backoff consumer"
+        );
+    }
+
+    /// The `initial_backoff` axis is the ONLY caller-varying field
+    /// [`RetryPolicy::caller_driven_backoff`] exposes — every other
+    /// field is inherited by delegation. Pinned across the three
+    /// seeds the current six consumers actually use (1s: one site;
+    /// 2s: three sites; 5s: two sites) so a regression that fused
+    /// `initial_backoff` with any other field (a typo in the field
+    /// assignment, an accidental shadow) would surface at exactly
+    /// one of the three seeds rather than as a silent schedule
+    /// regression at the consumption sites.
+    #[test]
+    fn test_caller_driven_backoff_varies_only_the_initial_backoff() {
+        for secs in [1u64, 2, 5, 10, 60] {
+            let seed = Duration::from_secs(secs);
+            let p = RetryPolicy::caller_driven_backoff(seed);
+            assert_eq!(p.initial_backoff, seed, "seed at {secs}s must round-trip");
+            // Every other field is the delegation-inherited constant.
+            assert_eq!(p.max_attempts, 1);
+            assert_eq!(p.factor, RetryPolicy::network().factor);
+            assert_eq!(p.max_backoff, RetryPolicy::network().max_backoff);
+        }
+    }
+
+    /// `caller_driven_backoff` is `const fn` — the constructor is
+    /// consumable in `const` context and every current call site
+    /// spells the pattern `const <NAME>: RetryPolicy = RetryPolicy::
+    /// caller_driven_backoff(Duration::from_secs(N));`. The
+    /// const-context pin against a future regression that flipped
+    /// the constructor to `fn` (e.g., a clamp against `Duration::ZERO`
+    /// added non-const-callably) would fail this pin as a compile
+    /// error — the same const-context discipline the sibling
+    /// [`Self::wall_clock_poll`] / [`Self::network`] /
+    /// [`Self::immediate`] / [`Self::network_or_immediate`] factories
+    /// share.
+    #[test]
+    fn test_caller_driven_backoff_is_const_fn() {
+        const POLICY: RetryPolicy = RetryPolicy::caller_driven_backoff(Duration::from_secs(3));
+        assert_eq!(POLICY.max_attempts, 1);
+        assert_eq!(POLICY.initial_backoff, Duration::from_secs(3));
+        assert_eq!(POLICY.factor, 2);
+        assert_eq!(POLICY.max_backoff, Duration::from_secs(30));
+    }
+
+    /// The lifted factory produces the exact same struct value the
+    /// six pre-lift field-literal `const` sites did. Pinned across
+    /// the three `initial_backoff` seeds the current consumers use
+    /// (1s / 2s / 5s) so a future regression that perturbed either
+    /// arm (a wrong factor, a wrong cap, a wrong `max_attempts`)
+    /// would surface here as a structural inequality against the
+    /// pre-lift literal rather than at one of the six downstream
+    /// sites. Rides the derived [`PartialEq`] surface — the one-line
+    /// `assert_eq!(lifted, literal)` the equality derive already
+    /// closes.
+    #[test]
+    fn test_caller_driven_backoff_equals_pre_lift_field_literal() {
+        // Pre-lift shape at commands/post_deploy_verification.rs::
+        // HEALTH_ENDPOINT_BACKOFF (1s seed).
+        let lifted_1s = RetryPolicy::caller_driven_backoff(Duration::from_secs(1));
+        let literal_1s = RetryPolicy {
+            max_attempts: 1,
+            initial_backoff: Duration::from_secs(1),
+            factor: 2,
+            max_backoff: Duration::from_secs(30),
+        };
+        assert_eq!(
+            lifted_1s, literal_1s,
+            "caller_driven_backoff(1s) must equal the pre-lift field \
+             literal — the migration from field-literal to factory must \
+             not perturb the resulting struct value"
+        );
+
+        // Pre-lift shape at commands/integration_tests.rs::
+        // POST_DEPLOYMENT_READINESS_POLL_BACKOFF,
+        // PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF, and
+        // commands/test.rs::TEST_RETRY_BACKOFF (all 2s seed).
+        let lifted_2s = RetryPolicy::caller_driven_backoff(Duration::from_secs(2));
+        let literal_2s = RetryPolicy {
+            max_attempts: 1,
+            initial_backoff: Duration::from_secs(2),
+            factor: 2,
+            max_backoff: Duration::from_secs(30),
+        };
+        assert_eq!(
+            lifted_2s, literal_2s,
+            "caller_driven_backoff(2s) must equal the pre-lift field literal"
+        );
+
+        // Pre-lift shape at commands/integration_tests.rs::
+        // INTEGRATION_TEST_RETRY_BACKOFF and commands/helm.rs::
+        // HELM_DEP_UPDATE_RETRY_BACKOFF (5s seed).
+        let lifted_5s = RetryPolicy::caller_driven_backoff(Duration::from_secs(5));
+        let literal_5s = RetryPolicy {
+            max_attempts: 1,
+            initial_backoff: Duration::from_secs(5),
+            factor: 2,
+            max_backoff: Duration::from_secs(30),
+        };
+        assert_eq!(
+            lifted_5s, literal_5s,
+            "caller_driven_backoff(5s) must equal the pre-lift field literal"
         );
     }
 
