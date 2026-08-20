@@ -165,8 +165,71 @@ pub fn get_repo_root() -> Result<PathBuf> {
     }
 
     // Fall back to git command
+    read_repo_root_via_rev_parse()
+}
+
+/// Run `git rev-parse --show-toplevel` (routed through
+/// [`get_tool_path`]/[`tools::GIT`] so `GIT_BIN` overrides land at the
+/// shared spawn primitive) and return the trimmed working-tree root.
+///
+/// Sole holder of the `&["rev-parse", "--show-toplevel"]` argv literal
+/// AND the stdout-decode `stdout_string` composition — pre-this-lift
+/// the pair was spelled verbatim at three sites ([`get_repo_root`],
+/// `commands/e2e.rs::resolve_repo_root`, `commands/helm.rs::bump`). Both
+/// [`get_repo_root`] and [`try_repo_root_via_rev_parse`] delegate here
+/// so a future refinement to the discovery shape (adding a
+/// `--absolute-git-dir` fallback, a canonicalization step, a per-attempt
+/// telemetry emit) lands at ONE body instead of at three inline copies
+/// diverging by accretion.
+fn read_repo_root_via_rev_parse() -> Result<PathBuf> {
     let stdout = git_capture(&["rev-parse", "--show-toplevel"], None, "rev-parse")?;
     Ok(PathBuf::from(stdout_string(stdout)?))
+}
+
+/// Read the enclosing git working-tree root via
+/// `git rev-parse --show-toplevel`, swallowing every failure mode.
+/// Returns `Some(root)` when the git spawn succeeded with a zero exit
+/// and valid UTF-8 output; returns `None` on spawn failure (missing
+/// binary), non-zero exit (not a git repository, corrupt HEAD,
+/// permission denied), or a UTF-8 decode error.
+///
+/// Sibling of [`get_repo_root`], which layers the `REPO_ROOT` env-var
+/// shortcut on top and surfaces failures as `Result`. This primitive
+/// is the raw git-side read for callers with their own fallback path:
+/// `commands/e2e.rs::resolve_repo_root` falls back to the current
+/// working directory when git can't answer; `commands/helm.rs::bump`
+/// wraps the `None` in a caller-supplied `anyhow!` context.
+///
+/// # Why this primitive
+///
+/// Pre-lift the raw `git rev-parse --show-toplevel` invocation was
+/// authored verbatim at THREE sites — [`get_repo_root`] (typed-error
+/// propagation via [`git_capture`]), `commands/e2e.rs::resolve_repo_root`
+/// (inline `git_command_sync().args(...).output()` with cwd fallback),
+/// and `commands/helm.rs::bump` (inline `git_command_sync().args(...)
+/// .output()` with `context()`-wrapped bail). Three occurrences of
+/// the `["rev-parse", "--show-toplevel"]` argv literal is exactly
+/// THEORY.md §VI.1's three-times-is-a-law threshold ("two occurrences
+/// is a coincidence; three is a law"). Post-lift the argv slice, the
+/// stdout-string decode, and the `PathBuf::from` conversion all live
+/// at one body ([`read_repo_root_via_rev_parse`]); each consumer
+/// composes only its own failure-handling shape.
+///
+/// # What this catches at construction
+///
+/// The pre-lift `commands/helm.rs::bump` site had a latent silent-empty
+/// bug: `.output().context("Failed to run git rev-parse")?` returned
+/// `Ok(_)` on any git spawn that succeeded — including a git that
+/// exited non-zero with empty stdout (the "not a git repository" case
+/// on exit 128 with `fatal: not a git repository` on stderr), so
+/// `String::from_utf8(repo_root.stdout)?.trim().to_string()` yielded
+/// `""` and every subsequent `git add`/`commit`/`tag` in `bump` ran
+/// with `current_dir("")` instead of surfacing the error. Post-lift
+/// this primitive returns `None` on any non-zero exit, and the
+/// `helm::bump` caller's `.context("Failed to run git rev-parse")?`
+/// converts the `None` into a loud error before any downstream spawn.
+pub fn try_repo_root_via_rev_parse() -> Option<PathBuf> {
+    read_repo_root_via_rev_parse().ok()
 }
 
 /// Which form of the HEAD commit's SHA a `git rev-parse HEAD` read
@@ -840,6 +903,135 @@ mod tests {
             // literal.
             assert!(sha.len() >= HeadShaForm::Short7.expected_len());
         }
+    }
+
+    // -----------------------------------------------------------------
+    // try_repo_root_via_rev_parse — Option-returning sibling of
+    // get_repo_root. Owns the git-side read composed of the
+    // `["rev-parse", "--show-toplevel"]` argv literal, the
+    // `GIT_BIN`-routed spawn (via `git_capture`), and the
+    // trimmed-stdout decode. Consumed by
+    // `commands/e2e.rs::resolve_repo_root` (with a cwd fallback) and
+    // `commands/helm.rs::bump` (wrapping the `None` in a
+    // caller-supplied `anyhow!` context).
+    // -----------------------------------------------------------------
+
+    /// Happy path: a `git` shim that prints an absolute path to stdout
+    /// and exits 0 must produce a `Some(PathBuf)` equal to that path
+    /// (trimmed). Uses `GIT_BIN` to route the spawn through the shim
+    /// so the test is hermetic against the host `git` and does NOT
+    /// depend on the process cwd being inside a git repository.
+    #[test]
+    fn test_try_repo_root_via_rev_parse_returns_some_on_shim_zero_exit() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_shim_dir, shim) =
+            make_git_shim("#!/bin/sh\necho '/tmp/hermetic-fake-repo-root'\nexit 0\n");
+        let _scope = GitBinScope::set(&shim);
+
+        let root =
+            try_repo_root_via_rev_parse().expect("shim exit 0 with stdout must produce Some");
+        assert_eq!(root, PathBuf::from("/tmp/hermetic-fake-repo-root"));
+    }
+
+    /// Non-zero exit path: a `git` shim that exits 128 with empty
+    /// stdout (the "not a git repository" shape) must collapse to
+    /// `None` — the primitive's raison d'être. Pre-lift the
+    /// `commands/helm.rs::bump` production site inline-spelled
+    /// `.output().context("Failed to run git rev-parse")?` without
+    /// checking `status.success()`, then did
+    /// `String::from_utf8(stdout)?.trim().to_string()` — yielding `""`
+    /// on this shape and running every downstream `git
+    /// add`/`commit`/`tag` with `current_dir("")` instead of
+    /// surfacing the error. Post-lift the `None` here converts at the
+    /// caller's `.context(...)?` into a loud error before any
+    /// downstream spawn.
+    #[test]
+    fn test_try_repo_root_via_rev_parse_returns_none_on_shim_non_zero_exit() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_shim_dir, shim) =
+            make_git_shim("#!/bin/sh\necho 'fatal: not a git repository' 1>&2\nexit 128\n");
+        let _scope = GitBinScope::set(&shim);
+
+        assert_eq!(
+            try_repo_root_via_rev_parse(),
+            None,
+            "non-zero exit with empty stdout must collapse to None"
+        );
+    }
+
+    /// Spawn-failure path: pointing `GIT_BIN` at a nonexistent binary
+    /// must collapse to `None` — same Option semantic as the non-zero
+    /// exit path, so both classes of git failure surface identically
+    /// to callers. Sibling of
+    /// [`test_git_capture_exec_failed_carries_op`] on the upstream
+    /// `git_capture` surface (typed `GitError::ExecFailed` there,
+    /// swallowed to `None` here).
+    #[test]
+    fn test_try_repo_root_via_rev_parse_returns_none_on_spawn_failure() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _scope = GitBinScope::set("/nonexistent/path/to/git-binary-that-does-not-exist");
+
+        assert_eq!(
+            try_repo_root_via_rev_parse(),
+            None,
+            "missing git binary must collapse to None"
+        );
+    }
+
+    /// UTF-8 decode failure: a `git` shim that writes an invalid
+    /// UTF-8 byte to stdout and exits 0 must collapse to `None` —
+    /// pins the third failure arm the primitive's `Option` semantic
+    /// swallows. Same `stdout_string` discipline the internal
+    /// [`read_repo_root_via_rev_parse`] helper owns; a future
+    /// refactor that switched to `String::from_utf8_lossy` would
+    /// silently drop this arm and reach the consumer sites with a
+    /// path containing replacement characters instead of the
+    /// caller's fallback.
+    #[test]
+    fn test_try_repo_root_via_rev_parse_returns_none_on_invalid_utf8_stdout() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // `printf '\377'` emits the single byte 0xFF — invalid UTF-8
+        // (a leading byte of a 4-byte sequence with no continuation).
+        let (_shim_dir, shim) = make_git_shim("#!/bin/sh\nprintf '\\377'\nexit 0\n");
+        let _scope = GitBinScope::set(&shim);
+
+        assert_eq!(
+            try_repo_root_via_rev_parse(),
+            None,
+            "invalid UTF-8 stdout must collapse to None"
+        );
+    }
+
+    /// One-oracle invariant: [`read_repo_root_via_rev_parse`] and
+    /// [`try_repo_root_via_rev_parse`] must return the SAME
+    /// `PathBuf` on any input where both succeed. Pins the
+    /// sibling contract that [`get_repo_root`]'s git-fallback branch
+    /// and [`try_repo_root_via_rev_parse`] both delegate through
+    /// ONE body — so a future refinement (e.g. an
+    /// `--absolute-git-dir` fallback, a canonicalization pass, a
+    /// per-attempt telemetry emit) lands at one site and reaches
+    /// every consumer by construction. Pre-lift the composed
+    /// `git rev-parse --show-toplevel` + trim + `PathBuf::from`
+    /// shape was authored verbatim at THREE sites (`get_repo_root`,
+    /// `commands/e2e.rs::resolve_repo_root`,
+    /// `commands/helm.rs::bump`) — THEORY.md §VI.1's
+    /// three-times-is-a-law threshold.
+    #[test]
+    fn test_read_repo_root_via_rev_parse_agrees_with_try_variant() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_shim_dir, shim) =
+            make_git_shim("#!/bin/sh\necho '/tmp/hermetic-agreement-fake'\nexit 0\n");
+        let _scope = GitBinScope::set(&shim);
+
+        let via_result = read_repo_root_via_rev_parse()
+            .expect("shim exit 0 must produce Ok on the Result-returning helper");
+        let via_option = try_repo_root_via_rev_parse()
+            .expect("shim exit 0 must produce Some on the Option-returning primitive");
+        assert_eq!(
+            via_result, via_option,
+            "the Result-returning helper and its Option-swallowing sibling \
+             MUST resolve the SAME PathBuf — they share one body"
+        );
     }
 
     /// [`HeadShaForm::args`] returns the exact argv slice every
