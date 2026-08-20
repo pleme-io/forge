@@ -719,43 +719,25 @@ impl DeployConfig {
             })
     }
 
-    /// Find the product directory by walking up from current directory
+    /// Find the product directory by walking up from `start`.
     ///
-    /// Looks for a directory matching: pkgs/products/{product_name}
-    /// Also checks if the git repo root has a deploy.yaml with a `name:` field (standalone repo).
+    /// Delegates to [`crate::repo::find_product_dir`] with
+    /// [`crate::repo::ProductDirLayout::MonorepoOrNamedStandalone`] — the
+    /// fifth consumer of the shared parent-climb walker archetype (see
+    /// that function's doc for the walker's mechanics and the fused site
+    /// inventory). The `bail!` message here maps the archetype's `None`
+    /// return to the `Result<PathBuf>` shape the rest of the config
+    /// loader expects.
     fn find_product_directory(start: &Path) -> Result<PathBuf> {
-        let mut current = start.to_path_buf();
-
-        loop {
-            // Check if we're inside pkgs/products/{something}
-            if let Some(parent) = current.parent() {
-                if let Some(grandparent) = parent.parent() {
-                    if parent.file_name().and_then(|n| n.to_str()) == Some("products")
-                        && grandparent.file_name().and_then(|n| n.to_str()) == Some("pkgs")
-                    {
-                        return Ok(current);
-                    }
-                }
-            }
-
-            // Check if current directory is a git root with deploy.yaml (standalone repo)
-            if current.join(".git").exists() && current.join("deploy.yaml").exists() {
-                if let Ok(content) = std::fs::read_to_string(current.join("deploy.yaml")) {
-                    if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                        if yaml.get("name").and_then(|n| n.as_str()).is_some() {
-                            return Ok(current);
-                        }
-                    }
-                }
-            }
-
-            // Move up one level
-            if let Some(parent) = current.parent() {
-                current = parent.to_path_buf();
-            } else {
-                bail!("Could not find product directory (expected pkgs/products/{{product}} or standalone repo with deploy.yaml)");
-            }
-        }
+        crate::repo::find_product_dir(
+            start,
+            crate::repo::ProductDirLayout::MonorepoOrNamedStandalone,
+        )
+        .ok_or_else(|| {
+            anyhow!(
+                "Could not find product directory (expected pkgs/products/{{product}} or standalone repo with deploy.yaml)"
+            )
+        })
     }
 
     /// Find repository root by looking for .git directory

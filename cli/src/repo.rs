@@ -148,7 +148,11 @@ pub fn get_environment() -> String {
 /// The monorepo layout is universal — every consumer honors it. The
 /// standalone layout is additive and consumed only by the rust-service
 /// entry point, where a product may live as its own repository rather
-/// than a `pkgs/products/{product}` subtree of a larger monorepo.
+/// than a `pkgs/products/{product}` subtree of a larger monorepo. The
+/// named-standalone variant is additive on top of that: it also parses
+/// the standalone `deploy.yaml` and requires a top-level string `name:`
+/// field to be present, matching the `config::DeployConfig` loader's
+/// pre-lift acceptance rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductDirLayout {
     /// Monorepo pattern only: an ancestor whose parent is named `products`
@@ -158,12 +162,43 @@ pub enum ProductDirLayout {
     /// directory that carries both `deploy.yaml` and `.git`, i.e. a
     /// product repository whose root IS the product directory.
     MonorepoOrStandalone,
+    /// Monorepo pattern OR named standalone: additionally accept any
+    /// ancestor directory that carries `deploy.yaml` and `.git` AND whose
+    /// `deploy.yaml` parses as YAML with a top-level string `name:` field.
+    /// The parse-and-verify step distinguishes a genuine product-repo root
+    /// from any other `.git` directory that happens to carry an unrelated
+    /// `deploy.yaml` (a deploy-manifest fragment for something else, a
+    /// stray file). Matches the pre-lift
+    /// `config::DeployConfig::find_product_directory` acceptance rule; a
+    /// `.git`+`deploy.yaml` node without a valid `name:` string CONTINUES
+    /// the climb rather than terminating, so an inner match at a deeper
+    /// ancestor still resolves.
+    MonorepoOrNamedStandalone,
+}
+
+/// Does `dir/deploy.yaml` parse as YAML and expose a top-level string
+/// `name:` field? Extracted verbatim from the pre-lift
+/// `config::DeployConfig::find_product_directory` inline check so the
+/// named-standalone layout terminal preserves the same
+/// tolerate-parse-failures shape: an unreadable file, an unparseable
+/// YAML document, a document without a top-level `name`, or a `name`
+/// whose value is not a string all return `false` (i.e. the walker
+/// CONTINUES the climb) rather than propagating a parse error.
+fn standalone_deploy_yaml_has_name(dir: &Path) -> bool {
+    let deploy_yaml = dir.join("deploy.yaml");
+    let Ok(content) = std::fs::read_to_string(&deploy_yaml) else {
+        return false;
+    };
+    let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) else {
+        return false;
+    };
+    yaml.get("name").and_then(|n| n.as_str()).is_some()
 }
 
 /// Walk up from `start` toward the filesystem root, returning the first
 /// ancestor (including `start` itself) that satisfies `layout`.
 ///
-/// Fuses four sibling walkers that spelled the same parent-climb loop
+/// Fuses five sibling walkers that spelled the same parent-climb loop
 /// verbatim across the crate:
 ///
 /// - `commands/integration_tests.rs::find_product_dir_from_service`
@@ -174,13 +209,17 @@ pub enum ProductDirLayout {
 ///   ([`ProductDirLayout::Monorepo`])
 /// - `commands/rust_service.rs::find_product_dir_from_path`
 ///   ([`ProductDirLayout::MonorepoOrStandalone`])
+/// - `config::DeployConfig::find_product_directory`
+///   ([`ProductDirLayout::MonorepoOrNamedStandalone`])
 ///
-/// Three-of-four sites carried a byte-identical monorepo-only walker;
-/// the fourth extended it with a per-iteration standalone check. Post-
-/// lift the walk lives at ONE place with the layout choice encoded in
-/// the closed enum — a future refinement (a third layout, a per-layer
-/// audit hook, a symlink-cycle guard) lands atomically across every
-/// consumer rather than at whichever copy the author notices.
+/// Three of the five sites carried a byte-identical monorepo-only
+/// walker; the fourth extended it with a per-iteration standalone
+/// check; the fifth extended THAT with a `deploy.yaml`-parse-plus-`name:`
+/// verification. Post-lift the walk lives at ONE place with the layout
+/// choice encoded in the closed enum — a future refinement (a fourth
+/// layout, a per-layer audit hook, a symlink-cycle guard) lands
+/// atomically across every consumer rather than at whichever copy the
+/// author notices.
 ///
 /// Walker mechanics — matches the pre-lift shape at every consumer
 /// site:
@@ -198,7 +237,16 @@ pub enum ProductDirLayout {
 ///    that satisfies both (a `pkgs/products/{product}` node that
 ///    additionally carries a nested `.git`) returns via the monorepo
 ///    branch, preserving the pre-lift precedence.
-/// 3. On no match, climb by `current.parent()` and repeat. Terminate
+/// 3. The named-standalone terminal (only under
+///    [`ProductDirLayout::MonorepoOrNamedStandalone`]) is checked at
+///    every iteration against the CURRENT node: `current/.git` and
+///    `current/deploy.yaml` must both exist AND `current/deploy.yaml`
+///    must parse as YAML exposing a top-level string `name:` field —
+///    see [`standalone_deploy_yaml_has_name`]. A parse failure or a
+///    missing / non-string `name:` field CONTINUES the climb rather
+///    than terminating, so a deeper ancestor whose `deploy.yaml` DOES
+///    carry a valid `name:` still resolves.
+/// 4. On no match, climb by `current.parent()` and repeat. Terminate
 ///    with `None` when there is no parent (i.e. the filesystem root
 ///    was reached without hitting either terminal).
 pub fn find_product_dir(start: &Path, layout: ProductDirLayout) -> Option<PathBuf> {
@@ -213,11 +261,21 @@ pub fn find_product_dir(start: &Path, layout: ProductDirLayout) -> Option<PathBu
                 }
             }
         }
-        if matches!(layout, ProductDirLayout::MonorepoOrStandalone)
-            && current.join("deploy.yaml").exists()
-            && current.join(".git").exists()
-        {
-            return Some(current);
+        match layout {
+            ProductDirLayout::Monorepo => {}
+            ProductDirLayout::MonorepoOrStandalone => {
+                if current.join("deploy.yaml").exists() && current.join(".git").exists() {
+                    return Some(current);
+                }
+            }
+            ProductDirLayout::MonorepoOrNamedStandalone => {
+                if current.join(".git").exists()
+                    && current.join("deploy.yaml").exists()
+                    && standalone_deploy_yaml_has_name(&current)
+                {
+                    return Some(current);
+                }
+            }
         }
         if let Some(parent) = current.parent() {
             current = parent.to_path_buf();
@@ -413,6 +471,148 @@ mod tests {
         assert_eq!(
             find_product_dir(&product, ProductDirLayout::MonorepoOrStandalone),
             Some(product)
+        );
+    }
+
+    /// Under [`ProductDirLayout::MonorepoOrNamedStandalone`], a directory
+    /// carrying `.git` + `deploy.yaml` whose YAML exposes a top-level
+    /// string `name:` field terminates the walk at that node. Mirrors the
+    /// pre-lift `config::DeployConfig::find_product_directory` shape: the
+    /// walk starts from a nested subdirectory to prove the named-standalone
+    /// terminal is checked at every level of the parent climb, not only at
+    /// `start`.
+    #[test]
+    fn find_product_dir_named_standalone_terminal_matches_name_field() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let repo_root = root.path().join("named-standalone");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        std::fs::write(repo_root.join("deploy.yaml"), "name: my-product\n")
+            .expect("write deploy.yaml with name");
+        std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
+        let nested = repo_root.join("crates").join("worker");
+        std::fs::create_dir_all(&nested).expect("create nested crate dir");
+
+        assert_eq!(
+            find_product_dir(&nested, ProductDirLayout::MonorepoOrNamedStandalone),
+            Some(repo_root)
+        );
+    }
+
+    /// Under [`ProductDirLayout::MonorepoOrNamedStandalone`], a
+    /// `.git`+`deploy.yaml` node whose YAML lacks a top-level `name:`
+    /// field CONTINUES the climb rather than terminating. Load-bearing:
+    /// the pre-lift `config::DeployConfig::find_product_directory` used
+    /// this to distinguish a genuine product-repo root (carries a
+    /// product `name:`) from any other repo whose `deploy.yaml` fragment
+    /// happens to describe something else (e.g. only environment
+    /// settings, or a top-level manifest for a non-product artifact).
+    /// Without this rule the loader would silently mis-terminate at the
+    /// wrong `.git` and resolve a wrong product name.
+    #[test]
+    fn find_product_dir_named_standalone_ignores_yaml_without_name_field() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let repo_root = root.path().join("nameless");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        std::fs::write(repo_root.join("deploy.yaml"), "kind: deploy\n")
+            .expect("write deploy.yaml without name");
+        std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
+
+        assert!(
+            find_product_dir(&repo_root, ProductDirLayout::MonorepoOrNamedStandalone).is_none()
+        );
+    }
+
+    /// Under [`ProductDirLayout::MonorepoOrNamedStandalone`], a
+    /// `.git`+`deploy.yaml` whose CONTENT is unparseable YAML CONTINUES
+    /// the climb, matching the pre-lift
+    /// `config::DeployConfig::find_product_directory` tolerate-parse-
+    /// failures shape (`if let Ok(yaml) = serde_yaml::from_str::<...>(...)`).
+    /// A parse error propagating out of the walker would be a hard
+    /// regression: today a stray malformed `deploy.yaml` at a wrong
+    /// ancestor still lets the walker reach a valid deeper product root;
+    /// after the port that must remain true.
+    #[test]
+    fn find_product_dir_named_standalone_tolerates_unparseable_yaml() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let repo_root = root.path().join("broken");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        // Intentionally malformed YAML: unbalanced braces + tab where a
+        // key is expected.
+        std::fs::write(repo_root.join("deploy.yaml"), "\t{{\n")
+            .expect("write malformed deploy.yaml");
+        std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
+
+        assert!(
+            find_product_dir(&repo_root, ProductDirLayout::MonorepoOrNamedStandalone).is_none()
+        );
+    }
+
+    /// Under [`ProductDirLayout::MonorepoOrNamedStandalone`], the
+    /// monorepo terminal STILL fires (and takes precedence) at a
+    /// `pkgs/products/{product}` node even when that node ALSO carries a
+    /// named standalone `.git`+`deploy.yaml`. Pins the precedence rule
+    /// per (4) of `find_product_dir`'s doc: the closed enum adds only an
+    /// alternative terminal, never redirects the monorepo one. Without
+    /// this a well-formed monorepo product that additionally happens to
+    /// carry a nested `.git` (e.g. a submodule root, a dev-only
+    /// scratch git init) would silently return via the named-standalone
+    /// branch instead of the monorepo branch — the pre-lift consumers'
+    /// documented shape.
+    #[test]
+    fn find_product_dir_named_standalone_monorepo_terminal_still_wins() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let product = root.path().join("pkgs").join("products").join("foo");
+        std::fs::create_dir_all(&product).expect("create product dir");
+        std::fs::write(product.join("deploy.yaml"), "name: foo\n")
+            .expect("write deploy.yaml with name");
+        std::fs::create_dir_all(product.join(".git")).expect("create .git");
+
+        assert_eq!(
+            find_product_dir(&product, ProductDirLayout::MonorepoOrNamedStandalone),
+            Some(product)
+        );
+    }
+
+    /// The `Monorepo` variant IGNORES the named-standalone marker (a
+    /// `.git`+`deploy.yaml` whose YAML carries `name:`) — sibling of the
+    /// existing `find_product_dir_monorepo_ignores_standalone_marker`
+    /// test for the plain standalone marker. Guards the closed enum
+    /// against a future refactor that silently widens `Monorepo` to also
+    /// fire either standalone check.
+    #[test]
+    fn find_product_dir_monorepo_ignores_named_standalone_marker() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let repo_root = root.path().join("named-standalone");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        std::fs::write(repo_root.join("deploy.yaml"), "name: my-product\n")
+            .expect("write deploy.yaml with name");
+        std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
+
+        assert!(find_product_dir(&repo_root, ProductDirLayout::Monorepo).is_none());
+    }
+
+    /// The `MonorepoOrStandalone` variant does NOT verify the `name:`
+    /// field — a `.git`+`deploy.yaml` node without `name:` terminates
+    /// there under `MonorepoOrStandalone` (per the existing
+    /// `find_product_dir_standalone_terminal_matches_deploy_yaml_and_git`
+    /// test) but CONTINUES under `MonorepoOrNamedStandalone`. Pins the
+    /// two standalone variants as independent branches: a shift of one
+    /// variant's terminal condition must not silently reroute the other.
+    #[test]
+    fn find_product_dir_standalone_and_named_standalone_diverge_at_missing_name() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let repo_root = root.path().join("nameless");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        std::fs::write(repo_root.join("deploy.yaml"), "kind: deploy\n")
+            .expect("write deploy.yaml without name");
+        std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
+
+        assert_eq!(
+            find_product_dir(&repo_root, ProductDirLayout::MonorepoOrStandalone),
+            Some(repo_root.clone())
+        );
+        assert!(
+            find_product_dir(&repo_root, ProductDirLayout::MonorepoOrNamedStandalone).is_none()
         );
     }
 }
