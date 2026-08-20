@@ -11,12 +11,13 @@
 //! built by Nix (`dockerTools`) and handed in as a `docker save` tarball; this
 //! command only embeds + pushes it via the `crossplane` CLI.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
 use crate::repo::get_tool_path;
+use crate::retry::run_inherited_status_sync;
 
 /// Resolve the `crossplane` CLI path via `CROSSPLANE_BIN`, falling back to
 /// PATH. Every `crossplane` spawn in this module reads through this sigil
@@ -73,7 +74,8 @@ pub fn function_release(
         out.display()
     );
     let crossplane = crossplane_bin();
-    let build = Command::new(&crossplane)
+    let mut build = Command::new(&crossplane);
+    build
         .args([
             "xpkg",
             "build",
@@ -85,27 +87,19 @@ pub fn function_release(
         ])
         .arg(&out)
         .arg("--examples-root")
-        .arg(&examples)
-        .status()
-        .context("failed to run `crossplane xpkg build` (is the crossplane CLI on PATH?)")?;
-    if !build.success() {
-        bail!("crossplane xpkg build failed");
-    }
+        .arg(&examples);
+    run_inherited_status_sync(build, "crossplane xpkg build")?;
 
     let dest = crate::oci_manifest::image_reference(package_ref.trim_end_matches('/'), tag);
     info!("crossplane xpkg push → {}", dest);
     // `xpkg push <package> -f <files>`: the tag is the positional <package>; the
     // file flag's long form is `--package-files` (plural — verified against the
     // crossplane CLI, NOT the singular `--package-file` that `build` uses).
-    let push = Command::new(&crossplane)
-        .args(["xpkg", "push", "--package-files"])
+    let mut push = Command::new(&crossplane);
+    push.args(["xpkg", "push", "--package-files"])
         .arg(&out)
-        .arg(&dest)
-        .status()
-        .context("failed to run `crossplane xpkg push`")?;
-    if !push.success() {
-        bail!("crossplane xpkg push failed for {}", dest);
-    }
+        .arg(&dest);
+    run_inherited_status_sync(push, &format!("crossplane xpkg push {}", dest))?;
 
     info!("Function package published: {}", dest);
     Ok(())
@@ -127,7 +121,8 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
         out.display()
     );
     let crossplane = crossplane_bin();
-    let build = Command::new(&crossplane)
+    let mut build = Command::new(&crossplane);
+    build
         .args([
             "xpkg",
             "build",
@@ -137,23 +132,15 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
         ])
         .arg(&out)
         .arg("--examples-root")
-        .arg(&examples)
-        .status()
-        .context("failed to run `crossplane xpkg build`")?;
-    if !build.success() {
-        bail!("crossplane xpkg build failed");
-    }
+        .arg(&examples);
+    run_inherited_status_sync(build, "crossplane xpkg build")?;
     let dest = crate::oci_manifest::image_reference(package_ref.trim_end_matches('/'), tag);
     info!("crossplane xpkg push → {}", dest);
-    let push = Command::new(&crossplane)
-        .args(["xpkg", "push", "--package-files"])
+    let mut push = Command::new(&crossplane);
+    push.args(["xpkg", "push", "--package-files"])
         .arg(&out)
-        .arg(&dest)
-        .status()
-        .context("failed to run `crossplane xpkg push`")?;
-    if !push.success() {
-        bail!("crossplane xpkg push failed for {}", dest);
-    }
+        .arg(&dest);
+    run_inherited_status_sync(push, &format!("crossplane xpkg push {}", dest))?;
     info!("Configuration package published: {}", dest);
     Ok(())
 }
@@ -192,14 +179,9 @@ pub fn render(
         args.push(o);
     }
     let crossplane = crossplane_bin();
-    let status = Command::new(&crossplane)
-        .args(&args)
-        .status()
-        .context("failed to run `crossplane render`")?;
-    if !status.success() {
-        bail!("crossplane render failed");
-    }
-    Ok(())
+    let mut cmd = Command::new(&crossplane);
+    cmd.args(&args);
+    run_inherited_status_sync(cmd, "crossplane render")
 }
 
 /// Validate resources against an extensions directory (`crossplane beta
@@ -211,14 +193,9 @@ pub fn validate(extensions: &str, resources: &str) -> Result<()> {
         }
     }
     let crossplane = crossplane_bin();
-    let status = Command::new(&crossplane)
-        .args(["beta", "validate", extensions, resources])
-        .status()
-        .context("failed to run `crossplane beta validate`")?;
-    if !status.success() {
-        bail!("crossplane validate failed");
-    }
-    Ok(())
+    let mut cmd = Command::new(&crossplane);
+    cmd.args(["beta", "validate", extensions, resources]);
+    run_inherited_status_sync(cmd, "crossplane beta validate")
 }
 
 #[cfg(test)]
@@ -303,6 +280,54 @@ mod tests {
              (only in the `crossplane_bin()` sigil), not {resolve_count} \
              times — every consumer must route through `crossplane_bin()`, \
              not re-copy the resolve inline"
+        );
+    }
+
+    /// Whole-module shield: every status-only `crossplane` spawn routes
+    /// through `crate::retry::run_inherited_status_sync`, never a
+    /// hand-rolled `.status()` + `if !…success() { bail! }` stanza that
+    /// drops the exit code from the operator log line. Pre-lift all six
+    /// spawns (`function_release` build+push, `configuration_release`
+    /// build+push, `render`, `validate`) each spelled the inline stanza
+    /// with an ad-hoc `bail!("crossplane … failed")` that carried no
+    /// exit code; post-lift each is a one-line delegation and the
+    /// canonical `"{op} failed (exit {code})"` envelope is emitted by
+    /// construction at the primitive's ONE body.
+    ///
+    /// Negative side: the inline `.status()` builder-terminator must not
+    /// reappear at any code line in the module body (a re-inlined spawn
+    /// would bypass the primitive and re-drop the exit code). Positive
+    /// side: the delegation call must appear at ≥6 code lines (one per
+    /// pre-lift spawn), so a regression that deleted every primitive call
+    /// cannot leave the negative scan trivially satisfied by absence.
+    /// Both hits route through `code_line_hits` for anti-docstring-self-
+    /// match discipline. Same scan boundary (first `#[cfg(test)]` marker)
+    /// the sigil shield above uses.
+    #[test]
+    fn test_crossplane_status_spawns_route_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("crossplane.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\n")
+            .expect("crossplane.rs must have a `#[cfg(test)]` marker");
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status()");
+        assert!(
+            inline.is_empty(),
+            "commands/crossplane.rs must not spawn `crossplane` via an inline \
+             `.status()` terminator — every status-only spawn must route \
+             through `crate::retry::run_inherited_status_sync`, which carries \
+             the exit code into the failure envelope. Found: {inline:?}"
+        );
+
+        let delegations =
+            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
+        assert!(
+            delegations >= 6,
+            "commands/crossplane.rs must route all six crossplane spawns \
+             through `run_inherited_status_sync` — found only {delegations} \
+             delegation call(s); a dropped call would leave the negative \
+             `.status()` scan satisfied by absence"
         );
     }
 }

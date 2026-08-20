@@ -14170,13 +14170,29 @@ pub async fn run_inherited_status(
     mut cmd: tokio::process::Command,
     op: &str,
 ) -> anyhow::Result<()> {
-    use anyhow::Context;
     cmd.stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
-    let status = cmd
-        .status()
-        .await
-        .with_context(|| format!("Failed to run {}", op))?;
+    classify_inherited_status(cmd.status().await, op)
+}
+
+/// Sole owner of the inherited-stdio spawn outcome → `anyhow::Result<()>`
+/// envelope: the `"Failed to run {op}"` spawn-error context, the
+/// `"{op} failed (exit {code})"` non-zero-exit message, and the
+/// `"{op} failed (killed by signal)"` `status.code() == None` discriminator.
+///
+/// Both [`run_inherited_status`] (async, `tokio::process::Command`) and
+/// [`run_inherited_status_sync`] (sync, `std::process::Command`) route their
+/// outcome through this ONE body, so the envelope the async surface documents
+/// as canonical is the envelope the sync surface emits *by construction*
+/// rather than by an asserted parity that a later edit to one half could
+/// silently break. `std::process::ExitStatus` is the return type of both
+/// `Command::status()` families, so the shared tail needs no generic.
+fn classify_inherited_status(
+    status: std::io::Result<std::process::ExitStatus>,
+    op: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let status = status.with_context(|| format!("Failed to run {}", op))?;
     if !status.success() {
         let detail = match status.code() {
             Some(code) => format!("exit {}", code),
@@ -14185,6 +14201,49 @@ pub async fn run_inherited_status(
         anyhow::bail!("{} failed ({})", op, detail);
     }
     Ok(())
+}
+
+/// Sync sibling of [`run_inherited_status`] over `std::process::Command`.
+///
+/// [`run_inherited_status`]'s own doc claims the three typed-CLI primitives
+/// together mean "every external-command invocation in forge routes through
+/// one of them, with the same canonical spawn-failure envelope at every
+/// site." That claim was false for the **sync** spawn half: 29 sites across
+/// nine command modules (`commands/{pangea_infra, crossplane, test_ci, local,
+/// infra, gem, tool, rust_service, e2e}.rs`) hand-rolled
+///
+/// ```text
+/// let status = Command::new(&bin).args(ARGS).status().context(SPAWN_CTX)?;
+/// if !status.success() { bail!(FAIL_MSG); }
+/// ```
+///
+/// with a per-site ad-hoc `FAIL_MSG` that **drops the exit code** —
+/// precisely the regression the async primitive was written to close.
+/// `retry::run_query_capture_sync` covers the sync *captured-output* shape;
+/// this is the missing sync *status-only* shape, so the three-primitive
+/// claim now reconciles across both the async and sync spawn frontiers
+/// instead of holding on one of them.
+///
+/// The exit-code carry is the load-bearing part (THEORY §V.4): a migrated
+/// site's operator log line goes from `"crossplane xpkg build failed"` to
+/// `"crossplane xpkg build failed (exit 1)"`, and a future Phase 1
+/// attestation-record consumer reading the terminating shape gets ONE
+/// message format across every status-only spawn in forge rather than a
+/// per-module dialect.
+///
+/// # Stdio override
+///
+/// Sets `Stdio::inherit()` on the supplied `cmd` AFTER the caller has
+/// configured args / current-dir / env, so any caller-supplied
+/// `.stdout(...)` / `.stderr(...)` is overwritten — same contract the async
+/// sibling documents. `std::process::Command::status()` already inherits by
+/// default, so setting it explicitly is a no-op for the 29 migration
+/// candidates and a guard against a caller that piped earlier in the builder
+/// chain.
+pub fn run_inherited_status_sync(mut cmd: std::process::Command, op: &str) -> anyhow::Result<()> {
+    cmd.stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    classify_inherited_status(cmd.status(), op)
 }
 
 #[cfg(test)]
@@ -34842,6 +34901,108 @@ mod tests {
         assert!(
             result.is_ok(),
             "primitive must preserve caller-supplied .args() argv on the Command; got: {:?}",
+            result.err().map(|e| format!("{:#}", e))
+        );
+    }
+
+    /// Sync sibling: `exit 0` surfaces as `Ok(())` verbatim, same as the
+    /// async surface. Pins the sync status-only primitive's happy path.
+    #[test]
+    fn test_run_inherited_status_sync_success_returns_ok() {
+        let (_dir, shim) =
+            crate::test_support::make_executable_shim("sync-cli", "#!/bin/sh\nexit 0\n");
+        let cmd = std::process::Command::new(&shim);
+        let result = run_inherited_status_sync(cmd, "sync-cli");
+        assert!(result.is_ok(), "exit 0 must surface as Ok(())");
+    }
+
+    /// Sync sibling: a non-zero exit carries BOTH the op label and the
+    /// exit code through the shared [`classify_inherited_status`] body —
+    /// the exact envelope the async surface emits. This is the pin that
+    /// makes the 29-site sync migration's exit-code carry load-bearing:
+    /// pre-migration those sites spelled `bail!("crossplane xpkg build
+    /// failed")` and dropped the code; post-migration the message reads
+    /// `"crossplane xpkg build failed (exit 1)"` by construction.
+    #[test]
+    fn test_run_inherited_status_sync_nonzero_exit_carries_op_and_code() {
+        let (_dir, shim) =
+            crate::test_support::make_executable_shim("sync-cli", "#!/bin/sh\nexit 7\n");
+        let cmd = std::process::Command::new(&shim);
+        let err = run_inherited_status_sync(cmd, "sync-cli").expect_err("nonzero exit must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("sync-cli"),
+            "op label must appear in failure message, got: {msg}"
+        );
+        assert!(
+            msg.contains("exit 7"),
+            "exit code must appear in failure message, got: {msg}"
+        );
+    }
+
+    /// Sync sibling: a spawn failure (binary not on PATH) carries the op
+    /// label under the canonical `"Failed to run {op}"` envelope — the
+    /// same spawn-error context the async surface documents, emitted from
+    /// the shared body so the two cannot drift.
+    #[test]
+    fn test_run_inherited_status_sync_spawn_failure_carries_op() {
+        let cmd = std::process::Command::new(
+            "/nonexistent/path/to/sync-inherited-status-binary-that-does-not-exist",
+        );
+        let err = run_inherited_status_sync(cmd, "sync-missing-tool")
+            .expect_err("missing binary must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("sync-missing-tool"),
+            "op label must appear in spawn-failure message, got: {msg}"
+        );
+    }
+
+    /// Sync sibling: a signal-killed process (`status.code() == None`)
+    /// surfaces the `"killed by signal"` discriminator, distinct from a
+    /// normal non-zero exit — the same structural marker the async
+    /// surface pins, proving both halves route the `None`-code arm through
+    /// the one shared [`classify_inherited_status`] body.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_inherited_status_sync_signal_killed_reports_killed_by_signal() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "sync-self-killer",
+            "#!/bin/sh\nkill -9 $$\n",
+        );
+        let cmd = std::process::Command::new(&shim);
+        let err = run_inherited_status_sync(cmd, "sync-self-killer")
+            .expect_err("signal-killed must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("killed by signal"),
+            "signal-killed detail must surface, got: {msg}"
+        );
+        assert!(
+            msg.contains("sync-self-killer"),
+            "op label must appear in signal-killed message, got: {msg}"
+        );
+    }
+
+    /// Sync sibling: a caller-supplied `.args(...)` argv survives the
+    /// primitive's stdio override unchanged — the primitive neither
+    /// prepends, drops, nor reorders argv. Same content-addressable
+    /// probe shape the async args-survival pin uses.
+    #[test]
+    fn test_run_inherited_status_sync_preserves_caller_supplied_args() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "test \"$1\" = \"forge-sync-args-probe-a1b2c3d4\" && \
+             test \"$2\" = \"expected-sync-marker-e5f6a7b8\"",
+            "probe",
+            "forge-sync-args-probe-a1b2c3d4",
+            "expected-sync-marker-e5f6a7b8",
+        ]);
+        let result = run_inherited_status_sync(cmd, "sync-args-survival-probe");
+        assert!(
+            result.is_ok(),
+            "primitive must preserve caller-supplied .args() argv; got: {:?}",
             result.err().map(|e| format!("{:#}", e))
         );
     }
