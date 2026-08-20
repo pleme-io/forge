@@ -66,12 +66,8 @@ use crate::{commands, git};
 /// and consumes only [`RetryPolicy::compute_delay`] from this policy,
 /// not [`RetryPolicy::max_attempts`]. The `max_attempts` field is
 /// unconsulted at this consumption site.
-const SERVICES_HEALTHY_POLL_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: u32::MAX,
-    initial_backoff: Duration::from_secs(2),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const SERVICES_HEALTHY_POLL_BACKOFF: RetryPolicy =
+    RetryPolicy::wall_clock_poll(Duration::from_secs(2));
 
 /// Wall-clock timeout on the docker-compose services-healthy poll loop —
 /// preserves the pre-lift `60 * 2s = 2 minutes` intended budget the

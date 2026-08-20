@@ -67,12 +67,8 @@ use std::time::{Duration, Instant};
 /// signature) and consumes only [`RetryPolicy::compute_delay`] from
 /// this policy, not [`RetryPolicy::max_attempts`]. The `max_attempts`
 /// field is unconsulted at this consumption site.
-const SHINKA_MIGRATION_POLL_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: u32::MAX,
-    initial_backoff: Duration::from_secs(2),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const SHINKA_MIGRATION_POLL_BACKOFF: RetryPolicy =
+    RetryPolicy::wall_clock_poll(Duration::from_secs(2));
 
 /// Backoff between Shinka reconcile-poll iterations, given a 0-indexed
 /// local `attempt` counter (the `loop { ... }` shape

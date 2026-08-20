@@ -71,12 +71,7 @@ use crate::retry::RetryPolicy;
 /// consume only [`RetryPolicy::compute_delay`] from this policy, not
 /// [`RetryPolicy::max_attempts`]. The `max_attempts` field is
 /// unconsulted at these consumption sites.
-const FLUX_POLL_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: u32::MAX,
-    initial_backoff: Duration::from_secs(2),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const FLUX_POLL_BACKOFF: RetryPolicy = RetryPolicy::wall_clock_poll(Duration::from_secs(2));
 
 /// Backoff between deployment-pod-polling iterations, given a 0-indexed
 /// local `attempt` counter (the `loop { ... }` shape both
