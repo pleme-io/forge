@@ -106,6 +106,29 @@ pub fn make_executable_shim(name: &str, body: &str) -> (tempfile::TempDir, Strin
 /// keeps the fleet moving.
 pub static GIT_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serial-safe guard for tests that either mutate `REPO_ROOT` /
+/// `SERVICE_DIR` env vars or the process working directory (via
+/// `std::env::set_current_dir`) — the composed shape
+/// [`crate::repo::activate_root_flake`] owns.
+///
+/// The primitive touches THREE process-global surfaces at once:
+/// `REPO_ROOT`, `SERVICE_DIR`, and cwd. Each is read by production code
+/// paths across the crate — `repo::find_repo_root`,
+/// `git::get_repo_root`, `path_builder::PathBuilder::new`,
+/// `config::DeployConfig::load_for_service`, and every consumer of
+/// `SERVICE_DIR` under `commands/*.rs`. A concurrent test that either
+/// activated a different root or mid-flight chdir'd to a different
+/// directory would race any test observing those surfaces. Same
+/// discipline as [`GIT_BIN_ENV_LOCK`], applied to the root-flake
+/// activation surface.
+///
+/// Consumers acquire the lock at the top of the test body via
+/// `let _guard = ROOT_FLAKE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());`.
+/// The `unwrap_or_else(|p| p.into_inner())` shape is load-bearing: a
+/// prior panicking test that poisoned the mutex must not chain-fail
+/// every subsequent test that shares the lock.
+pub static ROOT_FLAKE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// RAII scope-guard that sets `GIT_BIN=value` on construction and
 /// restores the pre-scope state (either the original value or unset) on
 /// drop — panic-safe by construction. Snapshots via `std::env::var` so

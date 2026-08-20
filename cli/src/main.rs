@@ -102,12 +102,7 @@ use commands::{
 fn setup_service_directory(service_dir: Option<String>, repo_root: Option<String>) -> Result<()> {
     match (repo_root, service_dir) {
         // Root flake pattern: Change to repo root, set SERVICE_DIR for path computation
-        (Some(root), Some(dir)) => {
-            std::env::set_var("REPO_ROOT", &root);
-            std::env::set_var("SERVICE_DIR", &dir);
-            std::env::set_current_dir(&root)?;
-            Ok(())
-        }
+        (Some(root), Some(dir)) => crate::repo::activate_root_flake(&root, &dir),
         // Missing required parameters
         _ => {
             anyhow::bail!(

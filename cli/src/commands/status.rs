@@ -205,9 +205,7 @@ pub async fn execute(
     format: OutputFormat,
 ) -> Result<()> {
     // Set up environment for root flake pattern
-    std::env::set_var("REPO_ROOT", repo_root);
-    std::env::set_var("SERVICE_DIR", service_dir);
-    std::env::set_current_dir(repo_root)?;
+    crate::repo::activate_root_flake(repo_root, service_dir)?;
 
     // Load deploy.yaml - check deploy/{service_name}.yaml first (outside Nix source tree),
     // then fall back to service_dir/deploy.yaml for backward compatibility.
