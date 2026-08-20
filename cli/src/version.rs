@@ -10376,30 +10376,67 @@ pub fn classify_cargo(content: &str) -> CargoShape {
 /// A `MemberInheriting` manifest is a REFUSAL rather than a fallback: its
 /// version genuinely lives in the workspace root, and quietly returning
 /// something else is how a bumper writes the wrong file.
+///
+/// Routes through [`cargo_top_version_span`] via [`read_version_by_span`] —
+/// the same one-line delegation shape [`read_zig_version`],
+/// [`read_chart_version`], and [`read_package_json_version`] all share, so
+/// the two uniform read-side error contexts (`Failed to read <path>` and
+/// `cannot read a version from <path>`) are inherited by construction and
+/// the reader family's "one IO shell, one context pair, per-ecosystem
+/// locator" claim now holds on all four members rather than three.
 pub fn read_cargo_version(path: &Path) -> Result<String> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    read_version_by_span(path, cargo_top_version_span)
+}
 
-    match classify_cargo(&content) {
-        CargoShape::SingleCrate(v) | CargoShape::HybridRoot(v) | CargoShape::WorkspaceShared(v) => {
-            Ok(v)
-        }
+/// Byte span of the value bytes of the top-level `version` in a Cargo.toml.
+///
+/// The cargo-arm sibling of [`zig_top_version_span`],
+/// [`chart_top_version_span`], and [`package_json_top_version_span`] — a
+/// pure `content -> Result<Range<usize>>` locator, so the reader plugs into
+/// [`read_version_by_span`] without a second IO shell.
+///
+/// # Contract
+///
+/// - Routes on [`classify_cargo`] and reads from the same section
+///   [`writable_section`] writes to: `[package]` for `SingleCrate` and
+///   `HybridRoot`, `[workspace.package]` for `WorkspaceShared`. So a read
+///   and a subsequent write see the same authoritative source; a
+///   read/write shape-dispatch drift is sealed by
+///   [`tests::read_cargo_version_agrees_with_writer_after_bump`].
+/// - `MemberInheriting`, `VirtualWorkspaceNoVersion`, and `NoVersion` are
+///   REFUSED with a class-naming message. The read-side family shell
+///   ([`read_version_by_span`]) wraps each refusal with the uniform
+///   `cannot read a version from <path>` context, so the failure the
+///   caller sees names both the file and the class — the same shape
+///   every other reader in the family produces.
+/// - The returned span covers the value BYTES ONLY (never the surrounding
+///   `"..."`), matching what [`value_span`] returns and what
+///   [`plan_cargo_version_write`] splices over. `content[span]` is
+///   byte-identical to the string the pre-lift `read_cargo_version` read
+///   out of the `CargoShape` variant.
+fn cargo_top_version_span(content: &str) -> Result<std::ops::Range<usize>> {
+    let shape = classify_cargo(content);
+    let section = match &shape {
+        CargoShape::SingleCrate(_) | CargoShape::HybridRoot(_) => "[package]",
+        CargoShape::WorkspaceShared(_) => "[workspace.package]",
         CargoShape::MemberInheriting => bail!(
-            "{} inherits its version from the workspace root \
+            "this manifest inherits its version from the workspace root \
              (`version.workspace = true`) — read the root's \
-             [workspace.package].version instead",
-            path.display()
+             [workspace.package].version instead"
         ),
         CargoShape::VirtualWorkspaceNoVersion => bail!(
-            "{} is a virtual workspace root with no [workspace.package].version \
-             — its members each carry their own version, so there is nothing to \
-             read here",
-            path.display()
+            "virtual workspace root with no [workspace.package].version — \
+             its members each carry their own version, so there is nothing \
+             to read here"
         ),
-        CargoShape::NoVersion => {
-            bail!("No version field found in {}", path.display())
-        }
-    }
+        CargoShape::NoVersion => bail!("no version field found"),
+    };
+    value_span(content, section, "version").with_context(|| {
+        format!(
+            "classified as {shape:?} but no quoted `version` value found in \
+             {section} — refusing to guess"
+        )
+    })
 }
 
 /// Read the top-level `.version` value from a build.zig.zon file.
@@ -11924,26 +11961,38 @@ mod tests {
         );
     }
 
-    /// The two form-preserving top-level manifest readers MUST delegate
-    /// their entire body through `read_version_by_span`. Any direct
+    /// Every form-preserving top-level manifest reader MUST delegate
+    /// its entire body through `read_version_by_span`. Any direct
     /// `std::fs::read_to_string(path)` call, any hand-rolled
     /// `Ok(content[span].to_string())` slice, or any inline `cannot read
     /// a version from` context wrap inside their body re-opens the
-    /// two-replica duplication this helper closed and lets the
-    /// read-side error contexts drift between ecosystems.
+    /// N-replica duplication this helper closed and lets the read-side
+    /// error contexts drift between ecosystems.
     ///
-    /// Fail-before-pass-after: with either of the two readers reverted
-    /// to its pre-lift 4-line body
-    /// (`std::fs::read_to_string(path).with_context(...)?; let span =
-    /// <ecosystem>_top_version_span(&content).with_context(...)?;
-    /// Ok(content[span].to_string())`), the
-    /// `.starts_with("read_version_by_span(")` assertion on that
-    /// reader's slice fires. Restoring the delegation returns the shield
-    /// to green.
+    /// Fail-before-pass-after: with any of the four readers reverted to
+    /// its pre-lift shape (for zig/chart/package.json: the 4-line
+    /// `std::fs::read_to_string(path).with_context(...)?; let span =
+    /// <eco>_top_version_span(&content).with_context(...)?;
+    /// Ok(content[span].to_string())`; for cargo: the shape-matching
+    /// body with its own IO shell and per-arm `bail!(..., path.display())`
+    /// refusals), the `.starts_with("read_version_by_span(")` assertion on
+    /// that reader's slice fires. Restoring the delegation returns the
+    /// shield to green.
+    ///
+    /// Cargo is the fourth arm (added post-lift): its refusals on the
+    /// three non-readable shapes (`MemberInheriting`,
+    /// `VirtualWorkspaceNoVersion`, `NoVersion`) now come from
+    /// [`super::cargo_top_version_span`] rather than the reader's own
+    /// body, and the uniform `cannot read a version from <path>` wrap is
+    /// added by the shell — the same shape zig/chart/package.json
+    /// refusals already produce, so a caller reading the error chain
+    /// (`err.contains("cannot read a version from")`) gets a uniform
+    /// answer across every ecosystem the reader family covers.
     #[test]
     fn top_level_readers_route_through_read_version_by_span() {
         let src = include_str!("version.rs");
         for name in [
+            "read_cargo_version",
             "read_zig_version",
             "read_chart_version",
             "read_package_json_version",
@@ -12084,6 +12133,147 @@ mod tests {
         assert!(
             msg.contains("not a JSON object"),
             "the top-level refusal must name the class explicitly, got: {msg}"
+        );
+    }
+
+    /// The cargo locator returns the byte span of the value bytes for
+    /// each of the three READABLE `CargoShape` arms — `SingleCrate`,
+    /// `HybridRoot`, `WorkspaceShared` — and the span slices back to the
+    /// exact value string on disk. `SingleCrate` and `HybridRoot` read
+    /// out of `[package]`; `WorkspaceShared` reads out of
+    /// `[workspace.package]` — the same shape → section dispatch
+    /// [`writable_section`] uses on the write side, so a subsequent
+    /// [`plan_cargo_version_write`] splices over the same span this
+    /// locator returns. Cargo is uniquely multi-shape in the reader
+    /// family, so a single-shape fixture would not cover the dispatch
+    /// — every readable shape runs here.
+    #[test]
+    fn cargo_top_version_span_locates_the_top_level_version_value_bytes() {
+        for (shape_label, content, expected) in [
+            (
+                "SingleCrate",
+                "[package]\nname = \"a\"\nversion = \"0.0.3\"\nedition = \"2024\"\n",
+                "0.0.3",
+            ),
+            (
+                "HybridRoot",
+                "[workspace]\nmembers = [\"m\"]\n\n\
+                 [package]\nname = \"root\"\nversion = \"0.4.0\"\nedition = \"2024\"\n",
+                "0.4.0",
+            ),
+            (
+                "WorkspaceShared",
+                "[workspace]\nmembers = [\"m\"]\n\n\
+                 [workspace.package]\nversion = \"1.2.3\"\nedition = \"2024\"\n",
+                "1.2.3",
+            ),
+        ] {
+            let span = cargo_top_version_span(content).expect(shape_label);
+            assert_eq!(
+                &content[span.clone()],
+                expected,
+                "{shape_label}: the span must name the value bytes exactly, not the surrounding quotes"
+            );
+            assert_eq!(
+                &content[span.start - 1..span.start],
+                "\"",
+                "{shape_label}: the byte immediately before the span must be the opening `\"`"
+            );
+            assert_eq!(
+                &content[span.end..span.end + 1],
+                "\"",
+                "{shape_label}: the byte immediately after the span must be the closing `\"`"
+            );
+        }
+    }
+
+    /// A `MemberInheriting` manifest (`version.workspace = true`) is
+    /// REFUSED with a class-naming message rather than a first-hit guess
+    /// at some other `version = "..."` line in the file. The refusal
+    /// message drops the file path — the read-side family shell
+    /// [`read_version_by_span`] adds the uniform `cannot read a version
+    /// from <path>` wrap, so both the class and the file are named in
+    /// the caller's error chain (verified end-to-end by
+    /// [`test_read_cargo_version_member_inheriting_refuses_via_shell_wrap`]).
+    #[test]
+    fn cargo_top_version_span_refuses_a_member_inheriting_manifest() {
+        let content = "[package]\nname = \"m\"\nversion.workspace = true\n";
+        let err = cargo_top_version_span(content).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("inherits its version"),
+            "the MemberInheriting refusal must name the class explicitly, got: {msg}"
+        );
+        assert!(
+            msg.contains("read the root's"),
+            "the refusal must point the caller at the readable file, got: {msg}"
+        );
+    }
+
+    /// A virtual workspace root (`[workspace]` with no
+    /// `[workspace.package].version`) is REFUSED — its members each
+    /// carry their own version, so there is nothing single to read.
+    /// Same class message shape as the `MemberInheriting` refusal above;
+    /// the file-path wrap comes from the shell.
+    #[test]
+    fn cargo_top_version_span_refuses_a_virtual_workspace_root() {
+        let content = "[workspace]\nmembers = [\"m\"]\n";
+        let err = cargo_top_version_span(content).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("virtual workspace root"),
+            "the VirtualWorkspaceNoVersion refusal must name the class explicitly, got: {msg}"
+        );
+        assert!(
+            msg.contains("nothing"),
+            "the refusal must say there is nothing to read here, got: {msg}"
+        );
+    }
+
+    /// A manifest with no `version` field at all (a `[package]` with a
+    /// `name` and `edition` but no `version = "..."`) is REFUSED — the
+    /// pre-lift reader bailed with `No version field found in <path>`;
+    /// post-lift the locator bails with `no version field found` and the
+    /// shell adds the file-path wrap.
+    #[test]
+    fn cargo_top_version_span_refuses_a_manifest_with_no_version_field() {
+        let content = "[package]\nname = \"test\"\nedition = \"2021\"\n";
+        let err = cargo_top_version_span(content).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no version field"),
+            "the NoVersion refusal must name the class explicitly, got: {msg}"
+        );
+    }
+
+    /// End-to-end seal that the class-refusal message from
+    /// [`cargo_top_version_span`] and the file-path wrap from
+    /// [`read_version_by_span`] compose into a single error chain that
+    /// names BOTH — the same shape every other reader in the family
+    /// produces on a locator-refusal. Pre-lift the path was baked into
+    /// the refusal itself (`bail!("{} inherits its version...", path)`);
+    /// post-lift the path comes from the shell's wrap, so a caller
+    /// pattern-matching on either "inherits its version" or "cannot read
+    /// a version from" gets a uniform answer across every ecosystem.
+    #[test]
+    fn test_read_cargo_version_member_inheriting_refuses_via_shell_wrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(&path, "[package]\nname = \"m\"\nversion.workspace = true\n").unwrap();
+
+        let err = read_cargo_version(&path).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("cannot read a version from"),
+            "the shell must wrap the locator refusal with the read-side version-context, got: {chain}"
+        );
+        assert!(
+            chain.contains(&path.display().to_string()),
+            "the wrap must name the file the read is against, got: {chain}"
+        );
+        assert!(
+            chain.contains("inherits its version"),
+            "the class-refusal message must survive into the caller's chain, got: {chain}"
         );
     }
 
