@@ -4,9 +4,11 @@
 //! operations for Pangea-managed infrastructure. Each command follows the
 //! gated workspace pattern: tests must pass before any infrastructure changes.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Result};
 use std::process::Command;
 use tracing::info;
+
+use crate::retry::run_inherited_status_sync;
 
 /// Resolve the `terraform` binary path via `TERRAFORM`, falling back to
 /// `terraform` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
@@ -126,17 +128,12 @@ pub fn test(working_dir: &str, architecture: &str) -> Result<()> {
     }
 
     let bundle = bundle_bin();
-    let status = Command::new(&bundle)
-        .args(&args)
-        .current_dir(working_dir)
-        .status()
-        .context("Failed to run bundle exec rspec")?;
-
-    ensure!(
-        status.success(),
-        "RSpec synthesis tests failed for architecture: {}",
-        architecture
-    );
+    let mut cmd = Command::new(&bundle);
+    cmd.args(&args).current_dir(working_dir);
+    run_inherited_status_sync(
+        cmd,
+        &format!("bundle exec rspec for architecture {}", architecture),
+    )?;
 
     info!("All synthesis tests passed for: {}", architecture);
     Ok(())
@@ -147,18 +144,11 @@ pub fn plan(workspace: &str, working_dir: &str) -> Result<()> {
     info!("Running terraform plan for workspace: {}", workspace);
 
     let terraform = terraform_bin();
-    let status = Command::new(&terraform)
-        .args(["plan", "-input=false"])
+    let mut cmd = Command::new(&terraform);
+    cmd.args(["plan", "-input=false"])
         .current_dir(working_dir)
-        .env("TF_WORKSPACE", workspace)
-        .status()
-        .context("Failed to run terraform plan")?;
-
-    ensure!(
-        status.success(),
-        "Terraform plan failed for workspace: {}",
-        workspace
-    );
+        .env("TF_WORKSPACE", workspace);
+    run_inherited_status_sync(cmd, &format!("terraform plan for workspace {}", workspace))?;
 
     info!("Plan complete for workspace: {}", workspace);
     Ok(())
@@ -181,18 +171,11 @@ pub fn apply(workspace: &str, working_dir: &str, auto_approve: bool) -> Result<(
     }
 
     let terraform = terraform_bin();
-    let status = Command::new(&terraform)
-        .args(&args)
+    let mut cmd = Command::new(&terraform);
+    cmd.args(&args)
         .current_dir(working_dir)
-        .env("TF_WORKSPACE", workspace)
-        .status()
-        .context("Failed to run terraform apply")?;
-
-    ensure!(
-        status.success(),
-        "Terraform apply failed for workspace: {}",
-        workspace
-    );
+        .env("TF_WORKSPACE", workspace);
+    run_inherited_status_sync(cmd, &format!("terraform apply for workspace {}", workspace))?;
 
     info!("Apply complete for workspace: {}", workspace);
     Ok(())
@@ -203,16 +186,9 @@ pub fn verify(workspace: &str, inspec_profile: &str, target: &str) -> Result<()>
     info!("Running InSpec verification for workspace: {}", workspace);
 
     let inspec = inspec_bin();
-    let status = Command::new(&inspec)
-        .args(["exec", inspec_profile, "-t", target, "--reporter", "cli"])
-        .status()
-        .context("Failed to run inspec exec")?;
-
-    ensure!(
-        status.success(),
-        "InSpec verification failed for workspace: {}",
-        workspace
-    );
+    let mut cmd = Command::new(&inspec);
+    cmd.args(["exec", inspec_profile, "-t", target, "--reporter", "cli"]);
+    run_inherited_status_sync(cmd, &format!("inspec exec for workspace {}", workspace))?;
 
     info!("InSpec verification passed for workspace: {}", workspace);
     Ok(())
@@ -276,18 +252,14 @@ pub fn destroy(workspace: &str, working_dir: &str, auto_approve: bool) -> Result
     }
 
     let terraform = terraform_bin();
-    let status = Command::new(&terraform)
-        .args(&args)
+    let mut cmd = Command::new(&terraform);
+    cmd.args(&args)
         .current_dir(working_dir)
-        .env("TF_WORKSPACE", workspace)
-        .status()
-        .context("Failed to run terraform destroy")?;
-
-    ensure!(
-        status.success(),
-        "Terraform destroy failed for workspace: {}",
-        workspace
-    );
+        .env("TF_WORKSPACE", workspace);
+    run_inherited_status_sync(
+        cmd,
+        &format!("terraform destroy for workspace {}", workspace),
+    )?;
 
     info!("Destroy complete for workspace: {}", workspace);
     Ok(())
@@ -314,16 +286,11 @@ pub fn status(workspace: &str, working_dir: &str) -> Result<()> {
     info!("Checking status for workspace: {}", workspace);
 
     let terraform = terraform_bin();
-    let status = Command::new(&terraform)
-        .args(["show", "-no-color"])
+    let mut cmd = Command::new(&terraform);
+    cmd.args(["show", "-no-color"])
         .current_dir(working_dir)
-        .env("TF_WORKSPACE", workspace)
-        .status()
-        .context("Failed to run terraform show")?;
-
-    if !status.success() {
-        bail!("Failed to get status for workspace: {}", workspace);
-    }
+        .env("TF_WORKSPACE", workspace);
+    run_inherited_status_sync(cmd, &format!("terraform show for workspace {}", workspace))?;
 
     Ok(())
 }
@@ -514,6 +481,71 @@ mod tests {
             "commands/pangea_infra.rs",
             "inspec",
             "INSPEC_BIN",
+        );
+    }
+
+    /// Whole-module shield: every status-only spawn in
+    /// `commands/pangea_infra.rs` routes through
+    /// [`crate::retry::run_inherited_status_sync`], never a hand-rolled
+    /// `.status()` + `ensure!(status.success(), …)` (or `if
+    /// !status.success() { bail!(…) }`) stanza that drops the exit code
+    /// from the operator log line. Pre-lift all six spawns — `test`
+    /// (`bundle exec rspec`), `plan` (`terraform plan`), `apply`
+    /// (`terraform apply`), `verify` (`inspec exec`), `destroy`
+    /// (`terraform destroy`), and `status` (`terraform show`) — each
+    /// spelled the inline stanza with an ad-hoc `Terraform apply failed
+    /// for workspace: <ws>`-style message that carried the workspace or
+    /// architecture but no exit code; post-lift each is a one-line
+    /// delegation and the canonical `"{op} failed (exit {code})"`
+    /// envelope is emitted by construction at the primitive's ONE body,
+    /// with the workspace / architecture folded into the `op` label so
+    /// the operator log line reads e.g. `terraform apply for workspace
+    /// prod failed (exit 1)` — pre-lift context PLUS the exit code.
+    ///
+    /// Sibling of the `commands/crossplane.rs` shield
+    /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
+    /// (6cb9442). Same three-primitive discipline: negative side forbids
+    /// the inline `.status()` builder-terminator at any code line in the
+    /// module body; positive side pins that `run_inherited_status_sync(`
+    /// appears at ≥6 code lines (one per pre-lift spawn), so a
+    /// regression that dropped every delegation cannot leave the
+    /// negative scan trivially satisfied by absence. Both hits route
+    /// through [`crate::test_support::code_line_hits`] for
+    /// anti-docstring-self-match discipline. Scan bounds from file start
+    /// to the FIRST `\n#[cfg(test)]\n` marker (this test module's own
+    /// opener), so this shield's own body — the string literal
+    /// `".status()"` passed to `code_line_hits`, and the assertion
+    /// message that names the forbidden terminator — stays out of scope.
+    /// Same boundary discipline as the sibling shield
+    /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
+    /// (6cb9442).
+    #[test]
+    fn test_pangea_infra_status_spawns_route_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("pangea_infra.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\n")
+            .expect("pangea_infra.rs must have a `#[cfg(test)]` marker");
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status()");
+        assert!(
+            inline.is_empty(),
+            "commands/pangea_infra.rs must not spawn via an inline \
+             `.status()` terminator — every status-only spawn must route \
+             through `crate::retry::run_inherited_status_sync`, which \
+             carries the exit code into the failure envelope. Found: \
+             {inline:?}"
+        );
+
+        let delegations =
+            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
+        assert!(
+            delegations >= 6,
+            "commands/pangea_infra.rs must route all six status-only \
+             spawns (`test`/`plan`/`apply`/`verify`/`destroy`/`status`) \
+             through `run_inherited_status_sync` — found only \
+             {delegations} delegation call(s); a dropped call would \
+             leave the negative `.status()` scan satisfied by absence"
         );
     }
 }
