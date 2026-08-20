@@ -169,16 +169,133 @@ pub fn get_repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(stdout_string(stdout)?))
 }
 
+/// Which form of the HEAD commit's SHA a `git rev-parse HEAD` read
+/// resolves to — the typed sum owning the `rev-parse` argv slice AND
+/// the expected hex length of the rendered SHA.
+///
+/// Pre-this-lift each of `get_full_sha` / `get_short_sha` /
+/// `get_short_sha_async` / `get_short_sha_async_in` spelled the
+/// `rev-parse` argv literal by hand — three of the four also spelled
+/// the load-bearing `"--short=7"` string verbatim, a §VI.1
+/// three-times-is-a-law violation for a load-bearing invariant the
+/// module's own docstring names: `--short=7` is explicit, not
+/// `core.abbrev`-dependent, so callers that consume the SHA for image
+/// tags inherit deterministic `{arch}-<7-char-sha>` rendering across
+/// hosts whose `git config core.abbrev` differs from the default. A
+/// fourth consumer that added a hand-rolled `--short=7 HEAD` site
+/// would silently drift if a future host-abbrev migration ever wanted
+/// to widen the form. Post-lift the argv slice AND the expected-length
+/// oracle live once at [`HeadShaForm::args`] /
+/// [`HeadShaForm::expected_len`]; every consumer routes through the
+/// typed variant instead of respelling the argv.
+///
+/// # Consumers
+///
+/// * [`get_full_sha`] resolves the 40-character SHA at the process CWD.
+/// * [`get_short_sha`] / [`get_short_sha_async`] resolve the
+///   7-character SHA at the process CWD.
+/// * [`get_short_sha_async_in`] resolves the 7-character SHA against
+///   a supplied `workdir` (sub-repo whose codegen commit is owned by a
+///   different working directory than the current process's CWD).
+///
+/// # THEORY grounding
+///
+/// THEORY.md §II Language — typed primitives own boundary
+/// classification; the `--short=7` argv literal is a typed variant of
+/// [`HeadShaForm`] rather than a bare `&str` respelled at every
+/// consumer. THEORY.md §VI.1 one-oracle discipline — the `rev-parse`
+/// argv slice AND the expected SHA hex length live at ONE surface
+/// (this enum's `args` / `expected_len` methods); a future third form
+/// (e.g., `Short12` for a 12-character SHA) extends the enum at one
+/// site instead of re-derived at every downstream consumer's inline
+/// literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HeadShaForm {
+    /// The 7-character short hex SHA — `git rev-parse --short=7 HEAD`.
+    /// `--short=7` is explicit, not `core.abbrev`-dependent, so
+    /// deployment-tag consumers inherit deterministic
+    /// `{arch}-<7-char-sha>` rendering across hosts.
+    ///
+    /// # Source order is load-bearing
+    ///
+    /// [`Short7`] is declared BEFORE [`Full`] so the source-order
+    /// [`PartialOrd`] / [`Ord`] derivation puts `Short7 < Full` —
+    /// the "hex-length" ladder pinned by
+    /// [`tests::test_head_sha_form_ord_short7_below_full`]. A future
+    /// consumer that reads "the wider form outranks the narrower
+    /// form" gets it from a single `>=` comparison instead of a
+    /// three-arm disjunction against the [`Full`] variant. A future
+    /// third variant (e.g., `Short12` for a 12-character SHA) would
+    /// insert between the two here to extend the ladder without a
+    /// variant-order flip at the two present consumers.
+    Short7,
+    /// The full 40-character hex SHA — `git rev-parse HEAD`.
+    Full,
+}
+
+impl HeadShaForm {
+    /// The `git rev-parse` argv slice this form spawns with. The two
+    /// variants encode the exact literals every pre-lift call site
+    /// respelled by hand.
+    const fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Full => &["rev-parse", "HEAD"],
+            Self::Short7 => &["rev-parse", "--short=7", "HEAD"],
+        }
+    }
+
+    /// The expected hex length of the rendered SHA — 40 for
+    /// [`Self::Full`], 7 for [`Self::Short7`]. Downstream length
+    /// invariants (test assertions, deployment-tag renderers that
+    /// slice by `expected_len()`) read this oracle instead of
+    /// respelling the literal at every consumer. `#[allow(dead_code)]`
+    /// on this crate is the same posture the sibling typed sums
+    /// ([`crate::retry::PerAttemptRegion`]) take: `pub const fn`
+    /// visibility carries the surface for future consumers (structured
+    /// telemetry emitters, deployment-tag renderers) while the
+    /// present-day consumers live in `#[cfg(test)]` — the
+    /// `test_head_sha_form_expected_len_pins_hex_length_per_variant`
+    /// / `test_git_client_sha` /
+    /// `test_get_short_sha_async_in_returns_seven_char_sha` /
+    /// `test_read_head_sha_async_full_variant_returns_forty_char_hex`
+    /// pins read through this method rather than the `40` / `7`
+    /// literals.
+    #[allow(dead_code)]
+    pub const fn expected_len(self) -> usize {
+        match self {
+            Self::Full => 40,
+            Self::Short7 => 7,
+        }
+    }
+}
+
+/// Read the HEAD commit's SHA at `form` through `git_capture`,
+/// optionally scoped to `workdir`. The composed primitive every
+/// `get_{full,short}_sha[_async][_in]` public entry point delegates
+/// to — the argv slice, the `"rev-parse"` op label, and the
+/// stdout-string trim are named ONCE here.
+fn read_head_sha(form: HeadShaForm, workdir: Option<&Path>) -> Result<String> {
+    let stdout = git_capture(form.args(), workdir, "rev-parse")?;
+    stdout_string(stdout)
+}
+
+/// Async sibling of [`read_head_sha`] — same argv/op/trim composition
+/// through [`git_capture_async`] so the tokio consumers
+/// ([`get_short_sha_async`], [`get_short_sha_async_in`]) share the
+/// primitive rather than each hand-rolling the argv slice.
+async fn read_head_sha_async(form: HeadShaForm, workdir: Option<&Path>) -> Result<String> {
+    let stdout = git_capture_async(form.args(), workdir, "rev-parse").await?;
+    stdout_string(stdout)
+}
+
 /// Get full git SHA (40 characters)
 pub fn get_full_sha() -> Result<String> {
-    let stdout = git_capture(&["rev-parse", "HEAD"], None, "rev-parse")?;
-    stdout_string(stdout)
+    read_head_sha(HeadShaForm::Full, None)
 }
 
 /// Get short git SHA (7 characters)
 pub fn get_short_sha() -> Result<String> {
-    let stdout = git_capture(&["rev-parse", "--short=7", "HEAD"], None, "rev-parse")?;
-    stdout_string(stdout)
+    read_head_sha(HeadShaForm::Short7, None)
 }
 
 /// Async sibling of [`git_capture`] — same `(args, workdir, op)`
@@ -226,8 +343,7 @@ async fn git_capture_async_with_bin(
 /// `{arch}-<7-char-sha>` rendering across hosts whose
 /// `git config core.abbrev` differs from the default.
 pub async fn get_short_sha_async() -> Result<String> {
-    let stdout = git_capture_async(&["rev-parse", "--short=7", "HEAD"], None, "rev-parse").await?;
-    stdout_string(stdout)
+    read_head_sha_async(HeadShaForm::Short7, None).await
 }
 
 /// `workdir`-scoped sibling of [`get_short_sha_async`]. Resolves the
@@ -235,13 +351,7 @@ pub async fn get_short_sha_async() -> Result<String> {
 /// sub-repo whose codegen commit is owned by a different working
 /// directory than the current process's CWD).
 pub async fn get_short_sha_async_in(workdir: &Path) -> Result<String> {
-    let stdout = git_capture_async(
-        &["rev-parse", "--short=7", "HEAD"],
-        Some(workdir),
-        "rev-parse",
-    )
-    .await?;
-    stdout_string(stdout)
+    read_head_sha_async(HeadShaForm::Short7, Some(workdir)).await
 }
 
 /// Update kustomization.yaml with new image tag
@@ -723,8 +833,48 @@ mod tests {
         // This test only works in a git repo
         if let Ok(sha) = get_short_sha() {
             assert!(!sha.is_empty());
-            assert!(sha.len() >= 7); // Short SHA is at least 7 chars
+            // Length invariant reads through the typed oracle — a
+            // future third form (Short12) that extended `HeadShaForm`
+            // would update `expected_len()` and this assertion at
+            // the same site rather than at every hand-rolled `>= 7`
+            // literal.
+            assert!(sha.len() >= HeadShaForm::Short7.expected_len());
         }
+    }
+
+    /// [`HeadShaForm::args`] returns the exact argv slice every
+    /// pre-lift call site respelled by hand — pinned per variant so a
+    /// future rewrite that dropped `"--short=7"` (silently widening
+    /// the SHA to a host-abbrev-dependent length) fails this test
+    /// rather than degrade every deployment-tag renderer downstream.
+    #[test]
+    fn test_head_sha_form_args_owns_rev_parse_literal_per_variant() {
+        assert_eq!(HeadShaForm::Full.args(), &["rev-parse", "HEAD"]);
+        assert_eq!(
+            HeadShaForm::Short7.args(),
+            &["rev-parse", "--short=7", "HEAD"],
+        );
+    }
+
+    /// [`HeadShaForm::expected_len`] pins the hex-length oracle every
+    /// consumer reads instead of respelling the `40` / `7` literals
+    /// inline. A regression that flipped the two arms would fail this
+    /// test before it reached the deployment-tag length invariant.
+    #[test]
+    fn test_head_sha_form_expected_len_pins_hex_length_per_variant() {
+        assert_eq!(HeadShaForm::Full.expected_len(), 40);
+        assert_eq!(HeadShaForm::Short7.expected_len(), 7);
+    }
+
+    /// The typed sum carries `PartialOrd` / `Ord` via source-order
+    /// derivation so a future consumer that reads "the full form is
+    /// wider than the short form" gets it from `Short7 < Full`
+    /// directly. Pins the source-order invariant so a variant
+    /// reordering that flipped the ladder fails this test.
+    #[test]
+    fn test_head_sha_form_ord_short7_below_full() {
+        assert!(HeadShaForm::Short7 < HeadShaForm::Full);
+        assert!(HeadShaForm::Full > HeadShaForm::Short7);
     }
 
     // ---------------------------------------------------------------
@@ -857,14 +1007,74 @@ mod tests {
         let sha = get_short_sha_async_in(&work)
             .await
             .expect("get_short_sha_async_in must succeed in a seeded repo");
+        // Length invariant reads through the typed oracle
+        // ([`HeadShaForm::Short7::expected_len`]) rather than the
+        // literal `7` — a future variant addition that widened the
+        // form would update `expected_len` and this assertion at one
+        // site.
         assert_eq!(
             sha.len(),
-            7,
+            HeadShaForm::Short7.expected_len(),
             "--short=7 must yield a 7-character SHA, got: {sha:?}"
         );
         assert!(
             sha.chars().all(|c| c.is_ascii_hexdigit()),
             "SHA must be hex, got: {sha:?}"
+        );
+    }
+
+    /// [`read_head_sha_async`] end-to-end against the real `git`
+    /// binary inside a hermetic bare-work pair, exercising the
+    /// [`HeadShaForm::Full`] variant. The four public entry points
+    /// pre-this-commit only exposed the `Short7` variant on the async
+    /// surface (`get_short_sha_async`, `get_short_sha_async_in`); the
+    /// `Full` variant reached async consumers only indirectly through
+    /// this primitive. Pins that the `Full` variant returns a
+    /// 40-character hex SHA and that the same repo's `Short7` answer
+    /// is its 7-character prefix — the reader-side agreement the
+    /// typed-primitive contract encodes at
+    /// [`HeadShaForm::expected_len`].
+    ///
+    /// `clippy::await_holding_lock` allowed: this test holds
+    /// `GIT_BIN_ENV_LOCK` across the async production entry point
+    /// exactly as the sibling
+    /// [`test_get_short_sha_async_in_returns_seven_char_sha`] test
+    /// does — the guard exists to serialize against the
+    /// env-var-mutating async test
+    /// (`test_no_bin_entry_points_route_through_git_bin_env_var`) so
+    /// a concurrent write does not redirect the spawn to a shim
+    /// mid-flight. Same rationale, same posture.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_read_head_sha_async_full_variant_returns_forty_char_hex() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_parent, _bare, work) = make_bare_origin_with_work();
+
+        let full = read_head_sha_async(HeadShaForm::Full, Some(&work))
+            .await
+            .expect("read_head_sha_async(Full) must succeed in a seeded repo");
+        assert_eq!(
+            full.len(),
+            HeadShaForm::Full.expected_len(),
+            "Full variant must yield a 40-character SHA, got: {full:?}"
+        );
+        assert!(
+            full.chars().all(|c| c.is_ascii_hexdigit()),
+            "Full SHA must be hex, got: {full:?}"
+        );
+
+        let short = read_head_sha_async(HeadShaForm::Short7, Some(&work))
+            .await
+            .expect("read_head_sha_async(Short7) must succeed in a seeded repo");
+        assert_eq!(
+            short.len(),
+            HeadShaForm::Short7.expected_len(),
+            "Short7 variant must yield a 7-character SHA, got: {short:?}"
+        );
+        assert!(
+            full.starts_with(&short),
+            "Short7 must be the 7-character prefix of Full at the same HEAD; \
+             full = {full:?}, short = {short:?}"
         );
     }
 
