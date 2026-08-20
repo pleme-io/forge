@@ -13835,6 +13835,95 @@ pub fn log_retry_attempt(
     outcome
 }
 
+/// Same shape as [`retry_command`] with the per-attempt
+/// [`log_retry_attempt`] warn stanza pre-composed at the primitive
+/// level: the caller-supplied `spawn` closure only owns the per-
+/// attempt command-build (the `Command::new(...).args(...).output()
+/// .await` shape); the `op` / `policy` clones the pre-migration
+/// caller-inline sites all threaded into the closure PLUS the trailing
+/// `log_retry_attempt(outcome, &op, attempt, &policy)` call live at
+/// this primitive.
+///
+/// # The invariant this closes
+///
+/// The canonical retry-driven external-CLI shape at the pre-migration
+/// call sites was verbatim:
+/// ```text
+/// let result = retry_command(&policy, &op, |attempt| {
+///     let op = op.clone();
+///     let policy = policy.clone();
+///     // ...per-site captures...
+///     async move {
+///         let outcome = <build cmd>.output().await;
+///         log_retry_attempt(outcome, &op, attempt, &policy)
+///     }
+/// })
+/// .await;
+/// ```
+/// Five sites in forge carried the same two clones + trailing warn-
+/// dispatch call verbatim modulo the `<build cmd>` middle:
+/// `infrastructure/attic.rs::AtticClient::push_with_retries`,
+/// `infrastructure/attic.rs::AtticClient::login_with_retries`,
+/// `infrastructure/registry.rs::RegistryClient::push_with_retries`,
+/// `commands/push.rs::push_with_retry`,
+/// `commands/github_runner_ci.rs::push_with_retry`. Well past the
+/// three-times threshold (THEORY §VI.1: "two occurrences is a
+/// coincidence; three is a law"), and the class the duplication opens
+/// is a real defect: a caller that omits the trailing
+/// `log_retry_attempt` silently loses the per-attempt warn on failure
+/// (the retry loop still fires but the operator log surface goes
+/// quiet). Owning the composition at the primitive forecloses the
+/// omission at every consumer by construction.
+///
+/// # Pass-through invariant
+///
+/// The `spawn` closure returns `io::Result<Output>` verbatim — the
+/// same shape [`retry_command`] takes. The primitive inserts
+/// [`log_retry_attempt`]'s pass-through between the caller's `spawn`
+/// output and [`retry_command`]'s classification step, and both
+/// halves (the warn arm, the retry-loop classification) see the same
+/// `outcome` bytes the caller produced. A caller that needs to
+/// interleave per-attempt debug observability (e.g., the
+/// `debug_log_capture_streams` tee that `commands/github_runner_ci.rs
+/// ::push_with_retry` emits between `cmd.output().await` and the
+/// warn-dispatch) can do that INSIDE the `spawn` closure — the
+/// primitive wraps the closure's OUTPUT, not its BODY, so per-site
+/// dialects at the closure body stay at the call site.
+///
+/// # Why not fold into `retry_command`
+///
+/// [`retry_command`] is the primitive underneath; this is the
+/// convenience wrapper that composes it with [`log_retry_attempt`].
+/// A caller that wants a different per-attempt log surface (a
+/// different tracing level, a different message format, a structured
+/// per-attempt span emit) still reaches for [`retry_command`]
+/// directly. The two coexist: the retry loop itself is one primitive;
+/// the retry loop + canonical per-attempt warn is a second primitive
+/// that names the canonical composition.
+pub async fn retry_command_logged<F, Fut>(
+    policy: &RetryPolicy,
+    operation: impl Into<String>,
+    mut spawn: F,
+) -> Result<std::process::Output, CommandAttemptFailure>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = std::io::Result<std::process::Output>>,
+{
+    let operation = operation.into();
+    let inner_op = operation.clone();
+    let inner_policy = policy.clone();
+    retry_command(policy, operation, move |attempt| {
+        let op = inner_op.clone();
+        let policy = inner_policy.clone();
+        let fut = spawn(attempt);
+        async move {
+            let outcome = fut.await;
+            log_retry_attempt(outcome, &op, attempt, &policy)
+        }
+    })
+    .await
+}
+
 /// Format captured stdout/stderr of an external-command [`std::process::Output`]
 /// as `<tool>`-prefixed debug-level messages, suitable for tee'ing into
 /// `tracing::debug!`. Pure function — no I/O, no side effects, no tracing
@@ -33643,6 +33732,285 @@ mod tests {
         assert_eq!(err.attempt, 3);
         assert!(err.is_transient());
         assert!(err.stderr.contains("503"));
+    }
+
+    /// Happy path for the composed primitive: a first-attempt success
+    /// produces `Ok(Output)` through the pass-through and the spawn
+    /// closure is invoked exactly once. Pins that
+    /// `retry_command_logged` composes `retry_command` end-to-end (the
+    /// success arm terminates without extra attempts) and that the
+    /// pre-composed `log_retry_attempt` step does not corrupt the
+    /// captured output on the success branch.
+    #[tokio::test]
+    async fn test_retry_command_logged_first_success_returns_output() {
+        let p = RetryPolicy::immediate();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_command_logged(&p, "echo hello", move |_attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(synth_output(true, b"hello\n", b""))
+            }
+        })
+        .await;
+        let output = result.expect("zero-exit must return Output");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello\n");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Always-transient failure (HTTP 503 in stderr) must invoke
+    /// `spawn` exactly `max_attempts` times and return the LAST
+    /// `CommandAttemptFailure` — same shape as
+    /// [`retry_command`]'s own exhaustion contract, so the primitive
+    /// composition preserves the retry-loop's transient-classifier
+    /// behavior end-to-end. Also pins that the caller's closure sees
+    /// only the per-attempt command-build shape (no `op` / `policy`
+    /// clones threaded through) — the primitive owns the `op` and
+    /// `policy` and passes them into `log_retry_attempt` internally.
+    #[tokio::test]
+    async fn test_retry_command_logged_exhausts_on_transient_stderr() {
+        let p = RetryPolicy::new(4, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_command_logged(&p, "push transient", move |_attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(synth_output(
+                    false,
+                    b"",
+                    b"received unexpected HTTP status: 503",
+                ))
+            }
+        })
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 4, "must exhaust attempts");
+        let err = result.expect_err("transient exhaustion must produce Err");
+        assert_eq!(err.attempt, 4, "last error must carry final attempt");
+        assert_eq!(err.operation, "push transient");
+        assert!(err.is_transient());
+        assert!(err.stderr.contains("503"));
+    }
+
+    /// Terminal stderr (HTTP 401) short-circuits on the first attempt
+    /// under the composed primitive — same short-circuit contract
+    /// [`retry_command`] itself honors on a non-transient
+    /// `CommandAttemptFailure`. The `log_retry_attempt` step composes
+    /// AFTER the caller's `spawn` closure and BEFORE the retry-loop
+    /// classification, so a terminal failure still surfaces as
+    /// `Err(CommandAttemptFailure)` on the first attempt rather than
+    /// consuming the retry budget.
+    #[tokio::test]
+    async fn test_retry_command_logged_short_circuits_on_terminal_stderr() {
+        let p = RetryPolicy::new(10, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_command_logged(&p, "push terminal", move |_attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(synth_output(false, b"", b"HTTP 401 unauthorized"))
+            }
+        })
+        .await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "terminal stderr must short-circuit; retry loop must not burn budget"
+        );
+        let err = result.expect_err("terminal failure must produce Err");
+        assert_eq!(err.attempt, 1);
+        assert!(!err.is_transient());
+    }
+
+    /// The spawn closure sees a monotonically-increasing `attempt`
+    /// index (starting at 1) — same contract [`retry_command`]
+    /// itself honors. Pins that the composed primitive threads the
+    /// retry loop's `attempt` counter into the caller's closure
+    /// verbatim, so a caller that needs per-attempt structured
+    /// telemetry (e.g., a per-attempt tracing span, a per-attempt
+    /// attestation-trace ID) has the same input the pre-composition
+    /// [`retry_command`] surface offered.
+    #[tokio::test]
+    async fn test_retry_command_logged_passes_attempt_index() {
+        let p = RetryPolicy::new(3, Duration::ZERO, 1, Duration::ZERO);
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let attempts_clone = attempts.clone();
+        let _ = retry_command_logged(&p, "push attempt", move |attempt| {
+            let attempts = attempts_clone.clone();
+            async move {
+                attempts.lock().unwrap().push(attempt);
+                Ok(synth_output(false, b"", b"503"))
+            }
+        })
+        .await;
+        assert_eq!(*attempts.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    /// Eventual success on attempt N stops the retry loop at N and
+    /// returns the successful `Output` — the composed primitive
+    /// preserves [`retry_command`]'s eventual-success contract
+    /// end-to-end. Pins that `log_retry_attempt`'s pass-through does
+    /// not corrupt the success outcome even after the warn arm fired
+    /// on prior attempts.
+    #[tokio::test]
+    async fn test_retry_command_logged_eventual_success() {
+        let p = RetryPolicy::new(5, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_command_logged(&p, "push eventual", move |_attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if n < 3 {
+                    Ok(synth_output(false, b"", b"503"))
+                } else {
+                    Ok(synth_output(true, b"ok", b""))
+                }
+            }
+        })
+        .await;
+        let output = result.expect("eventual success must return Output");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ok");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// Spawn failure (`Err(io::Error)`) at attempt 1 is TERMINAL under
+    /// the composed primitive — same shape [`retry_command`] itself
+    /// honors on the spawn-failure branch. The primitive threads the
+    /// spawn-error through `log_retry_attempt`'s pass-through and
+    /// into the retry loop's classification, which routes it to
+    /// `CommandAttemptFailure::from_capture`'s spawn-failure variant
+    /// (retryable=false), so the loop exits without burning budget.
+    #[tokio::test]
+    async fn test_retry_command_logged_spawn_failure_is_terminal() {
+        let p = RetryPolicy::new(4, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_command_logged(&p, "push spawn-err", move |_attempt| {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::Error::other("attic not on PATH"))
+            }
+        })
+        .await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "spawn failure must short-circuit on attempt 1"
+        );
+        let err = result.expect_err("spawn failure must produce Err");
+        assert!(err.is_spawn_failure());
+        assert!(err.stdout.contains("attic not on PATH"));
+    }
+
+    /// The operation label the caller passes to `retry_command_logged`
+    /// surfaces verbatim on the final `CommandAttemptFailure`. Pins
+    /// that the primitive threads the `impl Into<String>` operation
+    /// argument through to [`retry_command`]'s own operation-label
+    /// carry — a caller that consumes the failure's `.operation` field
+    /// downstream (e.g., a telemetry emitter, a typed-error
+    /// constructor) sees the same string it passed in.
+    #[tokio::test]
+    async fn test_retry_command_logged_operation_label_surfaces_on_failure() {
+        let p = RetryPolicy::new(2, Duration::ZERO, 1, Duration::ZERO);
+        let result = retry_command_logged(&p, "push my-operation", |_attempt| async move {
+            Ok(synth_output(false, b"", b"503"))
+        })
+        .await;
+        let err = result.expect_err("transient exhaustion must produce Err");
+        assert_eq!(err.operation, "push my-operation");
+    }
+
+    /// Equivalence oracle: `retry_command_logged(policy, op, spawn)`
+    /// produces the same `CommandAttemptFailure` shape as the hand-
+    /// composed pre-migration idiom
+    /// `retry_command(&policy, &op, |attempt| { let op = op.clone();
+    /// let policy = policy.clone(); async move { let outcome =
+    /// spawn(attempt).await; log_retry_attempt(outcome, &op, attempt,
+    /// &policy) } })`. Pinning the equivalence at the primitive-level
+    /// test suite is what makes the five call-site migrations safe by
+    /// construction — a divergence here fails BEFORE it reaches any
+    /// consumer, whether at the exhaustion arm (attempt count, stderr
+    /// carry), the spawn-failure arm (retryable=false discrimination),
+    /// or the operation-label carry.
+    #[tokio::test]
+    async fn test_retry_command_logged_equivalence_with_hand_composed_idiom() {
+        let policy = RetryPolicy::new(3, Duration::ZERO, 1, Duration::ZERO);
+        let op = "equiv-op".to_string();
+
+        let via_primitive = retry_command_logged(&policy, op.clone(), |_attempt| async move {
+            Ok(synth_output(false, b"", b"503"))
+        })
+        .await
+        .expect_err("primitive must produce Err on exhaustion");
+
+        let op_clone = op.clone();
+        let policy_clone = policy.clone();
+        let via_hand = retry_command(&policy, op.clone(), move |attempt| {
+            let op = op_clone.clone();
+            let policy = policy_clone.clone();
+            async move {
+                let outcome = Ok(synth_output(false, b"", b"503"));
+                log_retry_attempt(outcome, &op, attempt, &policy)
+            }
+        })
+        .await
+        .expect_err("hand-composed must produce Err on exhaustion");
+
+        assert_eq!(via_primitive.operation, via_hand.operation);
+        assert_eq!(via_primitive.attempt, via_hand.attempt);
+        assert_eq!(via_primitive.exit_code, via_hand.exit_code);
+        assert_eq!(via_primitive.stderr, via_hand.stderr);
+        assert_eq!(via_primitive.is_transient(), via_hand.is_transient());
+        assert_eq!(
+            via_primitive.is_spawn_failure(),
+            via_hand.is_spawn_failure()
+        );
+    }
+
+    /// Pass-through under the composed primitive: the caller's
+    /// `spawn` closure is free to interleave per-attempt observability
+    /// (a `debug!` on success, a `debug_log_capture_streams` tee on
+    /// failure) BEFORE returning the `outcome` — the primitive wraps
+    /// the closure's OUTPUT, not its body, so per-site dialects at
+    /// the closure body stay at the call site. Pins the migration
+    /// path for `commands/github_runner_ci.rs::push_with_retry`,
+    /// which emits `debug_log_capture_streams` on the non-success
+    /// arm inside the retry closure.
+    #[tokio::test]
+    async fn test_retry_command_logged_permits_per_attempt_debug_tee_inside_closure() {
+        let p = RetryPolicy::new(3, Duration::ZERO, 1, Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let teed = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let teed_clone = teed.clone();
+        let _ = retry_command_logged(&p, "push tee", move |_attempt| {
+            let calls = calls_clone.clone();
+            let teed = teed_clone.clone();
+            async move {
+                let outcome = Ok(synth_output(false, b"", b"503"));
+                if let Ok(out) = outcome.as_ref() {
+                    if !out.status.success() {
+                        // stand-in for `debug_log_capture_streams(out, "tool")`
+                        teed.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                calls.fetch_add(1, Ordering::SeqCst);
+                outcome
+            }
+        })
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            teed.load(Ordering::SeqCst),
+            3,
+            "per-attempt debug tee inside the closure must fire on every failing attempt"
+        );
     }
 
     /// Pass-through invariant across the full canonical-factory ×

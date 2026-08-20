@@ -13,8 +13,8 @@ use tracing::{info, warn};
 use crate::error::AtticError;
 use crate::repo::get_tool_path;
 use crate::retry::{
-    classify_attempt_failure, classify_capture, log_retry_attempt, retry_command,
-    CommandAttemptFailure, RetryPolicy,
+    classify_attempt_failure, classify_capture, retry_command_logged, CommandAttemptFailure,
+    RetryPolicy,
 };
 
 /// Module-scoped sigil: resolve the `attic` binary via the canonical
@@ -291,12 +291,10 @@ impl AtticClient {
         let token = self.token.clone();
         let op = format!("push {} to {}", store_path, cache);
 
-        let result = retry_command(&policy, &op, |attempt| {
+        let result = retry_command_logged(&policy, &op, |_attempt| {
             let attic_bin = attic_bin.clone();
             let cache = cache.clone();
             let token = token.clone();
-            let op = op.clone();
-            let policy = policy.clone();
             async move {
                 let mut cmd = Command::new(&attic_bin);
                 cmd.args(["push", &cache, store_path])
@@ -305,7 +303,7 @@ impl AtticClient {
                 if let Some(t) = token.as_deref() {
                     cmd.env("ATTIC_TOKEN", t);
                 }
-                log_retry_attempt(cmd.output().await, &op, attempt, &policy)
+                cmd.output().await
             }
         })
         .await;
@@ -600,19 +598,17 @@ impl AtticClient {
         let token_owned = token.to_string();
         let op = format!("login to Attic cache {}", cache);
 
-        let result = retry_command(&policy, &op, |attempt| {
+        let result = retry_command_logged(&policy, &op, |_attempt| {
             let attic_bin = attic_bin.clone();
             let cache = cache.clone();
             let server_url_owned = server_url_owned.clone();
             let token_owned = token_owned.clone();
-            let op = op.clone();
-            let policy = policy.clone();
             async move {
                 let mut cmd = Command::new(&attic_bin);
                 cmd.args(["login", &cache, &server_url_owned, &token_owned])
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
-                log_retry_attempt(cmd.output().await, &op, attempt, &policy)
+                cmd.output().await
             }
         })
         .await;
