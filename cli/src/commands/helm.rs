@@ -299,6 +299,63 @@ fn ensure_helm_success(output: &std::process::Output, context: &str) -> Result<(
     Ok(())
 }
 
+/// Spawn `helm <args>` via [`helm_bin`], stream the captured stdout and
+/// stderr to this process's own descriptors, and boundary-classify the
+/// captured [`std::process::Output`] via [`ensure_helm_success`]. The
+/// three-step ritual every captured-output helm consumer respells —
+/// `Command::new(helm_bin()).args(...).output().context(...)?` +
+/// `print_captured_output(&out.stdout, &out.stderr)` +
+/// `ensure_helm_success(&out, ctx)?` — collapses onto ONE primitive.
+///
+/// Three consumer sites past the ≥3 three-times-rule threshold ([THEORY
+/// §VI.1](): "two occurrences is a coincidence; three is a law")
+/// converge here: [`lint`]'s `helm lint` post-check (with the pre-lift
+/// `Failed to run helm lint` outer anyhow context), [`package`]'s `helm
+/// package` post-check (`Failed to run helm package`), and [`push`]'s
+/// `helm push` post-check (`Failed to run helm push`). Pre-lift the
+/// same seven-line stanza was authored at three sibling literal
+/// positions that a factor-out edit — a per-spawn env-injection hook, a
+/// telemetry sigil on `helm_bin()`, a switch to `with_context` closures
+/// carrying `chart_dir` into the outer wrap — had three sites to reach
+/// and could drift silently at any of them.
+///
+/// `failure_context` names the per-chart context at the bail
+/// (`chart_dir` for `helm lint` / `helm package`, `chart` for `helm
+/// push`) and is forwarded verbatim to [`ensure_helm_success`]; the
+/// outer `Failed to run helm <subcommand>` anyhow context is derived
+/// from `args.first()` so the primitive owns the subcommand-naming
+/// discipline at one body — a future edit that reshaped the outer wrap
+/// (a substrate-path prefix, a resolved-binary sigil, a per-attempt
+/// numeric tag) lands here once, not at three sibling `context(...)`
+/// calls.
+///
+/// The [`template`]'s captured-output variant (`helm template` at
+/// [`lint`], which nulls stdout and prints only stderr) is intentionally
+/// out of scope — a stdout-null parameter would complicate the primitive
+/// for a single consumer without redeeming a third occurrence, and the
+/// three-times-is-a-law threshold does not reach the four-way lift yet.
+/// It stays a per-caller stanza that consumes [`print_captured_output`]
+/// and [`ensure_helm_success`] directly.
+///
+/// Sibling primitive to [`ensure_helm_success`] (the exit-status → typed
+/// Result classifier), [`last_reason_line`] (the reason-line composer),
+/// [`format_failure_summary`] (the batch-summary composer), and
+/// [`print_captured_output`] (the captured-stream forwarder) at the
+/// same "helm output → typed per-chart Result" surface. This primitive
+/// closes the "spawn → capture → classify" boundary at the same
+/// surface, so the five helpers together own the whole "helm invoke →
+/// per-chart Result" pipeline the three consumer sites drive.
+fn run_helm_capture(args: &[&str], failure_context: &str) -> Result<()> {
+    let subcommand = args.first().copied().unwrap_or("<no subcommand>");
+    let output = Command::new(helm_bin())
+        .args(args)
+        .output()
+        .with_context(|| format!("Failed to run helm {}", subcommand))?;
+    print_captured_output(&output.stdout, &output.stderr);
+    ensure_helm_success(&output, failure_context)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod capture_tests {
     use super::{ensure_helm_success, format_failure_summary, last_reason_line};
@@ -493,6 +550,198 @@ mod capture_tests {
     }
 }
 
+#[cfg(test)]
+mod run_helm_capture_tests {
+    use super::run_helm_capture;
+
+    // Serial-guarded HELM_BIN swap: the primitive resolves the binary
+    // through `helm_bin()` → `get_tool_path("HELM_BIN", "helm")`, and
+    // env-var writes are process-global. Without a lock, a concurrent
+    // sibling test that also mutates HELM_BIN could smuggle a different
+    // shim into the spawn between our `set_var` and `run_helm_capture`
+    // calls. Local-only because these are the only tests in the module
+    // that write HELM_BIN.
+    static HELM_BIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_helm_shim<F: FnOnce()>(body: &str, f: F) {
+        let _guard = HELM_BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_dir, shim) = crate::test_support::make_executable_shim("helm", body);
+        let prior = std::env::var_os("HELM_BIN");
+        // SAFETY: guarded by HELM_BIN_LOCK for the duration of `f`.
+        unsafe {
+            std::env::set_var("HELM_BIN", &shim);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        // SAFETY: same lock; restore or clear.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("HELM_BIN", v),
+                None => std::env::remove_var("HELM_BIN"),
+            }
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    /// A success-status shim → `Ok(())`. Pins that the primitive routes
+    /// the "clean exit + captured output" path through
+    /// [`super::ensure_helm_success`] to `Ok(())` verbatim, matching
+    /// pre-lift behavior at all three consumer sites (`lint` / `package`
+    /// / `push`).
+    #[test]
+    fn run_helm_capture_returns_ok_on_success_status_shim() {
+        with_helm_shim(
+            "#!/bin/sh\necho 'Successfully packaged chart'\nexit 0\n",
+            || {
+                let r = run_helm_capture(
+                    &["package", "chart-dir", "--destination", "out"],
+                    "chart-dir",
+                );
+                assert!(r.is_ok(), "success-status shim must return Ok, got {r:?}");
+            },
+        );
+    }
+
+    /// A non-zero-exit shim → the exact pre-lift `"<context>: <last_reason_line
+    /// (stdout, stderr)>"` failure prose. Pins the composition
+    /// [`super::run_helm_capture`] → [`super::ensure_helm_success`] →
+    /// [`super::last_reason_line`] verbatim, so a future primitive edit
+    /// that broke the `(context, reason)` pairing at the bail site
+    /// would fail here rather than silently degrade one of the three
+    /// consumer sites' operator-visible per-chart failure diagnostic.
+    #[test]
+    fn run_helm_capture_bails_with_context_colon_reason_on_failure() {
+        with_helm_shim(
+            "#!/bin/sh\necho 'Error: failed to perform \"Push\" on destination: 403: denied: permission_denied: write_package' 1>&2\nexit 1\n",
+            || {
+                let err = run_helm_capture(&["push", "chart-tgz", "oci://registry"], "chart-tgz")
+                    .expect_err("non-zero-exit shim must bail");
+                assert_eq!(
+                    err.to_string(),
+                    "chart-tgz: Error: failed to perform \"Push\" on destination: 403: denied: permission_denied: write_package",
+                    "the bail must be `<failure_context>: <last_reason_line>` verbatim — a drift here would silently degrade every consumer's per-chart failure diagnostic",
+                );
+            },
+        );
+    }
+
+    /// The primitive forwards `args` to the spawned `helm` verbatim. A
+    /// shim that records its argv to a tempfile confirms the argv shape
+    /// lands unchanged — a future primitive edit that reordered,
+    /// dropped, or injected an element would fail here rather than
+    /// break lint/package/push at once in production.
+    #[test]
+    fn run_helm_capture_forwards_argv_verbatim_to_the_helm_spawn() {
+        let work = tempfile::tempdir().expect("temp dir");
+        let observed = work.path().join(".observed-argv");
+        let observed_str = observed.display().to_string();
+        // Shim writes "$1\n$2\n$3\n..." to the observed file, then
+        // exits 0. The primitive succeeds and we assert the recorded
+        // argv equals what we passed in.
+        let body = format!(
+            "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> {q}; done\nexit 0\n",
+            q = shell_escape(&observed_str),
+        );
+        with_helm_shim(&body, || {
+            run_helm_capture(
+                &["lint", "some/chart-dir", "--set", "image.repository=test"],
+                "some/chart-dir",
+            )
+            .expect("shim exits 0 → primitive must return Ok");
+        });
+        let recorded =
+            std::fs::read_to_string(&observed).expect("shim must have written the observed argv");
+        assert_eq!(
+            recorded,
+            "lint\nsome/chart-dir\n--set\nimage.repository=test\n",
+            "argv must land at the shim byte-exact — a future primitive edit that reorders, drops, or injects an element would fail here",
+        );
+    }
+
+    // Minimal POSIX single-quote shell escape for the observed-argv
+    // shim's output redirect. The path comes from `tempfile::tempdir`
+    // (no embedded single quotes) but the escape keeps the shim
+    // robust to a `TMPDIR` containing spaces.
+    fn shell_escape(s: &str) -> String {
+        let mut out = String::from("'");
+        for ch in s.chars() {
+            if ch == '\'' {
+                out.push_str("'\\''");
+            } else {
+                out.push(ch);
+            }
+        }
+        out.push('\'');
+        out
+    }
+
+    /// Whole-file shield: post-lift, the captured-output helm-spawn
+    /// stanza `<pco>(&<ident>.stdout, …)` (where `<pco>` is the
+    /// [`super::print_captured_output`] name and `<ident>` is any
+    /// identifier that yields a `.stdout` byte-slice) must appear at
+    /// EXACTLY ONE code line in this file — the call inside
+    /// [`super::run_helm_capture`]. The [`super::template`]-variant
+    /// site at [`super::lint`] uses `<pco>(&[], …)` (a literal
+    /// empty-slice first arg, not an `.stdout` field access) and does
+    /// NOT match this needle, so it stays out of scope. A future
+    /// regression that re-fuses the pre-lift seven-line stanza
+    /// (`Command::new(helm_bin())` + `.output().context(...)?` +
+    /// `<pco>(&x.stdout, &x.stderr)` + `ensure_helm_success(&x, ctx)?`)
+    /// at any of the three consumer sites would reintroduce a
+    /// `.stdout`-first hit and flip this shield red at `cargo test`.
+    ///
+    /// The needle is reconstructed at test time via [`format!`] from
+    /// the constituent name so this shield's own source text does not
+    /// contain the fused literal and cannot false-match itself — the
+    /// same discipline the sibling
+    /// `test_helm_spawns_route_through_helm_bin_not_raw_literal`
+    /// carries for the `HELM_BIN` bare-literal ban. Filters
+    /// `///`/`//!`/`//` doc-comment lines so the primitive's own
+    /// docstring at [`super::run_helm_capture`] (which legitimately
+    /// names the pre-lift shape as prose) does not false-fire, and
+    /// scans the WHOLE file — no split_once boundary — so a re-fusion
+    /// at ANY caller position in the file (including future sites
+    /// added past the first `#[cfg(test)]` marker at
+    /// `super::capture_tests`) is caught.
+    #[test]
+    fn run_helm_capture_is_the_only_stdout_first_capture_consumer_in_production() {
+        const SOURCE: &str = include_str!("helm.rs");
+        // Reconstruct the forbidden shape at test time — the fused
+        // literal `<pco>(&` never appears in this shield's source,
+        // only the parts do, so a whole-file scan does not self-match.
+        let pco = "print_captured_output";
+        let capture_head = format!("{pco}(&");
+        // A `.stdout` field access is the distinguishing marker of the
+        // three-consumer pre-lift stanza; the template-variant caller
+        // (`{pco}(&[], …)`) lacks it and is out of scope.
+        let stdout_field = ".stdout";
+        let hits: Vec<String> = SOURCE
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                let t = l.trim_start();
+                !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("//")
+            })
+            .filter(|(_, l)| l.contains(&capture_head) && l.contains(stdout_field))
+            .map(|(i, l)| format!("line {}: {}", i + 1, l.trim()))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "post-lift, the captured-output helm-spawn stanza \
+             `{pco}(&<ident>{stdout_field}, …)` must appear at exactly \
+             ONE code line in `commands/helm.rs` (only inside \
+             `run_helm_capture`). A hit at any other line is a \
+             re-fusion of the pre-lift seven-line stanza at one of the \
+             `lint`/`package`/`push` consumer sites, or a fourth \
+             consumer that should also route through the primitive. \
+             Found {} hit(s): {hits:#?}",
+            hits.len(),
+        );
+    }
+}
+
 /// `helm dependency update` for a chart, bounded by [`DEP_TIMEOUT_SECS`] and
 /// retried [`DEP_RETRIES`] times with exponential-with-cap backoff (see
 /// [`HELM_DEP_UPDATE_RETRY_BACKOFF`] + [`helm_dep_update_retry_delay`]). A
@@ -577,13 +826,8 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     // helm lint
     let mut lint_args: Vec<String> = vec!["lint".into(), chart_dir.into()];
     lint_args.extend(value_args.iter().cloned());
-    let lint_output = Command::new(helm_bin())
-        .args(&lint_args)
-        .output()
-        .context("Failed to run helm lint")?;
-    print_captured_output(&lint_output.stdout, &lint_output.stderr);
-
-    ensure_helm_success(&lint_output, chart_dir)?;
+    let lint_argv: Vec<&str> = lint_args.iter().map(String::as_str).collect();
+    run_helm_capture(&lint_argv, chart_dir)?;
 
     // helm template (validation) — skip for library charts. Discard rendered
     // stdout (keep stderr for errors): this is an exit-code validation, not a
@@ -707,13 +951,7 @@ pub fn package(chart_dir: &str, output: &str, version: Option<&str>) -> Result<S
         args.push(&version_str);
     }
 
-    let pkg_output = Command::new(helm_bin())
-        .args(&args)
-        .output()
-        .context("Failed to run helm package")?;
-    print_captured_output(&pkg_output.stdout, &pkg_output.stderr);
-
-    ensure_helm_success(&pkg_output, chart_dir)?;
+    run_helm_capture(&args, chart_dir)?;
 
     // Find the generated tarball — use name from Chart.yaml, not the directory
     // basename (which may contain a Nix store hash prefix).
@@ -742,13 +980,7 @@ pub fn push(chart: &str, registry: &str) -> Result<()> {
 
     info!("Pushing {} → {}", chart, registry);
 
-    let output = Command::new(helm_bin())
-        .args(["push", chart, registry])
-        .output()
-        .context("Failed to run helm push")?;
-    print_captured_output(&output.stdout, &output.stderr);
-
-    ensure_helm_success(&output, chart)?;
+    run_helm_capture(&["push", chart, registry], chart)?;
 
     info!("Push succeeded");
     Ok(())
