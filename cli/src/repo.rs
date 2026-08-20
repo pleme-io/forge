@@ -143,6 +143,90 @@ pub fn get_environment() -> String {
     std::env::var("FORGE_ENV").unwrap_or_else(|_| "staging".to_string())
 }
 
+/// Which product-directory layouts [`find_product_dir`] accepts as terminal.
+///
+/// The monorepo layout is universal — every consumer honors it. The
+/// standalone layout is additive and consumed only by the rust-service
+/// entry point, where a product may live as its own repository rather
+/// than a `pkgs/products/{product}` subtree of a larger monorepo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductDirLayout {
+    /// Monorepo pattern only: an ancestor whose parent is named `products`
+    /// and whose grandparent is named `pkgs` — i.e. `.../pkgs/products/{product}`.
+    Monorepo,
+    /// Monorepo pattern OR standalone: additionally accept any ancestor
+    /// directory that carries both `deploy.yaml` and `.git`, i.e. a
+    /// product repository whose root IS the product directory.
+    MonorepoOrStandalone,
+}
+
+/// Walk up from `start` toward the filesystem root, returning the first
+/// ancestor (including `start` itself) that satisfies `layout`.
+///
+/// Fuses four sibling walkers that spelled the same parent-climb loop
+/// verbatim across the crate:
+///
+/// - `commands/integration_tests.rs::find_product_dir_from_service`
+///   ([`ProductDirLayout::Monorepo`])
+/// - `commands/status.rs::find_product_dir_from_service`
+///   ([`ProductDirLayout::Monorepo`])
+/// - `commands/test.rs::find_product_dir_from_path`
+///   ([`ProductDirLayout::Monorepo`])
+/// - `commands/rust_service.rs::find_product_dir_from_path`
+///   ([`ProductDirLayout::MonorepoOrStandalone`])
+///
+/// Three-of-four sites carried a byte-identical monorepo-only walker;
+/// the fourth extended it with a per-iteration standalone check. Post-
+/// lift the walk lives at ONE place with the layout choice encoded in
+/// the closed enum — a future refinement (a third layout, a per-layer
+/// audit hook, a symlink-cycle guard) lands atomically across every
+/// consumer rather than at whichever copy the author notices.
+///
+/// Walker mechanics — matches the pre-lift shape at every consumer
+/// site:
+///
+/// 1. The monorepo terminal is checked at every iteration against the
+///    CURRENT node: `current.parent()` must be named `products` and
+///    `current.parent().parent()` must be named `pkgs`. The `current`
+///    node itself (the `{product}` component) is what is returned.
+/// 2. The standalone terminal (only under
+///    [`ProductDirLayout::MonorepoOrStandalone`]) is checked at every
+///    iteration against the CURRENT node: `current/deploy.yaml` and
+///    `current/.git` must both exist. Order matches the pre-lift
+///    `commands/rust_service.rs::find_product_dir_from_path` layout —
+///    monorepo terminal first, standalone terminal second — so a path
+///    that satisfies both (a `pkgs/products/{product}` node that
+///    additionally carries a nested `.git`) returns via the monorepo
+///    branch, preserving the pre-lift precedence.
+/// 3. On no match, climb by `current.parent()` and repeat. Terminate
+///    with `None` when there is no parent (i.e. the filesystem root
+///    was reached without hitting either terminal).
+pub fn find_product_dir(start: &Path, layout: ProductDirLayout) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if let Some(parent) = current.parent() {
+            if let Some(grandparent) = parent.parent() {
+                if parent.file_name().and_then(|n| n.to_str()) == Some("products")
+                    && grandparent.file_name().and_then(|n| n.to_str()) == Some("pkgs")
+                {
+                    return Some(current);
+                }
+            }
+        }
+        if matches!(layout, ProductDirLayout::MonorepoOrStandalone)
+            && current.join("deploy.yaml").exists()
+            && current.join(".git").exists()
+        {
+            return Some(current);
+        }
+        if let Some(parent) = current.parent() {
+            current = parent.to_path_buf();
+        } else {
+            return None;
+        }
+    }
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -205,5 +289,130 @@ mod tests {
         std::env::set_var("FORGE_ENV", "production");
         assert_eq!(get_environment(), "production");
         std::env::remove_var("FORGE_ENV");
+    }
+
+    /// The monorepo terminal fires at the `{product}` node when its parent
+    /// is `products` and its grandparent is `pkgs`. Pins the returned path
+    /// to the `{product}` component itself — i.e. `.../pkgs/products/foo`
+    /// walked up from a nested `services/bar` child, NOT the `services`
+    /// sub-node or the `pkgs` root. Same shape every pre-lift consumer
+    /// spelled: the walk-up returns the FIRST ancestor whose parent is
+    /// `products` and grandparent is `pkgs`, so a deep service subtree
+    /// resolves to its owning product directory.
+    #[test]
+    fn find_product_dir_monorepo_returns_product_dir_from_nested_service() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let product = root.path().join("pkgs").join("products").join("foo");
+        let service = product.join("services").join("bar");
+        std::fs::create_dir_all(&service).expect("create nested service dir");
+
+        assert_eq!(
+            find_product_dir(&service, ProductDirLayout::Monorepo),
+            Some(product)
+        );
+    }
+
+    /// A path with no `pkgs/products/{product}` ancestor and no
+    /// `deploy.yaml`+`.git` marker under [`ProductDirLayout::Monorepo`]
+    /// returns `None` at the filesystem-root terminal. Guards the walker's
+    /// termination shape — the pre-lift `loop {}` returned `None` only
+    /// when `current.parent()` was `None` at the outermost climb, and this
+    /// post-lift shape must match. A silent `Some(root)` return here
+    /// (e.g. a mis-refactored "any path counts" acceptance rule) would
+    /// silently reroute every consumer's `deploy.yaml` lookup to the
+    /// filesystem root.
+    #[test]
+    fn find_product_dir_monorepo_returns_none_when_no_pkgs_products_ancestor() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let unrelated = root.path().join("some").join("other").join("place");
+        std::fs::create_dir_all(&unrelated).expect("create unrelated dir");
+
+        assert!(find_product_dir(&unrelated, ProductDirLayout::Monorepo).is_none());
+    }
+
+    /// Under [`ProductDirLayout::MonorepoOrStandalone`], a directory
+    /// carrying BOTH `deploy.yaml` and `.git` at the current node terminates
+    /// the walk at that node — the pre-lift
+    /// `commands/rust_service.rs::find_product_dir_from_path` shape. The
+    /// walk starts from a nested subdirectory to prove the standalone
+    /// terminal is checked at every level of the parent climb, not only at
+    /// `start`.
+    #[test]
+    fn find_product_dir_standalone_terminal_matches_deploy_yaml_and_git() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let repo_root = root.path().join("standalone-product");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        std::fs::write(repo_root.join("deploy.yaml"), "kind: deploy\n").expect("write deploy.yaml");
+        std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
+        let nested = repo_root.join("crates").join("worker");
+        std::fs::create_dir_all(&nested).expect("create nested crate dir");
+
+        assert_eq!(
+            find_product_dir(&nested, ProductDirLayout::MonorepoOrStandalone),
+            Some(repo_root)
+        );
+    }
+
+    /// Under [`ProductDirLayout::Monorepo`], the standalone terminal is
+    /// NOT checked — a `deploy.yaml`+`.git` directory outside a
+    /// `pkgs/products/{product}` layout returns `None`. Pins the layout
+    /// enum's semantics at the terminal boundary: a caller passing
+    /// [`ProductDirLayout::Monorepo`] gets exactly the pre-lift
+    /// monorepo-only shape, not a superset. Without this a future
+    /// refactor could silently widen the `Monorepo` variant to also fire
+    /// the standalone check and misroute `commands/status.rs` /
+    /// `commands/integration_tests.rs` / `commands/test.rs`.
+    #[test]
+    fn find_product_dir_monorepo_ignores_standalone_marker() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let repo_root = root.path().join("standalone-product");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        std::fs::write(repo_root.join("deploy.yaml"), "kind: deploy\n").expect("write deploy.yaml");
+        std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
+
+        assert!(find_product_dir(&repo_root, ProductDirLayout::Monorepo).is_none());
+    }
+
+    /// A `deploy.yaml` alone (no `.git`) does NOT satisfy the standalone
+    /// terminal — the pre-lift
+    /// `commands/rust_service.rs::find_product_dir_from_path` shape
+    /// required BOTH markers via `&&`. Prevents a bare-`deploy.yaml`
+    /// intermediary directory in the walk (e.g. a `deploy/` folder holding
+    /// per-service YAMLs) from being misidentified as a product root.
+    #[test]
+    fn find_product_dir_standalone_requires_both_deploy_yaml_and_git() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let repo_root = root.path().join("half-standalone");
+        std::fs::create_dir_all(&repo_root).expect("create repo root");
+        std::fs::write(repo_root.join("deploy.yaml"), "kind: deploy\n").expect("write deploy.yaml");
+
+        assert!(find_product_dir(&repo_root, ProductDirLayout::MonorepoOrStandalone).is_none());
+    }
+
+    /// Monorepo terminal wins over standalone terminal when both fire at
+    /// the same node. A `pkgs/products/{product}` directory that also
+    /// carries `deploy.yaml`+`.git` returns via the monorepo branch, not
+    /// the standalone one — preserves the pre-lift
+    /// `commands/rust_service.rs::find_product_dir_from_path` precedence
+    /// (monorepo check first, standalone check second, per iteration).
+    /// Load-bearing because the return value shape is identical either way
+    /// (`Some(current)`), so the branch that fires isn't observable at
+    /// the return, only at the walker's internal ordering — and a
+    /// reordering that silently checked standalone first would still
+    /// return `Some(current)` at this test's node but would diverge at a
+    /// hypothetical layout that terminated on a lower-precedence rule
+    /// first.
+    #[test]
+    fn find_product_dir_monorepo_terminal_wins_when_both_fire() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let product = root.path().join("pkgs").join("products").join("foo");
+        std::fs::create_dir_all(&product).expect("create product dir");
+        std::fs::write(product.join("deploy.yaml"), "kind: deploy\n").expect("write deploy.yaml");
+        std::fs::create_dir_all(product.join(".git")).expect("create .git");
+
+        assert_eq!(
+            find_product_dir(&product, ProductDirLayout::MonorepoOrStandalone),
+            Some(product)
+        );
     }
 }

@@ -1126,28 +1126,6 @@ fn print_summary(results: &[TestResult]) {
 // ============================================================================
 
 use crate::config::PreDeploymentTestsConfig;
-use std::path::Path;
-
-/// Walk up from a service directory to find the product directory (pkgs/products/{product}).
-fn find_product_dir_from_service(service_dir: &Path) -> Option<PathBuf> {
-    let mut current = service_dir.to_path_buf();
-    loop {
-        if let Some(parent) = current.parent() {
-            if let Some(grandparent) = parent.parent() {
-                if parent.file_name().and_then(|n| n.to_str()) == Some("products")
-                    && grandparent.file_name().and_then(|n| n.to_str()) == Some("pkgs")
-                {
-                    return Some(current);
-                }
-            }
-        }
-        if let Some(parent) = current.parent() {
-            current = parent.to_path_buf();
-        } else {
-            return None;
-        }
-    }
-}
 
 /// Raw deploy.yaml structure for parsing integration_tests directly
 /// (Web services use a different structure than Rust services)
@@ -1179,12 +1157,13 @@ pub async fn execute_manual(
     // Load deploy.yaml - check deploy/{service_name}.yaml first (outside Nix source tree),
     // then fall back to service_dir/deploy.yaml for backward compatibility.
     let service_dir_path = PathBuf::from(service_dir);
-    let deploy_yaml_path =
-        if let Some(product_dir) = find_product_dir_from_service(&service_dir_path) {
-            crate::config::resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
-        } else {
-            service_dir_path.join("deploy.yaml")
-        };
+    let deploy_yaml_path = if let Some(product_dir) =
+        crate::repo::find_product_dir(&service_dir_path, crate::repo::ProductDirLayout::Monorepo)
+    {
+        crate::config::resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
+    } else {
+        service_dir_path.join("deploy.yaml")
+    };
     if !deploy_yaml_path.exists() {
         anyhow::bail!("No deploy.yaml found at: {}", deploy_yaml_path.display());
     }
