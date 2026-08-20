@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
+use crate::retry::run_inherited_status_sync;
 use crate::version;
 
 /// Resolve the `gem` binary path via `GEM_BIN`, falling back to `gem` on
@@ -389,15 +390,9 @@ pub fn build(working_dir: &str, name: Option<String>) -> Result<String> {
 
     // gem build
     let gem = gem_bin();
-    let status = Command::new(&gem)
-        .args(["build", &gemspec])
-        .current_dir(dir)
-        .status()
-        .context("Failed to run gem build")?;
-
-    if !status.success() {
-        bail!("gem build failed for {}", gemspec);
-    }
+    let mut cmd = Command::new(&gem);
+    cmd.args(["build", &gemspec]).current_dir(dir);
+    run_inherited_status_sync(cmd, &format!("gem build for {}", gemspec))?;
 
     // Find the built .gem file
     let gem_file = find_gem_file(dir, &gem_name)?;
@@ -462,14 +457,9 @@ pub fn push(
     }
 
     let gem = gem_bin();
-    let status = Command::new(&gem)
-        .args(&args)
-        .status()
-        .context("Failed to run gem push")?;
-
-    if !status.success() {
-        bail!("gem push failed for {}", gem_file);
-    }
+    let mut cmd = Command::new(&gem);
+    cmd.args(&args);
+    run_inherited_status_sync(cmd, &format!("gem push for {}", gem_file))?;
 
     info!("Published: {}", gem_file);
     Ok(())
@@ -490,15 +480,9 @@ pub fn test(working_dir: &str, name: Option<String>) -> Result<()> {
     info!("Running tests for gem: {}", gem_name);
 
     let bundle = bundle_bin();
-    let status = Command::new(&bundle)
-        .args(["exec", "rake", "spec"])
-        .current_dir(dir)
-        .status()
-        .context("Failed to run bundle exec rake spec")?;
-
-    if !status.success() {
-        bail!("Tests failed for {}", gem_name);
-    }
+    let mut cmd = Command::new(&bundle);
+    cmd.args(["exec", "rake", "spec"]).current_dir(dir);
+    run_inherited_status_sync(cmd, &format!("bundle exec rake spec for {}", gem_name))?;
 
     info!("Tests passed: {}", gem_name);
     Ok(())
@@ -886,6 +870,71 @@ mod tests {
             after, "module GemUnderTest\n  VERSION = %(0.1.1).freeze\nend\n",
             "the file's post-bump bytes must be the pre-bump bytes with the version \
              spliced — every surrounding byte unchanged"
+        );
+    }
+
+    /// Whole-module shield: every status-only spawn in
+    /// `commands/gem.rs` routes through
+    /// [`crate::retry::run_inherited_status_sync`], never a hand-rolled
+    /// `.status()` + `if !status.success() { bail!(…) }` stanza that
+    /// drops the exit code from the operator log line. Pre-lift all
+    /// three spawns — `build` (`gem build <gemspec>`), `push`
+    /// (`gem push <gem-path> [--otp <code>]`), and `test`
+    /// (`bundle exec rake spec`) — spelled the inline stanza with an
+    /// ad-hoc `gem build failed for <gemspec>` / `gem push failed for
+    /// <gem-file>` / `Tests failed for <gem-name>` message that
+    /// carried the gemspec / gem-file / gem-name context but no exit
+    /// code; post-lift each is a one-line delegation and the canonical
+    /// `"{op} failed (exit {code})"` envelope is emitted by
+    /// construction at the primitive's ONE body, with the gemspec /
+    /// gem-file / gem-name folded into the `op` label so the operator
+    /// log line reads e.g. `gem push for foo-1.0.0.gem failed (exit 1)`
+    /// — pre-lift context PLUS the exit code the canonical envelope
+    /// now carries by construction.
+    ///
+    /// Sibling of the `commands/crossplane.rs` shield
+    /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
+    /// (6cb9442) and `commands/pangea_infra.rs`'s
+    /// `test_pangea_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (a6e9b96). Same three-primitive discipline: negative side
+    /// forbids the inline `.status()` builder-terminator at any code
+    /// line in the module body; positive side pins that
+    /// `run_inherited_status_sync(` appears at ≥3 code lines (one per
+    /// pre-lift spawn), so a regression that dropped every delegation
+    /// cannot leave the negative scan trivially satisfied by absence.
+    /// Both hits route through [`crate::test_support::code_line_hits`]
+    /// for anti-docstring-self-match discipline. Scan bounds from file
+    /// start to the FIRST `\n#[cfg(test)]\n` marker (this test
+    /// module's own opener), so this shield's own body — the string
+    /// literal `".status()"` passed to `code_line_hits`, and the
+    /// assertion message that names the forbidden terminator — stays
+    /// out of scope.
+    #[test]
+    fn test_gem_status_spawns_route_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("gem.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\n")
+            .expect("gem.rs must have a `#[cfg(test)]` marker");
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status()");
+        assert!(
+            inline.is_empty(),
+            "commands/gem.rs must not spawn via an inline `.status()` \
+             terminator — every status-only spawn must route through \
+             `crate::retry::run_inherited_status_sync`, which carries \
+             the exit code into the failure envelope. Found: {inline:?}"
+        );
+
+        let delegations =
+            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
+        assert!(
+            delegations >= 3,
+            "commands/gem.rs must route all three status-only spawns \
+             (`gem build` / `gem push` / `bundle exec rake spec`) \
+             through `run_inherited_status_sync` — found only \
+             {delegations} delegation call(s); a dropped call would \
+             leave the negative `.status()` scan satisfied by absence"
         );
     }
 }
