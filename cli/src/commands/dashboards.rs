@@ -761,41 +761,23 @@ mod tests {
     fn test_jsonnet_spawn_routes_through_jsonnet_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("dashboards.rs");
 
-        crate::test_support::assert_source_forbids_bare_spawn_shapes(
+        // Composed three-primitive stanza — bare-spawn refusal, sigil
+        // definition, canonical two-arg delegation — through the
+        // shared `assert_source_routes_bare_spawn_through_two_arg_sigil`
+        // (e108260). Sigil name (`jsonnet_bin`) and remediation
+        // (`resolve \`JSONNET_BIN\` via \`jsonnet_bin()\``) are derived
+        // by the helper from `bare` and `env_var`.
+        crate::test_support::assert_source_routes_bare_spawn_through_two_arg_sigil(
             SOURCE,
             "commands/dashboards.rs",
             "jsonnet",
-            "resolve `JSONNET_BIN` via `jsonnet_bin()`",
-        );
-
-        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
-            SOURCE,
-            "commands/dashboards.rs",
-            "jsonnet_bin",
             "JSONNET_BIN",
-            "jsonnet",
-        );
-        // Assert the canonical two-arg sigil-delegation form appears at
-        // a code line — filtered through `code_line_hits` so a
-        // docstring-only match cannot silently satisfy the shield if
-        // the production sigil body regresses. Pre-lift the shield
-        // spelled `SOURCE.contains(&canonical)` against the substituted
-        // form; the module docstring above at `commands/dashboards.rs`
-        // quotes the same form verbatim inside a `///` block, so a
-        // regression at `commands/dashboards.rs:46` would silently
-        // pass the pre-lift shield. Shared helper closes that defect
-        // once for the four-plus-cargo shield family.
-        crate::test_support::assert_source_has_canonical_two_arg_sigil_code_line(
-            SOURCE,
-            "commands/dashboards.rs",
-            "JSONNET_BIN",
-            "jsonnet",
         );
         // Also assert the pre-lift deriving one-arg literal-string
-        // form does NOT reappear at any *code* line. Shared helper
-        // since the reconstruction + code-line filter + panic-message
-        // stanza mirrors its constant-driven sibling used across the
-        // three docker shields (`local.rs`, `infra.rs`, `prerelease.rs`).
+        // form does NOT reappear at any *code* line. This site's
+        // uniqueness vs the docker shields: jsonnet has no
+        // `crate::tools::tools::JSONNET` constant, so only the
+        // literal-string deriving form is possible.
         crate::test_support::assert_source_forbids_deriving_one_arg_sigil_literal_form(
             SOURCE,
             "commands/dashboards.rs",
