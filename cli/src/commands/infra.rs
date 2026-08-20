@@ -2,12 +2,13 @@
 //!
 //! Replaces product-sdlc.nix::infra:up/down/clean.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
 use crate::git;
+use crate::retry::run_inherited_status_sync;
 
 /// Resolve the `docker` binary path via `DOCKER_BIN`, falling back to
 /// `docker` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
@@ -52,15 +53,9 @@ pub fn up(working_dir: &str, services: &[String]) -> Result<()> {
         args.push(svc.clone());
     }
 
-    let status = Command::new(docker_bin())
-        .args(&args)
-        .current_dir(&repo_root)
-        .status()
-        .context("Failed to run docker compose up")?;
-
-    if !status.success() {
-        bail!("docker compose up failed");
-    }
+    let mut cmd = Command::new(docker_bin());
+    cmd.args(&args).current_dir(&repo_root);
+    run_inherited_status_sync(cmd, "docker compose up")?;
 
     info!("Infrastructure services started");
     Ok(())
@@ -73,15 +68,10 @@ pub fn down(working_dir: &str) -> Result<()> {
 
     info!("Stopping infrastructure services...");
 
-    let status = Command::new(docker_bin())
-        .args(["compose", "-f", &compose_file.to_string_lossy(), "down"])
-        .current_dir(&repo_root)
-        .status()
-        .context("Failed to run docker compose down")?;
-
-    if !status.success() {
-        bail!("docker compose down failed");
-    }
+    let mut cmd = Command::new(docker_bin());
+    cmd.args(["compose", "-f", &compose_file.to_string_lossy(), "down"])
+        .current_dir(&repo_root);
+    run_inherited_status_sync(cmd, "docker compose down")?;
 
     info!("Infrastructure services stopped");
     Ok(())
@@ -94,22 +84,17 @@ pub fn clean(working_dir: &str) -> Result<()> {
 
     info!("Cleaning infrastructure (removing volumes and orphans)...");
 
-    let status = Command::new(docker_bin())
-        .args([
-            "compose",
-            "-f",
-            &compose_file.to_string_lossy(),
-            "down",
-            "-v",
-            "--remove-orphans",
-        ])
-        .current_dir(&repo_root)
-        .status()
-        .context("Failed to run docker compose down -v")?;
-
-    if !status.success() {
-        bail!("docker compose clean failed");
-    }
+    let mut cmd = Command::new(docker_bin());
+    cmd.args([
+        "compose",
+        "-f",
+        &compose_file.to_string_lossy(),
+        "down",
+        "-v",
+        "--remove-orphans",
+    ])
+    .current_dir(&repo_root);
+    run_inherited_status_sync(cmd, "docker compose clean")?;
 
     info!("Infrastructure cleaned");
     Ok(())
@@ -201,6 +186,76 @@ mod docker_bin_routing_tests {
             "DOCKER_BIN",
             "docker",
             "DOCKER",
+        );
+    }
+}
+
+#[cfg(test)]
+mod status_spawn_routing_tests {
+    /// Whole-module shield: every status-only spawn in
+    /// `commands/infra.rs` routes through
+    /// [`crate::retry::run_inherited_status_sync`], never a hand-rolled
+    /// `.status()` + `if !status.success() { bail!(…) }` stanza that
+    /// drops the exit code from the operator log line. Pre-lift all
+    /// three spawns — `up` (`docker compose -f <file> up -d
+    /// [services…]`), `down` (`docker compose -f <file> down`), and
+    /// `clean` (`docker compose -f <file> down -v --remove-orphans`)
+    /// — spelled the inline stanza with an ad-hoc `docker compose
+    /// {up,down,clean} failed` message that carried the SDLC-phase
+    /// discriminator but no exit code; post-lift each is a one-line
+    /// delegation and the canonical `"{op} failed (exit {code})"`
+    /// envelope is emitted by construction at the primitive's ONE
+    /// body, with the phase discriminator folded into the `op` label
+    /// so the operator log line reads e.g. `docker compose clean
+    /// failed (exit 1)` — pre-lift phase context PLUS the exit code
+    /// the canonical envelope now carries by construction.
+    ///
+    /// Sibling of the `commands/crossplane.rs` shield
+    /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
+    /// (6cb9442), `commands/pangea_infra.rs`'s
+    /// `test_pangea_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (a6e9b96), and `commands/gem.rs`'s
+    /// `test_gem_status_spawns_route_through_run_inherited_status_sync`
+    /// (9072905). Same three-primitive discipline: negative side
+    /// forbids the inline `.status()` builder-terminator at any code
+    /// line in the module body; positive side pins that
+    /// `run_inherited_status_sync(` appears at ≥3 code lines (one per
+    /// pre-lift spawn), so a regression that dropped every delegation
+    /// cannot leave the negative scan trivially satisfied by absence.
+    /// Both hits route through [`crate::test_support::code_line_hits`]
+    /// for anti-docstring-self-match discipline. Scan bounds from file
+    /// start to the FIRST `\n#[cfg(test)]\n` marker (the sibling
+    /// `docker_bin_routing_tests` opener), so this shield's own body
+    /// — the string literal `".status()"` passed to `code_line_hits`,
+    /// and the assertion message that names the forbidden terminator
+    /// — stays out of scope.
+    #[test]
+    fn test_infra_status_spawns_route_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("infra.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\n")
+            .expect("infra.rs must have a `#[cfg(test)]` marker");
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status()");
+        assert!(
+            inline.is_empty(),
+            "commands/infra.rs must not spawn via an inline `.status()` \
+             terminator — every status-only spawn must route through \
+             `crate::retry::run_inherited_status_sync`, which carries \
+             the exit code into the failure envelope. Found: {inline:?}"
+        );
+
+        let delegations =
+            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
+        assert!(
+            delegations >= 3,
+            "commands/infra.rs must route all three status-only spawns \
+             (`docker compose up` / `docker compose down` / `docker \
+             compose clean`) through `run_inherited_status_sync` — \
+             found only {delegations} delegation call(s); a dropped \
+             call would leave the negative `.status()` scan satisfied \
+             by absence"
         );
     }
 }
