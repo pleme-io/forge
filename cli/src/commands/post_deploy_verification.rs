@@ -55,12 +55,8 @@ use crate::retry::RetryPolicy;
 /// only [`RetryPolicy::compute_delay`] from this policy, not
 /// [`RetryPolicy::max_attempts`]. The `max_attempts` field is
 /// unconsulted at this consumption site.
-const HEALTH_ENDPOINT_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: 1,
-    initial_backoff: Duration::from_secs(1),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const HEALTH_ENDPOINT_BACKOFF: RetryPolicy =
+    RetryPolicy::caller_driven_backoff(Duration::from_secs(1));
 
 /// Backoff between health-endpoint probe retries, given a 0-indexed
 /// local `attempt` counter (the `for attempt in 0..=retries` shape

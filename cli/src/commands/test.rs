@@ -65,12 +65,7 @@ use crate::retry::RetryPolicy;
 /// consumes only [`RetryPolicy::compute_delay`] from this policy, not
 /// [`RetryPolicy::max_attempts`]. The `max_attempts` field is
 /// unconsulted at this consumption site.
-const TEST_RETRY_BACKOFF: RetryPolicy = RetryPolicy {
-    max_attempts: 1,
-    initial_backoff: Duration::from_secs(2),
-    factor: 2,
-    max_backoff: Duration::from_secs(30),
-};
+const TEST_RETRY_BACKOFF: RetryPolicy = RetryPolicy::caller_driven_backoff(Duration::from_secs(2));
 
 /// Backoff between web-test-suite retries, given the 1-indexed local
 /// `attempt` counter of the attempt that just failed (the
