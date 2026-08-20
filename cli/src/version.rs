@@ -11576,6 +11576,52 @@ mod tests {
         src[after_brace..body_end].trim()
     }
 
+    /// Count occurrences of `needle` in `src`, stripping any line whose
+    /// first non-whitespace bytes are `//` (both regular `//` and doc
+    /// `///` — the latter starts with `//`, so a single check covers
+    /// both). The "executable-only tally" every source-scan shield in
+    /// this module uses to pin a routing invariant: "the whole module
+    /// carries exactly ONE executable form of this needle — inside the
+    /// helper the shield protects."
+    ///
+    /// Stripping `//` lines stops the helper's own doc, the shield's
+    /// own doc, and any prose about the discipline from spending the
+    /// budget. Callers pair the helper with a `concat!`-split needle so
+    /// the shield's own executable body does not self-match either.
+    ///
+    /// # Compounding
+    ///
+    /// Three tally shields —
+    /// [`shield_body_extraction_lives_in_fn_body_after_signature`],
+    /// [`dep_planners_route_through_plan_optional_dep_by_span`], and
+    /// [`planners_route_semver_guard_through_ensure_writable_semver`] —
+    /// each used to spell this same six-line stripped-tally body inline
+    /// (one as a `count_live` local closure, two as inline `let
+    /// live_hits: usize = src.lines()…` blocks). Three replicas is
+    /// THEORY.md §VI.1's three-times-is-a-law threshold. Post-lift each
+    /// shield takes the tally by one line of delegation, and any drift
+    /// in what "executable" means (a fourth line-filter shape a future
+    /// edit needs — say block comments, `#[cfg(test)]`-gated blocks, or
+    /// a raw-string filter) lands in exactly one place rather than three.
+    ///
+    /// A fourth tally shield (a future writer/reader family's "the
+    /// per-ecosystem locator lives in ONE place" assertion, a future
+    /// `spawn_shield` sibling in `tools.rs` that lands its own module-
+    /// scan needle) inherits the stripped-tally by one line of
+    /// delegation rather than by cargo-cult copy.
+    ///
+    /// The sibling tally shield
+    /// [`tally_shields_route_through_count_live_occurrences`] forbids
+    /// future re-growth: any hand-rolled `line.matches(needle).count()`
+    /// inside a tally shield trips its `live_hits == 1` assertion at
+    /// source-scan time.
+    fn count_live_occurrences(src: &str, needle: &str) -> usize {
+        src.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .map(|line| line.matches(needle).count())
+            .sum()
+    }
+
     /// The helper extracts the trimmed bytes between the opening and
     /// closing braces of a top-level fn item, and handles both brace
     /// styles present in the tests-module shields — brace-on-signature
@@ -11606,6 +11652,55 @@ mod tests {
         assert_eq!(body, "let x = {\n        1\n    };\n    x");
     }
 
+    /// The helper counts occurrences of `needle` in `src`, stripping
+    /// every line whose first non-whitespace bytes are `//`. Direct
+    /// fixture, rather than inferring the contract from the three
+    /// tally shields that delegate to it.
+    #[test]
+    fn count_live_occurrences_strips_comment_lines_before_counting() {
+        // A needle on an executable line — one occurrence.
+        assert_eq!(count_live_occurrences("let x = foo(1);\n", "foo("), 1);
+
+        // Same needle on a `//` line — stripped, zero occurrences.
+        assert_eq!(count_live_occurrences("// let x = foo(1);\n", "foo("), 0);
+
+        // Same needle on a `///` doc line — stripped, zero occurrences.
+        // `starts_with("//")` covers both `//` and `///` (the latter's
+        // first two bytes are `//`), so the single check subsumes both
+        // comment styles.
+        assert_eq!(count_live_occurrences("/// let x = foo(1);\n", "foo("), 0);
+
+        // Leading whitespace does not save a comment — `trim_start`
+        // owns the "first non-whitespace" bit.
+        assert_eq!(
+            count_live_occurrences("    // let x = foo(1);\n", "foo("),
+            0
+        );
+
+        // Multiple executable lines add up; a comment line between them
+        // is stripped.
+        assert_eq!(
+            count_live_occurrences(
+                "let a = foo(1);\nlet b = foo(2);\n// let c = foo(3);\n",
+                "foo("
+            ),
+            2
+        );
+
+        // Multiple occurrences on ONE executable line all count —
+        // `.matches` yields every non-overlapping hit.
+        assert_eq!(
+            count_live_occurrences("let x = foo(1) + foo(2);\n", "foo("),
+            2
+        );
+
+        // Absent needle → zero, on both executable and comment lines.
+        assert_eq!(
+            count_live_occurrences("let x = bar(1);\n// bar(2)\n", "foo("),
+            0
+        );
+    }
+
     /// The three low-level body-extraction find-strings the helper owns
     /// — `.find(" {\n")` (brace on signature line), `.find("\n{\n")`
     /// (brace after where clause), and `.find("\n}\n")` (closing brace)
@@ -11628,15 +11723,6 @@ mod tests {
     #[test]
     fn shield_body_extraction_lives_in_fn_body_after_signature() {
         let src = include_str!("version.rs");
-        let count_live = |needle: &str| -> usize {
-            src.lines()
-                .filter(|line| {
-                    let trimmed = line.trim_start();
-                    !(trimmed.starts_with("//") || trimmed.starts_with("///"))
-                })
-                .map(|line| line.matches(needle).count())
-                .sum()
-        };
 
         // Broken up with `concat!` so this test's own executable body
         // does not self-match — only the helper's `.find(...)` calls
@@ -11650,7 +11736,7 @@ mod tests {
             (open_where, "brace-after-where-clause locator"),
             (close_brace, "closing-brace locator"),
         ] {
-            let live_hits = count_live(needle);
+            let live_hits = count_live_occurrences(src, needle);
             assert_eq!(
                 live_hits, 1,
                 "the whole module must carry exactly ONE executable \
@@ -11659,6 +11745,46 @@ mod tests {
                  six-replica duplication the helper closed."
             );
         }
+    }
+
+    /// The stripped-tally shape every source-scan shield in this module
+    /// rides — `src.lines().filter(strip `//`).map(line.matches(needle).count()).sum()`
+    /// — lives in exactly ONE executable place: inside
+    /// [`count_live_occurrences`]. Three tally shields
+    /// ([`shield_body_extraction_lives_in_fn_body_after_signature`],
+    /// [`dep_planners_route_through_plan_optional_dep_by_span`], and
+    /// [`planners_route_semver_guard_through_ensure_writable_semver`])
+    /// used to spell the same six-line body inline; any hand-rolled
+    /// re-grown copy re-opens the three-replica duplication the helper
+    /// closed.
+    ///
+    /// `line.matches(needle).count()` is the executable form the tally
+    /// carries and nothing else in the module needs — a per-line
+    /// non-overlapping needle count against a caller-supplied `needle`
+    /// binding — so pinning its module-wide count to ONE is a sharper
+    /// invariant than the outer `.lines().filter(...)` frame (which
+    /// could show up in an unrelated helper). Broken up with `concat!`
+    /// so this test's own executable body does not self-match — only
+    /// the helper's `.matches(...)` call (and any regrown inline
+    /// tally) contributes.
+    ///
+    /// Fail-before-pass-after: re-grow any one tally shield's inline
+    /// six-line body (say, revert `dep_planners_route_through_plan_optional_dep_by_span`'s
+    /// tally to its pre-lift `let live_hits: usize = src.lines()…`
+    /// block) and this shield fires with `left: 2, right: 1`;
+    /// restoring the delegation returns the shield to green.
+    #[test]
+    fn tally_shields_route_through_count_live_occurrences() {
+        let src = include_str!("version.rs");
+        let needle = concat!("line.matches", "(needle).count()");
+        let live_hits = count_live_occurrences(src, needle);
+        assert_eq!(
+            live_hits, 1,
+            "the whole module must carry exactly ONE executable \
+             {needle} — inside `count_live_occurrences`. A tally shield \
+             with its own hand-rolled body re-opens the three-replica \
+             duplication the helper closed."
+        );
     }
 
     /// The IO shell must fire the pure core with the file bytes it read
@@ -12694,19 +12820,13 @@ mod tests {
 
         // Tally: exactly ONE executable occurrence of the
         // repository-URL acceptance shape lives in the module — the
-        // one inside `ensure_writable_repository_url` itself. Comment
-        // mentions of the pattern (in doc comments describing the
-        // guard) are stripped before counting so prose about the
-        // discipline does not spend the budget.
+        // one inside `ensure_writable_repository_url` itself. Routes
+        // through `count_live_occurrences` — the module-wide stripped-
+        // tally primitive that every source-scan shield rides — so the
+        // comment-line filter and per-line `.matches` add-up shape stay
+        // defined in exactly one place.
         let needle = concat!("new_repository", ".is_empty()");
-        let live_hits: usize = src
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim_start();
-                !(trimmed.starts_with("//") || trimmed.starts_with("///"))
-            })
-            .map(|line| line.matches(needle).count())
-            .sum();
+        let live_hits = count_live_occurrences(src, needle);
         assert_eq!(
             live_hits, 1,
             "the whole module must carry exactly ONE executable \
@@ -12771,19 +12891,13 @@ mod tests {
 
         // The tally shield: the module's non-comment surface carries
         // exactly ONE `SEMVER_LIKE.is_match(new_version)` — the one
-        // inside `ensure_writable_semver` itself. Comment mentions of
-        // the pattern (in this test's doc, in the helper's doc) are
-        // stripped before counting so prose about the discipline does
-        // not spend the budget.
+        // inside `ensure_writable_semver` itself. Routes through
+        // `count_live_occurrences` — the module-wide stripped-tally
+        // primitive that every source-scan shield rides — so the
+        // comment-line filter and per-line `.matches` add-up shape stay
+        // defined in exactly one place.
         let needle = concat!("SEMVER_LIKE", ".is_match(new_version)");
-        let live_hits: usize = src
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim_start();
-                !(trimmed.starts_with("//") || trimmed.starts_with("///"))
-            })
-            .map(|line| line.matches(needle).count())
-            .sum();
+        let live_hits = count_live_occurrences(src, needle);
         assert_eq!(
             live_hits, 1,
             "the whole module must carry exactly ONE executable \
