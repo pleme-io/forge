@@ -312,18 +312,33 @@ pub async fn execute(
         spinner.set_message("Building with Nix...");
         spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
-        let build_result = Command::new(get_tool_path("NIX_BIN", "nix"))
+        // Route the status-only `nix build` spawn through the canonical
+        // `crate::retry::run_inherited_status` primitive so the pre-lift
+        // `.status().await.context(…)?` + `if !build_result.success() {
+        // anyhow::bail!("Nix build failed") }` stanza — which dropped the
+        // exit code from the operator log line (`status.code()` was in
+        // scope and unread) — collapses onto the primitive and the
+        // canonical `"nix build failed (exit {code})"` envelope emerges by
+        // construction at the primitive's ONE body. Binding the outcome
+        // before the `?` propagation also fixes a pre-lift spinner leak
+        // on the spawn-error path: `?` on `.context("Failed to run nix
+        // build")` ran BEFORE `spinner.finish_and_clear()`, so a missing-
+        // nix bubble left the terminal with a live spinner animating
+        // beneath the printed error. Post-lift the spinner clears on
+        // every path (success, non-zero exit, AND spawn error). Sibling
+        // of every recent status-only-spawn lift onto `run_inherited_
+        // status` (build.rs 72a7adf, pangea.rs c5ff1c4, product_release
+        // .rs bf6d836, image_release.rs b5d9573) and its sync twin
+        // (a3d51eb through 6cb9442).
+        let mut build_cmd = Command::new(get_tool_path("NIX_BIN", "nix"));
+        build_cmd
             .current_dir(&working_dir)
-            .args(&["build", ".#dockerImage", "--print-build-logs"])
-            .status()
-            .await
-            .context("Failed to run nix build")?;
+            .args(&["build", ".#dockerImage", "--print-build-logs"]);
+        let outcome = crate::retry::run_inherited_status(build_cmd, "nix build").await;
 
         spinner.finish_and_clear();
 
-        if !build_result.success() {
-            anyhow::bail!("Nix build failed");
-        }
+        outcome?;
 
         // Create result-runner symlink - use just "result" as relative path
         tokio::fs::remove_file(&build_output).await.ok(); // Ignore if doesn't exist
@@ -1580,6 +1595,55 @@ mod nix_bin_routing_tests {
             "commands/github_runner_ci.rs must resolve the nix \
              binary via `get_tool_path(\"NIX_BIN\", \"nix\")` — the \
              canonical lookup was not found in the module body."
+        );
+    }
+
+    /// Whole-module shield: every async status-only spawn in
+    /// `commands/github_runner_ci.rs` routes through
+    /// [`crate::retry::run_inherited_status`], never a hand-rolled
+    /// inline builder terminated by `.status().await` +
+    /// `if !status.success() { anyhow::bail!(FAIL_MSG) }` that drops
+    /// the exit code from the operator log line. Pre-lift the sole
+    /// `nix build .#dockerImage` spawn in [`execute`] spelled the
+    /// eleven-line `.status().await` + `.context(…)?` +
+    /// `if !build_result.success() { anyhow::bail!("Nix build failed") }`
+    /// stanza with an ad-hoc `bail!` that named the phase but dropped
+    /// the exit code — `"Nix build failed"` carried no `code` even
+    /// though `status.code()` was in scope. Post-lift the delegation
+    /// call routes through the primitive and the canonical
+    /// `"nix build failed (exit {code})"` envelope emerges by
+    /// construction at the primitive's ONE body (THEORY.md §V.4
+    /// terminating shape) — the same shape every migrated sibling on
+    /// the async frontier (`commands/{build, pangea, product_release,
+    /// image_release}.rs`, 72a7adf / c5ff1c4 / bf6d836 / b5d9573) and
+    /// on the sync frontier (a3d51eb through 6cb9442) now emits.
+    ///
+    /// Negative side: no `.status().await` builder terminator may
+    /// reappear at any code line in the module body — a re-inlined
+    /// spawn would bypass the primitive and re-drop the exit code.
+    /// Positive side: the delegation call must appear at ≥1 code line
+    /// — a regression that deleted the primitive call cannot leave
+    /// the negative scan trivially satisfied by absence. Both hits
+    /// route through [`crate::test_support::code_line_hits`] for
+    /// anti-docstring-self-match discipline (the `.status().await`
+    /// string in this shield's own docstring is excluded because
+    /// [`code_line_hits`] filters `///`-prefixed lines). The shield
+    /// delegates through the canonical primitive
+    /// [`crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status`]
+    /// so a future refinement (structured diagnostic hook, broadened
+    /// inline needle, tighter cutoff) lands in one body at
+    /// `test_support.rs:1728` and propagates to every consumer by
+    /// construction rather than being copy-edited at each shield.
+    ///
+    /// [`code_line_hits`]: crate::test_support::code_line_hits
+    /// [`execute`]: super::execute
+    #[test]
+    fn test_github_runner_ci_status_spawns_route_through_run_inherited_status() {
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status(
+            include_str!("github_runner_ci.rs"),
+            "commands/github_runner_ci.rs",
+            1,
+            "its `nix build .#dockerImage` spawn",
         );
     }
 }
