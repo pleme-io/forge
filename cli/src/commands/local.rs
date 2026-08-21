@@ -3,12 +3,12 @@
 //! Replaces web-build.nix::mkWebLocalApps.
 //! Builds a Docker image via Nix, loads it, and runs it locally.
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use std::process::Command;
 use tracing::info;
 
 use crate::nix::build_flake_attr;
-use crate::retry::run_query_capture_sync;
+use crate::retry::{run_inherited_status_sync, run_query_capture_sync};
 
 /// Resolve the `docker` binary path via `DOCKER_BIN`, falling back to
 /// `docker` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
@@ -38,14 +38,9 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
     // If a compose file is provided, use docker compose instead
     if let Some(cf) = compose_file {
         info!("Starting {} via docker compose...", name);
-        let status = Command::new(docker_bin())
-            .args(["compose", "-f", cf, "up", "-d", name])
-            .status()
-            .context("Failed to run docker compose up")?;
-
-        if !status.success() {
-            bail!("docker compose up failed for {}", name);
-        }
+        let mut cmd = Command::new(docker_bin());
+        cmd.args(["compose", "-f", cf, "up", "-d", name]);
+        run_inherited_status_sync(cmd, "docker compose up")?;
 
         info!("{} started via compose on port {}", name, port);
         return Ok(());
@@ -64,14 +59,9 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
 
     // Load the image into Docker
     info!("Loading image into Docker...");
-    let load_status = Command::new(docker_bin())
-        .args(["load", "-i", image_path.as_str()])
-        .status()
-        .context("Failed to run docker load")?;
-
-    if !load_status.success() {
-        bail!("docker load failed for {}", image_path);
-    }
+    let mut cmd = Command::new(docker_bin());
+    cmd.args(["load", "-i", image_path.as_str()]);
+    run_inherited_status_sync(cmd, "docker load")?;
 
     // Stop and remove any existing container with the same name
     let _ = Command::new(docker_bin()).args(["stop", name]).output();
@@ -79,22 +69,17 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
 
     // Run the container
     info!("Starting container {} on port {}...", name, port);
-    let run_status = Command::new(docker_bin())
-        .args([
-            "run",
-            "-d",
-            "-p",
-            &format!("{}:80", port),
-            "--name",
-            name,
-            name,
-        ])
-        .status()
-        .context("Failed to run docker run")?;
-
-    if !run_status.success() {
-        bail!("docker run failed for {}", name);
-    }
+    let mut cmd = Command::new(docker_bin());
+    cmd.args([
+        "run",
+        "-d",
+        "-p",
+        &format!("{}:80", port),
+        "--name",
+        name,
+        name,
+    ]);
+    run_inherited_status_sync(cmd, "docker run")?;
 
     info!("{} running at http://localhost:{}", name, port);
     Ok(())
@@ -104,14 +89,9 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
 pub fn down(name: &str, compose_file: Option<&str>) -> Result<()> {
     if let Some(cf) = compose_file {
         info!("Stopping {} via docker compose...", name);
-        let status = Command::new(docker_bin())
-            .args(["compose", "-f", cf, "down"])
-            .status()
-            .context("Failed to run docker compose down")?;
-
-        if !status.success() {
-            bail!("docker compose down failed for {}", name);
-        }
+        let mut cmd = Command::new(docker_bin());
+        cmd.args(["compose", "-f", cf, "down"]);
+        run_inherited_status_sync(cmd, "docker compose down")?;
 
         info!("{} stopped", name);
         return Ok(());
@@ -225,6 +205,82 @@ mod docker_bin_routing_tests {
             "DOCKER_BIN",
             "docker",
             "DOCKER",
+        );
+    }
+}
+
+#[cfg(test)]
+mod status_spawn_routing_tests {
+    /// Whole-module shield: every status-only spawn in
+    /// `commands/local.rs` routes through
+    /// [`crate::retry::run_inherited_status_sync`], never a hand-rolled
+    /// `.status()` + `if !status.success() { bail!(…) }` stanza that
+    /// drops the exit code from the operator log line. Pre-lift all
+    /// four spawns — `up`'s compose branch (`docker compose -f
+    /// <file> up -d <name>`), the Nix-image path's `docker load -i
+    /// <image>` and `docker run -d -p <port>:80 --name <name>
+    /// <name>`, and `down`'s compose branch (`docker compose -f
+    /// <file> down`) — spelled the inline stanza with an ad-hoc
+    /// `docker … failed for <name>` message that carried the target
+    /// name but no exit code; post-lift each is a one-line delegation
+    /// and the canonical `"{op} failed (exit {code})"` envelope is
+    /// emitted by construction at the primitive's ONE body, so the
+    /// operator log line reads e.g. `docker load failed (exit 1)`.
+    ///
+    /// Sibling of the `commands/test_ci.rs` shield
+    /// `test_test_ci_status_spawns_route_through_run_inherited_status_sync`
+    /// (a21bd67), `commands/e2e.rs`'s
+    /// `test_e2e_status_spawns_route_through_run_inherited_status_sync`
+    /// (5faeecb), `commands/tool.rs`'s
+    /// `test_tool_status_spawns_route_through_run_inherited_status_sync`
+    /// (a3d51eb), `commands/infra.rs`'s
+    /// `test_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (27896e4), `commands/gem.rs`'s
+    /// `test_gem_status_spawns_route_through_run_inherited_status_sync`
+    /// (9072905), `commands/pangea_infra.rs`'s
+    /// `test_pangea_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (a6e9b96), and `commands/crossplane.rs`'s
+    /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
+    /// (6cb9442). Same three-primitive discipline: negative side
+    /// forbids the inline `.status()` builder-terminator at any code
+    /// line in the module body; positive side pins that
+    /// `run_inherited_status_sync(` appears at ≥4 code lines (one per
+    /// pre-lift spawn), so a regression that dropped every delegation
+    /// cannot leave the negative scan trivially satisfied by absence.
+    /// Both hits route through [`crate::test_support::code_line_hits`]
+    /// for anti-docstring-self-match discipline. Scan bounds from file
+    /// start to the FIRST `\n#[cfg(test)]\n` marker (the sibling
+    /// `docker_bin_routing_tests` opener), so this shield's own body
+    /// — the string literal `".status()"` passed to `code_line_hits`,
+    /// and the assertion message that names the forbidden terminator
+    /// — stays out of scope.
+    #[test]
+    fn test_local_status_spawns_route_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("local.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\n")
+            .expect("local.rs must have a `#[cfg(test)]` marker");
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status()");
+        assert!(
+            inline.is_empty(),
+            "commands/local.rs must not spawn via an inline `.status()` \
+             terminator — every status-only spawn must route through \
+             `crate::retry::run_inherited_status_sync`, which carries \
+             the exit code into the failure envelope. Found: {inline:?}"
+        );
+
+        let delegations =
+            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
+        assert!(
+            delegations >= 4,
+            "commands/local.rs must route all four status-only spawns \
+             (`docker compose up` / `docker load` / `docker run` in \
+             `up`, `docker compose down` in `down`) through \
+             `run_inherited_status_sync` — found only {delegations} \
+             delegation call(s); a dropped call would leave the \
+             negative `.status()` scan satisfied by absence"
         );
     }
 }
