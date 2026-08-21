@@ -491,17 +491,16 @@ mod tests {
         // sites all live inside it. The wrapping `execute(` and the tests
         // module below reference the pre-migration string legitimately;
         // the docstring on this test itself does too.
-        let fn_marker = "pub async fn update_kustomization(";
-        let start = SOURCE
-            .find(fn_marker)
-            .expect("push.rs must contain `pub async fn update_kustomization(` — module invariant");
-        let after_fn = &SOURCE[start..];
-        // Bound at the next top-level `pub async fn` in the file
-        // (`execute`), which follows `update_kustomization` in source order.
-        let end_relative = after_fn
-            .find("\npub async fn execute(")
-            .expect("push.rs must contain `pub async fn execute(` after `update_kustomization`");
-        let fn_body = &after_fn[..end_relative];
+        // Bound the fn body between `update_kustomization`'s header and
+        // the next top-level `pub async fn` (`execute`), so docstrings
+        // and the tests module below reference the pre-migration string
+        // legitimately outside this scope.
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "push.rs",
+            "pub async fn update_kustomization(",
+            "\npub async fn execute(",
+        );
 
         assert!(
             !fn_body.contains("Command::new(\"git\")"),

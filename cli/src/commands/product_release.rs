@@ -985,21 +985,15 @@ mod tests {
         // sites all live inside it. The wrapping `push_prebuilt_image`
         // still uses `Command::new(&docker)` legitimately, and the
         // tests / docstrings below reference the pre-migration string.
-        let fn_marker = "pub(crate) async fn run_health_check(";
-        let start = SOURCE.find(fn_marker).expect(
-            "product_release.rs must contain `pub(crate) async fn run_health_check(` \
-             — module invariant",
-        );
-        let after_fn = &SOURCE[start..];
-        // Bound at the next top-level function marker in source order.
+        // Bound the fn body between `run_health_check`'s header and
+        // the next top-level function marker in source order.
         // `check_local_image_exists` follows `run_health_check`.
-        let end_relative = after_fn
-            .find("\nasync fn check_local_image_exists(")
-            .expect(
-                "product_release.rs must contain `async fn check_local_image_exists(` \
-                 after `run_health_check`",
-            );
-        let fn_body = &after_fn[..end_relative];
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "product_release.rs",
+            "pub(crate) async fn run_health_check(",
+            "\nasync fn check_local_image_exists(",
+        );
 
         assert!(
             !fn_body.contains("Command::new(\"kubectl\")"),
@@ -1053,21 +1047,16 @@ mod tests {
     fn test_run_nix_release_app_routes_nix_through_nix_bin_not_raw_command() {
         const SOURCE: &str = include_str!("product_release.rs");
 
-        let fn_marker = "async fn run_nix_release_app(";
-        let start = SOURCE.find(fn_marker).expect(
-            "product_release.rs must contain `async fn run_nix_release_app(` \
-             — module invariant",
+        // Bound the fn body between `run_nix_release_app`'s header and
+        // the next top-level fn marker in source order.
+        // `run_health_check` (identified via its leading doc-comment)
+        // follows `run_nix_release_app`.
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "product_release.rs",
+            "async fn run_nix_release_app(",
+            "\n/// Run a kubectl health check for a deployment.",
         );
-        let after_fn = &SOURCE[start..];
-        // Bound at the next top-level fn marker in source order.
-        // `run_health_check` follows `run_nix_release_app`.
-        let end_relative = after_fn
-            .find("\n/// Run a kubectl health check for a deployment.")
-            .expect(
-                "product_release.rs must contain the `run_health_check` doc-comment \
-                 after `run_nix_release_app`",
-            );
-        let fn_body = &after_fn[..end_relative];
 
         assert!(
             !fn_body.contains("Command::new(\"nix\")"),
@@ -1116,19 +1105,15 @@ mod tests {
     fn test_push_prebuilt_image_routes_docker_through_docker_bin_not_raw_command() {
         const SOURCE: &str = include_str!("product_release.rs");
 
-        let fn_marker = "async fn push_prebuilt_image(";
-        let start = SOURCE.find(fn_marker).expect(
-            "product_release.rs must contain `async fn push_prebuilt_image(` \
-             — module invariant",
-        );
-        let after_fn = &SOURCE[start..];
-        // Bound at the next top-level fn marker in source order.
+        // Bound the fn body between `push_prebuilt_image`'s header and
+        // the next top-level fn marker in source order.
         // `write_artifact_tags` follows `push_prebuilt_image`.
-        let end_relative = after_fn.find("\nasync fn write_artifact_tags(").expect(
-            "product_release.rs must contain `async fn write_artifact_tags(` \
-                 after `push_prebuilt_image`",
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "product_release.rs",
+            "async fn push_prebuilt_image(",
+            "\nasync fn write_artifact_tags(",
         );
-        let fn_body = &after_fn[..end_relative];
 
         assert!(
             !fn_body.contains("Command::new(\"docker\")"),

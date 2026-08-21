@@ -1241,18 +1241,16 @@ mod tests {
         // sibling functions in this module legitimately reference the
         // pre-migration literal, so scoping the check to the target
         // function's body avoids false positives.
-        let fn_marker = "pub fn resolve_k8s_repo_root(";
-        let start = SOURCE.find(fn_marker).expect(
-            "config/mod.rs must contain `pub fn resolve_k8s_repo_root(` — module invariant",
-        );
-        let after_fn = &SOURCE[start..];
-        // Bound at the next top-level `pub fn` in source order
+        // Bound the fn body between `resolve_k8s_repo_root`'s header
+        // and the next top-level `pub fn` in source order
         // (`resolve_deploy_yaml_path`), which follows
         // `resolve_k8s_repo_root`.
-        let end_relative = after_fn
-            .find("\npub fn resolve_deploy_yaml_path(")
-            .expect("config/mod.rs must contain `pub fn resolve_deploy_yaml_path(` after `resolve_k8s_repo_root`");
-        let fn_body = &after_fn[..end_relative];
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "config/mod.rs",
+            "pub fn resolve_k8s_repo_root(",
+            "\npub fn resolve_deploy_yaml_path(",
+        );
 
         assert!(
             !fn_body.contains("Command::new(\"git\")"),

@@ -437,18 +437,16 @@ mod tests {
         // live inside it. The `#[cfg(test)] mod tests` module below
         // references the pre-migration string legitimately in this
         // docstring; the bound stops before it.
-        let fn_marker = "pub async fn execute(";
-        let start = SOURCE
-            .find(fn_marker)
-            .expect("rollback.rs must contain `pub async fn execute(` — module invariant");
-        let after_fn = &SOURCE[start..];
-        // Bound at the `#[cfg(test)]` marker, which follows `execute`
-        // in source order and contains a legitimate mention of the
-        // pre-migration literal in this docstring.
-        let end_relative = after_fn
-            .find("\n#[cfg(test)]")
-            .expect("rollback.rs must contain `#[cfg(test)]` after `execute`");
-        let fn_body = &after_fn[..end_relative];
+        // Bound the fn body between `execute`'s header and the
+        // `#[cfg(test)]` marker, which follows `execute` in source
+        // order and contains a legitimate mention of the pre-migration
+        // literal in this docstring.
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "rollback.rs",
+            "pub async fn execute(",
+            "\n#[cfg(test)]",
+        );
 
         assert!(
             !fn_body.contains("Command::new(\"git\")"),

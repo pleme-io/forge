@@ -2091,18 +2091,12 @@ mod post_deployment_readiness_poll_backoff_tests {
     #[test]
     fn test_execute_readiness_poll_consumes_typed_delay_not_bare_fixed_sleep() {
         let source = include_str!("integration_tests.rs");
-        let fn_marker = "pub async fn execute(";
-        let next_fn_marker = "\nasync fn prepare_environment";
-        let fn_start = source.find(fn_marker).expect(
-            "the `pub async fn execute(` signature must exist — the \
-             shield's slice boundary relies on this signature.",
+        let execute_body = crate::test_support::fn_body_slice_between_markers(
+            source,
+            "commands/integration_tests.rs",
+            "pub async fn execute(",
+            "\nasync fn prepare_environment",
         );
-        let fn_body_rel = source[fn_start..].find(next_fn_marker).expect(
-            "the `async fn prepare_environment` signature must follow \
-             `execute` — the shield's slice boundary relies on this \
-             ordering.",
-        );
-        let execute_body = &source[fn_start..fn_start + fn_body_rel];
 
         let bespoke_needle = format!(
             "sleep(Duration::from_secs({}))",
@@ -2336,22 +2330,15 @@ mod pre_deployment_test_suite_retry_backoff_tests {
     #[test]
     fn test_execute_pre_deployment_tests_retry_consumes_typed_delay_not_bare_fixed_sleep() {
         let source = include_str!("integration_tests.rs");
-        let fn_marker = "pub async fn execute_pre_deployment_tests(";
-        let fn_start = source.find(fn_marker).expect(
-            "the `pub async fn execute_pre_deployment_tests(` \
-             signature must exist — the shield's slice boundary \
-             relies on this signature.",
-        );
         // Bound the slice at the first `#[cfg(test)]` (start of the
         // test-module block that follows the last runtime function)
         // so the shield does not scan its own docstring text below.
-        let tests_marker = "\n#[cfg(test)]\n";
-        let fn_body_rel = source[fn_start..].find(tests_marker).expect(
-            "the `#[cfg(test)]` test-module block must follow \
-             `execute_pre_deployment_tests` — the shield's slice \
-             boundary relies on this ordering.",
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            source,
+            "commands/integration_tests.rs",
+            "pub async fn execute_pre_deployment_tests(",
+            "\n#[cfg(test)]\n",
         );
-        let fn_body = &source[fn_start..fn_start + fn_body_rel];
 
         let bespoke_needle = format!(
             "sleep(Duration::from_secs({}))",
