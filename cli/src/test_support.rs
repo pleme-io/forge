@@ -1516,6 +1516,175 @@ pub fn assert_source_routes_bare_spawn_through_two_arg_sigil(
     assert_source_has_canonical_two_arg_sigil_code_line(source, module_path, env_var, bare);
 }
 
+/// One canonical composition for a whole-module status-only-spawn shield
+/// on the SYNC frontier: every `std::process::Command`-driven status-only
+/// spawn in `source` MUST route through
+/// [`crate::retry::run_inherited_status_sync`], never through a hand-rolled
+/// `.status()` builder-terminator that drops the exit code from the
+/// operator log line.
+///
+/// # Arguments
+///
+/// - `source` — the whole module source (typically
+///   `include_str!("<module>.rs")`).
+/// - `module_path` — canonical repo-relative path used in panic messages
+///   (e.g. `"commands/crossplane.rs"`).
+/// - `min_delegations` — the ≥-floor on `run_inherited_status_sync(`
+///   code-line hits in the module body. The lower bound reflects the
+///   number of status-only spawn sites the caller's `execute` /
+///   command-entry surface currently exposes, so a regression that
+///   drops even one delegation cannot leave the negative `.status()`
+///   scan trivially satisfied by absence.
+/// - `spawns_description` — human-readable name of WHICH spawns the
+///   shield covers (e.g. `"all six status-only spawns
+///   (`test`/`plan`/`apply`/`verify`/`destroy`/`status`)"`), so the
+///   delegation-count assertion carries the same specificity a
+///   hand-rolled shield does.
+///
+/// # What it enforces
+///
+/// The helper computes `body = &source[..cutoff]` where `cutoff` is the
+/// FIRST `\n#[cfg(test)]\n` marker in `source` (which lands at the top
+/// of the primary test block), then:
+///
+/// - `code_line_hits(body, ".status()")` MUST be empty. Any code-line
+///   hit is an inline `.status()` builder-terminator that bypasses the
+///   primitive and silently drops the exit code from the failure
+///   envelope. Docstring / `//`-comment mentions of `.status()` are
+///   filtered by [`code_line_hits`] so the shield's own prose above the
+///   delegation call cannot false-match.
+/// - `code_line_hits(body, "run_inherited_status_sync(").len() >=
+///   min_delegations`. A regression that deletes even one delegation
+///   cannot leave the negative `.status()` scan trivially satisfied by
+///   absence — the two halves are load-bearing together.
+///
+/// # Why one canonical helper
+///
+/// The nine-line shield body appears verbatim across ten command
+/// modules (`crossplane` 6cb9442, `e2e` 5faeecb, `gem` 9072905,
+/// `image_release` b5d9573, `infra` 27896e4, `local` c2922fd,
+/// `pangea_infra` a6e9b96, `rust_service` 5b5c765, `test_ci` a21bd67,
+/// `tool` a3d51eb), differing only in `SOURCE`, `module_path`,
+/// `min_delegations`, and `spawns_description`. Ten occurrences is
+/// >3× THEORY.md §VI.1's three-times-is-a-law threshold ("two
+/// occurrences is a coincidence; three is a law"); this helper is the
+/// law-redeeming consolidation. A future refinement (say broadening
+/// `.status()` to also flag a new terminator form, adding a third
+/// `.stdout(Stdio::inherit())` cross-check, tightening the cutoff
+/// discipline to require a specific marker, or attaching a structured
+/// diagnostic hook) lands in ONE body and propagates to every consumer
+/// by construction rather than being copy-edited at ten sites.
+///
+/// # Boundary marker
+///
+/// The `"\n#[cfg(test)]\n"` marker is the shortest form that reliably
+/// identifies the top of the primary test block across every migrated
+/// module (both the `#[cfg(test)]\nmod tests {` shape and the plain
+/// `#[cfg(test)]` shape reduce to it). Modules with multiple
+/// `#[cfg(test)]` blocks land the cutoff at the FIRST one (the primary
+/// tests) — any production code AFTER the first test block would
+/// escape the scan, so callers keep production code above the first
+/// `#[cfg(test)]`.
+pub fn assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+    source: &str,
+    module_path: &str,
+    min_delegations: usize,
+    spawns_description: &str,
+) {
+    let cutoff = source.find("\n#[cfg(test)]\n").unwrap_or_else(|| {
+        panic!("{module_path} must have a `#[cfg(test)]` marker — the shield's scan boundary depends on it")
+    });
+    let body = &source[..cutoff];
+
+    let inline = code_line_hits(body, ".status()");
+    assert!(
+        inline.is_empty(),
+        "{module_path} must not spawn via an inline `.status()` \
+         terminator — every status-only spawn must route through \
+         `crate::retry::run_inherited_status_sync`, which carries the \
+         exit code into the failure envelope. Found: {inline:?}"
+    );
+
+    let delegations = code_line_hits(body, "run_inherited_status_sync(").len();
+    assert!(
+        delegations >= min_delegations,
+        "{module_path} must route {spawns_description} through \
+         `run_inherited_status_sync` — found only {delegations} \
+         delegation call(s); a dropped call would leave the negative \
+         `.status()` scan satisfied by absence"
+    );
+}
+
+/// Async sibling of
+/// [`assert_source_routes_status_only_spawns_through_run_inherited_status_sync`]:
+/// every `tokio::process::Command`-driven status-only spawn in `source`
+/// MUST route through [`crate::retry::run_inherited_status`], never
+/// through a hand-rolled `.status().await` builder-terminator that
+/// drops the exit code from the operator log line.
+///
+/// # Arguments
+///
+/// Same shape as the sync sibling. `spawns_description` names WHICH
+/// async spawns the shield covers (e.g. `"the two `regenerate_compiler`
+/// status-only spawn sites (`bundle lock --update` and `bundix`)"`).
+///
+/// # What it enforces
+///
+/// The helper computes `body = &source[..cutoff]` where `cutoff` is
+/// the FIRST `\n#[cfg(test)]\n` marker in `source`, then:
+///
+/// - `code_line_hits(body, ".status().await")` MUST be empty. Any
+///   code-line hit is an inline `.status().await` builder-terminator
+///   that bypasses the primitive. The needle is `.status().await`
+///   (not the sync `.status()`) so a legitimate sync `.status()`
+///   consumer elsewhere in the module — should one ever land — does
+///   not false-match this async shield.
+/// - `code_line_hits(body, "run_inherited_status(").len() >=
+///   min_delegations`. The needle `run_inherited_status(` has the
+///   trailing `(` so it does NOT match `run_inherited_status_sync(`
+///   (the character after `_status` is `_`, not `(`) — the two
+///   frontiers count independently.
+///
+/// # Why one canonical helper
+///
+/// The nine-line shield body appears verbatim across three command
+/// modules on the async spawn frontier (`build.rs` 72a7adf,
+/// `pangea.rs` c5ff1c4, `product_release.rs` bf6d836) — past the
+/// three-times-is-a-law threshold in its own right, and part of a
+/// wider thirteen-shield family (10 sync + 3 async) with the sync
+/// sibling above. A future refinement (structured diagnostic hook,
+/// broadened inline needle, tighter cutoff) lands in one body per
+/// frontier rather than at every site.
+pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
+    source: &str,
+    module_path: &str,
+    min_delegations: usize,
+    spawns_description: &str,
+) {
+    let cutoff = source.find("\n#[cfg(test)]\n").unwrap_or_else(|| {
+        panic!("{module_path} must have a `#[cfg(test)]` marker — the shield's scan boundary depends on it")
+    });
+    let body = &source[..cutoff];
+
+    let inline = code_line_hits(body, ".status().await");
+    assert!(
+        inline.is_empty(),
+        "{module_path} must not spawn via an inline `.status().await` \
+         terminator — every async status-only spawn must route through \
+         `crate::retry::run_inherited_status`, which carries the exit \
+         code into the failure envelope. Found: {inline:?}"
+    );
+
+    let delegations = code_line_hits(body, "run_inherited_status(").len();
+    assert!(
+        delegations >= min_delegations,
+        "{module_path} must route {spawns_description} through \
+         `run_inherited_status` — found only {delegations} \
+         delegation call(s); a dropped call would leave the negative \
+         `.status().await` scan satisfied by absence"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3053,6 +3222,128 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "cli/src/test_support.rs",
             "git",
             "git_command_sync",
+        );
+    }
+
+    /// Happy path for
+    /// [`assert_source_routes_status_only_spawns_through_run_inherited_status_sync`]:
+    /// a module body carrying no inline `.status()` terminator and
+    /// enough `run_inherited_status_sync(` delegations to meet the
+    /// floor passes cleanly. The `#[cfg(test)]` marker is required by
+    /// the helper's cutoff scan, so the fixture carries one.
+    #[test]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_sync_accepts_migrated_module(
+    ) {
+        let source = "\
+            fn a() { let mut c = std::process::Command::new(\"x\"); \
+             crate::retry::run_inherited_status_sync(c, \"x\").unwrap(); }\n\
+            fn b() { let mut c = std::process::Command::new(\"y\"); \
+             crate::retry::run_inherited_status_sync(c, \"y\").unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { fn t() { panic!(\".status()\"); } }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            source,
+            "fake/module.rs",
+            2,
+            "both status-only spawns",
+        );
+    }
+
+    /// The negative half: an inline `.status()` terminator anywhere in
+    /// the module body (above the first `#[cfg(test)]` marker) fires
+    /// the shield.
+    #[test]
+    #[should_panic(expected = "inline `.status()` terminator")]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_sync_rejects_inline_status_terminator(
+    ) {
+        let source = "\
+            fn a() { std::process::Command::new(\"x\").arg(\"probe\").status().unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            source,
+            "fake/module.rs",
+            0,
+            "no spawns claimed",
+        );
+    }
+
+    /// The positive half: a module body with too few delegations —
+    /// even absent any inline `.status()` — fires the shield. This
+    /// pins the "a dropped delegation cannot leave the negative scan
+    /// trivially satisfied by absence" invariant the docstring cites.
+    #[test]
+    #[should_panic(expected = "delegation call(s)")]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_sync_rejects_missing_delegation(
+    ) {
+        let source = "\
+            fn a() { let mut c = std::process::Command::new(\"x\"); \
+             crate::retry::run_inherited_status_sync(c, \"x\").unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            source,
+            "fake/module.rs",
+            2,
+            "both spawns",
+        );
+    }
+
+    /// Happy path for the async sibling
+    /// [`assert_source_routes_status_only_spawns_through_run_inherited_status`]:
+    /// a module body carrying no inline `.status().await` terminator
+    /// and enough `run_inherited_status(` delegations passes cleanly.
+    #[test]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_accepts_migrated_module(
+    ) {
+        let source = "\
+            async fn a() { let mut c = tokio::process::Command::new(\"x\"); \
+             crate::retry::run_inherited_status(c, \"x\").await.unwrap(); }\n\
+            async fn b() { let mut c = tokio::process::Command::new(\"y\"); \
+             crate::retry::run_inherited_status(c, \"y\").await.unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status(
+            source,
+            "fake/module.rs",
+            2,
+            "both async spawns",
+        );
+    }
+
+    /// The async sibling's needle is `.status().await`, so a sync
+    /// `.status()` terminator does NOT fire — the two frontiers are
+    /// scoped independently. Pinning this ensures a module that
+    /// happens to carry a legitimate sync `.status()` consumer
+    /// (routed through `run_inherited_status_sync`) is not
+    /// misdiagnosed by the async helper as an inline terminator.
+    #[test]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_ignores_sync_status_terminator(
+    ) {
+        let source = "\
+            async fn a() { let mut c = tokio::process::Command::new(\"x\"); \
+             crate::retry::run_inherited_status(c, \"x\").await.unwrap(); }\n\
+            // sync legitimate consumer routed through the sync primitive:\n\
+            fn b() { let mut c = std::process::Command::new(\"y\"); \
+             crate::retry::run_inherited_status_sync(c, \"y\").unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status(
+            source,
+            "fake/module.rs",
+            1,
+            "one async spawn",
+        );
+    }
+
+    /// An inline `.status().await` fires the async shield.
+    #[test]
+    #[should_panic(expected = "inline `.status().await` terminator")]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_rejects_inline_status_await_terminator(
+    ) {
+        let source = "\
+            async fn a() { tokio::process::Command::new(\"x\").status().await.unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status(
+            source,
+            "fake/module.rs",
+            0,
+            "no spawns claimed",
         );
     }
 }

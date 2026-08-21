@@ -521,31 +521,12 @@ mod tests {
     /// (6cb9442).
     #[test]
     fn test_pangea_infra_status_spawns_route_through_run_inherited_status_sync() {
-        const SOURCE: &str = include_str!("pangea_infra.rs");
-        let cutoff = SOURCE
-            .find("\n#[cfg(test)]\n")
-            .expect("pangea_infra.rs must have a `#[cfg(test)]` marker");
-        let body = &SOURCE[..cutoff];
-
-        let inline = crate::test_support::code_line_hits(body, ".status()");
-        assert!(
-            inline.is_empty(),
-            "commands/pangea_infra.rs must not spawn via an inline \
-             `.status()` terminator — every status-only spawn must route \
-             through `crate::retry::run_inherited_status_sync`, which \
-             carries the exit code into the failure envelope. Found: \
-             {inline:?}"
-        );
-
-        let delegations =
-            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
-        assert!(
-            delegations >= 6,
-            "commands/pangea_infra.rs must route all six status-only \
-             spawns (`test`/`plan`/`apply`/`verify`/`destroy`/`status`) \
-             through `run_inherited_status_sync` — found only \
-             {delegations} delegation call(s); a dropped call would \
-             leave the negative `.status()` scan satisfied by absence"
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            include_str!("pangea_infra.rs"),
+            "commands/pangea_infra.rs",
+            6,
+            "all six status-only spawns \
+             (`test`/`plan`/`apply`/`verify`/`destroy`/`status`)",
         );
     }
 }

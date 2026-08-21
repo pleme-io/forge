@@ -531,30 +531,11 @@ mod tests {
     /// module-body byte spans.
     #[test]
     fn test_build_status_spawns_route_through_run_inherited_status() {
-        const SOURCE: &str = include_str!("build.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
-            "build.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
-        );
-        let body = &SOURCE[..cutoff];
-
-        let inline = crate::test_support::code_line_hits(body, ".status().await");
-        assert!(
-            inline.is_empty(),
-            "commands/build.rs must not spawn via an inline \
-             `.status().await` terminator — every status-only spawn \
-             must route through `crate::retry::run_inherited_status`, \
-             which carries the exit code into the failure envelope. \
-             Found: {inline:?}"
-        );
-
-        let delegations = crate::test_support::code_line_hits(body, "run_inherited_status(").len();
-        assert!(
-            delegations >= 1,
-            "commands/build.rs must route its nix build spawn through \
-             `run_inherited_status` — found only {delegations} \
-             delegation call(s); a dropped call would leave the \
-             negative `.status().await` scan satisfied by absence"
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status(
+            include_str!("build.rs"),
+            "commands/build.rs",
+            1,
+            "its `nix build` spawn",
         );
     }
 }

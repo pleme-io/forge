@@ -2003,33 +2003,14 @@ mod e2e_status_spawn_routing_tests {
     /// forbidden terminator — stays out of scope.
     #[test]
     fn test_e2e_status_spawns_route_through_run_inherited_status_sync() {
-        const SOURCE: &str = include_str!("e2e.rs");
-        let cutoff = SOURCE
-            .find("\n#[cfg(test)]\n")
-            .expect("e2e.rs must have a `#[cfg(test)]` marker");
-        let body = &SOURCE[..cutoff];
-
-        let inline = crate::test_support::code_line_hits(body, ".status()");
-        assert!(
-            inline.is_empty(),
-            "commands/e2e.rs must not spawn via an inline `.status()` \
-             terminator — every status-only spawn must route through \
-             `crate::retry::run_inherited_status_sync`, which carries \
-             the exit code into the failure envelope. Found: {inline:?}"
-        );
-
-        let delegations =
-            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
-        assert!(
-            delegations >= 6,
-            "commands/e2e.rs must route all six status-only spawns \
-             (`cargo test --lib`, `bun run test` reporter + console \
-             branches, `cargo test --test integration_tests`, \
-             `cargo test --test e2e_tests`, and `nix build \
-             <flake-attr>`) through `run_inherited_status_sync` — \
-             found only {delegations} delegation call(s); a dropped \
-             call would leave the negative `.status()` scan satisfied \
-             by absence"
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            include_str!("e2e.rs"),
+            "commands/e2e.rs",
+            6,
+            "all six status-only spawns (`cargo test --lib`, `bun run \
+             test` reporter + console branches, `cargo test --test \
+             integration_tests`, `cargo test --test e2e_tests`, and \
+             `nix build <flake-attr>`)",
         );
     }
 }
