@@ -2072,12 +2072,10 @@ mod tests {
     /// anti-docstring-self-match discipline.
     #[test]
     fn test_attic_routes_attic_bin_through_attic_bin_sigil_not_raw_resolve() {
-        const SOURCE: &str = include_str!("attic.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
-            "infrastructure/attic.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("attic.rs"),
+            "infrastructure/attic.rs",
         );
-        let body = &SOURCE[..cutoff];
 
         let sigil_needle = crate::test_support::sigil_bin_fn_definition_needle("attic_bin");
         let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);

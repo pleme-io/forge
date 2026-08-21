@@ -559,12 +559,10 @@ mod tests {
     /// respective spawn surfaces.
     #[test]
     fn test_frontend_validation_routes_bun_through_bun_bin_sigil_not_raw_command() {
-        const SOURCE: &str = include_str!("frontend_validation.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
-            "frontend_validation.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("frontend_validation.rs"),
+            "commands/frontend_validation.rs",
         );
-        let body = &SOURCE[..cutoff];
         assert!(
             !body.contains("Command::new(\"bun\")"),
             "commands/frontend_validation.rs must not spawn `bun` via the bare \

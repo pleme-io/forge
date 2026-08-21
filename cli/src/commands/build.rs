@@ -478,12 +478,10 @@ mod tests {
     /// pioneered on `commands/supergraph_verification.rs` (65283fb).
     #[test]
     fn test_execute_routes_nix_through_nix_bin_not_raw_command() {
-        const SOURCE: &str = include_str!("build.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
-            "build.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("build.rs"),
+            "commands/build.rs",
         );
-        let body = &SOURCE[..cutoff];
         assert!(
             !body.contains("Command::new(\"nix\")"),
             "commands/build.rs must not spawn `nix` via the bare literal — \
