@@ -1080,12 +1080,10 @@ mod tests {
     #[test]
     fn test_comprehensive_release_routes_docker_compose_through_docker_compose_bin_not_raw_command()
     {
-        let source = include_str!("comprehensive_release.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "comprehensive_release.rs must have a `#[cfg(test)] mod tests {` marker \
-                     — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("comprehensive_release.rs"),
+            "commands/comprehensive_release.rs",
         );
-        let body = &source[..cutoff];
         assert!(
             !body.contains("Command::new(\"docker-compose\")"),
             "commands/comprehensive_release.rs must not spawn `docker-compose` via the bare literal — \
@@ -1130,12 +1128,10 @@ mod tests {
     /// docker-compose shield above.
     #[test]
     fn test_comprehensive_release_routes_docker_through_docker_bin_not_raw_command() {
-        let source = include_str!("comprehensive_release.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "comprehensive_release.rs must have a `#[cfg(test)] mod tests {` marker \
-                     — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("comprehensive_release.rs"),
+            "commands/comprehensive_release.rs",
         );
-        let body = &source[..cutoff];
         assert!(
             !body.contains("Command::new(\"docker\")"),
             "commands/comprehensive_release.rs must not spawn `docker` via the bare literal — \
@@ -1250,12 +1246,10 @@ mod tests {
     /// the sibling `SEA_ORM_CLI_BIN` shield (b037895) established.
     #[test]
     fn test_comprehensive_release_routes_sqlx_through_sqlx_bin_not_raw_command() {
-        let source = include_str!("comprehensive_release.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "comprehensive_release.rs must have a `#[cfg(test)] mod tests {` marker \
-                     — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("comprehensive_release.rs"),
+            "commands/comprehensive_release.rs",
         );
-        let body = &source[..cutoff];
         let forbidden = format!("Command::new({}sqlx{})", "\"", "\"");
         assert!(
             !body.contains(&forbidden),

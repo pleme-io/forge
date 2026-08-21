@@ -836,12 +836,10 @@ mod tests {
     /// (65283fb).
     #[test]
     fn test_developer_tools_routes_docker_compose_through_docker_compose_bin_not_raw_command() {
-        let source = include_str!("developer_tools.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "developer_tools.rs must have a `#[cfg(test)] mod tests {` marker \
-                     — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("developer_tools.rs"),
+            "commands/developer_tools.rs",
         );
-        let body = &source[..cutoff];
         assert!(
             !body.contains("Command::new(\"docker-compose\")"),
             "commands/developer_tools.rs must not spawn `docker-compose` via the bare literal — \
@@ -928,12 +926,10 @@ mod tests {
     /// mention of the forbidden needle from false-matching itself.
     #[test]
     fn test_developer_tools_cargo_update_routes_through_nix_run_cargo_update() {
-        let source = include_str!("developer_tools.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "developer_tools.rs must have a `#[cfg(test)] mod tests {` marker \
-                     — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("developer_tools.rs"),
+            "commands/developer_tools.rs",
         );
-        let body = &source[..cutoff];
         let forbidden = "run_inherited_status(cmd, \"cargo update\")";
         let inline_hits = crate::test_support::code_line_hits(body, forbidden);
         assert!(
@@ -1004,12 +1000,10 @@ mod tests {
     /// literal from false-matching itself.
     #[test]
     fn test_developer_tools_wrapped_crate2nix_routes_through_nix_primitive() {
-        let source = include_str!("developer_tools.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "developer_tools.rs must have a `#[cfg(test)] mod tests {` marker \
-                     — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("developer_tools.rs"),
+            "commands/developer_tools.rs",
         );
-        let body = &source[..cutoff];
         let forbidden = "\"nixpkgs#crate2nix\"";
         let inline_hits = crate::test_support::code_line_hits(body, forbidden);
         assert!(
