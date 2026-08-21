@@ -170,22 +170,35 @@ async fn run_sync_via_kubectl(
 
     println!("  {} Found pod: {}", "→".cyan(), pod_name);
 
-    // Copy config files to the pod
+    // Copy config files to the pod. Routed through
+    // `crate::retry::run_inherited_status` so a non-zero exit bails
+    // with the structural `"{op} failed (exit {code})"` envelope
+    // that `classify_inherited_status` (retry.rs) emits by
+    // construction, rather than the pre-lift ad-hoc bail that named
+    // the step but dropped the exit code the child process
+    // returned. Folds the target namespace/pod/path into the `op`
+    // label so the operator log line carries the same per-copy
+    // anchor the pre-lift bail message had, with the exit code the
+    // pre-lift stanza dropped now preserved at the operator surface.
+    // Sibling of the ten async-frontier lifts already on this
+    // primitive (`commands/{build, github_runner_ci, image_release,
+    // pangea, product_release, rust_service, e2e, local, pangea_infra,
+    // typescript}.rs`) and the intra-module `kubectl exec
+    // novasearchctl sync` lift already riding this same primitive
+    // below.
     let remote_config_path = "/tmp/search-sync-config";
 
-    let cp_status = kubectl_command_async()
-        .args([
-            "cp",
-            &config_path.to_string_lossy(),
-            &format!("{}/{}:{}", namespace, pod_name, remote_config_path),
-        ])
-        .status()
-        .await
-        .context("Failed to copy config to pod")?;
-
-    if !cp_status.success() {
-        bail!("Failed to copy config directory to pod");
-    }
+    let mut cp_cmd = kubectl_command_async();
+    cp_cmd.args([
+        "cp",
+        &config_path.to_string_lossy(),
+        &format!("{}/{}:{}", namespace, pod_name, remote_config_path),
+    ]);
+    let cp_op = format!(
+        "kubectl cp for {}/{}:{}",
+        namespace, pod_name, remote_config_path
+    );
+    crate::retry::run_inherited_status(cp_cmd, &cp_op).await?;
 
     // Run novasearchctl sync inside the pod
     let mut exec_args = vec![
@@ -424,6 +437,85 @@ mod tests {
             SOURCE,
             "commands/search_sync.rs",
             "novasearchctl",
+        );
+    }
+
+    /// Function-scoped shield: `run_sync_via_kubectl`'s body must route
+    /// its `kubectl cp` config-copy spawn through
+    /// [`crate::retry::run_inherited_status`], never a hand-rolled
+    /// `.status().await` + `.context(…)?` + `if !status.success() {
+    /// bail!(…) }` stanza that drops the exit code from the operator
+    /// log line.
+    ///
+    /// Pre-lift the `cp` site spelled the seven-line stanza with a
+    /// pair of ad-hoc failure messages that named the step but
+    /// dropped the exit code the child process returned. Post-lift
+    /// the canonical `"kubectl cp for <ns>/<pod>:<path> failed
+    /// (exit {code})"` envelope emerges by construction at the
+    /// primitive's ONE body — the sibling of the ten async-frontier
+    /// lifts already on this primitive (`commands/{build,
+    /// github_runner_ci, image_release, pangea, product_release,
+    /// rust_service}.rs`) — and the intra-module `kubectl exec
+    /// novasearchctl sync` spawn already routed through the same
+    /// primitive.
+    ///
+    /// Scope is `run_sync_via_kubectl`'s function body (from the fn
+    /// signature to the following `should_run_novasearch_sync`
+    /// docstring marker) because the sibling shields in this module
+    /// bound to the whole module and this one must exclude the
+    /// intentional `let _ = …status().await;` best-effort cleanup at
+    /// the tail of the same function — a fn-scoped slice via
+    /// [`crate::test_support::fn_body_slice_between_markers`] keeps
+    /// the negative-side scan tight against the pre-lift stanza and
+    /// leaves the cleanup-discard shape (which is semantically
+    /// distinct from a fatal-bail spawn) alone. The scan targets
+    /// the pre-lift `.context(…)?` needle spelled at test time via
+    /// [`format!`] so the shield's own docstring above (which names
+    /// the pre-lift shape only in prose) does not false-match.
+    /// Positive side pins that `crate::retry::run_inherited_status(`
+    /// appears in the fn body at ≥1 line, so a regression that
+    /// dropped the delegation cannot leave the negative scan
+    /// trivially satisfied by absence.
+    #[test]
+    fn test_run_sync_via_kubectl_cp_spawn_routes_through_run_inherited_status() {
+        const SOURCE: &str = include_str!("search_sync.rs");
+
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/search_sync.rs",
+            "async fn run_sync_via_kubectl(",
+            "\n/// Check if search sync should run",
+        );
+
+        let pre_lift_context = format!(".context({}Failed to copy config to pod{})", '"', '"');
+        assert!(
+            !fn_body.contains(&pre_lift_context),
+            "run_sync_via_kubectl must not re-inline the pre-lift \
+             `.context(…)?` stanza on the `kubectl cp` spawn — every \
+             kubectl cp spawn must route through \
+             `crate::retry::run_inherited_status`, which carries the \
+             exit code into the failure envelope."
+        );
+
+        let pre_lift_bail = format!(
+            "bail!({}Failed to copy config directory to pod{})",
+            '"', '"'
+        );
+        assert!(
+            !fn_body.contains(&pre_lift_bail),
+            "run_sync_via_kubectl must not re-inline the pre-lift \
+             `bail!(…)` on the `kubectl cp` spawn — the ad-hoc \
+             message dropped the exit code the child process \
+             returned. `run_inherited_status`'s canonical \
+             `\"{{op}} failed (exit {{code}})\"` envelope preserves it."
+        );
+
+        assert!(
+            fn_body.contains("crate::retry::run_inherited_status("),
+            "run_sync_via_kubectl must dispatch its `kubectl cp` \
+             spawn through `crate::retry::run_inherited_status` — \
+             the delegation string was not found in \
+             run_sync_via_kubectl."
         );
     }
 }
