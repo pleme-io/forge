@@ -285,14 +285,10 @@ mod tests {
     /// canonical resolver first.
     #[test]
     fn test_kubectl_spawns_resolve_through_tools_kubectl_not_bare_literal() {
-        const SOURCE: &str = include_str!("sessions.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = SOURCE.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("sessions.rs"),
+            "commands/sessions.rs",
         );
-        let module_body = &SOURCE[..body_end];
 
         let bare = "kubectl";
         let bypass_primitive = format!("run_query_capture_sync(\n        \"{}\"", bare);

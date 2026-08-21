@@ -1847,14 +1847,10 @@ mod integration_test_retry_backoff_tests {
     /// defects it forecloses).
     #[test]
     fn test_execute_suite_consumes_typed_retry_delay_not_bare_fixed_sleep() {
-        let source = include_str!("integration_tests.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("integration_tests.rs"),
+            "commands/integration_tests.rs",
         );
-        let module_body = &source[..body_end];
 
         let bare_sleep_hits =
             crate::test_support::code_line_hits(module_body, "sleep(Duration::from_secs(5))");

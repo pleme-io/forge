@@ -1147,14 +1147,10 @@ mod tests {
     /// at `commands/migrations.rs::tests` (commit b962db5).
     #[test]
     fn test_flux_polling_loops_consume_typed_poll_delay_not_bespoke_backoff_struct() {
-        let source = include_str!("flux.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("flux.rs"),
+            "commands/flux.rs",
         );
-        let module_body = &source[..body_end];
 
         // Code-line filter (via `code_line_hits`) skips docstring /
         // prose-comment lines, so the shield does not false-positive
@@ -1232,14 +1228,10 @@ mod tests {
     /// (65283fb) hold on the multi-function consumer surface.
     #[test]
     fn test_flux_routes_kubectl_through_kubectl_command_async_not_raw_command() {
-        let source = include_str!("flux.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-                 the module body — the shield's slice boundary relies \
-                 on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("flux.rs"),
+            "commands/flux.rs",
         );
-        let module_body = &source[..body_end];
 
         assert!(
             !module_body.contains("Command::new(\"kubectl\")"),
