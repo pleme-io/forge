@@ -1487,12 +1487,10 @@ exit 0\n",
     /// the sigil-body or deriving-form assertions.
     #[test]
     fn test_flux_get_routes_flux_bin_through_flux_bin_sigil_not_raw_resolve() {
-        const SOURCE: &str = include_str!("flux_get.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
-            "flux_get.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("flux_get.rs"),
+            "flux_get.rs",
         );
-        let body = &SOURCE[..cutoff];
 
         let sigil_needle = crate::test_support::sigil_bin_fn_definition_needle("flux_bin");
         let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);

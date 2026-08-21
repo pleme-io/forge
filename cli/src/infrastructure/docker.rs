@@ -491,12 +491,10 @@ mod tests {
     /// arm and 0 on the deriving-forbid arm.
     #[test]
     fn test_infrastructure_docker_routes_docker_through_docker_bin_sigil_not_raw_resolve() {
-        const SOURCE: &str = include_str!("docker.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
-            "infrastructure/docker.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("docker.rs"),
+            "infrastructure/docker.rs",
         );
-        let body = &SOURCE[..cutoff];
 
         // (a) The sigil definition itself must be present at a code line.
         let sigil_needle = crate::test_support::sigil_bin_fn_definition_needle("docker_bin");

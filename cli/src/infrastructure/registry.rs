@@ -1018,12 +1018,10 @@ mod tests {
     /// anti-docstring-self-match discipline.
     #[test]
     fn test_registry_routes_doca_through_doca_bin_sigil_not_raw_resolve() {
-        const SOURCE: &str = include_str!("registry.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
-            "infrastructure/registry.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("registry.rs"),
+            "infrastructure/registry.rs",
         );
-        let body = &SOURCE[..cutoff];
 
         let sigil_needle = crate::test_support::sigil_bin_fn_definition_needle("doca_bin");
         let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);
