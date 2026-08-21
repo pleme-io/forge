@@ -1141,11 +1141,7 @@ mod nix_bin_routing_tests {
     #[test]
     fn test_nix_routes_nix_through_nix_bin_sigil_not_raw_command() {
         const SOURCE: &str = include_str!("nix.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "cli/src/nix.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
-        );
-        let body = &SOURCE[..cutoff];
+        let body = crate::test_support::module_body_before_first_cfg_test(SOURCE, "cli/src/nix.rs");
         assert!(
             !body.contains("Command::new(\"nix\")"),
             "cli/src/nix.rs must not spawn `nix` via the bare \

@@ -571,11 +571,10 @@ mod nix_bin_routing_tests {
     #[test]
     fn test_nix_builder_routes_nix_through_nix_bin_not_raw_command() {
         const SOURCE: &str = include_str!("nix_builder.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "nix_builder.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/nix_builder.rs",
         );
-        let body = &SOURCE[..cutoff];
         assert!(
             !body.contains("Command::new(\"nix\")"),
             "commands/nix_builder.rs must not spawn `nix` via the bare \
@@ -646,11 +645,10 @@ mod nix_bin_routing_tests {
     #[test]
     fn test_nix_builder_probes_route_through_ssh_nc_dig_bin_not_raw_command() {
         const SOURCE: &str = include_str!("nix_builder.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "nix_builder.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/nix_builder.rs",
         );
-        let body = &SOURCE[..cutoff];
         for probe in ["ssh", "nc", "dig"] {
             let forbidden = format!("Command::new(\"{}\")", probe);
             assert!(
@@ -730,11 +728,10 @@ mod nix_bin_routing_tests {
     #[test]
     fn test_nix_builder_routes_nc_through_nc_bin_sigil_not_raw_resolve() {
         const SOURCE: &str = include_str!("nix_builder.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "nix_builder.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/nix_builder.rs",
         );
-        let body = &SOURCE[..cutoff];
 
         let sigil_needle = crate::test_support::sigil_bin_fn_definition_needle("nc_bin");
         let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);

@@ -1664,10 +1664,7 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status_sync
     min_delegations: usize,
     spawns_description: &str,
 ) {
-    let cutoff = source.find("\n#[cfg(test)]\n").unwrap_or_else(|| {
-        panic!("{module_path} must have a `#[cfg(test)]` marker — the shield's scan boundary depends on it")
-    });
-    let body = &source[..cutoff];
+    let body = module_body_before_first_cfg_test(source, module_path);
 
     let inline = code_line_hits(body, ".status()");
     assert!(
@@ -1734,10 +1731,7 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
     min_delegations: usize,
     spawns_description: &str,
 ) {
-    let cutoff = source.find("\n#[cfg(test)]\n").unwrap_or_else(|| {
-        panic!("{module_path} must have a `#[cfg(test)]` marker — the shield's scan boundary depends on it")
-    });
-    let body = &source[..cutoff];
+    let body = module_body_before_first_cfg_test(source, module_path);
 
     let inline = code_line_hits(body, ".status().await");
     assert!(
@@ -1864,13 +1858,7 @@ pub fn assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resol
     bare: &str,
     env_var: &str,
 ) {
-    let cutoff = source.find("\n#[cfg(test)]\n").unwrap_or_else(|| {
-        panic!(
-            "{module_path} must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it"
-        )
-    });
-    let body = &source[..cutoff];
+    let body = module_body_before_first_cfg_test(source, module_path);
 
     let sigil_fn = format!("{}_bin", bare.replace('-', "_"));
 
@@ -1975,6 +1963,81 @@ pub fn module_body_before_tests<'a>(source: &'a str, module_path: &str) -> &'a s
             "{module_path}: the `#[cfg(test)]\\nmod tests {{` marker \
              must follow the module body — the shield's slice boundary \
              relies on this module ordering"
+        )
+    });
+    &source[..body_end]
+}
+
+/// Slice `source` at the top of the FIRST `#[cfg(test)]` block (of any
+/// shape) and return the module's non-test body — the shorter-marker
+/// sibling of [`module_body_before_tests`].
+///
+/// The cutoff is the FIRST occurrence of the strictly shorter marker
+/// `"\n#[cfg(test)]\n"` — a `#[cfg(test)]` attribute on its own line,
+/// followed by any line-terminator. Both the `#[cfg(test)]\nmod tests {`
+/// shape (the discipline [`module_body_before_tests`] targets) and the
+/// plain-`#[cfg(test)]\nmod <other-name>` / `#[cfg(test)]\nfn ...` shape
+/// reduce to this shorter marker, so a module that carries MULTIPLE
+/// `#[cfg(test)]` sub-blocks (a per-frontier `mod cargo_env_routing_tests
+/// {}`, `mod docker_bin_routing_tests {}`, `mod resolve_repo_root_git_bin_routing_tests
+/// {}` layout — the shape `commands/e2e.rs` and every sibling module
+/// using per-frontier test buckets already carry) still has its
+/// production body sliced at the FIRST attribute, which is where the
+/// pre-lift `SOURCE.find("\n#[cfg(test)]\n").expect(...)` stanza already
+/// bounded.
+///
+/// # Panics
+///
+/// If `source` does not contain `"\n#[cfg(test)]\n"` — every consumer
+/// shield's slice boundary relies on this module ordering. A module
+/// without the marker cannot be sliced safely; the caller must keep
+/// production code above the first `#[cfg(test)]` block.
+///
+/// # Why one canonical helper
+///
+/// The five-line stanza this helper condenses —
+///
+/// ```ignore
+/// let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
+///     "<file>.rs must have a `#[cfg(test)]` marker — \
+///      the shield's scan boundary depends on it",
+/// );
+/// let body = &SOURCE[..cutoff];
+/// ```
+///
+/// — appears verbatim at 15 shield sites across `test_support.rs`
+/// itself (×3 — the three whole-module short-marker helpers), `nix.rs`
+/// (×1), `commands/crossplane.rs` (×1), `commands/e2e.rs` (×5),
+/// `commands/github_runner_ci.rs` (×1), `commands/nix_builder.rs` (×3),
+/// and `commands/rust_service.rs` (×1). Fifteen occurrences is >5×
+/// THEORY.md §VI.1's three-times-is-a-law threshold ("two occurrences
+/// is a coincidence; three is a law"); this helper is the law-redeeming
+/// consolidation for the shorter-marker half of the family, mirroring
+/// what [`module_body_before_tests`] closed for the longer-marker half.
+/// A future refinement (attaching a byte-offset return alongside the
+/// slice, tolerating a preceding `#[allow(...)]` attribute, tightening
+/// the marker discipline, or attaching a structured diagnostic hook)
+/// lands in ONE body and propagates to every shield by construction
+/// rather than being copy-edited at 15 sites.
+///
+/// # Contrast with the longer marker
+///
+/// [`module_body_before_tests`] uses the strictly longer marker
+/// `"\n#[cfg(test)]\nmod tests {"` because its 23 pre-lift callers all
+/// slice above a single `mod tests {}` block and want the boundary
+/// pinned to that specific shape (a plain `#[cfg(test)]` attribute on
+/// some helper fn would then NOT confuse the cutoff). This helper is
+/// the strictly-shorter dual — pins the boundary to the FIRST
+/// `#[cfg(test)]` attribute regardless of what follows it — because
+/// its 15 pre-lift callers all use the shorter marker verbatim to cover
+/// the per-frontier-test-bucket module layout their shields target.
+pub fn module_body_before_first_cfg_test<'a>(source: &'a str, module_path: &str) -> &'a str {
+    const MARKER: &str = "\n#[cfg(test)]\n";
+    let body_end = source.find(MARKER).unwrap_or_else(|| {
+        panic!(
+            "{module_path}: the `#[cfg(test)]` marker must follow the \
+             module body — the shield's slice boundary relies on this \
+             module ordering"
         )
     });
     &source[..body_end]
@@ -3866,6 +3929,68 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     fn test_module_body_before_tests_preserves_source_lifetime() {
         let source: String = "fn keep() {}\n#[cfg(test)]\nmod tests { }\n".to_string();
         let body = module_body_before_tests(source.as_str(), "fake/module.rs");
+        assert!(std::ptr::eq(body.as_ptr(), source.as_ptr()));
+        assert_eq!(body, "fn keep() {}");
+    }
+
+    /// [`module_body_before_first_cfg_test`] slices above the first
+    /// `#[cfg(test)]` attribute regardless of what follows it — the
+    /// happy-path shape a shield that per-frontier-buckets its test
+    /// modules (a `mod cargo_env_routing_tests {}`, `mod
+    /// docker_bin_routing_tests {}`, `mod resolve_repo_root_git_bin_routing_tests
+    /// {}` sequence) already relies on.
+    #[test]
+    fn test_module_body_before_first_cfg_test_slices_at_first_short_marker() {
+        let source = "\
+            fn keep() {}\n\
+            #[cfg(test)]\nmod some_frontier_tests { fn one() {} }\n\
+            #[cfg(test)]\nmod another_frontier_tests { fn two() {} }\n";
+        let body = module_body_before_first_cfg_test(source, "fake/module.rs");
+        assert_eq!(body, "fn keep() {}");
+    }
+
+    /// The FIRST occurrence of the shorter marker wins — a module that
+    /// carries multiple `#[cfg(test)]` attributes still has its
+    /// production body sliced at the first attribute, matching the
+    /// pre-lift stanza's `.find("\n#[cfg(test)]\n")` verb byte-for-byte.
+    /// Both the `mod tests {` shape and the plain `mod <other-name> {`
+    /// shape reduce to the shorter marker, so a shield that lifts onto
+    /// this primitive sees the same cutoff whether the module opens its
+    /// first test block with `mod tests {` or a per-frontier name.
+    #[test]
+    fn test_module_body_before_first_cfg_test_slices_at_first_marker_when_multiple() {
+        let source = "\
+            fn keep() {}\n\
+            #[cfg(test)]\nmod tests { fn one() {} }\n\
+            fn stray() {}\n\
+            #[cfg(test)]\nmod tests { fn two() {} }\n";
+        let body = module_body_before_first_cfg_test(source, "fake/module.rs");
+        assert_eq!(body, "fn keep() {}");
+    }
+
+    /// A source that carries NO `\n#[cfg(test)]\n` marker at all panics
+    /// with the caller-supplied `module_path` and the shorter-marker
+    /// literal in the diagnostic. Guards the pre-lift stanza's
+    /// `expect("<file>.rs must have a \`#[cfg(test)]\` marker …")`
+    /// discipline — a shield landing on a module that lost its
+    /// test-block scan-boundary diagnoses itself by name.
+    #[test]
+    #[should_panic(expected = "fake/module.rs: the `#[cfg(test)]` marker")]
+    fn test_module_body_before_first_cfg_test_panics_with_module_path_when_marker_absent() {
+        let source = "fn only() {}\n";
+        let _ = module_body_before_first_cfg_test(source, "fake/module.rs");
+    }
+
+    /// The returned `&str` borrows from the input `source` with the
+    /// same lifetime — pins the primitive's `<'a>(source: &'a str, ...)
+    /// -> &'a str` signature. A migrated shield that reads `body` and
+    /// then reads `SOURCE` afterward must observe that the primitive
+    /// does not consume or clone `source`; both bindings remain valid
+    /// and refer to the same backing buffer.
+    #[test]
+    fn test_module_body_before_first_cfg_test_preserves_source_lifetime() {
+        let source: String = "fn keep() {}\n#[cfg(test)]\nmod tests { }\n".to_string();
+        let body = module_body_before_first_cfg_test(source.as_str(), "fake/module.rs");
         assert!(std::ptr::eq(body.as_ptr(), source.as_ptr()));
         assert_eq!(body, "fn keep() {}");
     }
