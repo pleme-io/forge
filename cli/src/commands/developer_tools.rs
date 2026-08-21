@@ -754,46 +754,11 @@ mod tests {
     /// discipline for a multi-function consumer.
     #[test]
     fn test_developer_tools_routes_nix_through_nix_bin_not_raw_command() {
-        let source = include_str!("developer_tools.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "developer_tools.rs must have a `#[cfg(test)] mod tests {` marker \
-                     — the shield's scan boundary depends on it",
-        );
-        let body = &source[..cutoff];
-        assert!(
-            !body.contains("Command::new(\"nix\")"),
-            "commands/developer_tools.rs must not spawn `nix` via the bare literal — \
-             every `nix` spawn must resolve `NIX_BIN` via \
-             `nix_bin()` first. \
-             A raw `Command::new(\"nix\")` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        // Sigil sibling: after the `nix_bin()` lift, every consumer routes
-        // through the sigil, so `fn nix_bin()` must be defined AND the
-        // two-argument resolve string must appear in EXACTLY one place —
-        // only the sigil body — so a future added spawn cannot silently
-        // re-copy the resolve inline and drift away from the sigil's
-        // single point of truth. Mirrors the sibling `nix_bin()` shield on
-        // `commands/rust_service.rs::test_rust_service_routes_nix_through_nix_bin_not_raw_command`
-        // (63d4fe7) and the sibling `cargo_bin()` shield below on this
-        // same module. THEORY §I.5: duplication budget zero.
-        assert!(
-            body.contains("fn nix_bin()"),
-            "commands/developer_tools.rs must define `nix_bin()` — the \
-             sigil function that resolves the tools-registry `NIX_BIN` \
-             override for every nix spawn. Mirrors the `nix_bin()` sigil \
-             at `commands/rust_service.rs:117` and the sibling \
-             `cargo_bin()` sigil above on this same module."
-        );
-        let two_arg_needle =
-            crate::test_support::get_tool_path_two_arg_call_needle("NIX_BIN", "nix");
-        let resolve_count = body.matches(two_arg_needle.as_str()).count();
-        assert_eq!(
-            resolve_count, 1,
-            "the two-argument resolve `{two_arg_needle}` must appear \
-             exactly ONCE in the module body (only in the `nix_bin()` \
-             sigil), not {resolve_count} times — every consumer must \
-             route through `nix_bin()`, not re-copy the resolve inline"
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            include_str!("developer_tools.rs"),
+            "commands/developer_tools.rs",
+            "nix",
+            "NIX_BIN",
         );
     }
 
@@ -829,45 +794,11 @@ mod tests {
     /// (65283fb).
     #[test]
     fn test_developer_tools_routes_cargo_through_cargo_env_not_raw_command() {
-        let source = include_str!("developer_tools.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "developer_tools.rs must have a `#[cfg(test)] mod tests {` marker \
-                     — the shield's scan boundary depends on it",
-        );
-        let body = &source[..cutoff];
-        assert!(
-            !body.contains("Command::new(\"cargo\")"),
-            "commands/developer_tools.rs must not spawn `cargo` via the bare literal — \
-             every `cargo` spawn must resolve `CARGO` via \
-             `crate::repo::get_tool_path(\"CARGO\", \"cargo\")` first. \
-             A raw `Command::new(\"cargo\")` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        // Sigil sibling: after the cargo_bin() lift, every consumer routes
-        // through the sigil, so `fn cargo_bin()` must be defined AND the
-        // two-argument resolve string must appear in EXACTLY one place —
-        // only the sigil body — so a future added spawn cannot silently
-        // re-copy the resolve inline and drift away from the sigil's
-        // single point of truth. Mirrors the sibling `cargo_bin()` shield
-        // pair on `commands/test_ci.rs::test_test_ci_routes_cargo_through_cargo_bin_sigil_not_raw_command`
-        // (916f1a4). THEORY §I.5: duplication budget zero.
-        assert!(
-            body.contains("fn cargo_bin()"),
-            "commands/developer_tools.rs must define `cargo_bin()` — the \
-             sigil function that resolves the tools-registry `CARGO` \
-             override for every cargo spawn. Mirrors the `cargo_bin()` \
-             sigil at `commands/test_ci.rs:28` and \
-             `commands/prerelease.rs:109`."
-        );
-        let two_arg_needle =
-            crate::test_support::get_tool_path_two_arg_call_needle("CARGO", "cargo");
-        let resolve_count = body.matches(two_arg_needle.as_str()).count();
-        assert_eq!(
-            resolve_count, 1,
-            "the two-argument resolve `{two_arg_needle}` must appear \
-             exactly ONCE in the module body (only in the `cargo_bin()` \
-             sigil), not {resolve_count} times — every consumer must route \
-             through `cargo_bin()`, not re-copy the resolve inline"
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            include_str!("developer_tools.rs"),
+            "commands/developer_tools.rs",
+            "cargo",
+            "CARGO",
         );
     }
 
