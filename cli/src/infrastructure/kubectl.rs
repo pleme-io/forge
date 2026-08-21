@@ -172,7 +172,7 @@ pub fn kubectl_command_async() -> tokio::process::Command {
 /// runner (the same discipline the `make_executable_shim` helper
 /// enforces).
 pub fn fetch_secret_value(secret_name: &str, namespace: &str, data_key: &str) -> Option<String> {
-    let bin = get_tool_path("kubectl");
+    let bin = get_tool_path(tools::KUBECTL);
     fetch_secret_value_with_bin(&bin, secret_name, namespace, data_key)
 }
 
@@ -303,7 +303,7 @@ fn classify_first_pod_name(output: &std::process::Output) -> Option<String> {
 /// absolute shim path to avoid global-env mutation under cargo
 /// test's parallel runner.
 pub async fn find_first_pod_name_async(namespace: &str, label_selector: &str) -> Option<String> {
-    let bin = get_tool_path("kubectl");
+    let bin = get_tool_path(tools::KUBECTL);
     find_first_pod_name_async_with_bin(&bin, namespace, label_selector).await
 }
 
@@ -742,6 +742,111 @@ mod tests {
             "kubectl_command_async().output() must surface the shim's exit \
              code verbatim — proves the async constructor spawns the \
              KUBECTL_BIN shim end-to-end, not a PATH-resolved `kubectl`"
+        );
+    }
+
+    /// Whole-module shield: no bare
+    /// `crate::tools::get_tool_path("kubectl")` literal form may live
+    /// on any *code* line of `infrastructure/kubectl.rs`'s non-test
+    /// body. Both sync-and-async resolver entry points on this module
+    /// — [`fetch_secret_value`] (delegates to
+    /// [`fetch_secret_value_with_bin`]) and
+    /// [`find_first_pod_name_async`] (delegates to
+    /// [`find_first_pod_name_async_with_bin`]) — MUST route through
+    /// the canonical constant-form
+    /// [`crate::tools::get_tool_path`]`(`[`crate::tools::tools::KUBECTL`]`)`
+    /// lookup that the sibling [`kubectl_command_async`] constructor
+    /// (kubectl.rs:130-132) already uses. Pre-lift the two `_with_bin`
+    /// wrappers spelled `get_tool_path("kubectl")` verbatim — the
+    /// deriving one-arg literal-string form re-derives `KUBECTL_BIN`
+    /// at every call site from the bare `"kubectl"` basename, so a
+    /// fleet-wide grep on `tools::KUBECTL` (the load-bearing constant
+    /// this module's founding [`kubectl_command_async`] delegation
+    /// resolves through) misses the two sites entirely. Routing
+    /// through the `tools::KUBECTL` constant instead pins both
+    /// consumer wrappers to the same canonical name every other
+    /// `KUBECTL_BIN` consumer across forge
+    /// (`commands/sessions.rs`, `commands/seed.rs`, this module's own
+    /// [`kubectl_command_async`]) already routes through, so a rename
+    /// of `tools::KUBECTL` surfaces at every kubectl-resolving site
+    /// as a compile-time error and not silently at a subset of the
+    /// call sites the literal form hides from the audit.
+    ///
+    /// This test reads this module's own source via [`include_str!`]
+    /// and asserts:
+    ///
+    /// - The forbidden literal-string form `get_tool_path("kubectl")`
+    ///   does NOT appear on any *code* line of the non-test body —
+    ///   delegating the docstring filter to
+    ///   [`crate::test_support::code_line_hits`] so the pre-existing
+    ///   docstring at kubectl.rs:45 that narrates the anti-pattern
+    ///   verbatim stays legal.
+    /// - The canonical constant form `get_tool_path(tools::KUBECTL)`
+    ///   DOES appear on at least one *code* line of the non-test
+    ///   body — so a regression that deletes the tools::KUBECTL
+    ///   delegation while keeping the shield trivially satisfied by
+    ///   absence of the forbidden literal still fails.
+    ///
+    /// The forbidden needle is reconstructed via [`format!`] so this
+    /// shield's own body (a runtime string literal, not a docstring)
+    /// does not false-match itself. The scan is bounded strictly to
+    /// the module body — from the file start to the
+    /// `#[cfg(test)]\nmod tests {` marker — so this shield's own
+    /// docstrings AND every current or future kubectl-spawning helper
+    /// landing anywhere in the top-level module body (across the
+    /// three migrated entry points or any as-yet unadded sibling) is
+    /// covered by the same shield without a per-function narrowing.
+    /// Mirrors the whole-module boundary discipline the sibling
+    /// `commands/sessions.rs::tests::test_kubectl_spawns_resolve_
+    /// through_tools_kubectl_not_bare_literal` (commit 8643721) and
+    /// `commands/seed.rs`'s eponymous shield hold on their own
+    /// surfaces.
+    ///
+    /// The end-to-end `KUBECTL_BIN`-routing invariant of the
+    /// [`kubectl_command_async`] constructor is pinned separately by
+    /// [`test_kubectl_command_async_routes_through_kubectl_bin_env_var`]
+    /// above; this shield only certifies that the two sync-and-async
+    /// `_with_bin`-delegating entry points pre-resolve through the
+    /// same canonical constant name.
+    #[test]
+    fn test_kubectl_resolvers_route_through_tools_kubectl_not_bare_literal() {
+        const SOURCE: &str = include_str!("kubectl.rs");
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+        let body_end = SOURCE.find(tests_marker).expect(
+            "the `#[cfg(test)]\\nmod tests {` marker must follow \
+             the module body — the shield's slice boundary relies \
+             on this module ordering",
+        );
+        let module_body = &SOURCE[..body_end];
+
+        let bare = "kubectl";
+        let forbidden_literal = format!("get_tool_path(\"{}\")", bare);
+        let canonical_constant = "get_tool_path(tools::KUBECTL)";
+
+        let hits = crate::test_support::code_line_hits(module_body, &forbidden_literal);
+        assert!(
+            hits.is_empty(),
+            "infrastructure/kubectl.rs must NOT resolve `kubectl` via \
+             the deriving one-arg literal-string form \
+             `get_tool_path(\"kubectl\")` at any *code* line — the bare \
+             `\"kubectl\"` basename is hidden from a fleet-wide \
+             `tools::KUBECTL` audit at every such site, so a rename of \
+             the `tools::KUBECTL` constant would not surface as a build \
+             error at these call sites. Route through the canonical \
+             `get_tool_path(tools::KUBECTL)` constant form the sibling \
+             `kubectl_command_async` (kubectl.rs:130-132) already uses. \
+             Code-line hits: {hits:#?}"
+        );
+
+        let canonical_hits = crate::test_support::code_line_hits(module_body, canonical_constant);
+        assert!(
+            !canonical_hits.is_empty(),
+            "infrastructure/kubectl.rs must resolve the `kubectl` binary \
+             via the canonical `get_tool_path(tools::KUBECTL)` constant \
+             form on at least one *code* line — the required form was \
+             not found in the module body, so a future regression that \
+             drops the delegation would silently satisfy the negative \
+             scan by absence."
         );
     }
 }
