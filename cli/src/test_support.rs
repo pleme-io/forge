@@ -129,6 +129,79 @@ pub static GIT_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// every subsequent test that shares the lock.
 pub static ROOT_FLAKE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// RAII scope-guard that snapshots — and on drop restores — the three
+/// process-global surfaces [`crate::repo::activate_root_flake`] mutates:
+/// the `REPO_ROOT` env var, the `SERVICE_DIR` env var, and the current
+/// working directory. Panic-safe by construction: drop runs on both
+/// normal scope exit and unwind, so a test that panics mid-body cannot
+/// leak `REPO_ROOT=<tempdir>` / `SERVICE_DIR=<tempdir>` / cwd=<tempdir>
+/// to any subsequent test in the same process — the exact leak the
+/// pre-lift manual-restore stanza silently allowed.
+///
+/// Callers MUST hold [`ROOT_FLAKE_ENV_LOCK`] for the duration of the
+/// scope; the guard does not lock the mutex itself so a test-body can
+/// nest a `catch_unwind` inside its capture without deadlocking on
+/// re-entrancy through the lock. Same discipline as [`GitBinScope`]
+/// applied to the three-surface root-flake activation window.
+///
+/// Six tests in `cli/src/repo.rs` reached for the pre-lift three-line
+/// snapshot-and-nine-line-restore stanza VERBATIM
+/// (`activate_root_flake_publishes_repo_root_env_var`,
+/// `activate_root_flake_publishes_service_dir_env_var`,
+/// `activate_root_flake_chdirs_to_repo_root_not_service_dir`,
+/// `activate_root_flake_publishes_env_vars_even_when_chdir_fails`,
+/// `activate_root_flake_error_context_names_the_repo_root_path`,
+/// `activate_root_flake_accepts_str_and_string_and_path_args`) — 6×
+/// past THEORY §VI.1's three-times-is-a-law threshold with the
+/// additional defect that a panic between snapshot and restore
+/// silently leaked the three surfaces to every subsequent test the
+/// process ran. RAII drop closes that leak by construction.
+///
+/// The struct's field order is load-bearing for drop order: `prior_cwd`
+/// is restored FIRST (so `set_current_dir` runs before env-var
+/// mutation), mirroring the pre-lift stanza's ordering at the six
+/// migrated sites. `set_current_dir`'s `Result` is deliberately ignored
+/// with `let _ =` so a torn-down tempdir at drop time cannot
+/// double-panic the unwind path (`set_var` / `remove_var` return `()`,
+/// so they carry the same no-double-panic guarantee for free).
+pub struct RootFlakeEnvSnapshot {
+    prior_cwd: std::path::PathBuf,
+    prior_repo: std::result::Result<String, std::env::VarError>,
+    prior_svc: std::result::Result<String, std::env::VarError>,
+}
+
+impl RootFlakeEnvSnapshot {
+    /// Snapshot the three surfaces `activate_root_flake` mutates at
+    /// the moment of the call. Panics if the current working directory
+    /// is unreadable — same `expect("cwd")` shape the pre-lift
+    /// consumers spelled verbatim, so the migration is a byte-identical
+    /// lift at the snapshot boundary.
+    pub fn capture() -> Self {
+        let prior_cwd = std::env::current_dir().expect("cwd");
+        let prior_repo = std::env::var("REPO_ROOT");
+        let prior_svc = std::env::var("SERVICE_DIR");
+        Self {
+            prior_cwd,
+            prior_repo,
+            prior_svc,
+        }
+    }
+}
+
+impl Drop for RootFlakeEnvSnapshot {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.prior_cwd);
+        match &self.prior_repo {
+            Ok(v) => std::env::set_var("REPO_ROOT", v),
+            Err(_) => std::env::remove_var("REPO_ROOT"),
+        }
+        match &self.prior_svc {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+    }
+}
+
 /// RAII scope-guard that sets `GIT_BIN=value` on construction and
 /// restores the pre-scope state (either the original value or unset) on
 /// drop — panic-safe by construction. Snapshots via `std::env::var` so
@@ -3727,5 +3800,190 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let body = module_body_before_tests(source.as_str(), "fake/module.rs");
         assert!(std::ptr::eq(body.as_ptr(), source.as_ptr()));
         assert_eq!(body, "fn keep() {}");
+    }
+
+    /// [`RootFlakeEnvSnapshot`] MUST restore `REPO_ROOT` and
+    /// `SERVICE_DIR` on drop for BOTH directions of the pre-scope
+    /// state: originally-unset stays unset, originally-set restores
+    /// verbatim. Same two-direction contract [`GitBinScope`]'s sibling
+    /// test at `cli/src/git.rs::test_git_bin_scope_restores_pre_scope_state_on_drop`
+    /// pins, applied to the two env-var surfaces this snapshot owns.
+    #[test]
+    fn test_root_flake_env_snapshot_restores_env_vars_on_drop() {
+        let _guard = ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let starting_cwd = std::env::current_dir().expect("cwd");
+        let starting_repo = std::env::var("REPO_ROOT");
+        let starting_svc = std::env::var("SERVICE_DIR");
+
+        // Direction 1: originally-unset REPO_ROOT / SERVICE_DIR must
+        // stay unset after drop, regardless of in-scope mutation.
+        std::env::remove_var("REPO_ROOT");
+        std::env::remove_var("SERVICE_DIR");
+        {
+            let _snap = RootFlakeEnvSnapshot::capture();
+            std::env::set_var("REPO_ROOT", "/tmp/in-scope-repo");
+            std::env::set_var("SERVICE_DIR", "/tmp/in-scope-svc");
+            assert_eq!(
+                std::env::var("REPO_ROOT").ok().as_deref(),
+                Some("/tmp/in-scope-repo"),
+                "in-scope REPO_ROOT mutation must be visible"
+            );
+            assert_eq!(
+                std::env::var("SERVICE_DIR").ok().as_deref(),
+                Some("/tmp/in-scope-svc"),
+                "in-scope SERVICE_DIR mutation must be visible"
+            );
+        }
+        assert!(
+            std::env::var("REPO_ROOT").is_err(),
+            "originally-unset REPO_ROOT must be unset again after drop"
+        );
+        assert!(
+            std::env::var("SERVICE_DIR").is_err(),
+            "originally-unset SERVICE_DIR must be unset again after drop"
+        );
+
+        // Direction 2: originally-set REPO_ROOT / SERVICE_DIR must
+        // restore the pre-capture value verbatim.
+        std::env::set_var("REPO_ROOT", "/orig/repo");
+        std::env::set_var("SERVICE_DIR", "/orig/svc");
+        {
+            let _snap = RootFlakeEnvSnapshot::capture();
+            std::env::set_var("REPO_ROOT", "/mid/repo");
+            std::env::set_var("SERVICE_DIR", "/mid/svc");
+        }
+        assert_eq!(
+            std::env::var("REPO_ROOT").ok().as_deref(),
+            Some("/orig/repo"),
+            "originally-set REPO_ROOT must be restored verbatim after drop"
+        );
+        assert_eq!(
+            std::env::var("SERVICE_DIR").ok().as_deref(),
+            Some("/orig/svc"),
+            "originally-set SERVICE_DIR must be restored verbatim after drop"
+        );
+
+        // Restore the process-level starting state so a subsequent
+        // test (or the process teardown) sees the same env it did on
+        // entry.
+        match starting_repo {
+            Ok(v) => std::env::set_var("REPO_ROOT", v),
+            Err(_) => std::env::remove_var("REPO_ROOT"),
+        }
+        match starting_svc {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+        let _ = std::env::set_current_dir(starting_cwd);
+    }
+
+    /// [`RootFlakeEnvSnapshot`] MUST restore the pre-scope current
+    /// working directory on drop, mirroring the `let _ =
+    /// std::env::set_current_dir(&prior_cwd);` line each of the 6
+    /// pre-lift migrated sites spelled at teardown. Load-bearing: a
+    /// test that chdirs into a tempdir and then panics leaves every
+    /// subsequent test's `std::env::current_dir()` reading the
+    /// (torn-down) tempdir path — an unrecoverable state without
+    /// process restart. Canonicalization on both sides handles the
+    /// `/private/var/...` vs `/var/...` symlink-prefix drift the
+    /// pre-lift sibling test
+    /// `activate_root_flake_chdirs_to_repo_root_not_service_dir`
+    /// already threads through.
+    #[test]
+    fn test_root_flake_env_snapshot_restores_cwd_on_drop() {
+        let _guard = ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let starting_cwd = std::env::current_dir().expect("cwd");
+        let starting_repo = std::env::var("REPO_ROOT");
+        let starting_svc = std::env::var("SERVICE_DIR");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        {
+            let _snap = RootFlakeEnvSnapshot::capture();
+            std::env::set_current_dir(tmp.path()).expect("chdir to tempdir");
+            let observed_in_scope = std::env::current_dir()
+                .expect("cwd in scope")
+                .canonicalize()
+                .expect("canonicalize in-scope cwd");
+            let expected_in_scope = tmp.path().canonicalize().expect("canonicalize tempdir");
+            assert_eq!(
+                observed_in_scope, expected_in_scope,
+                "in-scope chdir must be visible before drop"
+            );
+        }
+        let observed = std::env::current_dir()
+            .expect("cwd after drop")
+            .canonicalize()
+            .expect("canonicalize observed");
+        let expected = starting_cwd.canonicalize().expect("canonicalize starting");
+        assert_eq!(
+            observed, expected,
+            "cwd must be restored to pre-scope value after drop"
+        );
+
+        match starting_repo {
+            Ok(v) => std::env::set_var("REPO_ROOT", v),
+            Err(_) => std::env::remove_var("REPO_ROOT"),
+        }
+        match starting_svc {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+    }
+
+    /// [`RootFlakeEnvSnapshot`]'s Drop MUST fire on panic-unwind, not
+    /// only on normal scope exit. This is the load-bearing property the
+    /// pre-lift manual-restore stanza did NOT provide: a panic between
+    /// `let prior_repo = ...` and the `match prior_repo { Ok(v) =>
+    /// set_var(...) ...}` epilogue silently leaked `REPO_ROOT`,
+    /// `SERVICE_DIR`, and cwd to every subsequent test in the process.
+    /// RAII closes that leak by construction; this test pins the
+    /// closure so a future refactor that (say) moved the restore into
+    /// a non-Drop path cannot silently regress the invariant.
+    #[test]
+    fn test_root_flake_env_snapshot_restores_env_vars_when_scope_panics() {
+        let _guard = ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let starting_cwd = std::env::current_dir().expect("cwd");
+        let starting_repo = std::env::var("REPO_ROOT");
+        let starting_svc = std::env::var("SERVICE_DIR");
+
+        std::env::set_var("REPO_ROOT", "/pre-panic/repo");
+        std::env::set_var("SERVICE_DIR", "/pre-panic/svc");
+
+        let panic_result = std::panic::catch_unwind(|| {
+            let _snap = RootFlakeEnvSnapshot::capture();
+            std::env::set_var("REPO_ROOT", "/panic-mid/repo");
+            std::env::set_var("SERVICE_DIR", "/panic-mid/svc");
+            panic!("simulated test panic mid-scope");
+        });
+        assert!(
+            panic_result.is_err(),
+            "the simulated panic must propagate out of catch_unwind"
+        );
+        assert_eq!(
+            std::env::var("REPO_ROOT").ok().as_deref(),
+            Some("/pre-panic/repo"),
+            "Drop must have restored REPO_ROOT on the unwind path"
+        );
+        assert_eq!(
+            std::env::var("SERVICE_DIR").ok().as_deref(),
+            Some("/pre-panic/svc"),
+            "Drop must have restored SERVICE_DIR on the unwind path"
+        );
+
+        match starting_repo {
+            Ok(v) => std::env::set_var("REPO_ROOT", v),
+            Err(_) => std::env::remove_var("REPO_ROOT"),
+        }
+        match starting_svc {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+        let _ = std::env::set_current_dir(starting_cwd);
     }
 }

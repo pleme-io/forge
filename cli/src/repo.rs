@@ -667,13 +667,11 @@ mod tests {
         let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::test_support::RootFlakeEnvSnapshot::capture();
         let dir = tempfile::tempdir().expect("tempdir");
         let repo_root = dir.path().join("repo");
         let service_dir = dir.path().join("repo").join("services").join("api");
         std::fs::create_dir_all(&service_dir).expect("create service dir");
-        let prior_repo = std::env::var("REPO_ROOT");
-        let prior_svc = std::env::var("SERVICE_DIR");
-        let prior_cwd = std::env::current_dir().expect("cwd");
 
         activate_root_flake(&repo_root, &service_dir).expect("activate");
         assert_eq!(
@@ -683,19 +681,6 @@ mod tests {
                 .as_deref(),
             Some(repo_root.as_path())
         );
-
-        // Restore process-global state so unrelated tests see a clean
-        // baseline (the lock guards the observation window; restoring
-        // here narrows it further).
-        let _ = std::env::set_current_dir(&prior_cwd);
-        match prior_repo {
-            Ok(v) => std::env::set_var("REPO_ROOT", v),
-            Err(_) => std::env::remove_var("REPO_ROOT"),
-        }
-        match prior_svc {
-            Ok(v) => std::env::set_var("SERVICE_DIR", v),
-            Err(_) => std::env::remove_var("SERVICE_DIR"),
-        }
     }
 
     /// [`activate_root_flake`] publishes `SERVICE_DIR` to the process
@@ -712,13 +697,11 @@ mod tests {
         let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::test_support::RootFlakeEnvSnapshot::capture();
         let dir = tempfile::tempdir().expect("tempdir");
         let repo_root = dir.path().join("repo");
         let service_dir = dir.path().join("repo").join("services").join("worker");
         std::fs::create_dir_all(&service_dir).expect("create service dir");
-        let prior_repo = std::env::var("REPO_ROOT");
-        let prior_svc = std::env::var("SERVICE_DIR");
-        let prior_cwd = std::env::current_dir().expect("cwd");
 
         activate_root_flake(&repo_root, &service_dir).expect("activate");
         assert_eq!(
@@ -728,16 +711,6 @@ mod tests {
                 .as_deref(),
             Some(service_dir.as_path())
         );
-
-        let _ = std::env::set_current_dir(&prior_cwd);
-        match prior_repo {
-            Ok(v) => std::env::set_var("REPO_ROOT", v),
-            Err(_) => std::env::remove_var("REPO_ROOT"),
-        }
-        match prior_svc {
-            Ok(v) => std::env::set_var("SERVICE_DIR", v),
-            Err(_) => std::env::remove_var("SERVICE_DIR"),
-        }
     }
 
     /// [`activate_root_flake`] changes the process working directory to
@@ -754,13 +727,11 @@ mod tests {
         let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::test_support::RootFlakeEnvSnapshot::capture();
         let dir = tempfile::tempdir().expect("tempdir");
         let repo_root = dir.path().join("repo");
         let service_dir = repo_root.join("services").join("api");
         std::fs::create_dir_all(&service_dir).expect("create service dir");
-        let prior_repo = std::env::var("REPO_ROOT");
-        let prior_svc = std::env::var("SERVICE_DIR");
-        let prior_cwd = std::env::current_dir().expect("cwd");
 
         activate_root_flake(&repo_root, &service_dir).expect("activate");
         let observed = std::env::current_dir().expect("cwd after activate");
@@ -770,16 +741,6 @@ mod tests {
         let expected = repo_root.canonicalize().expect("canonicalize repo_root");
         let observed = observed.canonicalize().expect("canonicalize observed");
         assert_eq!(observed, expected);
-
-        let _ = std::env::set_current_dir(&prior_cwd);
-        match prior_repo {
-            Ok(v) => std::env::set_var("REPO_ROOT", v),
-            Err(_) => std::env::remove_var("REPO_ROOT"),
-        }
-        match prior_svc {
-            Ok(v) => std::env::set_var("SERVICE_DIR", v),
-            Err(_) => std::env::remove_var("SERVICE_DIR"),
-        }
     }
 
     /// [`activate_root_flake`] sets both env vars BEFORE attempting the
@@ -797,15 +758,13 @@ mod tests {
         let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::test_support::RootFlakeEnvSnapshot::capture();
         let dir = tempfile::tempdir().expect("tempdir");
         // Point repo_root at a path that DOES NOT exist so
         // set_current_dir fails; service_dir can still be any path.
         let nonexistent_repo_root = dir.path().join("does-not-exist");
         let service_dir = dir.path().join("service");
         assert!(!nonexistent_repo_root.exists());
-        let prior_repo = std::env::var("REPO_ROOT");
-        let prior_svc = std::env::var("SERVICE_DIR");
-        let prior_cwd = std::env::current_dir().expect("cwd");
 
         let result = activate_root_flake(&nonexistent_repo_root, &service_dir);
         assert!(result.is_err(), "chdir to nonexistent path should fail");
@@ -824,16 +783,6 @@ mod tests {
                 .as_deref(),
             Some(service_dir.as_path())
         );
-
-        let _ = std::env::set_current_dir(&prior_cwd);
-        match prior_repo {
-            Ok(v) => std::env::set_var("REPO_ROOT", v),
-            Err(_) => std::env::remove_var("REPO_ROOT"),
-        }
-        match prior_svc {
-            Ok(v) => std::env::set_var("SERVICE_DIR", v),
-            Err(_) => std::env::remove_var("SERVICE_DIR"),
-        }
     }
 
     /// The chdir-failure error surfaces `repo_root`'s path in its
@@ -848,12 +797,10 @@ mod tests {
         let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::test_support::RootFlakeEnvSnapshot::capture();
         let dir = tempfile::tempdir().expect("tempdir");
         let nonexistent_repo_root = dir.path().join("nope");
         let service_dir = dir.path().join("service");
-        let prior_repo = std::env::var("REPO_ROOT");
-        let prior_svc = std::env::var("SERVICE_DIR");
-        let prior_cwd = std::env::current_dir().expect("cwd");
 
         let err = activate_root_flake(&nonexistent_repo_root, &service_dir).unwrap_err();
         let msg = format!("{err:#}");
@@ -861,16 +808,6 @@ mod tests {
             msg.contains(&nonexistent_repo_root.display().to_string()),
             "error should name the repo_root path; got: {msg}"
         );
-
-        let _ = std::env::set_current_dir(&prior_cwd);
-        match prior_repo {
-            Ok(v) => std::env::set_var("REPO_ROOT", v),
-            Err(_) => std::env::remove_var("REPO_ROOT"),
-        }
-        match prior_svc {
-            Ok(v) => std::env::set_var("SERVICE_DIR", v),
-            Err(_) => std::env::remove_var("SERVICE_DIR"),
-        }
     }
 
     /// The primitive accepts the caller's argument shape verbatim
@@ -887,15 +824,13 @@ mod tests {
         let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::test_support::RootFlakeEnvSnapshot::capture();
         let dir = tempfile::tempdir().expect("tempdir");
         let repo_root = dir.path().join("repo");
         let service_dir = repo_root.join("s");
         std::fs::create_dir_all(&service_dir).expect("mkdir");
         let repo_root_str: &str = repo_root.to_str().unwrap();
         let service_dir_string: String = service_dir.display().to_string();
-        let prior_repo = std::env::var("REPO_ROOT");
-        let prior_svc = std::env::var("SERVICE_DIR");
-        let prior_cwd = std::env::current_dir().expect("cwd");
 
         // &str for repo_root, String for service_dir.
         activate_root_flake(repo_root_str, service_dir_string).expect("&str + String");
@@ -905,16 +840,6 @@ mod tests {
         // &str for service_dir (matches the pre-lift status.rs shape).
         let repo_root_owned: String = repo_root.display().to_string();
         activate_root_flake(&repo_root_owned, "").ok();
-
-        let _ = std::env::set_current_dir(&prior_cwd);
-        match prior_repo {
-            Ok(v) => std::env::set_var("REPO_ROOT", v),
-            Err(_) => std::env::remove_var("REPO_ROOT"),
-        }
-        match prior_svc {
-            Ok(v) => std::env::set_var("SERVICE_DIR", v),
-            Err(_) => std::env::remove_var("SERVICE_DIR"),
-        }
     }
 
     /// The `MonorepoOrStandalone` variant does NOT verify the `name:`
