@@ -810,14 +810,10 @@ mod tests {
     /// same canonical constant name.
     #[test]
     fn test_kubectl_resolvers_route_through_tools_kubectl_not_bare_literal() {
-        const SOURCE: &str = include_str!("kubectl.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = SOURCE.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("kubectl.rs"),
+            "infrastructure/kubectl.rs",
         );
-        let module_body = &SOURCE[..body_end];
 
         let bare = "kubectl";
         let forbidden_literal = format!("get_tool_path(\"{}\")", bare);

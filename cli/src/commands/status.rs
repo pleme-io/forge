@@ -1695,14 +1695,10 @@ mod tests {
     /// (65283fb) pioneered on the multi-function consumer surface.
     #[test]
     fn test_status_routes_kubectl_through_kubectl_command_async_not_raw_command() {
-        let source = include_str!("status.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-                 the module body — the shield's slice boundary relies \
-                 on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
         );
-        let module_body = &source[..body_end];
 
         assert!(
             !module_body.contains("Command::new(\"kubectl\")"),
@@ -1897,14 +1893,10 @@ mod tests {
     /// cc81215 / 3e26bbc / 4163c7e / ffa5271 / 8eed602).
     #[test]
     fn kubectl_get_items_is_only_json_items_parse_at_the_fetch_helper_bail_surface() {
-        let source = include_str!("status.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
         );
-        let module_body = &source[..body_end];
 
         let hits = crate::test_support::code_line_hits(module_body, "let empty_vec = vec![];");
         assert!(
@@ -1967,14 +1959,10 @@ mod tests {
     /// cd1cb10 / 89e3231 / 8216981 / 521bda3).
     #[test]
     fn fetch_pods_pre_lift_items_envelope_default_does_not_reappear() {
-        let source = include_str!("status.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
         );
-        let module_body = &source[..body_end];
 
         let hits =
             crate::test_support::code_line_hits(module_body, r#"serde_json::json!({"items": []})"#);
@@ -2141,14 +2129,10 @@ mod tests {
     #[test]
     fn kubectl_get_item_is_only_bail_not_found_parse_stanza_at_the_single_item_fetch_helper_surface(
     ) {
-        let source = include_str!("status.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
         );
-        let module_body = &source[..body_end];
 
         let bail_hits = crate::test_support::code_line_hits(module_body, "anyhow::bail!(\"");
         let compound_hits: Vec<String> = bail_hits
@@ -2348,14 +2332,10 @@ mod tests {
     /// 4163c7e / ffa5271 / 8eed602 / f6b4229 / 59c3391 / 695a8cc).
     #[test]
     fn replica_readiness_display_is_only_ready_equals_desired_conditional_at_fetch_helpers() {
-        let source = include_str!("status.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
         );
-        let module_body = &source[..body_end];
 
         let hits = crate::test_support::code_line_hits(module_body, "if ready == desired {");
         assert_eq!(
@@ -2508,14 +2488,10 @@ mod tests {
     /// 695a8cc / cd1cb10).
     #[test]
     fn replica_count_is_only_pointer_as_i64_unwrap_or_zero_at_the_replica_reader_surface() {
-        let source = include_str!("status.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
         );
-        let module_body = &source[..body_end];
 
         let tail_hits = crate::test_support::code_line_hits(
             module_body,
@@ -2584,14 +2560,10 @@ mod tests {
     /// cd1cb10 / 89e3231).
     #[test]
     fn kubectl_get_object_is_only_seven_arg_get_vector_at_the_single_object_fetch_helper_surface() {
-        let source = include_str!("status.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
         );
-        let module_body = &source[..body_end];
 
         for pre_lift in [
             r#".args(["get", "deployment", deployment_name, "-n", namespace, "-o", "json"])"#,
@@ -2636,14 +2608,10 @@ mod tests {
     /// identifier-placeholder spelling to exactly ONE site.
     #[test]
     fn kubectl_get_object_owns_the_seven_arg_vector_at_exactly_one_line() {
-        let source = include_str!("status.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
         );
-        let module_body = &source[..body_end];
 
         let hits = crate::test_support::code_line_hits(
             module_body,

@@ -1456,14 +1456,10 @@ mod tests {
     /// below.
     #[test]
     fn test_wait_for_shinka_migration_consumes_typed_poll_delay_not_mut_backoff_secs() {
-        let source = include_str!("migrations.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("migrations.rs"),
+            "commands/migrations.rs",
         );
-        let module_body = &source[..body_end];
 
         // Code-line filter (via `code_line_hits`) skips docstring /
         // prose-comment lines, so the shield does not false-positive
@@ -1519,14 +1515,10 @@ mod tests {
 
     #[test]
     fn test_migrations_routes_kubectl_through_kubectl_command_async_not_raw_command() {
-        let source = include_str!("migrations.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("migrations.rs"),
+            "commands/migrations.rs",
         );
-        let module_body = &source[..body_end];
 
         assert!(
             !module_body.contains("Command::new(\"kubectl\")"),

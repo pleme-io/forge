@@ -1014,14 +1014,10 @@ mod tests {
     /// without going through the primitive.
     #[test]
     fn test_execute_consumes_typed_poll_delay_not_bare_fixed_sleep() {
-        let source = include_str!("comprehensive_release.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("comprehensive_release.rs"),
+            "commands/comprehensive_release.rs",
         );
-        let module_body = &source[..body_end];
 
         let bespoke_needle = format!(
             "tokio::time::sleep(tokio::time::Duration::from_secs({}))",

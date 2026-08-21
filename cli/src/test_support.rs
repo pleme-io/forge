@@ -1831,6 +1831,82 @@ pub fn assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resol
     );
 }
 
+/// Slice `source` at the top of its primary `#[cfg(test)] mod tests { … }`
+/// block and return the module's non-test body — the shared shield-slice
+/// primitive.
+///
+/// The cutoff is the FIRST occurrence of the specific
+/// `"\n#[cfg(test)]\nmod tests {"` marker (a `#[cfg(test)]` attribute on
+/// its own line, directly followed by `mod tests {` on the next line —
+/// the shape every migrated shield module across `cli/src/commands`,
+/// `cli/src/infrastructure`, and `cli/src/services` uses to introduce its
+/// primary test block). `source` is typically the module's own
+/// `include_str!("<file>.rs")`, and `module_path` is the canonical
+/// repo-relative label (e.g. `"commands/status.rs"`) named in the panic
+/// message if the marker is missing.
+///
+/// # Panics
+///
+/// If `source` does not contain `"\n#[cfg(test)]\nmod tests {"` — every
+/// consumer shield's slice boundary relies on this module ordering. A
+/// module without the marker cannot be sliced safely; the caller must
+/// keep production code above the first `#[cfg(test)]\nmod tests {`
+/// marker.
+///
+/// # Why one canonical helper
+///
+/// The seven-line stanza this helper condenses —
+///
+/// ```ignore
+/// let tests_marker = "\n#[cfg(test)]\nmod tests {";
+/// let body_end = source.find(tests_marker).expect(
+///     "the `#[cfg(test)]\\nmod tests {` marker must follow \
+///      the module body — the shield's slice boundary relies \
+///      on this module ordering",
+/// );
+/// let module_body = &source[..body_end];
+/// ```
+///
+/// — appears verbatim at 23 shield sites across `commands/status.rs`
+/// (×8), `commands/flux.rs` (×2), `commands/federation_tests.rs` (×2),
+/// `commands/supergraph_verification.rs` (×2), `commands/migrations.rs`
+/// (×2), `commands/comprehensive_release.rs`, `commands/test.rs`,
+/// `commands/integration_tests.rs`, `commands/seed.rs`,
+/// `commands/sessions.rs`, `infrastructure/kubectl.rs`, and
+/// `services/migration_service.rs`. Twenty-three occurrences is >7×
+/// THEORY.md §VI.1's three-times-is-a-law threshold ("two occurrences
+/// is a coincidence; three is a law"); this helper is the law-redeeming
+/// consolidation. A future refinement (say attaching a byte-offset
+/// return alongside the slice, tolerating a preceding `#[allow(...)]`
+/// attribute, or attaching a structured diagnostic hook) lands in ONE
+/// body and propagates to every shield by construction rather than
+/// being copy-edited at 23 sites.
+///
+/// # Contrast with the shorter marker
+///
+/// The sibling helpers
+/// [`assert_source_routes_status_only_spawns_through_run_inherited_status_sync`],
+/// [`assert_source_routes_status_only_spawns_through_run_inherited_status`],
+/// and
+/// [`assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve`]
+/// slice at the strictly shorter marker `"\n#[cfg(test)]\n"` because
+/// they intentionally cover both the `mod tests {` and plain
+/// `#[cfg(test)]` block shapes. This helper deliberately keeps the more
+/// specific `mod tests {`-suffixed marker to match the 23 pre-lift
+/// callers verbatim, so a migration is a pure textual lift with zero
+/// behaviour change at the slice boundary.
+pub fn module_body_before_tests<'a>(source: &'a str, module_path: &str) -> &'a str {
+    const MARKER: &str = "\n#[cfg(test)]\nmod tests {";
+    let body_end = source.find(MARKER).unwrap_or_else(|| {
+        panic!(
+            "{module_path}: the `#[cfg(test)]\\nmod tests {{` marker \
+             must follow the module body — the shield's slice boundary \
+             relies on this module ordering"
+        )
+    });
+    &source[..body_end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3587,5 +3663,69 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "zeta-widget",
             "ZETA_WIDGET_BIN",
         );
+    }
+
+    /// The happy path — a source with a `\n#[cfg(test)]\nmod tests {`
+    /// marker — returns the substring BEFORE the leading newline of the
+    /// marker verbatim. Pins the load-bearing slice boundary the 23
+    /// migrated shield sites depend on: everything up to (and NOT
+    /// including) the newline that starts the marker survives, so a
+    /// shield scanning the returned body sees the module's non-test
+    /// production body and none of its `#[cfg(test)]`-guarded prose.
+    #[test]
+    fn test_module_body_before_tests_slices_at_first_cfg_test_mod_tests_marker() {
+        let source = "fn keep() {}\n#[cfg(test)]\nmod tests { fn drop() {} }\n";
+        let body = module_body_before_tests(source, "fake/module.rs");
+        assert_eq!(body, "fn keep() {}");
+    }
+
+    /// The FIRST occurrence of the marker wins even when the source
+    /// carries multiple `#[cfg(test)]\nmod tests {` blocks — pins the
+    /// callers' pre-lift `source.find(tests_marker)` semantics. A
+    /// module that (say) grew a second test block after the primary
+    /// one still has its non-test body sliced at the first marker,
+    /// matching the pre-lift stanza's `.find(...)` verb byte-for-byte.
+    #[test]
+    fn test_module_body_before_tests_slices_at_first_marker_when_multiple() {
+        let source = "\
+            fn keep() {}\n\
+            #[cfg(test)]\nmod tests { fn one() {} }\n\
+            fn stray() {}\n\
+            #[cfg(test)]\nmod tests { fn two() {} }\n";
+        let body = module_body_before_tests(source, "fake/module.rs");
+        assert_eq!(body, "fn keep() {}");
+    }
+
+    /// A source that spells the shorter `#[cfg(test)]` marker WITHOUT
+    /// the `\nmod tests {` suffix (an inline `#[cfg(test)] fn ...`
+    /// attribute, or a `#[cfg(test)] mod foo {` block whose name is
+    /// not `tests`) does NOT match — the primitive's marker is
+    /// deliberately strict about the `mod tests {` suffix so it
+    /// matches the 23 pre-lift call sites verbatim. The panic surfaces
+    /// with the caller-supplied `module_path` so a shield that lands
+    /// on a module without a `mod tests { ... }` block diagnoses
+    /// itself by name.
+    #[test]
+    #[should_panic(expected = "fake/module.rs: the `#[cfg(test)]\\nmod tests {` marker")]
+    fn test_module_body_before_tests_panics_with_module_path_when_marker_absent() {
+        let source = "fn keep() {}\n#[cfg(test)] fn inline() {}\n";
+        let _ = module_body_before_tests(source, "fake/module.rs");
+    }
+
+    /// The returned `&str` borrows from the input `source` with the
+    /// same lifetime — pins the primitive's `<'a>(source: &'a str, ...)
+    /// -> &'a str` signature. A migrated shield that reads
+    /// `module_body` and then reads `source` afterward (e.g.
+    /// `commands/supergraph_verification.rs::test_rover_fhs_spawn_
+    /// routes_through_rover_fhs_bin_not_raw_literal` at line 801-802)
+    /// must observe that the primitive does not consume or clone
+    /// `source`; both bindings remain valid and refer to the same
+    /// backing buffer.
+    #[test]
+    fn test_module_body_before_tests_preserves_source_lifetime() {
+        let source: String = "fn keep() {}\n#[cfg(test)]\nmod tests { }\n".to_string();
+        let body = module_body_before_tests(source.as_str(), "fake/module.rs");
+        assert!(std::ptr::eq(body.as_ptr(), source.as_ptr()));
+        assert_eq!(body, "fn keep() {}");
     }
 }

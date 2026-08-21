@@ -865,14 +865,10 @@ mod tests {
     /// silently ride along without going through the primitive.
     #[test]
     fn test_wait_for_job_completion_consumes_typed_poll_delay_not_bare_fixed_sleep() {
-        let source = include_str!("federation_tests.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("federation_tests.rs"),
+            "commands/federation_tests.rs",
         );
-        let module_body = &source[..body_end];
 
         let bespoke_needle = format!(
             "sleep(tokio::time::Duration::from_secs({}))",
@@ -950,14 +946,10 @@ mod tests {
     /// pioneered on the multi-function consumer surface.
     #[test]
     fn test_federation_tests_routes_kubectl_through_kubectl_command_async_not_raw_command() {
-        let source = include_str!("federation_tests.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("federation_tests.rs"),
+            "commands/federation_tests.rs",
         );
-        let module_body = &source[..body_end];
 
         assert!(
             !module_body.contains("Command::new(\"kubectl\")"),

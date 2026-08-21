@@ -545,14 +545,10 @@ mod tests {
     /// primitive.
     #[test]
     fn test_wait_for_job_consumes_typed_poll_delay_not_bare_fixed_sleep() {
-        let source = include_str!("migration_service.rs");
-        let tests_marker = "\n#[cfg(test)]\nmod tests {";
-        let body_end = source.find(tests_marker).expect(
-            "the `#[cfg(test)]\\nmod tests {` marker must follow \
-             the module body — the shield's slice boundary relies \
-             on this module ordering",
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("migration_service.rs"),
+            "services/migration_service.rs",
         );
-        let module_body = &source[..body_end];
 
         let bespoke_needle = format!(
             "sleep(Duration::from_secs({}))",
