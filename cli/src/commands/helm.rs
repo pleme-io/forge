@@ -1381,14 +1381,23 @@ pub fn template(chart_dir: &str, values: Option<&str>, set_values: &[String]) ->
         args.push("image.repository=test".to_string());
     }
 
-    let status = Command::new(helm_bin())
-        .args(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
-        .status()
-        .context("Failed to run helm template")?;
-
-    if !status.success() {
-        bail!("helm template failed for {}", chart_dir);
-    }
+    // Route the sole status-only `helm template` spawn through the
+    // canonical sync primitive so the pre-lift seven-line
+    // `.status().context(…)?` + `if !status.success() { bail!(…) }`
+    // stanza (which dropped the exit code from the operator log line —
+    // `"helm template failed for <chart_dir>"` carried no `code` even
+    // though `status.code()` was in scope) collapses onto
+    // `crate::retry::run_inherited_status_sync`, and the canonical
+    // `"helm template for <chart_dir> failed (exit {code})"` envelope
+    // emerges by construction. Same lift the sync-frontier siblings
+    // (`commands/{crossplane, pangea_infra, gem, infra, tool, test_ci,
+    // local, e2e, rust_service, image_release}.rs`, 6cb9442 through
+    // 5b5c765) rode; the `Command::new(helm_bin())` shape is preserved
+    // so the `helm_bin_routing_tests` sigil shield's HELM_BIN-routing
+    // discipline stays intact.
+    let mut cmd = Command::new(helm_bin());
+    cmd.args(&args);
+    crate::retry::run_inherited_status_sync(cmd, &format!("helm template for {}", chart_dir))?;
 
     Ok(())
 }
@@ -3360,6 +3369,98 @@ mod helm_bin_routing_tests {
             "commands/helm.rs",
             "HELM_BIN",
             "helm",
+        );
+    }
+}
+
+#[cfg(test)]
+mod template_status_spawn_routing_tests {
+    /// Function-scoped shield: `template`'s sole status-only `helm
+    /// template` spawn routes through
+    /// [`crate::retry::run_inherited_status_sync`], never a hand-rolled
+    /// `.status().context(…)?` + `if !status.success() { bail!(…) }`
+    /// stanza that drops the exit code from the operator log line.
+    ///
+    /// Pre-lift the spawn spelled the seven-line
+    /// `.status().context("Failed to run helm template")?` + `if
+    /// !status.success() { bail!("helm template failed for {chart_dir}")
+    /// }` stanza with an ad-hoc `bail!` message that named the phase
+    /// but dropped the exit code the child process returned. Post-lift
+    /// the canonical `"helm template for {chart_dir} failed (exit
+    /// {code})"` envelope emerges by construction at the primitive's
+    /// ONE body — the same `(op, exit_code, stderr)` structural-record
+    /// tuple THEORY.md §V.4 Phase 1 attestation-record consumers
+    /// pattern-match on, the shape every sync-frontier sibling
+    /// (`commands/{crossplane, pangea_infra, gem, infra, tool,
+    /// test_ci, local, e2e, rust_service, image_release}.rs`, 6cb9442
+    /// through 5b5c765) already emits.
+    ///
+    /// Fn-scoping is load-bearing: `helm.rs::bump` retains three
+    /// legitimate `.status()` sites in the sibling `git add / commit /
+    /// tag` block (a fallback path, a bail-on-fail, a warn-on-fail
+    /// tag) that do NOT lift cleanly onto `run_inherited_status_sync`,
+    /// and `helm.rs::deploy` retains three fire-and-forget `let _ =
+    /// ….status()` sites documented as advisory. A whole-module
+    /// shield here would false-fire on those; instead the scan bounds
+    /// to `template`'s body via
+    /// [`crate::test_support::fn_body_slice_between_markers`] with
+    /// open marker `"pub fn template("` and end marker `"\n/// Bump a
+    /// library chart version"` (the docstring of the next fn), the
+    /// same marker-scoped discipline the sibling
+    /// `commands/comprehensive_release.rs::
+    /// test_docker_tag_spawn_routes_through_run_inherited_status`
+    /// (dad33a4) and `commands/search_sync.rs::
+    /// test_run_sync_via_kubectl_cp_spawn_routes_through_run_inherited_status`
+    /// (b864fd8) use.
+    ///
+    /// Negative side scans for two pre-lift needles reconstructed at
+    /// test time via [`format!`] (so this shield's own docstring,
+    /// which names the pre-lift shape only in prose, does not
+    /// false-match): the `.context("Failed to run helm template")`
+    /// builder-terminator suffix and the `bail!("helm template
+    /// failed for` ad-hoc fail-message prefix. Positive side pins
+    /// that `crate::retry::run_inherited_status_sync(` appears in the
+    /// sliced fn body at ≥1 line — a regression that deleted the
+    /// delegation cannot leave the negative scan trivially satisfied
+    /// by absence.
+    #[test]
+    fn test_template_status_spawn_routes_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/helm.rs",
+            "pub fn template(",
+            "\n/// Bump a library chart version",
+        );
+
+        let pre_lift_context = format!(".context({}Failed to run helm template{})", '"', '"');
+        assert!(
+            !fn_body.contains(&pre_lift_context),
+            "helm::template must not re-inline the pre-lift \
+             `.context(…)?` stanza on the `helm template` spawn — \
+             every status-only helm spawn must route through \
+             `crate::retry::run_inherited_status_sync`, which carries \
+             the exit code into the failure envelope."
+        );
+
+        let pre_lift_bail = format!("bail!({}helm template failed for ", '"');
+        assert!(
+            !fn_body.contains(&pre_lift_bail),
+            "helm::template must not re-inline the pre-lift `bail!(…)` \
+             on the `helm template` spawn — the ad-hoc message dropped \
+             the exit code the child process returned. \
+             `run_inherited_status_sync`'s canonical `\"{{op}} failed \
+             (exit {{code}})\"` envelope preserves it."
+        );
+
+        assert!(
+            fn_body.contains("crate::retry::run_inherited_status_sync("),
+            "helm::template must dispatch its `helm template` spawn \
+             through `crate::retry::run_inherited_status_sync` — the \
+             delegation string was not found in `template`'s body. A \
+             regression that dropped the delegation cannot leave the \
+             negative scan trivially satisfied by absence."
         );
     }
 }
