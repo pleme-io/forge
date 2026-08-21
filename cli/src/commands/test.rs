@@ -631,12 +631,10 @@ mod tests {
     /// CARGO shield.
     #[test]
     fn test_cargo_spawn_routes_through_cargo_env_not_raw_literal() {
-        let source = include_str!("test.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "test.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("test.rs"),
+            "commands/test.rs",
         );
-        let body = &source[..cutoff];
         assert!(
             !body.contains("Command::new(\"cargo\")"),
             "commands/test.rs must not spawn `cargo` via the bare literal — \
@@ -681,12 +679,10 @@ mod tests {
     /// false-match itself.
     #[test]
     fn test_sh_spawn_routes_through_sh_bin_env_not_raw_literal() {
-        let source = include_str!("test.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "test.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("test.rs"),
+            "commands/test.rs",
         );
-        let body = &source[..cutoff];
         crate::test_support::assert_source_forbids_bare_spawn_shapes(
             body,
             "commands/test.rs",

@@ -1056,12 +1056,10 @@ mod tests {
     /// shield (f95d541) and its lineage.
     #[test]
     fn test_cargo_spawn_routes_through_cargo_env_not_raw_literal() {
-        let source = include_str!("tool.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "commands/tool.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("tool.rs"),
+            "commands/tool.rs",
         );
-        let body = &source[..cutoff];
         assert!(
             !body.contains("Command::new(\"cargo\")"),
             "commands/tool.rs must not spawn `cargo` via the bare literal — \
@@ -1148,12 +1146,10 @@ mod tests {
     /// above the cutoff.
     #[test]
     fn test_crate2nix_spawn_routes_through_crate2nix_env_not_raw_literal() {
-        let source = include_str!("tool.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "commands/tool.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("tool.rs"),
+            "commands/tool.rs",
         );
-        let body = &source[..cutoff];
         assert!(
             !body.contains("Command::new(\"crate2nix\")"),
             "commands/tool.rs must not spawn `crate2nix` via the bare literal — \
@@ -1253,12 +1249,10 @@ mod tests {
     /// `run_cmd(dir, "zig",` form.
     #[test]
     fn test_zig_spawn_routes_through_zig_bin_not_raw_literal() {
-        let source = include_str!("tool.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "commands/tool.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("tool.rs"),
+            "commands/tool.rs",
         );
-        let body = &source[..cutoff];
 
         // (1) Direct `Command::new(<bare-zig>)` shape. The needle is
         // reconstructed via `format!` so this shield's own source
