@@ -2,12 +2,13 @@
 //!
 //! Replaces product-sdlc.nix::test:ci.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
 use crate::repo::get_tool_path;
+use crate::retry::run_inherited_status_sync;
 
 /// Resolve the `cargo` binary via `CARGO`, falling back to PATH. Every
 /// `cargo` spawn in this module reads through this sigil so the resolve
@@ -40,42 +41,32 @@ pub fn execute(working_dir: &str, threads: u32) -> Result<()> {
 
     if which::which("cargo-nextest").is_ok() {
         info!("Running tests with cargo nextest (threads={})...", threads);
-        let status = Command::new(&cargo)
-            .args([
-                "nextest",
-                "run",
-                "--profile",
-                "ci",
-                "--test-threads",
-                &threads.to_string(),
-            ])
-            .current_dir(dir)
-            .status()
-            .context("Failed to run cargo nextest")?;
-
-        if !status.success() {
-            bail!("cargo nextest run failed");
-        }
+        let mut cmd = Command::new(&cargo);
+        cmd.args([
+            "nextest",
+            "run",
+            "--profile",
+            "ci",
+            "--test-threads",
+            &threads.to_string(),
+        ])
+        .current_dir(dir);
+        run_inherited_status_sync(cmd, "cargo nextest run")?;
     } else {
         info!(
             "cargo-nextest not found, falling back to cargo test (threads={})...",
             threads
         );
-        let status = Command::new(&cargo)
-            .args([
-                "test",
-                "--no-fail-fast",
-                "--",
-                "--test-threads",
-                &threads.to_string(),
-            ])
-            .current_dir(dir)
-            .status()
-            .context("Failed to run cargo test")?;
-
-        if !status.success() {
-            bail!("cargo test failed");
-        }
+        let mut cmd = Command::new(&cargo);
+        cmd.args([
+            "test",
+            "--no-fail-fast",
+            "--",
+            "--test-threads",
+            &threads.to_string(),
+        ])
+        .current_dir(dir);
+        run_inherited_status_sync(cmd, "cargo test")?;
     }
 
     info!("All tests passed");
@@ -93,29 +84,18 @@ pub fn coverage(working_dir: &str, format: &str) -> Result<()> {
 
     if which::which("cargo-tarpaulin").is_err() {
         info!("Installing cargo-tarpaulin...");
-        let status = Command::new(&cargo)
-            .args(["install", "cargo-tarpaulin"])
-            .status()
-            .context("Failed to install cargo-tarpaulin")?;
-
-        if !status.success() {
-            bail!("cargo install cargo-tarpaulin failed");
-        }
+        let mut cmd = Command::new(&cargo);
+        cmd.args(["install", "cargo-tarpaulin"]);
+        run_inherited_status_sync(cmd, "cargo install cargo-tarpaulin")?;
     }
 
     info!(
         "Running coverage with cargo tarpaulin (format={})...",
         format
     );
-    let status = Command::new(&cargo)
-        .args(["tarpaulin", "--out", format])
-        .current_dir(dir)
-        .status()
-        .context("Failed to run cargo tarpaulin")?;
-
-    if !status.success() {
-        bail!("cargo tarpaulin failed");
-    }
+    let mut cmd = Command::new(&cargo);
+    cmd.args(["tarpaulin", "--out", format]).current_dir(dir);
+    run_inherited_status_sync(cmd, "cargo tarpaulin")?;
 
     info!("Coverage report generated ({})", format);
     Ok(())
@@ -206,6 +186,93 @@ mod tests {
              `cargo_bin()` sigil), not {resolve_count} times — every \
              consumer must route through `cargo_bin()`, not re-copy the \
              resolve inline"
+        );
+    }
+
+    /// Whole-module shield: no inline `.status()` builder-terminator may
+    /// live in this module's non-test body. Every status-only spawn in
+    /// `commands/test_ci.rs` — the four sites in `execute` (nextest
+    /// branch, cargo-test fallback branch) and `coverage` (tarpaulin
+    /// install gate, tarpaulin run itself) — must route through
+    /// [`crate::retry::run_inherited_status_sync`], which carries the
+    /// exit code into the canonical
+    /// `retry::classify_inherited_status` failure envelope
+    /// (`"{op} failed (exit {code})"` on non-zero exit and
+    /// `"{op} failed (killed by signal)"` on
+    /// `status.code() == None`).
+    ///
+    /// Pre-lift each site spelled the same four-line stanza verbatim:
+    ///
+    /// ```text
+    /// let status = Command::new(&cargo)
+    ///     .args([...]).current_dir(dir)
+    ///     .status()
+    ///     .context("Failed to run …")?;
+    /// if !status.success() { bail!("… failed"); }
+    /// ```
+    ///
+    /// with a per-site ad-hoc bail message (`"cargo nextest run
+    /// failed"`, `"cargo test failed"`, `"cargo install
+    /// cargo-tarpaulin failed"`, `"cargo tarpaulin failed"`) that
+    /// **dropped the exit code entirely** — precisely the regression
+    /// [`crate::retry::run_inherited_status_sync`] was written to
+    /// close. Post-lift the operator log line for a failed
+    /// `test_ci::execute` (or `coverage`) invocation now reads
+    /// e.g. `"cargo nextest run failed (exit 1)"` by construction at
+    /// the primitive's ONE body, matching the envelope every other
+    /// migrated command module already emits.
+    ///
+    /// Sibling of `commands/e2e.rs`'s
+    /// `test_e2e_status_spawns_route_through_run_inherited_status_sync`
+    /// (5faeecb), `commands/tool.rs`'s
+    /// `test_tool_status_spawns_route_through_run_inherited_status_sync`
+    /// (a3d51eb), `commands/infra.rs`'s
+    /// `test_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (27896e4), `commands/gem.rs`'s
+    /// `test_gem_status_spawns_route_through_run_inherited_status_sync`
+    /// (9072905), `commands/pangea_infra.rs`'s
+    /// `test_pangea_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (a6e9b96), and `commands/crossplane.rs`'s
+    /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
+    /// (6cb9442). Same three-primitive discipline: negative side
+    /// forbids the inline `.status()` builder-terminator at any code
+    /// line in the module body; positive side pins that
+    /// `run_inherited_status_sync(` appears at ≥4 code lines (one per
+    /// pre-lift spawn), so a regression that dropped every delegation
+    /// cannot leave the negative scan trivially satisfied by absence.
+    /// Both hits route through [`crate::test_support::code_line_hits`]
+    /// for anti-docstring-self-match discipline. Scan bounds from
+    /// file start to the FIRST `\n#[cfg(test)]\n` marker so this
+    /// shield's own body — the `".status()"` literal passed to
+    /// `code_line_hits` and the assertion message that names the
+    /// forbidden terminator — stays out of scope.
+    #[test]
+    fn test_test_ci_status_spawns_route_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("test_ci.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\n")
+            .expect("test_ci.rs must have a `#[cfg(test)]` marker");
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status()");
+        assert!(
+            inline.is_empty(),
+            "commands/test_ci.rs must not spawn via an inline `.status()` \
+             terminator — every status-only spawn must route through \
+             `crate::retry::run_inherited_status_sync`, which carries \
+             the exit code into the failure envelope. Found: {inline:?}"
+        );
+
+        let delegations =
+            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
+        assert!(
+            delegations >= 4,
+            "commands/test_ci.rs must route all four status-only spawns \
+             (`cargo nextest run` / `cargo test` in `execute`, `cargo \
+             install cargo-tarpaulin` / `cargo tarpaulin` in `coverage`) \
+             through `run_inherited_status_sync` — found only \
+             {delegations} delegation call(s); a dropped call would \
+             leave the negative `.status()` scan satisfied by absence"
         );
     }
 }
