@@ -1257,32 +1257,14 @@ mod status_spawn_routing_tests {
     /// away from self-match.
     #[test]
     fn test_product_release_status_spawns_route_through_run_inherited_status() {
-        const SOURCE: &str = include_str!("product_release.rs");
-        let cutoff = SOURCE
-            .find("\n#[cfg(test)]\nmod tests {")
-            .expect("product_release.rs must have a `#[cfg(test)] mod tests {` marker");
-        let body = &SOURCE[..cutoff];
-
-        let inline = crate::test_support::code_line_hits(body, ".status().await");
-        assert!(
-            inline.is_empty(),
-            "commands/product_release.rs must not spawn via an inline \
-             `.status().await` terminator — every async status-only \
-             spawn must route through `crate::retry::run_inherited_status`, \
-             which carries the exit code into the failure envelope. \
-             Found: {inline:?}"
-        );
-
-        let delegations = crate::test_support::code_line_hits(body, "run_inherited_status(").len();
-        assert!(
-            delegations >= 5,
-            "commands/product_release.rs must route the five status-only \
-             spawn sites (`run_forge_subcommand`, `run_nix_release_app`, \
-             `run_health_check` rollout-status, `push_prebuilt_image` \
-             docker-tag, `push_prebuilt_image` docker-push) through \
-             `run_inherited_status` — found only {delegations} \
-             delegation call(s); a dropped call would leave the \
-             negative `.status().await` scan satisfied by absence"
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status(
+            include_str!("product_release.rs"),
+            "commands/product_release.rs",
+            5,
+            "the five status-only spawn sites (`run_forge_subcommand`, \
+             `run_nix_release_app`, `run_health_check` rollout-status, \
+             `push_prebuilt_image` docker-tag, `push_prebuilt_image` \
+             docker-push)",
         );
     }
 }

@@ -908,30 +908,12 @@ mod status_spawn_routing_tests {
     /// away from self-match.
     #[test]
     fn test_pangea_status_spawns_route_through_run_inherited_status() {
-        const SOURCE: &str = include_str!("pangea.rs");
-        let cutoff = SOURCE
-            .find("\n#[cfg(test)]\nmod tests {")
-            .expect("commands/pangea.rs must have a `#[cfg(test)] mod tests {` marker");
-        let body = &SOURCE[..cutoff];
-
-        let inline = crate::test_support::code_line_hits(body, ".status().await");
-        assert!(
-            inline.is_empty(),
-            "commands/pangea.rs must not spawn via an inline \
-             `.status().await` terminator — every async status-only \
-             spawn must route through `crate::retry::run_inherited_status`, \
-             which carries the exit code into the failure envelope. \
-             Found: {inline:?}"
-        );
-
-        let delegations = crate::test_support::code_line_hits(body, "run_inherited_status(").len();
-        assert!(
-            delegations >= 2,
-            "commands/pangea.rs must route the two `regenerate_compiler` \
-             status-only spawn sites (`bundle lock --update` and `bundix`) \
-             through `crate::retry::run_inherited_status` — found only \
-             {delegations} delegation call(s); a dropped call would leave \
-             the negative `.status().await` scan satisfied by absence"
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status(
+            include_str!("pangea.rs"),
+            "commands/pangea.rs",
+            2,
+            "the two `regenerate_compiler` status-only spawn sites \
+             (`bundle lock --update` and `bundix`)",
         );
     }
 }

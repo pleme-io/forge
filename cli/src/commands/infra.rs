@@ -231,31 +231,12 @@ mod status_spawn_routing_tests {
     /// — stays out of scope.
     #[test]
     fn test_infra_status_spawns_route_through_run_inherited_status_sync() {
-        const SOURCE: &str = include_str!("infra.rs");
-        let cutoff = SOURCE
-            .find("\n#[cfg(test)]\n")
-            .expect("infra.rs must have a `#[cfg(test)]` marker");
-        let body = &SOURCE[..cutoff];
-
-        let inline = crate::test_support::code_line_hits(body, ".status()");
-        assert!(
-            inline.is_empty(),
-            "commands/infra.rs must not spawn via an inline `.status()` \
-             terminator — every status-only spawn must route through \
-             `crate::retry::run_inherited_status_sync`, which carries \
-             the exit code into the failure envelope. Found: {inline:?}"
-        );
-
-        let delegations =
-            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
-        assert!(
-            delegations >= 3,
-            "commands/infra.rs must route all three status-only spawns \
-             (`docker compose up` / `docker compose down` / `docker \
-             compose clean`) through `run_inherited_status_sync` — \
-             found only {delegations} delegation call(s); a dropped \
-             call would leave the negative `.status()` scan satisfied \
-             by absence"
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            include_str!("infra.rs"),
+            "commands/infra.rs",
+            3,
+            "all three status-only spawns (`docker compose up` / \
+             `docker compose down` / `docker compose clean`)",
         );
     }
 }

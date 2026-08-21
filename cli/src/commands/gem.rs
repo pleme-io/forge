@@ -911,30 +911,12 @@ mod tests {
     /// out of scope.
     #[test]
     fn test_gem_status_spawns_route_through_run_inherited_status_sync() {
-        const SOURCE: &str = include_str!("gem.rs");
-        let cutoff = SOURCE
-            .find("\n#[cfg(test)]\n")
-            .expect("gem.rs must have a `#[cfg(test)]` marker");
-        let body = &SOURCE[..cutoff];
-
-        let inline = crate::test_support::code_line_hits(body, ".status()");
-        assert!(
-            inline.is_empty(),
-            "commands/gem.rs must not spawn via an inline `.status()` \
-             terminator — every status-only spawn must route through \
-             `crate::retry::run_inherited_status_sync`, which carries \
-             the exit code into the failure envelope. Found: {inline:?}"
-        );
-
-        let delegations =
-            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
-        assert!(
-            delegations >= 3,
-            "commands/gem.rs must route all three status-only spawns \
-             (`gem build` / `gem push` / `bundle exec rake spec`) \
-             through `run_inherited_status_sync` — found only \
-             {delegations} delegation call(s); a dropped call would \
-             leave the negative `.status()` scan satisfied by absence"
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            include_str!("gem.rs"),
+            "commands/gem.rs",
+            3,
+            "all three status-only spawns (`gem build` / `gem push` / \
+             `bundle exec rake spec`)",
         );
     }
 }

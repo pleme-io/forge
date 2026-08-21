@@ -305,29 +305,12 @@ mod tests {
     /// the sigil shield above uses.
     #[test]
     fn test_crossplane_status_spawns_route_through_run_inherited_status_sync() {
-        const SOURCE: &str = include_str!("crossplane.rs");
-        let cutoff = SOURCE
-            .find("\n#[cfg(test)]\n")
-            .expect("crossplane.rs must have a `#[cfg(test)]` marker");
-        let body = &SOURCE[..cutoff];
-
-        let inline = crate::test_support::code_line_hits(body, ".status()");
-        assert!(
-            inline.is_empty(),
-            "commands/crossplane.rs must not spawn `crossplane` via an inline \
-             `.status()` terminator — every status-only spawn must route \
-             through `crate::retry::run_inherited_status_sync`, which carries \
-             the exit code into the failure envelope. Found: {inline:?}"
-        );
-
-        let delegations =
-            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
-        assert!(
-            delegations >= 6,
-            "commands/crossplane.rs must route all six crossplane spawns \
-             through `run_inherited_status_sync` — found only {delegations} \
-             delegation call(s); a dropped call would leave the negative \
-             `.status()` scan satisfied by absence"
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            include_str!("crossplane.rs"),
+            "commands/crossplane.rs",
+            6,
+            "all six crossplane spawns (`function_release` build+push, \
+             `configuration_release` build+push, `render`, `validate`)",
         );
     }
 }
