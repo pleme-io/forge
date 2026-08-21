@@ -839,23 +839,45 @@ fn build_and_load_image(repo_root: &str, name: &str, flake_attr: &str) -> Result
     // Load into Docker
     ui::print_info(&format!("Loading {} image into Docker", name));
 
-    // Read the image file and pipe to docker load
+    // Route the second-half `docker load` — fed via `stdin(image_file)`
+    // from the Nix-built store path — through the canonical sync
+    // primitive so both halves of `build_and_load_image` (the `nix
+    // build <flake_attr> -o <path>` above and this `docker load`)
+    // ride the same one delegation shape. Pre-lift this site spelled
+    // an eight-line `.spawn().context("Failed to spawn docker load")?`
+    // + `.wait().context("Failed to wait for docker load")?` + `if
+    // !load_status.success() { bail!("docker load failed for {name}") }`
+    // stanza whose `bail!` dropped the exit code (`load_status.code()`
+    // was in scope but discarded) — precisely the regression the sync
+    // primitive was written to close (retry.rs:14243 →
+    // classify_inherited_status at retry.rs:14190) — and whose two
+    // context messages named only the phase (`docker load`) without
+    // the image name, so an operator seeing `"Failed to spawn docker
+    // load"` in a multi-image E2E build (`backend` + `web`, called at
+    // 525 / 532) had no way to tell which `build_and_load_image` had
+    // failed. Post-lift the canonical `"docker load for {name} failed
+    // (exit {code})"` envelope emerges by construction and the image
+    // name lands in both the spawn-failure context and the non-zero
+    // envelope at the one primitive body — the shape every
+    // sync-frontier sibling (`commands/{crossplane, pangea_infra,
+    // gem, infra, tool, test_ci, local, e2e, rust_service,
+    // image_release, helm}.rs`, 6cb9442 through 5772ab2) already
+    // emits.
+    //
+    // `std::process::Command::status()` (called inside the primitive)
+    // inherits the caller-configured `.stdin(image_file)` File →
+    // Stdio conversion — `run_inherited_status_sync` overrides only
+    // stdout/stderr — so the file-into-docker-load pipe survives the
+    // lift, and the pre-lift `.spawn()`+`.wait()` two-call shape (a
+    // stdin-piping-specific workaround from before `.status()` was
+    // established as sufficient for pre-configured stdin) collapses
+    // to the same one delegation the sibling non-piped spawns use.
     let image_file = std::fs::File::open(&output_path)
         .context(format!("Failed to open image file: {}", output_path))?;
 
-    let mut docker_load = Command::new(docker_bin())
-        .arg("load")
-        .stdin(image_file)
-        .spawn()
-        .context("Failed to spawn docker load")?;
-
-    let load_status = docker_load
-        .wait()
-        .context("Failed to wait for docker load")?;
-
-    if !load_status.success() {
-        bail!("docker load failed for {}", name);
-    }
+    let mut docker_load_cmd = Command::new(docker_bin());
+    docker_load_cmd.arg("load").stdin(image_file);
+    run_inherited_status_sync(docker_load_cmd, &format!("docker load for {}", name))?;
 
     ui::print_success(&format!("{} image loaded", name));
     Ok(())
@@ -1923,8 +1945,8 @@ mod e2e_status_spawn_routing_tests {
     /// inline builder-terminator + `if !status.success()` stanza that
     /// drops the exit code from the operator log line.
     ///
-    /// Pre-lift, six status-only sites each spelled the inline shape
-    /// verbatim:
+    /// Pre-lift, seven status-only sites each spelled a hand-rolled
+    /// inline shape verbatim:
     ///
     /// 1. `run_backend_unit_tests` — `cargo test --lib`;
     /// 2. `run_frontend_unit_tests` (reporter branch) — `bun run test
@@ -1935,7 +1957,9 @@ mod e2e_status_spawn_routing_tests {
     /// 4. `run_backend_integration_tests` — `cargo test --test
     ///    integration_tests`;
     /// 5. `run_e2e_tests` — `cargo test --test e2e_tests`;
-    /// 6. `build_and_load_image` — `nix build <flake-attr>`.
+    /// 6. `build_and_load_image` — `nix build <flake-attr>`;
+    /// 7. `build_and_load_image` — `docker load` (fed via
+    ///    `stdin(image_file)` from the Nix store path).
     ///
     /// Sites 1, 3, 4, 5 routed through a local
     /// `ensure_test_suite_success` helper whose bail body spelled
@@ -1944,7 +1968,20 @@ mod e2e_status_spawn_routing_tests {
     /// canonical `retry::classify_inherited_status` envelope
     /// (`"exit 1"` / `"killed by signal"`). Site 2 dropped the exit
     /// code altogether; site 6 kept only the flake-attr and dropped
-    /// the exit code.
+    /// the exit code. Site 7 uniquely spelled the pre-lift shape as
+    /// `.spawn().context(SPAWN_CTX)?` + `.wait().context(WAIT_CTX)?`
+    /// + `if !load_status.success() { bail!(FAIL_MSG) }` (the
+    /// stdin-piping-specific spawn+wait shape used before `.status()`
+    /// was established as sufficient for pre-configured stdin), and
+    /// its `bail!` dropped the exit code AND its two context
+    /// messages dropped the image name — an operator seeing
+    /// `"Failed to spawn docker load"` in a multi-image E2E build
+    /// (`backend` + `web`, called at 525 / 532) had no way to tell
+    /// WHICH `build_and_load_image` had failed. Post-lift both
+    /// name-carrying context (`"Failed to run docker load for
+    /// {name}"`) and exit-carrying envelope (`"docker load for
+    /// {name} failed (exit {code})"`) emerge by construction at the
+    /// one primitive body.
     ///
     /// Post-lift each spawn is a one-line delegation and the
     /// canonical `"{op} failed (exit {code})"` envelope emerges by
@@ -1967,13 +2004,15 @@ mod e2e_status_spawn_routing_tests {
     /// (a3d51eb). Same three-primitive discipline: negative side
     /// forbids the inline `.status()` builder-terminator at any code
     /// line in the module body; positive side pins that
-    /// `run_inherited_status_sync(` appears at ≥6 code lines (one
-    /// per pre-lift spawn), so a regression that dropped every
-    /// delegation cannot leave the negative scan trivially satisfied
-    /// by absence. Both hits route through
-    /// [`crate::test_support::code_line_hits`] for anti-docstring-
-    /// self-match discipline. Scan bounds from file start to the
-    /// FIRST `\n#[cfg(test)]\n` marker (the sibling
+    /// `run_inherited_status_sync(` appears at ≥7 code lines (one
+    /// per pre-lift spawn — the six original status-only sites plus
+    /// the `docker load` site whose stdin-piping-specific `.spawn()`
+    /// + `.wait()` shape now collapses onto the same primitive), so
+    /// a regression that dropped every delegation cannot leave the
+    /// negative scan trivially satisfied by absence. Both hits
+    /// route through [`crate::test_support::code_line_hits`] for
+    /// anti-docstring-self-match discipline. Scan bounds from file
+    /// start to the FIRST `\n#[cfg(test)]\n` marker (the sibling
     /// `resolve_repo_root_git_bin_routing_tests` opener), so this
     /// shield's own body — the string literal `".status()"` passed
     /// to `code_line_hits`, and the assertion message that names the
@@ -1983,11 +2022,12 @@ mod e2e_status_spawn_routing_tests {
         crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
             include_str!("e2e.rs"),
             "commands/e2e.rs",
-            6,
-            "all six status-only spawns (`cargo test --lib`, `bun run \
-             test` reporter + console branches, `cargo test --test \
-             integration_tests`, `cargo test --test e2e_tests`, and \
-             `nix build <flake-attr>`)",
+            7,
+            "all seven status-only spawns (`cargo test --lib`, `bun \
+             run test` reporter + console branches, `cargo test \
+             --test integration_tests`, `cargo test --test \
+             e2e_tests`, `nix build <flake-attr>`, and the piped \
+             `docker load` in `build_and_load_image`)",
         );
     }
 }
