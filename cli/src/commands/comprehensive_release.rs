@@ -1205,41 +1205,11 @@ mod tests {
     /// itself on the count-eq-1 assertion.
     #[test]
     fn test_comprehensive_release_routes_cargo_through_cargo_bin_sigil_not_raw_command() {
-        let source = include_str!("comprehensive_release.rs");
-        let cutoff = source.find("\n#[cfg(test)]\nmod tests {").expect(
-            "comprehensive_release.rs must have a `#[cfg(test)] mod tests {` marker \
-                     — the shield's scan boundary depends on it",
-        );
-        let body = &source[..cutoff];
-        assert!(
-            !body.contains("Command::new(\"cargo\")"),
-            "commands/comprehensive_release.rs must not spawn `cargo` via the bare literal — \
-             every `cargo` spawn must resolve `CARGO` via the \
-             `cargo_bin()` sigil first. A raw `Command::new(\"cargo\")` \
-             bypasses the hermetic-runner contract substrate's \
-             mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            body.contains("fn cargo_bin()"),
-            "commands/comprehensive_release.rs must define `cargo_bin()` \
-             — the sigil function that resolves the tools-registry \
-             `CARGO` override for every cargo spawn. Mirrors the \
-             sibling `cargo_bin()` sigils at `commands/test_ci.rs` \
-             (916f1a4), `commands/developer_tools.rs` (534ef48), \
-             `commands/tool.rs` (9f6046b), `commands/e2e.rs` (170ecac), \
-             and the broader `<tool>_bin()` sigil discipline across \
-             the fleet."
-        );
-        let two_arg_needle =
-            crate::test_support::get_tool_path_two_arg_call_needle("CARGO", "cargo");
-        let resolve_count = body.matches(two_arg_needle.as_str()).count();
-        assert_eq!(
-            resolve_count, 1,
-            "the two-argument resolve `{two_arg_needle}` must appear \
-             exactly ONCE in the module body (only in the \
-             `cargo_bin()` sigil), not {resolve_count} times — every \
-             consumer must route through `cargo_bin()`, not re-copy \
-             the resolve inline"
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            include_str!("comprehensive_release.rs"),
+            "commands/comprehensive_release.rs",
+            "cargo",
+            "CARGO",
         );
     }
 

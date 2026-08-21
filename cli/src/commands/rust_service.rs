@@ -2906,40 +2906,11 @@ mod nix_bin_routing_tests {
     /// pioneered on `commands/supergraph_verification.rs` (65283fb).
     #[test]
     fn test_rust_service_routes_nix_through_nix_bin_not_raw_command() {
-        const SOURCE: &str = include_str!("rust_service.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "rust_service.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
-        );
-        let body = &SOURCE[..cutoff];
-        assert!(
-            !body.contains("Command::new(\"nix\")"),
-            "commands/rust_service.rs must not spawn `nix` via the bare \
-             literal — every `nix` spawn must resolve `NIX_BIN` via \
-             `nix_bin()` first. A raw `Command::new(\"nix\")` bypasses \
-             the hermetic-runner contract substrate's mkRuntimeToolsEnv \
-             exports."
-        );
-        assert!(
-            body.contains("fn nix_bin()"),
-            "commands/rust_service.rs must define `nix_bin()` — the \
-             sigil function that resolves the tools-registry `NIX_BIN` \
-             override for every nix spawn. Mirrors the `cargo_bin()` \
-             sigil discipline at `commands/test_ci.rs:28`, \
-             `commands/prerelease.rs:109`, \
-             `commands/developer_tools.rs:36`, `commands/e2e.rs:87`, \
-             `commands/tool.rs:37`, and the `bun_bin()` sigil at \
-             `commands/frontend_validation.rs`."
-        );
-        let two_arg_needle =
-            crate::test_support::get_tool_path_two_arg_call_needle("NIX_BIN", "nix");
-        let resolve_count = body.matches(two_arg_needle.as_str()).count();
-        assert_eq!(
-            resolve_count, 1,
-            "the two-argument resolve `{two_arg_needle}` must appear \
-             exactly ONCE in the module body (only in the `nix_bin()` \
-             sigil), not {resolve_count} times — every consumer must \
-             route through `nix_bin()`, not re-copy the resolve inline"
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            include_str!("rust_service.rs"),
+            "commands/rust_service.rs",
+            "nix",
+            "NIX_BIN",
         );
     }
 }

@@ -150,42 +150,11 @@ mod tests {
     /// `commands/supergraph_verification.rs` (65283fb).
     #[test]
     fn test_test_ci_routes_cargo_through_cargo_bin_sigil_not_raw_command() {
-        const SOURCE: &str = include_str!("test_ci.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\nmod tests {").expect(
-            "test_ci.rs must have a `#[cfg(test)] mod tests {` marker \
-             — the shield's scan boundary depends on it",
-        );
-        let body = &SOURCE[..cutoff];
-        assert!(
-            !body.contains("Command::new(\"cargo\")"),
-            "commands/test_ci.rs must not spawn `cargo` via the bare literal — \
-             every `cargo` spawn must resolve `CARGO` via the `cargo_bin()` \
-             sigil first. A raw `Command::new(\"cargo\")` bypasses the \
-             hermetic-runner contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            body.contains("fn cargo_bin()"),
-            "commands/test_ci.rs must define `cargo_bin()` — the sigil \
-             function that resolves the tools-registry `CARGO` override \
-             for every cargo spawn. Mirrors the `cargo_bin()` sigil at \
-             `commands/prerelease.rs:102` and the sibling \
-             `crossplane_bin()` / `cosign_bin()` / `jsonnet_bin()` sigil \
-             discipline on other command modules."
-        );
-        // Solve-once: the two-argument resolve string appears in exactly
-        // ONE place — the `cargo_bin()` sigil definition — so a future
-        // added spawn cannot silently re-copy the resolve inline and
-        // drift away from the sigil's single point of truth. Every
-        // consumer must read through `cargo_bin()`. THEORY §I.5:
-        // duplication budget zero.
-        let resolve_count = body.matches("get_tool_path(\"CARGO\", \"cargo\")").count();
-        assert_eq!(
-            resolve_count, 1,
-            "the two-argument resolve `get_tool_path(\"CARGO\", \"cargo\")` \
-             must appear exactly ONCE in the module body (only in the \
-             `cargo_bin()` sigil), not {resolve_count} times — every \
-             consumer must route through `cargo_bin()`, not re-copy the \
-             resolve inline"
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            include_str!("test_ci.rs"),
+            "commands/test_ci.rs",
+            "cargo",
+            "CARGO",
         );
     }
 

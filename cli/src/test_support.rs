@@ -1685,6 +1685,152 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
     );
 }
 
+/// One canonical composition for a whole-module `<bare>`-through-sigil
+/// routing shield with the SOLITARY-RESOLVE invariant: every `<bare>`
+/// spawn in `source` MUST route through the `<sigil>_bin()` sigil, AND
+/// the two-argument `get_tool_path("<env_var>", "<bare>")` resolve MUST
+/// appear at EXACTLY ONE place in the module body — the sigil body —
+/// so a future added spawn cannot silently re-copy the resolve inline
+/// and drift away from the sigil's single point of truth.
+///
+/// # Arguments
+///
+/// - `source` — the whole module source (typically
+///   `include_str!("<module>.rs")`).
+/// - `module_path` — canonical repo-relative path used in panic messages
+///   (e.g. `"commands/test_ci.rs"`).
+/// - `bare` — the tool basename the shield exists to route
+///   (e.g. `"cargo"`, `"nix"`). Dash-bearing tool names are
+///   canonicalized dash→underscore for the sigil-fn name.
+/// - `env_var` — the tools-registry env-var name the sigil resolves
+///   (e.g. `"CARGO"`, `"NIX_BIN"`).
+///
+/// # What it enforces
+///
+/// The helper computes `body = &source[..cutoff]` where `cutoff` is the
+/// FIRST `\n#[cfg(test)]\n` marker in `source` (which lands at the top
+/// of the primary test block), then asserts three invariants against
+/// `body`:
+///
+/// - `!body.contains("Command::new(\"<bare>\")")` — no bare `Command`
+///   spawn literal survives in the module body. The bare-literal
+///   needle is reconstructed via [`format!`] at test time so this
+///   helper's own source text contains only the templated form, never
+///   a substituted concrete literal — a shield that scans
+///   `include_str!("test_support.rs")` does not false-match this
+///   helper's body on any concrete tool.
+/// - `body.contains("fn <sigil>_bin()")` — the sigil function is
+///   defined at some line in the module body. `sigil = bare` with
+///   dashes canonicalized to underscores (matching the fleet's
+///   universal `<tool>_bin()` naming: `docker_compose_bin`,
+///   `rover_fhs_bin`, `redis_cli_bin` — see
+///   [`assert_source_routes_bare_spawn_through_two_arg_sigil`]).
+/// - `body.matches("get_tool_path(\"<env_var>\", \"<bare>\")").count()
+///   == 1` — the two-argument resolve appears at EXACTLY one place in
+///   the module body (only in the `<sigil>_bin()` sigil), so a future
+///   added spawn cannot silently re-copy the resolve inline and drift
+///   away from the sigil's single point of truth. The count-exactly-one
+///   invariant is what distinguishes this shield from the at-least-one
+///   sibling [`assert_source_routes_bare_spawn_through_two_arg_sigil`]:
+///   the sigil's SOLE responsibility for spelling the resolve is
+///   pinned by construction, not by review discipline.
+///
+/// # Why one canonical helper
+///
+/// The three-assertion block appears verbatim across five whole-module
+/// sigil-routing shields as of commit `08fdb86`:
+///
+/// - `commands/test_ci.rs::test_test_ci_routes_cargo_through_cargo_bin_sigil_not_raw_command`
+/// - `commands/developer_tools.rs::test_developer_tools_routes_nix_through_nix_bin_not_raw_command`
+/// - `commands/developer_tools.rs::test_developer_tools_routes_cargo_through_cargo_env_not_raw_command`
+/// - `commands/rust_service.rs::test_rust_service_routes_nix_through_nix_bin_not_raw_command`
+/// - `commands/comprehensive_release.rs::test_comprehensive_release_routes_cargo_through_cargo_bin_sigil_not_raw_command`
+///
+/// Each site spelled the same body-cutoff + three-assertion stanza
+/// verbatim, differing only in `source` / `module_path` / `bare` /
+/// `env_var`. Five occurrences past THEORY.md §VI.1's three-times
+/// threshold ("two occurrences is a coincidence; three is a law"), and
+/// the shield's SOLITARY-RESOLVE invariant is a specific defect-class
+/// the sibling [`assert_source_routes_bare_spawn_through_two_arg_sigil`]
+/// does not close on its own — inline drift where a consumer re-copies
+/// the resolve rather than routing through the sigil. This helper is
+/// the law-redeeming consolidation: a future refinement (say tightening
+/// the bare-spawn needle to also flag `std::process::` and
+/// `tokio::process::` prefixed shapes, filtering the body scan through
+/// [`code_line_hits`] to also drop production-body docstring quotes,
+/// broadening the resolve needle to also match the fully-qualified
+/// `crate::repo::get_tool_path` form) lands at ONE body and propagates
+/// to every shield by construction rather than being copy-edited at
+/// five sites.
+///
+/// # Boundary marker
+///
+/// The `"\n#[cfg(test)]\n"` marker is the shortest form that reliably
+/// identifies the top of the primary test block across every migrated
+/// module (both the `#[cfg(test)]\nmod tests {` shape and the plain
+/// `#[cfg(test)]` shape — `commands/rust_service.rs` has five sibling
+/// `#[cfg(test)] mod <name>_routing_tests` blocks — reduce to it).
+/// Modules with multiple `#[cfg(test)]` blocks land the cutoff at the
+/// FIRST one; any production code AFTER the first test block would
+/// escape the scan, so callers keep production code above the first
+/// `#[cfg(test)]`.
+///
+/// # Load-bearing invariant order
+///
+/// The three assertions fire in the order (bare-literal refusal,
+/// sigil-definition, resolve-count-one) — the same order every migrated
+/// site spelled pre-lift, so a reader of a failing shield sees the same
+/// "which invariant fired first" diagnostic experience as pre-lift. A
+/// missing-sigil failure surfaces AFTER a bare-literal failure (the
+/// worse offense first), and a resolve-count-drift failure surfaces
+/// LAST (the subtlest offense last, only reachable once the harder
+/// invariants pass).
+pub fn assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+    source: &str,
+    module_path: &str,
+    bare: &str,
+    env_var: &str,
+) {
+    let cutoff = source.find("\n#[cfg(test)]\n").unwrap_or_else(|| {
+        panic!(
+            "{module_path} must have a `#[cfg(test)]` marker — \
+             the shield's scan boundary depends on it"
+        )
+    });
+    let body = &source[..cutoff];
+
+    let sigil_fn = format!("{}_bin", bare.replace('-', "_"));
+
+    let bare_spawn_needle = format!("Command::new(\"{bare}\")");
+    assert!(
+        !body.contains(&bare_spawn_needle),
+        "{module_path} must not spawn `{bare}` via the bare literal — \
+         every `{bare}` spawn must resolve `{env_var}` via the \
+         `{sigil_fn}()` sigil first. A bare `Command::new(<{bare}>)` \
+         bypasses the hermetic-runner contract substrate's \
+         mkRuntimeToolsEnv exports."
+    );
+
+    let sigil_def_needle = format!("fn {sigil_fn}()");
+    assert!(
+        body.contains(&sigil_def_needle),
+        "{module_path} must define `{sigil_fn}()` — the sigil function \
+         that resolves the tools-registry `{env_var}` override for \
+         every `{bare}` spawn."
+    );
+
+    let two_arg_needle = get_tool_path_two_arg_call_needle(env_var, bare);
+    let resolve_count = body.matches(two_arg_needle.as_str()).count();
+    assert_eq!(
+        resolve_count, 1,
+        "the two-argument resolve `{two_arg_needle}` must appear \
+         exactly ONCE in the module body of {module_path} (only in the \
+         `{sigil_fn}()` sigil), not {resolve_count} times — every \
+         consumer must route through `{sigil_fn}()`, not re-copy the \
+         resolve inline"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3344,6 +3490,102 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "fake/module.rs",
             0,
             "no spawns claimed",
+        );
+    }
+
+    /// Happy path for
+    /// [`assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve`]:
+    /// a module body carrying no bare `Command::new("<bare>")` literal,
+    /// a `fn <sigil>_bin()` definition, and the two-arg resolve at
+    /// EXACTLY one code line passes cleanly. The test uses a bare tool
+    /// name deliberately distinct from every real shield's
+    /// (`zeta-widget` → `zeta_widget_bin` after dash canonicalization)
+    /// so a Grep of the crate for `zeta-widget` resolves to this test
+    /// and its three siblings — the fast way to find the pinning tests
+    /// when editing the helper.
+    #[test]
+    fn test_assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve_accepts_migrated_module(
+    ) {
+        let source = "\
+            fn zeta_widget_bin() -> String { \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\") }\n\
+            fn use_a() { let _cmd = Command::new(zeta_widget_bin()); }\n\
+            fn use_b() { let _cmd = Command::new(zeta_widget_bin()); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            source,
+            "fake/module.rs",
+            "zeta-widget",
+            "ZETA_WIDGET_BIN",
+        );
+    }
+
+    /// A bare `Command::new("<bare>")` in the module body fires the
+    /// negative-side assertion — the FIRST of the three invariants to
+    /// surface (bare-literal refusal before sigil-definition before
+    /// resolve-count-one), matching every pre-lift shield's stanza
+    /// order.
+    #[test]
+    #[should_panic(expected = "fake/module.rs must not spawn `zeta-widget` via the bare literal")]
+    fn test_assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve_rejects_bare_command_literal(
+    ) {
+        let source = "\
+            fn zeta_widget_bin() -> String { \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\") }\n\
+            fn drift() { let _cmd = Command::new(\"zeta-widget\"); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            source,
+            "fake/module.rs",
+            "zeta-widget",
+            "ZETA_WIDGET_BIN",
+        );
+    }
+
+    /// A missing `fn <sigil>_bin()` definition fires the sigil-
+    /// definition assertion — the SECOND of the three invariants, only
+    /// reachable once the negative-side bare-literal refusal passes.
+    /// This test uses a body with the resolve inlined at a consumer
+    /// (bypassing the sigil), so the shield fires on the missing sigil
+    /// before the resolve-count invariant runs.
+    #[test]
+    #[should_panic(expected = "fake/module.rs must define `zeta_widget_bin()`")]
+    fn test_assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve_rejects_missing_sigil_definition(
+    ) {
+        let source = "\
+            fn use_a() { let _bin = \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\"); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            source,
+            "fake/module.rs",
+            "zeta-widget",
+            "ZETA_WIDGET_BIN",
+        );
+    }
+
+    /// A body whose resolve appears at more than one code line fires
+    /// the SOLITARY-RESOLVE assertion — the THIRD of the three
+    /// invariants, only reachable once the bare-literal refusal and
+    /// sigil-definition invariants pass. This is the defect class the
+    /// count-exactly-one invariant exists to close: a consumer that
+    /// re-copies the resolve inline (bypassing the sigil) even while
+    /// the sigil itself is intact.
+    #[test]
+    #[should_panic(expected = "exactly ONCE in the module body of fake/module.rs")]
+    fn test_assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve_rejects_duplicated_resolve_call_sites(
+    ) {
+        let source = "\
+            fn zeta_widget_bin() -> String { \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\") }\n\
+            fn drift() { let _bin = \
+             crate::repo::get_tool_path(\"ZETA_WIDGET_BIN\", \"zeta-widget\"); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            source,
+            "fake/module.rs",
+            "zeta-widget",
+            "ZETA_WIDGET_BIN",
         );
     }
 }
