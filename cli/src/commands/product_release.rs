@@ -28,20 +28,9 @@ pub(crate) async fn run_forge_subcommand(args: &[&str]) -> Result<()> {
     let exe = std::env::current_exe().context("Failed to get current executable path")?;
     println!("   {} forge {}", ">>".dimmed(), args.join(" ").dimmed());
 
-    let status = Command::new(exe)
-        .args(args)
-        .status()
-        .await
-        .with_context(|| format!("Failed to run forge subcommand: {:?}", args))?;
-
-    if !status.success() {
-        bail!(
-            "forge subcommand failed (exit {}): {:?}",
-            status.code().unwrap_or(-1),
-            args
-        );
-    }
-    Ok(())
+    let mut cmd = Command::new(exe);
+    cmd.args(args);
+    crate::retry::run_inherited_status(cmd, &format!("forge {}", args.join(" "))).await
 }
 
 /// Run a nix release app.
@@ -65,20 +54,9 @@ async fn run_nix_release_app(
     println!("   {} nix {}", ">>".dimmed(), args.join(" ").dimmed());
 
     let nix_bin = get_tool_path("NIX_BIN", "nix");
-    let status = Command::new(&nix_bin)
-        .args(args)
-        .status()
-        .await
-        .with_context(|| format!("Failed to run nix release app: {}", app))?;
-
-    if !status.success() {
-        bail!(
-            "nix release app failed (exit {}): {}",
-            status.code().unwrap_or(-1),
-            app
-        );
-    }
-    Ok(())
+    let mut cmd = Command::new(&nix_bin);
+    cmd.args(args);
+    crate::retry::run_inherited_status(cmd, &format!("nix run {}", app)).await
 }
 
 /// Run a kubectl health check for a deployment.
@@ -96,27 +74,23 @@ pub(crate) async fn run_health_check(
 
     // Check rollout status
     let timeout_str = format!("{}s", timeout_secs);
-    let status = kubectl_command_async()
-        .args([
-            "rollout",
-            "status",
-            &format!("deployment/{}", deployment),
-            "-n",
-            namespace,
-            &format!("--timeout={}", timeout_str),
-        ])
-        .status()
-        .await
-        .context("Failed to run kubectl rollout status")?;
-
-    if !status.success() {
-        bail!(
-            "Health check failed: deployment/{} in {} (timeout: {}s)",
-            deployment,
-            namespace,
-            timeout_secs
-        );
-    }
+    let mut cmd = kubectl_command_async();
+    cmd.args([
+        "rollout",
+        "status",
+        &format!("deployment/{}", deployment),
+        "-n",
+        namespace,
+        &format!("--timeout={}", timeout_str),
+    ]);
+    crate::retry::run_inherited_status(
+        cmd,
+        &format!(
+            "kubectl rollout status deployment/{} -n {} --timeout={}",
+            deployment, namespace, timeout_str
+        ),
+    )
+    .await?;
 
     // Verify at least one pod is Running
     let output = kubectl_command_async()
@@ -208,26 +182,15 @@ async fn push_prebuilt_image(local_name: &str, registry: &str, deploy_tag: &str)
     let docker = get_tool_path("DOCKER_BIN", "docker");
 
     // Tag with registry URL and SHA
-    let status = Command::new(&docker)
-        .args(["tag", &image_id, &full_tag])
-        .status()
-        .await
-        .with_context(|| format!("Failed to tag image {} → {}", local_name, full_tag))?;
-
-    if !status.success() {
-        bail!("docker tag failed: {} → {}", local_name, full_tag);
-    }
+    let mut tag_cmd = Command::new(&docker);
+    tag_cmd.args(["tag", &image_id, &full_tag]);
+    crate::retry::run_inherited_status(tag_cmd, &format!("docker tag {} {}", image_id, full_tag))
+        .await?;
 
     // Push to registry
-    let status = Command::new(&docker)
-        .args(["push", &full_tag])
-        .status()
-        .await
-        .with_context(|| format!("Failed to push image {}", full_tag))?;
-
-    if !status.success() {
-        bail!("docker push failed: {}", full_tag);
-    }
+    let mut push_cmd = Command::new(&docker);
+    push_cmd.args(["push", &full_tag]);
+    crate::retry::run_inherited_status(push_cmd, &format!("docker push {}", full_tag)).await?;
 
     Ok(())
 }
@@ -1235,6 +1198,91 @@ mod tests {
             "commands/product_release.rs",
             "git",
             "git_command_sync",
+        );
+    }
+}
+
+#[cfg(test)]
+mod status_spawn_routing_tests {
+    /// Whole-module shield: every async status-only spawn in
+    /// `commands/product_release.rs` routes through
+    /// [`crate::retry::run_inherited_status`], never a hand-rolled
+    /// inline builder terminated by `.status().await` +
+    /// `if !status.success() { bail!(…) }` that drops the exit code
+    /// from the operator log line.
+    ///
+    /// Pre-lift five sites — `run_forge_subcommand`,
+    /// `run_nix_release_app`, `run_health_check`'s rollout-status
+    /// probe, and `push_prebuilt_image`'s docker-tag and docker-push
+    /// spawns — spelled the eleven-line `.status().await` +
+    /// `with_context(…)?` + `if !status.success() { bail!(FAIL_MSG) }`
+    /// stanza with per-site ad-hoc `FAIL_MSG`s that either dropped the
+    /// exit code entirely (`"docker tag failed: {} → {}"`,
+    /// `"docker push failed: {}"`, `"Health check failed: …"`) or
+    /// leaked a `Debug`-formatted `Option<i32>` via
+    /// `status.code().unwrap_or(-1)` — the same exit-code-drop
+    /// regression the sync sibling shields
+    /// (`commands/{crossplane, pangea_infra, gem, infra, tool,
+    /// test_ci, local, e2e, rust_service}.rs`, 6cb9442 through 5b5c765)
+    /// closed on the sync frontier and the async sibling
+    /// `commands/build.rs` shield (72a7adf) closed on the async
+    /// `nix build` site. Post-lift each site is a
+    /// `let mut cmd = Command::new(...); cmd.args(...);
+    /// run_inherited_status(cmd, "...").await?;` triple and the
+    /// canonical `"{op} failed (exit {code})"` envelope emerges by
+    /// construction at the primitive's ONE body (THEORY.md §V.1
+    /// knowable-platform construction guarantee; THEORY.md §VI.1
+    /// three-times-rule redeemed by lifting to the archetype rather
+    /// than re-spelling the stanza).
+    ///
+    /// Negative side: no `.status().await` builder terminator may
+    /// reappear at any code line in the module body — a re-inlined
+    /// spawn would bypass the primitive and re-drop the exit code.
+    /// Positive side: `run_inherited_status(` must appear at ≥5 code
+    /// lines (one per lifted site), so a regression that deleted a
+    /// delegation call cannot leave the negative scan trivially
+    /// satisfied by absence. Both hits route through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline (the `.status().await` string in this
+    /// shield's own docstring is excluded because
+    /// [`code_line_hits`] filters `///`-prefixed lines). Scan bounds
+    /// from file start to the first `\n#[cfg(test)]\nmod tests {`
+    /// marker so this whole shield's own source (the string literal
+    /// `".status().await"` passed to `code_line_hits`, and the
+    /// assertion message that names the forbidden terminator) stays
+    /// out of scope — this shield lives in a SIBLING
+    /// `mod status_spawn_routing_tests { … }` opened after the
+    /// primary `mod tests { … }` block precisely so the boundary the
+    /// production body ends at also bounds every shield in this file
+    /// away from self-match.
+    #[test]
+    fn test_product_release_status_spawns_route_through_run_inherited_status() {
+        const SOURCE: &str = include_str!("product_release.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("product_release.rs must have a `#[cfg(test)] mod tests {` marker");
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status().await");
+        assert!(
+            inline.is_empty(),
+            "commands/product_release.rs must not spawn via an inline \
+             `.status().await` terminator — every async status-only \
+             spawn must route through `crate::retry::run_inherited_status`, \
+             which carries the exit code into the failure envelope. \
+             Found: {inline:?}"
+        );
+
+        let delegations = crate::test_support::code_line_hits(body, "run_inherited_status(").len();
+        assert!(
+            delegations >= 5,
+            "commands/product_release.rs must route the five status-only \
+             spawn sites (`run_forge_subcommand`, `run_nix_release_app`, \
+             `run_health_check` rollout-status, `push_prebuilt_image` \
+             docker-tag, `push_prebuilt_image` docker-push) through \
+             `run_inherited_status` — found only {delegations} \
+             delegation call(s); a dropped call would leave the \
+             negative `.status().await` scan satisfied by absence"
         );
     }
 }
