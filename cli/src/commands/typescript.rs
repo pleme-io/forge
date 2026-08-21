@@ -2,7 +2,7 @@
 //!
 //! Replaces typescript-tool.nix::mkTypescriptRegenApp.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::path::Path;
 use std::process::Command;
 use tracing::info;
@@ -35,14 +35,12 @@ pub fn regenerate(projects: &[String]) -> Result<()> {
 
         info!("Regenerating lockfile for {}...", project);
 
-        let status = Command::new(&pleme_linker)
-            .args(["resolve", "--project", project])
-            .status()
-            .with_context(|| format!("Failed to run pleme-linker resolve for {}", project))?;
-
-        if !status.success() {
-            bail!("pleme-linker resolve failed for {}", project);
-        }
+        let mut cmd = Command::new(&pleme_linker);
+        cmd.args(["resolve", "--project", project]);
+        crate::retry::run_inherited_status_sync(
+            cmd,
+            &format!("pleme-linker resolve for {}", project),
+        )?;
 
         info!("  Done: {}", project);
     }
@@ -101,6 +99,64 @@ mod tests {
             "commands/typescript.rs",
             "PLEME_LINKER_BIN",
             "pleme-linker",
+        );
+    }
+
+    /// Whole-module shield: the sole status-only spawn in
+    /// `commands/typescript.rs` — the `pleme-linker resolve --project
+    /// <p>` step at the heart of [`super::regenerate`] — routes
+    /// through [`crate::retry::run_inherited_status_sync`], never a
+    /// hand-rolled `.status()` + `if !status.success() { bail!(…) }`
+    /// stanza that drops the exit code from the operator log line.
+    /// Pre-lift the site spelled the inline four-line stanza with an
+    /// ad-hoc `pleme-linker resolve failed for <p>` bail message that
+    /// carried the project name but no exit code; post-lift the
+    /// delegation is one call and the canonical
+    /// `"{op} failed (exit {code})"` envelope is emitted by
+    /// construction at the primitive's ONE body, with the project
+    /// name folded into the `op` label so the operator log line reads
+    /// `pleme-linker resolve for <p> failed (exit 1)` — pre-lift
+    /// context PLUS the exit code the canonical envelope now carries
+    /// by construction. The last hand-rolled inline status-only spawn
+    /// on this module's surface; the pleme-linker `resolve` frontier
+    /// now emits the same failure shape every migrated sibling module
+    /// (`commands/gem.rs`, `commands/tool.rs`, `commands/test_ci.rs`,
+    /// `commands/local.rs`, `commands/e2e.rs`, `commands/infra.rs`,
+    /// `commands/rust_service.rs`, `commands/crossplane.rs`,
+    /// `commands/pangea_infra.rs`, `commands/image_release.rs`) emits
+    /// on its own status-only spawns.
+    ///
+    /// Sibling of `commands/gem.rs`'s
+    /// `test_gem_status_spawns_route_through_run_inherited_status_sync`
+    /// (9072905), `commands/tool.rs`'s
+    /// `test_tool_status_spawns_route_through_run_inherited_status_sync`
+    /// (a3d51eb), `commands/crossplane.rs`'s
+    /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
+    /// (6cb9442), `commands/pangea_infra.rs`'s
+    /// `test_pangea_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (a6e9b96), and the seven other sibling shields riding on the
+    /// same [`crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync`]
+    /// primitive. Same three-primitive discipline: negative side
+    /// forbids the inline `.status()` builder-terminator at any code
+    /// line in the module body; positive side pins that
+    /// `run_inherited_status_sync(` appears at ≥1 code line (one per
+    /// pre-lift spawn), so a regression that dropped the delegation
+    /// cannot leave the negative scan trivially satisfied by absence.
+    /// Both hits route through [`crate::test_support::code_line_hits`]
+    /// for anti-docstring-self-match discipline. Scan bounds from
+    /// file start to the FIRST `\n#[cfg(test)]\n` marker (this test
+    /// module's own opener), so this shield's own body — the string
+    /// literal `".status()"` passed to `code_line_hits`, and the
+    /// assertion message that names the forbidden terminator — stays
+    /// out of scope.
+    #[test]
+    fn test_typescript_status_spawns_route_through_run_inherited_status_sync() {
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            include_str!("typescript.rs"),
+            "commands/typescript.rs",
+            1,
+            "the sole status-only spawn (`pleme-linker resolve --project <p>` \
+             in `regenerate`)",
         );
     }
 }
