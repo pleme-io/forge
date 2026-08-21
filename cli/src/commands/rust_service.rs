@@ -3029,11 +3029,10 @@ mod ps_bin_routing_tests {
     #[test]
     fn test_rust_service_routes_ps_through_ps_bin_not_raw_command() {
         const SOURCE: &str = include_str!("rust_service.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "rust_service.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/rust_service.rs",
         );
-        let body = &SOURCE[..cutoff];
         crate::test_support::assert_source_forbids_bare_spawn_shapes(
             body,
             "commands/rust_service.rs",

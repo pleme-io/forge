@@ -1281,11 +1281,8 @@ mod nix_bin_routing_tests {
     #[test]
     fn test_e2e_routes_nix_through_nix_bin_not_raw_command() {
         const SOURCE: &str = include_str!("e2e.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "e2e.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
-        );
-        let body = &SOURCE[..cutoff];
+        let body =
+            crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/e2e.rs");
         assert!(
             !body.contains("Command::new(\"nix\")"),
             "commands/e2e.rs must not spawn `nix` via the bare \
@@ -1354,11 +1351,8 @@ mod docker_bin_routing_tests {
     #[test]
     fn test_e2e_routes_docker_through_docker_bin_not_raw_command() {
         const SOURCE: &str = include_str!("e2e.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "e2e.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
-        );
-        let body = &SOURCE[..cutoff];
+        let body =
+            crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/e2e.rs");
         assert!(
             !body.contains("Command::new(\"docker\")"),
             "commands/e2e.rs must not spawn `docker` via the bare \
@@ -1483,11 +1477,8 @@ mod cargo_env_routing_tests {
     #[test]
     fn test_e2e_routes_cargo_through_cargo_env_not_raw_command() {
         const SOURCE: &str = include_str!("e2e.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "e2e.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
-        );
-        let body = &SOURCE[..cutoff];
+        let body =
+            crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/e2e.rs");
         assert!(
             !body.contains("Command::new(\"cargo\")"),
             "commands/e2e.rs must not spawn `cargo` via the bare \
@@ -1579,11 +1570,8 @@ mod bun_env_routing_tests {
     #[test]
     fn test_e2e_routes_bun_through_bun_bin_sigil_not_raw_command() {
         const SOURCE: &str = include_str!("e2e.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "e2e.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
-        );
-        let body = &SOURCE[..cutoff];
+        let body =
+            crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/e2e.rs");
         assert!(
             !body.contains("Command::new(\"bun\")"),
             "commands/e2e.rs must not spawn `bun` via the bare \
@@ -1661,11 +1649,8 @@ mod open_bin_routing_tests {
     #[test]
     fn test_e2e_routes_open_through_open_bin_not_raw_command() {
         const SOURCE: &str = include_str!("e2e.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "e2e.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
-        );
-        let body = &SOURCE[..cutoff];
+        let body =
+            crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/e2e.rs");
         crate::test_support::assert_source_forbids_bare_spawn_shapes(
             body,
             "commands/e2e.rs",

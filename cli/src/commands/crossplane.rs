@@ -237,11 +237,10 @@ mod tests {
     #[test]
     fn test_crossplane_routes_through_crossplane_bin_not_raw_command() {
         const SOURCE: &str = include_str!("crossplane.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "crossplane.rs must have a `#[cfg(test)]` marker \
-             — the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/crossplane.rs",
         );
-        let body = &SOURCE[..cutoff];
         assert!(
             !body.contains("Command::new(\"crossplane\")"),
             "commands/crossplane.rs must not spawn `crossplane` via the \

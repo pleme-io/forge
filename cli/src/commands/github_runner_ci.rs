@@ -1562,11 +1562,10 @@ mod nix_bin_routing_tests {
     #[test]
     fn test_github_runner_ci_routes_nix_through_nix_bin_not_raw_command() {
         const SOURCE: &str = include_str!("github_runner_ci.rs");
-        let cutoff = SOURCE.find("\n#[cfg(test)]\n").expect(
-            "github_runner_ci.rs must have a `#[cfg(test)]` marker — \
-             the shield's scan boundary depends on it",
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/github_runner_ci.rs",
         );
-        let body = &SOURCE[..cutoff];
         assert!(
             !body.contains("Command::new(\"nix\")"),
             "commands/github_runner_ci.rs must not spawn `nix` via \
