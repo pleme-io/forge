@@ -2565,20 +2565,17 @@ pub async fn release_rust_service(
 
         println!("   📁 Federation tests: {}", federation_tests_dir.display());
 
-        // Run nix run .#release from the federation-tests directory
-        let nix_bin = nix_bin();
-        let status = std::process::Command::new(&nix_bin)
-            .args(&["run", ".#release"])
-            .current_dir(&federation_tests_dir)
-            .status()
-            .context("Failed to execute nix run .#release for federation-tests")?;
-
-        if !status.success() {
-            bail!(
-                "Federation-tests release failed with exit code: {:?}",
-                status.code()
-            );
-        }
+        // Run nix run .#release from the federation-tests directory —
+        // routes through `crate::retry::run_inherited_status_sync` so
+        // the exit code lands in the operator log line by construction
+        // at the primitive's ONE body, closing the last frontier site
+        // the primitive's docstring nine-module enumeration named
+        // (siblings a21bd67 / 5faeecb / a3d51eb / 27896e4 / 9072905 /
+        // a6e9b96 / 6cb9442 / c2922fd).
+        let mut cmd = std::process::Command::new(nix_bin());
+        cmd.args(["run", ".#release"])
+            .current_dir(&federation_tests_dir);
+        crate::retry::run_inherited_status_sync(cmd, "nix run .#release (federation-tests)")?;
 
         println!("   ✅ Federation-tests image released");
 
@@ -3086,6 +3083,80 @@ mod ps_bin_routing_tests {
             "commands/rust_service.rs must define the `ps_bin` sigil — \
              the one bridge between this module's `ps` spawn and the \
              substrate-exported `PS_BIN` env override."
+        );
+    }
+}
+
+#[cfg(test)]
+mod status_spawn_routing_tests {
+    /// Whole-module shield: every status-only spawn in
+    /// `commands/rust_service.rs` routes through
+    /// [`crate::retry::run_inherited_status_sync`], never a hand-rolled
+    /// `.status()` + `if !status.success() { bail!(…) }` stanza that
+    /// drops the exit code from the operator log line.
+    ///
+    /// Pre-lift the single spawn — `release_rust_service`'s
+    /// federation-tests branch (`nix run .#release` from
+    /// `pkgs/products/{product}/tests/federation`) — spelled the
+    /// inline `.status()` + `.context(…)?` + `if !status.success() {
+    /// bail!(…) }` stanza with a `"Federation-tests release failed
+    /// with exit code: {:?}"` message that surfaced a `Debug`-
+    /// formatted `Option<i32>` (`Some(1)` / `None`) rather than the
+    /// canonical `(exit N)` envelope every other status-only spawn
+    /// in forge now emits by construction. Post-lift the site is a
+    /// one-line delegation and the operator log line reads
+    /// `nix run .#release (federation-tests) failed (exit 1)`.
+    ///
+    /// Closes the last frontier site the
+    /// [`crate::retry::run_inherited_status_sync`] docstring's
+    /// nine-module enumeration (`commands/{pangea_infra, crossplane,
+    /// test_ci, local, infra, gem, tool, rust_service, e2e}.rs`)
+    /// named. Sibling of `commands/test_ci.rs`'s
+    /// `test_test_ci_status_spawns_route_through_run_inherited_status_sync`
+    /// (a21bd67), `commands/e2e.rs` (5faeecb), `commands/tool.rs`
+    /// (a3d51eb), `commands/infra.rs` (27896e4), `commands/gem.rs`
+    /// (9072905), `commands/pangea_infra.rs` (a6e9b96),
+    /// `commands/crossplane.rs` (6cb9442), and `commands/local.rs`
+    /// (c2922fd). Same three-primitive discipline: negative side
+    /// forbids the inline `.status()` builder-terminator at any code
+    /// line in the module body; positive side pins that
+    /// `run_inherited_status_sync(` appears at ≥1 code lines, so a
+    /// regression that dropped the delegation cannot leave the
+    /// negative scan trivially satisfied by absence. Both hits route
+    /// through [`crate::test_support::code_line_hits`] for anti-
+    /// docstring-self-match discipline. Scan bounds from file start
+    /// to the FIRST `\n#[cfg(test)]\n` marker (the sibling
+    /// `deploy_rust_service_with_tag_git_bin_routing_tests` opener),
+    /// so this shield's own body — the `.status()` string literal
+    /// passed to `code_line_hits`, and the assertion message that
+    /// names the forbidden terminator — stays out of scope.
+    #[test]
+    fn test_rust_service_status_spawns_route_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("rust_service.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\n")
+            .expect("rust_service.rs must have a `#[cfg(test)]` marker");
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status()");
+        assert!(
+            inline.is_empty(),
+            "commands/rust_service.rs must not spawn via an inline \
+             `.status()` terminator — every status-only spawn must \
+             route through `crate::retry::run_inherited_status_sync`, \
+             which carries the exit code into the failure envelope. \
+             Found: {inline:?}"
+        );
+
+        let delegations =
+            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
+        assert!(
+            delegations >= 1,
+            "commands/rust_service.rs must route the federation-tests \
+             `nix run .#release` status-only spawn through \
+             `run_inherited_status_sync` — found only {delegations} \
+             delegation call(s); a dropped call would leave the \
+             negative `.status()` scan satisfied by absence"
         );
     }
 }
