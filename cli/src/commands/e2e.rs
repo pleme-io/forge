@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::repo::get_tool_path;
-use crate::retry::RetryPolicy;
+use crate::retry::{run_inherited_status_sync, RetryPolicy};
 use crate::ui;
 
 /// Resolve the `docker` binary path via `DOCKER_BIN`, falling back to
@@ -360,59 +360,6 @@ pub fn run_test_pyramid(
     Ok(())
 }
 
-/// Boundary-classify a captured `std::process::ExitStatus` from a
-/// test-suite spawn as a typed `Ok(())` / [`bail!`] result: return
-/// `Ok(())` when the status is a success, or bail with the SPECIFIC
-/// per-suite reason `"<suite> failed (exit code: {status.code():?})"`
-/// when it is not.
-///
-/// This is the shared typed primitive the four `if !status.success()
-/// { bail!("<suite> failed (exit code: {:?})", status.code()); }` sites
-/// at [`run_backend_unit_tests`], [`run_frontend_unit_tests`] (the
-/// `bun run test` console-reporter branch), [`run_backend_integration_tests`],
-/// and the final `cargo test ... e2e` step in [`run_e2e_tests`] collapse
-/// onto — four consumers past the ≥3 three-times-rule threshold
-/// ([THEORY §VI.1](): "two occurrences is a coincidence; three is a
-/// law"), so the shape is a law-redeeming consolidation rather than a
-/// coincidence.
-///
-/// Two structural properties the primitive owns at ONE body instead of
-/// at four sibling literal positions:
-///
-/// 1. **Diagnostic prose authorship.** The exact `"<suite> failed
-///    (exit code: {:?})"` format string lives here (ONE [`bail!`] body);
-///    a future edit that reshapes the parenthesization (`" — exit
-///    code: {:?}"` instead of `" (exit code: {:?})"`) or the code
-///    formatter (`{status:?}` for the whole `ExitStatus` display
-///    instead of just `.code()`) lands at one call site and reaches
-///    every consumer without drift. Pre-lift, the same two-arg
-///    `bail!("<suite> failed (exit code: {:?})", status.code())` shape
-///    was authored at four independent literal positions that a
-///    factor-out edit or an exit-code-display refactor would silently
-///    diverge across.
-/// 2. **`status.code()` sourcing.** Every consumer routes the same
-///    [`std::process::ExitStatus`] through the same `.code()` reader —
-///    pre-lift, a stray copy-paste that dropped `.code()` and printed
-///    the whole `ExitStatus` via `{:?}` (matching the naked
-///    `bail!("... {:?}", status)` shape) would silently degrade that
-///    site's failure diagnostic to a `ExitStatus(unix_wait_status(256))`
-///    debug dump without any of the other three sibling sites noticing.
-///    Post-lift the sourcing is authored once at this body and
-///    impossible to typo at the consumer side.
-///
-/// Sibling primitive to the `helm.rs::ensure_helm_success` /
-/// `release_tracker.rs::ensure_success` / `rollout.rs::format_rollback_*`
-/// same-shape lifts on adjacent command surfaces — this primitive
-/// closes the "test-suite `ExitStatus` → typed Result" boundary on the
-/// four `commands/e2e.rs` test-runner entry points the pre-lift
-/// literal shape was scattered across.
-fn ensure_test_suite_success(status: std::process::ExitStatus, suite: &str) -> Result<()> {
-    if !status.success() {
-        bail!("{} failed (exit code: {:?})", suite, status.code());
-    }
-    Ok(())
-}
-
 /// Run backend unit tests
 fn run_backend_unit_tests(backend_dir: &str, filter: Option<&str>) -> Result<()> {
     ui::print_info("Running cargo test --lib");
@@ -426,7 +373,7 @@ fn run_backend_unit_tests(backend_dir: &str, filter: Option<&str>) -> Result<()>
     }
 
     let start = Instant::now();
-    let status = cmd.status().context("Failed to run cargo test")?;
+    let outcome = run_inherited_status_sync(cmd, "Backend unit tests");
     let elapsed = start.elapsed();
 
     ui::print_info(&format!(
@@ -434,7 +381,7 @@ fn run_backend_unit_tests(backend_dir: &str, filter: Option<&str>) -> Result<()>
         elapsed.as_secs_f64()
     ));
 
-    ensure_test_suite_success(status, "Backend unit tests")
+    outcome
 }
 
 /// Run frontend unit tests
@@ -473,9 +420,7 @@ fn run_frontend_unit_tests(
         }
 
         let start = Instant::now();
-        let status = cmd
-            .status()
-            .context("Failed to run bun test with reporter")?;
+        let outcome = run_inherited_status_sync(cmd, "Frontend unit tests");
         let elapsed = start.elapsed();
 
         println!();
@@ -485,9 +430,7 @@ fn run_frontend_unit_tests(
         ));
         ui::print_info(&format!("JSON report: {}", output_file));
 
-        if !status.success() {
-            bail!("Frontend unit tests failed (see report for details)");
-        }
+        outcome?;
     } else {
         ui::print_info("Running bun run test");
 
@@ -504,7 +447,7 @@ fn run_frontend_unit_tests(
         }
 
         let start = Instant::now();
-        let status = cmd.status().context("Failed to run bun test")?;
+        let outcome = run_inherited_status_sync(cmd, "Frontend unit tests");
         let elapsed = start.elapsed();
 
         ui::print_info(&format!(
@@ -512,7 +455,7 @@ fn run_frontend_unit_tests(
             elapsed.as_secs_f64()
         ));
 
-        ensure_test_suite_success(status, "Frontend unit tests")?;
+        outcome?;
     }
 
     Ok(())
@@ -536,11 +479,9 @@ fn run_backend_integration_tests(backend_dir: &str, filter: Option<&str>) -> Res
 
     let start = Instant::now();
     let cargo = cargo_bin();
-    let status = Command::new(&cargo)
-        .current_dir(backend_dir)
-        .args(&args)
-        .status()
-        .context("Failed to run integration tests")?;
+    let mut cmd = Command::new(&cargo);
+    cmd.current_dir(backend_dir).args(&args);
+    let outcome = run_inherited_status_sync(cmd, "Backend integration tests");
     let elapsed = start.elapsed();
 
     ui::print_info(&format!(
@@ -548,7 +489,7 @@ fn run_backend_integration_tests(backend_dir: &str, filter: Option<&str>) -> Res
         elapsed.as_secs_f64()
     ));
 
-    ensure_test_suite_success(status, "Backend integration tests")
+    outcome
 }
 
 /// Prepare E2E test images by building them via Nix and loading into Docker
@@ -674,7 +615,7 @@ pub fn run_e2e_tests(
         cmd.env_remove("E2E_HEADLESS");
     }
 
-    let status = cmd.status().context("Failed to run cargo test")?;
+    let outcome = run_inherited_status_sync(cmd, "E2E tests");
     let elapsed = start.elapsed();
 
     // Post-cleanup: remove containers regardless of pass/fail
@@ -688,10 +629,10 @@ pub fn run_e2e_tests(
         elapsed.as_secs_f64()
     ));
 
-    if !status.success() {
+    if outcome.is_err() {
         print_failure_diagnostics();
     }
-    ensure_test_suite_success(status, "E2E tests")?;
+    outcome?;
 
     ui::print_success("E2E tests passed!");
     Ok(())
@@ -889,15 +830,11 @@ fn build_and_load_image(repo_root: &str, name: &str, flake_attr: &str) -> Result
 
     // Build with Nix
     ui::print_info(&format!("Building {} image via Nix", name));
-    let build_status = Command::new(get_tool_path("NIX_BIN", "nix"))
+    let mut build_cmd = Command::new(get_tool_path("NIX_BIN", "nix"));
+    build_cmd
         .current_dir(repo_root)
-        .args(["build", flake_attr, "-o", &output_path])
-        .status()
-        .context("Failed to run nix build")?;
-
-    if !build_status.success() {
-        bail!("Nix build failed for {}", flake_attr);
-    }
+        .args(["build", flake_attr, "-o", &output_path]);
+    run_inherited_status_sync(build_cmd, &format!("nix build {}", flake_attr))?;
 
     // Load into Docker
     ui::print_info(&format!("Loading {} image into Docker", name));
@@ -2002,140 +1939,97 @@ mod docker_startup_poll_backoff_tests {
 }
 
 #[cfg(test)]
-mod ensure_test_suite_success_tests {
-    use super::ensure_test_suite_success;
-
-    /// Build a synthetic `std::process::ExitStatus` whose `.code()`
-    /// returns the given exit code — the hermetic
-    /// `ExitStatusExt::from_raw`-driven builder every peer
-    /// `ensure_*_success` shield in forge rides on
-    /// (`commands/helm.rs::capture_tests::make_output` +
-    /// `commands/rollout.rs::format_rollback_non_success_…` +
-    /// `infrastructure/release_tracker.rs`'s response shields).
-    /// The raw wait-status layout Unix defines is `(code << 8) | signal`;
-    /// leaving the low byte zero lets `ExitStatus::code()` return
-    /// `Some(<code>)` rather than falling into the "killed by signal"
-    /// case that returns `None`.
-    #[cfg(unix)]
-    fn exit_status_with_code(code: i32) -> std::process::ExitStatus {
-        use std::os::unix::process::ExitStatusExt;
-        std::process::ExitStatus::from_raw(code << 8)
-    }
-
-    /// The success branch: a zero-exit status returns `Ok(())`
-    /// regardless of the suite label. Pins the base case the four
-    /// consumer sites at `run_backend_unit_tests`,
-    /// `run_frontend_unit_tests`, `run_backend_integration_tests`, and
-    /// the E2E-tests site in `run_e2e_tests` depend on so the loop
-    /// falls through to the post-test success surface (the
-    /// `ui::print_success("E2E tests passed!")` line, and the
-    /// `Ok(())` returns on the three sibling test-runner functions).
-    #[cfg(unix)]
-    #[test]
-    fn ensure_test_suite_success_returns_ok_on_success_status() {
-        let status = exit_status_with_code(0);
-        assert!(status.success(), "code=0 must classify as success");
-        assert!(ensure_test_suite_success(status, "Backend unit tests").is_ok());
-        assert!(ensure_test_suite_success(status, "Frontend unit tests").is_ok());
-        assert!(ensure_test_suite_success(status, "Backend integration tests").is_ok());
-        assert!(ensure_test_suite_success(status, "E2E tests").is_ok());
-    }
-
-    /// The failure branch: a non-zero-exit status bails with the
-    /// canonical pre-lift prose shape `"<suite> failed (exit code:
-    /// {status.code():?})"` — byte-for-byte the same shape the four
-    /// pre-lift literal sites in this module emitted before the lift.
-    /// A future edit that reshapes the parenthesization (`" — exit
-    /// code:"` instead of `" (exit code:"`) or drops `.code()` (falling
-    /// back to `ExitStatus`'s `Debug` dump) fails this shield.
-    #[cfg(unix)]
-    #[test]
-    fn ensure_test_suite_success_bails_with_pre_lift_prose_on_failure() {
-        let status = exit_status_with_code(1);
-        assert!(!status.success(), "code=1 must classify as failure");
-        let err = ensure_test_suite_success(status, "Backend unit tests")
-            .expect_err("a non-success status must bail");
-        assert_eq!(
-            err.to_string(),
-            "Backend unit tests failed (exit code: Some(1))",
-            "bail message must equal the pre-lift prose byte-for-byte",
-        );
-
-        let err = ensure_test_suite_success(exit_status_with_code(2), "Frontend unit tests")
-            .expect_err("a non-success status must bail");
-        assert_eq!(
-            err.to_string(),
-            "Frontend unit tests failed (exit code: Some(2))",
-            "bail message must equal the pre-lift prose byte-for-byte",
-        );
-
-        let err =
-            ensure_test_suite_success(exit_status_with_code(101), "Backend integration tests")
-                .expect_err("a non-success status must bail");
-        assert_eq!(
-            err.to_string(),
-            "Backend integration tests failed (exit code: Some(101))",
-            "bail message must equal the pre-lift prose byte-for-byte",
-        );
-
-        let err = ensure_test_suite_success(exit_status_with_code(137), "E2E tests")
-            .expect_err("a non-success status must bail");
-        assert_eq!(
-            err.to_string(),
-            "E2E tests failed (exit code: Some(137))",
-            "bail message must equal the pre-lift prose byte-for-byte",
-        );
-    }
-
-    /// Whole-module production-slice re-fusion shield: post-lift, the
-    /// production slice of `commands/e2e.rs` must not contain any bare
-    /// `bail!("<suite>" ..., status.code())` shape — every test-suite
-    /// spawn's `ExitStatus`-to-typed-Result boundary must consume
-    /// [`super::ensure_test_suite_success`] instead. Slices `SOURCE`
-    /// at the first `\n#[cfg(test)]\n` marker so this shield's own
-    /// literal-string needles (living in `#[cfg(test)]` code below
-    /// the marker) do not self-match, and filters `///` / `//!` /
-    /// `//` doc-comment lines that legitimately name the pre-lift
-    /// shape as prose so the `ensure_test_suite_success` docstring
-    /// above does not false-fire.
+mod e2e_status_spawn_routing_tests {
+    /// Whole-module shield: every status-only spawn in
+    /// `commands/e2e.rs` routes through
+    /// [`crate::retry::run_inherited_status_sync`], never a hand-rolled
+    /// inline builder-terminator + `if !status.success()` stanza that
+    /// drops the exit code from the operator log line.
     ///
-    /// Pre-lift, four sibling literal positions each spelled the
-    /// shape verbatim (`run_backend_unit_tests`,
-    /// `run_frontend_unit_tests`'s `bun run test` console branch,
-    /// `run_backend_integration_tests`, and the final `cargo test
-    /// ... e2e` step in `run_e2e_tests`). Post-lift the production
-    /// slice contains exactly ONE code-line hit for the substring
-    /// `"failed (exit code:"` — [`super::ensure_test_suite_success`]'s
-    /// own `bail!` body — and every other consumer site delegates
-    /// through the helper. A future edit that re-fuses the literal at
-    /// any of the four sites (or a new fifth site that silently copies
-    /// the shape) fails here, not in production where the consumers'
-    /// failure-diagnostic prose would silently drift out of sync with
-    /// the helper's.
+    /// Pre-lift, six status-only sites each spelled the inline shape
+    /// verbatim:
+    ///
+    /// 1. `run_backend_unit_tests` — `cargo test --lib`;
+    /// 2. `run_frontend_unit_tests` (reporter branch) — `bun run test
+    ///    --reporter=json`; pre-lift its diagnostic bailed with
+    ///    `"Frontend unit tests failed (see report for details)"`
+    ///    and **dropped the exit code entirely**;
+    /// 3. `run_frontend_unit_tests` (console branch) — `bun run test`;
+    /// 4. `run_backend_integration_tests` — `cargo test --test
+    ///    integration_tests`;
+    /// 5. `run_e2e_tests` — `cargo test --test e2e_tests`;
+    /// 6. `build_and_load_image` — `nix build <flake-attr>`.
+    ///
+    /// Sites 1, 3, 4, 5 routed through a local
+    /// `ensure_test_suite_success` helper whose bail body spelled
+    /// `"<suite> failed (exit code: {:?})"` — the pre-canonical
+    /// `Debug`-format envelope (`Some(1)` / `None`) rather than the
+    /// canonical `retry::classify_inherited_status` envelope
+    /// (`"exit 1"` / `"killed by signal"`). Site 2 dropped the exit
+    /// code altogether; site 6 kept only the flake-attr and dropped
+    /// the exit code.
+    ///
+    /// Post-lift each spawn is a one-line delegation and the
+    /// canonical `"{op} failed (exit {code})"` envelope emerges by
+    /// construction at the `run_inherited_status_sync` body — so
+    /// every failed E2E-tier spawn's operator log line now reads
+    /// e.g. `"Backend unit tests failed (exit 1)"` (Display, one
+    /// shape across every status-only site in forge) rather than the
+    /// per-site dialect the pre-lift shape carried.
+    ///
+    /// Sibling of the `commands/crossplane.rs` shield
+    /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
+    /// (6cb9442), `commands/pangea_infra.rs`'s
+    /// `test_pangea_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (a6e9b96), `commands/gem.rs`'s
+    /// `test_gem_status_spawns_route_through_run_inherited_status_sync`
+    /// (9072905), `commands/infra.rs`'s
+    /// `test_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (27896e4), and `commands/tool.rs`'s
+    /// `test_tool_status_spawns_route_through_run_inherited_status_sync`
+    /// (a3d51eb). Same three-primitive discipline: negative side
+    /// forbids the inline `.status()` builder-terminator at any code
+    /// line in the module body; positive side pins that
+    /// `run_inherited_status_sync(` appears at ≥6 code lines (one
+    /// per pre-lift spawn), so a regression that dropped every
+    /// delegation cannot leave the negative scan trivially satisfied
+    /// by absence. Both hits route through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline. Scan bounds from file start to the
+    /// FIRST `\n#[cfg(test)]\n` marker (the sibling
+    /// `resolve_repo_root_git_bin_routing_tests` opener), so this
+    /// shield's own body — the string literal `".status()"` passed
+    /// to `code_line_hits`, and the assertion message that names the
+    /// forbidden terminator — stays out of scope.
     #[test]
-    fn no_bare_bail_exit_code_pattern_remains_outside_helper() {
+    fn test_e2e_status_spawns_route_through_run_inherited_status_sync() {
         const SOURCE: &str = include_str!("e2e.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\n")
+            .expect("e2e.rs must have a `#[cfg(test)]` marker");
+        let body = &SOURCE[..cutoff];
 
-        let production = SOURCE
-            .split_once("\n#[cfg(test)]\n")
-            .map(|(prod, _)| prod)
-            .unwrap_or(SOURCE);
-        let hits = crate::test_support::code_line_hits(production, "failed (exit code:");
-        assert_eq!(
-            hits.len(),
-            1,
-            "commands/e2e.rs must contain exactly ONE production \
-             code-line hit for `\"failed (exit code:\"` \
-             — the sole authorized emission at \
-             `ensure_test_suite_success`'s `bail!` body. Every \
-             pre-lift `if !status.success() {{ bail!(\"<suite> \
-             failed (exit code: {{:?}})\", status.code()); }}` \
-             literal at `run_backend_unit_tests`, \
-             `run_frontend_unit_tests`, \
-             `run_backend_integration_tests`, and the E2E-tests site \
-             in `run_e2e_tests` must consume the helper. Found {} \
-             code-line hit(s): {hits:#?}",
-            hits.len(),
+        let inline = crate::test_support::code_line_hits(body, ".status()");
+        assert!(
+            inline.is_empty(),
+            "commands/e2e.rs must not spawn via an inline `.status()` \
+             terminator — every status-only spawn must route through \
+             `crate::retry::run_inherited_status_sync`, which carries \
+             the exit code into the failure envelope. Found: {inline:?}"
+        );
+
+        let delegations =
+            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
+        assert!(
+            delegations >= 6,
+            "commands/e2e.rs must route all six status-only spawns \
+             (`cargo test --lib`, `bun run test` reporter + console \
+             branches, `cargo test --test integration_tests`, \
+             `cargo test --test e2e_tests`, and `nix build \
+             <flake-attr>`) through `run_inherited_status_sync` — \
+             found only {delegations} delegation call(s); a dropped \
+             call would leave the negative `.status()` scan satisfied \
+             by absence"
         );
     }
 }
