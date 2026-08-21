@@ -14,6 +14,7 @@ use tracing::info;
 
 use crate::git;
 use crate::nix::build_flake_attr_in;
+use crate::retry::run_inherited_status_sync;
 // Both, deliberately: `regctl` below is a tool whose NAME and binary string are
 // identical, so the deriving lookup is correct for it. `oci-push` is not — see
 // the note at the DOCA resolution.
@@ -110,40 +111,36 @@ pub async fn execute(
         let regctl = get_tool_path("regctl");
 
         // SHA-pinned multi-arch index.
-        let status = Command::new(&regctl)
-            .args([
-                "index",
-                "create",
-                &format!("{}:{}", registry, sha),
-                "--ref",
-                &format!("{}:{}", registry, amd64_tag),
-                "--ref",
-                &format!("{}:arm64-{}", registry, sha),
-            ])
-            .status()
-            .context("Failed to create multi-arch index (sha)")?;
-
-        if !status.success() {
-            bail!("regctl index create (sha) failed");
-        }
+        let mut sha_index = Command::new(&regctl);
+        sha_index.args([
+            "index",
+            "create",
+            &format!("{}:{}", registry, sha),
+            "--ref",
+            &format!("{}:{}", registry, amd64_tag),
+            "--ref",
+            &format!("{}:arm64-{}", registry, sha),
+        ]);
+        run_inherited_status_sync(
+            sha_index,
+            &format!("regctl multi-arch index create for {}:{}", registry, sha),
+        )?;
 
         // Floating `latest` multi-arch index.
-        let status = Command::new(&regctl)
-            .args([
-                "index",
-                "create",
-                &format!("{}:latest", registry),
-                "--ref",
-                &format!("{}:amd64-latest", registry),
-                "--ref",
-                &format!("{}:arm64-latest", registry),
-            ])
-            .status()
-            .context("Failed to create multi-arch index (latest)")?;
-
-        if !status.success() {
-            bail!("regctl index create (latest) failed");
-        }
+        let mut latest_index = Command::new(&regctl);
+        latest_index.args([
+            "index",
+            "create",
+            &format!("{}:latest", registry),
+            "--ref",
+            &format!("{}:amd64-latest", registry),
+            "--ref",
+            &format!("{}:arm64-latest", registry),
+        ]);
+        run_inherited_status_sync(
+            latest_index,
+            &format!("regctl multi-arch index create for {}:latest", registry),
+        )?;
     }
 
     // Build the actual list of tags pushed so the summary is accurate.
@@ -204,24 +201,19 @@ fn push_image(doca: &str, image_path: &str, registry: &str, tag: &str) -> Result
         format!("registry {registry:?} has no '/', cannot split host from image")
     })?;
 
-    let status = Command::new(doca)
-        .args([
-            "push",
-            "--tarball",
-            image_path,
-            "--registry",
-            host,
-            "--image",
-            image,
-            "--tag",
-            tag,
-        ])
-        .status()
-        .with_context(|| format!("Failed to push {}:{}", registry, tag))?;
-
-    if !status.success() {
-        bail!("doca push failed for {}:{}", registry, tag);
-    }
+    let mut push = Command::new(doca);
+    push.args([
+        "push",
+        "--tarball",
+        image_path,
+        "--registry",
+        host,
+        "--image",
+        image,
+        "--tag",
+        tag,
+    ]);
+    run_inherited_status_sync(push, &format!("doca push for {}:{}", registry, tag))?;
 
     Ok(())
 }
@@ -983,5 +975,77 @@ mod tests {
         let tmp = build_fake_docker_archive(&payload);
         let path = tmp.path().to_string_lossy().to_string();
         assert!(verify_binary_contents_arch(&path, "amd64").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod status_spawn_routing_tests {
+    /// Whole-module shield: every status-only spawn in
+    /// `commands/image_release.rs` routes through
+    /// [`crate::retry::run_inherited_status_sync`], never a hand-rolled
+    /// `.status()` + `if !status.success() { bail!(…) }` stanza that
+    /// drops the exit code from the operator log line. Pre-lift all
+    /// three spawns — the two `regctl index create` calls (SHA-pinned
+    /// and floating `latest` multi-arch indexes) in `execute` and the
+    /// `doca push` call in `push_image` — spelled the inline stanza
+    /// with an ad-hoc `regctl index create (sha) failed` /
+    /// `regctl index create (latest) failed` / `doca push failed for
+    /// <registry>:<tag>` message that carried the target reference
+    /// but no exit code; post-lift each is a one-line delegation and
+    /// the canonical `"{op} failed (exit {code})"` envelope is
+    /// emitted by construction at the primitive's ONE body, with the
+    /// registry:tag folded into the `op` label so the operator log
+    /// line reads e.g. `doca push for ghcr.io/foo:amd64-<sha> failed
+    /// (exit 1)` — pre-lift context PLUS the exit code the canonical
+    /// envelope now carries by construction.
+    ///
+    /// Sibling of the `commands/crossplane.rs` shield
+    /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
+    /// (6cb9442), `commands/pangea_infra.rs`'s
+    /// `test_pangea_infra_status_spawns_route_through_run_inherited_status_sync`
+    /// (a6e9b96), and `commands/gem.rs`'s
+    /// `test_gem_status_spawns_route_through_run_inherited_status_sync`
+    /// (9072905). Same three-primitive discipline: negative side
+    /// forbids the inline `.status()` builder-terminator at any code
+    /// line in the module body; positive side pins that
+    /// `run_inherited_status_sync(` appears at ≥3 code lines (one
+    /// per pre-lift spawn), so a regression that dropped every
+    /// delegation cannot leave the negative scan trivially satisfied
+    /// by absence. Both hits route through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline. Scan bounds from file start to the
+    /// FIRST `\n#[cfg(test)]\n` marker (the primary `mod tests`
+    /// opener above), so this shield's own body — the string
+    /// literal `".status()"` passed to `code_line_hits`, and the
+    /// assertion message that names the forbidden terminator — stays
+    /// out of scope.
+    #[test]
+    fn test_image_release_status_spawns_route_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("image_release.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\n")
+            .expect("image_release.rs must have a `#[cfg(test)]` marker");
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status()");
+        assert!(
+            inline.is_empty(),
+            "commands/image_release.rs must not spawn via an inline \
+             `.status()` terminator — every status-only spawn must \
+             route through `crate::retry::run_inherited_status_sync`, \
+             which carries the exit code into the failure envelope. \
+             Found: {inline:?}"
+        );
+
+        let delegations =
+            crate::test_support::code_line_hits(body, "run_inherited_status_sync(").len();
+        assert!(
+            delegations >= 3,
+            "commands/image_release.rs must route all three status-only \
+             spawns (two `regctl index create` + one `doca push`) \
+             through `run_inherited_status_sync` — found only \
+             {delegations} delegation call(s); a dropped call would \
+             leave the negative `.status()` scan satisfied by absence"
+        );
     }
 }
