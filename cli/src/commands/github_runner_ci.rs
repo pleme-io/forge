@@ -946,26 +946,16 @@ mod tests {
     /// un-migrating the typed-error surface.
     #[test]
     fn test_execute_routes_attic_push_through_attic_client_not_helper() {
-        let source = include_str!("github_runner_ci.rs");
-        let execute_start = source
-            .find("pub async fn execute(")
-            .expect("execute() must be present in this module's source");
-        // Bound the search at the tests module marker so this test's
-        // own docstring — which legitimately spells the pre-migration
-        // `&["push", ...]` args slice for context — is excluded from
-        // the scan. The pre-migration `\nasync fn attic_command_with_retry`
-        // boundary marker was retired when the helper itself was
-        // deleted; the tests-module boundary is the load-bearing
-        // marker every real `execute()` code site sits strictly above.
-        let helper_marker = "\n#[cfg(test)]";
-        let execute_end = source[execute_start..]
-            .find(helper_marker)
-            .map(|i| execute_start + i)
-            .expect(
-                "the `#[cfg(test)]` tests-module marker must follow `execute()` — \
-                 the shield's slice boundary relies on this module ordering",
-            );
-        let execute_body = &source[execute_start..execute_end];
+        // Bound the fn body between `execute()`'s header and the next
+        // `\n#[cfg(test)]` marker so this test's own docstring — which
+        // legitimately spells the pre-migration `&["push", ...]` args
+        // slice for context — is excluded from the scan.
+        let execute_body = crate::test_support::fn_body_slice_between_markers(
+            include_str!("github_runner_ci.rs"),
+            "commands/github_runner_ci.rs",
+            "pub async fn execute(",
+            "\n#[cfg(test)]",
+        );
 
         // Post-migration invariant #1: no `attic_command_with_retry`
         // call spawning `attic push` remains in `execute()`. The
@@ -1049,25 +1039,16 @@ mod tests {
     /// un-migrating the typed-error surface.
     #[test]
     fn test_execute_routes_attic_use_through_attic_client_not_helper() {
-        let source = include_str!("github_runner_ci.rs");
-        let execute_start = source
-            .find("pub async fn execute(")
-            .expect("execute() must be present in this module's source");
-        // Bound the search at the tests module marker so this test's
-        // own docstring — which legitimately spells the pre-migration
-        // `&["use", ...]` args slice for context — is excluded from
-        // the scan. The pre-migration `\nasync fn attic_command_with_retry`
-        // boundary marker was retired when the helper itself was
-        // deleted.
-        let helper_marker = "\n#[cfg(test)]";
-        let execute_end = source[execute_start..]
-            .find(helper_marker)
-            .map(|i| execute_start + i)
-            .expect(
-                "the `#[cfg(test)]` tests-module marker must follow `execute()` — \
-                 the shield's slice boundary relies on this module ordering",
-            );
-        let execute_body = &source[execute_start..execute_end];
+        // Bound the fn body between `execute()`'s header and the next
+        // `\n#[cfg(test)]` marker so this test's own docstring — which
+        // legitimately spells the pre-migration `&["use", ...]` args
+        // slice for context — is excluded from the scan.
+        let execute_body = crate::test_support::fn_body_slice_between_markers(
+            include_str!("github_runner_ci.rs"),
+            "commands/github_runner_ci.rs",
+            "pub async fn execute(",
+            "\n#[cfg(test)]",
+        );
 
         // Post-migration invariant #1: no `attic_command_with_retry`
         // call spawning `attic use` remains in `execute()`. The
@@ -1137,23 +1118,20 @@ mod tests {
     /// un-migrating the typed-error surface.
     #[test]
     fn test_execute_routes_attic_login_through_attic_client_not_helper() {
+        // Bound the fn body between `execute()`'s header and the next
+        // `\n#[cfg(test)]` marker so this test's own docstring — which
+        // legitimately spells the pre-migration `&["login", ...]` args
+        // slice for context — is excluded from the scan. The
+        // whole-module `source` binding is retained below for the
+        // sibling retired-helper predicate that scans past the
+        // tests-module boundary.
         let source = include_str!("github_runner_ci.rs");
-        let execute_start = source
-            .find("pub async fn execute(")
-            .expect("execute() must be present in this module's source");
-        // Bound the search at the tests module marker so this test's
-        // own docstring — which legitimately spells the pre-migration
-        // `&["login", ...]` args slice for context — is excluded from
-        // the scan.
-        let helper_marker = "\n#[cfg(test)]";
-        let execute_end = source[execute_start..]
-            .find(helper_marker)
-            .map(|i| execute_start + i)
-            .expect(
-                "the `#[cfg(test)]` tests-module marker must follow `execute()` — \
-                 the shield's slice boundary relies on this module ordering",
-            );
-        let execute_body = &source[execute_start..execute_end];
+        let execute_body = crate::test_support::fn_body_slice_between_markers(
+            source,
+            "commands/github_runner_ci.rs",
+            "pub async fn execute(",
+            "\n#[cfg(test)]",
+        );
 
         // Post-migration invariant #1: no `attic_command_with_retry`
         // call spawning `attic login` remains in `execute()`. The
@@ -1262,26 +1240,18 @@ mod tests {
     /// second consumer of the `kubectl_command_async` primitive.
     #[test]
     fn test_execute_routes_kubectl_through_kubectl_command_async_not_raw_command() {
-        let source = include_str!("github_runner_ci.rs");
-        let execute_start = source
-            .find("pub async fn execute(")
-            .expect("execute() must be present in this module's source");
         // Bound at the next top-level function marker in source order.
         // `push_with_retry` follows `execute`; the tests-module
         // `#[cfg(test)]` marker follows `push_with_retry`. Using the
         // fn-boundary keeps the shield scoped strictly to `execute()`
         // so a future kubectl-spawning helper landing between the two
         // functions cannot silently ride along without its own shield.
-        let helper_marker = "\nasync fn push_with_retry(";
-        let execute_end = source[execute_start..]
-            .find(helper_marker)
-            .map(|i| execute_start + i)
-            .expect(
-                "the `async fn push_with_retry(` marker must follow \
-                 `execute()` — the shield's slice boundary relies on \
-                 this module ordering",
-            );
-        let execute_body = &source[execute_start..execute_end];
+        let execute_body = crate::test_support::fn_body_slice_between_markers(
+            include_str!("github_runner_ci.rs"),
+            "commands/github_runner_ci.rs",
+            "pub async fn execute(",
+            "\nasync fn push_with_retry(",
+        );
 
         assert!(
             !execute_body.contains("Command::new(\"kubectl\")"),
