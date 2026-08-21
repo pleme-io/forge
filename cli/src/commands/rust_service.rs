@@ -2827,18 +2827,15 @@ mod deploy_rust_service_with_tag_git_bin_routing_tests {
         // git spawn sites live in its single-repo `else` branch. The
         // shield's own docstring above legitimately mentions
         // `Command::new("git")` and lives outside this bound.
-        let fn_marker = "pub async fn deploy_rust_service_with_tag(";
-        let start = SOURCE
-            .find(fn_marker)
-            .expect("rust_service.rs must contain `pub async fn deploy_rust_service_with_tag(` — module invariant");
-        let after_fn = &SOURCE[start..];
-        // Bound at the next top-level `fn` in source order
-        // (`print_deployment_report`), which follows
-        // `deploy_rust_service_with_tag`.
-        let end_relative = after_fn
-            .find("\nasync fn print_deployment_report(")
-            .expect("rust_service.rs must contain `async fn print_deployment_report(` after `deploy_rust_service_with_tag`");
-        let fn_body = &after_fn[..end_relative];
+        // Bound the fn body between `deploy_rust_service_with_tag`'s
+        // header and the next top-level `fn` in source order
+        // (`print_deployment_report`), which follows it.
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "rust_service.rs",
+            "pub async fn deploy_rust_service_with_tag(",
+            "\nasync fn print_deployment_report(",
+        );
 
         assert!(
             !fn_body.contains("Command::new(\"git\")"),

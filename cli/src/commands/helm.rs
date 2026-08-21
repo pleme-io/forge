@@ -3099,17 +3099,15 @@ mod deploy_git_bin_routing_tests {
         // `bump_git_bin_routing_tests` shield's own literal spellings
         // of `Command::new("git")` remain in this file, and those are
         // out of scope of this bound.
-        let fn_marker = "pub fn deploy(";
-        let start = SOURCE
-            .find(fn_marker)
-            .expect("helm.rs must contain `pub fn deploy(` — module invariant");
-        let after_fn = &SOURCE[start..];
-        // Bound at the next top-level `pub fn` in source order
-        // (`release`), which follows `deploy`.
-        let end_relative = after_fn
-            .find("\npub fn release(")
-            .expect("helm.rs must contain `pub fn release(` after `deploy`");
-        let fn_body = &after_fn[..end_relative];
+        // Bound the fn body between `deploy`'s header and the next
+        // top-level `pub fn` in source order (`release`), which follows
+        // `deploy`.
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "helm.rs",
+            "pub fn deploy(",
+            "\npub fn release(",
+        );
 
         assert!(
             !fn_body.contains("Command::new(\"git\")"),
@@ -3178,15 +3176,12 @@ mod bump_git_bin_routing_tests {
         // Bound the scan to `bump` — the five git spawn sites all
         // live inside it. Bounds at the next top-level `fn` in source
         // order (`chart_version_at`) which follows `bump`.
-        let fn_marker = "pub fn bump(";
-        let start = SOURCE
-            .find(fn_marker)
-            .expect("helm.rs must contain `pub fn bump(` — module invariant");
-        let after_fn = &SOURCE[start..];
-        let end_relative = after_fn
-            .find("\nfn chart_version_at(")
-            .expect("helm.rs must contain `fn chart_version_at(` after `bump`");
-        let fn_body = &after_fn[..end_relative];
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "helm.rs",
+            "pub fn bump(",
+            "\nfn chart_version_at(",
+        );
 
         assert!(
             !fn_body.contains("Command::new(\"git\")"),

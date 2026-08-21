@@ -1980,6 +1980,74 @@ pub fn module_body_before_tests<'a>(source: &'a str, module_path: &str) -> &'a s
     &source[..body_end]
 }
 
+/// Slice `source` at the first occurrence of `open_marker` and cap the
+/// returned window at the FIRST occurrence of `end_marker` that follows
+/// that opening — the `fn`-scoped sibling of [`module_body_before_tests`]
+/// and the shield-side sibling of `version.rs`'s brace-nesting-aware
+/// private `fn_body_after_signature`.
+///
+/// A shield that reads the module's own source via `include_str!` and
+/// wants to bound a `.contains(...)` scan to ONE function's body (so
+/// docstrings on sibling functions and this shield's own diagnostic
+/// prose stay out of scope) writes the composition once:
+///
+/// ```text
+/// const SOURCE: &str = include_str!("push.rs");
+/// let fn_body = crate::test_support::fn_body_slice_between_markers(
+///     SOURCE,
+///     "push.rs",
+///     "pub async fn update_kustomization(",
+///     "\npub async fn execute(",
+/// );
+/// assert!(!fn_body.contains("Command::new(\"git\")"), "...");
+/// ```
+///
+/// instead of open-coding the seven-line `SOURCE.find(fn_marker).expect(
+/// ...); let after_fn = &SOURCE[start..]; let end_relative = after_fn.
+/// find(end_marker).expect(...); let fn_body = &after_fn[..end_relative];`
+/// stanza at each shield site.
+///
+/// Panics with the caller-supplied `module_path` naming which marker is
+/// absent so a shield that lands on a module whose fn was renamed or
+/// reordered diagnoses itself by name rather than falling through as a
+/// generic `find` `None` unwrap.
+///
+/// Signature preserves the source lifetime (`<'a>(source: &'a str, ...)
+/// -> &'a str`) so a caller can hand the sliced body to a shield and
+/// still read `source` afterward without cloning — the exact shape
+/// `commands/integration_tests.rs` uses at 2094-2105 / 2338-2354 to
+/// cross-check the sliced fn body against the full source.
+///
+/// The returned slice INCLUDES the bytes of `open_marker` at its head
+/// (matches the pre-lift stanza's `&SOURCE[start..]` semantics: the
+/// slice starts at the marker's opening byte, not past it) and EXCLUDES
+/// the bytes of `end_marker` at its tail (matches `&after_fn[..
+/// end_relative]`: everything up to but not including the marker). This
+/// dual-inclusive/exclusive discipline is what the 11 pre-lift callers
+/// spelled verbatim; changing either boundary here would silently drift
+/// every migrated shield's scan window.
+pub fn fn_body_slice_between_markers<'a>(
+    source: &'a str,
+    module_path: &str,
+    open_marker: &str,
+    end_marker: &str,
+) -> &'a str {
+    let start = source.find(open_marker).unwrap_or_else(|| {
+        panic!(
+            "{module_path} must contain `{open_marker}` — the shield's \
+             slice boundary depends on this signature"
+        )
+    });
+    let after = &source[start..];
+    let end_rel = after.find(end_marker).unwrap_or_else(|| {
+        panic!(
+            "{module_path} must contain `{end_marker}` after `{open_marker}` \
+             — the shield's slice boundary depends on this ordering"
+        )
+    });
+    &after[..end_rel]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3800,6 +3868,143 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let body = module_body_before_tests(source.as_str(), "fake/module.rs");
         assert!(std::ptr::eq(body.as_ptr(), source.as_ptr()));
         assert_eq!(body, "fn keep() {}");
+    }
+
+    /// [`fn_body_slice_between_markers`] returns the byte range
+    /// `[start_of_open_marker .. start_of_end_marker)` — the open marker
+    /// is INCLUDED at the head, the end marker is EXCLUDED at the tail.
+    /// Pins the load-bearing pre-lift semantics the 11 migrated shield
+    /// sites depend on: everything from the fn signature (inclusive) to
+    /// the next top-level marker (exclusive) survives, so a `.contains`
+    /// scan sees the target fn's body verbatim.
+    #[test]
+    fn test_fn_body_slice_between_markers_returns_open_inclusive_end_exclusive() {
+        let source = "\
+            fn keep() {}\n\
+            pub async fn target(x: u32) -> u32 {\n    x + 1\n}\n\
+            pub async fn other() {}\n";
+        let body = fn_body_slice_between_markers(
+            source,
+            "fake/module.rs",
+            "pub async fn target(",
+            "\npub async fn other(",
+        );
+        assert_eq!(body, "pub async fn target(x: u32) -> u32 {\n    x + 1\n}");
+    }
+
+    /// The FIRST occurrence of the open marker wins even when the source
+    /// carries multiple matches. Pins the callers' pre-lift
+    /// `SOURCE.find(fn_marker)` semantics: a shield whose target fn
+    /// exists once and whose forbidden literal happens to appear later
+    /// as a docstring or a sibling fn's parameter type still bounds at
+    /// the FIRST hit and slices consistently.
+    #[test]
+    fn test_fn_body_slice_between_markers_first_open_marker_wins() {
+        let source = "\
+            // fake mention: pub async fn target(\n\
+            pub async fn target() {}\n\
+            pub async fn other() {}\n";
+        let body = fn_body_slice_between_markers(
+            source,
+            "fake/module.rs",
+            "pub async fn target(",
+            "\npub async fn other(",
+        );
+        assert!(
+            body.starts_with("pub async fn target("),
+            "expected fn body to start at the fn header, got: {body:?}"
+        );
+    }
+
+    /// The FIRST occurrence of the end marker AFTER the open marker
+    /// wins even when the source carries multiple matches downstream.
+    /// Pins the callers' pre-lift `after_fn.find(end_marker)` semantics
+    /// (a `.find` walking `after_fn`, not `source`, so a matching
+    /// literal BEFORE the open marker cannot confuse the boundary).
+    #[test]
+    fn test_fn_body_slice_between_markers_first_end_marker_after_open_wins() {
+        let source = "\
+            \npub async fn other() {}\n\
+            pub async fn target() { let x = 1; }\n\
+            pub async fn other() { let y = 2; }\n\
+            pub async fn other() { let z = 3; }\n";
+        let body = fn_body_slice_between_markers(
+            source,
+            "fake/module.rs",
+            "pub async fn target(",
+            "\npub async fn other(",
+        );
+        assert_eq!(body, "pub async fn target() { let x = 1; }");
+    }
+
+    /// Absent open marker panics with the caller-supplied `module_path`
+    /// and the open-marker literal. Guards the pre-lift stanza's
+    /// `expect("<file>.rs must contain <fn_marker>")` diagnostic — a
+    /// shield landing on a module whose target fn was renamed diagnoses
+    /// itself by name rather than the generic `None` unwrap.
+    #[test]
+    #[should_panic(expected = "fake/module.rs must contain `pub async fn missing(`")]
+    fn test_fn_body_slice_between_markers_panics_when_open_marker_absent() {
+        let source = "fn keep() {}\n";
+        let _ = fn_body_slice_between_markers(
+            source,
+            "fake/module.rs",
+            "pub async fn missing(",
+            "\npub async fn other(",
+        );
+    }
+
+    /// Absent end marker panics with the caller-supplied `module_path`,
+    /// naming the missing end marker and the open marker it was
+    /// expected to follow. Guards the pre-lift stanza's
+    /// `expect("<file>.rs must contain <end_marker> after <fn_name>")`
+    /// diagnostic when a reorder moved the terminating fn upstream of
+    /// the target.
+    #[test]
+    #[should_panic(expected = "after `pub async fn target(`")]
+    fn test_fn_body_slice_between_markers_panics_when_end_marker_absent() {
+        let source = "pub async fn target() { let x = 1; }\n";
+        let _ = fn_body_slice_between_markers(
+            source,
+            "fake/module.rs",
+            "pub async fn target(",
+            "\n#[cfg(test)]",
+        );
+    }
+
+    /// The returned `&str` borrows from the input `source` with the
+    /// same lifetime — pins the primitive's `<'a>(source: &'a str, ...)
+    /// -> &'a str` signature. A migrated shield that reads `fn_body`
+    /// and then reads `SOURCE` afterward (e.g.
+    /// `commands/integration_tests.rs::test_execute_readiness_poll_
+    /// consumes_typed_delay_not_bare_fixed_sleep` at line 2094-2105)
+    /// must observe that the primitive does not consume or clone
+    /// `source`; both bindings remain valid and refer to the same
+    /// backing buffer.
+    #[test]
+    fn test_fn_body_slice_between_markers_preserves_source_lifetime() {
+        let source: String = "\
+            fn keep() {}\n\
+            pub async fn target() { let x = 1; }\n\
+            pub async fn other() {}\n"
+            .to_string();
+        let body = fn_body_slice_between_markers(
+            source.as_str(),
+            "fake/module.rs",
+            "pub async fn target(",
+            "\npub async fn other(",
+        );
+        // The slice's byte pointer lies WITHIN the source buffer — i.e.
+        // it borrows, does not clone.
+        let src_start = source.as_ptr() as usize;
+        let src_end = src_start + source.len();
+        let body_start = body.as_ptr() as usize;
+        assert!(
+            body_start >= src_start && body_start < src_end,
+            "returned slice must borrow from `source` (start pointer {body_start:#x} \
+             must lie within source range [{src_start:#x}, {src_end:#x}))"
+        );
+        assert!(body.starts_with("pub async fn target("));
     }
 
     /// [`RootFlakeEnvSnapshot`] MUST restore `REPO_ROOT` and

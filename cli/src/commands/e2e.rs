@@ -1201,17 +1201,15 @@ mod resolve_repo_root_git_bin_routing_tests {
         // functions in this module legitimately reference the
         // pre-migration literal, so scoping the check to the target
         // function's body avoids false positives.
-        let fn_marker = "fn resolve_repo_root(";
-        let start = SOURCE
-            .find(fn_marker)
-            .expect("commands/e2e.rs must contain `fn resolve_repo_root(` — module invariant");
-        let after_fn = &SOURCE[start..];
-        // Bound at the next top-level `fn verify_docker(` in source
-        // order, which follows `resolve_repo_root`.
-        let end_relative = after_fn
-            .find("\nfn verify_docker(")
-            .expect("commands/e2e.rs must contain `fn verify_docker(` after `resolve_repo_root`");
-        let fn_body = &after_fn[..end_relative];
+        // Bound the fn body between `resolve_repo_root`'s header and
+        // the next top-level `fn verify_docker(` in source order,
+        // which follows `resolve_repo_root`.
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/e2e.rs",
+            "fn resolve_repo_root(",
+            "\nfn verify_docker(",
+        );
 
         assert!(
             !fn_body.contains("Command::new(\"git\")"),
@@ -1898,18 +1896,12 @@ mod docker_startup_poll_backoff_tests {
     fn test_ensure_docker_running_consumes_typed_poll_delay_not_bare_fixed_sleep() {
         const SOURCE: &str = include_str!("e2e.rs");
 
-        let fn_marker = "pub fn ensure_docker_running(";
-        let start = SOURCE.find(fn_marker).expect(
-            "commands/e2e.rs must contain `pub fn ensure_docker_running(` \
-             — the shield's slice boundary relies on this function name",
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/e2e.rs",
+            "pub fn ensure_docker_running(",
+            "\n#[cfg(test)]\n",
         );
-        let after_fn = &SOURCE[start..];
-        let end_relative = after_fn.find("\n#[cfg(test)]\n").expect(
-            "commands/e2e.rs must have a `#[cfg(test)]` marker after \
-             `ensure_docker_running` — the shield's slice boundary \
-             depends on the module ordering",
-        );
-        let fn_body = &after_fn[..end_relative];
 
         let bespoke_needle = format!(
             "thread::sleep(Duration::from_secs({}))",
