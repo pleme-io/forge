@@ -407,19 +407,34 @@ pub async fn execute(
 
                 info!("   Loaded: {}", image_name);
 
-                // Tag for compose
+                // Tag for compose. Routed through
+                // `crate::retry::run_inherited_status` so the pre-lift
+                // `.status().await` + `.context("Failed to tag Docker
+                // image")?` + `if !tag_result.success() { anyhow::bail!(
+                // "Failed to tag Docker image") }` stanza — whose ad-hoc
+                // bail named the phase but dropped the exit code
+                // (`tag_result.code()` was in scope and unread) —
+                // collapses onto the primitive and the canonical
+                // `"docker tag <img> -> <compose_tag> failed (exit
+                // {code})"` envelope emerges by construction at
+                // `retry::classify_inherited_status`'s ONE body. Folds
+                // the source-image and target-tag pair into the `op`
+                // label so the operator log line names WHICH tag the
+                // spawn was staging when it failed, with the exit code
+                // the pre-lift stanza dropped now preserved at the
+                // operator surface by construction. Sibling of the
+                // async-frontier lifts already on this primitive
+                // (`commands/{build, github_runner_ci, image_release,
+                // pangea, product_release, rust_service, search_sync,
+                // typescript}.rs`, 72a7adf / 4510026 / b5d9573 /
+                // c5ff1c4 / bf6d836 / 5b5c765 / b864fd8 / a3c3a49).
                 let compose_tag = format!("{}:latest", registry);
                 info!("🏷️  Tagging image: {}", compose_tag);
 
-                let tag_result = Command::new(&docker)
-                    .args(&["tag", image_name, &compose_tag])
-                    .status()
-                    .await
-                    .context("Failed to tag Docker image")?;
-
-                if !tag_result.success() {
-                    anyhow::bail!("Failed to tag Docker image");
-                }
+                let mut tag_cmd = Command::new(&docker);
+                tag_cmd.args(["tag", image_name, &compose_tag]);
+                let tag_op = format!("docker tag {} -> {}", image_name, compose_tag);
+                crate::retry::run_inherited_status(tag_cmd, &tag_op).await?;
 
                 println!();
                 info!("🚀 Starting docker-compose environment...");
@@ -1264,6 +1279,106 @@ mod tests {
             "commands/comprehensive_release.rs must resolve the `sqlx` binary via \
              `get_tool_path(\"SQLX_BIN\", \"sqlx\")` — the canonical lookup \
              was not found in the module body."
+        );
+    }
+
+    /// Marker-scoped shield: the `docker tag` block inside
+    /// [`super::execute`] (the integration-test step's "Tag for compose"
+    /// spawn that stages the loaded OCI image under `<registry>:latest`
+    /// for the sibling `docker-compose up`) MUST route through
+    /// [`crate::retry::run_inherited_status`], never through a
+    /// hand-rolled inline builder terminated by a `.status().await`
+    /// then `.context(…)?` then `if !status.success() { anyhow::bail!(
+    /// FAIL_MSG) }` stanza that drops the exit code from the operator
+    /// log line.
+    ///
+    /// Pre-lift the site spelled the seven-line stanza with a pair of
+    /// ad-hoc failure messages (a `.context("Failed to tag Docker
+    /// image")?` builder-terminator suffix followed by a `bail!(
+    /// "Failed to tag Docker image")` inline bail) that named the
+    /// phase but dropped the exit code `tag_result.code()` returned —
+    /// the same class the async primitive was written to close
+    /// (retry.rs `classify_inherited_status`). Post-lift the
+    /// delegation call routes through the primitive and the canonical
+    /// `"docker tag <img> -> <compose_tag> failed (exit {code})"`
+    /// envelope emerges by construction at the primitive's ONE body,
+    /// the shape every sibling on the async spawn frontier
+    /// (`commands/{build, github_runner_ci, image_release, pangea,
+    /// product_release, rust_service, search_sync, typescript}.rs`,
+    /// 72a7adf / 4510026 / b5d9573 / c5ff1c4 / bf6d836 / 5b5c765 /
+    /// b864fd8 / a3c3a49) already emits.
+    ///
+    /// # Why marker-scoped, not whole-module
+    ///
+    /// `super::execute` intentionally carries many other `.status().await`
+    /// terminators — the docker-compose up spawn (has a compose-down
+    /// cleanup branch on failure that must run BEFORE the bail), the
+    /// docker-compose ps / logs / down fire-and-forget cleanups (`let _
+    /// = …status().await;`), the sqlx migrate warn-on-failure spawn
+    /// (match-based dispatch, no bail), the integration-test spawn
+    /// (deferred bail so cleanup runs first), and the cargo unit-test
+    /// spawn (spinner-clear must run between the status and the bail).
+    /// None of those lift cleanly onto `run_inherited_status`, so a
+    /// whole-module shield would false-fire on legitimate remaining
+    /// sites. This shield bounds the negative scan to ONLY the docker-
+    /// tag block via [`crate::test_support::fn_body_slice_between_markers`]
+    /// (open marker `// Tag for compose. Routed through`, end marker
+    /// `// Start docker-compose`) so the discipline is tight against
+    /// the block-under-migration and leaves the surrounding legitimate
+    /// stanzas alone. Sibling of `commands/search_sync.rs::tests::
+    /// test_run_sync_via_kubectl_cp_spawn_routes_through_run_inherited_status`
+    /// (b864fd8), which uses the same primitive to bound its shield
+    /// tightly around one function's `kubectl cp` block while excluding
+    /// a sibling `let _ = …status().await;` best-effort cleanup at the
+    /// tail of the same function.
+    ///
+    /// # Anti-self-match discipline
+    ///
+    /// The pre-lift `.context(…)?` and `bail!(…)` needles are
+    /// reconstructed at test time via `format!` so this shield's own
+    /// docstring — which names the pre-lift shape only in prose above
+    /// — does not false-match itself against the module-body scan.
+    /// Positive side pins that `crate::retry::run_inherited_status(`
+    /// appears in the sliced block at ≥1 line, so a regression that
+    /// dropped the delegation cannot leave the negative scan trivially
+    /// satisfied by absence.
+    #[test]
+    fn test_docker_tag_spawn_routes_through_run_inherited_status() {
+        const SOURCE: &str = include_str!("comprehensive_release.rs");
+
+        let block = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/comprehensive_release.rs",
+            "// Tag for compose. Routed through",
+            "// Start docker-compose",
+        );
+
+        let pre_lift_context = format!(".context({}Failed to tag Docker image{})", '"', '"');
+        assert!(
+            !block.contains(&pre_lift_context),
+            "commands/comprehensive_release.rs must not re-inline the \
+             pre-lift `.context(…)?` stanza on the `docker tag` spawn \
+             — every status-only spawn in this block must route \
+             through `crate::retry::run_inherited_status`, which carries \
+             the exit code into the failure envelope."
+        );
+
+        let pre_lift_bail = format!("bail!({}Failed to tag Docker image{})", '"', '"');
+        assert!(
+            !block.contains(&pre_lift_bail),
+            "commands/comprehensive_release.rs must not re-inline the \
+             pre-lift `bail!(…)` on the `docker tag` spawn — the \
+             ad-hoc message dropped the exit code `tag_result.code()` \
+             returned. `run_inherited_status`'s canonical \
+             `\"{{op}} failed (exit {{code}})\"` envelope preserves it."
+        );
+
+        assert!(
+            block.contains("crate::retry::run_inherited_status("),
+            "commands/comprehensive_release.rs must dispatch its \
+             `docker tag` spawn through \
+             `crate::retry::run_inherited_status` — the delegation \
+             string was not found in the docker-tag block."
         );
     }
 }
