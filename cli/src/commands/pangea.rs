@@ -521,26 +521,14 @@ pub async fn regenerate_compiler() -> Result<()> {
     in_directory(&pangea_dir, || async {
         // Update Gemfile.lock
         info!("Updating Gemfile.lock...");
-        let status = tokio::process::Command::new(&bundler)
-            .args(["lock", "--update"])
-            .status()
-            .await
-            .context("Failed to run bundle lock")?;
-
-        if !status.success() {
-            anyhow::bail!("bundle lock --update failed");
-        }
+        let mut bundler_cmd = tokio::process::Command::new(&bundler);
+        bundler_cmd.args(["lock", "--update"]);
+        crate::retry::run_inherited_status(bundler_cmd, "bundle lock --update").await?;
 
         // Regenerate gemset.nix
         info!("Regenerating gemset.nix...");
-        let status = tokio::process::Command::new(&bundix)
-            .status()
-            .await
-            .context("Failed to run bundix")?;
-
-        if !status.success() {
-            anyhow::bail!("bundix failed");
-        }
+        let bundix_cmd = tokio::process::Command::new(&bundix);
+        crate::retry::run_inherited_status(bundix_cmd, "bundix").await?;
 
         Ok(())
     })
@@ -856,6 +844,94 @@ mod tests {
              bundix derivation at the gemset.nix regeneration verdict.",
             bare_bundix,
             bare_bundix
+        );
+    }
+}
+
+#[cfg(test)]
+mod status_spawn_routing_tests {
+    /// Whole-module shield: every async status-only spawn in
+    /// `commands/pangea.rs` routes through
+    /// [`crate::retry::run_inherited_status`], never a hand-rolled
+    /// inline builder terminated by `.status().await` +
+    /// `if !status.success() { bail!(…) }` that drops the exit code
+    /// from the operator log line.
+    ///
+    /// Pre-lift the two spawns in `regenerate_compiler` — the
+    /// `bundle lock --update` run that produces the updated
+    /// `Gemfile.lock` and the `bundix` run that regenerates
+    /// `gemset.nix` from it — each spelled the seven-line
+    /// `.status().await` + `.context(…)?` + `if !status.success() {
+    /// anyhow::bail!(FAIL_MSG) }` stanza with a per-site ad-hoc
+    /// `FAIL_MSG` (`"bundle lock --update failed"`, `"bundix
+    /// failed"`) that named the phase but dropped the exit code the
+    /// child process actually returned. Post-lift each site is a
+    /// two-line `let cmd = tokio::process::Command::new(...); …;
+    /// crate::retry::run_inherited_status(cmd, "...").await?;`
+    /// pair and the canonical `"{op} failed (exit {code})"`
+    /// envelope emerges by construction at the primitive's ONE body
+    /// — the shape every other lifted status-only spawn in forge
+    /// now emits (sibling shields at `commands/{build, image_release,
+    /// product_release, rust_service, tool, crossplane, pangea_infra,
+    /// gem, infra, test_ci, local, e2e}.rs`, 72a7adf through b5d9573).
+    ///
+    /// The exit-code carry is the load-bearing part: pre-lift, a
+    /// non-zero `bundle lock --update` at `regenerate_compiler`
+    /// produced the operator log line `"bundle lock --update failed"`
+    /// with no `code`, indistinguishable from a `bundix` that
+    /// segfaulted (SIGSEGV — `status.code() == None`) at the same
+    /// scan-of-the-log-line surface. Post-lift the two worlds
+    /// separate at construction: `"bundle lock --update failed (exit
+    /// 1)"` vs `"bundle lock --update failed (signal 11)"`, the same
+    /// `(op, exit_code, stderr)` structural-record tuple THEORY.md
+    /// §V.4 Phase 1 attestation-record consumers pattern-match on.
+    ///
+    /// Negative side: no `.status().await` builder terminator may
+    /// reappear at any code line in the module body — a re-inlined
+    /// spawn would bypass the primitive and re-drop the exit code.
+    /// Positive side: `run_inherited_status(` must appear at ≥2 code
+    /// lines (one per lifted site), so a regression that dropped a
+    /// delegation call cannot leave the negative scan trivially
+    /// satisfied by absence. Both hits route through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline (the `.status().await` string in this
+    /// shield's own docstring is excluded because
+    /// [`code_line_hits`] filters `///`-prefixed lines). Scan bounds
+    /// from file start to the first `\n#[cfg(test)]\nmod tests {`
+    /// marker so this whole shield's own source (the string literal
+    /// `".status().await"` passed to `code_line_hits`, the assertion
+    /// message that names the forbidden terminator) stays out of
+    /// scope — this shield lives in a SIBLING
+    /// `mod status_spawn_routing_tests { … }` block opened after the
+    /// primary `mod tests { … }` precisely so the scan boundary the
+    /// production body ends at also bounds every shield in this file
+    /// away from self-match.
+    #[test]
+    fn test_pangea_status_spawns_route_through_run_inherited_status() {
+        const SOURCE: &str = include_str!("pangea.rs");
+        let cutoff = SOURCE
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("commands/pangea.rs must have a `#[cfg(test)] mod tests {` marker");
+        let body = &SOURCE[..cutoff];
+
+        let inline = crate::test_support::code_line_hits(body, ".status().await");
+        assert!(
+            inline.is_empty(),
+            "commands/pangea.rs must not spawn via an inline \
+             `.status().await` terminator — every async status-only \
+             spawn must route through `crate::retry::run_inherited_status`, \
+             which carries the exit code into the failure envelope. \
+             Found: {inline:?}"
+        );
+
+        let delegations = crate::test_support::code_line_hits(body, "run_inherited_status(").len();
+        assert!(
+            delegations >= 2,
+            "commands/pangea.rs must route the two `regenerate_compiler` \
+             status-only spawn sites (`bundle lock --update` and `bundix`) \
+             through `crate::retry::run_inherited_status` — found only \
+             {delegations} delegation call(s); a dropped call would leave \
+             the negative `.status().await` scan satisfied by absence"
         );
     }
 }
