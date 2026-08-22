@@ -14745,14 +14745,111 @@ pub fn probe_stdout_capture_sync(bin: &str, args: &[&str]) -> Option<String> {
 /// between the async `build_flake_attr` and the sync `docker run` —
 /// their spawn shape is `Command::new(...).output()` (bare `Command`
 /// re-exports `std::process::Command` per the top-of-module `use`).
-/// A tokio-flavored async twin does not exist because forge has no
-/// async best-effort-discard call site (the async `let _ = ....status().
-/// await` sites in `commands/comprehensive_release.rs` inherit both
-/// streams into the parent's terminal — a distinct primitive-shape
-/// with distinct stream semantics — and none of them fit this
-/// `.output()`-based discard-both-streams contract).
+/// The tokio-flavored async twin at [`run_status_discard_in_async`]
+/// occupies the sibling `(async × () × inherit-both-streams)` cell —
+/// the four `let _ = tokio::process::Command::new(&docker_compose)
+/// .current_dir(&working_dir).args(&[...]).status().await;` sites in
+/// `commands/comprehensive_release.rs` (the services-up-failure
+/// `down -v` cleanup, the services-healthy-timeout `logs` and
+/// `down -v` cleanup, and the integration-test-failure `logs`
+/// diagnostic) deliberately inherit both streams into the parent's
+/// terminal so the operator watching a `forge comprehensive-release`
+/// invocation SEES the compose-log lines that name why the timeout
+/// tripped or the integration tests failed. That distinct stdio
+/// contract (inherit-both-streams vs. pipe-and-drop) is a distinct
+/// primitive; the sibling docstring pins the operator-visible-log
+/// carve-out this primitive does not carry.
 pub fn run_discard_sync(bin: &str, args: &[&str]) {
     let _ = std::process::Command::new(bin).args(args).output();
+}
+
+/// Best-effort async spawn-and-discard-status primitive with caller-
+/// supplied working directory. Spawn `bin` with `args` async via
+/// `tokio::process::Command`, set `current_dir`, wait for the child
+/// via `.status().await`, discard the
+/// `std::io::Result<std::process::ExitStatus>` entirely — swallow
+/// every failure (spawn `io::Error`, non-zero exit, signal termination),
+/// return `()`. The `()` return type is load-bearing — a caller cannot
+/// silently promote it into a control-flow position because the
+/// primitive has no envelope to inspect, closing the misuse surface a
+/// docstring-only carve-out would leave open.
+///
+/// # Semantics — deliberately infallible at the caller
+///
+/// - Spawn `Err` (`fork+exec` failed, e.g., `docker-compose` daemon
+///   path unresolvable on a Nix-hermetic runner with no
+///   `docker-compose` in PATH beyond `DOCKER_COMPOSE_BIN` and a stale
+///   sigil): swallow, return `()`. Every pre-lift site already
+///   discarded this branch by the `let _ = …` binding.
+/// - Spawn `Ok`: return `()` regardless of `output.status.success()`.
+///   Cleanup/diagnostic sweeps must not fail the caller — a `docker-
+///   compose down -v` failure at the timeout-cleanup path would
+///   otherwise mask the underlying "services never went healthy"
+///   failure the operator is triaging.
+///
+/// # Stdio — inherits both streams into the parent's terminal
+///
+/// Spawns via `.status().await` rather than `.output().await` —
+/// `.status()`-based tokio spawns leave stdout and stderr unset, so
+/// the child inherits both streams from the parent, and the operator
+/// watching a `forge comprehensive-release` invocation SEES the
+/// docker-compose log lines that name why a timeout tripped or an
+/// integration test failed. The four pre-lift sites in `commands/
+/// comprehensive_release.rs` chose this stream semantics deliberately:
+/// the three log/diagnostic sweeps (`logs`, `logs --tail=100`,
+/// timeout `logs`) exist PRECISELY to render compose output on the
+/// operator's terminal, and the two `down -v` cleanup sweeps benefit
+/// from the operator seeing "which containers did compose actually
+/// tear down" during a failure post-mortem. The
+/// `test_run_status_discard_in_async_uses_status_await_source_form`
+/// source-level shield pins the `.status().await` discipline so a
+/// regression that promoted the body to `.output().await` would
+/// silently swallow the compose logs the operator relies on to
+/// triage the failure.
+///
+/// # When to reach for this vs the sibling primitives
+///
+/// This primitive is DELIBERATELY narrower than its captured-output
+/// and inherited-status siblings: it does not surface stdout, exit
+/// status, or the spawn envelope. It is the right choice ONLY when
+/// the caller wants a silent-at-the-caller / loud-on-the-terminal
+/// invocation whose success or failure has no bearing on the
+/// enclosing operation. Do NOT reach for this when:
+///
+/// - The caller decides what to do next based on the exit code or
+///   the child's stdout → use [`run_capture_anyhow`] (async, anyhow,
+///   returns intact [`std::process::Output`]) or its sync twin
+///   [`run_capture_anyhow_sync`].
+/// - The caller wants the child's failure surfaced into the operator
+///   log line → use [`run_bin_args_inherited_status`], which raises
+///   the canonical `(op, exit_code)` failure envelope through
+///   [`classify_inherited_status`].
+/// - The caller wants child output PIPED AND DROPPED (silent at
+///   both the caller AND the terminal) → use [`run_discard_sync`],
+///   the sync sibling whose `.output()`-based discard-both-streams
+///   contract complements this primitive's inherit-both-streams
+///   contract at the two extremes of the stdio matrix.
+///
+/// # Async-only by construction
+///
+/// The four lifted sites all live inside `commands/
+/// comprehensive_release.rs::execute` — an `async fn` running under
+/// the tokio runtime — so the spawn shape is `tokio::process::Command`
+/// throughout. A sync sibling would need a distinct primitive at
+/// `std::process::Command`; the current fleet has no such site
+/// (`commands/local.rs::up`'s sync interlude is the pipe-and-drop
+/// shape that rides on [`run_discard_sync`], not the inherit-both-
+/// streams shape).
+pub async fn run_status_discard_in_async(
+    bin: &str,
+    current_dir: impl AsRef<std::path::Path>,
+    args: &[&str],
+) {
+    let _ = tokio::process::Command::new(bin)
+        .current_dir(current_dir)
+        .args(args)
+        .status()
+        .await;
 }
 
 #[cfg(test)]
@@ -36401,6 +36498,274 @@ mod tests {
              stdio streams, breaking the pre-lift discard-both-streams \
              contract. Body inspected: {body}",
             s = "status",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // run_status_discard_in_async — the best-effort async spawn-and-
+    // discard-status primitive with caller-supplied working directory
+    // that lifts the four `let _ = Command::new(&docker_compose)
+    // .current_dir(&working_dir).args(&[...]).status().await;` sites
+    // in `commands/comprehensive_release.rs::execute` (up-failure
+    // `down -v` cleanup, timeout `logs`, timeout `down -v` cleanup,
+    // integration-test-failure `logs --tail=100`). Every test drives
+    // the full spawn pipeline against hermetic `make_executable_shim`
+    // binaries so a future regression at either the spawn surface
+    // (a swallowed spawn error re-raised as anyhow) or the exit-
+    // status surface (a nonzero exit re-raised as anyhow) fails HERE
+    // rather than silently degrading the four consumer sites this
+    // commit migrates. The status-discard shape is pinned end-to-end
+    // via side-effect probes (a shim writes to a marker file the test
+    // then inspects) rather than by return-value inspection — the
+    // primitive returns `()` by construction. The `current_dir`
+    // survival is pinned via a marker-in-tempdir probe so a
+    // regression that silently dropped `.current_dir(...)` from the
+    // primitive body would spawn compose in the wrong dir and fail
+    // this test before the cleanup would run in the wrong compose
+    // project's dir at the operator's terminal.
+    // -----------------------------------------------------------------
+
+    /// Zero-exit spawn: the primitive returns `()` and the shim's
+    /// side effect ran to completion. The four pre-lift sites each
+    /// rely on the child actually executing — the whole point of the
+    /// `docker-compose down -v` cleanup after a services-up-failure
+    /// is that the down must complete before the enclosing
+    /// `anyhow::bail!("Failed to start docker-compose")` returns.
+    /// The `marker_ran` side-effect probe pins that the primitive
+    /// does not silently return before the child runs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_status_discard_in_async_zero_exit_runs_child_and_returns_unit() {
+        let tmp =
+            tempfile::tempdir().expect("tempdir for run_status_discard_in_async side-effect probe");
+        let marker = tmp.path().join("marker_ran");
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "status-discard-success",
+            &format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+        );
+        run_status_discard_in_async(&shim, tmp.path(), &[]).await;
+        assert!(
+            marker.exists(),
+            "the shim's side effect must have run — the primitive \
+             cannot return before the child completes, else the \
+             pre-lift `docker-compose down -v` cleanup would race \
+             with the enclosing `anyhow::bail!` and the compose \
+             stack would be left partially up on a `forge \
+             comprehensive-release` up-failure post-mortem",
+        );
+    }
+
+    /// Nonzero exit: the primitive STILL returns `()` — no anyhow
+    /// bail. The four pre-lift sites ignored the exit status (the
+    /// `let _ = …` binding discarded the whole
+    /// `io::Result<ExitStatus>`). A regression that surfaced a
+    /// nonzero exit as an anyhow bail would break the pre-lift
+    /// "cleanup / diagnostic sweeps are non-blocking" contract — a
+    /// timeout-cleanup `docker-compose down -v` whose exit was
+    /// nonzero (because a container was already gone) would then
+    /// mask the underlying `anyhow::bail!("Timeout waiting for
+    /// services to become healthy")` the operator is triaging. The
+    /// absence of a panic is the assertion; the `()` signature
+    /// enforces the "does not bail" half at the type system.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_status_discard_in_async_nonzero_exit_swallowed() {
+        let tmp = tempfile::tempdir()
+            .expect("tempdir for run_status_discard_in_async nonzero-exit probe");
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "status-discard-nonzero",
+            "#!/bin/sh\nexit 1\n",
+        );
+        // Must not panic and must not bail. The `()` return type
+        // makes the "does not bail" half enforceable at the type
+        // system rather than at the test.
+        run_status_discard_in_async(&shim, tmp.path(), &[]).await;
+    }
+
+    /// Args are forwarded to the spawn: the shim reads its own `$1`
+    /// argv slot and writes it to a marker file, so a regression
+    /// that dropped the `args` slot from the spawn (silently
+    /// spawning `bin` with no argv) would blank the marker's
+    /// contents and this test would fail. Pins the caller-supplied
+    /// argv-preservation contract — the four pre-lift sites each
+    /// pass distinct argv slices (`["-f", compose, "down", "-v"]`,
+    /// `["-f", compose, "logs"]`, `["-f", compose, "logs",
+    /// "--tail=100"]`) whose survival past the primitive body is
+    /// load-bearing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_status_discard_in_async_forwards_args() {
+        let tmp = tempfile::tempdir().expect("tempdir for run_status_discard_in_async argv probe");
+        let marker = tmp.path().join("argv_echo");
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "status-discard-argv",
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$1\" > '{}'\nexit 0\n",
+                marker.display()
+            ),
+        );
+        run_status_discard_in_async(&shim, tmp.path(), &["compose-argv-forwarded"]).await;
+        let contents =
+            std::fs::read_to_string(&marker).expect("shim must have written the argv marker file");
+        assert_eq!(
+            contents, "compose-argv-forwarded",
+            "the `args` slice must reach the spawned process's argv \
+             — a regression that dropped the `.args(args)` call from \
+             the primitive body would blank the shim's echo and this \
+             test would fail",
+        );
+    }
+
+    /// `current_dir` is set: the shim `test`s for the presence of a
+    /// marker file in its OWN cwd, and the primitive is invoked with
+    /// a `current_dir` pointing at the tempdir where the marker was
+    /// written. If the primitive silently dropped
+    /// `.current_dir(current_dir)`, the shim would spawn in the test
+    /// process's cwd (the crate root), the `test -f` would fail, and
+    /// the shim would exit nonzero — but the primitive swallows
+    /// nonzero exits, so the "did the cwd survive" question cannot
+    /// be answered by exit code alone. The shim therefore writes a
+    /// second marker whose presence proves it saw the first marker
+    /// and reached its own `touch second-marker` line — a
+    /// regression that lost the cwd would leave second-marker
+    /// absent, and this test would fail.
+    ///
+    /// Load-bearing because all four `commands/
+    /// comprehensive_release.rs` sites pass `.current_dir(
+    /// &working_dir)` to name the compose-project directory; a
+    /// primitive that silently reset cwd would spawn compose in the
+    /// wrong dir and either bail with a "no compose file" spawn
+    /// error (visible to the operator) or, worse, tear down the
+    /// WRONG compose project's containers (silent, corrupting the
+    /// operator's other in-flight compose stacks).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_status_discard_in_async_preserves_current_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir for run_status_discard_in_async cwd probe");
+        let first_marker = tmp.path().join("cwd-first-marker-b4a2c1d3");
+        std::fs::write(&first_marker, b"present").expect("first marker write must succeed");
+        let second_marker = tmp.path().join("cwd-second-marker-b4a2c1d3");
+        let (_shim_dir, shim) = crate::test_support::make_executable_shim(
+            "status-discard-cwd",
+            &format!(
+                "#!/bin/sh\ntest -f cwd-first-marker-b4a2c1d3 && touch '{}'\n",
+                second_marker.display()
+            ),
+        );
+        run_status_discard_in_async(&shim, tmp.path(), &[]).await;
+        assert!(
+            second_marker.exists(),
+            "the primitive must set `current_dir` — the shim reads a \
+             first-marker relative to its cwd and only writes the \
+             second-marker when the first is present. A primitive \
+             that silently dropped `.current_dir(current_dir)` would \
+             spawn the shim in the test process's cwd (the crate \
+             root), the `test -f` would fail, the shim would exit \
+             nonzero, and the second-marker would not appear. \
+             Missing marker path: {}",
+            second_marker.display(),
+        );
+    }
+
+    /// Spawn `Err`: an absolute path that cannot exist folds the
+    /// `io::Error(ENOENT)` from `fork+exec` into a swallowed no-op.
+    /// The four pre-lift sites each relied on this branch — the
+    /// `let _ = …` binding silently discarded the spawn failure
+    /// whenever `DOCKER_COMPOSE_BIN` resolved to an absent path on
+    /// a hermetic runner. A regression that surfaced the spawn
+    /// error as an anyhow bail would violate the primitive's
+    /// "best-effort cleanup must not fail the caller" contract and
+    /// break the pre-lift no-op-on-spawn-Err behavior at every
+    /// consumer site — an up-failure cleanup would then re-bail
+    /// with a spawn error that masked the "Failed to start
+    /// docker-compose" bail the operator actually needs to see.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_status_discard_in_async_spawn_error_swallowed() {
+        let tmp =
+            tempfile::tempdir().expect("tempdir for run_status_discard_in_async spawn-err probe");
+        // A path guaranteed absent under `/nonexistent/...`, so
+        // `fork+exec` synthesizes `io::Error(ENOENT)` and the
+        // primitive folds it via the `let _ = …` binding. The
+        // suffix is a nonce that cannot collide with any real
+        // binary on any hermetic runner this crate runs under.
+        run_status_discard_in_async(
+            "/nonexistent/forge-run-status-discard-async-never-exists-9c4d",
+            tmp.path(),
+            &[],
+        )
+        .await;
+    }
+
+    /// The primitive body MUST spawn via `.status().await`
+    /// (inherit-both-streams), not `.output().await` (pipe-and-drop).
+    /// The four pre-lift sites each chose `.status()` deliberately:
+    /// the three log/diagnostic sweeps (`logs`, `logs --tail=100`,
+    /// timeout `logs`) exist PRECISELY to render compose output on
+    /// the operator's terminal, and the two `down -v` cleanup
+    /// sweeps benefit from the operator seeing "which containers
+    /// did compose actually tear down" during a failure post-mortem.
+    /// A regression that promoted the body to `.output().await`
+    /// would silently swallow the compose logs the operator relies
+    /// on to triage the failure — the exact anti-pattern the
+    /// mirrored sibling `test_run_discard_sync_uses_output_not_status_
+    /// source_form` shield closes at the other extreme of the
+    /// stdio matrix. This shield is the mirror discipline for the
+    /// inherit-both-streams cell.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_status_discard_in_async_uses_status_await_source_form() {
+        // Source-level shield: the primitive body must spawn via
+        // `.status().await` — the inherit-both-streams contract.
+        // `.output().await` would pipe both streams into buffers
+        // this primitive then drops (the sibling `run_discard_sync`
+        // shape). Reconstructing the needle via `format!` keeps
+        // this test's own body out of the code-line scan.
+        const SOURCE: &str = include_str!("retry.rs");
+        // Slice out the primitive body between the `pub async fn
+        // run_status_discard_in_async(` opener and its closing
+        // brace. A regression that changed the primitive body's
+        // spawn form fails here BEFORE the behavior-level side-
+        // effect probes above catch the collapsed child stream.
+        let start = SOURCE
+            .find("pub async fn run_status_discard_in_async(")
+            .expect("run_status_discard_in_async must be defined in retry.rs");
+        let body_slice = &SOURCE[start..];
+        let end_relative = body_slice
+            .find("\n}\n")
+            .expect("run_status_discard_in_async body must terminate with a closing `}`");
+        let body = &body_slice[..end_relative];
+        // rustfmt is free to break `.status().await;` across lines
+        // (`.status()\n    .await;`), so the shield asserts the two
+        // atoms independently rather than a single joined literal
+        // that would false-negative on the split-line form.
+        let status_atom = format!(".{}()", "status");
+        let await_atom = ".await";
+        assert!(
+            body.contains(&status_atom) && body.contains(await_atom),
+            "run_status_discard_in_async must spawn via `.{s}()` \
+             followed by `{a}` — the inherit-both-streams shape all \
+             four pre-lift sites (`let _ = \
+             Command::new(&docker_compose).current_dir(&working_dir) \
+             .args([...]).status().await;` across \
+             `commands/comprehensive_release.rs`) deliberately \
+             chose. A regression to `.output().await` would pipe- \
+             and-drop both streams and swallow the compose logs the \
+             operator relies on to triage a `forge \
+             comprehensive-release` failure. Body inspected: {body}",
+            s = "status",
+            a = await_atom,
+        );
+        let output_atom = format!(".{}()", "output");
+        assert!(
+            !body.contains(&output_atom),
+            "run_status_discard_in_async must NOT spawn via `.{o}()` \
+             — the child's stdout and stderr would then be piped \
+             into buffers this primitive drops, breaking the pre- \
+             lift inherit-both-streams contract that keeps compose \
+             logs visible on the operator's terminal. Body \
+             inspected: {body}",
+            o = "output",
         );
     }
 }
