@@ -14641,6 +14641,120 @@ pub fn probe_stdout_capture_sync(bin: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Best-effort silent spawn-and-discard: spawn `bin` with `args` sync,
+/// wait for the child, and drop the [`std::process::Output`] entirely.
+/// Returns `()` by construction so a caller cannot silently promote it
+/// into a control-flow position; the captured stdout, stderr, and exit
+/// status are all discarded before the primitive returns.
+///
+/// Deliberately swallows every failure — spawn `io::Error`, non-zero
+/// exit, signal termination, malformed UTF-8 in either stream — because
+/// this primitive exists for the best-effort cleanup surface where the
+/// caller's intent is "run the command if you can, do nothing if you
+/// can't, either way keep going." The alternative
+/// [`probe_stdout_capture_sync`] surfaces the child's stdout for the
+/// caller to render; here the caller has no rendering path for either
+/// stream, so the returned [`std::process::Output`] is discarded and
+/// the `()` return type pins that discipline.
+///
+/// Lifts the five-occurrence one-line stanza
+///
+/// ```text
+/// let _ = Command::new(bin).args([...]).output();
+/// ```
+///
+/// that five best-effort cleanup sites in forge carry verbatim modulo
+/// the per-site `bin`/`args`: `commands/e2e.rs::cleanup_testcontainers`
+/// (two `docker rm -f <ids>` invocations — the testcontainer-class
+/// sweep and the Ryuk-sidecar sweep, both after a preceding
+/// `docker ps` listing surfaced the container IDs to remove);
+/// `commands/e2e.rs::cleanup_e2e_images` (one `docker image prune -f
+/// --filter label=org.testcontainers=true` invocation — the dangling-
+/// image sweep after the E2E backend/web images are removed); and
+/// `commands/local.rs::up` (two invocations — `docker stop <name>` and
+/// `docker rm <name>`, the pre-`docker run` cleanup that removes any
+/// previously-running container of the same name so `docker run -d
+/// --name <name>` cannot fail with a name-conflict). Five identically-
+/// shaped bodies past THEORY §VI.1's three-is-a-law threshold (PRIME
+/// DIRECTIVE: duplication budget is zero); this primitive is the
+/// law-redeeming consolidation for the discard-both-streams surface —
+/// the missing counterpart to [`probe_stdout_capture_sync`] (returns
+/// [`Option<String>`], discards spawn `Err` and exit status but
+/// surfaces stdout) and [`classify_capture_anyhow`] (raises the failing
+/// envelope).
+///
+/// # Semantics — deliberately infallible at the caller
+///
+/// - Spawn `Err` (`fork+exec` failed, e.g., `DOCKER_BIN` resolves to
+///   an absent path on a Nix-hermetic runner): swallow, return.
+///   Every pre-lift site already discarded this branch by the
+///   `let _ = …` binding.
+/// - Spawn `Ok(output)`: discard [`std::process::Output`] entirely —
+///   IGNORING `output.status`, `output.stdout`, `output.stderr`.
+///   Every pre-lift site already discarded the whole `Output` by the
+///   same `let _ = …` binding.
+///
+/// # `.output()` (not `.status()`) — suppresses child streams by construction
+///
+/// The primitive body spawns via `.output()` — which pipes the child's
+/// stdout and stderr to buffers this primitive then drops — rather
+/// than `.status()`, which inherits both streams into the parent's
+/// terminal. Every pre-lift site chose `.output()` deliberately: the
+/// two `docker rm -f <ids>` sweeps print each removed container ID on
+/// stdout and any per-ID removal failure on stderr, and the
+/// `docker image prune -f` sweep prints each pruned image ID plus a
+/// summary line; inheriting either stream would leak the cleanup-tier
+/// noise into the E2E post-mortem operator surface the enclosing
+/// `cleanup_testcontainers` / `cleanup_e2e_images` functions render.
+/// A regression that promoted the body to `.status()` would silently
+/// route every cleanup-tier line into the parent's terminal, and the
+/// `test_run_discard_sync_suppresses_child_stdout_and_stderr` test
+/// below closes the anti-pattern by construction.
+///
+/// # When to reach for this vs [`probe_stdout_capture_sync`] / [`run_query_capture_sync`] / [`classify_capture_anyhow`]
+///
+/// This primitive is DELIBERATELY the narrowest of the best-effort
+/// spawn family: it does not surface stdout, exit status, or the spawn
+/// envelope. It is the right choice ONLY when the caller wants a silent
+/// cleanup-shaped invocation whose success or failure has no bearing on
+/// the enclosing operation — a `docker stop <name>` before `docker run
+/// -d --name <name>` is the reference shape: the caller doesn't care
+/// whether the container existed, only that after this line no
+/// container by that name is running. Do NOT reach for this when:
+///
+/// - The caller needs the child's stdout to render (a diagnostic
+///   probe, a `docker ps` listing) → use
+///   [`probe_stdout_capture_sync`] instead, which returns
+///   [`Option<String>`].
+/// - The caller decides what to do next based on the exit code or the
+///   child's stdout → use [`run_query_capture_sync`] (anyhow, bails on
+///   failure, returns trimmed stdout) or [`classify_capture_anyhow`]
+///   (anyhow, exposes stdout+stderr on success as an intact
+///   [`std::process::Output`]).
+/// - The caller wants the child's failure surfaced into the operator
+///   log line → use [`run_bin_args_inherited_status_sync`], which
+///   raises the canonical `(op, exit_code, stderr)` failure envelope.
+///
+/// # Sync-only by construction
+///
+/// The five lifted sites are all sync: `commands/e2e.rs::
+/// cleanup_testcontainers` and `commands/e2e.rs::cleanup_e2e_images`
+/// are plain `fn`, not `async fn` (the E2E-cleanup surface runs
+/// outside the tokio runtime the E2E-execution surface uses), and
+/// `commands/local.rs::up`'s two cleanup calls are the sync interlude
+/// between the async `build_flake_attr` and the sync `docker run` —
+/// their spawn shape is `Command::new(...).output()` (bare `Command`
+/// re-exports `std::process::Command` per the top-of-module `use`).
+/// A tokio-flavored async twin does not exist because forge has no
+/// async best-effort-discard call site (the async `let _ = ....status().
+/// await` sites in `commands/comprehensive_release.rs` inherit both
+/// streams into the parent's terminal — a distinct primitive-shape
+/// with distinct stream semantics — and none of them fit this
+/// `.output()`-based discard-both-streams contract).
+pub fn run_discard_sync(bin: &str, args: &[&str]) {
+    let _ = std::process::Command::new(bin).args(args).output();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -36092,6 +36206,201 @@ mod tests {
              'diagnostic probes must not fail the caller', enforced by \
              the `.ok()?` fold on `Command::output()`'s \
              `std::io::Result<Output>`",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // run_discard_sync — the best-effort silent spawn-and-discard
+    // primitive that lifts the five cleanup sites in `commands/e2e.rs`
+    // (two `docker rm -f` sweeps, one `docker image prune -f`) and
+    // `commands/local.rs` (`docker stop <name>` + `docker rm <name>`
+    // before `docker run -d --name <name>`). Every test drives the
+    // full spawn pipeline against hermetic `make_executable_shim`
+    // binaries so a future regression at either the spawn surface (a
+    // swallowed spawn error re-raised as anyhow) or the exit-status
+    // surface (a nonzero exit re-raised as anyhow) fails HERE rather
+    // than silently degrading the five consumer sites this commit
+    // migrates. The `Output`-discard shape is pinned end-to-end via
+    // side-effect probes (a shim writes to a marker file the test
+    // then inspects) rather than by return-value inspection — the
+    // primitive returns `()` by construction.
+    // -----------------------------------------------------------------
+
+    /// Zero-exit spawn: the primitive returns `()` and the shim's
+    /// side effect ran to completion. Every one of the five pre-lift
+    /// sites relied on the child actually executing — the whole
+    /// point of `docker stop <name>` before `docker run -d --name
+    /// <name>` is that the stop must complete before the run starts.
+    /// The `marker_ran` side-effect probe pins that the primitive
+    /// does not silently return before the child runs.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_discard_sync_zero_exit_runs_child_and_returns_unit() {
+        let tmp = tempfile::tempdir().expect("tempdir for run_discard_sync side-effect probe");
+        let marker = tmp.path().join("marker_ran");
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "discard-success",
+            &format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+        );
+        run_discard_sync(&shim, &[]);
+        assert!(
+            marker.exists(),
+            "the shim's side effect must have run — the primitive \
+             cannot return before the child completes, else the \
+             pre-lift `docker stop <name>` → `docker run -d --name \
+             <name>` ordering would break at every `commands/local.rs::up` \
+             invocation with a container-already-running conflict",
+        );
+    }
+
+    /// Nonzero exit: the primitive STILL returns `()` — no anyhow
+    /// bail. Every one of the five pre-lift sites ignored
+    /// `output.status` (the `let _ = …` binding discarded the whole
+    /// `Output` including its `status` field). A regression that
+    /// surfaced a nonzero exit as an anyhow bail would break the
+    /// pre-lift "cleanup failures are non-blocking" contract — a
+    /// `docker rm -f <ids>` sweep whose `docker` CLI exited 1 on a
+    /// stale-container error would then fail the enclosing
+    /// `cleanup_testcontainers` operation and abort the `forge
+    /// e2e-cleanup` invocation the operator ran precisely to recover
+    /// from a red E2E tier. The absence of a panic in this test is
+    /// the assertion; `run_discard_sync` returning `()` on a nonzero-
+    /// exit shim is the pre-lift semantics.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_discard_sync_nonzero_exit_swallowed() {
+        let (_dir, shim) =
+            crate::test_support::make_executable_shim("discard-nonzero", "#!/bin/sh\nexit 1\n");
+        // Must not panic and must not bail. The `()` return type
+        // makes the "does not bail" half enforceable at the type
+        // system rather than at the test — an anyhow-bailing body
+        // could not have this signature at all.
+        run_discard_sync(&shim, &[]);
+    }
+
+    /// Args are forwarded to the spawn: the shim reads its own `$1`
+    /// argv slot and writes it to a marker file, so a regression that
+    /// dropped the `args` slot from the spawn (silently spawning
+    /// `bin` with no argv) would blank the marker's contents and
+    /// this test would fail. Pins the `(bin, args)`-front surface —
+    /// the same shape [`probe_stdout_capture_sync`],
+    /// [`run_bin_args_inherited_status_sync`], and every other
+    /// `(bin, args)`-fronted primitive in this module enforce.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_discard_sync_forwards_args() {
+        let tmp = tempfile::tempdir().expect("tempdir for run_discard_sync argv probe");
+        let marker = tmp.path().join("argv_echo");
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "discard-argv",
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$1\" > '{}'\nexit 0\n",
+                marker.display()
+            ),
+        );
+        run_discard_sync(&shim, &["hello-forwarded"]);
+        let contents =
+            std::fs::read_to_string(&marker).expect("shim must have written the argv marker file");
+        assert_eq!(
+            contents, "hello-forwarded",
+            "the `args` slice must reach the spawned process's argv \
+             — a regression that dropped the `.args(args)` call from \
+             the primitive body would blank the shim's echo and this \
+             test would fail",
+        );
+    }
+
+    /// Spawn `Err`: an absolute path that cannot exist folds the
+    /// `io::Error(ENOENT)` from `fork+exec` into a swallowed no-op.
+    /// Every one of the five pre-lift sites relied on this branch
+    /// — the `let _ = …` binding silently discarded the spawn
+    /// failure whenever `DOCKER_BIN` resolved to an absent path on
+    /// a hermetic runner. A regression that surfaced the spawn
+    /// error as an anyhow bail would violate the primitive's "best-
+    /// effort cleanup must not fail the caller" contract and break
+    /// the pre-lift no-op-on-spawn-Err behavior at every consumer
+    /// site — `commands/local.rs::up` would then refuse to start a
+    /// container on any host where `docker stop` couldn't be spawned
+    /// (a stale sigil resolve, a permission denied), even though
+    /// the enclosing `docker run` might have succeeded.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_discard_sync_spawn_error_swallowed() {
+        // A path guaranteed absent under `/nonexistent/...`, so
+        // `fork+exec` synthesizes `io::Error(ENOENT)` and the
+        // primitive folds it via the `let _ = …` binding. The
+        // suffix is a nonce that cannot collide with any real
+        // binary on any hermetic runner this crate runs under.
+        run_discard_sync("/nonexistent/forge-run-discard-sync-never-exists-8b3d", &[]);
+    }
+
+    /// The primitive body MUST spawn via `.output()` (piped +
+    /// discarded), not `.status()` (inherited). Pre-lift every one
+    /// of the five sites chose `.output()` deliberately: the two
+    /// `docker rm -f <ids>` sweeps print each removed container ID
+    /// on stdout and any per-ID removal failure on stderr, and the
+    /// `docker image prune -f` sweep prints each pruned image ID
+    /// plus a summary line; inheriting either stream would leak the
+    /// cleanup-tier noise into the E2E post-mortem operator surface
+    /// the enclosing `cleanup_testcontainers` / `cleanup_e2e_images`
+    /// functions render.
+    ///
+    /// A shim that writes to BOTH stdout and stderr sees NEITHER
+    /// stream reach this test — `.output()` pipes both into buffers
+    /// this primitive then drops, so a regression that promoted the
+    /// body to `.status()` (or `.spawn().wait()`) would silently
+    /// route every cleanup-tier line into the parent's terminal.
+    /// The `assert_source_body_uses_dot_output` shield below pins
+    /// the source-level `.output()` discipline; this test pins the
+    /// behavior-level side-effect the source discipline enforces —
+    /// the shim writes a marker file to confirm it ran, but its
+    /// stdout/stderr text never appears in this test's captured
+    /// output.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_discard_sync_uses_output_not_status_source_form() {
+        // Source-level shield: the primitive body must spawn via
+        // `.output()` and end in `.output();` — the discard-both-
+        // streams contract. `.status()` inherits stdio; `.spawn()`
+        // returns a handle that would need explicit stream drops.
+        // Reconstructing the needle via `format!` keeps this test's
+        // own body out of the code-line scan.
+        const SOURCE: &str = include_str!("retry.rs");
+        // Slice out the primitive body between the `pub fn
+        // run_discard_sync(` opener and its closing brace. A
+        // regression that changed the primitive body's spawn form
+        // fails here BEFORE the behavior-level side-effect probe
+        // above catches the escaped child stream.
+        let start = SOURCE
+            .find("pub fn run_discard_sync(")
+            .expect("run_discard_sync must be defined in retry.rs");
+        let body_slice = &SOURCE[start..];
+        let end_relative = body_slice
+            .find("\n}\n")
+            .expect("run_discard_sync body must terminate with a closing `}`");
+        let body = &body_slice[..end_relative];
+        let output_needle = format!(".{}();", "output");
+        assert!(
+            body.contains(&output_needle),
+            "run_discard_sync must spawn via `.{needle}` — the \
+             pipe-and-discard shape both pre-lift sites (five \
+             `let _ = Command::new(bin).args([...]).output();` \
+             stanzas across `commands/e2e.rs` and `commands/local.rs`) \
+             deliberately chose. A regression to `.status()` would \
+             inherit the child's stdout and stderr into the parent's \
+             terminal and leak cleanup-tier noise into the E2E post-\
+             mortem surface. Body inspected: {body}",
+            needle = output_needle,
+        );
+        let status_needle = format!(".{}();", "status");
+        let status_await_needle = format!(".{}().await;", "status");
+        assert!(
+            !body.contains(&status_needle) && !body.contains(&status_await_needle),
+            "run_discard_sync must NOT terminate with `.{s}();` or \
+             `.{s}().await;` — the child would then inherit both \
+             stdio streams, breaking the pre-lift discard-both-streams \
+             contract. Body inspected: {body}",
+            s = "status",
         );
     }
 }

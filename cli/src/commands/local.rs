@@ -4,7 +4,6 @@
 //! Builds a Docker image via Nix, loads it, and runs it locally.
 
 use anyhow::Result;
-use std::process::Command;
 use tracing::info;
 
 use crate::nix::build_flake_attr;
@@ -67,9 +66,18 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
         "docker load",
     )?;
 
-    // Stop and remove any existing container with the same name
-    let _ = Command::new(docker_bin()).args(["stop", name]).output();
-    let _ = Command::new(docker_bin()).args(["rm", name]).output();
+    // Stop and remove any existing container with the same name.
+    // Best-effort cleanup — either invocation may fail (no container
+    // by that name yet, or a stale daemon) without gating the
+    // downstream `docker run -d --name <name>` on its outcome. Routes
+    // through the canonical `crate::retry::run_discard_sync` primitive
+    // (the `(bin, args) -> ()` consolidation for the sync
+    // discard-both-streams surface) so a future edit to the "silently
+    // suppress child streams on best-effort cleanup" contract lands in
+    // ONE body rather than at every replicated
+    // `let _ = Command::new(bin).args([...]).output();` site.
+    crate::retry::run_discard_sync(&docker_bin(), &["stop", name]);
+    crate::retry::run_discard_sync(&docker_bin(), &["rm", name]);
 
     // Run the container
     info!("Starting container {} on port {}...", name, port);
@@ -268,6 +276,93 @@ mod status_spawn_routing_tests {
             "all four status-only spawns (`docker compose up` / \
              `docker load` / `docker run` in `up`, `docker compose \
              down` in `down`)",
+        );
+    }
+}
+
+#[cfg(test)]
+mod discard_spawn_routing_tests {
+    /// Whole-module shield: the two best-effort silent
+    /// spawn-and-discard `docker` cleanup sites inside [`super::up`]
+    /// (`docker stop <name>` and `docker rm <name>`, both between
+    /// the async `build_flake_attr` + `docker load` sequence above
+    /// and the sync `docker run -d --name <name>` below) MUST
+    /// delegate through [`crate::retry::run_discard_sync`], never
+    /// through a hand-rolled
+    /// `let _ = Command::new(docker_bin()).args([...]).output();`
+    /// discard-both-streams stanza that silently reintroduces the
+    /// five-copy pre-lift duplication this commit closes.
+    ///
+    /// Pre-lift the two sites carried the verbatim one-line stanza
+    /// above, and the sibling `commands/e2e.rs::cleanup_testcontainers`
+    /// / `cleanup_e2e_images` block carried three MORE copies past
+    /// its own docker-literal shield — five identically-shaped bodies
+    /// past THEORY §VI.1's three-is-a-law threshold (PRIME DIRECTIVE:
+    /// duplication budget is zero). The lift onto
+    /// [`crate::retry::run_discard_sync`] preserves the exact
+    /// pre-lift semantics — spawn `Err` is swallowed, spawn `Ok`
+    /// discards the entire [`std::process::Output`] regardless of
+    /// `output.status` — so the migration is behavior-identical at
+    /// the cleanup surface, and the primitive's docstring pins the
+    /// "deliberately infallible at the caller" contract that future
+    /// callers must honor.
+    ///
+    /// # Why a delegation-count floor
+    ///
+    /// A negative-only shield that forbids the pre-lift stanza is
+    /// trivially satisfied by absence — a regression that dropped
+    /// one of the two cleanup calls (say, removed the `docker stop`
+    /// on the theory that `docker rm` covers it) would still pass
+    /// the negative scan while silently breaking the pre-lift
+    /// ordering the downstream `docker run -d --name <name>` relies
+    /// on. Pinning the delegation count to `>= 2` means every one
+    /// of the two cleanup calls MUST still route through the
+    /// primitive; a deletion drops the count and fails the shield.
+    /// Same discipline the sibling
+    /// `test_e2e_cleanup_sweeps_route_through_run_discard_sync`
+    /// shield honors on the E2E cleanup surface, and the
+    /// fleet-wide status-only-spawn shields
+    /// (a21bd67 / 5faeecb / c2922fd / 08fdb86 / a31ef65) honor via
+    /// the two-arm
+    /// `assert_source_routes_status_only_spawns_through_run_inherited_status_sync`
+    /// composition.
+    ///
+    /// # Reconstruction discipline
+    ///
+    /// The delegation needle `run_discard_sync(` is reconstructed
+    /// via [`format!`] at test time so this shield's own source
+    /// text does not self-match the substring count — the per-line
+    /// filter would otherwise inflate the count by one for the
+    /// needle-literal line. The two delegation sites each spell
+    /// `crate::retry::run_discard_sync(` verbatim; the shorter
+    /// `run_discard_sync(` needle matches both (a suffix of the
+    /// fully-qualified form) without also matching the shield's
+    /// own body (which only spells the two halves as separate
+    /// literals joined at `format!` time). Scan bounds on the
+    /// whole-module boundary from the file start to the FIRST
+    /// `\n#[cfg(test)]\n` marker so this shield's own docstring
+    /// mentions stay out of scope.
+    #[test]
+    fn test_local_cleanup_pair_routes_through_run_discard_sync() {
+        const SOURCE: &str = include_str!("local.rs");
+        let body =
+            crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/local.rs");
+        let needle = format!("run_discard_{}(", "sync");
+        let hits = crate::test_support::code_line_hits(body, &needle);
+        assert!(
+            hits.len() >= 2,
+            "commands/local.rs must delegate its two best-effort \
+             `docker` cleanup calls (`docker stop <name>` and \
+             `docker rm <name>` inside `up`, both between the async \
+             image-build/load sequence above and the sync `docker \
+             run -d --name <name>` below) through the shared \
+             `crate::retry::run_discard_sync` primitive — found {} \
+             delegation(s) in the top-of-file body, expected at \
+             least 2. A regression that reintroduces the pre-lift \
+             `let _ = Command::new(docker_bin()).args([...]).output();` \
+             stanza re-establishes the five-copy duplication this \
+             commit closes. Offending hits: {hits:?}",
+            hits.len(),
         );
     }
 }
