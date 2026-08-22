@@ -664,7 +664,7 @@ pub fn cleanup_testcontainers() -> Result<()> {
         for id in &ids {
             args.push(id);
         }
-        let _ = Command::new(docker_bin()).args(&args).output();
+        crate::retry::run_discard_sync(&docker_bin(), &args);
     }
 
     // Kill Ryuk sidecars (may not have the label)
@@ -688,7 +688,7 @@ pub fn cleanup_testcontainers() -> Result<()> {
         for id in &ids {
             args.push(id);
         }
-        let _ = Command::new(docker_bin()).args(&args).output();
+        crate::retry::run_discard_sync(&docker_bin(), &args);
     }
 
     let total = tc_count + ryuk_count;
@@ -725,15 +725,16 @@ pub fn cleanup_e2e_images() -> Result<()> {
     }
 
     // Prune dangling images from testcontainers
-    let _ = Command::new(docker_bin())
-        .args([
+    crate::retry::run_discard_sync(
+        &docker_bin(),
+        &[
             "image",
             "prune",
             "-f",
             "--filter",
             "label=org.testcontainers=true",
-        ])
-        .output();
+        ],
+    );
 
     if removed > 0 {
         ui::print_success(&format!("Removed {} E2E image(s)", removed));
@@ -1470,6 +1471,90 @@ mod docker_bin_routing_tests {
              &output.stdout); ... }}` stanza re-establishes the \
              six-copy duplication this commit closes. Offending hits: \
              {hits:?}",
+            hits.len(),
+        );
+    }
+
+    /// Whole-module shield: the three best-effort silent
+    /// spawn-and-discard `docker` cleanup sites inside
+    /// [`super::cleanup_testcontainers`] (two `docker rm -f <ids>`
+    /// sweeps — the testcontainer class and the Ryuk-sidecar class,
+    /// both after a preceding `docker ps` listing surfaced the
+    /// container IDs to remove) and [`super::cleanup_e2e_images`]
+    /// (one `docker image prune -f --filter
+    /// label=org.testcontainers=true` sweep) MUST delegate through
+    /// [`crate::retry::run_discard_sync`], never through a hand-rolled
+    /// `let _ = Command::new(docker_bin()).args([...]).output();`
+    /// discard-both-streams stanza that silently reintroduces the
+    /// five-copy pre-lift duplication this commit closes.
+    ///
+    /// Pre-lift the three sites each carried the verbatim one-line
+    /// stanza above, and the sibling `commands/local.rs::up` block
+    /// carried two MORE copies past its own docker-literal shield —
+    /// five identically-shaped bodies past THEORY §VI.1's
+    /// three-is-a-law threshold (PRIME DIRECTIVE: duplication budget
+    /// is zero). The lift onto [`crate::retry::run_discard_sync`]
+    /// preserves the exact pre-lift semantics — spawn `Err` is
+    /// swallowed, spawn `Ok` discards the entire
+    /// [`std::process::Output`] regardless of `output.status` — so
+    /// the migration is behavior-identical at the cleanup surface,
+    /// and the primitive's docstring pins the "deliberately
+    /// infallible at the caller" contract that future callers must
+    /// honor.
+    ///
+    /// # Why a delegation-count floor (not just a negative scan)
+    ///
+    /// A negative-only shield that forbids the pre-lift stanza is
+    /// trivially satisfied by absence — a regression that
+    /// accidentally deleted one of the three cleanup sweeps (say,
+    /// dropped the `docker image prune` block during a cleanup-tier
+    /// prose rewrite) would still pass the negative scan. Pinning
+    /// the delegation count to `>= 3` means every one of the three
+    /// cleanup surfaces MUST still route through the primitive; a
+    /// deletion drops the count and fails the shield. Same
+    /// discipline the sibling
+    /// `test_e2e_diagnostic_probes_route_through_probe_stdout_capture_sync`
+    /// (1ffda81) shield above and the fleet-wide status-only-spawn
+    /// shields (a21bd67 `test_ci` four spawns, 5faeecb `e2e` six
+    /// spawns, c2922fd `local` four spawns, and the eight
+    /// sync-frontier consolidations at 08fdb86 / a31ef65) honor via
+    /// the two-arm
+    /// `assert_source_routes_status_only_spawns_through_run_inherited_status_sync`
+    /// composition.
+    ///
+    /// # Reconstruction discipline
+    ///
+    /// The delegation needle `run_discard_sync(` is reconstructed
+    /// via [`format!`] at test time so this shield's own source
+    /// text does not self-match the substring count — the per-line
+    /// filter would otherwise inflate the count by one for the
+    /// needle-literal line. The three delegation sites each spell
+    /// `crate::retry::run_discard_sync(` verbatim; the shorter
+    /// `run_discard_sync(` needle matches all three (a suffix of
+    /// the fully-qualified form) without also matching the shield's
+    /// own body (which only spells the two halves as separate
+    /// literals joined at `format!` time).
+    #[test]
+    fn test_e2e_cleanup_sweeps_route_through_run_discard_sync() {
+        const SOURCE: &str = include_str!("e2e.rs");
+        let body =
+            crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/e2e.rs");
+        let needle = format!("run_discard_{}(", "sync");
+        let hits = crate::test_support::code_line_hits(body, &needle);
+        assert!(
+            hits.len() >= 3,
+            "commands/e2e.rs must delegate its three best-effort \
+             `docker` cleanup sweeps (two `docker rm -f <ids>` \
+             sweeps inside `cleanup_testcontainers` and one \
+             `docker image prune -f --filter \
+             label=org.testcontainers=true` inside \
+             `cleanup_e2e_images`) through the shared \
+             `crate::retry::run_discard_sync` primitive — found {} \
+             delegation(s) in the top-of-file body, expected at \
+             least 3. A regression that reintroduces the pre-lift \
+             `let _ = Command::new(docker_bin()).args([...]).output();` \
+             stanza re-establishes the five-copy duplication this \
+             commit closes. Offending hits: {hits:?}",
             hits.len(),
         );
     }
