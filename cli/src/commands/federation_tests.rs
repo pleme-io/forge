@@ -29,6 +29,7 @@
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
@@ -149,6 +150,87 @@ fn federation_job_poll_delay(attempt: u32) -> Duration {
     FEDERATION_JOB_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
 }
 
+/// Reserve a hermetic on-disk destination for the federation-test
+/// k8s-Job manifest. Returns a `(TempDir, PathBuf)` pair whose
+/// `TempDir` half is a RAII guard — its `Drop` unlinks the created
+/// directory AND the manifest file inside it, panic-safe by
+/// construction. The path half is `<dir>/<job_name>.yaml`; the caller
+/// writes the rendered manifest to it via `std::fs::write` and then
+/// hands its `--filename` value to `kubectl apply`. The returned
+/// `TempDir` MUST be bound to a local `_dir` (or longer-lived)
+/// variable for the duration of the `kubectl apply` handoff: an
+/// unbound `let (_, out) = federation_test_job_manifest_file(...)?;`
+/// drops the guard immediately, unlinks the file, and `kubectl apply
+/// -f <out>` reproducibly fails with a `ENOENT` — a fast, loud signal
+/// instead of a flake. Sibling shape discipline to
+/// `commands/crossplane.rs::xpkg_output_file` (commit 220b207) and
+/// `test_support::make_executable_shim`, all three of which return
+/// `(TempDir, <path-like>)` for the same "the returned owner is what
+/// keeps the on-disk state alive" reason.
+///
+/// # Why the RAII-scratch shape is load-bearing
+///
+/// Two defects lived at the pre-lift `let manifest_path =
+/// format!("/tmp/{}.yaml", job_name);` shape that
+/// `run_federation_tests` carried:
+///
+/// 1. **Unbounded on-disk leak on every non-happy path.** The
+///    pre-lift stanza wrote the manifest to a hard-coded `/tmp/<job-
+///    name>.yaml` and relied on a trailing `let _ = std::fs::remove_
+///    file(&manifest_path);` between the `wait_for_job_completion`
+///    return and the outcome match. That trailing cleanup ran on the
+///    success + timeout paths, but NOT on `kubectl apply`'s `?`
+///    propagation (a `retry::classify_capture_anyhow` bail returned
+///    before reaching the cleanup line), NOT on an `await`-boundary
+///    panic through `wait_for_job_completion` or `check_job_success`,
+///    and NOT on an operator Ctrl-C at the apply → wait handoff.
+///    Every such non-happy exit left the manifest — carrying the
+///    service name, image tag, git SHA, and namespace of the deploy —
+///    on the runner's `/tmp` forever. A long-running self-hosted
+///    runner accumulates a manifest per failed federation-test
+///    invocation, indefinitely. `TempDir::Drop` runs unconditionally
+///    — through panics, through early returns, through Ctrl-C during
+///    unwind — so the on-disk state is bound to the caller's stack
+///    frame and released with it.
+/// 2. **Hard-coded `/tmp` bypasses `TMPDIR` and breaks in the Nix
+///    hermetic sandbox.** A Nix build under a `sandbox = true`
+///    daemon (the default on the fleet's build runners) has no
+///    writable `/tmp`; the daemon exposes only `$TMPDIR`, which the
+///    pre-lift `format!("/tmp/…")` ignored. `tempfile::Builder::new()
+///    .tempdir()` honors `TMPDIR` (via `std::env::temp_dir`) so a
+///    hermetic runner's per-build scratch root is respected by
+///    construction rather than by every-caller-remembers-to-check
+///    prose.
+///
+/// The concurrent-race half (two `forge deploy` invocations on the
+/// same runner racing the same `/tmp/<job-name>.yaml`) is not
+/// closed by this shape alone because the pre-lift `job_name`
+/// already embeds `SystemTime::now().as_secs()` — but a second-
+/// resolution timestamp collides when the same product + service is
+/// re-deployed within one wall-clock second (a re-run after a
+/// transient RBAC error, say), so the `mkdtemp(3)`-appended unique
+/// suffix in `tempfile::Builder::tempdir()` also closes THAT class
+/// of race as a side effect of the RAII lift.
+// `#[allow(dead_code)]` here mirrors the pre-existing baseline flag on
+// `federation_job_poll_delay` / `wait_for_job_completion` /
+// `run_federation_tests` / `check_job_success` /
+// `create_federation_test_job` inside this module — the whole non-test
+// consumer chain in `commands/federation_tests.rs` is dead-code-flagged
+// under `cargo clippy --all-targets` on the main `forge` bin target
+// because clippy's cross-module reachability from
+// `commands/rust_service.rs::run_rust_service_release` does not resolve
+// through the enclosing async surface. Same discipline
+// `FEDERATION_JOB_POLL_BACKOFF` carries above.
+#[allow(dead_code)]
+fn federation_test_job_manifest_file(job_name: &str) -> Result<(tempfile::TempDir, PathBuf)> {
+    let dir = tempfile::Builder::new()
+        .prefix("forge-fed-tests-")
+        .tempdir()
+        .context("create federation test job manifest scratch tempdir")?;
+    let path = dir.path().join(format!("{}.yaml", job_name));
+    Ok((dir, path))
+}
+
 /// Run federation integration tests for a service
 ///
 /// Creates a Kubernetes Job that runs the federation-tests image
@@ -211,18 +293,28 @@ pub async fn run_federation_tests(
         federation_tests_tag_override,
     )?;
 
-    // Write manifest to temporary file
-    let manifest_path = format!("/tmp/{}.yaml", job_name);
+    // Typed RAII scratch surface — `_manifest_dir` is the guard whose
+    // `Drop` unlinks the whole tempdir + the manifest inside it,
+    // panic-safe across the apply → wait → check-status handoff and
+    // closing the on-disk leak the pre-lift trailing `remove_file`
+    // could not (it never ran on `?` propagation from the apply, on
+    // `.await`-boundary panic, or on operator Ctrl-C between apply
+    // and cleanup). The guard's binding outlives every subsequent
+    // spawn in this function; the `TempDir::Drop` fires only after
+    // the whole apply → wait → status-check flow completes (or an
+    // intervening `bail!` unwinds through it).
+    let (_manifest_dir, manifest_path) = federation_test_job_manifest_file(&job_name)?;
     std::fs::write(&manifest_path, manifest)
         .context("Failed to write federation test job manifest")?;
 
-    println!("   📝 Created job manifest: {}", manifest_path);
+    let manifest_path_str: String = manifest_path.to_string_lossy().into_owned();
+    println!("   📝 Created job manifest: {}", manifest_path_str);
 
     // Apply the job
     println!("   🚀 Creating federation test job...");
     let _output = crate::retry::classify_capture_anyhow(
         kubectl_command_async()
-            .args(&["apply", "-f", &manifest_path])
+            .args(&["apply", "-f", &manifest_path_str])
             .output()
             .await,
         "kubectl apply federation test job",
@@ -242,8 +334,10 @@ pub async fn run_federation_tests(
         .await
         .unwrap_or(false);
 
-    // Clean up manifest file
-    let _ = std::fs::remove_file(&manifest_path);
+    // Manifest cleanup rides `_manifest_dir`'s `TempDir::Drop` — no
+    // manual `remove_file` needed. See `federation_test_job_manifest_
+    // file`'s docstring for the two structural defects the RAII lift
+    // closes over the pre-lift trailing-`remove_file` shape.
 
     // Handle results
     match (wait_result, job_succeeded) {
@@ -1006,6 +1100,214 @@ mod tests {
             body,
             "commands/federation_tests.rs::run_federation_tests",
             1,
+        );
+    }
+
+    /// Primitive pin: the returned path carries the `.yaml` extension
+    /// `kubectl apply -f <file>` reads by suffix. A drift onto a bare
+    /// `<job_name>` basename (or a `.yml` variant) would still apply
+    /// (kubectl sniffs the manifest content), but an operator sifting
+    /// through the tempdir root after a failed apply would no longer
+    /// see a self-describing manifest name, and any sibling tooling
+    /// that greps for `*.yaml` (a fleet-wide `find /tmp -name
+    /// '*.yaml'` triage sweep) would miss the manifest.
+    #[test]
+    fn test_federation_test_job_manifest_file_returns_yaml_extension_path() {
+        let (_dir, path) =
+            super::federation_test_job_manifest_file("myapp-auth-federation-tests-1699999999")
+                .expect("federation_test_job_manifest_file");
+        assert_eq!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("yaml"),
+            "federation_test_job_manifest_file must return a path with `.yaml` \
+             extension, got {path:?}",
+        );
+    }
+
+    /// Primitive pin — the debug-affordance half: the caller-supplied
+    /// `job_name` MUST start the returned path's basename so an
+    /// operator dumping the tempdir root after a failing federation-
+    /// test invocation can trace the manifest back to the k8s Job it
+    /// was applied for. A drift that dropped the `job_name` from the
+    /// basename (say, a rename onto a fixed `manifest.yaml`) would
+    /// still apply, but every parallel matrix invocation's tempdirs
+    /// would carry identical basenames — an operator debugging a
+    /// federation-test flake across two concurrent invocations would
+    /// have no way to tell which manifest belonged to which job.
+    #[test]
+    fn test_federation_test_job_manifest_file_embeds_job_name_in_basename() {
+        let job_name = "myapp-auth-federation-tests-1699999999";
+        let (_dir, path) = super::federation_test_job_manifest_file(job_name)
+            .expect("federation_test_job_manifest_file");
+        let basename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("basename utf-8");
+        assert!(
+            basename.starts_with(job_name),
+            "federation_test_job_manifest_file basename must start with the \
+             caller-supplied job_name (debug affordance for tempdir triage) — \
+             expected basename to start with {job_name:?}, got {basename:?}",
+        );
+        assert_eq!(
+            basename,
+            format!("{}.yaml", job_name),
+            "federation_test_job_manifest_file basename must be exactly \
+             `<job_name>.yaml` — got {basename:?}",
+        );
+    }
+
+    /// Primitive pin — the concurrent-race half: two calls in the
+    /// same process return strictly-distinct paths, so two `forge
+    /// deploy` invocations on the same runner cannot alias on the
+    /// same on-disk slot even when their `job_name` collides (the
+    /// pre-lift `SystemTime::now().as_secs()` timestamp collides
+    /// when the same product + service is re-deployed within one
+    /// wall-clock second — a re-run after a transient RBAC error,
+    /// say). `mkdtemp(3)`-backed unique-suffix discipline; a drift
+    /// onto a fixed-dir shape would fail HERE, not as a mysterious
+    /// "wrong manifest applied to the wrong Job" downstream.
+    #[test]
+    fn test_federation_test_job_manifest_file_returns_distinct_paths_on_each_call() {
+        let job_name = "myapp-auth-federation-tests-1699999999";
+        let (_a_dir, a) = super::federation_test_job_manifest_file(job_name).expect("a");
+        let (_b_dir, b) = super::federation_test_job_manifest_file(job_name).expect("b");
+        assert_ne!(
+            a, b,
+            "two calls to federation_test_job_manifest_file(same job_name) must \
+             return strictly-distinct paths — a fixed-dir shape would race two \
+             concurrent forge deploy invocations against the same tempdir entry \
+             when their SystemTime::now().as_secs() timestamp collides",
+        );
+    }
+
+    /// Primitive pin — the leak half: the returned path starts fresh
+    /// (the caller writes the manifest via `std::fs::write`), the
+    /// guard keeps the scratch dir alive across a mid-body write,
+    /// and `Drop` unlinks both dir AND file. A drift onto a
+    /// `NamedTempFile`-only shape that pre-created the file would
+    /// change the `std::fs::write` semantics (from create-or-
+    /// truncate to write-into-existing); a drift onto a bare
+    /// `tempdir()` without the RAII guard held would flake because
+    /// `Drop` ran between the write and the `kubectl apply`. Both
+    /// surface here.
+    #[test]
+    fn test_federation_test_job_manifest_file_fresh_and_dir_drop_unlinks_written_bytes() {
+        let job_name = "myapp-auth-federation-tests-1699999999";
+        let path = {
+            let (dir, out) = super::federation_test_job_manifest_file(job_name)
+                .expect("federation_test_job_manifest_file");
+            assert!(
+                !out.exists(),
+                "returned path must be fresh — the caller writes the manifest \
+                 via std::fs::write; a pre-created file would change the \
+                 write semantics from create-or-truncate to write-into-existing"
+            );
+            std::fs::write(&out, b"apiVersion: batch/v1\nkind: Job\n")
+                .expect("write stub manifest");
+            assert!(
+                out.exists() && dir.path().is_dir(),
+                "file exists AND dir is alive while the RAII guard is held"
+            );
+            out
+        };
+        assert!(
+            !path.exists(),
+            "`TempDir::Drop` must unlink the scratch dir + its contents — a \
+             mid-body panic between apply and cleanup would otherwise leak \
+             `/tmp/forge-fed-tests-*/<job_name>.yaml` forever"
+        );
+    }
+
+    /// Whole-fn shield: `run_federation_tests` MUST reserve its
+    /// manifest scratch path through the `federation_test_job_
+    /// manifest_file()` sigil, never a hand-rolled `format!("/tmp/…")`
+    /// stanza that leaks the produced manifest AND ignores `TMPDIR`.
+    /// Pre-lift `run_federation_tests` spelled the fixed-path shape
+    /// verbatim (`let manifest_path = format!("/tmp/{}.yaml", job_
+    /// name);` at the manifest-write site + a trailing `let _ = std::
+    /// fs::remove_file(&manifest_path);` at the outcome-match
+    /// boundary), so every non-happy exit (`?` propagation from the
+    /// apply, `.await`-boundary panic, operator Ctrl-C) left the
+    /// manifest — carrying the deploy's service name, image tag, git
+    /// SHA, and namespace — on the runner's `/tmp` forever. And a
+    /// hermetic Nix-sandbox build with no writable `/tmp` failed to
+    /// even write the manifest, because `format!("/tmp/…")` bypassed
+    /// the daemon-provided `TMPDIR`. `TempDir::Drop` + `tempfile::
+    /// Builder::tempdir()`'s `std::env::temp_dir()` honor close both
+    /// defects by construction.
+    ///
+    /// Positive side: the delegation call
+    /// `federation_test_job_manifest_file(` must appear at exactly
+    /// ONE code line in `run_federation_tests`'s fn body (the single
+    /// consumer site), so a regression that deleted the delegation
+    /// call cannot leave the negative scan trivially satisfied by
+    /// absence. The sigil definition itself (line reading `fn
+    /// federation_test_job_manifest_file(`) is out of scope because
+    /// this shield's fn-body slice starts at the `pub async fn run_
+    /// federation_tests(` marker.
+    ///
+    /// Negative side: the pre-lift `format!("/tmp/…")` shape must
+    /// not appear at any code line in the fn body. The forbidden
+    /// needle is reconstructed at test time via `format!("format!\
+    /// (\"/{}/", "tmp")` so this shield's own panic-message and
+    /// docstring prose does not false-match itself (same discipline
+    /// `canonical_two_arg_sigil_needle` holds for the routing-needle
+    /// family). Both halves route through `code_line_hits` for anti-
+    /// docstring-self-match discipline. Scope is
+    /// `run_federation_tests`'s fn body (via
+    /// [`crate::test_support::fn_body_slice_between_markers`]) with
+    /// end marker `\nasync fn wait_for_job_completion(` — same
+    /// slice boundary the sibling `test_run_federation_tests_bail_
+    /// routes_through_classify_capture_anyhow` shield above uses.
+    #[test]
+    fn test_run_federation_tests_manifest_path_routes_through_federation_test_job_manifest_file() {
+        const SOURCE: &str = include_str!("federation_tests.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/federation_tests.rs",
+            "pub async fn run_federation_tests(",
+            "\nasync fn wait_for_job_completion(",
+        );
+        // Positive: run_federation_tests delegates to the sigil.
+        let delegation_hits =
+            crate::test_support::code_line_hits(body, "federation_test_job_manifest_file(");
+        assert_eq!(
+            delegation_hits.len(),
+            1,
+            "run_federation_tests must delegate to `federation_test_job_manifest_file(` \
+             at exactly one code line (the single manifest-scratch consumer site); \
+             got {} — hits: {delegation_hits:#?}",
+            delegation_hits.len(),
+        );
+        // Negative: no code-line hit of the pre-lift fixed `/tmp/…` shape.
+        let forbidden = format!("format!(\"/{}/", "tmp");
+        let stale = crate::test_support::code_line_hits(body, &forbidden);
+        assert!(
+            stale.is_empty(),
+            "run_federation_tests must not spell the pre-lift fixed-`/tmp/…` \
+             manifest-path shape at any code line — every manifest scratch \
+             path must route through `federation_test_job_manifest_file()` so \
+             `TempDir::Drop` closes the leak AND `tempfile::Builder`'s \
+             `std::env::temp_dir()` honor closes the hermetic-`TMPDIR` \
+             bypass. Offending: {stale:#?}",
+        );
+        // Negative: the trailing `remove_file` cleanup is now RAII-Drop-backed,
+        // not hand-rolled — a regression that reintroduced the manual sweep
+        // would silently mask the leak-on-`?` and leak-on-panic surfaces the
+        // RAII lift closes, so pin its absence too. Reconstructed via
+        // `format!` so the docstring prose above (which cites the pre-lift
+        // stanza) does not false-match.
+        let forbidden_cleanup = format!("std::fs::{}(&manifest_path)", "remove_file");
+        let stale_cleanup = crate::test_support::code_line_hits(body, &forbidden_cleanup);
+        assert!(
+            stale_cleanup.is_empty(),
+            "run_federation_tests must not spell the pre-lift trailing \
+             `remove_file(&manifest_path)` sweep at any code line — the \
+             RAII `TempDir::Drop` on the sigil-returned guard is the \
+             canonical cleanup path, and a hand-rolled sweep alongside it \
+             would silently mask the leak-on-`?` / leak-on-panic surfaces \
+             the RAII lift closes. Offending: {stale_cleanup:#?}",
         );
     }
 }
