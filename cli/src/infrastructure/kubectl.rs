@@ -416,7 +416,7 @@ pub async fn kubectl_probe_stdout_capture(args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::make_executable_shim;
+    use crate::test_support::{make_executable_shim, ArgvLog};
     use base64::{engine::general_purpose, Engine as _};
 
     /// On a successful kubectl invocation, `fetch_secret_value_with_bin`
@@ -547,27 +547,13 @@ mod tests {
     #[test]
     fn test_fetch_secret_value_with_bin_passes_canonical_kubectl_args() {
         let encoded = general_purpose::STANDARD.encode(b"ok");
-        let log_dir = tempfile::tempdir().expect("log tempdir");
-        let log_path = log_dir.path().join("argv.log");
-        let log_str = log_path.display().to_string();
-
-        // The shim writes each positional arg on its own line to argv.log,
-        // then prints the canonical base64 blob to stdout and exits 0.
-        // `printf '%s\n'` instead of `echo` so a `-n` argument isn't
-        // swallowed as echo's "no trailing newline" flag (POSIX sh
-        // portability trap: `echo -n` writes nothing on most shells).
-        let body = format!(
-            "#!/bin/sh\n\
-             for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{}'; done\n\
-             printf '%s' '{}'\n",
-            log_str, encoded
-        );
-        let (_dir, shim) = make_executable_shim("kubectl", &body);
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("kubectl", &argv_log.shim_body(&encoded));
 
         let got = fetch_secret_value_with_bin(&shim, "my-secret", "my-ns", "MY_KEY");
         assert_eq!(got, Some("ok".to_string()));
 
-        let logged = std::fs::read_to_string(&log_path).expect("read argv log");
+        let logged = argv_log.read_argv_log();
         let lines: Vec<&str> = logged.lines().collect();
         assert_eq!(
             lines,
@@ -689,26 +675,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_find_first_pod_name_async_with_bin_passes_canonical_kubectl_args() {
-        let log_dir = tempfile::tempdir().expect("log tempdir");
-        let log_path = log_dir.path().join("argv.log");
-        let log_str = log_path.display().to_string();
-
-        // The shim writes each positional arg on its own line to argv.log,
-        // then prints the canonical pod name. `printf '%s\n'` instead of
-        // `echo` so a `-n` argument isn't swallowed as echo's
-        // "no trailing newline" flag (POSIX sh portability trap).
-        let body = format!(
-            "#!/bin/sh\n\
-             for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{}'; done\n\
-             printf '%s' 'job-runner-abc'\n",
-            log_str
-        );
-        let (_dir, shim) = make_executable_shim("kubectl", &body);
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("kubectl", &argv_log.shim_body("job-runner-abc"));
 
         let got = find_first_pod_name_async_with_bin(&shim, "my-ns", "job-name=my-job").await;
         assert_eq!(got, Some("job-runner-abc".to_string()));
 
-        let logged = std::fs::read_to_string(&log_path).expect("read argv log");
+        let logged = argv_log.read_argv_log();
         let lines: Vec<&str> = logged.lines().collect();
         assert_eq!(
             lines,
@@ -908,16 +881,8 @@ mod tests {
         let _guard = KUBECTL_BIN_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let log_dir = tempfile::tempdir().expect("tempdir for argv log");
-        let log_path = log_dir.path().join("argv.log");
-        let log_str = log_path.to_string_lossy().to_string();
-        let body = format!(
-            "#!/bin/sh\n\
-             for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{}'; done\n\
-             printf '%s' 'ok'\n",
-            log_str
-        );
-        let (_dir, shim) = make_executable_shim("kubectl", &body);
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("kubectl", &argv_log.shim_body("ok"));
         let _scope = KubectlBinScope::set(&shim);
 
         let out = kubectl_probe_stdout_capture(&[
@@ -932,7 +897,7 @@ mod tests {
         .await;
         assert_eq!(out.as_deref(), Some("ok"));
 
-        let logged = std::fs::read_to_string(&log_path).expect("read argv log");
+        let logged = argv_log.read_argv_log();
         let lines: Vec<&str> = logged.lines().collect();
         assert_eq!(
             lines,

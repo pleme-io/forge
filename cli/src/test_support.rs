@@ -2612,6 +2612,108 @@ pub fn named_scratch_dir(prefix: &str) -> tempfile::TempDir {
         })
 }
 
+/// RAII-guarded per-test argv-log scratch — a hermetic tempdir plus
+/// an `argv.log` path inside it, bound to `self` so `Drop` unlinks
+/// both together.
+///
+/// Four `#[cfg(unix)]` argv-shim tests across
+/// `cli/src/infrastructure/docker.rs` and
+/// `cli/src/infrastructure/kubectl.rs`
+/// (`test_find_first_image_id_by_name_with_bin_passes_canonical_docker_args`,
+/// `test_fetch_secret_value_with_bin_passes_canonical_kubectl_args`,
+/// `test_find_first_pod_name_async_with_bin_passes_canonical_kubectl_args`,
+/// `test_kubectl_probe_stdout_capture_forwards_args`) reached for the
+/// same three-line reservation body VERBATIM
+///
+/// ```ignore
+/// let log_dir = tempfile::tempdir().expect("log tempdir");
+/// let log_path = log_dir.path().join("argv.log");
+/// let log_str = log_path.display().to_string();
+/// ```
+///
+/// then wove `log_str` into a byte-identical POSIX-sh shim body
+///
+/// ```ignore
+/// #!/bin/sh
+/// for a in "$@"; do printf '%s\n' "$a" >> '{log_str}'; done
+/// printf '%s' '{stdout_payload}'
+/// ```
+///
+/// and read the file back with the same two-line
+/// `read_to_string + .lines().collect::<Vec<_>>()` stanza. That is
+/// four copies of one shape past THEORY §VI.1's three-times-is-a-law
+/// threshold, each independently able to drift off:
+///
+/// 1. `tempfile::tempdir()` honoring `TMPDIR` (so a Nix
+///    `sandbox = true` daemon build with no writable `/tmp` still
+///    reserves scratch in the daemon's per-build slot).
+/// 2. `TempDir::Drop` unlinking the whole dir + `argv.log` inside it
+///    (panic-safe across the shim-write → spawn → read-back handoff).
+/// 3. `printf '%s\n'` — not `echo` — in the shim body, so a
+///    positional arg beginning with `-n` isn't swallowed as echo's
+///    POSIX "no trailing newline" flag (a shell-portability trap
+///    every one of the four pre-lift sites called out in prose).
+///
+/// This primitive collects all three at ONE definition. A fifth
+/// argv-shim consumer (a `cosign verify` argv test, a `nix store
+/// verify` argv test, a `helm template` argv test — every one of
+/// them a plausible follow-on) inherits every discipline in one call.
+///
+/// A `let _ = ArgvLog::reserve();` binding that drops the guard
+/// unlinks the file with it — the guard's lifetime is the log's
+/// lifetime by construction (THEORY §I.1 beat 2: the declaration is
+/// well-formed by its return type).
+pub struct ArgvLog {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl ArgvLog {
+    /// Reserve a fresh hermetic tempdir and an `argv.log` path
+    /// inside it. The tempdir is bound to `self`; `Drop` unlinks
+    /// both together.
+    pub fn reserve() -> Self {
+        let dir = tempfile::tempdir().expect("argv log tempdir");
+        let path = dir.path().join("argv.log");
+        Self { _dir: dir, path }
+    }
+
+    /// Path to `argv.log` inside the guarded tempdir. Useful for
+    /// callers that need to inspect the file directly instead of via
+    /// [`ArgvLog::read_argv_log`].
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// A POSIX-sh shim body that appends every positional arg on its
+    /// own line to this argv log, then prints `stdout_payload` to
+    /// stdout (with no trailing newline) and exits 0.
+    ///
+    /// `printf '%s\n'` — not `echo` — so a `-n` argument isn't
+    /// swallowed as echo's "no trailing newline" flag. Every one of
+    /// the four pre-lift sites called this trap out in prose above
+    /// the hand-rolled body; the fix now lives at one definition.
+    ///
+    /// Callers pass the returned string to
+    /// [`make_executable_shim`]`(bin, &body)` to write a chmod +x
+    /// shim on disk.
+    pub fn shim_body(&self, stdout_payload: &str) -> String {
+        let log = self.path.display();
+        format!(
+            "#!/bin/sh\n\
+             for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{log}'; done\n\
+             printf '%s' '{stdout_payload}'\n"
+        )
+    }
+
+    /// Read the argv log's raw contents as a `String`. Callers
+    /// typically follow with `.lines().collect::<Vec<_>>()` for
+    /// line-by-line comparison against the canonical argv slice.
+    pub fn read_argv_log(&self) -> String {
+        std::fs::read_to_string(&self.path).expect("read argv log")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3815,6 +3917,280 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         // consumer path the shield in `commands/migration_validation.rs`
         // pins. Invocation here is the runtime half.
         let _guard = crate::test_support::named_scratch_dir("reachability");
+    }
+
+    // ---------------------------------------------------------------
+    // ArgvLog — RAII per-test argv-log scratch primitive.
+    //
+    // Consolidates the four `#[cfg(unix)]` argv-shim stanzas across
+    // `infrastructure/docker.rs` and `infrastructure/kubectl.rs` that
+    // hand-rolled the same three-line reservation + POSIX-sh shim
+    // body + read-back triple. See the primitive's docstring for
+    // the pre-lift catalog and the disciplines it centralizes.
+    // ---------------------------------------------------------------
+
+    /// The reserved path's basename is exactly `argv.log`, with no
+    /// suffix appended and no extra path components inserted. Pins
+    /// the file-name contract the four consumer sites depend on for
+    /// their `read_argv_log` reads and the shim script's write
+    /// target — a future drift that quietly renamed the log to
+    /// `argv.log.tmp` (or dropped the extension) would surface here
+    /// instead of as a mysterious "empty argv" downstream.
+    #[test]
+    fn test_argv_log_path_basename_is_argv_log() {
+        let argv_log = ArgvLog::reserve();
+        assert_eq!(
+            argv_log.path().file_name().and_then(|n| n.to_str()),
+            Some("argv.log"),
+            "argv log path must end in `argv.log`, got {:?}",
+            argv_log.path(),
+        );
+    }
+
+    /// A freshly-reserved argv log points at a nonexistent file:
+    /// the tempdir exists, but the `argv.log` inside it hasn't been
+    /// created yet — the shim script's first `printf … >>` call is
+    /// what creates it. Consumers that read the log before running
+    /// the shim would see this contract violated and get a
+    /// "no such file" error rather than an empty read.
+    #[test]
+    fn test_argv_log_reserve_returns_fresh_nonexistent_path() {
+        let argv_log = ArgvLog::reserve();
+        assert!(
+            !argv_log.path().exists(),
+            "argv.log must not exist until the shim writes to it, but \
+             already exists at {:?}",
+            argv_log.path(),
+        );
+        assert!(
+            argv_log
+                .path()
+                .parent()
+                .expect("argv.log has a parent dir")
+                .exists(),
+            "argv.log's parent tempdir must exist so `>>` from the shim \
+             succeeds without a `mkdir -p`",
+        );
+    }
+
+    /// Two independent `reserve()` calls return strictly-distinct
+    /// paths — the `tempfile::tempdir()`-backed `mkdtemp(3)` unique
+    /// suffix is the discipline the primitive carries by
+    /// construction. Two concurrent test threads cannot alias one
+    /// on-disk `argv.log` and race each other's argv writes.
+    #[test]
+    fn test_argv_log_reserve_returns_distinct_paths_on_each_call() {
+        let a = ArgvLog::reserve();
+        let b = ArgvLog::reserve();
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "two ArgvLog::reserve() calls must return distinct paths so \
+             concurrent test threads cannot race on one argv.log; got \
+             {:?} vs {:?}",
+            a.path(),
+            b.path(),
+        );
+    }
+
+    /// End-to-end: `shim_body` + `make_executable_shim` + spawn
+    /// round-trips every positional arg on its own line, and
+    /// `read_argv_log` reads them back verbatim. This is the
+    /// integration the four consumer sites depend on; pinning it
+    /// here means a future refactor that changed either half (the
+    /// `printf '%s\n'` format template on the write side, the
+    /// `read_to_string` on the read side) breaks this test rather
+    /// than manifesting as an off-by-one argv mismatch downstream.
+    #[cfg(unix)]
+    #[test]
+    fn test_argv_log_shim_body_round_trips_args_verbatim() {
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("probe", &argv_log.shim_body("payload"));
+
+        let out = std::process::Command::new(&shim)
+            .args(["alpha", "beta", "gamma"])
+            .output()
+            .expect("spawn argv-log probe shim");
+        assert!(out.status.success(), "shim exit was non-zero: {out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "payload");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(lines, vec!["alpha", "beta", "gamma"]);
+    }
+
+    /// `printf '%s\n'` — not `echo` — is what makes the argv log
+    /// preserve a `-n` positional arg verbatim; `echo -n` on most
+    /// POSIX shells writes NOTHING (interpreting `-n` as its
+    /// no-trailing-newline flag), so a hand-rolled shim body that
+    /// reached for `echo "$a"` would silently drop `-n` args and a
+    /// consumer's argv assertion would see a missing element with
+    /// no clue why. This test pins the `printf` discipline every
+    /// pre-lift site called out in prose above its hand-rolled body.
+    #[cfg(unix)]
+    #[test]
+    fn test_argv_log_shim_body_preserves_dash_n_positional_arg() {
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("probe", &argv_log.shim_body("ok"));
+
+        let out = std::process::Command::new(&shim)
+            .args(["-n", "value"])
+            .output()
+            .expect("spawn dash-n probe shim");
+        assert!(out.status.success());
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["-n", "value"],
+            "shim body must preserve `-n` as a positional arg; if this \
+             regression lands, the shim reached for `echo` and POSIX sh \
+             swallowed the flag",
+        );
+    }
+
+    /// `ArgvLog::Drop` unlinks the tempdir and the `argv.log` file
+    /// inside it — the guard's lifetime is the log's lifetime by
+    /// construction. Same RAII discipline as `named_scratch_dir`
+    /// and `hermetic_scratch_file`; a `let _ = ArgvLog::reserve();`
+    /// binding that drops the guard immediately is a type-visible
+    /// defect at review, and any subsequent read of the returned
+    /// path reproducibly fails with `ENOENT`.
+    #[test]
+    fn test_argv_log_drop_unlinks_the_file() {
+        let (path, parent) = {
+            let argv_log = ArgvLog::reserve();
+            std::fs::write(argv_log.path(), b"seed").expect("write seed argv");
+            assert!(argv_log.path().exists());
+            let parent = argv_log
+                .path()
+                .parent()
+                .expect("argv.log has a parent dir")
+                .to_path_buf();
+            (argv_log.path().to_path_buf(), parent)
+        };
+        assert!(
+            !path.exists(),
+            "argv.log must be unlinked after ArgvLog drops, but still \
+             exists at {path:?}",
+        );
+        assert!(
+            !parent.exists(),
+            "parent tempdir must be unlinked after ArgvLog drops, but \
+             still exists at {parent:?}",
+        );
+    }
+
+    /// The four argv-shim tests across `infrastructure/docker.rs`
+    /// and `infrastructure/kubectl.rs`, as `(module path, source,
+    /// `fn <name>(` open marker)` triples. Each entry's body is
+    /// sliced from its open marker to the first top-level `\n    }\n`
+    /// — the test-fn's closing brace at its natural
+    /// 4-space-indented `mod tests { ... }` depth.
+    ///
+    /// Adding a fifth argv-shim consumer means adding a row here;
+    /// the shield below then holds it to the same delegation
+    /// contract as the four that already exist.
+    const ARGV_LOG_SITES: [(&str, &str, &str); 4] = [
+        (
+            "infrastructure/docker.rs",
+            include_str!("infrastructure/docker.rs"),
+            "fn test_find_first_image_id_by_name_with_bin_passes_canonical_docker_args(",
+        ),
+        (
+            "infrastructure/kubectl.rs",
+            include_str!("infrastructure/kubectl.rs"),
+            "fn test_fetch_secret_value_with_bin_passes_canonical_kubectl_args(",
+        ),
+        (
+            "infrastructure/kubectl.rs",
+            include_str!("infrastructure/kubectl.rs"),
+            "fn test_find_first_pod_name_async_with_bin_passes_canonical_kubectl_args(",
+        ),
+        (
+            "infrastructure/kubectl.rs",
+            include_str!("infrastructure/kubectl.rs"),
+            "fn test_kubectl_probe_stdout_capture_forwards_args(",
+        ),
+    ];
+
+    /// Cross-module shield: every argv-shim test on the
+    /// `infrastructure/` tree MUST reserve its argv-log scratch
+    /// through [`ArgvLog::reserve`] and MUST derive its POSIX-sh
+    /// shim body through [`ArgvLog::shim_body`], never a hand-rolled
+    /// `tempfile::tempdir()` + `.join("argv.log")` + inline
+    /// `format!("#!/bin/sh…")` stanza of its own.
+    ///
+    /// Pre-lift all four sites spelled the same reservation +
+    /// shim-body triple verbatim, varying only in the `printf
+    /// '%s' '<payload>'` stdout string — four copies of one shape
+    /// past THEORY §VI.1's three-times-is-a-law threshold, each
+    /// independently able to drift off the `printf '%s\n'`-vs-`echo`
+    /// POSIX-sh portability discipline the primitive centralizes.
+    /// A fifth argv-shim test added by copying a neighbor would
+    /// inherit whichever copy it happened to copy.
+    ///
+    /// Positive side: the delegation call `ArgvLog::reserve(` and
+    /// the shim-body-derivation call `.shim_body(` must EACH appear
+    /// at exactly ONE code line in each test-fn's body, so a
+    /// regression that deleted the delegation cannot leave the
+    /// negative scan trivially satisfied by absence.
+    ///
+    /// Negative side: no hand-rolled `tempfile::tempdir(` or
+    /// `.join("argv.log")` call may appear at any code line in any
+    /// test-fn's body. Both needles are reconstructed at test time
+    /// so this shield's own docstring prose citing the pre-lift
+    /// stanza does not false-match itself (same discipline the
+    /// per-module consumer shields carry). [`code_line_hits`]
+    /// additionally filters `//` / `///` / `//!` lines, so
+    /// delegation comments inside each body are ignored.
+    #[test]
+    fn test_all_argv_log_shim_stanzas_route_through_argv_log_reserve() {
+        let forbidden_tempdir = format!("{}::tempdir(", "tempfile");
+        let forbidden_join = format!(".join({}argv.log{})", "\"", "\"");
+        for (module_path, source, open_marker) in ARGV_LOG_SITES {
+            let body = fn_body_slice_between_markers(source, module_path, open_marker, "\n    }\n");
+
+            let reserve_hits = code_line_hits(body, "ArgvLog::reserve(");
+            assert_eq!(
+                reserve_hits.len(),
+                1,
+                "{module_path}'s `{open_marker}` test must delegate to \
+                 `ArgvLog::reserve(` at exactly one code line; got {} \
+                 — hits: {reserve_hits:#?}",
+                reserve_hits.len(),
+            );
+
+            let shim_body_hits = code_line_hits(body, ".shim_body(");
+            assert_eq!(
+                shim_body_hits.len(),
+                1,
+                "{module_path}'s `{open_marker}` test must derive its \
+                 shim body via `.shim_body(` at exactly one code line; \
+                 got {} — hits: {shim_body_hits:#?}",
+                shim_body_hits.len(),
+            );
+
+            let hand_rolled_tempdir = code_line_hits(body, &forbidden_tempdir);
+            assert!(
+                hand_rolled_tempdir.is_empty(),
+                "{module_path}'s `{open_marker}` test must NOT hand-roll \
+                 its own `tempfile::tempdir(` call — the shared primitive \
+                 at `test_support::ArgvLog::reserve` carries the TMPDIR- \
+                 honoring / mkdtemp-unique-suffix / Drop-unlinks discipline \
+                 in one place; hits: {hand_rolled_tempdir:#?}",
+            );
+
+            let hand_rolled_join = code_line_hits(body, &forbidden_join);
+            assert!(
+                hand_rolled_join.is_empty(),
+                "{module_path}'s `{open_marker}` test must NOT hand-roll a \
+                 `.join(\"argv.log\")` call — the argv.log basename is a \
+                 property of `test_support::ArgvLog`, not of each caller; \
+                 hits: {hand_rolled_join:#?}",
+            );
+        }
     }
 
     /// `init_repo_with_one_commit` leaves the work-tree on `main`
