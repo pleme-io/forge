@@ -7,6 +7,7 @@
 //! - E2E: auto-builds and loads images if missing
 
 use anyhow::{bail, Context, Result};
+use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -809,6 +810,80 @@ fn verify_docker() -> Result<()> {
     Ok(())
 }
 
+/// Reserve a hermetic on-disk destination for a `nix build -o <path>`
+/// output symlink that a subsequent `docker load` reads. Returns a
+/// `(TempDir, PathBuf)` pair whose `TempDir` half is a RAII guard —
+/// its `Drop` unlinks the created directory AND the symlink inside it,
+/// panic-safe by construction. The path half is `<dir>/<name>-image`,
+/// the destination `nix build <flake_attr> -o <path>` will create as a
+/// GC-root symlink into the Nix store. It does NOT yet exist, so a
+/// `nix build -o` that refuses to overwrite still succeeds. The
+/// returned `TempDir` MUST be bound to a local `_dir` (or longer-lived)
+/// variable for the duration of the caller: an unbound
+/// `let (_, out) = e2e_image_output_symlink(name)?;` drops the guard
+/// immediately, unlinks the scratch dir, and the follow-up
+/// `nix build -o <out>` (or `File::open(<out>)`) reproducibly fails
+/// with a parent-dir `ENOENT` — a fast, loud signal instead of a
+/// flake. Sibling shape discipline to
+/// `commands/crossplane.rs::xpkg_output_file` (220b207),
+/// `commands/federation_tests.rs::federation_test_job_manifest_file`
+/// (76b256e), and `commands/migrations.rs::migration_job_manifest_file`
+/// (950a0e7), all `(TempDir, PathBuf)` returners on the same
+/// "the returned owner is what keeps the on-disk state alive" contract.
+///
+/// # Why the RAII-scratch shape is load-bearing
+///
+/// Three defects lived at the pre-lift `format!("/tmp/{}-image", name)`
+/// shape that `build_and_load_image` carried at the `nix build -o <path>`
+/// destination the sibling `docker load` reads:
+///
+/// 1. **Unbounded on-disk symlink leak — the store path stays GC-rooted forever.**
+///    The pre-lift shape carried NO cleanup — not on the happy path,
+///    not on `?` propagation from the `nix build` / `docker load` bail
+///    sites, not on `await`-boundary panic, not on operator Ctrl-C.
+///    Every `forge e2e-prepare` (or `forge test`-with-E2E-fallback)
+///    invocation left a `/tmp/backend-image` + `/tmp/web-image`
+///    symlink on the runner, AND those symlinks are Nix GC roots —
+///    the store paths they point at are pinned against
+///    `nix-collect-garbage` for as long as the symlinks exist. A
+///    long-running self-hosted runner accumulates one pair per
+///    `forge e2e-prepare` invocation, indefinitely, and each pair
+///    pins a full container image tarball (backend + web, hundreds of
+///    MB each) against GC — so the runner's Nix store grows without
+///    bound. `TempDir::Drop` unlinks the symlink on every exit path,
+///    at which point the store path becomes GC-eligible on the next
+///    `nix-collect-garbage` pass — the correct lifecycle, since after
+///    `docker load` the Docker daemon carries the image and the
+///    Nix-store copy is redundant.
+/// 2. **Hard-coded `/tmp` bypasses `TMPDIR` and breaks in the Nix hermetic sandbox.**
+///    A Nix build under a `sandbox = true` daemon (the default on the
+///    fleet's build runners) has no writable `/tmp`; the daemon
+///    exposes only `$TMPDIR`, which the pre-lift `format!("/tmp/…")`
+///    ignored — so a hermetic-runner `forge e2e-prepare` step would
+///    fail at the `nix build -o` step before even reaching `docker
+///    load`. `tempfile::Builder::tempdir()` honors `TMPDIR` via
+///    `std::env::temp_dir()` so the daemon-provided scratch root is
+///    respected by construction rather than by every-caller-
+///    remembers-to-check prose.
+/// 3. **Concurrent-invocation race on a fixed slot.**
+///    Two `forge e2e-prepare` invocations on the same runner (a
+///    re-run after a transient nix-daemon error) both wrote to
+///    `/tmp/backend-image` and raced the `nix build -o` → `File::open`
+///    → `docker load` handoff. The second builder's `nix build -o`
+///    replaced the first's symlink between the first's build and its
+///    `File::open`, so the second builder's bytes rode into the
+///    first's `docker load` under the first's image name. The
+///    `mkdtemp(3)`-appended unique suffix in
+///    `tempfile::Builder::tempdir()` closes it at the syscall.
+fn e2e_image_output_symlink(name: &str) -> Result<(tempfile::TempDir, PathBuf)> {
+    let dir = tempfile::Builder::new()
+        .prefix("forge-e2e-image-")
+        .tempdir()
+        .context("create e2e image output scratch tempdir")?;
+    let path = dir.path().join(format!("{}-image", name));
+    Ok((dir, path))
+}
+
 /// Check if a Docker image exists locally.
 ///
 /// Delegates to the canonical
@@ -827,14 +902,36 @@ fn check_image_exists(image_name: &str) -> Result<bool> {
 
 /// Build a Nix image and load it into Docker
 fn build_and_load_image(repo_root: &str, name: &str, flake_attr: &str) -> Result<()> {
-    let output_path = format!("/tmp/{}-image", name);
+    // Typed RAII scratch surface — `_output_dir` is the guard whose
+    // `Drop` unlinks the whole tempdir + the `nix build -o` symlink
+    // inside it, panic-safe across the build → docker-load handoff and
+    // closing the pre-lift `format!("/tmp/{}-image", name)` shape's
+    // triple defect (unbounded GC-rooted store-path leak on every exit
+    // path, hard-coded `/tmp` bypassing `TMPDIR` on Nix-sandbox
+    // runners, and the fixed-slot race between two concurrent
+    // `forge e2e-prepare` invocations). Sibling shape discipline to
+    // `commands/crossplane.rs`'s `xpkg_output_file` (220b207),
+    // `commands/federation_tests.rs`'s
+    // `federation_test_job_manifest_file` (76b256e), and
+    // `commands/migrations.rs`'s `migration_job_manifest_file`
+    // (950a0e7). `docker load` handoff below opens the symlink by
+    // path — `File::open` follows it into the Nix store, and the
+    // subsequent `.stdin(image_file)` pipe survives past this fn's
+    // `Ok(())` because the `File` handle is dropped only after
+    // `run_inherited_status_sync` returns, at which point Drop of
+    // `_output_dir` unlinks the symlink (marking the store path
+    // GC-eligible on the next `nix-collect-garbage` pass, which is
+    // the correct lifecycle: Docker daemon now carries the image and
+    // the Nix-store tarball is redundant).
+    let (_output_dir, output_path) = e2e_image_output_symlink(name)?;
+    let output_path_str = output_path.to_string_lossy().into_owned();
 
     // Build with Nix
     ui::print_info(&format!("Building {} image via Nix", name));
     let mut build_cmd = Command::new(get_tool_path("NIX_BIN", "nix"));
     build_cmd
         .current_dir(repo_root)
-        .args(["build", flake_attr, "-o", &output_path]);
+        .args(["build", flake_attr, "-o", &output_path_str]);
     run_inherited_status_sync(build_cmd, &format!("nix build {}", flake_attr))?;
 
     // Load into Docker
@@ -874,7 +971,7 @@ fn build_and_load_image(repo_root: &str, name: &str, flake_attr: &str) -> Result
     // established as sufficient for pre-configured stdin) collapses
     // to the same one delegation the sibling non-piped spawns use.
     let image_file = std::fs::File::open(&output_path)
-        .context(format!("Failed to open image file: {}", output_path))?;
+        .context(format!("Failed to open image file: {}", output_path_str))?;
 
     let mut docker_load_cmd = Command::new(docker_bin());
     docker_load_cmd.arg("load").stdin(image_file);
@@ -2190,6 +2287,189 @@ mod e2e_status_spawn_routing_tests {
              --test integration_tests`, `cargo test --test \
              e2e_tests`, `nix build <flake-attr>`, and the piped \
              `docker load` in `build_and_load_image`)",
+        );
+    }
+}
+
+#[cfg(test)]
+mod e2e_image_output_symlink_tests {
+    /// Primitive pin: the returned path's basename is exactly
+    /// `<name>-image` — the same shape the pre-lift
+    /// `format!("/tmp/{}-image", name)` reservation produced, so an
+    /// operator dumping the scratch tempdir root after a failing
+    /// `forge e2e-prepare` (or auto-fallback E2E-image build inside
+    /// `run_test_pyramid`'s E2E phase) can still trace the symlink
+    /// back to the image name it was built for. A drift onto a bare
+    /// `image` basename would still let `nix build -o` succeed and
+    /// `docker load` follow the symlink, but two concurrent
+    /// `build_and_load_image` calls with different `name`s
+    /// (`backend` vs `web`) would produce two `image` symlinks in
+    /// two different tempdirs — an operator debugging a scratch-dir
+    /// leak in a hermetic-runner post-mortem would have no way to
+    /// tell which tempdir was which.
+    #[test]
+    fn test_e2e_image_output_symlink_returns_expected_basename() {
+        let (_dir, path) =
+            super::e2e_image_output_symlink("backend").expect("e2e_image_output_symlink backend");
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("backend-image"),
+            "e2e_image_output_symlink(\"backend\") must return a path \
+             whose basename is exactly `backend-image` — same shape the \
+             pre-lift `format!(\"/tmp/{{}}-image\", name)` reservation \
+             produced; got {path:?}",
+        );
+        let (_dir_web, path_web) =
+            super::e2e_image_output_symlink("web").expect("e2e_image_output_symlink web");
+        assert_eq!(
+            path_web.file_name().and_then(|s| s.to_str()),
+            Some("web-image"),
+            "e2e_image_output_symlink(\"web\") must return a path whose \
+             basename is exactly `web-image`; got {path_web:?}",
+        );
+    }
+
+    /// Primitive pin — the concurrent-race half: two calls in the
+    /// same process with the same `name` return strictly-distinct
+    /// paths, so two `forge e2e-prepare` invocations on the same
+    /// runner cannot alias on the same on-disk symlink slot even
+    /// when the image name collides (both call
+    /// `build_and_load_image(&repo_root, "backend", …)`, say — a
+    /// re-run after a transient nix-daemon error). `mkdtemp(3)`-
+    /// backed unique-suffix discipline; a drift onto a fixed-dir
+    /// shape would fail HERE, not as a mysterious wrong-bytes-to-
+    /// wrong-image-name `docker load` downstream.
+    #[test]
+    fn test_e2e_image_output_symlink_returns_distinct_paths_on_each_call() {
+        let (_a_dir, a) = super::e2e_image_output_symlink("backend").expect("a");
+        let (_b_dir, b) = super::e2e_image_output_symlink("backend").expect("b");
+        assert_ne!(
+            a, b,
+            "two calls to e2e_image_output_symlink(same name) must return \
+             strictly-distinct paths — a fixed-dir shape would race two \
+             concurrent forge e2e-prepare invocations against the same \
+             `<name>-image` symlink slot",
+        );
+    }
+
+    /// Primitive pin — the leak half: the returned path starts fresh
+    /// (the caller creates the symlink via `nix build -o <path>`),
+    /// the guard keeps the scratch dir alive across a mid-body
+    /// write, and `Drop` unlinks both dir AND the symlink inside it.
+    /// A drift onto a `NamedTempFile`-only shape that pre-created
+    /// the file would change the `nix build -o` semantics (from
+    /// create-fresh-symlink to `nix build -o` refuses-to-overwrite);
+    /// a drift onto a bare `tempdir()` without the RAII guard held
+    /// would flake because `Drop` ran between the `nix build -o` and
+    /// the `File::open` follow-through. Both surface here.
+    #[test]
+    fn test_e2e_image_output_symlink_fresh_and_dir_drop_unlinks_written_bytes() {
+        let path = {
+            let (dir, out) =
+                super::e2e_image_output_symlink("backend").expect("e2e_image_output_symlink");
+            assert!(
+                !out.exists(),
+                "returned path must be fresh — the caller creates the \
+                 symlink via `nix build -o <path>`; a pre-created file \
+                 would change `nix build -o` semantics from create-fresh \
+                 to refuses-to-overwrite"
+            );
+            // Stub the symlink-payload with a plain file — the leak
+            // discipline is on the on-disk entry, not on the symlink-vs-
+            // regular-file distinction the real caller carries.
+            std::fs::write(&out, b"stub image tarball\n").expect("write stub image bytes");
+            assert!(
+                out.exists() && dir.path().is_dir(),
+                "file exists AND dir is alive while the RAII guard is held"
+            );
+            out
+        };
+        assert!(
+            !path.exists(),
+            "`TempDir::Drop` must unlink the scratch dir + its contents \
+             — a mid-body panic between `nix build -o` and `docker load` \
+             would otherwise leak `/tmp/forge-e2e-image-*/backend-image` \
+             AND pin the GC-rooted store path forever"
+        );
+    }
+
+    /// Whole-fn shield: `build_and_load_image` MUST reserve its
+    /// `nix build -o <path>` destination through the
+    /// `e2e_image_output_symlink()` sigil, never a hand-rolled
+    /// `format!("/tmp/{}-image", name)` stanza that leaks the
+    /// GC-rooted store path AND ignores `TMPDIR`.
+    ///
+    /// Pre-lift `build_and_load_image` spelled the fixed-path shape
+    /// verbatim (`let output_path = format!("/tmp/{}-image", name);`
+    /// at the build-destination reservation site with NO cleanup at
+    /// any exit path — not on the happy path, not on `?` propagation
+    /// from `nix build` / `docker load` bails, not on operator
+    /// Ctrl-C), so every non-happy exit left the `/tmp/<name>-image`
+    /// symlink on the runner forever AND pinned the container-
+    /// tarball store path against `nix-collect-garbage`. And a
+    /// hermetic Nix-sandbox build with no writable `/tmp` failed
+    /// to even create the symlink, because `format!("/tmp/…")`
+    /// bypassed the daemon-provided `TMPDIR`. `TempDir::Drop` +
+    /// `tempfile::Builder::tempdir()`'s `std::env::temp_dir()`
+    /// honor close both defects by construction. Sibling shape
+    /// discipline to the `test_run_federation_tests_manifest_path_
+    /// routes_through_federation_test_job_manifest_file` shield
+    /// (76b256e) and the `test_run_migration_job_manifest_path_
+    /// routes_through_migration_job_manifest_file` shield
+    /// (950a0e7) on the sibling command modules.
+    ///
+    /// Positive side: the delegation call
+    /// `e2e_image_output_symlink(` must appear at exactly ONE code
+    /// line in `build_and_load_image`'s fn body (the single
+    /// consumer site), so a regression that deleted the delegation
+    /// call cannot leave the negative scan trivially satisfied by
+    /// absence. The sigil definition itself (line reading `fn
+    /// e2e_image_output_symlink(`) is out of scope because this
+    /// shield's fn-body slice starts at the `fn
+    /// build_and_load_image(` marker.
+    ///
+    /// Negative side: the pre-lift `format!("/tmp/{}-image", name)`
+    /// shape must not appear at any code line in the fn body. The
+    /// forbidden needle is reconstructed at test time via
+    /// `format!("format!(\"/{}/", "tmp")` so this shield's own
+    /// panic-message and docstring prose does not false-match
+    /// itself (same discipline the sibling
+    /// `federation_test_job_manifest_file` shield's negative-scan
+    /// needle carries). Scope is `build_and_load_image`'s fn body
+    /// (via [`crate::test_support::fn_body_slice_between_markers`])
+    /// with end marker `\nfn print_image_info(` — the next fn in
+    /// source order after `build_and_load_image`.
+    #[test]
+    fn test_build_and_load_image_output_path_routes_through_e2e_image_output_symlink() {
+        const SOURCE: &str = include_str!("e2e.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/e2e.rs",
+            "fn build_and_load_image(",
+            "\nfn print_image_info(",
+        );
+        // Positive: build_and_load_image delegates to the sigil.
+        let delegation_hits =
+            crate::test_support::code_line_hits(body, "e2e_image_output_symlink(");
+        assert_eq!(
+            delegation_hits.len(),
+            1,
+            "build_and_load_image must delegate to `e2e_image_output_symlink(` \
+             at exactly one code line (the single scratch-symlink consumer \
+             site); got {} — hits: {delegation_hits:#?}",
+            delegation_hits.len(),
+        );
+        // Negative: no code-line hit of the pre-lift fixed `/tmp/…` shape.
+        let forbidden = format!("format!(\"/{}/", "tmp");
+        let stale = crate::test_support::code_line_hits(body, &forbidden);
+        assert!(
+            stale.is_empty(),
+            "build_and_load_image must not spell the pre-lift fixed-`/tmp/…` \
+             scratch-symlink shape at any code line — every scratch-symlink \
+             path must route through `e2e_image_output_symlink()` so \
+             `TempDir::Drop` closes the leak AND `tempfile::Builder`'s \
+             `std::env::temp_dir()` honor closes the hermetic-`TMPDIR` \
+             bypass. Offending: {stale:#?}",
         );
     }
 }
