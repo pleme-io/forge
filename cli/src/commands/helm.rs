@@ -1584,15 +1584,31 @@ pub fn bump(
         }
 
         let commit_msg = format!("release: {} v{}", lib_chart_name, new_version);
-        let status = crate::git::git_command_sync()
+        // Route the release commit's `git commit -m <msg>` spawn through
+        // the canonical sync status-only primitive so the pre-lift
+        // hand-rolled `.status()` + `.context(…)?` + non-zero-exit-bail
+        // stanza (which dropped the exit code from the terminating log
+        // line — an operator seeing a bare failure notice on a release-
+        // lib-chart bump against a repo whose commit hook rejected the
+        // change had no way to tell whether git exited 1 (a pre-commit
+        // hook refusal), 128 (a broken index), or was killed by a signal)
+        // collapses onto the primitive's canonical
+        // `"{op} failed (exit {code})"` envelope emitted by ONE body at
+        // `retry.rs::classify_inherited_status`. The sibling `git add`
+        // (fallback path, above) and `git tag` (warn-on-fail, below)
+        // interrogate `.status()` for control-flow rather than bailing,
+        // so they do NOT lift onto the primitive; only this middle
+        // bail-on-fail site fits the primitive's shape. The pre-lift
+        // literal strings are named in prose only (not in the source
+        // form the sibling
+        // `bump_git_commit_status_spawn_routing_tests` shield scans
+        // for), so this comment does not false-fire the shield's
+        // negative-scan needles.
+        let mut commit_cmd = crate::git::git_command_sync();
+        commit_cmd
             .args(["commit", "-m", &commit_msg])
-            .current_dir(&repo_root)
-            .status()
-            .context("Failed to git commit")?;
-
-        if !status.success() {
-            bail!("git commit failed");
-        }
+            .current_dir(&repo_root);
+        crate::retry::run_inherited_status_sync(commit_cmd, "git commit")?;
 
         let tag = format!("v{}", new_version);
         let status = crate::git::git_command_sync()
@@ -3395,10 +3411,14 @@ mod template_status_spawn_routing_tests {
     /// test_ci, local, e2e, rust_service, image_release}.rs`, 6cb9442
     /// through 5b5c765) already emits.
     ///
-    /// Fn-scoping is load-bearing: `helm.rs::bump` retains three
-    /// legitimate `.status()` sites in the sibling `git add / commit /
-    /// tag` block (a fallback path, a bail-on-fail, a warn-on-fail
-    /// tag) that do NOT lift cleanly onto `run_inherited_status_sync`,
+    /// Fn-scoping is load-bearing: `helm.rs::bump` retains two
+    /// legitimate `.status()` sites in the sibling `git add / tag`
+    /// block (a fallback path, a warn-on-fail tag) that do NOT lift
+    /// cleanly onto `run_inherited_status_sync` — they interrogate
+    /// `.status()` for control-flow rather than bailing on non-zero.
+    /// The sibling `git commit` bail-on-fail site DID lift (this
+    /// commit's peer); its own scoped shield lives at
+    /// [`super::bump_git_commit_status_spawn_routing_tests`],
     /// and `helm.rs::deploy` retains three fire-and-forget `let _ =
     /// ….status()` sites documented as advisory. A whole-module
     /// shield here would false-fire on those; instead the scan bounds
@@ -3460,6 +3480,98 @@ mod template_status_spawn_routing_tests {
              through `crate::retry::run_inherited_status_sync` — the \
              delegation string was not found in `template`'s body. A \
              regression that dropped the delegation cannot leave the \
+             negative scan trivially satisfied by absence."
+        );
+    }
+}
+
+#[cfg(test)]
+mod bump_git_commit_status_spawn_routing_tests {
+    /// Function-scoped shield: `bump`'s release commit spawn — the sole
+    /// `git commit -m <msg>` invocation inside the `if commit { ... }`
+    /// block — routes through
+    /// [`crate::retry::run_inherited_status_sync`], never a hand-rolled
+    /// `.status().context(…)?` + `if !status.success() { bail!(…) }`
+    /// stanza that drops the exit code from the operator log line.
+    ///
+    /// Pre-lift the spawn spelled the four-line
+    /// `.status().context("Failed to git commit")?` + `if
+    /// !status.success() { bail!("git commit failed") }` stanza with an
+    /// ad-hoc bail message that named the phase but dropped the exit
+    /// code the child process returned. Post-lift the canonical `"git
+    /// commit failed (exit {code})"` envelope emerges by construction
+    /// at the primitive's ONE body (`retry.rs::classify_inherited_status`)
+    /// — the shape every migrated sync-frontier sibling in
+    /// `commands/{crossplane, pangea_infra, gem, infra, tool, test_ci,
+    /// local, e2e, rust_service, image_release}.rs` (6cb9442 through
+    /// 5b5c765) and the sibling `helm::template` spawn (5772ab2)
+    /// already emit.
+    ///
+    /// Fn-scoping is load-bearing: the sibling shield
+    /// [`super::template_status_spawn_routing_tests`] documents that
+    /// `bump` still carries two legitimate `.status()` sites in the
+    /// same `git add / tag` block — a fallback path (git-add
+    /// interrogated to decide between `<charts_dir>/*/Chart.yaml`
+    /// glob-add and `-A` catch-all) and a warn-on-fail tag (git-tag
+    /// non-zero degrades to `warn!("git tag failed (tag may already
+    /// exist)")` rather than bailing). Both interrogate `.status()`
+    /// for control-flow rather than bailing, so they do NOT lift onto
+    /// `run_inherited_status_sync` — only the middle `git commit`
+    /// bail-on-fail site fits the primitive's shape. A whole-module
+    /// shield here would false-fire on those two; instead the scan
+    /// bounds to `bump`'s body via
+    /// [`crate::test_support::fn_body_slice_between_markers`] with
+    /// open marker `"pub fn bump("` and end marker `"\nfn
+    /// chart_version_at("` (the next fn signature) — the same
+    /// marker-scoped discipline the sibling `helm::template` shield
+    /// uses.
+    ///
+    /// Negative side scans for two pre-lift needles reconstructed at
+    /// test time via [`format!`] (so this shield's own docstring, which
+    /// names the pre-lift shape only in prose, does not false-match):
+    /// the `.context("Failed to git commit")` builder-terminator suffix
+    /// and the `bail!("git commit failed")` ad-hoc fail-message. Positive
+    /// side pins that `crate::retry::run_inherited_status_sync(` appears
+    /// in the sliced fn body at ≥1 line — a regression that deleted the
+    /// delegation cannot leave the negative scan trivially satisfied by
+    /// absence.
+    #[test]
+    fn test_bump_git_commit_spawn_routes_through_run_inherited_status_sync() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/helm.rs",
+            "pub fn bump(",
+            "\nfn chart_version_at(",
+        );
+
+        let pre_lift_context = format!(".context({}Failed to git commit{})", '"', '"');
+        assert!(
+            !fn_body.contains(&pre_lift_context),
+            "helm::bump must not re-inline the pre-lift `.context(…)?` \
+             stanza on the release-commit `git commit` spawn — the \
+             bail-on-fail spawn must route through \
+             `crate::retry::run_inherited_status_sync`, which carries \
+             the exit code into the failure envelope."
+        );
+
+        let pre_lift_bail = format!("bail!({}git commit failed{})", '"', '"');
+        assert!(
+            !fn_body.contains(&pre_lift_bail),
+            "helm::bump must not re-inline the pre-lift `bail!(…)` on \
+             the release-commit `git commit` spawn — the ad-hoc \
+             message dropped the exit code the child process returned. \
+             `run_inherited_status_sync`'s canonical `\"{{op}} failed \
+             (exit {{code}})\"` envelope preserves it."
+        );
+
+        assert!(
+            fn_body.contains("crate::retry::run_inherited_status_sync("),
+            "helm::bump must dispatch its release-commit `git commit` \
+             spawn through `crate::retry::run_inherited_status_sync` \
+             — the delegation string was not found in `bump`'s body. \
+             A regression that dropped the delegation cannot leave the \
              negative scan trivially satisfied by absence."
         );
     }
