@@ -410,11 +410,13 @@ pub async fn build_docker_image_from_dir(
 pub async fn run_crate2nix(crate2nix_path: &str) -> Result<()> {
     info!("🔄 Running crate2nix generate...");
 
-    let mut cmd = Command::new(crate2nix_path);
-    cmd.args(["generate"]);
-    crate::retry::run_inherited_status(cmd, "crate2nix generate")
-        .await
-        .context("Failed to regenerate Cargo.nix")?;
+    crate::retry::run_bin_args_inherited_status(
+        crate2nix_path,
+        &["generate"],
+        "crate2nix generate",
+    )
+    .await
+    .context("Failed to regenerate Cargo.nix")?;
 
     Ok(())
 }
@@ -442,11 +444,9 @@ pub async fn run_crate2nix(crate2nix_path: &str) -> Result<()> {
 pub async fn run_nix_wrapped_crate2nix(nix_path: &str, extra_generate_args: &[&str]) -> Result<()> {
     info!("🔄 Running `nix run nixpkgs#crate2nix -- generate`...");
 
-    let mut cmd = Command::new(nix_path);
     let mut argv: Vec<&str> = vec!["run", "nixpkgs#crate2nix", "--", "generate"];
     argv.extend_from_slice(extra_generate_args);
-    cmd.args(&argv);
-    crate::retry::run_inherited_status(cmd, "crate2nix generate")
+    crate::retry::run_bin_args_inherited_status(nix_path, &argv, "crate2nix generate")
         .await
         .context("Failed to generate Cargo.nix")?;
 
@@ -469,9 +469,7 @@ pub async fn run_nix_wrapped_crate2nix(nix_path: &str, extra_generate_args: &[&s
 pub async fn run_cargo_update(cargo_path: &str) -> Result<()> {
     info!("📦 Updating Cargo.lock...");
 
-    let mut cmd = Command::new(cargo_path);
-    cmd.args(["update"]);
-    crate::retry::run_inherited_status(cmd, "cargo update")
+    crate::retry::run_bin_args_inherited_status(cargo_path, &["update"], "cargo update")
         .await
         .context("Failed to update Cargo.lock")?;
 
