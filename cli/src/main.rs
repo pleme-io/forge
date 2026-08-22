@@ -61,6 +61,7 @@ mod version;
 // Legacy modules (to be migrated)
 mod cloudflare;
 mod git;
+mod hermetic_scratch;
 mod k8s;
 mod nix;
 mod nix_hooks;
