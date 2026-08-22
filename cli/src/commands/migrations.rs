@@ -29,8 +29,102 @@ use crate::retry::RetryPolicy;
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+
+/// Reserve an on-disk scratch slot for the migration-job manifest
+/// `run_migration_job` writes and `kubectl apply -f <path>` consumes.
+///
+/// Returns `(TempDir, PathBuf)` — the `TempDir` half is the RAII
+/// guard whose `Drop` unlinks both the scratch dir AND the manifest
+/// inside it, panic-safe across the `write → apply → wait → status
+/// → cleanup-jobs` handoff. The path half is `<dir>/<config_name>-
+/// migration-job-<timestamp>.yaml`, the destination `tokio::fs::
+/// write` writes to and the `apply --filename` slot consumes.
+///
+/// The `mkdtemp(3)`-backed unique suffix in
+/// [`tempfile::Builder::tempdir`] closes the fixed-path race at the
+/// syscall — a `let (_, out) = migration_job_manifest_file(...)?`
+/// binding immediately drops the guard, unlinks the dir, and the
+/// downstream `tokio::fs::write` reproducibly fails with an
+/// `ENOENT` on the parent — a fast, loud signal rather than the
+/// silent post-write leak the pre-lift `format!("/tmp/…")` shape
+/// carried. Return-type shape mirrors the sibling primitives
+/// [`crate::commands::federation_tests::federation_test_job_manifest_file`]
+/// (commit 76b256e) and
+/// [`crate::commands::crossplane::xpkg_output_file`] (commit
+/// 220b207) that establish the same `(TempDir, PathBuf)` sigil
+/// algebra across the `commands/` tree.
+///
+/// # Why the RAII-scratch shape is load-bearing
+///
+/// Two defects lived at the pre-lift `let temp_file = format!(
+/// "/tmp/{}-migration-job-{}.yaml", config.name(), timestamp);`
+/// shape `run_migration_job` carried:
+///
+/// 1. **Unbounded on-disk leak on every non-happy path.** The
+///    pre-lift stanza wrote the manifest to a hard-coded
+///    `/tmp/<service>-migration-job-<ts>.yaml` and relied on a
+///    trailing `let _ = tokio::fs::remove_file(&temp_file).await;`
+///    two lines after the `run_inherited_status` apply. That
+///    trailing sweep ran on the happy path only. On `?`
+///    propagation from the apply (a `retry::run_inherited_status`
+///    bail returned before reaching the cleanup line), on an
+///    `.await`-boundary panic, or on operator Ctrl-C at the
+///    apply → cleanup handoff the cleanup never fired. Every such
+///    non-happy exit left the manifest — carrying the deploy's
+///    service name, image tag, git SHA, environment, product ID,
+///    namespace, and every configured secret name — on the
+///    runner's `/tmp` forever. A long-running deploy runner
+///    accumulates a manifest per failed migration invocation,
+///    indefinitely. `TempDir::Drop` runs unconditionally — through
+///    panics, through early returns, through Ctrl-C during unwind
+///    — so the on-disk state is bound to the caller's stack frame
+///    and released with it.
+/// 2. **Hard-coded `/tmp` bypasses `TMPDIR`.** A Nix build under a
+///    hermetic-sandbox daemon (`sandbox = true`, the default on
+///    the fleet's build runners) has no writable `/tmp`; the
+///    daemon exposes only `$TMPDIR`, which the pre-lift
+///    `format!("/tmp/…")` ignored — so a hermetic-runner migration
+///    invocation would fail at the `tokio::fs::write` step before
+///    even reaching `kubectl apply`. [`tempfile::Builder::tempdir`]
+///    honors `TMPDIR` (via [`std::env::temp_dir`]) so the
+///    daemon-provided scratch root is respected by construction
+///    rather than by every-caller-remembers-to-check prose.
+///
+/// The concurrent-race half — two `forge deploy` invocations on the
+/// same runner racing the same
+/// `/tmp/<service>-migration-job-<ts>.yaml` — is closed as a side
+/// effect: the pre-lift timestamp is a `chrono::Utc::now().
+/// timestamp()` (second-resolution) so two migrations of the same
+/// service inside one wall-clock second (a re-run after a
+/// transient RBAC error, say) collide on the same slot, and one
+/// overwrites the other's manifest between apply and cleanup. The
+/// `mkdtemp(3)`-appended unique suffix in
+/// [`tempfile::Builder::tempdir`] closes that class at the
+/// syscall.
+// `#[allow(dead_code)]` mirrors the pre-existing module-wide
+// disposition on the whole non-test consumer chain here — clippy's
+// cross-module reachability from `commands/rust_service.rs` /
+// `commands/comprehensive_release.rs` migration entrypoints does
+// not always resolve through the enclosing async surface, so the
+// standalone helper carries the same silencing the sibling sigils
+// (`federation_test_job_manifest_file`, `xpkg_output_file`) use.
+#[allow(dead_code)]
+fn migration_job_manifest_file(
+    config_name: &str,
+    timestamp: i64,
+) -> Result<(tempfile::TempDir, PathBuf)> {
+    let dir = tempfile::Builder::new()
+        .prefix("forge-migration-job-")
+        .tempdir()
+        .context("create migration job manifest scratch tempdir")?;
+    let path = dir
+        .path()
+        .join(format!("{}-migration-job-{}.yaml", config_name, timestamp));
+    Ok((dir, path))
+}
 
 /// The typed exponential-backoff policy for [`wait_for_shinka_migration`]
 /// reconcile-poll cadence — `initial_backoff` 2s × `factor` 2 capped at
@@ -461,22 +555,38 @@ spec:
         config.migration_cpu_limit()
     );
 
-    // Write manifest to temp file
-    let temp_file = format!("/tmp/{}-migration-job-{}.yaml", config.name(), timestamp);
-    tokio::fs::write(&temp_file, manifest)
+    // Typed RAII scratch surface — `_manifest_dir` is the guard
+    // whose `Drop` unlinks the whole tempdir + the manifest inside
+    // it, panic-safe across the write → apply → wait → status →
+    // cleanup-jobs handoff. Closes the on-disk leak the pre-lift
+    // trailing `let _ = tokio::fs::remove_file(&temp_file).await;`
+    // sweep could not (it never ran on `?` propagation from the
+    // apply, on `.await`-boundary panic, or on operator Ctrl-C
+    // between apply and cleanup). The guard binding outlives every
+    // subsequent kubectl spawn in this function; the `TempDir::
+    // Drop` fires only after `run_migration_job` returns (or an
+    // intervening `bail!` unwinds through it). See
+    // `migration_job_manifest_file`'s docstring for the two
+    // structural defects the RAII lift closes.
+    let (_manifest_dir, manifest_path) = migration_job_manifest_file(config.name(), timestamp)?;
+    let manifest_path_str: String = manifest_path.to_string_lossy().into_owned();
+    tokio::fs::write(&manifest_path, manifest)
         .await
         .context("Failed to write migration job manifest")?;
 
     // Apply the job
     println!("📄 Applying {} migration job: {}", db_label, job_name);
     let mut apply_cmd = kubectl_command_async();
-    apply_cmd.args(["apply", "-f", &temp_file]);
+    apply_cmd.args(["apply", "-f", &manifest_path_str]);
     crate::retry::run_inherited_status(apply_cmd, "kubectl apply")
         .await
         .context("Failed to apply migration job")?;
 
-    // Clean up temp file
-    let _ = tokio::fs::remove_file(&temp_file).await;
+    // Manifest cleanup rides `_manifest_dir`'s `TempDir::Drop` — no
+    // manual `tokio::fs::remove_file` needed. See
+    // `migration_job_manifest_file`'s docstring for the two
+    // structural defects the RAII lift closes over the pre-lift
+    // trailing best-effort sweep.
 
     // Wait for job completion
     println!(
@@ -1510,6 +1620,208 @@ mod tests {
             "SHINKA_MIGRATION_POLL_BACKOFF.max_backoff must match \
              RetryPolicy::network().max_backoff — both consume the \
              Bazel/Buck2/SLSA-frontier 30s cap reference.",
+        );
+    }
+
+    /// Primitive pin — the basename shape: the returned path lives
+    /// inside a fresh tempdir and its basename is exactly
+    /// `<config_name>-migration-job-<timestamp>.yaml`, so a drift
+    /// onto a differently-shaped basename would fail HERE rather
+    /// than as a mysterious "cannot find manifest" downstream in
+    /// `run_migration_job`'s `tokio::fs::write` → `kubectl apply`
+    /// handoff. Sibling of
+    /// `test_federation_test_job_manifest_file_lives_inside_the_returned_tempdir_with_expected_basename`
+    /// (commit 76b256e) on the federation-tests-side sigil.
+    #[test]
+    fn test_migration_job_manifest_file_lives_inside_returned_tempdir_with_expected_basename() {
+        let config_name = "myapp-cart";
+        let timestamp: i64 = 1_699_999_999;
+        let (dir, path) = super::migration_job_manifest_file(config_name, timestamp)
+            .expect("migration_job_manifest_file");
+        assert!(
+            path.starts_with(dir.path()),
+            "migration_job_manifest_file's returned path must live inside the \
+             returned TempDir — a drift onto a fixed-`/tmp/…` shape (the pre-lift \
+             defect this sigil closed) would leak the manifest outside the guarded \
+             scope. Got dir={:?}, path={:?}",
+            dir.path(),
+            path,
+        );
+        let basename = path
+            .file_name()
+            .expect("basename")
+            .to_string_lossy()
+            .into_owned();
+        let expected = format!("{}-migration-job-{}.yaml", config_name, timestamp);
+        assert_eq!(
+            basename, expected,
+            "migration_job_manifest_file basename must be exactly \
+             `<config_name>-migration-job-<timestamp>.yaml` — a drift would \
+             break `kubectl apply -f <path>`'s downstream expectation and \
+             (worse) silently change the on-disk artifact operators debug from. \
+             Got {basename:?}, expected {expected:?}",
+        );
+    }
+
+    /// Primitive pin — the concurrent-race half: two calls in the
+    /// same process return strictly-distinct paths, so two
+    /// `forge deploy` migrations of the same service on the same
+    /// runner cannot alias on the same on-disk slot even when their
+    /// `chrono::Utc::now().timestamp()` collides at second-
+    /// resolution (a re-run after a transient RBAC error inside one
+    /// wall-clock second). `mkdtemp(3)`-backed unique-suffix
+    /// discipline; a drift onto a fixed-dir shape would fail HERE,
+    /// not as a mysterious "wrong manifest applied to the wrong
+    /// migration Job" downstream. Sibling of
+    /// `test_federation_test_job_manifest_file_returns_distinct_paths_on_each_call`.
+    #[test]
+    fn test_migration_job_manifest_file_returns_distinct_paths_on_each_call() {
+        let config_name = "myapp-cart";
+        let timestamp: i64 = 1_699_999_999;
+        let (_a_dir, a) = super::migration_job_manifest_file(config_name, timestamp).expect("a");
+        let (_b_dir, b) = super::migration_job_manifest_file(config_name, timestamp).expect("b");
+        assert_ne!(
+            a, b,
+            "two calls to migration_job_manifest_file(same config_name, same \
+             timestamp) must return strictly-distinct paths — a fixed-dir shape \
+             would race two concurrent forge deploy migrations against the same \
+             tempdir entry when their `chrono::Utc::now().timestamp()` collides \
+             at second-resolution.",
+        );
+    }
+
+    /// Primitive pin — the leak half: the returned path starts
+    /// fresh (the caller writes the manifest via `tokio::fs::
+    /// write`), the guard keeps the scratch dir alive across a
+    /// mid-body write, and `Drop` unlinks both dir AND file. A
+    /// drift onto a `NamedTempFile`-only shape that pre-created
+    /// the file would change the `tokio::fs::write` semantics
+    /// (from create-or-truncate to write-into-existing); a drift
+    /// onto a bare `tempdir()` without the RAII guard held would
+    /// flake because `Drop` ran between the write and the
+    /// `kubectl apply`. Both surface here.
+    #[test]
+    fn test_migration_job_manifest_file_fresh_and_dir_drop_unlinks_written_bytes() {
+        let config_name = "myapp-cart";
+        let timestamp: i64 = 1_699_999_999;
+        let path = {
+            let (dir, out) = super::migration_job_manifest_file(config_name, timestamp)
+                .expect("migration_job_manifest_file");
+            assert!(
+                !out.exists(),
+                "returned path must be fresh — the caller writes the manifest \
+                 via `tokio::fs::write`; a pre-created file would change the \
+                 write semantics from create-or-truncate to write-into-existing.",
+            );
+            std::fs::write(&out, b"apiVersion: batch/v1\nkind: Job\n")
+                .expect("write stub manifest");
+            assert!(
+                out.exists() && dir.path().is_dir(),
+                "file exists AND dir is alive while the RAII guard is held.",
+            );
+            out
+        };
+        assert!(
+            !path.exists(),
+            "`TempDir::Drop` must unlink the scratch dir + its contents — a \
+             mid-body panic between apply and cleanup would otherwise leak \
+             `/tmp/forge-migration-job-*/<config>-migration-job-<ts>.yaml` \
+             forever.",
+        );
+    }
+
+    /// Whole-fn shield: `run_migration_job` MUST reserve its
+    /// manifest scratch path through the `migration_job_manifest_
+    /// file()` sigil, never a hand-rolled `format!("/tmp/…")`
+    /// stanza that leaks the produced manifest AND ignores
+    /// `TMPDIR`. Pre-lift `run_migration_job` spelled the
+    /// fixed-path shape verbatim (`let temp_file = format!("/tmp/
+    /// {}-migration-job-{}.yaml", config.name(), timestamp);` at
+    /// the manifest-write site + a trailing `let _ = tokio::fs::
+    /// remove_file(&temp_file).await;` two lines after the apply),
+    /// so every non-happy exit (`?` propagation from the apply,
+    /// `.await`-boundary panic, operator Ctrl-C) left the manifest
+    /// — carrying the deploy's service name, image tag, git SHA,
+    /// environment, product ID, namespace, and every configured
+    /// secret name — on the runner's `/tmp` forever. And a
+    /// hermetic Nix-sandbox invocation with no writable `/tmp`
+    /// failed to even write the manifest, because `format!("/tmp/
+    /// …")` bypassed the daemon-provided `TMPDIR`.
+    /// `TempDir::Drop` + `tempfile::Builder::tempdir()`'s
+    /// `std::env::temp_dir()` honor close both defects by
+    /// construction.
+    ///
+    /// Positive side: the delegation call `migration_job_manifest_
+    /// file(` must appear at exactly ONE code line in
+    /// `run_migration_job`'s fn body (the single consumer site), so
+    /// a regression that deleted the delegation cannot leave the
+    /// negative scan trivially satisfied by absence. The sigil
+    /// definition itself (line reading `fn migration_job_manifest_
+    /// file(`) is out of scope because this shield's fn-body slice
+    /// starts at the `async fn run_migration_job(` marker.
+    ///
+    /// Negative side: the pre-lift `format!("/tmp/…")` shape and
+    /// the pre-lift trailing `remove_file(&temp_file).await` sweep
+    /// must not appear at any code line in the fn body. The
+    /// forbidden needles are reconstructed at test time via
+    /// `format!` so this shield's own docstring / panic-message
+    /// prose (which cites the pre-lift stanzas as context) does
+    /// not false-match itself — same discipline the sibling
+    /// `test_run_federation_tests_manifest_path_routes_through_federation_test_job_manifest_file`
+    /// (commit 76b256e) and `canonical_two_arg_sigil_needle` family
+    /// carry. Both halves route through `code_line_hits` for
+    /// anti-docstring-self-match discipline. Scope is
+    /// `run_migration_job`'s fn body (via
+    /// [`crate::test_support::fn_body_slice_between_markers`])
+    /// with end marker `\nasync fn run_postgres_migrations(`.
+    #[test]
+    fn test_run_migration_job_manifest_path_routes_through_migration_job_manifest_file() {
+        const SOURCE: &str = include_str!("migrations.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/migrations.rs",
+            "async fn run_migration_job(",
+            "\nasync fn run_postgres_migrations(",
+        );
+        // Positive: run_migration_job delegates to the sigil.
+        let delegation_hits =
+            crate::test_support::code_line_hits(body, "migration_job_manifest_file(");
+        assert_eq!(
+            delegation_hits.len(),
+            1,
+            "run_migration_job must delegate to `migration_job_manifest_file(` \
+             at exactly one code line (the single manifest-scratch consumer site); \
+             got {} — hits: {delegation_hits:#?}",
+            delegation_hits.len(),
+        );
+        // Negative: no code-line hit of the pre-lift fixed `/tmp/…` shape.
+        let forbidden = format!("format!(\"/{}/", "tmp");
+        let stale = crate::test_support::code_line_hits(body, &forbidden);
+        assert!(
+            stale.is_empty(),
+            "run_migration_job must not spell the pre-lift fixed-`/tmp/…` \
+             manifest-path shape at any code line — every manifest scratch \
+             path must route through `migration_job_manifest_file()` so \
+             `TempDir::Drop` closes the leak AND `tempfile::Builder`'s \
+             `std::env::temp_dir()` honor closes the hermetic-`TMPDIR` \
+             bypass. Offending: {stale:#?}",
+        );
+        // Negative: the trailing `remove_file` cleanup is now RAII-Drop-backed,
+        // not hand-rolled — a regression that reintroduced the manual sweep
+        // would silently mask the leak-on-`?` and leak-on-panic surfaces the
+        // RAII lift closes, so pin its absence too. Reconstructed via
+        // `format!` so the docstring prose above (which cites the pre-lift
+        // stanza) does not false-match.
+        let forbidden_cleanup = format!("tokio::fs::{}(&temp_file)", "remove_file");
+        let stale_cleanup = crate::test_support::code_line_hits(body, &forbidden_cleanup);
+        assert!(
+            stale_cleanup.is_empty(),
+            "run_migration_job must not spell the pre-lift trailing \
+             `tokio::fs::remove_file(&temp_file)` sweep at any code line — the \
+             RAII `TempDir::Drop` on the sigil-returned guard is the \
+             canonical cleanup path, and a hand-rolled sweep alongside it \
+             would silently mask the leak-on-`?` / leak-on-panic surfaces \
+             the RAII lift closes. Offending: {stale_cleanup:#?}",
         );
     }
 
