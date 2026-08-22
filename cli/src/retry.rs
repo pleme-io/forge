@@ -14618,17 +14618,24 @@ pub fn run_bin_args_inherited_status_sync(
 /// trimmed stdout) or [`classify_capture_anyhow`] (anyhow, exposes
 /// stdout+stderr on success as an intact [`std::process::Output`]).
 ///
-/// # Sync-only by construction
+/// # Sync-only by construction — the async twin lives on `infrastructure::kubectl`
 ///
 /// The six lifted sites are all sync (`print_failure_diagnostics` /
 /// `print_e2e_diagnostics` are both plain `fn`, not `async fn`, and
 /// their spawn shape is `std::process::Command::new(...).output()`
-/// without `.await`). A tokio-flavored async twin
-/// (`probe_stdout_capture` with `.output().await`) would be the
-/// obvious sibling; forge has no async best-effort-diagnostic sites
-/// of this exact shape today (`commands/flux.rs`'s async probes ride
-/// on the `kubectl_command_async()` builder, not `Command::new(bin)`,
-/// so they don't fit this primitive's `(bin, args)`-front surface).
+/// without `.await`). The tokio-flavored async twin lives at
+/// [`crate::infrastructure::kubectl::kubectl_probe_stdout_capture`]
+/// — `(args)`-fronted rather than `(bin, args)`-fronted because its
+/// `bin` is pinned by [`crate::infrastructure::kubectl::kubectl_command_async`]
+/// (the canonical `KUBECTL_BIN`-honoring resolver), so it belongs on
+/// the `infrastructure::kubectl` surface next to its
+/// `find_first_pod_name_async` sibling and not on this free-form
+/// spawn frontier. That primitive redeems the seven-site duplication
+/// in `commands/flux.rs::gather_deployment_diagnostics` (replicas
+/// jsonpath, conditions jsonpath, `-o wide` pod listing, container-
+/// state jsonpath, waiting/terminated-reason jsonpath, deployment-
+/// scoped events, namespace-wide pod events) — the frontier this
+/// docstring's prior note said forge had no primitive for.
 pub fn probe_stdout_capture_sync(bin: &str, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new(bin).args(args).output().ok()?;
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
