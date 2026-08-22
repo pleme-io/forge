@@ -84,9 +84,11 @@ pub fn coverage(working_dir: &str, format: &str) -> Result<()> {
 
     if which::which("cargo-tarpaulin").is_err() {
         info!("Installing cargo-tarpaulin...");
-        let mut cmd = Command::new(&cargo);
-        cmd.args(["install", "cargo-tarpaulin"]);
-        run_inherited_status_sync(cmd, "cargo install cargo-tarpaulin")?;
+        crate::retry::run_bin_args_inherited_status_sync(
+            &cargo,
+            &["install", "cargo-tarpaulin"],
+            "cargo install cargo-tarpaulin",
+        )?;
     }
 
     info!(

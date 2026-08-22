@@ -1602,12 +1602,18 @@ pub fn assert_source_routes_bare_spawn_through_two_arg_sigil(
 ///   `include_str!("<module>.rs")`).
 /// - `module_path` — canonical repo-relative path used in panic messages
 ///   (e.g. `"commands/crossplane.rs"`).
-/// - `min_delegations` — the ≥-floor on `run_inherited_status_sync(`
-///   code-line hits in the module body. The lower bound reflects the
-///   number of status-only spawn sites the caller's `execute` /
+/// - `min_delegations` — the ≥-floor on the SUM of
+///   `run_inherited_status_sync(` (direct primitive) and
+///   `run_bin_args_inherited_status_sync(` (the `(bin, args)`-front
+///   wrapper introduced alongside the async sibling
+///   `run_bin_args_inherited_status`) code-line hits in the module
+///   body. Both forms route through the same
+///   [`crate::retry::classify_inherited_status`] body, so either counts
+///   as a valid delegation. The lower bound reflects the number of
+///   status-only spawn sites the caller's `execute` /
 ///   command-entry surface currently exposes, so a regression that
-///   drops even one delegation cannot leave the negative `.status()`
-///   scan trivially satisfied by absence.
+///   drops even one delegation (in EITHER form) cannot leave the
+///   negative `.status()` scan trivially satisfied by absence.
 /// - `spawns_description` — human-readable name of WHICH spawns the
 ///   shield covers (e.g. `"all six status-only spawns
 ///   (`test`/`plan`/`apply`/`verify`/`destroy`/`status`)"`), so the
@@ -1626,10 +1632,17 @@ pub fn assert_source_routes_bare_spawn_through_two_arg_sigil(
 ///   envelope. Docstring / `//`-comment mentions of `.status()` are
 ///   filtered by [`code_line_hits`] so the shield's own prose above the
 ///   delegation call cannot false-match.
-/// - `code_line_hits(body, "run_inherited_status_sync(").len() >=
-///   min_delegations`. A regression that deletes even one delegation
+/// - `code_line_hits(body, "run_inherited_status_sync(").len() +
+///   code_line_hits(body, "run_bin_args_inherited_status_sync(").len()
+///   >= min_delegations`. A regression that deletes even one delegation
 ///   cannot leave the negative `.status()` scan trivially satisfied by
-///   absence — the two halves are load-bearing together.
+///   absence — the two halves are load-bearing together. The two
+///   needles are DISJOINT as substrings: the wrapper form contains
+///   `run_bin_args_inherited_status_sync(` while the direct form is
+///   `run_inherited_status_sync(`, and neither is a substring of the
+///   other (position 4 of the wrapper is `b`, not `i`), so summing
+///   `code_line_hits` counts across both patterns never double-counts a
+///   single call site.
 ///
 /// # Why one canonical helper
 ///
@@ -1671,16 +1684,22 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status_sync
         inline.is_empty(),
         "{module_path} must not spawn via an inline `.status()` \
          terminator — every status-only spawn must route through \
-         `crate::retry::run_inherited_status_sync`, which carries the \
-         exit code into the failure envelope. Found: {inline:?}"
+         `crate::retry::run_inherited_status_sync` (direct primitive) \
+         or `crate::retry::run_bin_args_inherited_status_sync` (the \
+         `(bin, args)`-front wrapper), which carry the exit code into \
+         the failure envelope. Found: {inline:?}"
     );
 
-    let delegations = code_line_hits(body, "run_inherited_status_sync(").len();
+    let direct = code_line_hits(body, "run_inherited_status_sync(").len();
+    let wrapped = code_line_hits(body, "run_bin_args_inherited_status_sync(").len();
+    let delegations = direct + wrapped;
     assert!(
         delegations >= min_delegations,
         "{module_path} must route {spawns_description} through \
-         `run_inherited_status_sync` — found only {delegations} \
-         delegation call(s); a dropped call would leave the negative \
+         `run_inherited_status_sync` or \
+         `run_bin_args_inherited_status_sync` — found only \
+         {delegations} delegation call(s) (direct: {direct}, wrapped: \
+         {wrapped}); a dropped call would leave the negative \
          `.status()` scan satisfied by absence"
     );
 }
@@ -3992,6 +4011,61 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "fake/module.rs",
             2,
             "both spawns",
+        );
+    }
+
+    /// Wrapper-form pin: a call to the `(bin, args)`-front sibling
+    /// [`crate::retry::run_bin_args_inherited_status_sync`] counts as
+    /// a valid delegation, so a module that migrates every direct
+    /// `run_inherited_status_sync(cmd, op)` call to the wrapper
+    /// (`run_bin_args_inherited_status_sync(&bin, &[...], op)`) still
+    /// passes the shield without the caller lowering `min_delegations`.
+    /// Pre-widening the shield counted only the direct-primitive
+    /// needle; a full-module lift to the wrapper would have driven the
+    /// count to zero and fired the "delegation call(s)" arm even
+    /// though the wrapper delegates to the same
+    /// [`crate::retry::classify_inherited_status`] body. The two
+    /// needles are disjoint (neither is a substring of the other), so
+    /// a single call site is counted at most once across the sum.
+    #[test]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_sync_counts_wrapper_form(
+    ) {
+        let source = "\
+            fn a() { crate::retry::run_bin_args_inherited_status_sync(\
+             &tool_bin(), &[\"probe\"], \"a\").unwrap(); }\n\
+            fn b() { crate::retry::run_bin_args_inherited_status_sync(\
+             &tool_bin(), &[\"probe\"], \"b\").unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            source,
+            "fake/module.rs",
+            2,
+            "both wrapper-form spawns",
+        );
+    }
+
+    /// Mixed-form pin: a module carrying a mix of direct-primitive and
+    /// wrapper-form delegations sums both toward `min_delegations`. This
+    /// covers the common migration state where a single wave lifts SOME
+    /// of a module's status-only spawns onto the wrapper while others
+    /// stay on the direct primitive (e.g. because they need
+    /// `.current_dir(...)` or `.env(...)`), and the shield must still
+    /// hold at the pre-migration floor.
+    #[test]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_sync_counts_mixed_forms(
+    ) {
+        let source = "\
+            fn a() { let mut c = std::process::Command::new(\"x\"); \
+             c.current_dir(\"/tmp\"); \
+             crate::retry::run_inherited_status_sync(c, \"a\").unwrap(); }\n\
+            fn b() { crate::retry::run_bin_args_inherited_status_sync(\
+             &tool_bin(), &[\"probe\"], \"b\").unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            source,
+            "fake/module.rs",
+            2,
+            "one direct + one wrapper delegation",
         );
     }
 

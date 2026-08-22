@@ -185,10 +185,11 @@ pub fn apply(workspace: &str, working_dir: &str, auto_approve: bool) -> Result<(
 pub fn verify(workspace: &str, inspec_profile: &str, target: &str) -> Result<()> {
     info!("Running InSpec verification for workspace: {}", workspace);
 
-    let inspec = inspec_bin();
-    let mut cmd = Command::new(&inspec);
-    cmd.args(["exec", inspec_profile, "-t", target, "--reporter", "cli"]);
-    run_inherited_status_sync(cmd, &format!("inspec exec for workspace {}", workspace))?;
+    crate::retry::run_bin_args_inherited_status_sync(
+        &inspec_bin(),
+        &["exec", inspec_profile, "-t", target, "--reporter", "cli"],
+        &format!("inspec exec for workspace {}", workspace),
+    )?;
 
     info!("InSpec verification passed for workspace: {}", workspace);
     Ok(())

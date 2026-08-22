@@ -178,10 +178,7 @@ pub fn render(
         args.push("--observed-resources");
         args.push(o);
     }
-    let crossplane = crossplane_bin();
-    let mut cmd = Command::new(&crossplane);
-    cmd.args(&args);
-    run_inherited_status_sync(cmd, "crossplane render")
+    crate::retry::run_bin_args_inherited_status_sync(&crossplane_bin(), &args, "crossplane render")
 }
 
 /// Validate resources against an extensions directory (`crossplane beta
@@ -192,10 +189,11 @@ pub fn validate(extensions: &str, resources: &str) -> Result<()> {
             bail!("crossplane validate: {} path not found: {}", label, path);
         }
     }
-    let crossplane = crossplane_bin();
-    let mut cmd = Command::new(&crossplane);
-    cmd.args(["beta", "validate", extensions, resources]);
-    run_inherited_status_sync(cmd, "crossplane beta validate")
+    crate::retry::run_bin_args_inherited_status_sync(
+        &crossplane_bin(),
+        &["beta", "validate", extensions, resources],
+        "crossplane beta validate",
+    )
 }
 
 #[cfg(test)]
