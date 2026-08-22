@@ -87,7 +87,7 @@ pub async fn commit_cluster_overlay_release(
 mod tests {
     use super::*;
     use crate::git::git_command_sync;
-    use crate::test_support::{add_bare_origin, init_repo_with_one_commit};
+    use crate::test_support::{init_repo_with_one_commit, make_seeded_work_and_bare_origin};
 
     /// The pure commit-subject helper MUST produce the canonical
     /// `"chore(release): Update <component> to <new_tag>\n\nUpdated
@@ -116,13 +116,7 @@ mod tests {
     /// caller-local string.
     #[tokio::test]
     async fn test_commit_cluster_overlay_release_lands_canonical_subject_on_origin() {
-        let parent = tempfile::tempdir().expect("parent tempdir");
-        let work = parent.path().join("work");
-        let bare = parent.path().join("origin.git");
-        std::fs::create_dir(&work).expect("mkdir work");
-        std::fs::create_dir(&bare).expect("mkdir bare");
-        init_repo_with_one_commit(&work);
-        add_bare_origin(&work, &bare);
+        let (parent, bare, work) = make_seeded_work_and_bare_origin();
         std::fs::write(work.join("kustomization.yaml"), "images: []\n").unwrap();
 
         let outcome = commit_cluster_overlay_release(

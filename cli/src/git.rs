@@ -743,7 +743,9 @@ mod tests {
     use super::*;
     use crate::error::GitError;
 
-    use crate::test_support::{make_executable_shim, GitBinScope, GIT_BIN_ENV_LOCK};
+    use crate::test_support::{
+        make_executable_shim, make_seeded_work_and_bare_origin, GitBinScope, GIT_BIN_ENV_LOCK,
+    };
 
     /// Write an executable shim that pretends to be `git`. Delegates to
     /// the shared `crate::test_support::make_executable_shim` so the
@@ -1190,12 +1192,15 @@ mod tests {
     /// federation) all consume.
     #[tokio::test]
     async fn test_get_short_sha_async_in_returns_seven_char_sha() {
-        // See [`test_git_client_sha`] rationale — this test invokes the
-        // async no-bin production entry point and would blow up if a
-        // concurrent env-var-mutating test redirected the spawn to a
-        // shim mid-flight.
+        // Fixture setup releases `GIT_BIN_ENV_LOCK` internally between
+        // its composed spawns; we acquire it AFTER the primitive
+        // returns so the async production entry point below reads a
+        // stable `GIT_BIN` even under a concurrent env-var-mutating
+        // test. Same caller-holds-lock-after-setup discipline every
+        // `test_support::make_seeded_work_and_bare_origin` consumer
+        // follows.
+        let (_parent, _bare, work) = make_seeded_work_and_bare_origin();
         let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let (_parent, _bare, work) = make_bare_origin_with_work();
         let sha = get_short_sha_async_in(&work)
             .await
             .expect("get_short_sha_async_in must succeed in a seeded repo");
@@ -1239,8 +1244,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_read_head_sha_async_full_variant_returns_forty_char_hex() {
+        let (_parent, _bare, work) = make_seeded_work_and_bare_origin();
         let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let (_parent, _bare, work) = make_bare_origin_with_work();
 
         let full = read_head_sha_async(HeadShaForm::Full, Some(&work))
             .await
@@ -1270,55 +1275,6 @@ mod tests {
         );
     }
 
-    /// Stand up a bare "origin" repo and a work-tree clone of it on
-    /// `main` with an initial seed commit already pushed. Returns the
-    /// owning `TempDir` plus the (bare, work) path pair. Shared
-    /// scaffolding for the `commit_and_push_in` round-trip tests so
-    /// the bare/work setup discipline lives in one place — same
-    /// rationale as `test_support::make_executable_shim`.
-    fn make_bare_origin_with_work() -> (tempfile::TempDir, PathBuf, PathBuf) {
-        let parent = tempfile::tempdir().expect("tempdir");
-        let bare = parent.path().join("origin.git");
-        let work = parent.path().join("work");
-        std::fs::create_dir(&bare).expect("mkdir bare");
-        std::fs::create_dir(&work).expect("mkdir work");
-
-        let run = |args: &[&str], cwd: &Path| {
-            let status = git_command_sync()
-                .args(args)
-                .current_dir(cwd)
-                .status()
-                .expect("spawn git");
-            assert!(status.success(), "git {args:?} in {cwd:?} failed");
-        };
-
-        run(&["init", "--bare", "--initial-branch=main"], &bare);
-        run(&["init", "--initial-branch=main"], &work);
-        run(&["config", "user.email", "test@forge.local"], &work);
-        run(&["config", "user.name", "Forge Test"], &work);
-        // Disable commit signing locally so the test is hermetic
-        // against the host's global `commit.gpgsign = true` (e.g. the
-        // managed remote-execution environment forge runs in). Without
-        // this the seed commit hits the host signer and fails the
-        // setup before the function under test ever runs.
-        run(&["config", "commit.gpgsign", "false"], &work);
-        run(
-            &[
-                "remote",
-                "add",
-                "origin",
-                bare.to_str().expect("bare path utf-8"),
-            ],
-            &work,
-        );
-        std::fs::write(work.join("seed.txt"), "initial\n").expect("write seed");
-        run(&["add", "seed.txt"], &work);
-        run(&["commit", "-m", "seed"], &work);
-        run(&["push", "-u", "origin", "main"], &work);
-
-        (parent, bare, work)
-    }
-
     /// `commit_and_push_in` end-to-end: against a real bare-repo
     /// "origin" and a work-tree clone, pull → add → commit → push
     /// lands the configured commit subject on origin. Pins the
@@ -1331,11 +1287,24 @@ mod tests {
     /// actual production spawn sequence rather than a shim.
     #[test]
     fn test_commit_and_push_in_lands_commit_on_origin() {
+        let (parent, bare, work) = make_seeded_work_and_bare_origin();
+
         // `commit_and_push_in` invokes `git_capture` / `git_capture_remote`
         // — the no-bin production entry points that resolve through
-        // `GIT_BIN`. Serialize against the env-mutating test.
+        // `GIT_BIN`. Serialize against the env-mutating test. Fixture
+        // setup above released its internal guard between spawns; we
+        // hold the lock across the seed push and the tested primitive
+        // so a concurrent env-var flip cannot redirect either.
         let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let (parent, bare, work) = make_bare_origin_with_work();
+        // `commit_and_push_in` opens with `git pull origin main`, which
+        // requires the bare to already carry a `main` branch — so pre-push
+        // the seed commit onto origin before invoking the tested primitive.
+        let seed_push = git_command_sync()
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&work)
+            .status()
+            .expect("seed push spawn");
+        assert!(seed_push.success(), "seed push to bare origin must succeed");
 
         let manifest = work.join("kustomization.yaml");
         std::fs::write(&manifest, "images: []\n").expect("write manifest");
@@ -1358,9 +1327,21 @@ mod tests {
     /// single-repo deploy path; this pin catches it.
     #[test]
     fn test_commit_and_push_in_stages_every_file_in_slice() {
-        // Same env-var race guard as the single-file sibling above.
+        let (parent, bare, work) = make_seeded_work_and_bare_origin();
+
+        // Same env-var race guard as the single-file sibling above:
+        // hold the lock across the seed push and the tested primitive
+        // so a concurrent env-var flip cannot redirect either.
         let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let (parent, bare, work) = make_bare_origin_with_work();
+        // Same pre-push discipline as the single-file sibling above —
+        // `commit_and_push_in`'s opening `git pull origin main` needs
+        // a `main` branch on origin to fast-forward against.
+        let seed_push = git_command_sync()
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&work)
+            .status()
+            .expect("seed push spawn");
+        assert!(seed_push.success(), "seed push to bare origin must succeed");
 
         let manifest = work.join("kustomization.yaml");
         let config_map = work.join("svc-config.yaml");
