@@ -328,6 +328,91 @@ pub(crate) async fn find_first_pod_name_async_with_bin(
     classify_first_pod_name(&output)
 }
 
+/// Best-effort captured-stdout `kubectl` probe: spawn `kubectl` via
+/// [`kubectl_command_async`] with `args`, and return the UTF-8-lossy
+/// stdout on `Ok(output)` — regardless of `output.status` — or `None`
+/// on spawn `Err`. Deliberately swallows every failure (spawn
+/// `io::Error`, non-zero exit, signal termination) because this
+/// primitive exists for the diagnostic-print surface where the caller's
+/// intent is "print whatever the probe produced, and stay silent if
+/// the probe cannot be run."
+///
+/// Async twin of [`crate::retry::probe_stdout_capture_sync`] at the
+/// `kubectl_command_async()` frontier: the sync twin is `(bin, args)`-
+/// fronted so it lives on `retry.rs` alongside its
+/// `run_bin_args_inherited_status_sync` / `run_inherited_status_sync`
+/// siblings; this primitive is `(args)`-fronted because its `bin` is
+/// pinned to whatever `kubectl_command_async()` resolves (the
+/// canonical [`crate::tools::get_tool_path`]`(`[`crate::tools::tools::KUBECTL`]`)`
+/// lookup honoring `KUBECTL_BIN`) — so it belongs on the
+/// `infrastructure::kubectl` surface with its `kubectl_command_async`
+/// / `fetch_secret_value` / `find_first_pod_name_async` siblings and
+/// not on the free-form `retry.rs` spawn frontier.
+///
+/// Lifts the seven-occurrence async four-line stanza
+///
+/// ```text
+/// if let Ok(output) = kubectl_command_async().args([...]).output().await {
+///     let stdout = String::from_utf8_lossy(&output.stdout);
+///     // ... use stdout ...
+/// }
+/// ```
+///
+/// that seven pod / event / condition diagnostic sites in
+/// [`crate::commands::flux::gather_deployment_diagnostics`] carry
+/// verbatim modulo the per-site argv and the trailing `use stdout`
+/// block (replicas jsonpath, conditions jsonpath, `-o wide` pod
+/// listing, container-state jsonpath, waiting/terminated-reason
+/// jsonpath, deployment-scoped events, namespace-wide pod events).
+/// Seven identically-shaped bodies past THEORY §VI.1's three-is-a-law
+/// threshold (PRIME DIRECTIVE: duplication budget is zero); this
+/// primitive is the law-redeeming consolidation for the async
+/// best-effort-captured-stdout surface on the `kubectl_command_async()`
+/// frontier — the missing counterpart to
+/// [`crate::retry::run_capture_anyhow`] (async, raises the failing
+/// envelope, used by [`crate::commands::flux::get_pod_status_full`]'s
+/// control-flow-carrying pod-JSON capture in the same module).
+///
+/// # Semantics — deliberately infallible at the caller
+///
+/// - Spawn `Err` (`fork+exec` failed, e.g., `KUBECTL_BIN` points at
+///   a store path that no longer exists on a Nix-hermetic runner
+///   whose sigil has drifted): swallow, return `None`. Every pre-lift
+///   site already discarded this branch by the `if let Ok(...)`
+///   binding.
+/// - Spawn `Ok(output)`: return `Some(String::from_utf8_lossy(
+///   &output.stdout).into_owned())`, IGNORING `output.status`.
+///   Diagnostic probes must not fail the caller, so a non-zero exit
+///   is treated as "no data" from the probe's perspective — matches
+///   pre-lift behavior at all seven sites (none consulted
+///   `output.status.success()`). A caller that wants "empty means
+///   no rows" can still `.map(|s| s.trim().is_empty())` on the
+///   returned `Option<String>` — six of the seven pre-lift sites do
+///   exactly this to skip the diagnostic header when the probe
+///   returned no data.
+///
+/// # When to reach for this vs [`crate::retry::run_capture_anyhow`]
+///
+/// This primitive is DELIBERATELY narrower than its control-flow-
+/// carrying sibling: it is the right choice ONLY for diagnostic
+/// surfaces where the alternative is silently dropping the failure
+/// envelope. Do NOT use it for control-flow-carrying captures — a
+/// caller that decides what to do next based on the probe's output
+/// MUST surface both the spawn envelope AND the exit-status envelope
+/// through [`crate::retry::run_capture_anyhow`] (anyhow, exposes
+/// stdout+stderr on success as an intact [`std::process::Output`]).
+/// The pattern in [`crate::commands::flux`] is exactly this carve-out
+/// today: [`crate::commands::flux::get_pod_status_full`]'s pod-JSON
+/// capture is control-flow-carrying (drives the deploy-health state
+/// machine) and rides on `run_capture_anyhow`, while
+/// [`crate::commands::flux::gather_deployment_diagnostics`]'s seven
+/// probes are best-effort-diagnostic (each `if let Ok(...) { print
+/// section }`) and ride on this primitive.
+pub async fn kubectl_probe_stdout_capture(args: &[&str]) -> Option<String> {
+    let output = kubectl_command_async().args(args).output().await.ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +827,153 @@ mod tests {
             "kubectl_command_async().output() must surface the shim's exit \
              code verbatim — proves the async constructor spawns the \
              KUBECTL_BIN shim end-to-end, not a PATH-resolved `kubectl`"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // kubectl_probe_stdout_capture — the async best-effort captured-
+    // stdout diagnostic probe. Contract mirrors the sync twin
+    // `retry::probe_stdout_capture_sync` at the
+    // `kubectl_command_async()` frontier: on `Ok(output)`, return the
+    // UTF-8-lossy stdout regardless of `output.status`; on spawn
+    // `Err`, return `None`.
+    // ---------------------------------------------------------------
+
+    /// The primitive's canonical happy path: a shim that exits zero
+    /// and prints an owned stdout sigil round-trips the stdout to the
+    /// caller as UTF-8-lossy [`Option<String>`]. Pins the operator-
+    /// visible surface every pre-lift call site relied on for the
+    /// `let stdout = String::from_utf8_lossy(&output.stdout);` line
+    /// they carried verbatim.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_probe_stdout_capture_zero_exit_returns_lossy_stdout() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_dir, shim) = make_executable_shim(
+            "kubectl",
+            "#!/bin/sh\nprintf '%s' 'ns/deploy/pod-abc Ready'\n",
+        );
+        let _scope = KubectlBinScope::set(&shim);
+
+        let out = kubectl_probe_stdout_capture(&["get", "pods", "-n", "ns"]).await;
+        assert_eq!(out, Some("ns/deploy/pod-abc Ready".to_string()));
+    }
+
+    /// The load-bearing carve-out: a non-zero exit STILL surfaces the
+    /// stdout the shim produced. Pre-lift the seven diagnostic sites
+    /// in `commands/flux.rs::gather_deployment_diagnostics` all
+    /// discarded `output.status`, so a `kubectl get pods` that partial-
+    /// listed pods and then exited 1 (e.g., one namespace's RBAC
+    /// denied a jsonpath field but the deployment-scoped rows landed)
+    /// still had its stdout render into the diagnostic surface. A
+    /// naive re-implementation that gated on `output.status.success()`
+    /// would blank the diagnostic surface at the precise operator-
+    /// triage moment the primitive exists to preserve — that's the
+    /// anti-pattern the primitive's docstring pins against.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_probe_stdout_capture_nonzero_exit_still_returns_stdout() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_dir, shim) = make_executable_shim(
+            "kubectl",
+            "#!/bin/sh\nprintf '%s' 'partial-listing before error'\nexit 1\n",
+        );
+        let _scope = KubectlBinScope::set(&shim);
+
+        let out = kubectl_probe_stdout_capture(&["get", "pods", "-n", "ns"]).await;
+        assert_eq!(
+            out,
+            Some("partial-listing before error".to_string()),
+            "a non-zero kubectl exit must still surface the stdout \
+             the shim produced — a naive gate on `output.status.success()` \
+             would blank the diagnostic surface at the operator-triage \
+             moment the primitive exists to preserve"
+        );
+    }
+
+    /// The `(args)`-front surface routes the argv slice verbatim to
+    /// the spawned kubectl. Pins the contract seven pre-lift sites
+    /// relied on for their heterogeneous 8- and 10-element argv
+    /// slices — a regression that dropped, reordered, or truncated
+    /// the forwarded argv would break every diagnostic probe by
+    /// construction. Shim logs each argument to a temp file, one per
+    /// line; the primitive must forward every arg untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_probe_stdout_capture_forwards_args() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let log_dir = tempfile::tempdir().expect("tempdir for argv log");
+        let log_path = log_dir.path().join("argv.log");
+        let log_str = log_path.to_string_lossy().to_string();
+        let body = format!(
+            "#!/bin/sh\n\
+             for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{}'; done\n\
+             printf '%s' 'ok'\n",
+            log_str
+        );
+        let (_dir, shim) = make_executable_shim("kubectl", &body);
+        let _scope = KubectlBinScope::set(&shim);
+
+        let out = kubectl_probe_stdout_capture(&[
+            "get",
+            "events",
+            "-n",
+            "my-ns",
+            "--sort-by=.lastTimestamp",
+            "-o",
+            "custom-columns=TIME:.lastTimestamp",
+        ])
+        .await;
+        assert_eq!(out.as_deref(), Some("ok"));
+
+        let logged = std::fs::read_to_string(&log_path).expect("read argv log");
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "get",
+                "events",
+                "-n",
+                "my-ns",
+                "--sort-by=.lastTimestamp",
+                "-o",
+                "custom-columns=TIME:.lastTimestamp",
+            ],
+            "kubectl_probe_stdout_capture must forward every argv \
+             slice element verbatim to the spawned kubectl"
+        );
+    }
+
+    /// A spawn `Err` (the shim path is unresolvable) folds to `None`
+    /// at the primitive's boundary. Pre-lift the seven diagnostic
+    /// sites all discarded this branch by the `if let Ok(output) =
+    /// ...` binding; a regression that surfaced the `io::Error`
+    /// would `?`-propagate out of the diagnostic helper and abort
+    /// the whole operator-facing failure-triage flow at exactly the
+    /// moment the operator needs the diagnostic prints.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_probe_stdout_capture_spawn_error_returns_none() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _scope =
+            KubectlBinScope::set("/nonexistent/dir/absolutely-not-a-kubectl-binary-forge-shim");
+
+        let out = kubectl_probe_stdout_capture(&["get", "pods"]).await;
+        assert!(
+            out.is_none(),
+            "an unresolvable KUBECTL_BIN path must fold to None — the \
+             seven pre-lift `if let Ok(output) = ...` sites discarded \
+             this branch, and the primitive's contract preserves that \
+             swallow-every-spawn-error semantic so a diagnostic helper \
+             never aborts on spawn Err"
         );
     }
 

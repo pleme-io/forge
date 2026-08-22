@@ -10,7 +10,7 @@ use crate::flux_get::{
     get_kustomization_scoped, list_kustomizations_all_namespaces, list_kustomizations_in_namespace,
     FluxGetKustomizationsError, KustomizationRow,
 };
-use crate::infrastructure::kubectl::kubectl_command_async;
+use crate::infrastructure::kubectl::{kubectl_command_async, kubectl_probe_stdout_capture};
 use crate::retry::RetryPolicy;
 
 /// The typed exponential-backoff policy for the two deployment-pod-
@@ -766,20 +766,17 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     diag.push_str(&format!("{}\n", "━".repeat(72)));
 
     // 1. Deployment status (replicas, conditions)
-    if let Ok(output) = kubectl_command_async()
-        .args([
-            "get",
-            "deployment",
-            deployment_name,
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.status.replicas}/{.status.updatedReplicas}/{.status.readyReplicas}/{.status.availableReplicas}/{.status.unavailableReplicas}",
-        ])
-        .output()
-        .await
+    if let Some(stdout) = kubectl_probe_stdout_capture(&[
+        "get",
+        "deployment",
+        deployment_name,
+        "-n",
+        namespace,
+        "-o",
+        "jsonpath={.status.replicas}/{.status.updatedReplicas}/{.status.readyReplicas}/{.status.availableReplicas}/{.status.unavailableReplicas}",
+    ])
+    .await
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
         let parts: Vec<&str> = stdout.trim().split('/').collect();
         diag.push_str("\n  Deployment Replicas:\n");
         diag.push_str(&format!(
@@ -793,20 +790,17 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 2. Deployment conditions
-    if let Ok(output) = kubectl_command_async()
-        .args([
-            "get",
-            "deployment",
-            deployment_name,
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={range .status.conditions[*]}{.type}={.status} ({.reason}: {.message}){\"\\n\"}{end}",
-        ])
-        .output()
-        .await
+    if let Some(stdout) = kubectl_probe_stdout_capture(&[
+        "get",
+        "deployment",
+        deployment_name,
+        "-n",
+        namespace,
+        "-o",
+        "jsonpath={range .status.conditions[*]}{.type}={.status} ({.reason}: {.message}){\"\\n\"}{end}",
+    ])
+    .await
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.trim().is_empty() {
             diag.push_str("\n  Deployment Conditions:\n");
             for line in stdout.trim().lines() {
@@ -816,21 +810,18 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 3. All pods for this deployment (not just first)
-    if let Ok(output) = kubectl_command_async()
-        .args([
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-l",
-            &format!("app={}", deployment_name),
-            "-o",
-            "wide",
-        ])
-        .output()
-        .await
+    if let Some(stdout) = kubectl_probe_stdout_capture(&[
+        "get",
+        "pods",
+        "-n",
+        namespace,
+        "-l",
+        &format!("app={}", deployment_name),
+        "-o",
+        "wide",
+    ])
+    .await
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.trim().is_empty() {
             diag.push_str("\n  All Pods:\n");
             for line in stdout.trim().lines() {
@@ -840,21 +831,18 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 4. Container status details (waiting reasons like ImagePullBackOff, CrashLoopBackOff)
-    if let Ok(output) = kubectl_command_async()
-        .args([
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-l",
-            &format!("app={}", deployment_name),
-            "-o",
-            "jsonpath={range .items[*]}{.metadata.name}: {range .status.containerStatuses[*]}[{.name} state={.state} ready={.ready} restarts={.restartCount}] {end}{\"\\n\"}{end}",
-        ])
-        .output()
-        .await
+    if let Some(stdout) = kubectl_probe_stdout_capture(&[
+        "get",
+        "pods",
+        "-n",
+        namespace,
+        "-l",
+        &format!("app={}", deployment_name),
+        "-o",
+        "jsonpath={range .items[*]}{.metadata.name}: {range .status.containerStatuses[*]}[{.name} state={.state} ready={.ready} restarts={.restartCount}] {end}{\"\\n\"}{end}",
+    ])
+    .await
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.trim().is_empty() {
             diag.push_str("\n  Container States:\n");
             for line in stdout.trim().lines() {
@@ -864,21 +852,18 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 5. Waiting/terminated reasons (the most useful for debugging)
-    if let Ok(output) = kubectl_command_async()
-        .args([
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-l",
-            &format!("app={}", deployment_name),
-            "-o",
-            "jsonpath={range .items[*]}{.metadata.name}: {range .status.containerStatuses[*]}waiting={.state.waiting.reason}:{.state.waiting.message} terminated={.state.terminated.reason}:{.state.terminated.exitCode} {end}{\"\\n\"}{end}",
-        ])
-        .output()
-        .await
+    if let Some(stdout) = kubectl_probe_stdout_capture(&[
+        "get",
+        "pods",
+        "-n",
+        namespace,
+        "-l",
+        &format!("app={}", deployment_name),
+        "-o",
+        "jsonpath={range .items[*]}{.metadata.name}: {range .status.containerStatuses[*]}waiting={.state.waiting.reason}:{.state.waiting.message} terminated={.state.terminated.reason}:{.state.terminated.exitCode} {end}{\"\\n\"}{end}",
+    ])
+    .await
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
         let has_reasons = stdout.lines().any(|l| {
             l.contains("waiting=") && !l.contains("waiting=:")
                 || l.contains("terminated=") && !l.contains("terminated=:")
@@ -892,23 +877,20 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 6. Recent events for this namespace (last 20, sorted by time)
-    if let Ok(output) = kubectl_command_async()
-        .args([
-            "get",
-            "events",
-            "-n",
-            namespace,
-            "--sort-by=.lastTimestamp",
-            "--field-selector",
-            &format!("involvedObject.name={}", deployment_name),
-            "-o",
-            "custom-columns=TIME:.lastTimestamp,TYPE:.type,REASON:.reason,MESSAGE:.message",
-            "--no-headers",
-        ])
-        .output()
-        .await
+    if let Some(stdout) = kubectl_probe_stdout_capture(&[
+        "get",
+        "events",
+        "-n",
+        namespace,
+        "--sort-by=.lastTimestamp",
+        "--field-selector",
+        &format!("involvedObject.name={}", deployment_name),
+        "-o",
+        "custom-columns=TIME:.lastTimestamp,TYPE:.type,REASON:.reason,MESSAGE:.message",
+        "--no-headers",
+    ])
+    .await
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.trim().is_empty() {
             diag.push_str("\n  Deployment Events:\n");
             for line in stdout.trim().lines().rev().take(10) {
@@ -918,21 +900,18 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 7. Pod events (scheduling, image pull, etc.)
-    if let Ok(output) = kubectl_command_async()
-        .args([
-            "get",
-            "events",
-            "-n",
-            namespace,
-            "--sort-by=.lastTimestamp",
-            "-o",
-            "custom-columns=TIME:.lastTimestamp,TYPE:.type,REASON:.reason,OBJECT:.involvedObject.name,MESSAGE:.message",
-            "--no-headers",
-        ])
-        .output()
-        .await
+    if let Some(stdout) = kubectl_probe_stdout_capture(&[
+        "get",
+        "events",
+        "-n",
+        namespace,
+        "--sort-by=.lastTimestamp",
+        "-o",
+        "custom-columns=TIME:.lastTimestamp,TYPE:.type,REASON:.reason,OBJECT:.involvedObject.name,MESSAGE:.message",
+        "--no-headers",
+    ])
+    .await
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
         // Filter to pod events matching our deployment
         let pod_events: Vec<&str> = stdout
             .trim()
@@ -1291,6 +1270,47 @@ mod tests {
             body,
             "commands/flux.rs::get_pod_status_full",
             1,
+        );
+    }
+
+    /// Delegation-count shield for the seven best-effort captured-
+    /// stdout diagnostic probes in
+    /// [`super::gather_deployment_diagnostics`]. Every one MUST route
+    /// through
+    /// [`crate::infrastructure::kubectl::kubectl_probe_stdout_capture`]
+    /// — the async twin of [`crate::retry::probe_stdout_capture_sync`]
+    /// at the `kubectl_command_async()` frontier — so a regression
+    /// that reintroduced the pre-lift four-line stanza
+    /// (`if let Ok(output) = kubectl_command_async().args([...]).output().await
+    /// { let stdout = String::from_utf8_lossy(&output.stdout); ... }`)
+    /// at even one of the seven sites fails here rather than silently
+    /// drifting the diagnostic-print surface's discipline.
+    ///
+    /// The delegation-count floor mirrors the sibling
+    /// `commands/e2e.rs::docker_bin_routing_tests` and
+    /// `commands/prerelease.rs::tests` shields at 1ffda81 — a
+    /// negative-only scan (forbidding the pre-lift stanza) would be
+    /// trivially satisfied by absence, so the `>= 7` positive floor
+    /// forces every current-and-future diagnostic probe in this
+    /// module to land on the primitive by construction. Scan bounded
+    /// strictly to the module's non-test body (file start to the
+    /// FIRST `#[cfg(test)]\nmod tests {` marker) so this shield's own
+    /// docstring mention of the primitive stays out of scope.
+    #[test]
+    fn test_gather_deployment_diagnostics_routes_through_kubectl_probe_stdout_capture() {
+        const SOURCE: &str = include_str!("flux.rs");
+        let body = crate::test_support::module_body_before_tests(SOURCE, "commands/flux.rs");
+        let hits = crate::test_support::code_line_hits(body, "kubectl_probe_stdout_capture(");
+        assert!(
+            hits.len() >= 7,
+            "commands/flux.rs::gather_deployment_diagnostics must \
+             route every one of its seven best-effort captured-stdout \
+             diagnostic probes through \
+             `crate::infrastructure::kubectl::kubectl_probe_stdout_capture` — \
+             expected >= 7 code-line hits on `kubectl_probe_stdout_capture(`, \
+             found {}. Delegation-count hits: {:#?}",
+            hits.len(),
+            hits,
         );
     }
 }
