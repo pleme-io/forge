@@ -1707,15 +1707,22 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status_sync
 /// Async sibling of
 /// [`assert_source_routes_status_only_spawns_through_run_inherited_status_sync`]:
 /// every `tokio::process::Command`-driven status-only spawn in `source`
-/// MUST route through [`crate::retry::run_inherited_status`], never
-/// through a hand-rolled `.status().await` builder-terminator that
-/// drops the exit code from the operator log line.
+/// MUST route through [`crate::retry::run_inherited_status`] (the
+/// direct primitive) OR
+/// [`crate::retry::run_bin_args_inherited_status`] (the
+/// `(bin, args)`-front wrapper), never through a hand-rolled
+/// `.status().await` builder-terminator that drops the exit code from
+/// the operator log line.
 ///
 /// # Arguments
 ///
 /// Same shape as the sync sibling. `spawns_description` names WHICH
 /// async spawns the shield covers (e.g. `"the two `regenerate_compiler`
 /// status-only spawn sites (`bundle lock --update` and `bundix`)"`).
+/// `min_delegations` is the ≥-floor on the SUM of `run_inherited_status(`
+/// and `run_bin_args_inherited_status(` code-line hits — both forms
+/// route through the same [`crate::retry::classify_inherited_status`]
+/// body, so either counts as a valid delegation.
 ///
 /// # What it enforces
 ///
@@ -1728,11 +1735,20 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status_sync
 ///   (not the sync `.status()`) so a legitimate sync `.status()`
 ///   consumer elsewhere in the module — should one ever land — does
 ///   not false-match this async shield.
-/// - `code_line_hits(body, "run_inherited_status(").len() >=
-///   min_delegations`. The needle `run_inherited_status(` has the
-///   trailing `(` so it does NOT match `run_inherited_status_sync(`
-///   (the character after `_status` is `_`, not `(`) — the two
-///   frontiers count independently.
+/// - The sum `code_line_hits(body, "run_inherited_status(").len() +
+///   code_line_hits(body, "run_bin_args_inherited_status(").len()`
+///   must be at least `min_delegations`. A regression that deletes
+///   even one delegation cannot leave the negative `.status().await`
+///   scan trivially satisfied by absence — the two halves are
+///   load-bearing together. The two needles are DISJOINT as
+///   substrings: the wrapper form starts
+///   `run_bin_args_inherited_status(` while the direct form is
+///   `run_inherited_status(`, and neither is a substring of the
+///   other (position 4 of the wrapper is `b`, not `i`), so summing
+///   `code_line_hits` counts across both patterns never
+///   double-counts a single call site. Both needles carry the
+///   trailing `(` so neither matches its `_sync(`-suffixed sync
+///   sibling — the async and sync frontiers count independently.
 ///
 /// # Why one canonical helper
 ///
@@ -1741,9 +1757,17 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status_sync
 /// `pangea.rs` c5ff1c4, `product_release.rs` bf6d836) — past the
 /// three-times-is-a-law threshold in its own right, and part of a
 /// wider thirteen-shield family (10 sync + 3 async) with the sync
-/// sibling above. A future refinement (structured diagnostic hook,
-/// broadened inline needle, tighter cutoff) lands in one body per
-/// frontier rather than at every site.
+/// sibling above. Widening the count to sum both delegation forms
+/// closes the async/sync algebra gap: pre-widening a
+/// `run_inherited_status`→`run_bin_args_inherited_status` migration
+/// at ANY of the three async consumers would have driven the count
+/// to zero and fired the "delegation call(s)" arm even though the
+/// wrapper delegates to the same
+/// [`crate::retry::classify_inherited_status`] body — the same
+/// composition trap the sync sibling closed by summing both forms.
+/// A future refinement (structured diagnostic hook, broadened inline
+/// needle, tighter cutoff) lands in one body per frontier rather
+/// than at every site.
 pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
     source: &str,
     module_path: &str,
@@ -1757,17 +1781,22 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
         inline.is_empty(),
         "{module_path} must not spawn via an inline `.status().await` \
          terminator — every async status-only spawn must route through \
-         `crate::retry::run_inherited_status`, which carries the exit \
-         code into the failure envelope. Found: {inline:?}"
+         `crate::retry::run_inherited_status` (direct primitive) or \
+         `crate::retry::run_bin_args_inherited_status` (the \
+         `(bin, args)`-front wrapper), which carry the exit code into \
+         the failure envelope. Found: {inline:?}"
     );
 
-    let delegations = code_line_hits(body, "run_inherited_status(").len();
+    let direct = code_line_hits(body, "run_inherited_status(").len();
+    let wrapped = code_line_hits(body, "run_bin_args_inherited_status(").len();
+    let delegations = direct + wrapped;
     assert!(
         delegations >= min_delegations,
         "{module_path} must route {spawns_description} through \
-         `run_inherited_status` — found only {delegations} \
-         delegation call(s); a dropped call would leave the negative \
-         `.status().await` scan satisfied by absence"
+         `run_inherited_status` or `run_bin_args_inherited_status` — \
+         found only {delegations} delegation call(s) (direct: \
+         {direct}, wrapped: {wrapped}); a dropped call would leave \
+         the negative `.status().await` scan satisfied by absence"
     );
 }
 
@@ -4127,6 +4156,66 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "fake/module.rs",
             0,
             "no spawns claimed",
+        );
+    }
+
+    /// Wrapper-form pin for the async shield: a module whose async
+    /// status-only spawns all route through the
+    /// `run_bin_args_inherited_status(&bin, &[...], op)` wrapper (never
+    /// through the direct `run_inherited_status(cmd, op)` primitive)
+    /// still passes without the caller lowering `min_delegations`.
+    /// Pre-widening the async shield counted only the direct-primitive
+    /// needle; a full-module lift to the wrapper would have driven the
+    /// count to zero and fired the "delegation call(s)" arm even
+    /// though the wrapper delegates to the same
+    /// [`crate::retry::classify_inherited_status`] body. Mirrors the
+    /// sync sibling's
+    /// `test_assert_source_routes_status_only_spawns_through_run_inherited_status_sync_counts_wrapper_form`
+    /// pin at the async frontier so the composition trap is closed on
+    /// both halves of the spawn matrix. The two needles are disjoint
+    /// (neither is a substring of the other), so a single call site is
+    /// counted at most once across the sum.
+    #[test]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_counts_wrapper_form(
+    ) {
+        let source = "\
+            async fn a() { crate::retry::run_bin_args_inherited_status(\
+             &tool_bin(), &[\"probe\"], \"a\").await.unwrap(); }\n\
+            async fn b() { crate::retry::run_bin_args_inherited_status(\
+             &tool_bin(), &[\"probe\"], \"b\").await.unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status(
+            source,
+            "fake/module.rs",
+            2,
+            "both wrapper-form async spawns",
+        );
+    }
+
+    /// Mixed-form pin for the async shield: a module carrying a mix of
+    /// direct-primitive and wrapper-form async delegations sums both
+    /// toward `min_delegations`. Mirrors the sync sibling's
+    /// `test_assert_source_routes_status_only_spawns_through_run_inherited_status_sync_counts_mixed_forms`
+    /// pin at the async frontier, covering the common migration state
+    /// where a single wave lifts SOME of a module's async status-only
+    /// spawns onto the wrapper while others stay on the direct primitive
+    /// (e.g. because they need `.current_dir(...)` or `.env(...)`), and
+    /// the shield must still hold at the pre-migration floor.
+    #[test]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_counts_mixed_forms(
+    ) {
+        let source = "\
+            async fn a() { let mut c = tokio::process::Command::new(\"x\"); \
+             c.current_dir(\"/tmp\"); \
+             crate::retry::run_inherited_status(c, \"a\").await.unwrap(); }\n\
+            async fn b() { crate::retry::run_bin_args_inherited_status(\
+             &tool_bin(), &[\"probe\"], \"b\").await.unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status(
+            source,
+            "fake/module.rs",
+            2,
+            "one direct + one wrapper async delegation",
         );
     }
 

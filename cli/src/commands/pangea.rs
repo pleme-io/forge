@@ -519,16 +519,28 @@ pub async fn regenerate_compiler() -> Result<()> {
     info!("Using bundix: {}", bundix);
 
     in_directory(&pangea_dir, || async {
-        // Update Gemfile.lock
+        // Update Gemfile.lock. Rides `crate::retry::run_bin_args_inherited_status`
+        // — the async `(bin, args)`-front wrapper (c7cb181) over the direct
+        // `run_inherited_status` primitive — so the fixed-argv `bundle lock
+        // --update` shape lives at ONE `(bin, args, op)` call and the
+        // canonical `Stdio::inherit()` + `classify_inherited_status`
+        // envelope is preserved by construction.
         info!("Updating Gemfile.lock...");
-        let mut bundler_cmd = tokio::process::Command::new(&bundler);
-        bundler_cmd.args(["lock", "--update"]);
-        crate::retry::run_inherited_status(bundler_cmd, "bundle lock --update").await?;
+        crate::retry::run_bin_args_inherited_status(
+            &bundler,
+            &["lock", "--update"],
+            "bundle lock --update",
+        )
+        .await?;
 
-        // Regenerate gemset.nix
+        // Regenerate gemset.nix. Same `(bin, args)`-front wrapper as the
+        // sibling `bundle lock --update` above; the empty `&[]` argv slice
+        // carries the zero-arg `bundix` invocation faithfully because the
+        // wrapper forwards its slice verbatim to the underlying
+        // `std::process::Command::args` (retry.rs::run_bin_args_inherited_status
+        // pins this at `test_run_bin_args_inherited_status_success_returns_ok`).
         info!("Regenerating gemset.nix...");
-        let bundix_cmd = tokio::process::Command::new(&bundix);
-        crate::retry::run_inherited_status(bundix_cmd, "bundix").await?;
+        crate::retry::run_bin_args_inherited_status(&bundix, &[], "bundix").await?;
 
         Ok(())
     })
@@ -852,8 +864,10 @@ mod tests {
 mod status_spawn_routing_tests {
     /// Whole-module shield: every async status-only spawn in
     /// `commands/pangea.rs` routes through
-    /// [`crate::retry::run_inherited_status`], never a hand-rolled
-    /// inline builder terminated by `.status().await` +
+    /// [`crate::retry::run_inherited_status`] (the direct primitive)
+    /// OR [`crate::retry::run_bin_args_inherited_status`] (the
+    /// `(bin, args)`-front wrapper introduced by c7cb181), never a
+    /// hand-rolled inline builder terminated by `.status().await` +
     /// `if !status.success() { bail!(…) }` that drops the exit code
     /// from the operator log line.
     ///
@@ -865,15 +879,23 @@ mod status_spawn_routing_tests {
     /// anyhow::bail!(FAIL_MSG) }` stanza with a per-site ad-hoc
     /// `FAIL_MSG` (`"bundle lock --update failed"`, `"bundix
     /// failed"`) that named the phase but dropped the exit code the
-    /// child process actually returned. Post-lift each site is a
-    /// two-line `let cmd = tokio::process::Command::new(...); …;
-    /// crate::retry::run_inherited_status(cmd, "...").await?;`
-    /// pair and the canonical `"{op} failed (exit {code})"`
-    /// envelope emerges by construction at the primitive's ONE body
-    /// — the shape every other lifted status-only spawn in forge
-    /// now emits (sibling shields at `commands/{build, image_release,
-    /// product_release, rust_service, tool, crossplane, pangea_infra,
-    /// gem, infra, test_ci, local, e2e}.rs`, 72a7adf through b5d9573).
+    /// child process actually returned. First lift (c5ff1c4) collapsed
+    /// each site onto a two-line
+    /// `let cmd = tokio::process::Command::new(...); …;
+    /// crate::retry::run_inherited_status(cmd, "...").await?;` pair;
+    /// second lift consolidates the fixed-argv shape onto a
+    /// single-call
+    /// `crate::retry::run_bin_args_inherited_status(&bin, &[...], op).await?`
+    /// through the wrapper the sibling async-frontier consumers
+    /// (`developer_tools.rs`, `nix.rs`) already ride. Either form
+    /// routes through the same
+    /// [`crate::retry::classify_inherited_status`] body, so the
+    /// canonical `"{op} failed (exit {code})"` envelope emerges by
+    /// construction — the shape every other lifted status-only spawn
+    /// in forge now emits (sibling shields at
+    /// `commands/{build, image_release, product_release, rust_service,
+    /// tool, crossplane, pangea_infra, gem, infra, test_ci, local,
+    /// e2e}.rs`, 72a7adf through b5d9573).
     ///
     /// The exit-code carry is the load-bearing part: pre-lift, a
     /// non-zero `bundle lock --update` at `regenerate_compiler`
@@ -889,10 +911,13 @@ mod status_spawn_routing_tests {
     /// Negative side: no `.status().await` builder terminator may
     /// reappear at any code line in the module body — a re-inlined
     /// spawn would bypass the primitive and re-drop the exit code.
-    /// Positive side: `run_inherited_status(` must appear at ≥2 code
-    /// lines (one per lifted site), so a regression that dropped a
-    /// delegation call cannot leave the negative scan trivially
-    /// satisfied by absence. Both hits route through
+    /// Positive side: the SUM of `run_inherited_status(` and
+    /// `run_bin_args_inherited_status(` code-line hits must be ≥2
+    /// (one per lifted site) — a regression that dropped a delegation
+    /// call in EITHER form cannot leave the negative scan trivially
+    /// satisfied by absence. The two needles are disjoint substrings
+    /// (position 4 of the wrapper is `b`, not `i`), so a single call
+    /// site counts at most once across the sum. All hits route through
     /// [`crate::test_support::code_line_hits`] for anti-docstring-
     /// self-match discipline (the `.status().await` string in this
     /// shield's own docstring is excluded because
