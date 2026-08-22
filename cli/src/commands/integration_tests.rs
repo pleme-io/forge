@@ -683,21 +683,27 @@ async fn prepare_environment(config: &IntegrationTestConfig) -> Result<HashMap<S
 
 /// Fetch secret from Kubernetes
 async fn fetch_secret(secret_name: &str, key: &str) -> Result<String> {
-    let output = kubectl_command_async()
-        .args(&[
-            "get",
-            "secret",
-            secret_name,
-            "-o",
-            &format!("jsonpath={{.data.{}}}", key),
-        ])
-        .output()
+    // Owns the async captured-output spawn + classify ritual at the
+    // canonical `crate::retry::run_capture_anyhow` primitive so the
+    // operator log line carries the exit code by construction — the
+    // pre-lift bail spelled `"Failed to fetch secret {name}/{key}"`
+    // and dropped BOTH the exit code AND the stderr; post-lift each
+    // surfaces at the canonical `"kubectl get secret failed (exit
+    // {code}): {stderr}"` envelope at `retry::classify_capture_anyhow`'s
+    // ONE body, with the outer `.with_context(...)` retaining the
+    // secret_name/key hint on the anyhow chain (strictly additive per
+    // the sibling `workspace_deps` migration).
+    let mut cmd = kubectl_command_async();
+    cmd.args(&[
+        "get",
+        "secret",
+        secret_name,
+        "-o",
+        &format!("jsonpath={{.data.{}}}", key),
+    ]);
+    let output = crate::retry::run_capture_anyhow(cmd, "kubectl get secret")
         .await
-        .context("Failed to fetch secret from Kubernetes")?;
-
-    if !output.status.success() {
-        anyhow::bail!("Failed to fetch secret {}/{}", secret_name, key);
-    }
+        .with_context(|| format!("fetch secret {}/{}", secret_name, key))?;
 
     let base64_value = String::from_utf8(output.stdout)?;
 
@@ -2488,6 +2494,65 @@ mod sh_bin_routing_tests {
             "commands/integration_tests.rs",
             "SH_BIN",
             "sh",
+        );
+    }
+
+    /// Captured-output routing shield scoped to `fetch_secret`'s fn
+    /// body: the sole
+    /// `if !output.status.success() { bail!("Failed to fetch secret
+    /// {name}/{key}") }` stanza — the module's ONE captured-output
+    /// bail-on-non-zero-exit site — MUST route through
+    /// [`crate::retry::run_capture_anyhow`]. Pre-lift the operator log
+    /// line read `"Failed to fetch secret <name>/<key>"` and dropped
+    /// BOTH the exit code AND the stderr: an operator triaging an
+    /// integration-test suite that couldn't decrypt its environment
+    /// had no signal whether kubectl exited 1 (RBAC denial —
+    /// service account can't read the secret in the target namespace),
+    /// 127 (`KUBECTL_BIN` route broken on the runner), or was killed
+    /// by a signal. Post-lift the canonical `"kubectl get secret
+    /// failed (exit {code}): {stderr}"` envelope is emitted by
+    /// construction at `retry.rs::classify_capture_anyhow`'s ONE body,
+    /// and the outer `.with_context(|| format!("fetch secret
+    /// {name}/{key}"))` retains the secret_name/key hint on the
+    /// anyhow chain — pre-lift context (secret_name/key) PLUS the
+    /// exit code the canonical envelope now carries, strictly
+    /// additive per the sibling `commands/workspace_deps.rs`
+    /// migration (2d51b53).
+    ///
+    /// Scoped to `fetch_secret`'s fn body via
+    /// [`crate::test_support::fn_body_slice_between_markers`] rather
+    /// than a whole-module scan because
+    /// `commands/integration_tests.rs::execute_suite` at
+    /// `wait_with_output`'s continuation legitimately consumes
+    /// `output.status.success()` as a tuple element (not as a bail
+    /// condition, so the negative needle `if !output.status.success`
+    /// correctly doesn't false-match — but scoping to
+    /// `fetch_secret`'s fn body makes the shield's intent unambiguous
+    /// to a future reader).
+    ///
+    /// Sibling of the `commands/sync.rs::generate_entities` shield
+    /// (b82200d), the `commands/flux.rs::get_pod_status_full` shield
+    /// (this commit), and the
+    /// `commands/image_release.rs::verify_image_arch` shield (this
+    /// commit). Same three-primitive discipline: negative side
+    /// forbids the inline `if !output.status.success` bail
+    /// terminator at any code line in the fn body; positive side
+    /// pins that `run_capture_anyhow(` appears at ≥1 code line — a
+    /// regression that dropped the delegation cannot leave the
+    /// negative scan trivially satisfied by absence.
+    #[test]
+    fn test_fetch_secret_bail_routes_through_run_capture_anyhow() {
+        const SOURCE: &str = include_str!("integration_tests.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/integration_tests.rs",
+            "async fn fetch_secret(",
+            "\nasync fn execute_sequential(",
+        );
+        crate::test_support::assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/integration_tests.rs::fetch_secret",
+            1,
         );
     }
 }
