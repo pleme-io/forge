@@ -450,12 +450,19 @@ pub async fn execute(
                     .context("Failed to start docker-compose")?;
 
                 if !up_result.success() {
-                    // Cleanup on failure
-                    let _ = Command::new(&docker_compose)
-                        .current_dir(&working_dir)
-                        .args(&["-f", compose_path, "down", "-v"])
-                        .status()
-                        .await;
+                    // Cleanup on failure — best-effort async
+                    // `docker-compose down -v` whose exit envelope is
+                    // deliberately discarded (a cleanup failure must
+                    // not mask the "failed to start docker-compose"
+                    // bail below) and whose stdio inherits both
+                    // streams so the operator sees which containers
+                    // compose actually tore down.
+                    crate::retry::run_status_discard_in_async(
+                        &docker_compose,
+                        &working_dir,
+                        &["-f", compose_path, "down", "-v"],
+                    )
+                    .await;
                     anyhow::bail!("Failed to start docker-compose");
                 }
 
@@ -477,18 +484,27 @@ pub async fn execute(
                     }
 
                     if health_start.elapsed() >= SERVICES_HEALTHY_TIMEOUT {
-                        // Show logs and cleanup
-                        let _ = Command::new(&docker_compose)
-                            .current_dir(&working_dir)
-                            .args(&["-f", compose_path, "logs"])
-                            .status()
-                            .await;
+                        // Show logs and cleanup — both best-effort
+                        // async spawns whose exit envelope is
+                        // discarded (the enclosing bail! is the
+                        // authoritative failure) and whose stdio
+                        // inherits both streams so the operator sees
+                        // the compose logs that name why services
+                        // never went healthy AND which containers
+                        // compose actually tore down.
+                        crate::retry::run_status_discard_in_async(
+                            &docker_compose,
+                            &working_dir,
+                            &["-f", compose_path, "logs"],
+                        )
+                        .await;
 
-                        let _ = Command::new(&docker_compose)
-                            .current_dir(&working_dir)
-                            .args(&["-f", compose_path, "down", "-v"])
-                            .status()
-                            .await;
+                        crate::retry::run_status_discard_in_async(
+                            &docker_compose,
+                            &working_dir,
+                            &["-f", compose_path, "down", "-v"],
+                        )
+                        .await;
 
                         anyhow::bail!("Timeout waiting for services to become healthy");
                     }
@@ -603,11 +619,19 @@ pub async fn execute(
                     info!("📋 Dumping service logs for debugging...");
                     println!();
 
-                    let _ = Command::new(&docker_compose)
-                        .current_dir(&working_dir)
-                        .args(&["-f", compose_path, "logs", "--tail=100"])
-                        .status()
-                        .await;
+                    // Best-effort async `docker-compose logs
+                    // --tail=100` diagnostic — exit envelope discarded
+                    // (the caller renders logs FOR debugging, so a
+                    // logs-spawn failure must not mask the underlying
+                    // integration-test failure) and stdio inherits
+                    // both streams so the last-100-lines-per-service
+                    // dump reaches the operator's terminal directly.
+                    crate::retry::run_status_discard_in_async(
+                        &docker_compose,
+                        &working_dir,
+                        &["-f", compose_path, "logs", "--tail=100"],
+                    )
+                    .await;
 
                     println!();
                 }
@@ -1379,6 +1403,94 @@ mod tests {
              `docker tag` spawn through \
              `crate::retry::run_inherited_status` — the delegation \
              string was not found in the docker-tag block."
+        );
+    }
+
+    /// Whole-module delegation-count shield: the four best-effort
+    /// async `docker-compose` cleanup / diagnostic spawns in
+    /// `execute` — services-up-failure `down -v` cleanup, services-
+    /// healthy-timeout `logs`, services-healthy-timeout `down -v`
+    /// cleanup, and integration-test-failure `logs --tail=100`
+    /// diagnostic — must each dispatch through the shared
+    /// `crate::retry::run_status_discard_in_async` primitive rather
+    /// than re-inline the pre-lift six-line stanza
+    ///
+    /// ```text
+    /// let _ = Command::new(&docker_compose)
+    ///     .current_dir(&working_dir)
+    ///     .args(&[…])
+    ///     .status()
+    ///     .await;
+    /// ```
+    ///
+    /// Pre-lift the four sites carried this stanza verbatim modulo
+    /// the per-site argv slice — four identically-shaped bodies past
+    /// THEORY §VI.1's three-is-a-law threshold (PRIME DIRECTIVE:
+    /// duplication budget is zero). The lift onto
+    /// [`crate::retry::run_status_discard_in_async`] preserves the
+    /// exact pre-lift semantics — spawn `Err` is swallowed, spawn
+    /// `Ok` discards the entire `io::Result<ExitStatus>` regardless
+    /// of `output.status`, and the child's stdout and stderr remain
+    /// inherited-into-parent by construction (via `.status()`, not
+    /// `.output()`) so the compose-log output an operator watching
+    /// `forge comprehensive-release` needs to triage a failure
+    /// stays visible on the terminal.
+    ///
+    /// # Why a delegation-count floor (not just a negative scan)
+    ///
+    /// A negative-only shield that forbids the pre-lift stanza is
+    /// trivially satisfied by absence — a regression that
+    /// accidentally deleted one of the four cleanup / diagnostic
+    /// sweeps (say, dropped the timeout `logs` block during a
+    /// cleanup-tier prose rewrite) would still pass the negative
+    /// scan. Pinning the delegation count to `>= 4` means every
+    /// one of the four cleanup / diagnostic surfaces MUST still
+    /// route through the primitive; a deletion drops the count and
+    /// fails the shield. Same discipline the sibling
+    /// `test_e2e_cleanup_sweeps_route_through_run_discard_sync`
+    /// (72a49d4) shield and the fleet-wide status-only-spawn
+    /// shields (a21bd67 / 5faeecb / c2922fd / 08fdb86 / a31ef65 /
+    /// c7cb181 / 1ffda81) honor.
+    ///
+    /// # Reconstruction discipline
+    ///
+    /// The delegation needle `run_status_discard_in_async(` is
+    /// reconstructed via [`format!`] at test time so this shield's
+    /// own source text does not self-match the substring count —
+    /// the per-line filter would otherwise inflate the count by one
+    /// for the needle-literal line. The four delegation sites each
+    /// spell `crate::retry::run_status_discard_in_async(` verbatim;
+    /// the shorter `run_status_discard_in_async(` needle matches
+    /// all four (a suffix of the fully-qualified form) without also
+    /// matching the shield's own body (which only spells the two
+    /// halves as separate literals joined at `format!` time).
+    #[test]
+    fn test_comprehensive_release_docker_compose_cleanup_routes_through_run_status_discard_in_async(
+    ) {
+        const SOURCE: &str = include_str!("comprehensive_release.rs");
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/comprehensive_release.rs",
+        );
+        let needle = format!("run_status_discard_{}(", "in_async");
+        let hits = crate::test_support::code_line_hits(body, &needle);
+        assert!(
+            hits.len() >= 4,
+            "commands/comprehensive_release.rs must delegate its \
+             four best-effort async `docker-compose` cleanup / \
+             diagnostic spawns (services-up-failure `down -v` \
+             cleanup, services-healthy-timeout `logs`, services-\
+             healthy-timeout `down -v` cleanup, integration-test-\
+             failure `logs --tail=100` diagnostic) through the \
+             shared `crate::retry::run_status_discard_in_async` \
+             primitive — found {} delegation(s) in the top-of-file \
+             body, expected at least 4. A regression that \
+             reintroduces the pre-lift `let _ = Command::new( \
+             &docker_compose).current_dir(&working_dir).args([...]) \
+             .status().await;` stanza re-establishes the four-copy \
+             duplication this commit closes. Offending hits: \
+             {hits:?}",
+            hits.len(),
         );
     }
 }
