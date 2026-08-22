@@ -222,7 +222,7 @@ pub(crate) async fn find_first_image_id_by_name_async_with_bin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::make_executable_shim;
+    use crate::test_support::{make_executable_shim, ArgvLog};
 
     // ---------------------------------------------------------------
     // sync primitive — find_first_image_id_by_name
@@ -355,22 +355,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_find_first_image_id_by_name_with_bin_passes_canonical_docker_args() {
-        let log_dir = tempfile::tempdir().expect("log tempdir");
-        let log_path = log_dir.path().join("argv.log");
-        let log_str = log_path.display().to_string();
-
-        let body = format!(
-            "#!/bin/sh\n\
-             for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{}'; done\n\
-             printf '%s' 'sha256:ok'\n",
-            log_str
-        );
-        let (_dir, shim) = make_executable_shim("docker", &body);
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("docker", &argv_log.shim_body("sha256:ok"));
 
         let got = find_first_image_id_by_name_with_bin(&shim, "my-image");
         assert_eq!(got, Some("sha256:ok".to_string()));
 
-        let logged = std::fs::read_to_string(&log_path).expect("read argv log");
+        let logged = argv_log.read_argv_log();
         let lines: Vec<&str> = logged.lines().collect();
         assert_eq!(
             lines,
