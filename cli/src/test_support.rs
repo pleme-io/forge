@@ -2226,6 +2226,71 @@ pub fn fn_body_slice_between_markers<'a>(
     &after[..end_rel]
 }
 
+/// Build a synthetic [`std::process::Output`] whose `ExitStatus` reports
+/// success or a plain exit-code-1 failure, with caller-supplied stdout
+/// and stderr byte buffers. The canonical fake-Output builder for shield
+/// tests that drive an `&Output`-consuming primitive
+/// ([`crate::commands::helm::ensure_helm_success`],
+/// `commands/status.rs::kubectl_get_items` / `kubectl_get_item`, and
+/// downstream siblings) without paying the fork-a-subprocess cost the
+/// alternative synth-via-`true`/`false` shape (see
+/// `crate::retry::tests::synth_output`, `crate::error::tests::
+/// synth_output_for_git`) pays at every call.
+///
+/// # Why one canonical helper
+///
+/// Two byte-identical `fn make_output(success: bool, stdout: &[u8],
+/// stderr: &[u8]) -> std::process::Output` bodies lived at
+/// `commands/status.rs::tests` and `commands/helm.rs::capture_tests`
+/// verbatim — the `status.rs` copy's own comment described itself as
+/// "mirroring the sibling `commands/helm.rs::capture_tests::make_output`
+/// builder". PRIME DIRECTIVE: duplication budget is zero (THEORY §VI.1).
+/// This helper is the law-redeeming consolidation for the
+/// `ExitStatusExt::from_raw` fake-Output builder shape. Both consumer
+/// sites now delegate to this ONE body, so a future reshape (adding a
+/// captured signal detail, tracking the fork-elapsed instant, widening
+/// to a cross-platform builder) lands at one place.
+///
+/// # Exit-status encoding
+///
+/// The `success` bool maps to a Unix `wait(2)` status word:
+///
+/// - `true`  → `0x0000` (`W_EXITCODE(0, 0)`): exit code 0, no signal.
+///   [`std::process::ExitStatus::code`] returns `Some(0)` and
+///   [`std::process::ExitStatus::success`] returns `true`.
+/// - `false` → `0x0100` (`W_EXITCODE(1, 0)` = `1 << 8`): exit code 1, no
+///   signal. [`std::process::ExitStatus::code`] returns `Some(1)` and
+///   `success()` returns `false`.
+///
+/// The low byte of the wait-status word encodes the signal (0 = normal
+/// exit); the high byte encodes the exit code. `1 << 8` therefore means
+/// "exited cleanly with exit code 1" — the shape a `bail!`-terminated
+/// consumer primitive discriminates against `Some(0)`. This helper does
+/// NOT cover the signal-killed shape
+/// ([`std::process::ExitStatus::code`] returns `None`); the sole
+/// signal-killed test in the crate (`retry::tests::
+/// test_classify_capture_anyhow_signal_killed_surfaces_signal_detail`)
+/// builds a `SIGKILL` status inline via `ExitStatus::from_raw(9)` and
+/// stays in place for now.
+///
+/// # Unix-only
+///
+/// Uses [`std::os::unix::process::ExitStatusExt::from_raw`] which is
+/// gated to `cfg(unix)`. The forge test runner targets Linux and macOS
+/// exclusively (Nix flake's `systems = ["x86_64-linux", "aarch64-linux",
+/// "aarch64-darwin"]`), so the `#[cfg(unix)]` implicit gate here is a
+/// no-op on every host the test runner reaches. A future Windows target
+/// would need a `#[cfg(windows)]` sibling using `ExitStatusExt` from
+/// `std::os::windows::process`.
+pub fn synthetic_output(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::Output {
+        status: std::process::ExitStatus::from_raw(if success { 0 } else { 1 << 8 }),
+        stdout: stdout.to_vec(),
+        stderr: stderr.to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4539,5 +4604,81 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             Err(_) => std::env::remove_var("SERVICE_DIR"),
         }
         let _ = std::env::set_current_dir(starting_cwd);
+    }
+
+    /// Success arm pins the pre-lift `if success { 0 }` branch: an
+    /// `Output` returned with `success=true` reports exit code 0 AND
+    /// [`std::process::ExitStatus::success`] returns `true`. The two
+    /// deprecated `make_output` sites both relied on the coupled
+    /// invariant — the four helm-success shields
+    /// (`ensure_helm_success_returns_ok_on_success_status_regardless_
+    /// of_output_streams` and its siblings) discriminate on `.success()`
+    /// via `ensure_helm_success`, whereas the four
+    /// `kubectl_get_item[s]` shields discriminate on `!.status.
+    /// success()`. Same status; both consumer surfaces pass through
+    /// verbatim after the lift.
+    #[test]
+    fn test_synthetic_output_success_reports_exit_code_zero_and_success_true() {
+        let out = synthetic_output(true, b"ok bytes", b"stderr note");
+        assert!(
+            out.status.success(),
+            "success=true must yield an ExitStatus::success() true — \
+             the four `ensure_helm_success` positive-arm shields \
+             depend on this coupling"
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "success=true must yield exit code 0, not None or nonzero"
+        );
+        assert_eq!(out.stdout, b"ok bytes");
+        assert_eq!(out.stderr, b"stderr note");
+    }
+
+    /// Failure arm pins the pre-lift `else { 1 << 8 }` branch: an
+    /// `Output` returned with `success=false` reports exit code 1 AND
+    /// [`std::process::ExitStatus::success`] returns `false`, AND
+    /// [`std::process::ExitStatus::code`] returns `Some(1)` (NOT
+    /// `None`). The `Some(1)` shape distinguishes a clean exit-1
+    /// bail from a signal-killed exit whose `.code()` returns `None`
+    /// — a discriminator `retry::classify_capture_anyhow` surfaces as
+    /// `"exit 1"` vs `"killed by signal"` in the operator envelope.
+    /// A regression that dropped the `<< 8` (encoding failure as the
+    /// wait-status word `1` instead of `1 << 8`) would silently flip
+    /// `.code()` to `None`, misrouting the `code`-vs-`signal` arms of
+    /// downstream discriminators.
+    #[test]
+    fn test_synthetic_output_failure_reports_exit_code_one_via_wait_status_high_byte() {
+        let out = synthetic_output(false, b"", b"boom");
+        assert!(
+            !out.status.success(),
+            "success=false must yield ExitStatus::success() false"
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "success=false must yield Some(1), NOT None (which would \
+             signal a signal-kill) — the `<< 8` encoding is load-bearing"
+        );
+        assert_eq!(out.stderr, b"boom");
+        assert!(out.stdout.is_empty());
+    }
+
+    /// Byte-verbatim preservation on both streams. The pre-lift
+    /// `make_output` bodies both called `.to_vec()` on both slices,
+    /// so any non-UTF-8 byte, an interior NUL, or a trailing newline
+    /// survives into the returned `Output`. Shields that drive parse
+    /// primitives (`kubectl_get_items_propagates_parse_error_on_
+    /// invalid_json` handing in `b"this is not json {{["`, or the
+    /// `format_failure_summary` shield handing in binary chart
+    /// output) depend on that: the helper is a byte-pipe, not a
+    /// UTF-8-checking round trip.
+    #[test]
+    fn test_synthetic_output_preserves_stdout_and_stderr_bytes_verbatim() {
+        let raw_stdout: &[u8] = &[0, 1, 2, b'\n', 0xff, 0xfe];
+        let raw_stderr: &[u8] = &[0xc0, 0xff, 0xee, b'\t', 0];
+        let out = synthetic_output(true, raw_stdout, raw_stderr);
+        assert_eq!(out.stdout, raw_stdout);
+        assert_eq!(out.stderr, raw_stderr);
     }
 }

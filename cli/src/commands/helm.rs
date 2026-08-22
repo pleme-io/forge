@@ -359,20 +359,7 @@ fn run_helm_capture(args: &[&str], failure_context: &str) -> Result<()> {
 #[cfg(test)]
 mod capture_tests {
     use super::{ensure_helm_success, format_failure_summary, last_reason_line};
-
-    // Build a synthetic `std::process::Output` with the given exit
-    // status and captured streams. Used by the `ensure_helm_success`
-    // shields; centralized here so the four shields share one builder
-    // and a future reshape of the shape (adding a captured signal,
-    // widening to `ExitStatusExt`) lands at one place.
-    fn make_output(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
-        use std::os::unix::process::ExitStatusExt;
-        std::process::Output {
-            status: std::process::ExitStatus::from_raw(if success { 0 } else { 1 << 8 }),
-            stdout: stdout.to_vec(),
-            stderr: stderr.to_vec(),
-        }
-    }
+    use crate::test_support::synthetic_output;
 
     #[test]
     fn last_reason_line_prefers_final_nonblank_stderr_line() {
@@ -430,16 +417,16 @@ mod capture_tests {
     #[test]
     fn ensure_helm_success_returns_ok_on_success_status_regardless_of_output_streams() {
         // Empty streams.
-        assert!(ensure_helm_success(&make_output(true, b"", b""), "ctx").is_ok());
+        assert!(ensure_helm_success(&synthetic_output(true, b"", b""), "ctx").is_ok());
         // Non-empty stdout only (helm often prints "Manifest generated" on stdout even on success).
         assert!(ensure_helm_success(
-            &make_output(true, b"Manifest generated\n", b""),
+            &synthetic_output(true, b"Manifest generated\n", b""),
             "chart-dir"
         )
         .is_ok());
         // Non-empty stderr only (helm dep update chatter often lands on stderr even on success).
         assert!(ensure_helm_success(
-            &make_output(
+            &synthetic_output(
                 true,
                 b"",
                 b"Getting updates for unmanaged Helm repositories...\n"
@@ -449,7 +436,7 @@ mod capture_tests {
         .is_ok());
         // Both streams non-empty (the typical successful case).
         assert!(ensure_helm_success(
-            &make_output(
+            &synthetic_output(
                 true,
                 b"Successfully packaged chart\n",
                 b"Saving 2 charts\nDeleting outdated charts\n"
@@ -470,7 +457,7 @@ mod capture_tests {
     /// this shield.
     #[test]
     fn ensure_helm_success_bails_with_exact_pre_lift_prose_on_failure() {
-        let out = make_output(
+        let out = synthetic_output(
             false,
             b"",
             b"Error: failed to perform \"Push\" on destination: 403: denied: permission_denied: write_package\n",
@@ -493,19 +480,19 @@ mod capture_tests {
     #[test]
     fn ensure_helm_success_reason_line_composition_matches_last_reason_line_discipline() {
         // stderr-empty → stdout fallback.
-        let stdout_only = make_output(false, b"final stdout diagnostic\n", b"");
+        let stdout_only = synthetic_output(false, b"final stdout diagnostic\n", b"");
         let err =
             ensure_helm_success(&stdout_only, "ctx-a").expect_err("a non-success output must bail");
         assert_eq!(err.to_string(), "ctx-a: final stdout diagnostic");
 
         // both empty → "(no output captured)" sentinel.
-        let both_empty = make_output(false, b"", b"");
+        let both_empty = synthetic_output(false, b"", b"");
         let err =
             ensure_helm_success(&both_empty, "ctx-b").expect_err("a non-success output must bail");
         assert_eq!(err.to_string(), "ctx-b: (no output captured)");
 
         // both non-empty → stderr wins.
-        let both = make_output(false, b"stdout line\n", b"stderr line\n");
+        let both = synthetic_output(false, b"stdout line\n", b"stderr line\n");
         let err = ensure_helm_success(&both, "ctx-c").expect_err("a non-success output must bail");
         assert_eq!(err.to_string(), "ctx-c: stderr line");
     }
@@ -546,6 +533,49 @@ mod capture_tests {
              once in the production slice of helm.rs (inside \
              `ensure_helm_success`). Found {} hit(s): {hits:#?}",
             hits.len(),
+        );
+    }
+
+    /// Consolidation shield: the eight `ensure_helm_success` shields
+    /// in this test module MUST route fake-`Output` construction
+    /// through the shared [`crate::test_support::synthetic_output`]
+    /// helper, NOT a locally-redefined builder. Pre-consolidation
+    /// this module carried a byte-identical `ExitStatusExt::from_raw`
+    /// builder verbatim alongside the sibling `commands/status.rs::
+    /// tests` copy — two occurrences past the two-times rule (PRIME
+    /// DIRECTIVE: duplication budget is zero, THEORY §VI.1). Both
+    /// consumer sites now delegate to the ONE `test_support`
+    /// primitive, so a future reshape (adding a captured signal
+    /// detail, widening to a cross-platform builder, tracking the
+    /// fork-elapsed instant) lands at one body.
+    ///
+    /// Positive floor: the shared-helper import string appears at
+    /// least once in the module. Negative floor: the deprecated
+    /// local-def signature does NOT reappear. Both needles are
+    /// assembled via [`format!`] at test time so this shield's own
+    /// source text (which mentions the concepts in prose) does not
+    /// self-match the substring check.
+    #[test]
+    fn capture_tests_use_shared_synthetic_output_from_test_support_not_local_redef() {
+        const SOURCE: &str = include_str!("helm.rs");
+        let import_needle = format!("use crate::test_support::{};", "synthetic_output");
+        assert!(
+            SOURCE.contains(&import_needle),
+            "commands/helm.rs::capture_tests must import the shared \
+             fake-`Output` helper via `test_support` — the local \
+             builder was consolidated into the shared primitive."
+        );
+        let deprecated_signature = format!(
+            "fn make_{}(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output",
+            "output"
+        );
+        assert!(
+            !SOURCE.contains(&deprecated_signature),
+            "commands/helm.rs must NOT redefine the deprecated local \
+             fake-`Output` builder — route all fake-`Output` \
+             construction through `crate::test_support::\
+             synthetic_output` so a future reshape of the shape \
+             lands at ONE body."
         );
     }
 }
