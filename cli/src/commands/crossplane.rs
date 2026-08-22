@@ -11,8 +11,8 @@
 //! built by Nix (`dockerTools`) and handed in as a `docker save` tarball; this
 //! command only embeds + pushes it via the `crossplane` CLI.
 
-use anyhow::{bail, Result};
-use std::path::Path;
+use anyhow::{bail, Context, Result};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::info;
 
@@ -37,6 +37,58 @@ fn crossplane_bin() -> String {
     get_tool_path("CROSSPLANE_BIN", "crossplane")
 }
 
+/// Reserve a hermetic on-disk destination for an `xpkg` build. Returns
+/// a `(TempDir, PathBuf)` pair whose `TempDir` half is a RAII guard —
+/// its `Drop` unlinks the created directory AND every file underneath,
+/// panic-safe by construction. The path half is the destination
+/// `crossplane xpkg build --package-file <out>` will write to; it does
+/// NOT yet exist (crossplane creates it on build), so a build the CLI
+/// refuses to overwrite still succeeds. The returned `TempDir` MUST be
+/// bound to a local `_dir` (or longer-lived) variable for the duration
+/// of the caller: an unbound `let (_, out) = xpkg_output_file()?;`
+/// drops the guard immediately, unlinks the scratch dir, and any later
+/// `--package-file <out>` write reproducibly fails with a parent-dir
+/// `ENOENT` — a fast, loud signal instead of a flake. Sibling shape
+/// discipline to `test_support::make_executable_shim`, which returns
+/// `(TempDir, String)` for the same "the returned owner is what keeps
+/// the on-disk state alive" reason.
+///
+/// # Why the RAII-scratch shape is load-bearing
+///
+/// Two defects lived at the pre-lift `std::env::temp_dir().join(
+/// ".xpkg-<slot>.xpkg")` shape that both `function_release` and
+/// `configuration_release` carried verbatim:
+///
+/// 1. **Concurrent-invocation race on a fixed name.** Two `forge
+///    crossplane function-release` invocations (say, the parallel
+///    matrix jobs a `crossplane-function-auto-release.yml` reusable
+///    workflow spawns for a monorepo of Functions) both computed
+///    `/tmp/.xpkg-out.xpkg` and raced the build → push handoff: the
+///    second builder's `xpkg build` overwrote the first builder's
+///    output between the first builder's `build` completing and its
+///    `push` reading the file, so the second builder's bytes got
+///    pushed to the first builder's OCI ref. `tempfile::Builder::new()
+///    .prefix("xpkg-").tempdir()` calls `mkdtemp(3)` under the hood,
+///    which appends an OS-unique suffix to the prefix — two concurrent
+///    calls return strictly-distinct directories, closing the race at
+///    the syscall.
+/// 2. **The tempfile leaks on any panic OR success.** The pre-lift
+///    shape carried no `remove_file` — success left the xpkg on disk,
+///    and a `bail!` between build and push left a stale package the
+///    next operator would see as "why is there a `.xpkg-out.xpkg` on
+///    my `/tmp`?". `TempDir::Drop` runs unconditionally — through
+///    panics, through early returns, through the operator hitting
+///    Ctrl-C between build and push — so the on-disk state is bound
+///    to the caller's stack frame and released with it.
+fn xpkg_output_file() -> Result<(tempfile::TempDir, PathBuf)> {
+    let dir = tempfile::Builder::new()
+        .prefix("xpkg-")
+        .tempdir()
+        .context("create xpkg output scratch tempdir")?;
+    let path = dir.path().join("package.xpkg");
+    Ok((dir, path))
+}
+
 /// Build a Crossplane Function package (xpkg) from a Nix-built runtime image and
 /// a `package/` root, then push it to `package_ref:tag`.
 ///
@@ -58,9 +110,11 @@ pub fn function_release(
         bail!("runtime image tarball not found: {}", runtime_image);
     }
 
-    // Typed path surface (★★ TYPED EMISSION — PathBuf::join, not format!() +
-    // trim_end_matches, which mishandles separators).
-    let out = std::env::temp_dir().join(".xpkg-out.xpkg");
+    // Typed RAII scratch surface — `_out_dir` is the guard whose `Drop`
+    // unlinks the whole tempdir + the xpkg inside it, panic-safe across
+    // the build → push handoff and closing the concurrent-invocation
+    // race the pre-lift fixed-name `.xpkg-out.xpkg` shape carried.
+    let (_out_dir, out) = xpkg_output_file()?;
     // Scope --examples-root to the package dir. crossplane defaults it to
     // ./examples (cwd-relative), which scans the REPO's examples/ — those are
     // often non-Crossplane YAML (e.g. a drill spec) and fail to parse as package
@@ -113,7 +167,7 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
     if !Path::new(package_root).join("crossplane.yaml").exists() {
         bail!("no crossplane.yaml under package-root {}", package_root);
     }
-    let out = std::env::temp_dir().join(".xpkg-config.xpkg");
+    let (_out_dir, out) = xpkg_output_file()?;
     let examples = Path::new(package_root).join("examples");
     info!(
         "crossplane xpkg build (configuration): {} → {}",
@@ -308,6 +362,145 @@ mod tests {
             6,
             "all six crossplane spawns (`function_release` build+push, \
              `configuration_release` build+push, `render`, `validate`)",
+        );
+    }
+
+    /// Whole-module shield: every xpkg output-path site routes through
+    /// the `xpkg_output_file()` sigil, never a hand-rolled
+    /// `std::env::temp_dir().join("<fixed-name>")` stanza that leaks
+    /// the produced xpkg AND races two concurrent invocations against
+    /// the same on-disk slot. Pre-lift both `function_release` and
+    /// `configuration_release` spelled the fixed-name shape verbatim
+    /// (`.xpkg-out.xpkg` and `.xpkg-config.xpkg`), so:
+    ///
+    /// - Two `forge crossplane function-release` invocations on the
+    ///   same runner (the parallel matrix a
+    ///   `crossplane-function-auto-release.yml` reusable workflow
+    ///   spawns for a monorepo of Functions) both wrote to
+    ///   `/tmp/.xpkg-out.xpkg` and raced the build → push handoff —
+    ///   the second builder's `xpkg build` overwrote the first's
+    ///   output between the first's `build` completing and its `push`
+    ///   reading the file, and the second's bytes rode into the
+    ///   first's OCI ref.
+    /// - Any panic (or a `bail!` inside `run_inherited_status_sync`
+    ///   between build and push) left the xpkg on `/tmp` forever;
+    ///   success left it too. `TempDir::Drop` closes both leaks by
+    ///   construction.
+    ///
+    /// Positive side: the delegation call `xpkg_output_file()?` must
+    /// appear at exactly TWO code lines in the module body (one per
+    /// release fn), so a regression that deleted every call cannot
+    /// leave the negative scan trivially satisfied by absence. The
+    /// sigil definition itself (line reading `fn xpkg_output_file()`)
+    /// carries no `?` and is excluded from the count — this pins the
+    /// solve-once discipline (THEORY §I.5): every consumer routes
+    /// through the sigil, never re-copies the tempdir setup inline.
+    ///
+    /// Negative side: the pre-lift `std::env::temp_dir()` shape must
+    /// not appear at any code line in the module body. The forbidden
+    /// needle is reconstructed at test time via
+    /// `format!("std::env::{}()", "temp_dir")` so this shield's own
+    /// panic-message and docstring prose does not false-match itself
+    /// (same discipline `canonical_two_arg_sigil_needle` holds for
+    /// the routing-needle family). Both halves route through
+    /// `code_line_hits` for anti-docstring-self-match discipline.
+    /// Same scan boundary (first `#[cfg(test)]` marker) the sigil
+    /// shield above uses.
+    #[test]
+    fn test_crossplane_xpkg_output_paths_route_through_xpkg_output_file() {
+        const SOURCE: &str = include_str!("crossplane.rs");
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/crossplane.rs",
+        );
+        // Positive: both release fns delegate to the sigil.
+        let delegation_hits = crate::test_support::code_line_hits(body, "xpkg_output_file()?");
+        assert_eq!(
+            delegation_hits.len(),
+            2,
+            "commands/crossplane.rs must delegate to `xpkg_output_file()?` at \
+             exactly two code lines (function_release + configuration_release); \
+             got {} — hits: {delegation_hits:#?}",
+            delegation_hits.len(),
+        );
+        // Negative: no code-line hit of the pre-lift fixed-name shape.
+        let forbidden = format!("std::env::{}()", "temp_dir");
+        let stale = crate::test_support::code_line_hits(body, &forbidden);
+        assert!(
+            stale.is_empty(),
+            "commands/crossplane.rs must not spell the pre-lift fixed-name \
+             tempfile shape at any code line — every xpkg output path must \
+             route through `xpkg_output_file()` so `TempDir::Drop` closes \
+             the leak AND the `mkdtemp(3)`-appended unique suffix closes \
+             the concurrent-invocation race. Offending: {stale:#?}",
+        );
+    }
+
+    /// Primitive pin: the returned path carries the `.xpkg` extension
+    /// crossplane's `xpkg push --package-files <out>` reads by content
+    /// type. A drift onto a bare `package` basename would still push
+    /// (crossplane sniffs the manifest) but the on-disk artifact would
+    /// no longer be self-describing to an operator sifting through
+    /// `/tmp` after a failed run.
+    #[test]
+    fn test_xpkg_output_file_returns_xpkg_extension_path() {
+        let (_dir, path) = super::xpkg_output_file().expect("xpkg_output_file");
+        assert_eq!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("xpkg"),
+            "xpkg_output_file must return a path with `.xpkg` extension, got \
+             {path:?}",
+        );
+    }
+
+    /// Primitive pin — the concurrent-race half: two calls in the same
+    /// process return strictly-distinct paths, so a matrix workflow's
+    /// parallel invocations cannot alias on the same on-disk slot.
+    /// `mkdtemp(3)`-backed unique-suffix discipline; a drift onto a
+    /// fixed name would fail HERE, not as a mysterious "wrong bytes
+    /// pushed to the wrong OCI ref" downstream.
+    #[test]
+    fn test_xpkg_output_file_returns_distinct_paths_on_each_call() {
+        let (_a_dir, a) = super::xpkg_output_file().expect("a");
+        let (_b_dir, b) = super::xpkg_output_file().expect("b");
+        assert_ne!(
+            a, b,
+            "two calls to xpkg_output_file() must return strictly-distinct \
+             paths — a fixed-name shape would race two concurrent forge \
+             crossplane releases against the same `/tmp` entry",
+        );
+    }
+
+    /// Primitive pin — the leak half: the returned path starts fresh
+    /// (crossplane creates it on `xpkg build`), the guard keeps the
+    /// scratch dir alive across a mid-body `write`, and `Drop` unlinks
+    /// both dir AND file. A drift onto a `NamedTempFile`-only shape
+    /// that pre-created the file would fail on `crossplane xpkg
+    /// build`'s refuse-to-overwrite check; a drift onto a bare
+    /// `tempdir()` without the RAII guard held would flake because
+    /// `Drop` ran between build and push. Both surface here.
+    #[test]
+    fn test_xpkg_output_file_returned_path_is_fresh_and_dir_drop_unlinks_written_bytes() {
+        let path = {
+            let (dir, out) = super::xpkg_output_file().expect("xpkg_output_file");
+            assert!(
+                !out.exists(),
+                "returned path must be fresh — crossplane creates it on \
+                 `xpkg build --package-file <out>`; a pre-created file would \
+                 trip the CLI's refuse-to-overwrite check"
+            );
+            std::fs::write(&out, b"stub xpkg bytes").expect("write stub");
+            assert!(
+                out.exists() && dir.path().is_dir(),
+                "file exists AND dir is alive while the RAII guard is held"
+            );
+            out
+        };
+        assert!(
+            !path.exists(),
+            "`TempDir::Drop` must unlink the scratch dir + its contents — a \
+             mid-body panic between build and push would otherwise leak \
+             `/tmp/xpkg-*/package.xpkg` forever"
         );
     }
 }
