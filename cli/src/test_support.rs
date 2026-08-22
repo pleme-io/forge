@@ -2231,25 +2231,37 @@ pub fn fn_body_slice_between_markers<'a>(
 /// and stderr byte buffers. The canonical fake-Output builder for shield
 /// tests that drive an `&Output`-consuming primitive
 /// ([`crate::commands::helm::ensure_helm_success`],
-/// `commands/status.rs::kubectl_get_items` / `kubectl_get_item`, and
-/// downstream siblings) without paying the fork-a-subprocess cost the
-/// alternative synth-via-`true`/`false` shape (see
-/// `crate::retry::tests::synth_output`, `crate::error::tests::
-/// synth_output_for_git`) pays at every call.
+/// `commands/status.rs::kubectl_get_items` / `kubectl_get_item`, the
+/// `retry::CommandAttemptFailure::from_capture` classifier, the
+/// `error::GitError::from_capture` classifier, and downstream siblings)
+/// without paying the fork-a-subprocess cost the alternative
+/// synth-via-`true`/`false` shape would pay at every call. Every
+/// consumer in the crate now routes fake-`Output` construction through
+/// this ONE body.
 ///
 /// # Why one canonical helper
 ///
-/// Two byte-identical `fn make_output(success: bool, stdout: &[u8],
-/// stderr: &[u8]) -> std::process::Output` bodies lived at
+/// Four byte-identical fork-based fake-`Output` builders lived across
+/// the crate before consolidation: two `fn make_output(success: bool,
+/// stdout: &[u8], stderr: &[u8]) -> std::process::Output` bodies at
 /// `commands/status.rs::tests` and `commands/helm.rs::capture_tests`
-/// verbatim — the `status.rs` copy's own comment described itself as
-/// "mirroring the sibling `commands/helm.rs::capture_tests::make_output`
-/// builder". PRIME DIRECTIVE: duplication budget is zero (THEORY §VI.1).
-/// This helper is the law-redeeming consolidation for the
-/// `ExitStatusExt::from_raw` fake-Output builder shape. Both consumer
-/// sites now delegate to this ONE body, so a future reshape (adding a
-/// captured signal detail, tracking the fork-elapsed instant, widening
-/// to a cross-platform builder) lands at one place.
+/// (the `status.rs` copy's own comment described itself as "mirroring
+/// the sibling `commands/helm.rs::capture_tests::make_output`
+/// builder"), and two fork-based `fn synth_output(...)` /
+/// `fn synth_output_for_git(...)` bodies at `retry::tests` and
+/// `error::tests` (each paying `Command::new("true"/"false").status()
+/// .expect(...)` per fake-`Output` construction — a few hundred
+/// microseconds per call, summed across 80+ call sites in
+/// `retry::tests` alone). PRIME DIRECTIVE: duplication budget is zero
+/// (THEORY §VI.1). This helper is the law-redeeming consolidation for
+/// both the `ExitStatusExt::from_raw` and the fork-based shapes. All
+/// four consumer sites now delegate to this ONE body (the
+/// `retry::tests` and `error::tests` sites via a local `use ... as
+/// synth_output` / `use ... as synth_output_for_git` alias that
+/// preserves their 80+/4 pre-existing call-site spellings verbatim), so
+/// a future reshape (adding a captured signal detail, tracking the
+/// fork-elapsed instant, widening to a cross-platform builder) lands at
+/// one place.
 ///
 /// # Exit-status encoding
 ///
