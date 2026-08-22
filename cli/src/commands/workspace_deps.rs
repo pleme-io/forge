@@ -249,42 +249,42 @@ async fn build_package(pkg: &WorkspacePackage) -> Result<()> {
     let npm = npm_bin();
 
     // First, install dependencies
-    let install_status = Command::new(&npm)
+    let mut install_cmd = Command::new(&npm);
+    install_cmd
         .args(["install", "--silent"])
-        .current_dir(&pkg.path)
-        .status()
-        .await
-        .with_context(|| format!("Failed to run npm install for {}", pkg.name))?;
-
-    if !install_status.success() {
-        anyhow::bail!(
-            "npm install failed for {}\n\n  \
-            To fix manually:\n  \
+        .current_dir(&pkg.path);
+    crate::retry::run_inherited_status(
+        install_cmd,
+        &format!("npm install --silent for {}", pkg.name),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "To fix manually:\n  \
             cd {}\n  \
             npm install && npm run build",
-            pkg.name,
             pkg.path.display()
-        );
-    }
+        )
+    })?;
 
     // Then, build
-    let build_status = Command::new(&npm)
+    let mut build_cmd = Command::new(&npm);
+    build_cmd
         .args(["run", "build", "--silent"])
-        .current_dir(&pkg.path)
-        .status()
-        .await
-        .with_context(|| format!("Failed to run npm run build for {}", pkg.name))?;
-
-    if !build_status.success() {
-        anyhow::bail!(
-            "npm run build failed for {}\n\n  \
-            To fix manually:\n  \
+        .current_dir(&pkg.path);
+    crate::retry::run_inherited_status(
+        build_cmd,
+        &format!("npm run build --silent for {}", pkg.name),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "To fix manually:\n  \
             cd {}\n  \
             npm install && npm run build",
-            pkg.name,
             pkg.path.display()
-        );
-    }
+        )
+    })?;
 
     println!("   {} {} built successfully", "✓".bright_green(), pkg.name);
 
@@ -348,6 +348,97 @@ mod tests {
              `crate::tools::get_tool_path(\"npm\")` — the canonical \
              lookup was not found in the module. A regression here \
              would silently downgrade to the PATH fallback."
+        );
+    }
+
+    /// Whole-module shield: the two async status-only spawn sites in
+    /// `commands/workspace_deps.rs::build_package` — the
+    /// `npm install --silent` and `npm run build --silent` steps that
+    /// materialize each `@pleme/*` workspace package's `dist/` before a
+    /// pleme-linker consumer wires it into `node_modules` — route
+    /// through [`crate::retry::run_inherited_status`], never a
+    /// hand-rolled `.status().await` + `if !status.success() {
+    /// bail!(…) }` stanza that drops the exit code from the operator
+    /// log line.
+    ///
+    /// Pre-lift each site's six-line
+    /// `.status().await.with_context(…)?` + `if !status.success() {
+    /// anyhow::bail!("npm install failed for {}\n\n  To fix
+    /// manually:\n  cd {}\n  npm install && npm run build", …) }`
+    /// stanza dropped the exit code from the terminating log line: an
+    /// operator seeing `"npm install failed for pleme-foo"` in a
+    /// workspace-dependency prebuild against 15 `@pleme/*` packages
+    /// (one per `discover_packages` hit) had no way to tell whether
+    /// `npm` exited 1 (a real build failure), 2 (missing dependency),
+    /// 127 (a bad `NPM_BIN` route), or was killed by a signal (a
+    /// runner OOM eviction). Post-lift each site's operator log line
+    /// reads the canonical `"npm install --silent for pleme-foo
+    /// failed (exit {code})"` envelope every migrated sync- and async-
+    /// frontier sibling module already emits at `retry.rs::
+    /// classify_inherited_status`, with the multi-line
+    /// `"To fix manually: cd {path} && npm install && npm run build"`
+    /// remediation hint carried through as an `anyhow::Context`
+    /// layer on top of the primitive's terminating envelope — the
+    /// operator sees BOTH the exit code (from the primitive) AND the
+    /// remediation hint (from the context layer), rather than the
+    /// pre-lift trade of exit code FOR remediation hint.
+    ///
+    /// Negative side: no `.status().await` builder-terminator may
+    /// reappear at any code line in the module body — a re-inlined
+    /// spawn would bypass the primitive and re-drop the exit code.
+    /// Positive side: `run_inherited_status(` must appear at ≥2 code
+    /// lines (one per lifted site), so a regression that dropped the
+    /// delegation cannot leave the negative scan trivially satisfied
+    /// by absence. Both hits route through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline (the `.status().await` string in this
+    /// shield's own docstring is excluded because `code_line_hits`
+    /// filters `///`-prefixed lines). Scan bounds from file start to
+    /// the first `\n#[cfg(test)]\nmod tests {` marker so the sibling
+    /// `test_npm_spawn_routes_through_npm_bin_not_raw_literal`
+    /// shield's own source (which does not mention `.status().await`
+    /// but shares the module) stays out of scope by construction.
+    ///
+    /// # Idiom lineage
+    ///
+    /// Sibling of the twelve async- and sync-frontier shields already
+    /// migrated on this primitive family (`crossplane` 6cb9442,
+    /// `e2e` 5faeecb / 2fae634, `gem` 9072905, `image_release` b5d9573,
+    /// `infra` 27896e4, `local` c2922fd, `pangea_infra` a6e9b96,
+    /// `product_release` bf6d836, `rust_service` 5b5c765,
+    /// `test_ci` a21bd67, `tool` a3d51eb, `typescript` a3c3a49). This
+    /// module was the largest surviving async holdout with the two-
+    /// adjacent-status-spawn shape (twin `npm` steps in ONE
+    /// `build_package` body); every other command module on the
+    /// async frontier now emits the canonical failure envelope by
+    /// construction.
+    ///
+    /// # THEORY grounding
+    ///
+    /// THEORY.md §V.1 (construction guarantees): the canonical
+    /// failure envelope is emitted by construction at the primitive's
+    /// ONE body, not asserted after the fact at every site.
+    /// THEORY.md §V.4 (terminating shape): an attestation-record
+    /// consumer reading the terminating shape of a failed workspace-
+    /// dependency prebuild reads the `(op, exit_code)` structural
+    /// tuple the primitive emits, not the ad-hoc pre-lift string.
+    /// THEORY.md §VI.1 (one-oracle discipline): the "what does the
+    /// operator log line for a failed npm spawn look like" question
+    /// is answered at ONE typed-primitive body
+    /// (`retry.rs::classify_inherited_status`); a future refinement
+    /// to the envelope (structured JSON, added timing, added
+    /// derivation reference) lands there once and every migrated
+    /// site picks it up by construction.
+    #[test]
+    fn test_workspace_deps_status_spawns_route_through_run_inherited_status() {
+        const SOURCE: &str = include_str!("workspace_deps.rs");
+
+        crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status(
+            SOURCE,
+            "commands/workspace_deps.rs",
+            2,
+            "the two `build_package` status-only spawn sites \
+             (`npm install --silent` and `npm run build --silent`)",
         );
     }
 }
