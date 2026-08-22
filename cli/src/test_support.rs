@@ -380,6 +380,90 @@ pub fn add_bare_origin(work_dir: &Path, bare_dir: &Path) {
     );
 }
 
+/// Stand up a hermetic bare-origin repo + work-tree pair, both
+/// under a fresh parent tempdir, with the canonical seed commit on
+/// `main` produced by [`init_repo_with_one_commit`] on the work-tree
+/// and [`add_bare_origin`]'s `--initial-branch=main` bare + `origin`
+/// remote configured on the work-tree.
+///
+/// Returns `(parent, bare, work)` — the parent `TempDir` MUST be
+/// bound to a scope that outlives every subsequent use of `bare` /
+/// `work`. A `let (_, bare, work) = …` binding that drops the parent
+/// unlinks the on-disk state, and every subsequent git spawn against
+/// `bare` / `work` fails reproducibly (a fast, loud signal instead
+/// of a flake). Same RAII-guard contract as [`make_executable_shim`]
+/// and [`crate::hermetic_scratch::hermetic_scratch_file`].
+///
+/// # Why centralized
+///
+/// Six sibling `#[test]` / `#[tokio::test]` bodies across the crate
+/// each re-spelled the same seven-line stanza VERBATIM:
+///
+/// ```ignore
+/// let parent = tempfile::tempdir().expect("parent tempdir");
+/// let work = parent.path().join("work");
+/// let bare = parent.path().join("origin.git");
+/// std::fs::create_dir(&work).expect("mkdir work");
+/// std::fs::create_dir(&bare).expect("mkdir bare");
+/// init_repo_with_one_commit(&work);
+/// add_bare_origin(&work, &bare);
+/// ```
+///
+/// - `commands/release_commit.rs::test_commit_cluster_overlay_release_lands_canonical_subject_on_origin`
+/// - `commands/product_release.rs::test_commit_artifact_tags_uses_canonical_commit_subject_format`
+/// - `git.rs::tests::make_bare_origin_with_work` (a private local
+///   fixture with FOUR call sites, plus an additional
+///   `git push -u origin main` step baked into the fixture body)
+/// - `test_support.rs::test_add_bare_origin_round_trips_push_then_clone`
+///   (self-test of `add_bare_origin`, kept inline to exercise the
+///   underlying primitives directly)
+/// - `test_support.rs::test_clone_bare_and_read_head_subject_round_trips_seed_commit`
+///   (self-test of `clone_bare_and_read_head_subject`, kept inline
+///   for the same reason)
+/// - `test_support.rs::test_clone_bare_and_read_head_subject_returns_trimmed_string`
+///   (self-test of `clone_bare_and_read_head_subject`, kept inline
+///   for the same reason)
+///
+/// Six identically-shaped copies past THEORY.md §VI.1's
+/// three-times-is-a-law threshold ("two occurrences is a
+/// coincidence; three is a law"). This primitive is the
+/// law-redeeming consolidation. The three self-tests here in
+/// `test_support.rs` intentionally stay inline — they pin the
+/// composition ingredients ([`init_repo_with_one_commit`],
+/// [`add_bare_origin`], [`clone_bare_and_read_head_subject`]) at
+/// their own boundary rather than through the composed fixture.
+///
+/// # Panics
+///
+/// Panics on any failed tempdir reservation, mkdir, or delegated
+/// fixture spawn — every consumer is a `#[test]` / `#[tokio::test]`
+/// that treats fixture-setup failure as a bug, not a runtime error.
+/// Loud panics map to test failures at the call site whose
+/// diagnostic names the offending step; same discipline as
+/// [`make_executable_shim`]'s `expect("write shim")`.
+///
+/// # Env-var lock discipline
+///
+/// The two composed fixtures ([`init_repo_with_one_commit`] and
+/// [`add_bare_origin`]) each acquire + release [`GIT_BIN_ENV_LOCK`]
+/// internally. This primitive does NOT hold the lock across those
+/// two calls — `std::sync::Mutex` is not re-entrant and every
+/// existing consumer follows the caller-acquires-lock-AFTER-setup
+/// discipline this primitive inherits. A caller that needs the lock
+/// held across downstream verification spawns (e.g. `git push`, or
+/// the tested production entry point that reads `GIT_BIN`) acquires
+/// it ONCE after this primitive returns.
+pub fn make_seeded_work_and_bare_origin() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let parent = tempfile::tempdir().expect("parent tempdir");
+    let bare = parent.path().join("origin.git");
+    let work = parent.path().join("work");
+    std::fs::create_dir(&work).expect("mkdir work");
+    std::fs::create_dir(&bare).expect("mkdir bare");
+    init_repo_with_one_commit(&work);
+    add_bare_origin(&work, &bare);
+    (parent, bare, work)
+}
+
 /// Read and return the trimmed subject line of the HEAD commit at
 /// `dir` via `git log -1 --pretty=%s`. The spawn routes through
 /// [`crate::git::git_command_sync`] so a `GIT_BIN` env-var override
@@ -3850,6 +3934,172 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "seed",
             "probe-clone must resolve HEAD to the seed commit on main"
         );
+    }
+
+    /// [`make_seeded_work_and_bare_origin`] returns a parent tempdir
+    /// containing exactly two sibling entries: an initialized bare at
+    /// `origin.git` and an initialized work-tree at `work`, both
+    /// directories. Pins the RAII layout every consumer's
+    /// `parent.path().join(...)` extension (probe clones, extra
+    /// scratch files) implicitly depends on — a drift that renamed
+    /// or nested either half would break every consumer through the
+    /// same fixture-side seam.
+    #[test]
+    fn test_make_seeded_work_and_bare_origin_returns_sibling_bare_and_work() {
+        let (parent, bare, work) = make_seeded_work_and_bare_origin();
+        assert!(bare.is_dir(), "bare must be an initialized directory");
+        assert!(work.is_dir(), "work must be an initialized directory");
+        assert_eq!(
+            bare.parent(),
+            Some(parent.path()),
+            "bare must sit directly under the returned parent tempdir"
+        );
+        assert_eq!(
+            work.parent(),
+            Some(parent.path()),
+            "work must sit directly under the returned parent tempdir"
+        );
+        assert_ne!(bare, work, "bare and work must be strictly-distinct paths");
+    }
+
+    /// [`make_seeded_work_and_bare_origin`] leaves the returned work
+    /// on `main` at the canonical seed commit — inherited verbatim
+    /// from [`init_repo_with_one_commit`]. Pins the post-condition
+    /// every downstream consumer relies on when it invokes a
+    /// production entry point that reads `HEAD` (`get_short_sha_async_in`,
+    /// `read_head_sha_async`, `commit_and_push_in`'s opening
+    /// `git pull origin main`).
+    #[test]
+    fn test_make_seeded_work_and_bare_origin_work_has_seed_commit_on_main() {
+        let (_parent, _bare, work) = make_seeded_work_and_bare_origin();
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let branch = git_command_sync()
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&work)
+            .output()
+            .expect("git rev-parse spawn");
+        assert!(branch.status.success(), "git rev-parse must succeed");
+        assert_eq!(
+            String::from_utf8_lossy(&branch.stdout).trim(),
+            "main",
+            "work must sit on `main` after the composed fixture returns"
+        );
+        assert_eq!(
+            read_head_subject(&work),
+            "seed",
+            "work must carry the canonical seed commit subject on HEAD"
+        );
+    }
+
+    /// [`make_seeded_work_and_bare_origin`] round-trips end-to-end:
+    /// a `git push -u origin main` from work lands the seed on bare,
+    /// and a subsequent probe-clone of bare resolves `HEAD` to the
+    /// canonical seed subject. Pins the composed
+    /// `init_repo_with_one_commit` + `add_bare_origin` invariant at
+    /// the composed-fixture boundary so a drift on EITHER underlying
+    /// primitive that broke the origin remote or the seed commit
+    /// would fire this test — a defense-in-depth pin the four
+    /// `git.rs` `commit_and_push_in` / async-SHA consumers now share
+    /// through their fixture-side seam.
+    #[test]
+    fn test_make_seeded_work_and_bare_origin_round_trips_seed_push_then_clone() {
+        let (parent, bare, work) = make_seeded_work_and_bare_origin();
+
+        // Hold the lock across the push + clone so a concurrent
+        // env-var-mutating test cannot redirect either spawn.
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let push = git_command_sync()
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&work)
+            .status()
+            .expect("git push spawn");
+        assert!(
+            push.success(),
+            "seed push to composed-fixture bare origin must succeed"
+        );
+
+        let probe = parent.path().join("probe");
+        let subject = clone_bare_and_read_head_subject(&bare, &probe);
+        assert_eq!(
+            subject, "seed",
+            "probe-clone of composed-fixture bare must resolve HEAD to `seed`"
+        );
+    }
+
+    /// Cross-module shield: every non-`test_support` consumer that
+    /// pre-lift re-spelled the bare + work + seed + origin-remote
+    /// fixture stanza inline (or as a private local fixture)
+    /// MUST route through [`make_seeded_work_and_bare_origin`], and
+    /// MUST NOT hand-roll its own `parent.path().join("origin.git")`
+    /// stanza again.
+    ///
+    /// Pre-lift the three consumers spelled six copies of the same
+    /// seven-line seed:
+    /// - `git.rs` — one private local `make_bare_origin_with_work`
+    ///   fixture (with an extra `git push -u origin main` step baked
+    ///   into its body) called from four test sites (retired at this
+    ///   commit).
+    /// - `commands/release_commit.rs` — one inline copy in the
+    ///   canonical-subject round-trip test (retired at this commit).
+    /// - `commands/product_release.rs` — one inline copy in the
+    ///   canonical-subject round-trip test (retired at this commit).
+    ///
+    /// Positive side: the delegation call `make_seeded_work_and_bare_origin(`
+    /// must appear at at least ONE code line in each consumer's body,
+    /// so a regression that deleted the delegation cannot leave the
+    /// negative scan trivially satisfied by absence.
+    ///
+    /// Negative side: the load-bearing marker `parent.path().join("origin.git")`
+    /// must not appear at any code line in any consumer's body — the
+    /// exact string every hand-rolled copy carries, reconstructed at
+    /// test time via `format!` so this shield's own docstring prose
+    /// citing the pre-lift stanza does not false-match itself.
+    /// `code_line_hits` additionally filters `//` / `///` / `//!`
+    /// lines so any prose that quotes the pre-lift shape inside a
+    /// consumer's docstring is ignored.
+    ///
+    /// The three `test_support.rs` self-tests
+    /// (`test_add_bare_origin_round_trips_push_then_clone`,
+    /// `test_clone_bare_and_read_head_subject_round_trips_seed_commit`,
+    /// `test_clone_bare_and_read_head_subject_returns_trimmed_string`)
+    /// intentionally stay OFF this shield's consumer list — they pin
+    /// the composition ingredients ([`init_repo_with_one_commit`],
+    /// [`add_bare_origin`], [`clone_bare_and_read_head_subject`]) at
+    /// their own boundary rather than through the composed fixture
+    /// this shield guards.
+    #[test]
+    fn test_all_bare_work_pair_consumers_route_through_make_seeded_work_and_bare_origin() {
+        let forbidden = format!("parent.path().{}(\"origin.git\")", "join");
+        const CONSUMERS: [(&str, &str); 3] = [
+            ("cli/src/git.rs", include_str!("git.rs")),
+            (
+                "cli/src/commands/release_commit.rs",
+                include_str!("commands/release_commit.rs"),
+            ),
+            (
+                "cli/src/commands/product_release.rs",
+                include_str!("commands/product_release.rs"),
+            ),
+        ];
+        for (module_path, source) in CONSUMERS {
+            let delegations = code_line_hits(source, "make_seeded_work_and_bare_origin(");
+            assert!(
+                !delegations.is_empty(),
+                "{module_path} must delegate to `test_support::make_seeded_work_and_bare_origin(` \
+                 at at least one code line — the shared primitive that consolidates the \
+                 bare+work+seed+origin-remote fixture stanza; hits: {delegations:#?}",
+            );
+
+            let hand_rolled = code_line_hits(source, &forbidden);
+            assert!(
+                hand_rolled.is_empty(),
+                "{module_path} must NOT hand-roll its own bare+work fixture stanza \
+                 — the shared primitive at `test_support::make_seeded_work_and_bare_origin` \
+                 carries the composed `init_repo_with_one_commit` + `add_bare_origin` \
+                 discipline in one place; hits: {hand_rolled:#?}",
+            );
+        }
     }
 
     /// Whole-module shield: no raw bare-literal `git` spawn may live in

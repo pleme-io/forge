@@ -816,7 +816,7 @@ pub async fn product_release(
 mod tests {
     use super::*;
     use crate::git::git_command_sync;
-    use crate::test_support::{add_bare_origin, init_repo_with_one_commit};
+    use crate::test_support::{init_repo_with_one_commit, make_seeded_work_and_bare_origin};
 
     /// `commit_artifact_tags` MUST use the canonical commit-subject
     /// format `"chore: update artifact tags to <sha>"` and MUST land
@@ -827,13 +827,7 @@ mod tests {
     /// future drift cannot change the audit-grep target silently.
     #[tokio::test]
     async fn test_commit_artifact_tags_uses_canonical_commit_subject_format() {
-        let parent = tempfile::tempdir().expect("parent tempdir");
-        let work = parent.path().join("work");
-        let bare = parent.path().join("origin.git");
-        std::fs::create_dir(&work).expect("mkdir work");
-        std::fs::create_dir(&bare).expect("mkdir bare");
-        init_repo_with_one_commit(&work);
-        add_bare_origin(&work, &bare);
+        let (parent, bare, work) = make_seeded_work_and_bare_origin();
         std::fs::write(work.join("svc.artifact.json"), "{}\n").unwrap();
 
         let outcome = commit_artifact_tags(
