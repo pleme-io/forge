@@ -930,11 +930,10 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
     // Docker containers still running
     println!("\n   Docker containers (running):");
-    if let Ok(output) = std::process::Command::new(docker_bin())
-        .args(["ps", "--format", "     {{.Names}}\t{{.Status}}\t{{.Ports}}"])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(stdout) = crate::retry::probe_stdout_capture_sync(
+        &docker_bin(),
+        &["ps", "--format", "     {{.Names}}\t{{.Status}}\t{{.Ports}}"],
+    ) {
         if stdout.trim().is_empty() {
             println!("     (none)");
         } else {
@@ -944,8 +943,9 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
     // Recently exited containers
     println!("\n   Docker containers (recently exited):");
-    if let Ok(output) = std::process::Command::new(docker_bin())
-        .args([
+    if let Some(stdout) = crate::retry::probe_stdout_capture_sync(
+        &docker_bin(),
+        &[
             "ps",
             "-a",
             "--filter",
@@ -954,10 +954,8 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
             "15m",
             "--format",
             "     {{.Names}}\t{{.Status}}\t{{.Image}}",
-        ])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        ],
+    ) {
         if stdout.trim().is_empty() {
             println!("     (none)");
         } else {
@@ -967,15 +965,14 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
     // E2E images
     println!("\n   E2E Docker images:");
-    if let Ok(output) = std::process::Command::new(docker_bin())
-        .args([
+    if let Some(stdout) = crate::retry::probe_stdout_capture_sync(
+        &docker_bin(),
+        &[
             "images",
             "--format",
             "     {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.ID}}",
-        ])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        ],
+    ) {
         for line in stdout.lines() {
             if line.contains("-backend") || line.contains("-web") {
                 println!("{}", line);
@@ -1823,6 +1820,63 @@ mod tests {
             "commands/prerelease.rs",
             "cargo",
             "CARGO",
+        );
+    }
+
+    /// Whole-module shield: the three best-effort-captured `docker`
+    /// diagnostic probes inside [`super::print_e2e_diagnostics`]
+    /// (docker ps / docker ps -a --since=15m --filter status=exited /
+    /// docker images, the three sites the pre-release G14-failure
+    /// post-mortem surface renders in order) MUST delegate through
+    /// [`crate::retry::probe_stdout_capture_sync`], never through a
+    /// hand-rolled `if let Ok(output) =
+    /// std::process::Command::new(docker_bin()).args(...).output() {
+    /// let stdout = String::from_utf8_lossy(&output.stdout); ... }`
+    /// best-effort captured-output stanza that silently reintroduces
+    /// the six-copy pre-lift duplication this commit closes.
+    ///
+    /// Pre-lift the three sites each carried the verbatim three-line
+    /// stanza above (with an explicit `std::process::Command::new`
+    /// path override because the top-of-module `use tokio::process::
+    /// Command` would otherwise resolve to the async twin), and the
+    /// sibling `commands/e2e.rs::print_failure_diagnostics` block
+    /// carried three MORE copies (with a bare `Command::new` because
+    /// e2e.rs's top-of-module `use` is `std::process::Command`) —
+    /// six identically-shaped bodies past THEORY §VI.1's
+    /// three-is-a-law threshold (PRIME DIRECTIVE: duplication budget
+    /// is zero). Mirrors the sibling shield in
+    /// `commands/e2e.rs::docker_bin_routing_tests`, same primitive on
+    /// the receiving end.
+    ///
+    /// The delegation-count floor mirrors the sibling shield in
+    /// `commands/e2e.rs`, and the needle-reconstruction discipline
+    /// matches the same `format!`-based `probe_stdout_capture_sync(`
+    /// needle so this shield's own source text does not self-match.
+    #[test]
+    fn test_prerelease_diagnostic_probes_route_through_probe_stdout_capture_sync() {
+        const SOURCE: &str = include_str!("prerelease.rs");
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/prerelease.rs",
+        );
+        let needle = format!("probe_stdout_capture_{}(", "sync");
+        let hits = crate::test_support::code_line_hits(body, &needle);
+        assert!(
+            hits.len() >= 3,
+            "commands/prerelease.rs must delegate its three \
+             best-effort `docker` diagnostic probes (docker ps / \
+             docker ps -a --since=15m --filter status=exited / docker \
+             images inside `print_e2e_diagnostics`) through the \
+             shared `crate::retry::probe_stdout_capture_sync` \
+             primitive — found {} delegation(s) in the top-of-file \
+             body, expected at least 3. A regression that reintroduces \
+             the pre-lift `if let Ok(output) = \
+             std::process::Command::new(docker_bin()).args(...)\
+             .output() {{ let stdout = String::from_utf8_lossy(\
+             &output.stdout); ... }}` stanza re-establishes the \
+             six-copy duplication this commit closes. Offending hits: \
+             {hits:?}",
+            hits.len(),
         );
     }
 }

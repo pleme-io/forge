@@ -14553,6 +14553,87 @@ pub fn run_bin_args_inherited_status_sync(
     run_inherited_status_sync(cmd, op)
 }
 
+/// Best-effort captured-stdout probe: spawn `bin` with `args` sync, and
+/// return the UTF-8-lossy stdout on Ok — regardless of `output.status`
+/// — or `None` on spawn `Err`. Deliberately swallows every failure
+/// (spawn `io::Error`, non-zero exit, signal termination) because this
+/// primitive exists for the diagnostic-print surface where the caller's
+/// intent is "print whatever the probe produced, and stay silent if the
+/// probe cannot be run."
+///
+/// Lifts the six-occurrence three-line stanza
+///
+/// ```text
+/// if let Ok(output) = std::process::Command::new(bin).args([...]).output() {
+///     let stdout = String::from_utf8_lossy(&output.stdout);
+///     // ... use stdout ...
+/// }
+/// ```
+///
+/// that six E2E-diagnostic sites in forge carry verbatim modulo the
+/// per-site `bin`/`args` and the trailing `use stdout` block:
+/// `commands/e2e.rs::print_failure_diagnostics` (docker ps / docker ps
+/// -a --since=15m --filter status=exited / docker images, all three via
+/// `Command::new(docker_bin())` — bare `Command` here re-exports
+/// `std::process::Command` per the top-of-module `use`) and
+/// `commands/prerelease.rs::print_e2e_diagnostics` (docker ps / docker
+/// ps -a --since=15m --filter status=exited / docker images, all three
+/// via `std::process::Command::new(docker_bin())` — the explicit path
+/// override the sibling `tokio::process::Command` top-of-module `use`
+/// forces). Six identically-shaped bodies past THEORY §VI.1's
+/// three-is-a-law threshold (PRIME DIRECTIVE: duplication budget is
+/// zero); this primitive is the law-redeeming consolidation for the
+/// best-effort-captured-stdout surface — the missing counterpart to
+/// [`classify_capture_anyhow`], which raises the failing envelope, and
+/// to [`run_query_capture_sync`], which returns the trimmed stdout
+/// under an `anyhow::Result` and bails on any failure.
+///
+/// # Semantics — deliberately infallible at the caller
+///
+/// - Spawn `Err` (`fork+exec` failed, e.g., docker daemon path
+///   unresolvable on a Nix-hermetic runner with no `docker` in PATH
+///   beyond `DOCKER_BIN` and a stale sigil): swallow, return `None`.
+///   Every pre-lift site already discarded this branch by the
+///   `if let Ok(...)` binding.
+/// - Spawn `Ok(output)`: return `Some(String::from_utf8_lossy(
+///   &output.stdout).into_owned())`, IGNORING `output.status`.
+///   Diagnostic probes must not fail the caller, so a non-zero exit
+///   is treated as "no data" from the probe's perspective — matches
+///   pre-lift behavior at all six sites (none consulted
+///   `output.status.success()`). A caller that wants "empty means no
+///   containers" can still `.map(|s| s.trim().is_empty())` on the
+///   returned `Option<String>` — the two pre-lift `docker ps` sites
+///   in each module do exactly this to render `(none)` for the
+///   empty-stdout case.
+///
+/// # When to reach for this vs [`run_query_capture_sync`] / [`classify_capture_anyhow`]
+///
+/// This primitive is DELIBERATELY narrower than its captured-output
+/// siblings: it is the right choice ONLY for diagnostic surfaces where
+/// the alternative is silently dropping the failure envelope. Do NOT
+/// use it for control-flow-carrying captures — a caller that decides
+/// what to do next based on the probe's output MUST surface both the
+/// spawn envelope AND the exit-status envelope through
+/// [`run_query_capture_sync`] (anyhow, bails on failure, returns
+/// trimmed stdout) or [`classify_capture_anyhow`] (anyhow, exposes
+/// stdout+stderr on success as an intact [`std::process::Output`]).
+///
+/// # Sync-only by construction
+///
+/// The six lifted sites are all sync (`print_failure_diagnostics` /
+/// `print_e2e_diagnostics` are both plain `fn`, not `async fn`, and
+/// their spawn shape is `std::process::Command::new(...).output()`
+/// without `.await`). A tokio-flavored async twin
+/// (`probe_stdout_capture` with `.output().await`) would be the
+/// obvious sibling; forge has no async best-effort-diagnostic sites
+/// of this exact shape today (`commands/flux.rs`'s async probes ride
+/// on the `kubectl_command_async()` builder, not `Command::new(bin)`,
+/// so they don't fit this primitive's `(bin, args)`-front surface).
+pub fn probe_stdout_capture_sync(bin: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(bin).args(args).output().ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -35879,6 +35960,131 @@ mod tests {
              construction through `crate::test_support::\
              synthetic_output` so a future reshape of the shape \
              lands at ONE body."
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // probe_stdout_capture_sync — the best-effort captured-stdout probe
+    // that lifts the six E2E-diagnostic sites in `commands/e2e.rs` and
+    // `commands/prerelease.rs`. Drives the full spawn-then-lossy-decode
+    // pipeline against hermetic `make_executable_shim` binaries so a
+    // future regression at either the spawn surface (a swallowed spawn
+    // error re-raised as an anyhow bail, breaking the pre-lift
+    // "print nothing on spawn Err" contract) or the classification
+    // surface (a nonzero exit re-raised as an anyhow bail, breaking the
+    // pre-lift "read whatever stdout the process emitted regardless of
+    // status" contract) fails here rather than silently degrading the
+    // six consumer sites this commit migrates.
+    // -----------------------------------------------------------------
+
+    /// Zero-exit spawn with stdout: the primitive returns the raw
+    /// UTF-8-lossy stdout intact (bytes → `String` via
+    /// `String::from_utf8_lossy`, no trim, no filter, no
+    /// exit-status gate). Every one of the six pre-lift sites reads
+    /// `String::from_utf8_lossy(&output.stdout)` verbatim — the
+    /// primitive must reproduce that shape by construction so caller
+    /// post-processing (`.trim().is_empty()`, `.lines().filter(...)`)
+    /// keeps working after the migration.
+    #[cfg(unix)]
+    #[test]
+    fn test_probe_stdout_capture_sync_zero_exit_returns_lossy_stdout() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "probe-success",
+            "#!/bin/sh\nprintf 'container-alpha\\tUp 3 minutes\\n'\nexit 0\n",
+        );
+        let out = probe_stdout_capture_sync(&shim, &[]);
+        assert_eq!(
+            out.as_deref(),
+            Some("container-alpha\tUp 3 minutes\n"),
+            "zero-exit stdout must flow through verbatim (no trim, no \
+             UTF-8 round-trip loss) so caller post-processing \
+             (`.trim().is_empty()`, `.lines().filter(...)`) matches the \
+             pre-lift `String::from_utf8_lossy(&output.stdout)` shape",
+        );
+    }
+
+    /// Nonzero exit with stdout: the primitive STILL returns
+    /// `Some(stdout)` — no `output.status.success()` gate. Every one of
+    /// the six pre-lift sites ignored `output.status` (the `if let
+    /// Ok(output)` binding filtered on the spawn Result, not the exit
+    /// code). A regression that added a `.filter(|o|
+    /// o.status.success())` here would silently blank the diagnostic
+    /// surface on any nonzero-exit `docker ps` (docker exits 1 on
+    /// permission-denied while still emitting a partial container
+    /// listing on stdout), the exact anti-pattern this primitive's
+    /// docstring warns against under "Semantics — deliberately
+    /// infallible at the caller".
+    #[cfg(unix)]
+    #[test]
+    fn test_probe_stdout_capture_sync_nonzero_exit_still_returns_stdout() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "probe-nonzero",
+            "#!/bin/sh\nprintf 'partial-listing-line'\nexit 1\n",
+        );
+        let out = probe_stdout_capture_sync(&shim, &[]);
+        assert_eq!(
+            out.as_deref(),
+            Some("partial-listing-line"),
+            "a nonzero exit must NOT gate the returned stdout — the six \
+             pre-lift sites all ignored `output.status`, so a caller \
+             that reads partial output from a docker CLI that exited 1 \
+             (permission-denied on `docker ps` with a partial listing \
+             on stdout) still sees the bytes it saw before the migration",
+        );
+    }
+
+    /// Args are forwarded to the spawn: the shim reads its own `$1`
+    /// argv slot and echoes it, so a regression that dropped the
+    /// `args` slot from the spawn (silently spawning `bin` with no
+    /// argv) would fail this shape. Pins the `(bin, args)`-front
+    /// surface — the same shape [`run_bin_args_inherited_status_sync`]
+    /// (a31ef65) enforces at the inherited-status frontier.
+    #[cfg(unix)]
+    #[test]
+    fn test_probe_stdout_capture_sync_forwards_args() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "probe-argv",
+            "#!/bin/sh\nprintf '%s' \"$1\"\nexit 0\n",
+        );
+        let out = probe_stdout_capture_sync(&shim, &["hello-forwarded"]);
+        assert_eq!(
+            out.as_deref(),
+            Some("hello-forwarded"),
+            "the `args` slice must reach the spawned process's argv — \
+             a regression that dropped the `.args(args)` call from the \
+             primitive body would blank the shim's echo and this test \
+             would fail",
+        );
+    }
+
+    /// Spawn `Err`: an absolute path that cannot exist folds the
+    /// `io::Error(ENOENT)` from `fork+exec` into `None`. Every one of
+    /// the six pre-lift sites relied on this branch — the `if let
+    /// Ok(output)` binding silently skipped its post-processing block
+    /// whenever the spawn failed. A regression that surfaced the
+    /// spawn error as an anyhow bail would violate the primitive's
+    /// "diagnostic probes must not fail the caller" contract and
+    /// break the pre-lift no-op-on-spawn-Err behavior at every
+    /// consumer site.
+    #[cfg(unix)]
+    #[test]
+    fn test_probe_stdout_capture_sync_spawn_error_returns_none() {
+        // A path guaranteed absent under `/nonexistent/...`, so
+        // `fork+exec` synthesizes `io::Error(ENOENT)` and the
+        // primitive folds it to `None`. The suffix is a nonce that
+        // cannot collide with any real binary on any hermetic runner
+        // this crate runs under.
+        let out = probe_stdout_capture_sync(
+            "/nonexistent/forge-probe-stdout-capture-sync-never-exists-8b3d",
+            &[],
+        );
+        assert!(
+            out.is_none(),
+            "an unresolvable `bin` path must surface as `None`, not \
+             panic and not bail — the primitive's contract is \
+             'diagnostic probes must not fail the caller', enforced by \
+             the `.ok()?` fold on `Command::output()`'s \
+             `std::io::Result<Output>`",
         );
     }
 }
