@@ -1779,9 +1779,18 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
 ///   `"commands/dashboards.rs"`). Names the fn scope OR the module —
 ///   whichever the body slice actually covers — so a failing shield
 ///   points a reader at the exact scan window.
-/// - `min_delegations` — minimum number of
-///   `classify_capture_anyhow(` delegation call sites the body MUST
-///   carry. A dropped delegation would leave the negative
+/// - `min_delegations` — minimum number of delegation call sites the
+///   body MUST carry — summed across the three canonical entrypoints
+///   `classify_capture_anyhow(` (the bare classifier over an already-
+///   captured `Result<Output>`), `run_capture_anyhow(` (the async
+///   run-wrapper), and `run_capture_anyhow_sync(` (the sync run-
+///   wrapper). All three route through the ONE canonical
+///   `classify_capture_anyhow` body at `retry.rs`, so any of the three
+///   satisfies "the captured-output bail routes through the primitive"
+///   — a shield that only recognized the bare classifier would refuse
+///   a migration that spelled the higher-level run-wrapper (the
+///   canonical shape once the run-* algebra closed at 06cd778). A
+///   dropped delegation would leave the negative
 ///   `if !output.status.success` scan satisfied by absence — pinning a
 ///   positive floor guards against that regression class.
 ///
@@ -1800,12 +1809,17 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
 ///   conditional-return that short-circuits into an alternative typed
 ///   result (`DriftCheckResult::error`, `WaitOutcome::Timeout`) rather
 ///   than a bail — precisely the shapes the shield MUST not false-match.
-/// - `code_line_hits(body, "classify_capture_anyhow(")` MUST hit at
-///   least `min_delegations` times. Pins the positive floor so a
+/// - The sum of `code_line_hits` for `classify_capture_anyhow(`,
+///   `run_capture_anyhow(`, and `run_capture_anyhow_sync(` MUST hit
+///   at least `min_delegations` times. Pins the positive floor so a
 ///   regression that both dropped the delegation AND accidentally left
 ///   the negative side satisfied (e.g. by rewriting the bail into a
 ///   `bail!("failed")` shape without `if !output.status.success`) fails
-///   here.
+///   here. The three needles are mutually exclusive on any code line —
+///   `classify_capture_anyhow` does not contain `run_capture_anyhow`
+///   as a substring, `run_capture_anyhow_sync(` does not contain
+///   `run_capture_anyhow(` (the char after `run_capture_anyhow` is
+///   `_` not `(`), so summing without dedup is correct.
 ///
 /// # Why one canonical helper
 ///
@@ -1829,19 +1843,27 @@ pub fn assert_source_routes_captured_bails_through_classify_capture_anyhow(
         inline.is_empty(),
         "{label} must not carry an inline `if !output.status.success` \
          bail terminator — every captured-output bail-on-non-zero-exit \
-         must route through `crate::retry::classify_capture_anyhow`, \
-         which carries the exit code AND the stderr into the canonical \
+         must route through `crate::retry::classify_capture_anyhow` \
+         (or its higher-level run-wrappers `run_capture_anyhow` / \
+         `run_capture_anyhow_sync`), which carry the exit code AND the \
+         stderr into the canonical \
          `\"{{op}} failed (exit {{code}}): {{stderr}}\"` envelope. \
          Found: {inline:?}"
     );
 
-    let delegations = code_line_hits(body, "classify_capture_anyhow(").len();
+    let via_classify = code_line_hits(body, "classify_capture_anyhow(").len();
+    let via_run = code_line_hits(body, "run_capture_anyhow(").len();
+    let via_run_sync = code_line_hits(body, "run_capture_anyhow_sync(").len();
+    let delegations = via_classify + via_run + via_run_sync;
     assert!(
         delegations >= min_delegations,
         "{label} must route captured-output bails through \
-         `classify_capture_anyhow` — found only {delegations} \
-         delegation call(s); a dropped call would leave the negative \
-         `if !output.status.success` scan satisfied by absence"
+         `classify_capture_anyhow` (or `run_capture_anyhow` / \
+         `run_capture_anyhow_sync`) — found only {delegations} \
+         delegation call(s) (classify={via_classify}, \
+         run={via_run}, run_sync={via_run_sync}); a dropped call would \
+         leave the negative `if !output.status.success` scan satisfied \
+         by absence"
     );
 }
 
@@ -3927,6 +3949,47 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             let output = cmd.output()?;\n\
             // No bail, no delegation — the positive floor still fails.\n\
             drop(output);\n";
+        assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/fake.rs::fake_fn",
+            1,
+        );
+    }
+
+    /// A body that spells the higher-level async run-wrapper
+    /// `run_capture_anyhow(` (rather than the bare
+    /// `classify_capture_anyhow(` classifier) MUST satisfy the
+    /// positive floor. The run-wrapper delegates internally to
+    /// `classify_capture_anyhow`, so it IS the canonical shape once
+    /// the run-* algebra closed at 06cd778 — a shield that refused
+    /// this delegation would refuse the correct migration.
+    #[test]
+    fn test_assert_source_routes_captured_bails_through_classify_capture_anyhow_accepts_run_capture_anyhow_wrapper(
+    ) {
+        let body = "\
+            let output = crate::retry::run_capture_anyhow(cmd, \"kubectl get pods\").await?;\n\
+            match cmd2.output() { Ok(output) if output.status.success() => (), _ => () }\n";
+        assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/fake.rs::fake_fn",
+            1,
+        );
+    }
+
+    /// Sync sibling: a body that spells the higher-level sync run-
+    /// wrapper `run_capture_anyhow_sync(` MUST satisfy the positive
+    /// floor. Pins the substring-mutual-exclusion invariant the
+    /// helper's summation depends on: `run_capture_anyhow_sync(` does
+    /// NOT contain `run_capture_anyhow(` as a substring (the char
+    /// after `run_capture_anyhow` is `_`, not `(`), so the sum
+    /// `via_classify + via_run + via_run_sync` is not inflated by
+    /// double-counting on this line — the shield sees exactly one
+    /// delegation from the one sync run-wrapper call.
+    #[test]
+    fn test_assert_source_routes_captured_bails_through_classify_capture_anyhow_accepts_run_capture_anyhow_sync_wrapper(
+    ) {
+        let body = "\
+            let output = crate::retry::run_capture_anyhow_sync(cmd, \"doca inspect --tarball\")?;\n";
         assert_source_routes_captured_bails_through_classify_capture_anyhow(
             body,
             "commands/fake.rs::fake_fn",

@@ -671,24 +671,25 @@ struct PodStatus {
 /// Get comprehensive pod status for a deployment (image, phase, readiness, waiting reasons).
 async fn get_pod_status_full(namespace: &str, deployment_name: &str) -> Result<PodStatus> {
     // Single kubectl call using JSON for all fields
-    let output = kubectl_command_async()
-        .args([
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-l",
-            &format!("app={}", deployment_name),
-            "-o",
-            "json",
-        ])
-        .output()
-        .await
-        .context("Failed to get pods")?;
-
-    if !output.status.success() {
-        bail!("kubectl get pods failed");
-    }
+    // Owns the async captured-output spawn + classify ritual at the
+    // canonical `crate::retry::run_capture_anyhow` primitive so the
+    // operator log line carries the exit code by construction — the
+    // pre-lift bail spelled `"kubectl get pods failed"` and dropped
+    // BOTH the exit code AND the stderr; post-lift each surfaces at
+    // the canonical `"kubectl get pods failed (exit {code}): {stderr}"`
+    // envelope at `retry::classify_capture_anyhow`'s ONE body.
+    let mut cmd = kubectl_command_async();
+    cmd.args([
+        "get",
+        "pods",
+        "-n",
+        namespace,
+        "-l",
+        &format!("app={}", deployment_name),
+        "-o",
+        "json",
+    ]);
+    let output = crate::retry::run_capture_anyhow(cmd, "kubectl get pods").await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value =
@@ -1246,6 +1247,50 @@ mod tests {
             "flux.rs must delegate every kubectl spawn to \
              `kubectl_command_async()` — the delegation string was \
              not found in the module body."
+        );
+    }
+
+    /// Captured-output routing shield scoped to the whole
+    /// `commands/flux.rs` module body: the sole
+    /// `if !output.status.success() { bail!("kubectl get pods failed") }`
+    /// stanza in `get_pod_status_full` — the module's ONE captured-
+    /// output bail-on-non-zero-exit site — MUST route through
+    /// [`crate::retry::run_capture_anyhow`]. Pre-lift the operator
+    /// log line read `"kubectl get pods failed"` and dropped BOTH
+    /// the exit code AND the stderr: an operator triaging a Flux-
+    /// managed deployment that never went ready had `kubectl get pods`
+    /// failing with no signal whether kubectl exited 1 (a real
+    /// kubeconfig / RBAC error against the target namespace), 127
+    /// (`KUBECTL_BIN` route broken), or was killed by a signal
+    /// (runner OOM). Post-lift the canonical
+    /// `"kubectl get pods failed (exit {code}): {stderr}"` envelope
+    /// is emitted by construction at `retry.rs::classify_capture_anyhow`'s
+    /// ONE body, and the exit-code carry makes the three failure
+    /// modes discriminable at the first log line.
+    ///
+    /// Sibling of the `commands/dashboards.rs` shield
+    /// `test_generate_dashboards_from_jsonnet_bail_routes_through_classify_capture_anyhow`
+    /// (b82200d), the `commands/sync.rs::generate_entities` shield
+    /// (b82200d), the `commands/codegen.rs::execute` shield
+    /// `test_execute_bun_install_routes_through_run_capture_anyhow_not_inline_bail`
+    /// (06cd778), and the `commands/nix_builder.rs::test` shields
+    /// (06cd778). Same discipline: negative side forbids the inline
+    /// `if !output.status.success` bail terminator at any code line
+    /// in the module body; positive side pins that
+    /// `run_capture_anyhow(` appears at ≥1 code line — a regression
+    /// that dropped the delegation cannot leave the negative scan
+    /// trivially satisfied by absence. Scan bounds from file start
+    /// to the FIRST `\n#[cfg(test)]\n` marker (the primary `mod tests`
+    /// opener above), so this shield's own docstring mention of
+    /// `if !output.status.success` stays out of scope.
+    #[test]
+    fn test_get_pod_status_full_bail_routes_through_run_capture_anyhow() {
+        const SOURCE: &str = include_str!("flux.rs");
+        let body = crate::test_support::module_body_before_tests(SOURCE, "commands/flux.rs");
+        crate::test_support::assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/flux.rs::get_pod_status_full",
+            1,
         );
     }
 }

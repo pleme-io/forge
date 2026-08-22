@@ -459,18 +459,21 @@ fn verify_image_arch(doca: &str, image_path: &str, expected_arch: &str) -> Resul
     // casing (`Architecture`/`Os`), so `check_inspect_arch` below is unchanged.
     // doca gained this path specifically to retire the last skopeo call site in
     // forge; before it, inspect took only a registry --ref.
-    let output = Command::new(doca)
-        .args(["inspect", "--tarball", image_path])
-        .output()
-        .with_context(|| format!("Failed to run doca inspect on {}", image_path))?;
-
-    if !output.status.success() {
-        bail!(
-            "doca inspect failed for {}: {}",
-            image_path,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    // Owns the sync captured-output spawn + classify ritual at the
+    // canonical `crate::retry::run_capture_anyhow_sync` primitive so
+    // the operator log line carries the exit code by construction —
+    // the pre-lift bail spelled `"doca inspect failed for {image_path}:
+    // {stderr}"` and dropped the exit code; post-lift the canonical
+    // `"doca inspect --tarball failed (exit {code}): {stderr}"`
+    // envelope is emitted at `retry::classify_capture_anyhow`'s ONE
+    // body, and the outer `.with_context(...)` retains the image_path
+    // hint on the anyhow chain (both the primitive's `(op, exit_code,
+    // stderr)` envelope AND the pre-lift image_path context survive,
+    // strictly additive per the sibling `workspace_deps` migration).
+    let mut cmd = Command::new(doca);
+    cmd.args(["inspect", "--tarball", image_path]);
+    let output = crate::retry::run_capture_anyhow_sync(cmd, "doca inspect --tarball")
+        .with_context(|| format!("doca inspect --tarball {}", image_path))?;
 
     check_inspect_arch(&output.stdout, expected_arch, output.status.code())
         .map_err(|e| anyhow::anyhow!("{} (image: {})", e, image_path))?;
@@ -1027,6 +1030,53 @@ mod status_spawn_routing_tests {
             3,
             "all three status-only spawns (two `regctl index create` + \
              one `doca push`)",
+        );
+    }
+
+    /// Captured-output routing shield scoped to the whole
+    /// `commands/image_release.rs` module body: the sole
+    /// `if !output.status.success() { bail!("doca inspect failed for
+    /// {image_path}: {stderr}") }` stanza in `verify_image_arch` — the
+    /// module's ONE captured-output bail-on-non-zero-exit site — MUST
+    /// route through [`crate::retry::run_capture_anyhow_sync`]. Pre-
+    /// lift the operator log line read `"doca inspect failed for
+    /// {image_path}: {stderr}"` and dropped the exit code: an operator
+    /// triaging a rejected image at the arch gate had no signal whether
+    /// `doca inspect --tarball` exited 1 (a malformed archive that
+    /// `doca` refused to parse), 2 (missing precondition — no such
+    /// image at the path), 127 (`DOCA_BIN` route broken), or was killed
+    /// by a signal. Post-lift the canonical `"doca inspect --tarball
+    /// failed (exit {code}): {stderr}"` envelope is emitted by
+    /// construction at `retry.rs::classify_capture_anyhow`'s ONE body,
+    /// and the outer `.with_context(|| format!("doca inspect --tarball
+    /// {image_path}"))` retains the image_path hint on the anyhow
+    /// chain — pre-lift context (image_path) PLUS the exit code the
+    /// canonical envelope now carries, strictly additive per the
+    /// sibling `commands/workspace_deps.rs` migration (2d51b53).
+    ///
+    /// Sibling of the `commands/dashboards.rs` shield (b82200d), the
+    /// `commands/flux.rs::get_pod_status_full` shield (this commit),
+    /// and the sibling status-only shield above
+    /// (`test_image_release_status_spawns_route_through_run_inherited_status_sync`)
+    /// on the same module. Same discipline: negative side forbids the
+    /// inline `if !output.status.success` bail terminator at any code
+    /// line in the module body; positive side pins that
+    /// `run_capture_anyhow_sync(` appears at ≥1 code line — a
+    /// regression that dropped the delegation cannot leave the
+    /// negative scan trivially satisfied by absence. Scan bounds from
+    /// file start to the FIRST `\n#[cfg(test)]\n` marker (the primary
+    /// `mod tests` block opener at line 692), so this shield's own
+    /// docstring mention of `if !output.status.success` stays out of
+    /// scope.
+    #[test]
+    fn test_verify_image_arch_bail_routes_through_run_capture_anyhow_sync() {
+        const SOURCE: &str = include_str!("image_release.rs");
+        let body =
+            crate::test_support::module_body_before_tests(SOURCE, "commands/image_release.rs");
+        crate::test_support::assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/image_release.rs::verify_image_arch",
+            1,
         );
     }
 }
