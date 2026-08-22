@@ -150,25 +150,29 @@ mod docker_bin_routing_tests {
     fn test_docker_spawns_route_through_docker_bin_not_raw_literal() {
         const SOURCE: &str = include_str!("local.rs");
 
-        // Reconstruct the two forbidden shapes at test time — the
-        // format string here contains the shape frame (`{}("{}"...)`)
-        // but never the fused literal, so this file's source text
-        // does not match itself when this shield scans below.
-        let bare = "docker";
-        let raw_capture = format!("run_query_capture_sync(\"{}\",", bare);
-
         crate::test_support::assert_source_forbids_bare_spawn_shapes(
             SOURCE,
             "commands/local.rs",
             "docker",
             "resolve the substrate-exported `DOCKER_BIN` env override via `docker_bin()`",
         );
-        assert!(
-            !SOURCE.contains(&raw_capture),
-            "commands/local.rs must not spawn `docker` via the bare \
-             literal — every captured-output docker spawn must route \
-             through `run_query_capture_sync(&docker_bin(), …)`. A raw \
-             literal at `run_query_capture_sync` bypasses `DOCKER_BIN`."
+        // Also refuse the bare `"docker"` literal at
+        // `run_query_capture_sync`'s first argument — the primitive
+        // spawns the caller-supplied `&str` verbatim via
+        // `std::process::Command::new(cmd)`, so every captured-output
+        // docker spawn must route through
+        // `run_query_capture_sync(&docker_bin(), …)`. Shared helper
+        // (`test_support::assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg`)
+        // since three shield sites (this + `commands/seed.rs` +
+        // `commands/sessions.rs`) carried the format-plus-assert
+        // stanza — the helper defends BOTH the inline and multi-line
+        // rustfmt shapes at every site, tightening past this pre-lift
+        // shield's inline-only guard.
+        crate::test_support::assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg(
+            SOURCE,
+            "commands/local.rs",
+            "docker",
+            "resolve the substrate-exported `DOCKER_BIN` env override via `docker_bin()`",
         );
         crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
             SOURCE,

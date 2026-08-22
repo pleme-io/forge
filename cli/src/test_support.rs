@@ -2303,6 +2303,97 @@ pub fn synthetic_output(success: bool, stdout: &[u8], stderr: &[u8]) -> std::pro
     }
 }
 
+/// Whole-module shield: assert that `source` does NOT hand `bare` as a
+/// bare-string first argument to
+/// [`crate::retry::run_query_capture_sync`] in either of the two
+/// rustfmt-produced call-site shapes the primitive receives.
+///
+/// # The two forbidden shapes
+///
+/// `run_query_capture_sync(cmd: &str, args: &[&str])` spawns
+/// `std::process::Command::new(cmd)` verbatim per retry.rs:13167,
+/// which means a bare literal at the call site bypasses the
+/// substrate-exported `<TOOL>_BIN` env override every sibling
+/// tools-registry-routed spawn honors. rustfmt reaches the primitive
+/// in exactly two shapes depending on whether the call fits on one
+/// line:
+///
+/// - **Inline** (`run_query_capture_sync("<bare>", &["…"])`): the
+///   call fits on a single line. Matched by the reconstructed needle
+///   `run_query_capture_sync("<bare>",` (open paren, quoted literal,
+///   comma).
+/// - **Multi-line 8-space indent** (`run_query_capture_sync(\n
+///   "<bare>",\n    &["…"],\n)`): the call is broken after the open
+///   paren and each argument is on its own line with a 4-space
+///   additional indent. Nested two levels deep inside `impl`/`mod`
+///   the leading indent is 8 spaces. Matched by the reconstructed
+///   needle `run_query_capture_sync(\n        "<bare>"` (open paren,
+///   newline, 8 spaces, quoted literal).
+///
+/// Both needles are reconstructed via [`format!`] at call time, so
+/// this helper's own source text does not literally contain either
+/// shape — every scan therefore covers both the top-of-file
+/// production body AND every sibling `#[cfg(test)]` block without
+/// the helper's own body false-matching itself.
+///
+/// # Why one canonical helper
+///
+/// Three shield sites across `commands/seed.rs`,
+/// `commands/sessions.rs`, and `commands/local.rs` each carry the
+/// same `let bypass_primitive = format!("run_query_capture_sync(…\"{}
+/// \"…", bare); assert!(!source.contains(&bypass_primitive), "…");`
+/// stanza — two guard the multi-line 8-space form (seed / sessions,
+/// kubectl), one guards the inline form (local, docker). Three
+/// occurrences past THEORY §VI.1's three-times-is-a-law threshold
+/// (PRIME DIRECTIVE: duplication budget is zero); this helper is the
+/// law-redeeming consolidation.
+///
+/// Consolidating also strictly TIGHTENS every migrated shield: each
+/// pre-lift site checked ONE of the two shapes, so a rustfmt reflow
+/// that flipped a call from multi-line to inline (or vice versa)
+/// silently escaped its shield. Post-lift every shield defends BOTH
+/// shapes at once — a rustfmt reflow of a bypass-primitive attempt
+/// cannot escape by choosing the un-checked form.
+///
+/// # Panic-message shape
+///
+/// On a match the panic names `module_path`, `bare`, `resolver_remedy`
+/// (a caller-supplied phrase like ``resolve `KUBECTL_BIN` via
+/// `get_tool_path(tools::KUBECTL)```), AND the specific shape (inline
+/// vs multi-line) that matched — so a reader of a failing shield sees
+/// the exact rustfmt shape the regression introduced. Mirrors the
+/// per-shape diagnostic discipline
+/// [`assert_source_forbids_bare_spawn_shapes`] holds on the
+/// `Command::new` spawn frontier.
+pub fn assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg(
+    source: &str,
+    module_path: &str,
+    bare: &str,
+    resolver_remedy: &str,
+) {
+    let inline = format!("run_query_capture_sync(\"{bare}\",");
+    assert!(
+        !source.contains(&inline),
+        "{module_path} must NOT hand the bare `\"{bare}\"` literal to \
+         `run_query_capture_sync` as its first arg (inline form) — the \
+         primitive spawns the caller-supplied `&str` verbatim via \
+         `std::process::Command::new(cmd)`, so every consumer must \
+         pre-resolve through {resolver_remedy}. A bare literal at the \
+         primitive call site bypasses the substrate-exported env override."
+    );
+
+    let multi_line = format!("run_query_capture_sync(\n        \"{bare}\"");
+    assert!(
+        !source.contains(&multi_line),
+        "{module_path} must NOT hand the bare `\"{bare}\"` literal to \
+         `run_query_capture_sync` as its first arg (multi-line 8-space \
+         form) — the primitive spawns the caller-supplied `&str` verbatim \
+         via `std::process::Command::new(cmd)`, so every consumer must \
+         pre-resolve through {resolver_remedy}. A bare literal at the \
+         primitive call site bypasses the substrate-exported env override."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4692,5 +4783,87 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let out = synthetic_output(true, raw_stdout, raw_stderr);
         assert_eq!(out.stdout, raw_stdout);
         assert_eq!(out.stderr, raw_stderr);
+    }
+
+    /// Happy-path floor for
+    /// [`assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg`]:
+    /// a source whose sole `run_query_capture_sync` calls resolve
+    /// through a sigil-derived binding (`&kubectl`, `&docker_bin()`)
+    /// contains neither the inline nor the multi-line bare-literal
+    /// shape, so the helper returns without panic. Mirrors the shape-
+    /// free-source discipline
+    /// [`test_assert_source_forbids_bare_spawn_shapes_accepts_shape_free_source`]
+    /// holds on the `Command::new` spawn frontier — every shield's
+    /// floor is "absent any forbidden shape, the helper is a no-op."
+    ///
+    /// The `resolver_remedy` slot is exercised with a spelling
+    /// different from any real shield's ("fake-remedy") so a future
+    /// refactor that silently hard-coded the remediation phrase would
+    /// surface here as a substitution-drift failure, not as a passing
+    /// test with wrong-message diagnostics downstream.
+    #[test]
+    fn test_assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg_accepts_shape_free_source(
+    ) {
+        assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg(
+            "let kubectl = get_tool_path(tools::KUBECTL);\n\
+             run_query_capture_sync(&kubectl, &[\"get\", \"pods\"])?;\n\
+             run_query_capture_sync(&docker_bin(), &[\"stop\", name])?;",
+            "fake/module.rs",
+            "kubectl",
+            "route through `fake-remedy`",
+        );
+    }
+
+    /// The inline shape `run_query_capture_sync("<bare>",` is caught
+    /// and the panic message names the module, the bare tool, the
+    /// remediation phrase, AND the specific `(inline form)` marker.
+    /// `should_panic(expected = ...)` matches on a substring of the
+    /// panic payload, so a future edit that dropped any of the four
+    /// substituted / templated tokens from the inline-form message
+    /// (say, condensing the shape-specific tail into a generic "raw
+    /// literal") would break this test before shipping — a reader of
+    /// a failing shield relies on the shape-specific tail to know
+    /// which of the two forbidden rustfmt shapes matched.
+    ///
+    /// The bare tool `zeta-widget` is deliberately distinct from
+    /// every real shield's `bare` so a Grep of the crate for
+    /// `zeta-widget` resolves to exactly this test and its sibling —
+    /// a fast way to find the pinning tests when editing the helper.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must NOT hand the bare `\"zeta-widget\"` literal to `run_query_capture_sync` as its first arg (inline form)"
+    )]
+    fn test_assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg_panics_on_inline_shape(
+    ) {
+        assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg(
+            "let out = run_query_capture_sync(\"zeta-widget\", &[\"probe\"]);",
+            "fake/module.rs",
+            "zeta-widget",
+            "route through `zeta_bin()`",
+        );
+    }
+
+    /// The multi-line 8-space shape
+    /// `run_query_capture_sync(\n        "<bare>"` is caught and the
+    /// panic message names the module, the bare tool, the
+    /// remediation phrase, AND the specific `(multi-line 8-space
+    /// form)` marker. Sibling pin to
+    /// [`test_assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg_panics_on_inline_shape`]
+    /// — pins the second of the two rustfmt shapes the helper defends
+    /// so a per-shape drift surfaces distinctly. The fake source
+    /// spells the exact 8-space indent depth the primitive receives
+    /// from a two-level-nested (`impl`/`mod`) call body.
+    #[test]
+    #[should_panic(
+        expected = "fake/module.rs must NOT hand the bare `\"zeta-widget\"` literal to `run_query_capture_sync` as its first arg (multi-line 8-space form)"
+    )]
+    fn test_assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg_panics_on_multi_line_shape(
+    ) {
+        assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg(
+            "run_query_capture_sync(\n        \"zeta-widget\",\n        &[\"probe\"],\n    )?;",
+            "fake/module.rs",
+            "zeta-widget",
+            "route through `zeta_bin()`",
+        );
     }
 }
