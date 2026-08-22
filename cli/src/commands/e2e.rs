@@ -915,11 +915,10 @@ fn print_failure_diagnostics() {
 
     // Docker container status
     eprintln!("\nDocker containers (running):");
-    if let Ok(output) = Command::new(docker_bin())
-        .args(["ps", "--format", "  {{.Names}}\t{{.Status}}\t{{.Ports}}"])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(stdout) = crate::retry::probe_stdout_capture_sync(
+        &docker_bin(),
+        &["ps", "--format", "  {{.Names}}\t{{.Status}}\t{{.Ports}}"],
+    ) {
         if stdout.trim().is_empty() {
             eprintln!("  (none)");
         } else {
@@ -929,8 +928,9 @@ fn print_failure_diagnostics() {
 
     // Recently exited containers (testcontainers that died)
     eprintln!("\nDocker containers (recently exited):");
-    if let Ok(output) = Command::new(docker_bin())
-        .args([
+    if let Some(stdout) = crate::retry::probe_stdout_capture_sync(
+        &docker_bin(),
+        &[
             "ps",
             "-a",
             "--filter",
@@ -939,10 +939,8 @@ fn print_failure_diagnostics() {
             "15m",
             "--format",
             "  {{.Names}}\t{{.Status}}\t{{.Image}}",
-        ])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        ],
+    ) {
         if stdout.trim().is_empty() {
             eprintln!("  (none)");
         } else {
@@ -952,15 +950,14 @@ fn print_failure_diagnostics() {
 
     // Check Docker images
     eprintln!("\nE2E Docker images:");
-    if let Ok(output) = Command::new(docker_bin())
-        .args([
+    if let Some(stdout) = crate::retry::probe_stdout_capture_sync(
+        &docker_bin(),
+        &[
             "images",
             "--format",
             "  {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.ID}}",
-        ])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        ],
+    ) {
         for line in stdout.lines() {
             if line.contains("backend") || line.contains("web") {
                 eprintln!("{}", line);
@@ -1394,6 +1391,86 @@ mod docker_bin_routing_tests {
             "commands/e2e.rs must define the `docker_bin` sigil — the \
              one bridge between this module's docker spawns and the \
              substrate-exported `DOCKER_BIN` env override."
+        );
+    }
+
+    /// Whole-module shield: the three best-effort-captured `docker`
+    /// diagnostic probes inside [`super::print_failure_diagnostics`]
+    /// (docker ps / docker ps -a --since=15m --filter status=exited /
+    /// docker images, the three sites the E2E-failure post-mortem
+    /// surface renders in order) MUST delegate through
+    /// [`crate::retry::probe_stdout_capture_sync`], never through a
+    /// hand-rolled `if let Ok(output) = Command::new(docker_bin())
+    /// .args(...).output() { let stdout =
+    /// String::from_utf8_lossy(&output.stdout); ... }` best-effort
+    /// captured-output stanza that silently reintroduces the six-copy
+    /// pre-lift duplication this commit closes.
+    ///
+    /// Pre-lift the three sites each carried the verbatim three-line
+    /// stanza above, and the sibling `commands/prerelease.rs::
+    /// print_e2e_diagnostics` block carried three MORE copies past
+    /// its own docker-literal shield — six identically-shaped bodies
+    /// past THEORY §VI.1's three-is-a-law threshold (PRIME DIRECTIVE:
+    /// duplication budget is zero). The lift onto
+    /// [`crate::retry::probe_stdout_capture_sync`] preserves the exact
+    /// pre-lift semantics — spawn `Err` skips the block, spawn `Ok`
+    /// returns the UTF-8-lossy stdout regardless of `output.status`
+    /// — so the migration is behavior-identical at the diagnostic
+    /// surface, and the primitive's docstring pins the "deliberately
+    /// infallible at the caller" contract that future callers must
+    /// honor.
+    ///
+    /// # Why a delegation-count floor (not just a negative scan)
+    ///
+    /// A negative-only shield that forbids the pre-lift stanza is
+    /// trivially satisfied by absence — a regression that
+    /// accidentally deleted one of the three diagnostic probes
+    /// (say, dropped the `docker images` block during a diagnostic
+    /// prose rewrite) would still pass the negative scan. Pinning
+    /// the delegation count to `>= 3` means every one of the three
+    /// diagnostic surfaces MUST still route through the primitive;
+    /// a deletion drops the count and fails the shield. Same
+    /// discipline the sibling status-only-spawn shields
+    /// (a21bd67 `test_ci` four spawns, 5faeecb `e2e` six spawns,
+    /// c2922fd `local` four spawns, and the eight sync-frontier
+    /// consolidations at 08fdb86 / a31ef65) honor via the two-arm
+    /// `assert_source_routes_status_only_spawns_through_run_inherited_status_sync`
+    /// composition.
+    ///
+    /// # Reconstruction discipline
+    ///
+    /// The delegation needle `probe_stdout_capture_sync(` is
+    /// reconstructed via [`format!`] at test time so this shield's
+    /// own source text does not self-match the substring count — the
+    /// per-line filter would otherwise inflate the count by one for
+    /// the needle-literal line. The three delegation sites each
+    /// spell `crate::retry::probe_stdout_capture_sync(` verbatim; the
+    /// shorter `probe_stdout_capture_sync(` needle matches all three
+    /// (a suffix of the fully-qualified form) without also matching
+    /// the shield's own body (which only spells the two halves as
+    /// separate literals joined at `format!` time).
+    #[test]
+    fn test_e2e_diagnostic_probes_route_through_probe_stdout_capture_sync() {
+        const SOURCE: &str = include_str!("e2e.rs");
+        let body =
+            crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/e2e.rs");
+        let needle = format!("probe_stdout_capture_{}(", "sync");
+        let hits = crate::test_support::code_line_hits(body, &needle);
+        assert!(
+            hits.len() >= 3,
+            "commands/e2e.rs must delegate its three best-effort \
+             `docker` diagnostic probes (docker ps / docker ps -a \
+             --since=15m --filter status=exited / docker images inside \
+             `print_failure_diagnostics`) through the shared \
+             `crate::retry::probe_stdout_capture_sync` primitive — \
+             found {} delegation(s) in the top-of-file body, expected \
+             at least 3. A regression that reintroduces the pre-lift \
+             `if let Ok(output) = Command::new(docker_bin()).args(...)\
+             .output() {{ let stdout = String::from_utf8_lossy(\
+             &output.stdout); ... }}` stanza re-establishes the \
+             six-copy duplication this commit closes. Offending hits: \
+             {hits:?}",
+            hits.len(),
         );
     }
 }
