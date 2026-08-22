@@ -876,12 +876,16 @@ fn verify_docker() -> Result<()> {
 ///    `mkdtemp(3)`-appended unique suffix in
 ///    `tempfile::Builder::tempdir()` closes it at the syscall.
 fn e2e_image_output_symlink(name: &str) -> Result<(tempfile::TempDir, PathBuf)> {
-    let dir = tempfile::Builder::new()
-        .prefix("forge-e2e-image-")
-        .tempdir()
-        .context("create e2e image output scratch tempdir")?;
-    let path = dir.path().join(format!("{}-image", name));
-    Ok((dir, path))
+    // Delegates to the shared `(TempDir, PathBuf)` primitive at
+    // [`crate::hermetic_scratch::hermetic_scratch_file`] — the same
+    // three-line body lives once, with the sibling sigils
+    // `commands/crossplane.rs::xpkg_output_file` (220b207),
+    // `commands/federation_tests.rs::federation_test_job_manifest_file`
+    // (76b256e), and `commands/migrations.rs::migration_job_manifest_file`
+    // (950a0e7) all routed onto it (THEORY §I.3 belief 5 / §V.6 —
+    // recurring shape becomes a library before it becomes duplicated
+    // code).
+    crate::hermetic_scratch::hermetic_scratch_file("forge-e2e-image-", &format!("{}-image", name))
 }
 
 /// Check if a Docker image exists locally.

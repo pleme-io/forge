@@ -223,12 +223,18 @@ fn federation_job_poll_delay(attempt: u32) -> Duration {
 // `FEDERATION_JOB_POLL_BACKOFF` carries above.
 #[allow(dead_code)]
 fn federation_test_job_manifest_file(job_name: &str) -> Result<(tempfile::TempDir, PathBuf)> {
-    let dir = tempfile::Builder::new()
-        .prefix("forge-fed-tests-")
-        .tempdir()
-        .context("create federation test job manifest scratch tempdir")?;
-    let path = dir.path().join(format!("{}.yaml", job_name));
-    Ok((dir, path))
+    // Delegates to the shared `(TempDir, PathBuf)` primitive at
+    // [`crate::hermetic_scratch::hermetic_scratch_file`] — the same
+    // three-line body lives once, with the sibling sigils
+    // `commands/crossplane.rs::xpkg_output_file` (220b207),
+    // `commands/e2e.rs::e2e_image_output_symlink` (ab88937), and
+    // `commands/migrations.rs::migration_job_manifest_file` (950a0e7)
+    // all routed onto it (THEORY §I.3 belief 5 / §V.6 — recurring
+    // shape becomes a library before it becomes duplicated code).
+    crate::hermetic_scratch::hermetic_scratch_file(
+        "forge-fed-tests-",
+        &format!("{}.yaml", job_name),
+    )
 }
 
 /// Run federation integration tests for a service

@@ -11,7 +11,7 @@
 //! built by Nix (`dockerTools`) and handed in as a `docker save` tarball; this
 //! command only embeds + pushes it via the `crossplane` CLI.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::info;
@@ -81,12 +81,16 @@ fn crossplane_bin() -> String {
 ///    Ctrl-C between build and push — so the on-disk state is bound
 ///    to the caller's stack frame and released with it.
 fn xpkg_output_file() -> Result<(tempfile::TempDir, PathBuf)> {
-    let dir = tempfile::Builder::new()
-        .prefix("xpkg-")
-        .tempdir()
-        .context("create xpkg output scratch tempdir")?;
-    let path = dir.path().join("package.xpkg");
-    Ok((dir, path))
+    // Delegates to the shared `(TempDir, PathBuf)` primitive at
+    // [`crate::hermetic_scratch::hermetic_scratch_file`] — the same
+    // three-line body lives once, with the sibling sigils
+    // `commands/e2e.rs::e2e_image_output_symlink` (ab88937),
+    // `commands/federation_tests.rs::federation_test_job_manifest_file`
+    // (76b256e), and `commands/migrations.rs::migration_job_manifest_file`
+    // (950a0e7) all routed onto it (THEORY §I.3 belief 5 / §V.6 —
+    // recurring shape becomes a library before it becomes duplicated
+    // code).
+    crate::hermetic_scratch::hermetic_scratch_file("xpkg-", "package.xpkg")
 }
 
 /// Build a Crossplane Function package (xpkg) from a Nix-built runtime image and

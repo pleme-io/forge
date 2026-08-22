@@ -116,14 +116,19 @@ fn migration_job_manifest_file(
     config_name: &str,
     timestamp: i64,
 ) -> Result<(tempfile::TempDir, PathBuf)> {
-    let dir = tempfile::Builder::new()
-        .prefix("forge-migration-job-")
-        .tempdir()
-        .context("create migration job manifest scratch tempdir")?;
-    let path = dir
-        .path()
-        .join(format!("{}-migration-job-{}.yaml", config_name, timestamp));
-    Ok((dir, path))
+    // Delegates to the shared `(TempDir, PathBuf)` primitive at
+    // [`crate::hermetic_scratch::hermetic_scratch_file`] — the same
+    // three-line body lives once, with the sibling sigils
+    // `commands/crossplane.rs::xpkg_output_file` (220b207),
+    // `commands/e2e.rs::e2e_image_output_symlink` (ab88937), and
+    // `commands/federation_tests.rs::federation_test_job_manifest_file`
+    // (76b256e) all routed onto it (THEORY §I.3 belief 5 / §V.6 —
+    // recurring shape becomes a library before it becomes duplicated
+    // code).
+    crate::hermetic_scratch::hermetic_scratch_file(
+        "forge-migration-job-",
+        &format!("{}-migration-job-{}.yaml", config_name, timestamp),
+    )
 }
 
 /// The typed exponential-backoff policy for [`wait_for_shinka_migration`]
