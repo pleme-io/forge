@@ -8,7 +8,7 @@ use std::process::Command;
 use tracing::info;
 
 use crate::nix::build_flake_attr;
-use crate::retry::{run_inherited_status_sync, run_query_capture_sync};
+use crate::retry::run_query_capture_sync;
 
 /// Resolve the `docker` binary path via `DOCKER_BIN`, falling back to
 /// `docker` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
@@ -38,9 +38,11 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
     // If a compose file is provided, use docker compose instead
     if let Some(cf) = compose_file {
         info!("Starting {} via docker compose...", name);
-        let mut cmd = Command::new(docker_bin());
-        cmd.args(["compose", "-f", cf, "up", "-d", name]);
-        run_inherited_status_sync(cmd, "docker compose up")?;
+        crate::retry::run_bin_args_inherited_status_sync(
+            &docker_bin(),
+            &["compose", "-f", cf, "up", "-d", name],
+            "docker compose up",
+        )?;
 
         info!("{} started via compose on port {}", name, port);
         return Ok(());
@@ -59,9 +61,11 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
 
     // Load the image into Docker
     info!("Loading image into Docker...");
-    let mut cmd = Command::new(docker_bin());
-    cmd.args(["load", "-i", image_path.as_str()]);
-    run_inherited_status_sync(cmd, "docker load")?;
+    crate::retry::run_bin_args_inherited_status_sync(
+        &docker_bin(),
+        &["load", "-i", image_path.as_str()],
+        "docker load",
+    )?;
 
     // Stop and remove any existing container with the same name
     let _ = Command::new(docker_bin()).args(["stop", name]).output();
@@ -69,17 +73,12 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
 
     // Run the container
     info!("Starting container {} on port {}...", name, port);
-    let mut cmd = Command::new(docker_bin());
-    cmd.args([
-        "run",
-        "-d",
-        "-p",
-        &format!("{}:80", port),
-        "--name",
-        name,
-        name,
-    ]);
-    run_inherited_status_sync(cmd, "docker run")?;
+    let port_map = format!("{}:80", port);
+    crate::retry::run_bin_args_inherited_status_sync(
+        &docker_bin(),
+        &["run", "-d", "-p", &port_map, "--name", name, name],
+        "docker run",
+    )?;
 
     info!("{} running at http://localhost:{}", name, port);
     Ok(())
@@ -89,9 +88,11 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
 pub fn down(name: &str, compose_file: Option<&str>) -> Result<()> {
     if let Some(cf) = compose_file {
         info!("Stopping {} via docker compose...", name);
-        let mut cmd = Command::new(docker_bin());
-        cmd.args(["compose", "-f", cf, "down"]);
-        run_inherited_status_sync(cmd, "docker compose down")?;
+        crate::retry::run_bin_args_inherited_status_sync(
+            &docker_bin(),
+            &["compose", "-f", cf, "down"],
+            "docker compose down",
+        )?;
 
         info!("{} stopped", name);
         return Ok(());
