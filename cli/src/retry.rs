@@ -14440,6 +14440,70 @@ pub fn run_inherited_status_sync(mut cmd: std::process::Command, op: &str) -> an
     classify_inherited_status(cmd.status(), op)
 }
 
+/// Ergonomic `(bin, args)`-front wrapper over [`run_inherited_status`]
+/// for the hot shape at command-module callers:
+///
+/// ```text
+/// let bin = <tool>_bin();
+/// let mut cmd = tokio::process::Command::new(&bin);
+/// cmd.args(&[...]);
+/// crate::retry::run_inherited_status(cmd, "<op>").await
+/// ```
+///
+/// The wrapper builds the `tokio::process::Command`, forwards the
+/// caller-supplied `args`, and routes through [`run_inherited_status`],
+/// so the canonical `Stdio::inherit()` override AND the canonical
+/// spawn-error / exit-code / signal-killed envelope
+/// [`classify_inherited_status`] emits are preserved by construction —
+/// a caller that swaps its inline `Command::new + args +
+/// run_inherited_status` triple for a single
+/// `run_bin_args_inherited_status(&bin, &[...], op)` call cannot silently
+/// reshape the message format downstream operator log surfaces read.
+///
+/// # Why one canonical helper
+///
+/// Pre-lift the four-line stanza
+///
+/// ```text
+/// let bin = <tool>_bin();
+/// let mut cmd = tokio::process::Command::new(&bin);
+/// cmd.args(&[...]);
+/// crate::retry::run_inherited_status(cmd, "<op>").await
+/// ```
+///
+/// occurred verbatim at 8 sites in `commands/developer_tools.rs`
+/// (`rust_test`, `rust_lint`, `rust_fmt`, `rust_fmt_check`,
+/// `rust_extract_schema`, `rust_regenerate`'s generate-lockfile step,
+/// `rust_dev`'s docker-compose-up, `rust_dev_down`'s docker-compose-down)
+/// and at the three `nix.rs` primitives (`run_crate2nix`,
+/// `run_nix_wrapped_crate2nix`, `run_cargo_update`) — eleven copies of
+/// the same body past THEORY §VI.1's three-times-is-a-law threshold
+/// (PRIME DIRECTIVE: duplication budget is zero). This primitive is the
+/// law-redeeming consolidation for the pre-built-argv inherited-status
+/// frontier — the missing counterpart to [`run_query_capture_sync`],
+/// which encodes the same `(bin, args)`-front shape at the sync
+/// captured-output surface.
+///
+/// # When to reach for this vs [`run_inherited_status`]
+///
+/// This helper is the pre-built-argv sibling: `bin` is a resolved path
+/// (usually returned by a `<tool>_bin()` sigil), `args` is the fixed
+/// slice the caller would have passed to `cmd.args(&[...])`, and `op`
+/// is the operator-visible label. Callers that need to configure
+/// `.current_dir(...)`, `.env(...)`, or a builder-driven argv
+/// (`cmd.arg(...); if flag { cmd.arg(...); }`) should keep the direct
+/// [`run_inherited_status`] surface — this helper only wraps the
+/// fixed-argv shape.
+pub async fn run_bin_args_inherited_status(
+    bin: &str,
+    args: &[&str],
+    op: &str,
+) -> anyhow::Result<()> {
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(args);
+    run_inherited_status(cmd, op).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -35537,6 +35601,97 @@ mod tests {
         assert!(
             result.is_ok(),
             "primitive must preserve caller-supplied .args() argv; got: {:?}",
+            result.err().map(|e| format!("{:#}", e))
+        );
+    }
+
+    /// `(bin, args)`-front wrapper: `exit 0` from the resolved binary
+    /// surfaces as `Ok(())` verbatim, proving the wrapper composes with
+    /// [`run_inherited_status`] on the happy path. Mirrors the
+    /// `test_run_inherited_status_success_returns_ok` pin at the direct
+    /// primitive.
+    #[tokio::test]
+    async fn test_run_bin_args_inherited_status_success_returns_ok() {
+        let (_dir, shim) =
+            crate::test_support::make_executable_shim("bin-args-cli", "#!/bin/sh\nexit 0\n");
+        let result =
+            run_bin_args_inherited_status(&shim, &[], "bin-args-cli").await;
+        assert!(result.is_ok(), "exit 0 must surface as Ok(())");
+    }
+
+    /// `(bin, args)`-front wrapper: a non-zero exit carries BOTH the op
+    /// label and the exit code through the shared
+    /// [`classify_inherited_status`] body — the wrapper does not reshape
+    /// the envelope. This is the exit-code carry pin at the wrapper
+    /// surface, symmetric with
+    /// `test_run_inherited_status_nonzero_exit_carries_op_and_code` at
+    /// the direct primitive.
+    #[tokio::test]
+    async fn test_run_bin_args_inherited_status_nonzero_exit_carries_op_and_code() {
+        let (_dir, shim) =
+            crate::test_support::make_executable_shim("bin-args-cli", "#!/bin/sh\nexit 9\n");
+        let err = run_bin_args_inherited_status(&shim, &[], "bin-args-cli")
+            .await
+            .expect_err("nonzero exit must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("bin-args-cli"),
+            "op label must appear in failure message, got: {msg}"
+        );
+        assert!(
+            msg.contains("exit 9"),
+            "exit code must appear in failure message, got: {msg}"
+        );
+    }
+
+    /// `(bin, args)`-front wrapper: a spawn failure (binary not on PATH)
+    /// carries the op label under the canonical `"Failed to run {op}"`
+    /// envelope, proving the wrapper routes spawn errors through the
+    /// same shared body as the direct primitive.
+    #[tokio::test]
+    async fn test_run_bin_args_inherited_status_spawn_failure_carries_op() {
+        let err = run_bin_args_inherited_status(
+            "/nonexistent/path/to/bin-args-inherited-status-binary-that-does-not-exist",
+            &[],
+            "bin-args-missing-tool",
+        )
+        .await
+        .expect_err("missing binary must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("bin-args-missing-tool"),
+            "op label must appear in spawn-failure message, got: {msg}"
+        );
+    }
+
+    /// `(bin, args)`-front wrapper: caller-supplied `args` reach the
+    /// child in the exact positions the caller set — the wrapper neither
+    /// prepends, drops, nor reorders argv. Uses the same content-
+    /// addressable probe shape the sibling
+    /// `test_run_inherited_status_preserves_caller_supplied_args` pin
+    /// uses (a uniquely-labelled marker + value passed positionally),
+    /// so an argv-shape regression at the wrapper surface fails HERE
+    /// distinctly from a regression at the direct primitive.
+    #[tokio::test]
+    async fn test_run_bin_args_inherited_status_forwards_args_to_child() {
+        let marker = "forge-bin-args-probe-m1n2o3p4";
+        let value = "expected-bin-args-marker-q5r6s7t8";
+        let result = run_bin_args_inherited_status(
+            "/bin/sh",
+            &[
+                "-c",
+                "test \"$1\" = \"forge-bin-args-probe-m1n2o3p4\" && \
+                 test \"$2\" = \"expected-bin-args-marker-q5r6s7t8\"",
+                "probe",
+                marker,
+                value,
+            ],
+            "bin-args-forwarding-probe",
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "wrapper must forward caller-supplied args verbatim; got: {:?}",
             result.err().map(|e| format!("{:#}", e))
         );
     }

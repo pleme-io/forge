@@ -90,44 +90,47 @@ fn docker_compose_bin() -> String {
 /// Run Rust unit tests
 pub async fn rust_test(service: String) -> Result<()> {
     println!("🧪 Running unit tests for {}...", service.cyan());
-    let cargo = cargo_bin();
-    let mut cmd = Command::new(&cargo);
-    cmd.args(&["test", "--lib", "--bins"]);
-    crate::retry::run_inherited_status(cmd, "cargo test").await
+    crate::retry::run_bin_args_inherited_status(
+        &cargo_bin(),
+        &["test", "--lib", "--bins"],
+        "cargo test",
+    )
+    .await
 }
 
 /// Run Rust clippy linter
 pub async fn rust_lint(service: String) -> Result<()> {
     println!("🔍 Running clippy linter for {}...", service.cyan());
-    let cargo = cargo_bin();
-    let mut cmd = Command::new(&cargo);
-    cmd.args(&[
-        "clippy",
-        "--all-targets",
-        "--all-features",
-        "--",
-        "-D",
-        "warnings",
-    ]);
-    crate::retry::run_inherited_status(cmd, "cargo clippy").await
+    crate::retry::run_bin_args_inherited_status(
+        &cargo_bin(),
+        &[
+            "clippy",
+            "--all-targets",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        "cargo clippy",
+    )
+    .await
 }
 
 /// Format Rust code with rustfmt
 pub async fn rust_fmt(service: String) -> Result<()> {
     println!("✨ Formatting code for {}...", service.cyan());
-    let cargo = cargo_bin();
-    let mut cmd = Command::new(&cargo);
-    cmd.args(&["fmt", "--all"]);
-    crate::retry::run_inherited_status(cmd, "cargo fmt").await
+    crate::retry::run_bin_args_inherited_status(&cargo_bin(), &["fmt", "--all"], "cargo fmt").await
 }
 
 /// Check Rust code formatting
 pub async fn rust_fmt_check(service: String) -> Result<()> {
     println!("🔍 Checking code formatting for {}...", service.cyan());
-    let cargo = cargo_bin();
-    let mut cmd = Command::new(&cargo);
-    cmd.args(&["fmt", "--all", "--", "--check"]);
-    crate::retry::run_inherited_status(cmd, "cargo fmt --check").await
+    crate::retry::run_bin_args_inherited_status(
+        &cargo_bin(),
+        &["fmt", "--all", "--", "--check"],
+        "cargo fmt --check",
+    )
+    .await
 }
 
 /// Extract GraphQL schema from Rust service
@@ -141,11 +144,12 @@ pub async fn rust_extract_schema(service: String) -> Result<()> {
     for bin_name in &bin_names {
         let bin_path = format!("src/bin/{}.rs", bin_name);
         if Path::new(&bin_path).exists() {
-            let cargo = cargo_bin();
-            let mut cmd = Command::new(&cargo);
-            cmd.args(&["run", "--bin", bin_name]);
-            crate::retry::run_inherited_status(cmd, &format!("cargo run --bin {}", bin_name))
-                .await?;
+            crate::retry::run_bin_args_inherited_status(
+                &cargo_bin(),
+                &["run", "--bin", bin_name],
+                &format!("cargo run --bin {}", bin_name),
+            )
+            .await?;
             found = true;
             break;
         }
@@ -274,12 +278,13 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         "Generating new Cargo.lock".bold(),
         "(cargo generate-lockfile)".dimmed()
     );
-    let cargo = cargo_bin();
-    let mut cmd = Command::new(&cargo);
-    cmd.arg("generate-lockfile");
-    crate::retry::run_inherited_status(cmd, "cargo generate-lockfile")
-        .await
-        .context("Failed to run cargo generate-lockfile")?;
+    crate::retry::run_bin_args_inherited_status(
+        &cargo_bin(),
+        &["generate-lockfile"],
+        "cargo generate-lockfile",
+    )
+    .await
+    .context("Failed to run cargo generate-lockfile")?;
     println!("   ✅ Cargo.lock generated");
     println!();
 
@@ -442,12 +447,13 @@ pub async fn rust_dev(
                 .dimmed()
             );
 
-            let docker_compose = docker_compose_bin();
-            let mut cmd = Command::new(&docker_compose);
-            cmd.args(&["-f", compose_path.to_str().unwrap(), "up", "-d"]);
-            crate::retry::run_inherited_status(cmd, "docker-compose up")
-                .await
-                .context("Failed to start docker-compose")?;
+            crate::retry::run_bin_args_inherited_status(
+                &docker_compose_bin(),
+                &["-f", compose_path.to_str().unwrap(), "up", "-d"],
+                "docker-compose up",
+            )
+            .await
+            .context("Failed to start docker-compose")?;
 
             // Wait for PostgreSQL to be ready (check DATABASE_URL port)
             if let Some(db_url) = local_config.env.get("DATABASE_URL") {
@@ -606,12 +612,13 @@ pub async fn rust_dev_down(service: String) -> Result<()> {
     let compose_file = find_compose_file(service_path)?;
 
     if let Some(compose_path) = compose_file {
-        let docker_compose = docker_compose_bin();
-        let mut cmd = Command::new(&docker_compose);
-        cmd.args(&["-f", compose_path.to_str().unwrap(), "down"]);
-        crate::retry::run_inherited_status(cmd, "docker-compose down")
-            .await
-            .context("Failed to stop docker-compose")?;
+        crate::retry::run_bin_args_inherited_status(
+            &docker_compose_bin(),
+            &["-f", compose_path.to_str().unwrap(), "down"],
+            "docker-compose down",
+        )
+        .await
+        .context("Failed to stop docker-compose")?;
 
         println!("✅ Infrastructure stopped");
     } else {
