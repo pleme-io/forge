@@ -439,24 +439,28 @@ mod tests {
             "commands/seed.rs",
         );
 
-        let bare = "kubectl";
-        let bypass_primitive = format!("run_query_capture_sync(\n        \"{}\"", bare);
-
         crate::test_support::assert_source_forbids_bare_spawn_shapes(
             module_body,
             "commands/seed.rs",
             "kubectl",
             "resolve the substrate-exported `KUBECTL_BIN` env override via `get_tool_path(tools::KUBECTL)`",
         );
-        assert!(
-            !module_body.contains(&bypass_primitive),
-            "commands/seed.rs must NOT hand the bare `\"kubectl\"` \
-             literal to `run_query_capture_sync` as its first arg — \
-             the primitive spawns the caller-supplied `&str` verbatim \
-             via `std::process::Command::new(cmd)`, so every consumer \
-             must pre-resolve through `get_tool_path(tools::KUBECTL)` \
-             first. A bare literal at the primitive call site bypasses \
-             the `KUBECTL_BIN` env override every sibling site honors."
+        // Also refuse the bare `"kubectl"` literal at
+        // `run_query_capture_sync`'s first argument — the primitive
+        // spawns the caller-supplied `&str` verbatim via
+        // `std::process::Command::new(cmd)`, so `find_primary_pod` must
+        // pre-resolve through `get_tool_path(tools::KUBECTL)`. Shared
+        // helper (`test_support::assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg`)
+        // since three shield sites (this + `commands/sessions.rs` +
+        // `commands/local.rs`) carried the format-plus-assert stanza —
+        // the helper defends BOTH the inline and multi-line rustfmt
+        // shapes at every site, tightening past this pre-lift shield's
+        // multi-line-only guard.
+        crate::test_support::assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg(
+            module_body,
+            "commands/seed.rs",
+            "kubectl",
+            "resolve `KUBECTL_BIN` via `get_tool_path(tools::KUBECTL)`",
         );
         assert!(
             module_body.contains("get_tool_path(tools::KUBECTL)"),
