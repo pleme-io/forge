@@ -13172,6 +13172,98 @@ pub fn run_query_capture_sync(cmd: &str, args: &[&str]) -> anyhow::Result<String
     )
 }
 
+/// Output-shaped sibling of [`classify_capture_query_anyhow`]: routes the
+/// same three structural shapes (success / spawn-failure / op-failure)
+/// but returns the raw [`std::process::Output`] on success rather than
+/// the trimmed UTF-8-lossy stdout, so callers can consume
+/// `output.stdout` as bytes (a `serde_json::from_slice` parse, a
+/// `tokio::fs::write` of the composed supergraph, a base64-encoded
+/// binary blob) without an intervening `String::from_utf8_lossy` round
+/// trip. This is the anyhow analog of [`classify_capture`] (the typed-
+/// error `Result<Output, E>` primitive) — same op-shape / spawn-shape
+/// discrimination, same [`CapturedFailure`] destructuring on the op arm,
+/// but folded into an anyhow envelope keyed off a single `op` label
+/// rather than a caller-supplied closure pair.
+///
+/// Lifts the verbatim seven-line stanza
+/// ```text
+/// let output = cmd.output()[.await].context("Failed to run <op>")?;
+/// if !output.status.success() {
+///     let stderr = String::from_utf8_lossy(&output.stderr);
+///     anyhow::bail!("<op> failed: {}", stderr);
+/// }
+/// // ... use output.stdout ...
+/// ```
+/// that three command-module sites in forge carry verbatim modulo the
+/// per-site `<op>` label and sync/async at the spawn surface:
+/// `commands/dashboards.rs::generate_dashboards_from_jsonnet` (sync,
+/// `std::process::Command` → `jsonnet -J <vendor> <main.jsonnet>` for
+/// Grafana dashboard generation; consumes `output.stdout` as
+/// `serde_json::from_str` input), `commands/sync.rs::generate_entities`
+/// (async, `tokio::process::Command` → `sea-orm-cli generate entity` for
+/// Rust entity codegen; discards `output.stdout`),
+/// `commands/federation_tests.rs::run_federation_tests` (async,
+/// `tokio::process::Command` → `kubectl apply -f <manifest>` for
+/// federation test job creation; discards `output.stdout`). Three
+/// identically-shaped bodies past THEORY §VI.1's three-is-a-law
+/// threshold (PRIME DIRECTIVE: duplication budget is zero); this
+/// primitive is the law-redeeming consolidation for the captured-output
+/// bail-on-non-zero-exit surface — the missing counterpart to
+/// [`run_inherited_status`] / [`run_inherited_status_sync`], which
+/// close the same duplication story for the inherited-stdio surface.
+///
+/// # Sync/async-agnostic by construction
+///
+/// `std::io::Result<std::process::Output>` is the shape both
+/// `std::process::Command::output()` and
+/// `tokio::process::Command::output().await` produce, so the two
+/// migrated async sites and the one migrated sync site above flow
+/// through one canonical primitive with identical message shapes by
+/// construction — the async-vs-sync split lives at the caller's
+/// `.output()` / `.output().await` surface, not at the classifier.
+///
+/// # Message format
+///
+/// - Spawn-failure: `"Failed to spawn {op}: {io_error}"` — carries the
+///   captured `io::Error::Display` alongside the caller-supplied `op`
+///   label. Aligns with the [`run_inherited_status`] spawn envelope
+///   (`"Failed to run {op}"` there; adding `": {io_error}"` here folds
+///   in the extra diagnostic detail the pre-migration `.context("Failed
+///   to run <op>")?` sites all discarded past the `?`).
+/// - Op-failure: `"{op} failed ({detail}): {stderr}"` where `detail` is
+///   `"exit {code}"` or `"killed by signal"` — same
+///   `(op, exit_code)` envelope [`classify_inherited_status`] emits at
+///   the status-only frontier, extended with the trimmed UTF-8-lossy
+///   stderr the captured-output frontier already had in hand.
+///   Pre-migration the three sites' bail messages spelled
+///   `"Jsonnet failed: {stderr}"`, `"Entity generation failed: {stderr}"`,
+///   `"Failed to create federation test job:\n{stderr}"` — a per-site
+///   dialect over `(op, stderr)` that dropped the exit code. Post-lift
+///   the operator log line carries `(op, exit_code, stderr)` in ONE
+///   canonical shape.
+///
+/// Success returns the raw `Output` — stdout AND stderr are preserved
+/// for the caller, so a site that both parses stdout on success AND
+/// wants to see any diagnostic stderr the CLI emitted at exit 0 (e.g.,
+/// `rover supergraph compose` prints hints on stderr even on success)
+/// can still `String::from_utf8_lossy(&output.stderr)` from the returned
+/// value.
+pub fn classify_capture_anyhow(
+    captured: std::io::Result<std::process::Output>,
+    op: &str,
+) -> anyhow::Result<std::process::Output> {
+    let output = captured.map_err(|e| anyhow::anyhow!("Failed to spawn {}: {}", op, e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = match output.status.code() {
+            Some(code) => format!("exit {}", code),
+            None => "killed by signal".to_string(),
+        };
+        anyhow::bail!("{} failed ({}): {}", op, detail, stderr.trim());
+    }
+    Ok(output)
+}
+
 /// Captured output of a single failed external-command attempt.
 ///
 /// Typed error shape for ad-hoc retry call sites (`commands/push.rs`,
@@ -33525,6 +33617,145 @@ mod tests {
         assert!(
             msg.contains("true []"),
             "empty args must render as `[]` in the canonical shape, got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // classify_capture_anyhow — the output-shaped anyhow sibling of
+    // classify_capture_query_anyhow, sync/async-agnostic by construction.
+    // The three arms (success / op-failure / spawn-failure) each get a
+    // shield so a future regression at any one arm surfaces here BEFORE
+    // any of the three migrated consumer sites
+    // (`commands/dashboards.rs::generate_dashboards_from_jsonnet`,
+    // `commands/sync.rs::generate_entities`,
+    // `commands/federation_tests.rs::run_federation_tests`) silently
+    // drifts back onto the pre-lift bail-drops-exit-code dialect.
+    // -----------------------------------------------------------------
+
+    /// `classify_capture_anyhow` on a successful spawn returns the raw
+    /// [`std::process::Output`] intact — both `stdout` and `stderr` are
+    /// preserved so downstream parsers (`serde_json::from_slice` at
+    /// `commands/dashboards.rs`, `tokio::fs::write` of the composed
+    /// supergraph at `commands/federation.rs` if it later joins this
+    /// primitive) receive the exact bytes the CLI emitted rather than a
+    /// UTF-8-lossy round trip. Pins the "return `Output`, not `String`"
+    /// choice that discriminates this primitive from its query-shaped
+    /// sibling.
+    #[test]
+    fn test_classify_capture_anyhow_success_returns_output_intact() {
+        let out = synth_output(true, b"{\"key\":\"value\"}\n", b"info: fetched\n");
+        let output =
+            classify_capture_anyhow(Ok(out), "jsonnet").expect("zero-exit must return Ok(output)");
+        assert!(output.status.success());
+        assert_eq!(
+            output.stdout, b"{\"key\":\"value\"}\n",
+            "stdout bytes must survive verbatim for downstream parsing"
+        );
+        assert_eq!(
+            output.stderr, b"info: fetched\n",
+            "stderr bytes must survive verbatim — a caller that wants to \
+             log successful-but-noisy CLI output still can"
+        );
+    }
+
+    /// `classify_capture_anyhow` on a non-zero exit surfaces the canonical
+    /// `"{op} failed (exit {code}): {stderr}"` envelope. Pins the
+    /// `(op, exit_code, stderr)` structural-record tuple against a future
+    /// regression that dropped the exit code back into a per-site
+    /// `"{op} failed: {stderr}"` dialect — the exact defect the three
+    /// migrated consumer sites carried pre-lift.
+    #[test]
+    fn test_classify_capture_anyhow_op_failure_carries_op_exit_and_stderr() {
+        let out = synth_output(false, b"", b"  fatal: bad config  \n");
+        let err = classify_capture_anyhow(Ok(out), "jsonnet")
+            .expect_err("non-zero exit must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.starts_with("jsonnet failed ("),
+            "envelope must lead with `{{op}} failed (`, got: {msg}"
+        );
+        // `false` exits with code 1 on every Unix the test runner ships on;
+        // pin only that the exit code surfaces in the canonical
+        // `(exit N)` shape so a future regression to `(exit Some(N))`
+        // (the sibling `classify_capture_query_anyhow` Debug shape) fails
+        // here.
+        assert!(
+            msg.contains("(exit 1)"),
+            "msg must carry the polished `(exit {{N}})` shape shared with \
+             `classify_inherited_status`, got: {msg}"
+        );
+        assert!(
+            msg.contains("fatal: bad config"),
+            "msg must carry stderr in the terminal envelope, got: {msg}"
+        );
+        // The `.trim()` at the primitive must strip both directions so a
+        // regression that swapped `.trim()` for `.trim_end()` (leaking the
+        // leading whitespace) fails here.
+        assert!(
+            !msg.contains("  fatal:"),
+            "leading stderr whitespace must be stripped, got: {msg}"
+        );
+        assert!(
+            !msg.contains("bad config  "),
+            "trailing stderr whitespace must be stripped, got: {msg}"
+        );
+    }
+
+    /// `classify_capture_anyhow` on a spawn failure (binary not on PATH /
+    /// fork failed) surfaces the canonical
+    /// `"Failed to spawn {op}: {io_error}"` envelope. Pins the spawn-vs-op
+    /// discriminator — pre-migration the three consumer sites' spawn arm
+    /// fused into `.context("Failed to run <op>")?` envelopes that dropped
+    /// the `io::Error::Display` past the `?` unwrap. A future regression
+    /// that re-fused the spawn arm into the op arm (dropping `io_error`
+    /// or the `"Failed to spawn"` prefix) fails here.
+    #[test]
+    fn test_classify_capture_anyhow_spawn_failure_carries_op_label_and_io_error() {
+        let captured: std::io::Result<std::process::Output> = Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file or directory",
+        ));
+        let err = classify_capture_anyhow(captured, "sea-orm-cli generate entity")
+            .expect_err("spawn failure must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.starts_with("Failed to spawn sea-orm-cli generate entity"),
+            "spawn envelope must lead with `Failed to spawn {{op}}`, got: {msg}"
+        );
+        assert!(
+            msg.contains("no such file"),
+            "msg must carry `io::Error::Display`, got: {msg}"
+        );
+    }
+
+    /// `classify_capture_anyhow` on a signal-killed exit (`status.code()`
+    /// returns `None`) surfaces the `"killed by signal"` discriminator
+    /// rather than a `(exit N)` shape misrepresenting the outcome. Pins
+    /// parity with [`classify_inherited_status`], the sibling terminal
+    /// envelope on the inherited-stdio frontier. Only exercised when the
+    /// host offers a `bash -c 'kill -9 $$'` shim (Unix); on other hosts
+    /// the branch is left to the primitive's shared `classify_inherited_status`
+    /// coverage.
+    #[cfg(unix)]
+    #[test]
+    fn test_classify_capture_anyhow_signal_killed_surfaces_signal_detail() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(9); // SIGKILL, no exit code
+        let out = std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: b"killed mid-run".to_vec(),
+        };
+        let err = classify_capture_anyhow(Ok(out), "kubectl apply")
+            .expect_err("signal-killed exit must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("kubectl apply failed (killed by signal)"),
+            "signal envelope must discriminate on `killed by signal`, got: {msg}"
+        );
+        assert!(
+            msg.contains("killed mid-run"),
+            "stderr must survive into the signal envelope, got: {msg}"
         );
     }
 

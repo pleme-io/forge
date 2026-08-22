@@ -1752,6 +1752,99 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
     );
 }
 
+/// Captured-output sibling of
+/// [`assert_source_routes_status_only_spawns_through_run_inherited_status`]:
+/// every `.output()[.await].context(…)?` + `if !output.status.success() {
+/// bail!("<op> failed: {stderr}") }` bail-drops-exit-code stanza in
+/// `body` MUST route through [`crate::retry::classify_capture_anyhow`],
+/// which surfaces `(op, exit_code, stderr)` in ONE canonical envelope
+/// rather than the per-site `(op, stderr)` dialect the pre-lift sites
+/// each spelled.
+///
+/// # Arguments
+///
+/// - `body` — the source slice to scan. Callers slice with
+///   [`fn_body_slice_between_markers`] (when the module has other
+///   `output.status.success()` sites the shield must not false-match —
+///   `commands/sync.rs` retains two control-flow-shape
+///   `if !install_output.status.success()` / `if !codegen_output.status.success()`
+///   sites in `check_drift`, and `commands/federation_tests.rs` retains
+///   two `output.status.success()` matches in `wait_for_job_completion`
+///   / `check_job_success`) or with [`module_body_before_tests`] /
+///   the raw module `include_str!(...)` (when the migrated site is the
+///   sole `output.status.success()` consumer in the module —
+///   `commands/dashboards.rs`).
+/// - `label` — a caller-supplied slug used in panic messages
+///   (e.g. `"commands/sync.rs::generate_entities"`,
+///   `"commands/dashboards.rs"`). Names the fn scope OR the module —
+///   whichever the body slice actually covers — so a failing shield
+///   points a reader at the exact scan window.
+/// - `min_delegations` — minimum number of
+///   `classify_capture_anyhow(` delegation call sites the body MUST
+///   carry. A dropped delegation would leave the negative
+///   `if !output.status.success` scan satisfied by absence — pinning a
+///   positive floor guards against that regression class.
+///
+/// # What it enforces
+///
+/// - `code_line_hits(body, "if !output.status.success")` MUST be
+///   empty. The needle omits the trailing `()` so the shield catches
+///   both `if !output.status.success()` (the exact pre-lift shape at
+///   all three migrated sites) and any future variant that inserted a
+///   whitespace or refactored the accessor chain — every such line is
+///   a bail terminator that drops the exit code the primitive carries.
+///   The needle deliberately does NOT scan for a bare
+///   `output.status.success` (without the leading `if !`) because
+///   several call-site siblings in the same modules legitimately
+///   consume `output.status.success()` in a match arm or a
+///   conditional-return that short-circuits into an alternative typed
+///   result (`DriftCheckResult::error`, `WaitOutcome::Timeout`) rather
+///   than a bail — precisely the shapes the shield MUST not false-match.
+/// - `code_line_hits(body, "classify_capture_anyhow(")` MUST hit at
+///   least `min_delegations` times. Pins the positive floor so a
+///   regression that both dropped the delegation AND accidentally left
+///   the negative side satisfied (e.g. by rewriting the bail into a
+///   `bail!("failed")` shape without `if !output.status.success`) fails
+///   here.
+///
+/// # Why one canonical helper
+///
+/// The eight-line shield body is spelled verbatim across the three
+/// migrated consumer sites in this commit (`commands/dashboards.rs`,
+/// `commands/sync.rs::generate_entities`,
+/// `commands/federation_tests.rs::run_federation_tests`) — past THEORY
+/// §VI.1's three-is-a-law threshold in its own right. A future
+/// refinement (structured diagnostic hook, broadened inline needle,
+/// tighter cutoff) lands in one body per frontier rather than at every
+/// site — the same discipline
+/// [`assert_source_routes_status_only_spawns_through_run_inherited_status`]
+/// pins for the inherited-stdio sibling frontier.
+pub fn assert_source_routes_captured_bails_through_classify_capture_anyhow(
+    body: &str,
+    label: &str,
+    min_delegations: usize,
+) {
+    let inline = code_line_hits(body, "if !output.status.success");
+    assert!(
+        inline.is_empty(),
+        "{label} must not carry an inline `if !output.status.success` \
+         bail terminator — every captured-output bail-on-non-zero-exit \
+         must route through `crate::retry::classify_capture_anyhow`, \
+         which carries the exit code AND the stderr into the canonical \
+         `\"{{op}} failed (exit {{code}}): {{stderr}}\"` envelope. \
+         Found: {inline:?}"
+    );
+
+    let delegations = code_line_hits(body, "classify_capture_anyhow(").len();
+    assert!(
+        delegations >= min_delegations,
+        "{label} must route captured-output bails through \
+         `classify_capture_anyhow` — found only {delegations} \
+         delegation call(s); a dropped call would leave the negative \
+         `if !output.status.success` scan satisfied by absence"
+    );
+}
+
 /// One canonical composition for a whole-module `<bare>`-through-sigil
 /// routing shield with the SOLITARY-RESOLVE invariant: every `<bare>`
 /// spawn in `source` MUST route through the `<sigil>_bin()` sigil, AND
@@ -3770,6 +3863,74 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "fake/module.rs",
             0,
             "no spawns claimed",
+        );
+    }
+
+    /// Happy path for
+    /// [`assert_source_routes_captured_bails_through_classify_capture_anyhow`]:
+    /// a body carrying a `classify_capture_anyhow(` delegation and NO
+    /// `if !output.status.success` inline stanza passes cleanly. The
+    /// stub body carries a control-flow-shape `output.status.success()`
+    /// (without the `if !` prefix) as a match guard so the shield's
+    /// negative-side needle is exercised against a legitimate sibling
+    /// consumer of the same accessor chain — a future regression that
+    /// widened the needle to bare `output.status.success` would fail
+    /// here, catching the false-positive class before it landed on any
+    /// migrated site.
+    #[test]
+    fn test_assert_source_routes_captured_bails_through_classify_capture_anyhow_accepts_migrated_body(
+    ) {
+        let body = "\
+            let _output = crate::retry::classify_capture_anyhow(cmd.output(), \"jsonnet\")?;\n\
+            match cmd2.output() { Ok(output) if output.status.success() => (), _ => () }\n";
+        assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/fake.rs::fake_fn",
+            1,
+        );
+    }
+
+    /// An inline `if !output.status.success()` bail terminator fires the
+    /// negative-side assertion. Panics before the positive-side scan
+    /// runs, so a body that ALSO carried the delegation would still
+    /// fail on the bail-shape refusal — matching the stanza order every
+    /// migrated site enforces.
+    #[test]
+    #[should_panic(
+        expected = "commands/fake.rs::fake_fn must not carry an inline `if !output.status.success`"
+    )]
+    fn test_assert_source_routes_captured_bails_through_classify_capture_anyhow_rejects_inline_bail(
+    ) {
+        let body = "\
+            let output = cmd.output()?;\n\
+            if !output.status.success() { bail!(\"nope\"); }\n\
+            let _ = crate::retry::classify_capture_anyhow(other.output(), \"other\")?;\n";
+        assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/fake.rs::fake_fn",
+            1,
+        );
+    }
+
+    /// A missing `classify_capture_anyhow(` delegation fires the
+    /// positive-side assertion — reachable only when the negative-side
+    /// bail refusal passes. Pins the positive floor against a
+    /// regression that dropped the delegation and accidentally
+    /// satisfied the negative scan by absence.
+    #[test]
+    #[should_panic(
+        expected = "commands/fake.rs::fake_fn must route captured-output bails through `classify_capture_anyhow`"
+    )]
+    fn test_assert_source_routes_captured_bails_through_classify_capture_anyhow_rejects_missing_delegation(
+    ) {
+        let body = "\
+            let output = cmd.output()?;\n\
+            // No bail, no delegation — the positive floor still fails.\n\
+            drop(output);\n";
+        assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/fake.rs::fake_fn",
+            1,
         );
     }
 
