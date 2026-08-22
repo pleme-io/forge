@@ -1654,27 +1654,24 @@ migrations:
 
     #[tokio::test]
     async fn test_validate_manifest_missing_file() {
-        let dir = std::env::temp_dir().join("test_manifest_missing");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir_guard = crate::test_support::named_scratch_dir("test_manifest_missing");
+        let dir = dir_guard.path();
         // No manifest file
 
         let config = MigrationGatesConfig::default();
-        let result = validate_migration_manifest(&dir, &config).await.unwrap();
+        let result = validate_migration_manifest(dir, &config).await.unwrap();
         assert_eq!(result.issues.len(), 1);
         assert!(matches!(
             &result.issues[0],
             MigrationIssue::DataMigrationIncomplete { issue_type, .. }
             if issue_type.contains("Missing manifest")
         ));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_validate_manifest_with_unassessed_migration() {
-        let dir = std::env::temp_dir().join("test_manifest_unassessed");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
+        let dir_guard = crate::test_support::named_scratch_dir("test_manifest_unassessed");
+        let dir = dir_guard.path();
 
         // Create a migration file
         std::fs::write(
@@ -1692,22 +1689,19 @@ migrations:
             ..Default::default()
         };
 
-        let result = validate_migration_manifest(&dir, &config).await.unwrap();
+        let result = validate_migration_manifest(dir, &config).await.unwrap();
         assert_eq!(result.issues.len(), 1);
         assert!(matches!(
             &result.issues[0],
             MigrationIssue::DataMigrationIncomplete { issue_type, .. }
             if issue_type.contains("not assessed")
         ));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_validate_manifest_noop_without_reason() {
-        let dir = std::env::temp_dir().join("test_manifest_noop_no_reason");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
+        let dir_guard = crate::test_support::named_scratch_dir("test_manifest_noop_no_reason");
+        let dir = dir_guard.path();
 
         std::fs::write(dir.join("m20260301_000001_add_col.rs"), "// migration").unwrap();
 
@@ -1726,22 +1720,19 @@ migrations:
             ..Default::default()
         };
 
-        let result = validate_migration_manifest(&dir, &config).await.unwrap();
+        let result = validate_migration_manifest(dir, &config).await.unwrap();
         assert_eq!(result.issues.len(), 1);
         assert!(matches!(
             &result.issues[0],
             MigrationIssue::DataMigrationIncomplete { issue_type, .. }
             if issue_type.contains("without reason")
         ));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_validate_manifest_schema_and_data_missing_forward() {
-        let dir = std::env::temp_dir().join("test_manifest_missing_forward");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
+        let dir_guard = crate::test_support::named_scratch_dir("test_manifest_missing_forward");
+        let dir = dir_guard.path();
 
         std::fs::write(dir.join("m20260301_000001_rename.rs"), "// migration").unwrap();
 
@@ -1760,22 +1751,19 @@ migrations:
             ..Default::default()
         };
 
-        let result = validate_migration_manifest(&dir, &config).await.unwrap();
+        let result = validate_migration_manifest(dir, &config).await.unwrap();
         assert_eq!(result.issues.len(), 1);
         assert!(matches!(
             &result.issues[0],
             MigrationIssue::DataMigrationIncomplete { issue_type, .. }
             if issue_type.contains("without data_forward")
         ));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_validate_manifest_all_pass() {
-        let dir = std::env::temp_dir().join("test_manifest_pass");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
+        let dir_guard = crate::test_support::named_scratch_dir("test_manifest_pass");
+        let dir = dir_guard.path();
 
         std::fs::write(dir.join("m20260301_000001_add_col.rs"), "// migration").unwrap();
         std::fs::write(dir.join("m20260301_000002_index.rs"), "// migration").unwrap();
@@ -1799,18 +1787,15 @@ migrations:
             ..Default::default()
         };
 
-        let result = validate_migration_manifest(&dir, &config).await.unwrap();
+        let result = validate_migration_manifest(dir, &config).await.unwrap();
         assert!(result.issues.is_empty());
         assert_eq!(result.assessed_count, 2);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_rollback_compatibility_warns_on_missing_backward() {
-        let dir = std::env::temp_dir().join("test_rollback_compat");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
+        let dir_guard = crate::test_support::named_scratch_dir("test_rollback_compat");
+        let dir = dir_guard.path();
 
         std::fs::write(dir.join("m20260301_000001_rename.rs"), "// migration").unwrap();
         std::fs::write(
@@ -1837,20 +1822,16 @@ migrations:
             ..Default::default()
         };
 
-        let result = validate_rollback_compatibility(&dir, &config)
-            .await
-            .unwrap();
+        let result = validate_rollback_compatibility(dir, &config).await.unwrap();
         assert_eq!(result.warnings.len(), 1);
         assert!(result.warnings[0].contains("without data_backward"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_validate_manifest_data_forward_file_missing() {
-        let dir = std::env::temp_dir().join("test_manifest_forward_file_missing");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
+        let dir_guard =
+            crate::test_support::named_scratch_dir("test_manifest_forward_file_missing");
+        let dir = dir_guard.path();
 
         // Create the schema_and_data migration but NOT the companion file
         std::fs::write(dir.join("m20260301_000001_rename.rs"), "// migration").unwrap();
@@ -1873,7 +1854,7 @@ migrations:
             ..Default::default()
         };
 
-        let result = validate_migration_manifest(&dir, &config).await.unwrap();
+        let result = validate_migration_manifest(dir, &config).await.unwrap();
         // Should have 2 issues: companion file missing + orphaned manifest entry
         let forward_issue = result.issues.iter().any(|i| {
             matches!(
@@ -1883,15 +1864,12 @@ migrations:
             )
         });
         assert!(forward_issue, "Should detect missing companion file");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_validate_manifest_data_forward_wrong_classification() {
-        let dir = std::env::temp_dir().join("test_manifest_forward_wrong_class");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
+        let dir_guard = crate::test_support::named_scratch_dir("test_manifest_forward_wrong_class");
+        let dir = dir_guard.path();
 
         std::fs::write(dir.join("m20260301_000001_rename.rs"), "// migration").unwrap();
         std::fs::write(dir.join("m20260301_000002_rename_data.rs"), "// companion").unwrap();
@@ -1916,7 +1894,7 @@ migrations:
             ..Default::default()
         };
 
-        let result = validate_migration_manifest(&dir, &config).await.unwrap();
+        let result = validate_migration_manifest(dir, &config).await.unwrap();
         let cross_issue = result.issues.iter().any(|i| {
             matches!(
                 i,
@@ -1925,15 +1903,13 @@ migrations:
             )
         });
         assert!(cross_issue, "Should detect wrong companion classification");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_validate_manifest_data_forward_not_in_manifest() {
-        let dir = std::env::temp_dir().join("test_manifest_forward_not_declared");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
+        let dir_guard =
+            crate::test_support::named_scratch_dir("test_manifest_forward_not_declared");
+        let dir = dir_guard.path();
 
         std::fs::write(dir.join("m20260301_000001_rename.rs"), "// migration").unwrap();
         std::fs::write(
@@ -1959,7 +1935,7 @@ migrations:
             ..Default::default()
         };
 
-        let result = validate_migration_manifest(&dir, &config).await.unwrap();
+        let result = validate_migration_manifest(dir, &config).await.unwrap();
         // Two issues: companion not in manifest + migration file not assessed
         let not_declared = result.issues.iter().any(|i| {
             matches!(
@@ -1972,15 +1948,12 @@ migrations:
             not_declared,
             "Should detect companion not declared in manifest"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_validate_manifest_orphaned_entry() {
-        let dir = std::env::temp_dir().join("test_manifest_orphaned");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
+        let dir_guard = crate::test_support::named_scratch_dir("test_manifest_orphaned");
+        let dir = dir_guard.path();
 
         // Only one migration file exists
         std::fs::write(dir.join("m20260301_000001_add_col.rs"), "// migration").unwrap();
@@ -2005,7 +1978,7 @@ migrations:
             ..Default::default()
         };
 
-        let result = validate_migration_manifest(&dir, &config).await.unwrap();
+        let result = validate_migration_manifest(dir, &config).await.unwrap();
         let orphaned = result.issues.iter().any(|i| {
             matches!(
                 i,
@@ -2014,7 +1987,68 @@ migrations:
             )
         });
         assert!(orphaned, "Should detect orphaned manifest entry");
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    /// Delegation-count shield: every `commands/migration_validation.rs`
+    /// test that needs an on-disk scratch dir MUST route through
+    /// [`crate::test_support::named_scratch_dir`], not the pre-lift
+    /// `std::env::temp_dir().join("<fixed-name>")` boilerplate. Ten
+    /// pre-lift sites migrated; the `>= 10` floor forces every future
+    /// scratch-dir-consuming test to land on the RAII primitive by
+    /// construction, and a regression that silently reintroduced the
+    /// three-line pre-clean-then-recreate stanza (leaking the tempdir
+    /// on a mid-body panic per THEORY §V verification-by-construction
+    /// and racing the fixed-name subdir per THEORY §VII operation)
+    /// would drop the primitive-call hit count below the floor and
+    /// fail HERE before its consumer flaked on a CI reranner.
+    ///
+    /// The negative half — no code-line references the pre-lift
+    /// `std::env::temp_dir()` shape — pairs with the positive floor:
+    /// a shield that only counted `named_scratch_dir` calls could be
+    /// satisfied by ADDING the primitive alongside a lingering
+    /// pre-lift stanza; the negative check forces the old shape's
+    /// code-line absence. The forbidden needle is reconstructed via
+    /// [`format!`] at test time so this shield's own docstring /
+    /// panic-message prose does not false-match itself — the same
+    /// discipline [`crate::test_support::canonical_two_arg_sigil_needle`]
+    /// holds for the routing-needle family, and the sibling
+    /// [`crate::test_support::code_line_hits`] filter already skips
+    /// `///` / `//!` / `//` lines so the shield's docstring above is
+    /// out of scope by construction; the reconstruction is belt-and-
+    /// suspenders for a future edit that inlines the forbidden phrase
+    /// into a raw string literal on a code line.
+    #[test]
+    fn test_migration_validation_tests_route_scratch_through_named_scratch_dir() {
+        const SOURCE: &str = include_str!("migration_validation.rs");
+        let hits =
+            crate::test_support::code_line_hits(SOURCE, "crate::test_support::named_scratch_dir(");
+        assert!(
+            hits.len() >= 10,
+            "commands/migration_validation.rs must route every scratch-dir-consuming \
+             test through `crate::test_support::named_scratch_dir(...)` (an RAII \
+             wrapper whose `Drop` unlinks the tempdir through panics), not the \
+             pre-lift fixed-name-under-shared-temp-root stanza. Expected >= 10 \
+             code-line delegations; found {}.\n{}",
+            hits.len(),
+            hits.join("\n")
+        );
+        let forbidden = format!("std::env::{}()", "temp_dir");
+        let residue = crate::test_support::code_line_hits(SOURCE, &forbidden);
+        assert!(
+            residue.is_empty(),
+            "commands/migration_validation.rs must NOT reintroduce the pre-lift \
+             fixed-name-under-shared-temp-root shape — a mid-body panic leaves \
+             the subdir on disk (breaking THEORY §V verification-by-construction: \
+             a failing test now flakes a concurrent second run against its \
+             residue), and two parallel `cargo test` runs collide on the same \
+             fixed subdir name (breaking THEORY §VII operation: an operator \
+             debugging the flake reads it as \"the test is nondeterministic\"). \
+             Route new scratch-dir tests through \
+             `crate::test_support::named_scratch_dir` — \
+             `tempfile::Builder::prefix(...).tempdir()` appends an OS-unique \
+             suffix (POSIX `mkdtemp(3)` on Unix) and the returned `TempDir`'s \
+             `Drop` runs through panics.\n{}",
+            residue.join("\n")
+        );
     }
 }

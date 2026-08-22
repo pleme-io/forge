@@ -2442,6 +2442,92 @@ pub fn assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg(
     );
 }
 
+/// RAII-safe scratch directory for tests that need on-disk state
+/// (write fixture files, then assert against them, then clean up).
+///
+/// Builds a fresh tempdir under the system tempdir root, prefixed with
+/// `prefix` so the created directory's basename embeds the caller-
+/// supplied label (`tempfile::Builder`'s `prefix` becomes the leading
+/// component of the OS-unique basename it hands back). Returns the
+/// owning [`tempfile::TempDir`], whose `Drop` unlinks the directory
+/// and every file underneath — the caller MUST bind the return value
+/// to a local `_dir` (or longer-lived) variable for the duration of
+/// the test. Callers reach the on-disk path via `guard.path()` — the
+/// same shape [`make_executable_shim`]'s consumers use.
+///
+/// # Why one canonical helper
+///
+/// Ten tests in `commands/migration_validation.rs::tests` each carry
+/// the same three-to-four-line boilerplate:
+///
+/// ```ignore
+/// let dir = std::env::temp_dir().join("test_manifest_missing");
+/// let _ = std::fs::remove_dir_all(&dir);
+/// let _ = std::fs::create_dir_all(&dir);
+/// // ... test body writing under `&dir` ...
+/// let _ = std::fs::remove_dir_all(&dir);
+/// ```
+///
+/// Ten occurrences is >3× THEORY.md §VI.1's three-times-is-a-law
+/// threshold ("two occurrences is a coincidence; three is a law").
+/// The pre-lift stanza also carries three defects the RAII lift
+/// closes by construction:
+///
+/// 1. **A panic mid-test leaks the tempdir.** `assert_eq!` /
+///    `assert!` panic on failure, so any failing test skips the
+///    trailing `remove_dir_all` and leaves `/tmp/test_manifest_missing`
+///    on disk. A CI reranner that lands on the same test-runner
+///    machine hits the stale state (the pre-clean sweep does fire
+///    at test entry, but two parallel test-binary instances of the
+///    same test race the pre-clean-then-recreate window, so the
+///    second instance's `create_dir_all` can observe a partially-
+///    deleted state the first is still tearing down). `TempDir`'s
+///    `Drop` runs unconditionally — through panics too — closing
+///    the leak at the type system.
+/// 2. **`std::env::temp_dir().join("<fixed-name>")` is a shared,
+///    non-unique path.** Two concurrent `cargo test` runs (a
+///    developer running the suite while CI runs it on the same
+///    workstation, or two matrix jobs on a single self-hosted
+///    runner) collide on the same subdir and produce interleaved
+///    writes / deletes an operator debugging a flake reads as
+///    "the test is nondeterministic". `tempfile::Builder::prefix(...)
+///    .tempdir()` appends an OS-unique suffix (POSIX `mkdtemp(3)`
+///    on Unix), so two concurrent calls with the same prefix return
+///    strictly-distinct paths by construction.
+/// 3. **Duplicate boilerplate spreads a hidden precondition.** The
+///    pre-lift `let _ = std::fs::remove_dir_all(&dir);` sweep is
+///    LOAD-BEARING for the fixed-name shape — without it, state
+///    from a prior run silently pollutes this run. Nine of the ten
+///    sites carry it; one (`test_validate_manifest_missing_file`)
+///    silently omits the pre-clean because its body writes no
+///    files ("no manifest file"), so a future edit that added a
+///    file-write inherited the fixed-name-and-no-preclean shape and
+///    would flake against a prior run's residue. The RAII lift
+///    makes the shape irrelevant — every scratch dir is fresh by
+///    construction, so a caller adding a file-write cannot
+///    reintroduce the flake.
+///
+/// # Contrast with `make_executable_shim`
+///
+/// [`make_executable_shim`] returns a `(TempDir, String)` pair
+/// because its consumers need the absolute path to the shim binary
+/// inside the tempdir for `Command::new(shim_path)` — a two-slot
+/// return is load-bearing there. This helper's consumers own
+/// arbitrary on-disk state under the tempdir root (multiple files,
+/// nested subdirs) and reach the root via `guard.path()`, so a
+/// single-slot `TempDir` return is the tighter shape. Both
+/// primitives share the "the returned owner is what keeps the
+/// on-disk state alive, and a bare-string return would race Drop"
+/// discipline.
+pub fn named_scratch_dir(prefix: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .unwrap_or_else(|err| {
+            panic!("named_scratch_dir({prefix:?}): failed to create tempdir: {err}")
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3518,6 +3604,133 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             !std::path::Path::new(&path).exists(),
             "shim must be unlinked after TempDir drops, but still exists at: {path}"
         );
+    }
+
+    /// [`named_scratch_dir`] hands back a real, existing directory the
+    /// caller can `write` / `create_dir_all` under immediately. Floor
+    /// for every consumer in `commands/migration_validation.rs::tests`:
+    /// a regression that returned a `TempDir` whose backing directory
+    /// had already been unlinked (or was never created) would surface
+    /// here as a `Path::is_dir() == false`, not as a confusing `ENOENT`
+    /// from the FIRST `std::fs::write` call inside a consumer test.
+    #[test]
+    fn test_named_scratch_dir_returns_existing_directory() {
+        let guard = named_scratch_dir("floor-existing");
+        let path = guard.path();
+        assert!(path.exists(), "scratch dir must exist on disk: {path:?}");
+        assert!(path.is_dir(), "scratch dir must be a directory: {path:?}");
+        // A canary write proves the dir is writable in the same call, closing
+        // the "dir exists but is read-only" trap a Unix chmod drift would open.
+        std::fs::write(path.join("canary"), b"ok").expect("write inside scratch");
+        assert_eq!(
+            std::fs::read(path.join("canary")).expect("read canary"),
+            b"ok"
+        );
+    }
+
+    /// The caller-supplied `prefix` is embedded at the start of the
+    /// created directory's basename — `tempfile::Builder::prefix` is
+    /// the exact primitive backing the helper, and it appends the
+    /// OS-unique suffix AFTER the prefix. Pinning this is what
+    /// preserves the "descriptive name at debug time" carve-out the
+    /// pre-lift `std::env::temp_dir().join("test_manifest_missing")`
+    /// stanza carried: an operator dumping `ls /tmp` after a failing
+    /// test can still trace the tempdir back to which test wrote it.
+    /// A future drift that dropped the `.prefix(...)` slot (say a
+    /// migration onto bare `tempfile::tempdir()`) would fail HERE.
+    #[test]
+    fn test_named_scratch_dir_embeds_prefix_in_basename() {
+        let guard = named_scratch_dir("audit-me");
+        let basename = guard
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("basename utf-8");
+        assert!(
+            basename.starts_with("audit-me"),
+            "basename must start with the prefix, got: {basename}"
+        );
+        // The unique-suffix half: the basename must be strictly LONGER than
+        // the prefix (else two concurrent calls with the same prefix would
+        // collide on identical paths, defeating the "no fixed-name race"
+        // carve-out that motivated the lift).
+        assert!(
+            basename.len() > "audit-me".len(),
+            "basename must include a unique suffix beyond the prefix, got: {basename}"
+        );
+    }
+
+    /// Two concurrent (or sequential) calls with the SAME prefix return
+    /// strictly-distinct paths — `tempfile::Builder::prefix(...).tempdir()`
+    /// is backed by `mkdtemp(3)` on Unix, which guarantees an
+    /// OS-unique suffix per call. Pinning this closes the fixed-name
+    /// race the pre-lift `std::env::temp_dir().join("<fixed>")` shape
+    /// carried: two parallel `cargo test` runs (or two matrix jobs on
+    /// a shared self-hosted runner) with the same test binary would
+    /// pre-clean-and-recreate the same subdir and interleave writes
+    /// / deletes under it. Post-lift the paths are strictly-distinct
+    /// by construction, so collision is impossible regardless of how
+    /// many concurrent callers name the same prefix.
+    #[test]
+    fn test_named_scratch_dir_two_calls_same_prefix_return_distinct_paths() {
+        let a = named_scratch_dir("dup-prefix");
+        let b = named_scratch_dir("dup-prefix");
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "two calls with the same prefix must return strictly-distinct paths"
+        );
+        assert!(a.path().exists() && b.path().exists());
+    }
+
+    /// When the returned `TempDir` is dropped — including through a
+    /// panic in the test body — the on-disk directory AND every file
+    /// underneath it are unlinked. This is the panic-safety carve-out
+    /// the pre-lift stanza did NOT hold: a mid-body `assert_eq!` panic
+    /// skipped the trailing `let _ = std::fs::remove_dir_all(&dir);`
+    /// and leaked the state to the next run. Post-lift `Drop` is the
+    /// unconditional cleanup by construction, and this test pins that
+    /// contract at the type-system level rather than at prose in the
+    /// helper's docstring.
+    ///
+    /// The nested-file assertion is load-bearing: `Drop` must remove
+    /// the DIRECTORY (which requires it to be empty or use recursive
+    /// removal internally), not just its own entry. A future drift
+    /// onto a `TempDir` shape whose `Drop` only handled empty
+    /// directories would leave `payload` orphaned; the shape
+    /// `tempfile::TempDir` already contracts is recursive-remove per
+    /// `Drop`, and this test pins forge's dependence on that contract.
+    #[test]
+    fn test_named_scratch_dir_drop_removes_directory_and_contents() {
+        let path = {
+            let guard = named_scratch_dir("drop-cleanup");
+            let path = guard.path().to_path_buf();
+            std::fs::write(path.join("payload"), b"contents")
+                .expect("write payload inside scratch");
+            assert!(path.join("payload").exists());
+            drop(guard);
+            path
+        };
+        assert!(
+            !path.exists(),
+            "scratch dir must be unlinked after TempDir drops, but still exists at: {path:?}"
+        );
+    }
+
+    /// `commands/migration_validation.rs::tests` migrated ten pre-lift
+    /// scratch-dir sites onto this primitive; a future edit that
+    /// silently deleted the primitive (or renamed it without updating
+    /// consumers) would break every consumer test. This pins the
+    /// primitive's continued existence at the top of the module's
+    /// export surface so a rename lands in one place with a compile
+    /// error at the consumer, not as a mystery test breakage.
+    #[test]
+    fn test_named_scratch_dir_is_reachable_from_test_support_root() {
+        // The mere fact that this test compiles proves the primitive is
+        // reachable via `crate::test_support::named_scratch_dir` — the
+        // consumer path the shield in `commands/migration_validation.rs`
+        // pins. Invocation here is the runtime half.
+        let _guard = crate::test_support::named_scratch_dir("reachability");
     }
 
     /// `init_repo_with_one_commit` leaves the work-tree on `main`
