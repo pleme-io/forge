@@ -533,28 +533,25 @@ async fn generate_entities(config: &SyncConfig) -> Result<bool> {
     let sea_orm_cli = get_tool_path("SEA_ORM_CLI_BIN", "sea-orm-cli");
 
     // Generate entities
-    let output = Command::new(&sea_orm_cli)
-        .args([
-            "generate",
-            "entity",
-            "-u",
-            &database_url.unwrap(),
-            "-o",
-            "src/entities",
-            "--entity-format",
-            "dense",
-            "--with-serde",
-            "both",
-        ])
-        .current_dir(&config.backend_dir)
-        .output()
-        .await
-        .context("Failed to run sea-orm-cli")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Entity generation failed: {}", stderr);
-    }
+    let _output = crate::retry::classify_capture_anyhow(
+        Command::new(&sea_orm_cli)
+            .args([
+                "generate",
+                "entity",
+                "-u",
+                &database_url.unwrap(),
+                "-o",
+                "src/entities",
+                "--entity-format",
+                "dense",
+                "--with-serde",
+                "both",
+            ])
+            .current_dir(&config.backend_dir)
+            .output()
+            .await,
+        "sea-orm-cli generate entity",
+    )?;
 
     Ok(true)
 }
@@ -732,6 +729,47 @@ mod tests {
             SOURCE,
             "commands/sync.rs",
             "sea-orm-cli",
+        );
+    }
+
+    /// Captured-output routing shield scoped to `generate_entities`'s
+    /// fn body: the sole
+    /// `if !output.status.success() { bail!("Entity generation failed: {stderr}") }`
+    /// stanza in the fn — the module's sole bail-drops-exit-code
+    /// captured-output site — MUST route through
+    /// [`crate::retry::classify_capture_anyhow`]. Pre-lift the operator
+    /// log line read `"Entity generation failed: <stderr>"` and dropped
+    /// the exit code: an operator seeing the message on a `sea-orm-cli
+    /// generate entity` run against a stale schema had no way to tell
+    /// whether sea-orm-cli exited 1 (a real schema-inspection error),
+    /// 2 (`DATABASE_URL` unreachable), or 127 (a bad `SEA_ORM_CLI_BIN`
+    /// route). Post-lift the canonical `"sea-orm-cli generate entity
+    /// failed (exit {code}): {stderr}"` envelope emerges by
+    /// construction at the primitive's ONE body.
+    ///
+    /// Scope is `generate_entities`'s fn body (via
+    /// [`crate::test_support::fn_body_slice_between_markers`]) rather
+    /// than the whole module because `check_drift` retains two
+    /// legitimate `if !install_output.status.success()` /
+    /// `if !codegen_output.status.success()` sites that short-circuit
+    /// into `DriftCheckResult::error(...)` rather than bail — a shape
+    /// the primitive intentionally does NOT cover, and a whole-module
+    /// scan would false-fire on. The `end_marker` is the sibling
+    /// `count_ts_files` fn signature, the first fn after
+    /// `generate_entities` in module order.
+    #[test]
+    fn test_generate_entities_bail_routes_through_classify_capture_anyhow() {
+        const SOURCE: &str = include_str!("sync.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/sync.rs",
+            "async fn generate_entities(",
+            "\nasync fn count_ts_files(",
+        );
+        crate::test_support::assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/sync.rs::generate_entities",
+            1,
         );
     }
 }

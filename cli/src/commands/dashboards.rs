@@ -9,7 +9,7 @@
 //!   forge dashboards --working-dir /path/to/product
 //!   forge dashboards --working-dir /path/to/product --check
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -375,17 +375,14 @@ fn run_jsonnet(config: &DashboardConfig) -> Result<HashMap<String, serde_json::V
     }
 
     let jsonnet = jsonnet_bin();
-    let output = Command::new(&jsonnet)
-        .arg("-J")
-        .arg(templates_dir.join("vendor"))
-        .arg(&main_jsonnet)
-        .output()
-        .context("Failed to run jsonnet command")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Jsonnet failed: {}", stderr);
-    }
+    let output = crate::retry::classify_capture_anyhow(
+        Command::new(&jsonnet)
+            .arg("-J")
+            .arg(templates_dir.join("vendor"))
+            .arg(&main_jsonnet)
+            .output(),
+        "jsonnet",
+    )?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let dashboards: HashMap<String, serde_json::Value> = serde_json::from_str(&stdout)?;
@@ -783,6 +780,42 @@ mod tests {
             "commands/dashboards.rs",
             "JSONNET_BIN",
             "jsonnet",
+        );
+    }
+
+    /// Captured-output routing shield: the sole
+    /// `if !output.status.success() { bail!("Jsonnet failed: {stderr}") }`
+    /// stanza in `generate_dashboards_from_jsonnet` — the module's ONE
+    /// captured-output bail site — MUST route through
+    /// [`crate::retry::classify_capture_anyhow`]. Pre-lift the operator
+    /// log line read `"Jsonnet failed: <stderr>"` and dropped the exit
+    /// code: an operator reading that message on a jsonnet render
+    /// against an ill-formed `dashboards.jsonnet` had no way to tell
+    /// whether jsonnet exited 1 (a real parse error), 2 (a missing
+    /// `-J vendor` import), or 127 (a bad `JSONNET_BIN` route past the
+    /// sigil's own PATH-fallback). Post-lift the canonical
+    /// `"jsonnet failed (exit {code}): {stderr}"` envelope emerges by
+    /// construction at [`crate::retry::classify_capture_anyhow`]'s ONE
+    /// body — the same `(op, exit_code, stderr)` envelope the sibling
+    /// `commands/sync.rs::generate_entities` and
+    /// `commands/federation_tests.rs::run_federation_tests` shields
+    /// pin against this commit.
+    ///
+    /// The shield uses the whole-module include (rather than an
+    /// `fn_body_slice_between_markers` cut) because
+    /// `commands/dashboards.rs` carries NO other
+    /// `output.status.success` consumer sites — the pre-lift stanza
+    /// was the module's sole occurrence, and the helper's needle
+    /// (`if !output.status.success`) cannot false-match the whole
+    /// module.
+    #[test]
+    fn test_generate_dashboards_from_jsonnet_bail_routes_through_classify_capture_anyhow() {
+        const SOURCE: &str = include_str!("dashboards.rs");
+        let body = crate::test_support::module_body_before_tests(SOURCE, "commands/dashboards.rs");
+        crate::test_support::assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/dashboards.rs::generate_dashboards_from_jsonnet",
+            1,
         );
     }
 }

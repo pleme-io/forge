@@ -220,16 +220,13 @@ pub async fn run_federation_tests(
 
     // Apply the job
     println!("   🚀 Creating federation test job...");
-    let output = kubectl_command_async()
-        .args(&["apply", "-f", &manifest_path])
-        .output()
-        .await
-        .context("Failed to create federation test job")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to create federation test job:\n{}", stderr);
-    }
+    let _output = crate::retry::classify_capture_anyhow(
+        kubectl_command_async()
+            .args(&["apply", "-f", &manifest_path])
+            .output()
+            .await,
+        "kubectl apply federation test job",
+    )?;
 
     println!("   ✅ Job created: {}", job_name.green());
 
@@ -964,6 +961,51 @@ mod tests {
             "federation_tests.rs must delegate every kubectl spawn to \
              `kubectl_command_async()` — the delegation string was \
              not found in the module body."
+        );
+    }
+
+    /// Captured-output routing shield scoped to
+    /// `run_federation_tests`'s fn body: the sole
+    /// `if !output.status.success() { bail!("Failed to create federation
+    /// test job:\n{stderr}") }` stanza in the fn — the pre-lift bail
+    /// site immediately following the `kubectl apply -f <manifest>`
+    /// spawn — MUST route through
+    /// [`crate::retry::classify_capture_anyhow`]. Pre-lift the operator
+    /// log line read `"Failed to create federation test job: <stderr>"`
+    /// and dropped the exit code: an operator seeing the message on a
+    /// federation-test-job creation against an ill-formed job manifest
+    /// had no way to tell whether kubectl exited 1 (a real apply
+    /// error), 2 (invalid YAML the operator's own `.write` produced),
+    /// or 127 (a `KUBECTL_BIN` route to a missing binary). Post-lift
+    /// the canonical `"kubectl apply federation test job failed (exit
+    /// {code}): {stderr}"` envelope emerges by construction at the
+    /// primitive's ONE body.
+    ///
+    /// Scope is `run_federation_tests`'s fn body (via
+    /// [`crate::test_support::fn_body_slice_between_markers`]) rather
+    /// than the whole module because `wait_for_job_completion` and
+    /// `check_job_success` retain two legitimate
+    /// `output.status.success()` accessor sites that discriminate the
+    /// poll-loop state (`WaitOutcome::Succeeded` vs `::Failed`) rather
+    /// than bail — a shape the primitive intentionally does NOT cover,
+    /// and the shield's needle deliberately omits the trailing `()` so
+    /// a whole-module scan would still false-fire on the `if !` prefix
+    /// were the fn scope not narrowed. The `end_marker` is the sibling
+    /// `wait_for_job_completion` fn signature, the first fn after
+    /// `run_federation_tests` in module order.
+    #[test]
+    fn test_run_federation_tests_bail_routes_through_classify_capture_anyhow() {
+        const SOURCE: &str = include_str!("federation_tests.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/federation_tests.rs",
+            "pub async fn run_federation_tests(",
+            "\nasync fn wait_for_job_completion(",
+        );
+        crate::test_support::assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/federation_tests.rs::run_federation_tests",
+            1,
         );
     }
 }
