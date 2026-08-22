@@ -14443,6 +14443,17 @@ pub fn run_inherited_status_sync(mut cmd: std::process::Command, op: &str) -> an
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Alias-import the shared fork-free fake-`Output` builder as
+    // `synth_output` so the 80+ pre-existing call sites in this test
+    // module read verbatim while the underlying construction routes
+    // through the ONE `test_support::synthetic_output` body — the same
+    // consolidation `commands/status.rs::tests` (c8a3f55) and
+    // `commands/helm.rs::capture_tests` (c8a3f55) already carry against
+    // their pre-lift `fn make_output` bodies. Pre-lift the fork-based
+    // local `fn synth_output` this module carried paid `Command::new(
+    // "true"/"false").status().expect(...)` per fake-`Output`
+    // construction (see the sibling shield below for the enforcement).
+    use crate::test_support::synthetic_output as synth_output;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -31091,25 +31102,6 @@ mod tests {
         assert_eq!(result.unwrap_err(), "once");
     }
 
-    /// Helper: synthesize a `std::process::Output` with the given exit
-    /// status, stdout, and stderr. Lets the `from_capture` tests pin the
-    /// typed conversion without driving a real subprocess.
-    fn synth_output(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
-        // ExitStatus has no public constructor; produce one by running a
-        // trivial host binary whose exit code is deterministic. `true`
-        // (exit 0) and `false` (exit 1) ship on every platform forge
-        // targets and the OS-level fork is a few hundred microseconds.
-        let bin = if success { "true" } else { "false" };
-        let status = std::process::Command::new(bin)
-            .status()
-            .expect("host must provide /usr/bin/true and /usr/bin/false for the test runner");
-        std::process::Output {
-            status,
-            stdout: stdout.to_vec(),
-            stderr: stderr.to_vec(),
-        }
-    }
-
     /// Success case — `from_capture` returns the captured `Output` so
     /// callers can still read stdout/stderr (e.g., for debug-logging the
     /// happy path).
@@ -35546,6 +35538,55 @@ mod tests {
             result.is_ok(),
             "primitive must preserve caller-supplied .args() argv; got: {:?}",
             result.err().map(|e| format!("{:#}", e))
+        );
+    }
+
+    /// Consolidation shield: the 80+ `from_capture` / retry-classifier /
+    /// `log_retry_attempt` shields in this test module MUST route
+    /// fake-`Output` construction through the shared
+    /// [`crate::test_support::synthetic_output`] helper (aliased locally
+    /// as `synth_output` at the `mod tests` head), NOT a locally-
+    /// redefined fork-based builder. Pre-consolidation this module
+    /// carried a `fn synth_output` body that forked
+    /// `Command::new("true"/"false").status().expect(...)` per
+    /// fake-`Output` construction — the same fork-per-call cost the
+    /// sibling `commands/status.rs::tests` and
+    /// `commands/helm.rs::capture_tests` shields already close against
+    /// their `fn make_output` copies (c8a3f55). PRIME DIRECTIVE:
+    /// duplication budget is zero (THEORY §VI.1). All four sites now
+    /// delegate to the ONE `test_support::synthetic_output` body, so a
+    /// future reshape (adding a captured signal detail, widening to a
+    /// cross-platform builder, tracking the fork-elapsed instant) lands
+    /// at one body.
+    ///
+    /// Positive floor: the shared-helper import substring appears at
+    /// least once in the module (a bare `use ...synthetic_output;` or
+    /// the aliased `use ...synthetic_output as ...;` shape both match).
+    /// Negative floor: the deprecated fork-based local-def signature
+    /// does NOT reappear. Both needles are assembled via [`format!`] at
+    /// test time so this shield's own source text (which mentions the
+    /// concepts in prose) does not self-match the substring check.
+    #[test]
+    fn tests_use_shared_synthetic_output_from_test_support_not_local_redef() {
+        const SOURCE: &str = include_str!("retry.rs");
+        let import_needle = format!("use crate::test_support::{}", "synthetic_output");
+        assert!(
+            SOURCE.contains(&import_needle),
+            "retry.rs::tests must import the shared fake-`Output` \
+             helper via `test_support` — the local fork-based builder \
+             was consolidated into the shared primitive."
+        );
+        let deprecated_signature = format!(
+            "fn synth_{}(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output",
+            "output"
+        );
+        assert!(
+            !SOURCE.contains(&deprecated_signature),
+            "retry.rs must NOT redefine the deprecated local fork-based \
+             fake-`Output` builder — route all fake-`Output` \
+             construction through `crate::test_support::\
+             synthetic_output` so a future reshape of the shape \
+             lands at ONE body."
         );
     }
 }
