@@ -87,28 +87,28 @@ pub async fn test(hostname: String, port: u16, ssh_key: String, package: String)
     }
 
     info!("Testing SSH connection...");
-    let ssh_test = Command::new(get_tool_path("SSH_BIN", "ssh"))
-        .args(&[
-            "-i",
-            &ssh_key,
-            "-p",
-            &port.to_string(),
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "ConnectTimeout=10",
-            &format!("root@{}", hostname),
-            "echo 'SSH connection successful'",
-        ])
-        .output()
-        .context("Failed to execute SSH test")?;
-
-    if !ssh_test.status.success() {
-        let stderr = String::from_utf8_lossy(&ssh_test.stderr);
-        anyhow::bail!("SSH connection failed: {}", stderr);
-    }
+    // Owns the sync captured-output spawn + classify ritual at the
+    // canonical `crate::retry::run_capture_anyhow_sync` primitive.
+    // Post-lift the `"ssh probe failed (exit {code}): {stderr}"` /
+    // `"Failed to spawn ssh probe: {io_error}"` envelopes emerge by
+    // construction at `retry::classify_capture_anyhow` — same shape
+    // every migrated captured-output site in forge emits.
+    let mut ssh_cmd = Command::new(get_tool_path("SSH_BIN", "ssh"));
+    ssh_cmd.args(&[
+        "-i",
+        &ssh_key,
+        "-p",
+        &port.to_string(),
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=10",
+        &format!("root@{}", hostname),
+        "echo 'SSH connection successful'",
+    ]);
+    crate::retry::run_capture_anyhow_sync(ssh_cmd, "ssh probe")?;
 
     info!("✅ SSH connection successful!");
 
@@ -119,7 +119,11 @@ pub async fn test(hostname: String, port: u16, ssh_key: String, package: String)
         hostname, port
     );
 
-    let nix_build = Command::new(get_tool_path("NIX_BIN", "nix"))
+    // Sibling of the SSH probe: same primitive, retains the returned
+    // `Output` so the subsequent `info!` line can read
+    // `nix_build.stdout` to log the remote store path.
+    let mut nix_cmd = Command::new(get_tool_path("NIX_BIN", "nix"));
+    nix_cmd
         .args(&[
             "build",
             &format!("nixpkgs#{}", package),
@@ -128,14 +132,8 @@ pub async fn test(hostname: String, port: u16, ssh_key: String, package: String)
             "--no-link",
             "--print-out-paths",
         ])
-        .env("NIX_SSHOPTS", format!("-p {}", port))
-        .output()
-        .context("Failed to execute nix build")?;
-
-    if !nix_build.status.success() {
-        let stderr = String::from_utf8_lossy(&nix_build.stderr);
-        anyhow::bail!("Remote build failed: {}", stderr);
-    }
+        .env("NIX_SSHOPTS", format!("-p {}", port));
+    let nix_build = crate::retry::run_capture_anyhow_sync(nix_cmd, "nix cross-build")?;
 
     let output = String::from_utf8_lossy(&nix_build.stdout);
     info!("✅ Remote build successful!");
@@ -762,6 +760,114 @@ mod nix_bin_routing_tests {
              {resolve_hits:#?}",
             resolve_hits.len(),
             resolve_hits.len()
+        );
+    }
+
+    /// Regression-shield: `test` MUST route the SSH-probe spawn AND
+    /// the nix-cross-build spawn through the canonical
+    /// `crate::retry::run_capture_anyhow_sync` primitive rather than
+    /// re-spell the pre-lift per-site
+    /// `Command::new(bin).args(...)[.env(...)].output().context(
+    /// "Failed to execute <op>")? + if !X.status.success() { let stderr
+    /// = ...; bail!("<Op> failed: {}", stderr); }` six-line stanza that
+    /// each site carried verbatim modulo the per-site bin / args /
+    /// spawn-context / bail-message.
+    ///
+    /// Pre-lift each site's operator log line dropped the exit code:
+    /// someone seeing `"SSH connection failed:"` on a Nix-hermetic
+    /// runner had no way to tell whether ssh exited 255 (a real
+    /// connection refusal), 127 (SSH_BIN wiring bug), or was killed by
+    /// a signal (an OOM); someone seeing `"Remote build failed:"` on
+    /// the sibling cross-build probe had no way to tell whether nix
+    /// exited 1 (a real build error), 100 (nix-daemon evaluation
+    /// failure), or 127 (NIX_BIN wiring bug). Post-lift the canonical
+    /// `"ssh probe failed (exit {code}): {stderr}"` /
+    /// `"nix cross-build failed (exit {code}): {stderr}"` envelope
+    /// emerges by construction at
+    /// `retry::classify_capture_anyhow` — same
+    /// `(op, exit_code, stderr)` shape the sibling migrated sites
+    /// (`commands/dashboards.rs`, `commands/sync.rs`,
+    /// `commands/federation_tests.rs`, `commands/codegen.rs`) emit,
+    /// so a future Phase 1 attestation-record consumer (THEORY §V.4)
+    /// reading the terminating shape pattern-matches on ONE envelope
+    /// across every captured-output bail in forge.
+    ///
+    /// # Scan bounds
+    ///
+    /// Bounded to the `test` function body — from
+    /// `pub async fn test(` to the next top-level `async fn` marker
+    /// (`async fn verify_k8s_service(`) — so:
+    ///
+    /// - The sibling `nc_check` bail paths at
+    ///   `verify_k8s_service` (line 173-176 post-migration) and
+    ///   `verify_external` (line 208-215 post-migration) — which
+    ///   legitimately keep their custom
+    ///   `"Service not accessible: {service}. Stderr: {stderr}"` /
+    ///   `"Cannot connect to {hostname}:{port}. Stderr: {stderr}"`
+    ///   shapes carrying per-call service/host/port context that
+    ///   does NOT fit the primitive's
+    ///   `(op, exit_code, stderr)`-only envelope — stay out of scope.
+    /// - The migration-inline commentary above each migrated site
+    ///   (which quotes the pre-lift bail literal for narrative
+    ///   purposes) rides INSIDE the fn body, so the shield's
+    ///   forbidden-literal check uses `code_line_hits` to filter
+    ///   out `//` comment lines automatically — the same
+    ///   anti-docstring-self-match discipline the sibling
+    ///   `nc_bin` / `nix_bin` sigil shields above enforce.
+    ///
+    /// # What the shield pins
+    ///
+    /// - `bail!("SSH connection failed:` MUST NOT appear at a code
+    ///   line in the `test` fn body.
+    /// - `bail!("Remote build failed:` MUST NOT appear at a code line
+    ///   in the `test` fn body.
+    /// - `run_capture_anyhow_sync(` MUST appear at ≥2 code lines in
+    ///   the `test` fn body (one per migrated site — SSH probe and
+    ///   nix cross-build probe). A regression that dropped either
+    ///   delegation would leave the forbidden-literal side satisfied
+    ///   by absence; pinning a positive floor guards against that
+    ///   regression class.
+    #[test]
+    fn test_test_fn_routes_ssh_and_nix_probes_through_run_capture_anyhow_sync_not_inline_bail() {
+        const SOURCE: &str = include_str!("nix_builder.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/nix_builder.rs::test",
+            "pub async fn test(",
+            "\nasync fn verify_k8s_service(",
+        );
+
+        for forbidden in [
+            "bail!(\"SSH connection failed:",
+            "bail!(\"Remote build failed:",
+        ] {
+            let inline_hits = crate::test_support::code_line_hits(body, forbidden);
+            assert!(
+                inline_hits.is_empty(),
+                "commands/nix_builder.rs::test must not carry an inline \
+                 `{forbidden}...\")` terminator — the corresponding \
+                 captured-output spawn must route through \
+                 `crate::retry::run_capture_anyhow_sync`, which emits the \
+                 canonical `\"{{op}} failed (exit {{code}}): {{stderr}}\"` \
+                 envelope with the exit code carried. Found: \
+                 {inline_hits:?}"
+            );
+        }
+
+        let delegation = "run_capture_anyhow_sync(";
+        let delegation_hits = crate::test_support::code_line_hits(body, delegation);
+        assert!(
+            delegation_hits.len() >= 2,
+            "commands/nix_builder.rs::test must delegate BOTH the SSH \
+             probe AND the nix cross-build probe through \
+             `crate::retry::run_capture_anyhow_sync` — expected ≥2 \
+             delegations at code lines in the fn body, found {}. A \
+             regression that dropped one delegation AND accidentally \
+             left the forbidden-literal shield satisfied (e.g. by \
+             rewriting the bail into a `bail!(\"failed\")` shape \
+             without the pre-lift colon suffix) fails here. Hits: \
+             {delegation_hits:#?}",
+            delegation_hits.len()
         );
     }
 }

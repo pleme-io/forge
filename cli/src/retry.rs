@@ -13264,6 +13264,108 @@ pub fn classify_capture_anyhow(
     Ok(output)
 }
 
+/// Async run-wrapper over [`classify_capture_anyhow`]: owns the whole
+/// `Command::new(bin).args(...).output().await` + classifier ritual so
+/// captured-output consumer sites compose down to
+/// `let output = run_capture_anyhow(cmd, "<op>").await?;` — the
+/// captured-output sibling of [`run_inherited_status`]
+/// (inherited-stdio, async) and [`run_query_capture_sync`]
+/// (trimmed-stdout, sync), completing the run-* algebra on the anyhow
+/// surface across all three canonical output shapes:
+///
+/// - [`run_inherited_status`] / [`run_inherited_status_sync`]:
+///   status-only shape (`cmd.status()`), stdio inherited to the
+///   operator's terminal, `anyhow::Result<()>`.
+/// - [`run_query_capture_sync`]: captured-output shape (`cmd.output()`),
+///   returns trimmed UTF-8 stdout as a `String` for query call sites
+///   whose consumer wants a `\n`-free single-line pod name / SHA / URL.
+/// - `run_capture_anyhow` (this) / [`run_capture_anyhow_sync`]:
+///   captured-output shape (`cmd.output()`), returns the raw
+///   [`std::process::Output`] so callers can consume `output.stdout` as
+///   bytes (a `serde_json::from_slice`, a base64 blob, a `tokio::fs::write`
+///   of a composed schema, an ELF-magic-byte scan) or via
+///   `String::from_utf8_lossy` at the call site — the byte-verbatim
+///   sibling of the trimmed-string query wrapper.
+///
+/// # Why a separate primitive from the bare classifier
+///
+/// [`classify_capture_anyhow`] takes an already-captured
+/// `std::io::Result<Output>`, so the ritual at consumer sites still
+/// spells `Command::new(bin).args(...).output().await` followed by the
+/// classifier call — a three-line stanza at every site. The run-wrapper
+/// folds those three lines into one, and preserves the caller's builder
+/// chain (`.args()`, `.current_dir()`, `.env()`) by construction. Same
+/// design ratio the pair [`classify_inherited_status`] +
+/// [`run_inherited_status`] carries on the status-only frontier.
+///
+/// # No stdio override
+///
+/// Unlike [`run_inherited_status`], which must set `Stdio::inherit()` on
+/// the supplied command (a caller-piped `.stdout(...)` would defeat the
+/// purpose of the primitive), this wrapper adds NO stdio override —
+/// `.output()` on both `std::process::Command` and
+/// `tokio::process::Command` already captures stdout/stderr into
+/// `Vec<u8>` regardless of any caller-configured stdio. A caller that
+/// needs a streamed-to-terminal shape should use [`run_inherited_status`]
+/// or bare `.status()` instead — this primitive is the typed lift of
+/// the captured-output shape specifically.
+pub async fn run_capture_anyhow(
+    mut cmd: tokio::process::Command,
+    op: &str,
+) -> anyhow::Result<std::process::Output> {
+    classify_capture_anyhow(cmd.output().await, op)
+}
+
+/// Sync sibling of [`run_capture_anyhow`] over
+/// `std::process::Command`.
+///
+/// Same ritual, same envelope — the sync/async split lives at the
+/// caller's `.output()` / `.output().await` surface, not at the
+/// primitive body (both flow through the ONE
+/// [`classify_capture_anyhow`] classifier so the two cannot drift).
+/// The three-primitive algebra ([`run_inherited_status_sync`],
+/// [`run_query_capture_sync`], `run_capture_anyhow_sync`) now closes
+/// the sync half of the canonical typed-CLI surface at the same three
+/// output shapes the async half already closes.
+///
+/// # Migration sites
+///
+/// Three sites in forge hand-roll the captured-output spawn +
+/// bail-on-non-zero-exit ritual with the exact shape this primitive
+/// (and its async sibling [`run_capture_anyhow`]) consolidate:
+///
+/// - `commands/codegen.rs::execute` (async, `tokio::process::Command`)
+///   — the `bun install --frozen-lockfile` dep-install in the web dir
+///   that runs before GraphQL codegen. Pre-lift the bail spelled
+///   `"bun install failed:\n{stderr}"` and dropped the exit code.
+/// - `commands/nix_builder.rs::test` (sync, `std::process::Command`) —
+///   the `ssh -i <key> ... root@<host> 'echo ...'` reachability probe
+///   that decides whether the remote AMD64 builder is reachable at all
+///   before the nix cross-build test runs. Pre-lift the bail spelled
+///   `"SSH connection failed: {stderr}"` and dropped the exit code.
+/// - `commands/nix_builder.rs::test` (sync, `std::process::Command`) —
+///   the `nix build nixpkgs#<pkg> --system x86_64-linux --no-link
+///   --print-out-paths` cross-build probe under `NIX_SSHOPTS` that
+///   decides whether the remote builder can produce Linux artifacts
+///   from a Mac control plane. Pre-lift the bail spelled
+///   `"Remote build failed: {stderr}"` and dropped the exit code.
+///
+/// Three sites past THEORY §VI.1's three-times threshold ("two
+/// occurrences is a coincidence; three is a law"). Post-migration
+/// every operator log line on the captured-output frontier carries
+/// `(op, exit_code, stderr)` in ONE canonical envelope
+/// (`"{op} failed (exit {code}): {stderr}"`), and every spawn-failure
+/// carries `(op, io_error)` in ONE canonical envelope
+/// (`"Failed to spawn {op}: {io_error}"`) — the same load-bearing
+/// exit-code carry that made the sync status-only migration
+/// (THEORY §V.4 Phase 1 attestation records) worth doing.
+pub fn run_capture_anyhow_sync(
+    mut cmd: std::process::Command,
+    op: &str,
+) -> anyhow::Result<std::process::Output> {
+    classify_capture_anyhow(cmd.output(), op)
+}
+
 /// Captured output of a single failed external-command attempt.
 ///
 /// Typed error shape for ad-hoc retry call sites (`commands/push.rs`,
@@ -33756,6 +33858,215 @@ mod tests {
         assert!(
             msg.contains("killed mid-run"),
             "stderr must survive into the signal envelope, got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // run_capture_anyhow / run_capture_anyhow_sync — the run-* wrappers
+    // over `classify_capture_anyhow` that own the whole
+    // `Command::new(bin).args(...).output()[.await]` + classifier ritual.
+    // Drive the full spawn-then-classify pipeline against hermetic
+    // `make_executable_shim` binaries so a future regression at either
+    // the spawn surface or the classifier shape fails here rather than
+    // silently degrading the three consumer sites this commit migrates
+    // (`commands/codegen.rs::execute` bun install,
+    // `commands/nix_builder.rs::test` ssh probe,
+    // `commands/nix_builder.rs::test` nix cross-build probe).
+    // -----------------------------------------------------------------
+
+    /// `run_capture_anyhow_sync` end-to-end via a hermetic shim: a
+    /// zero-exit spawn returns the raw [`std::process::Output`] intact
+    /// (stdout AND stderr as bytes), so a caller that parses stdout
+    /// downstream (`nix_build.stdout` → `String::from_utf8_lossy` at
+    /// `commands/nix_builder.rs::test`) receives the exact bytes the
+    /// CLI emitted rather than a UTF-8-lossy round trip. The
+    /// `Output`-return choice discriminates this primitive from the
+    /// query-shaped sibling [`run_query_capture_sync`] (trimmed
+    /// `String`).
+    #[cfg(unix)]
+    #[test]
+    fn test_run_capture_anyhow_sync_success_returns_output_intact() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "capture-sync-success",
+            "#!/bin/sh\nprintf 'stdout-payload'\nprintf 'stderr-hint' 1>&2\nexit 0\n",
+        );
+        let cmd = std::process::Command::new(&shim);
+        let output = run_capture_anyhow_sync(cmd, "capture-sync-probe")
+            .expect("zero-exit shim must surface as Ok(Output)");
+        assert!(output.status.success());
+        assert_eq!(
+            output.stdout, b"stdout-payload",
+            "stdout bytes must flow through unchanged for downstream \
+             byte-level parsing (`serde_json::from_slice`, ELF magic \
+             scan, base64 decode) rather than a UTF-8-lossy round trip"
+        );
+        assert_eq!(
+            output.stderr, b"stderr-hint",
+            "stderr bytes must survive on the success path — a caller \
+             that wants to log a successful-but-noisy CLI's stderr \
+             (`rover supergraph compose` prints hints on stderr even at \
+             exit 0) still can"
+        );
+    }
+
+    /// `run_capture_anyhow_sync` on a non-zero exit surfaces the
+    /// canonical `"{op} failed (exit {code}): {stderr}"` envelope from
+    /// the shared [`classify_capture_anyhow`] body — the exit code and
+    /// the stderr both survive to the operator log line. Pre-migration
+    /// the three consumer sites' bail messages spelled
+    /// `"bun install failed:\n{stderr}"`,
+    /// `"SSH connection failed: {stderr}"`,
+    /// `"Remote build failed: {stderr}"` — a per-site dialect over
+    /// `(op, stderr)` that dropped the exit code. Post-lift the
+    /// envelope carries `(op, exit_code, stderr)` in ONE canonical
+    /// shape by construction of this primitive.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_capture_anyhow_sync_nonzero_exit_carries_op_exit_and_stderr() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "capture-sync-op-fail",
+            "#!/bin/sh\nprintf 'compile error: missing semicolon' 1>&2\nexit 7\n",
+        );
+        let cmd = std::process::Command::new(&shim);
+        let err =
+            run_capture_anyhow_sync(cmd, "ssh probe").expect_err("nonzero exit must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ssh probe failed (exit 7)"),
+            "canonical envelope `\"{{op}} failed (exit {{code}})\"` must \
+             carry both the op label AND the exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("compile error: missing semicolon"),
+            "stderr must survive into the op-failure envelope, got: {msg}"
+        );
+    }
+
+    /// `run_capture_anyhow_sync` on a spawn failure (binary not on
+    /// PATH / permission denied) carries the op label AND the
+    /// `io::Error::Display` under the canonical
+    /// `"Failed to spawn {op}: {io_error}"` envelope. Pre-lift the
+    /// three consumer sites' `.output().context("Failed to run <op>")?`
+    /// / `.output().await.with_context(...)?` envelopes discarded the
+    /// io_error detail past the `?` unwrap; post-lift both survive.
+    #[test]
+    fn test_run_capture_anyhow_sync_spawn_failure_carries_op_label_and_io_error() {
+        let cmd = std::process::Command::new(
+            "/nonexistent/path/to/capture-sync-binary-that-does-not-exist",
+        );
+        let err = run_capture_anyhow_sync(cmd, "bun install")
+            .expect_err("missing binary must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Failed to spawn bun install"),
+            "spawn-failure envelope must carry the op label, got: {msg}"
+        );
+        assert!(
+            msg.contains("No such file") || msg.contains("cannot find"),
+            "io_error detail must survive into the spawn-failure \
+             envelope so an operator can discriminate PATH miss from \
+             permission-denied from operating-system fork failure — \
+             the pre-lift `.context(\"Failed to run <op>\")?` shape \
+             discarded exactly this detail, got: {msg}"
+        );
+    }
+
+    /// `run_capture_anyhow_sync` preserves the caller-supplied
+    /// `.args(...)` argv unchanged — the primitive neither prepends,
+    /// drops, nor reorders argv. Same content-addressable probe shape
+    /// the sibling [`run_inherited_status_sync`] args-survival test
+    /// uses to pin the argv-preservation contract on the status-only
+    /// frontier — makes the migration of the three consumer sites'
+    /// per-spawn args (bun's `["install", "--frozen-lockfile"]`,
+    /// ssh's `["-i", key, "-p", port, ...]`, nix's
+    /// `["build", "nixpkgs#pkg", "--system", "x86_64-linux", ...]`)
+    /// safe from a "primitive silently dropped the argv" regression.
+    ///
+    /// The probe uses `make_executable_shim` (absolute-path spawn of a
+    /// hermetic shim in a tempdir) rather than
+    /// `Command::new("/bin/sh")` so this test does not inflate
+    /// `tools::spawn_shield::BASELINE`'s `/bin/sh` count — same
+    /// discipline the SHRINK-ONLY baseline demands.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_capture_anyhow_sync_preserves_caller_supplied_args() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "capture-args-probe",
+            "#!/bin/sh\ntest \"$1\" = \"capture-args-probe-a1b2c3d4\" && \
+             test \"$2\" = \"expected-marker-e5f6a7b8\"\n",
+        );
+        let mut cmd = std::process::Command::new(&shim);
+        cmd.args(["capture-args-probe-a1b2c3d4", "expected-marker-e5f6a7b8"]);
+        let result = run_capture_anyhow_sync(cmd, "args-survival-probe");
+        assert!(
+            result.is_ok(),
+            "primitive must preserve caller-supplied .args() argv; got: {:?}",
+            result.err().map(|e| format!("{e:#}"))
+        );
+    }
+
+    /// Async sibling: `run_capture_anyhow` end-to-end via a hermetic
+    /// shim over `tokio::process::Command`. Pins that the async surface
+    /// emits the SAME envelope shape the sync surface emits (both flow
+    /// through the one [`classify_capture_anyhow`] classifier so they
+    /// cannot drift). Consumer parity: `commands/codegen.rs::execute`'s
+    /// bun install migration rides this async path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_capture_anyhow_async_nonzero_exit_carries_op_exit_and_stderr() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "capture-async-op-fail",
+            "#!/bin/sh\nprintf 'ENOENT: lockfile missing' 1>&2\nexit 2\n",
+        );
+        let cmd = tokio::process::Command::new(&shim);
+        let err = run_capture_anyhow(cmd, "bun install")
+            .await
+            .expect_err("nonzero exit must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("bun install failed (exit 2)"),
+            "async surface must emit the SAME envelope shape as the sync \
+             surface — both route through `classify_capture_anyhow`, got: {msg}"
+        );
+        assert!(
+            msg.contains("ENOENT: lockfile missing"),
+            "stderr must survive into the async op-failure envelope, got: {msg}"
+        );
+    }
+
+    /// Async sibling: preserves the caller-supplied `.current_dir(...)`
+    /// setting unchanged — the primitive neither overrides nor
+    /// unsets cwd. Load-bearing because
+    /// `commands/codegen.rs::execute`'s bun install migration relies
+    /// on `.current_dir(web_dir)` to spawn bun in the web directory
+    /// where the lockfile lives; a primitive that silently reset cwd
+    /// would spawn bun in the wrong dir and report a confusing "no
+    /// lockfile" failure.
+    ///
+    /// The probe uses `make_executable_shim` (absolute-path spawn of a
+    /// hermetic shim in a tempdir) rather than
+    /// `Command::new("/bin/sh")` so this test does not inflate
+    /// `tools::spawn_shield::BASELINE`'s `/bin/sh` count — same
+    /// discipline the SHRINK-ONLY baseline demands.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_capture_anyhow_async_preserves_caller_supplied_current_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir must be creatable for cwd probe");
+        let marker = tmp.path().join("cwd-marker-a1b2c3d4");
+        std::fs::write(&marker, b"present").expect("marker write must succeed");
+        let (_shim_dir, shim) = crate::test_support::make_executable_shim(
+            "cwd-probe",
+            "#!/bin/sh\ntest -f cwd-marker-a1b2c3d4\n",
+        );
+        let mut cmd = tokio::process::Command::new(&shim);
+        cmd.current_dir(tmp.path());
+        let result = run_capture_anyhow(cmd, "cwd-survival-probe").await;
+        assert!(
+            result.is_ok(),
+            "primitive must preserve caller-supplied .current_dir(); \
+             the shim looks for `cwd-marker-a1b2c3d4` in the working dir \
+             and the marker file was written to the tempdir; got: {:?}",
+            result.err().map(|e| format!("{e:#}"))
         );
     }
 
