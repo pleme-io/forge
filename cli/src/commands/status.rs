@@ -1716,20 +1716,7 @@ mod tests {
         );
     }
 
-    // Build a synthetic `std::process::Output` for the `kubectl_get_items`
-    // shields below. Centralized so a future reshape of the shape
-    // (adding a captured signal, widening to a cross-platform
-    // `ExitStatusExt`) lands at one place, mirroring the sibling
-    // `commands/helm.rs::capture_tests::make_output` builder committed
-    // at 9e8e75c.
-    fn make_output(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
-        use std::os::unix::process::ExitStatusExt;
-        std::process::Output {
-            status: std::process::ExitStatus::from_raw(if success { 0 } else { 1 << 8 }),
-            stdout: stdout.to_vec(),
-            stderr: stderr.to_vec(),
-        }
-    }
+    use crate::test_support::synthetic_output;
 
     #[test]
     fn kubectl_get_items_returns_empty_vec_on_non_success_exit_status() {
@@ -1742,7 +1729,7 @@ mod tests {
         // parse: RBAC-denied `get` and missing-CRD `get` return an
         // error status alongside a helpful stderr-shaped hint, and
         // the pre-lift consumers all discarded stdout in that case.
-        let out = make_output(false, br#"{"items":[{"metadata":{"name":"leaked"}}]}"#, b"");
+        let out = synthetic_output(false, br#"{"items":[{"metadata":{"name":"leaked"}}]}"#, b"");
         let items = super::kubectl_get_items(&out).expect("non-success exit is Ok(empty)");
         assert!(
             items.is_empty(),
@@ -1766,7 +1753,7 @@ mod tests {
         // two sites apply `.rev().take(5)` post-primitive, so an
         // upstream reverse would surface the FIRST 5 (oldest) instead
         // of the LAST 5 (newest).
-        let out = make_output(
+        let out = synthetic_output(
             true,
             br#"{"items":[
                 {"metadata":{"name":"alpha"}},
@@ -1797,7 +1784,7 @@ mod tests {
         // nonexistent`) returns a JSON error document without an
         // `.items[]` array — the pre-lift consumers treated that as
         // empty rather than as an error. Preserved at the primitive.
-        let out = make_output(
+        let out = synthetic_output(
             true,
             br#"{"kind":"Status","status":"Failure","message":"deployment not found"}"#,
             b"",
@@ -1816,15 +1803,15 @@ mod tests {
         // at the primitive: a well-formed JSON with `"items":null` or
         // `"items":"unexpected"` yields `Ok(vec![])`, not a parse
         // error. Symmetric to the missing-field shield above.
-        let out_null = make_output(true, br#"{"items":null}"#, b"");
+        let out_null = synthetic_output(true, br#"{"items":null}"#, b"");
         assert!(super::kubectl_get_items(&out_null)
             .expect("success + null items is Ok(empty)")
             .is_empty());
-        let out_str = make_output(true, br#"{"items":"nope"}"#, b"");
+        let out_str = synthetic_output(true, br#"{"items":"nope"}"#, b"");
         assert!(super::kubectl_get_items(&out_str)
             .expect("success + string items is Ok(empty)")
             .is_empty());
-        let out_obj = make_output(true, br#"{"items":{"nested":"object"}}"#, b"");
+        let out_obj = synthetic_output(true, br#"{"items":{"nested":"object"}}"#, b"");
         assert!(super::kubectl_get_items(&out_obj)
             .expect("success + object items is Ok(empty)")
             .is_empty());
@@ -1840,7 +1827,7 @@ mod tests {
         // kubectl exits 0 but emits corrupt or truncated bytes
         // surfaces at the fetch site as an error, not as an empty
         // items list masquerading as a healthy empty response.
-        let out = make_output(true, b"this is not json {{[", b"");
+        let out = synthetic_output(true, b"this is not json {{[", b"");
         assert!(super::kubectl_get_items(&out).is_err());
     }
 
@@ -1998,7 +1985,7 @@ mod tests {
         // message verbatim on non-success exit — a downstream operator's
         // grep target ("StatefulSet not found" in the render error stream)
         // survives the lift byte-for-byte.
-        let out = make_output(false, b"", b"kubectl error");
+        let out = synthetic_output(false, b"", b"kubectl error");
         let err = super::kubectl_get_item(&out, "StatefulSet not found")
             .expect_err("non-success exit must bail");
         assert_eq!(err.to_string(), "StatefulSet not found");
@@ -2018,7 +2005,7 @@ mod tests {
         // stdout-emitted `readyReplicas: 999` payload would silently
         // surface a stale kubectl response as if the resource were
         // healthy.
-        let out = make_output(
+        let out = synthetic_output(
             false,
             br#"{"status":{"readyReplicas":999,"replicas":999}}"#,
             b"",
@@ -2037,7 +2024,7 @@ mod tests {
         // `.get("status")`, `.pointer("/spec/replicas")`, and `.as_object()`
         // extractions the four consumers apply post-lift compose
         // identically against the returned `serde_json::Value`.
-        let out = make_output(
+        let out = synthetic_output(
             true,
             br#"{"metadata":{"name":"cache"},"status":{"readyReplicas":3,"replicas":3}}"#,
             b"",
@@ -2070,7 +2057,7 @@ mod tests {
         // with a corrupt response payload). Symmetric to the
         // `kubectl_get_items_propagates_parse_error_on_invalid_json`
         // shield the sibling list-shaped primitive carries.
-        let out = make_output(true, b"this is not json {{[", b"");
+        let out = synthetic_output(true, b"this is not json {{[", b"");
         let err = super::kubectl_get_item(&out, "ConfigMap not found")
             .expect_err("success + invalid JSON must propagate parse error");
         // The parse error must NOT be the caller's not-found message;
@@ -2624,6 +2611,50 @@ mod tests {
              get` vector at exactly ONE code line — the \
              `kubectl_get_object` primitive body. Expected exactly one \
              hit; found: {hits:?}"
+        );
+    }
+
+    /// Consolidation shield: the ten `kubectl_get_item[s]` +
+    /// `replica_readiness_display` shields in this test module MUST
+    /// route fake-`Output` construction through the shared
+    /// [`crate::test_support::synthetic_output`] helper, NOT a
+    /// locally-redefined builder. Pre-consolidation this module
+    /// carried a byte-identical `ExitStatusExt::from_raw` builder
+    /// verbatim alongside the sibling `commands/helm.rs::capture_tests`
+    /// copy — two occurrences past the two-times rule (PRIME
+    /// DIRECTIVE: duplication budget is zero, THEORY §VI.1). Both
+    /// consumer sites now delegate to the ONE `test_support`
+    /// primitive, so a future reshape (adding a captured signal
+    /// detail, widening to a cross-platform builder, tracking the
+    /// fork-elapsed instant) lands at one body.
+    ///
+    /// Positive floor: the shared-helper import string appears at
+    /// least once in the module. Negative floor: the deprecated
+    /// local-def signature does NOT reappear. Both needles are
+    /// assembled via [`format!`] at test time so this shield's own
+    /// source text (which mentions the concepts in prose) does not
+    /// self-match the substring check.
+    #[test]
+    fn tests_use_shared_synthetic_output_from_test_support_not_local_redef() {
+        const SOURCE: &str = include_str!("status.rs");
+        let import_needle = format!("use crate::test_support::{};", "synthetic_output");
+        assert!(
+            SOURCE.contains(&import_needle),
+            "commands/status.rs::tests must import the shared \
+             fake-`Output` helper via `test_support` — the local \
+             builder was consolidated into the shared primitive."
+        );
+        let deprecated_signature = format!(
+            "fn make_{}(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output",
+            "output"
+        );
+        assert!(
+            !SOURCE.contains(&deprecated_signature),
+            "commands/status.rs must NOT redefine the deprecated local \
+             fake-`Output` builder — route all fake-`Output` \
+             construction through `crate::test_support::\
+             synthetic_output` so a future reshape of the shape \
+             lands at ONE body."
         );
     }
 }
