@@ -13252,7 +13252,7 @@ pub fn classify_capture_anyhow(
     captured: std::io::Result<std::process::Output>,
     op: &str,
 ) -> anyhow::Result<std::process::Output> {
-    let output = captured.map_err(|e| anyhow::anyhow!("Failed to spawn {}: {}", op, e))?;
+    let output = classify_spawn_anyhow(captured, op)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = match output.status.code() {
@@ -13262,6 +13262,47 @@ pub fn classify_capture_anyhow(
         anyhow::bail!("{} failed ({}): {}", op, detail, stderr.trim());
     }
     Ok(output)
+}
+
+/// Canonical spawn-envelope classifier: lift a
+/// [`std::io::Result<std::process::Output>`] into
+/// [`anyhow::Result<std::process::Output>`] by mapping the spawn `Err`
+/// arm to the same `"Failed to spawn {op}: {io_error}"` chain
+/// [`classify_capture_anyhow`] uses on its first line, and passing the
+/// `Ok(Output)` arm through UNCHANGED — non-zero exit status is a
+/// caller concern.
+///
+/// # Why extracted from `classify_capture_anyhow`
+///
+/// The `"Failed to spawn {op}: {io_error}"` envelope was formerly
+/// spelled inline at [`classify_capture_anyhow`]'s first line. Any
+/// second consumer that wanted the "bail on spawn error, keep the
+/// non-zero exit status intact" shape had to either (a) inline the
+/// `.map_err(|e| anyhow::anyhow!("Failed to spawn {}: {}", op, e))`
+/// stanza and risk drift with `classify_capture_anyhow`'s spawn arm,
+/// or (b) misuse `classify_capture_anyhow` and swallow the
+/// bail-on-non-zero semantic they did not want. Extracting the spawn
+/// arm into a dedicated primitive gives both consumers ONE body for
+/// the envelope discipline — `classify_capture_anyhow` now delegates
+/// its first line through here, and [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`]
+/// (five kubectl-async consumer sites in `services/migration_service.rs`
+/// and `commands/migrations.rs` that inspect `output.status` themselves
+/// after the spawn) composes through here on the kubectl frontier.
+///
+/// # Contract
+///
+/// - Spawn `Err` → `"Failed to spawn {op}: {io_error}"` anyhow chain.
+/// - Spawn `Ok(output)` → `Ok(output)`, byte-verbatim on stdout AND
+///   stderr, with `output.status` (success OR non-zero exit OR signal
+///   termination) preserved for the caller to interpret. Callers that
+///   want the non-zero-exit bail semantic route through
+///   [`classify_capture_anyhow`] instead, which layers that bail on
+///   top of this spawn envelope.
+pub fn classify_spawn_anyhow(
+    captured: std::io::Result<std::process::Output>,
+    op: &str,
+) -> anyhow::Result<std::process::Output> {
+    captured.map_err(|e| anyhow::anyhow!("Failed to spawn {}: {}", op, e))
 }
 
 /// Async run-wrapper over [`classify_capture_anyhow`]: owns the whole
@@ -34231,6 +34272,66 @@ mod tests {
         assert!(
             msg.contains("no such file"),
             "msg must carry `io::Error::Display`, got: {msg}"
+        );
+    }
+
+    /// `classify_spawn_anyhow` passes `Ok(output)` through UNCHANGED
+    /// even on a non-zero exit — the load-bearing distinction from
+    /// [`classify_capture_anyhow`]. Pins the contract every
+    /// [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`]
+    /// consumer depends on: `output.status.success()` inspection at
+    /// the caller must see the shim's non-zero exit verbatim.
+    #[cfg(unix)]
+    #[test]
+    fn test_classify_spawn_anyhow_nonzero_exit_passes_output_through() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(1 << 8); // exit 1 on unix
+        let captured: std::io::Result<std::process::Output> = Ok(std::process::Output {
+            status,
+            stdout: b"partial-body".to_vec(),
+            stderr: b"not-ready".to_vec(),
+        });
+        let output = classify_spawn_anyhow(captured, "kubectl get job")
+            .expect("non-zero exit MUST arrive as Ok(output), not Err");
+        assert!(
+            !output.status.success(),
+            "output.status must preserve the non-zero exit verbatim — a \
+             regression that swallowed it would break every polling \
+             probe consumer"
+        );
+        assert_eq!(output.stdout, b"partial-body");
+        assert_eq!(output.stderr, b"not-ready");
+    }
+
+    /// `classify_spawn_anyhow` on a spawn `Err` produces the SAME
+    /// canonical `"Failed to spawn {op}: {io_error}"` envelope
+    /// [`classify_capture_anyhow`] does — the sibling shield that pins
+    /// the ONE-body envelope discipline `classify_capture_anyhow` now
+    /// delegates its first line through. A regression that spelled the
+    /// envelope inconsistently between the two primitives would fail
+    /// here (this test) OR at
+    /// `test_classify_capture_anyhow_spawn_failure_carries_op_label_and_io_error`
+    /// (the sibling), so the two-body drift is closed by construction.
+    #[test]
+    fn test_classify_spawn_anyhow_spawn_failure_matches_capture_envelope() {
+        let make_err = || {
+            std::io::Result::<std::process::Output>::Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such file or directory",
+            ))
+        };
+        let spawn_err = classify_spawn_anyhow(make_err(), "sea-orm-cli generate entity")
+            .expect_err("spawn failure must produce Err");
+        let capture_err = classify_capture_anyhow(make_err(), "sea-orm-cli generate entity")
+            .expect_err("spawn failure must produce Err");
+        assert_eq!(
+            format!("{spawn_err}"),
+            format!("{capture_err}"),
+            "the two primitives MUST share the SAME spawn-failure \
+             envelope by delegation to `classify_spawn_anyhow` — a \
+             mismatch here proves the extraction has drifted and the \
+             `\"Failed to spawn {{op}}: {{io_error}}\"` shape now lives \
+             at two bodies again"
         );
     }
 

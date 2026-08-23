@@ -485,6 +485,102 @@ pub async fn kubectl_capture_anyhow(
     crate::retry::run_capture_anyhow(cmd, op).await
 }
 
+/// Async captured-output `kubectl` spawn that BAILS ON SPAWN ERROR ONLY
+/// and returns the raw [`std::process::Output`] with `output.status`
+/// intact for the caller to inspect. The missing "pass exit status
+/// through, bail only on spawn `Err`" cell on the
+/// (bail-on-exit × bail-on-spawn) matrix — the sibling of
+/// [`kubectl_capture_anyhow`] (bail on both) and
+/// [`kubectl_probe_stdout_capture`] (swallow both, lose exit status
+/// under `Option<String>`).
+///
+/// # Fusion of two existing primitives
+///
+/// Folds the three-line stanza
+///
+/// ```text
+/// let output = kubectl_command_async()
+///     .args([...])
+///     .output()
+///     .await
+///     .context("<per-site context string>")?;
+/// // caller then inspects `output.status.success()` to decide next step
+/// ```
+///
+/// into one delegation via
+/// [`crate::retry::classify_spawn_anyhow`] — the canonical
+/// `"Failed to spawn {op}: {io_error}"` envelope
+/// [`crate::retry::classify_capture_anyhow`] uses on ITS first line, so
+/// every kubectl spawn-failure across the fleet surfaces through ONE
+/// body regardless of whether the caller also wants the non-zero-exit
+/// bail semantic.
+///
+/// # Migration sites — five consumers past three-is-a-law
+///
+/// Lifts the five-occurrence three-line stanza that five
+/// control-flow-carrying `kubectl_command_async()` + `.output().await`
+/// + `.context(...)?` composition sites carry verbatim modulo the
+/// per-site argv and context string:
+///
+/// - [`crate::services::migration_service::MigrationService::delete_existing_job`]
+///   — pre-`create_job` idempotent `delete --ignore-not-found`; the
+///   caller `warn!`s on non-zero exit rather than failing the
+///   migration (the job may legitimately not exist, and
+///   `--ignore-not-found` should make that exit 0 anyway).
+/// - [`crate::services::migration_service::MigrationService::wait_for_job`]
+///   Complete-condition probe — non-zero exit means the poll target
+///   isn't ready yet (job absent, jsonpath resolves to empty), which
+///   the caller collapses to a "keep polling" branch, so bail on
+///   non-zero would misclassify the polling loop as a failure.
+/// - [`crate::services::migration_service::MigrationService::wait_for_job`]
+///   Failed-condition probe — same polling shape, checks the sibling
+///   Failed jsonpath and bails only when its trimmed stdout equals
+///   `"True"`.
+/// - [`crate::services::migration_service::MigrationService::get_job_logs`]
+///   — final logs pull whose stdout is returned unconditionally as
+///   the caller's `String`; a non-zero exit from `kubectl logs`
+///   (e.g., pod garbage-collected before the logs pull) still yields
+///   whatever partial stdout kubectl wrote before it failed.
+/// - `commands/migrations.rs::cleanup_migration_jobs` — per-job
+///   `delete --ignore-not-found` in a loop that prints
+///   `"✅ Deleted job: {job}"` only on non-zero exit, so bailing
+///   would drop the loop's progress on the first stale job.
+///
+/// Five occurrences past THEORY §VI.1's three-is-a-law threshold. Each
+/// pre-lift site was one place a future consumer could drift the spawn
+/// envelope: forget the `.context(...)` and lose the operator's ability
+/// to tell WHICH kubectl invocation failed, or spell the context string
+/// inconsistently across sites and hide the site from a fleet-wide grep
+/// on a canonical envelope.
+///
+/// # When to reach for this vs the sibling primitives
+///
+/// This primitive is the CONTROL-FLOW-CARRYING sibling of
+/// [`kubectl_capture_anyhow`] for callers whose next step depends on
+/// `output.status.success()` OR on the non-zero exit's stdout. Reach
+/// for [`kubectl_capture_anyhow`] instead when a non-zero exit MUST
+/// bail with the canonical `(op, exit_code, stderr)` envelope (the
+/// caller has no meaningful action on a `kubectl` failure beyond
+/// surfacing it). Reach for [`kubectl_probe_stdout_capture`] instead
+/// when a spawn `Err` should ALSO swallow into `None` (best-effort
+/// diagnostic surface where every failure shape must be silent at the
+/// caller).
+///
+/// # Envelope shape by construction
+///
+/// - Spawn `Err` (e.g., `KUBECTL_BIN` resolves to an absent path on a
+///   Nix-hermetic runner) → `"Failed to spawn {op}: {io_error}"` via
+///   the shared [`crate::retry::classify_spawn_anyhow`] classifier.
+/// - Spawn `Ok(output)` → `Ok(output)`, byte-verbatim on stdout AND
+///   stderr, with `output.status` (success OR non-zero exit OR signal
+///   termination) preserved for the caller.
+pub async fn kubectl_output_spawn_anyhow(
+    args: &[&str],
+    op: &str,
+) -> anyhow::Result<std::process::Output> {
+    crate::retry::classify_spawn_anyhow(kubectl_command_async().args(args).output().await, op)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1165,6 +1261,179 @@ mod tests {
             msg.contains("Failed to spawn kubectl get pods"),
             "canonical spawn-failure envelope `\"Failed to spawn \
              {{op}}\"` must carry the op label, got: {msg}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // kubectl_output_spawn_anyhow — the async control-flow-carrying
+    // captured-output composition that BAILS ON SPAWN ONLY. Sibling of
+    // `kubectl_capture_anyhow` on the (bail-on-exit × bail-on-spawn)
+    // matrix; delegates to `crate::retry::classify_spawn_anyhow` for
+    // the canonical `"Failed to spawn {op}: {io_error}"` envelope.
+    // ---------------------------------------------------------------
+
+    /// A non-zero exit MUST arrive as `Ok(output)` with `output.status`
+    /// intact — the load-bearing contract that distinguishes this
+    /// primitive from [`kubectl_capture_anyhow`]. All five migrated
+    /// consumers (`MigrationService::delete_existing_job`,
+    /// `wait_for_job` Complete/Failed probes, `get_job_logs`,
+    /// `cleanup_migration_jobs` loop) inspect `output.status.success()`
+    /// themselves to decide next-step (warn vs. keep polling vs. bail
+    /// on Failed=True vs. skip loop-print); a bail-on-non-zero
+    /// regression would misclassify every one of those "non-zero is
+    /// still information" carve-outs as a hard failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_output_spawn_anyhow_nonzero_exit_returns_output_intact() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_dir, shim) = make_executable_shim(
+            "kubectl",
+            "#!/bin/sh\nprintf 'partial-stdout'\nprintf 'not-ready-yet' 1>&2\nexit 1\n",
+        );
+        let _scope = KubectlBinScope::set(&shim);
+
+        let output = kubectl_output_spawn_anyhow(
+            &[
+                "get",
+                "job",
+                "migrate-svc",
+                "-n",
+                "ns",
+                "-o",
+                "jsonpath={.x}",
+            ],
+            "kubectl get job (Complete condition)",
+        )
+        .await
+        .expect(
+            "non-zero exit MUST arrive as Ok(output) — polling probes \
+             need output.status.success() intact to keep looping",
+        );
+        assert!(
+            !output.status.success(),
+            "output.status must preserve the shim's non-zero exit — a \
+             regression that swallowed the status into Ok(Output{{status: \
+             SUCCESS}}) would break every consumer that switches on it"
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(
+            output.stdout, b"partial-stdout",
+            "stdout bytes on the non-zero-exit arm must flow through — \
+             `get_job_logs` returns whatever partial output the failed \
+             kubectl wrote before it exited"
+        );
+        assert_eq!(output.stderr, b"not-ready-yet");
+    }
+
+    /// A zero exit surfaces `Ok(output)` byte-verbatim on both stdout
+    /// and stderr — the happy-path contract shared with
+    /// [`kubectl_capture_anyhow`]. Pins the shape
+    /// `wait_for_job`'s Complete-condition probe depends on when the
+    /// job has actually completed: `String::from_utf8_lossy(&output.stdout)
+    /// .trim() == "True"` returns the polling loop's success signal
+    /// verbatim.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_output_spawn_anyhow_success_returns_output_intact() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_dir, shim) = make_executable_shim(
+            "kubectl",
+            "#!/bin/sh\nprintf 'True'\nprintf 'ready' 1>&2\nexit 0\n",
+        );
+        let _scope = KubectlBinScope::set(&shim);
+
+        let output = kubectl_output_spawn_anyhow(
+            &[
+                "get",
+                "job",
+                "migrate-svc",
+                "-n",
+                "ns",
+                "-o",
+                "jsonpath={.x}",
+            ],
+            "kubectl get job (Complete condition)",
+        )
+        .await
+        .expect("zero-exit shim must surface as Ok(Output)");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"True");
+        assert_eq!(output.stderr, b"ready");
+    }
+
+    /// A spawn `Err` (`KUBECTL_BIN` resolves to a nonexistent path)
+    /// bails with the canonical
+    /// `"Failed to spawn {op}: {io_error}"` envelope — the SAME
+    /// envelope [`kubectl_capture_anyhow`] uses, sourced from the
+    /// shared [`crate::retry::classify_spawn_anyhow`] classifier both
+    /// primitives now delegate through. Pins the discipline that a
+    /// missing `kubectl` binary surfaces as an operator-actionable
+    /// error at the primitive (not silently at a downstream parse of
+    /// an empty [`std::process::Output`]).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_output_spawn_anyhow_spawn_error_carries_op_and_io_error() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _scope = KubectlBinScope::set(
+            "/nonexistent/dir/absolutely-not-a-kubectl-binary-forge-output-spawn-anyhow-shim",
+        );
+
+        let err = kubectl_output_spawn_anyhow(
+            &["delete", "job", "svc", "-n", "ns", "--ignore-not-found"],
+            "kubectl delete job (pre-create cleanup)",
+        )
+        .await
+        .expect_err("unresolvable KUBECTL_BIN must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Failed to spawn kubectl delete job (pre-create cleanup)"),
+            "canonical spawn-failure envelope `\"Failed to spawn \
+             {{op}}\"` must carry the full op label verbatim, got: {msg}"
+        );
+    }
+
+    /// The `(args)`-front surface routes the argv slice verbatim to
+    /// the spawned kubectl. Pins the contract the five consumer sites
+    /// rely on for their heterogeneous 6-element (`delete job <name>
+    /// -n <ns> --ignore-not-found`), 7-element (`get job <name> -n
+    /// <ns> -o jsonpath={...}`), and 4-element (`logs job/<name> -n
+    /// <ns>`) argv slices — a regression that dropped, reordered, or
+    /// re-tokenized on whitespace (a `job/<name>` reference has a
+    /// slash the regex-safe reconstructor would split) would silently
+    /// redirect the kubectl invocation.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_output_spawn_anyhow_forwards_args() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("kubectl", &argv_log.shim_body("logs-payload"));
+        let _scope = KubectlBinScope::set(&shim);
+
+        let output = kubectl_output_spawn_anyhow(
+            &["logs", "job/migrate-svc", "-n", "ns"],
+            "kubectl logs (migration job)",
+        )
+        .await
+        .expect("shim must succeed");
+        assert_eq!(output.stdout, b"logs-payload");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["logs", "job/migrate-svc", "-n", "ns"],
+            "kubectl_output_spawn_anyhow must forward every argv slice \
+             element verbatim to the spawned kubectl — including the \
+             `job/<name>` reference whose slash a whitespace-tokenizing \
+             regression would split into two args"
         );
     }
 
