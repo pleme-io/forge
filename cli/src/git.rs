@@ -738,6 +738,73 @@ pub fn git_command_sync() -> Command {
     Command::new(get_tool_path(tools::GIT))
 }
 
+/// Best-effort discard-status sibling of [`git_command_sync`]: build a
+/// `git <args>` spawn rooted at `current_dir`, wait for the child via
+/// `.status()`, then DISCARD the
+/// `std::io::Result<std::process::ExitStatus>` entirely — swallow every
+/// failure (spawn `io::Error`, non-zero exit, signal termination),
+/// return `()`. The unit return type is load-bearing: a caller cannot
+/// silently promote it into a control-flow position because the
+/// primitive has no envelope to inspect, closing the misuse surface a
+/// docstring-only carve-out would leave open.
+///
+/// Names the "advisory git spawn honoring `GIT_BIN`" shape once so the
+/// four pre-lift `let _ = crate::git::git_command_sync().args(…)
+/// .current_dir(…).status();` stanzas on `commands/helm.rs::deploy`
+/// (three consecutive `git add` / `git commit` / `git push` advisory
+/// spawns invoked under `--commit`) and `commands/helm.rs::bump` (one
+/// `git add -A <charts_dir>` fallback spawn) collapse onto ONE
+/// definition. Every consumer inherits both disciplines by
+/// construction: `GIT_BIN`-routing via the delegated
+/// [`git_command_sync`] and best-effort-discard via the discarded
+/// `.status()` — pre-lift the shape was hand-rolled and any future
+/// consumer that copied a sibling was free to independently drift the
+/// `GIT_BIN`-routing off (`Command::new("git")` — the exact class of
+/// bug the flake-follow of pre-lift consumer sites redeemed at
+/// 818ed9a / badcdf4 / 8653403 / f6be190 / 81d7486 / 8a1958e / etc.)
+/// or the best-effort-discard off (a bare `.status()?` that bubbled a
+/// spawn-only error out of an advisory spawn the operator can already
+/// see failing on inherited stderr).
+///
+/// # Stdio — inherits both streams into the parent's terminal
+///
+/// Spawns via `.status()` rather than `.output()` — `.status()`-based
+/// spawns leave stdout+stderr unset, so the child inherits both
+/// streams from the parent, and the operator watching a `forge helm
+/// deploy --commit` invocation SEES the git output that names why the
+/// advisory `git add`/`commit`/`push` failed (dirty tree, hook
+/// refusal, non-fast-forward push). Mirrors the sibling
+/// [`crate::retry::run_status_discard_in_async`] stdio contract on the
+/// async half of the discard-status fleet.
+///
+/// # When to reach for this vs the sibling primitives
+///
+/// This primitive is DELIBERATELY narrower than its inherited-status
+/// and captured-output siblings: it does not surface stdout, exit
+/// status, or the spawn envelope. It is the right choice ONLY when
+/// the caller wants a silent-at-the-caller / loud-on-the-terminal
+/// git invocation whose success or failure has no bearing on the
+/// enclosing operation. Do NOT reach for this when:
+///
+/// - The caller wants the git failure surfaced into the operator's
+///   error chain → route the `Command` returned by [`git_command_sync`]
+///   through [`crate::retry::run_inherited_status_sync`], which raises
+///   the canonical `(op, exit_code)` failure envelope through
+///   [`crate::retry::classify_inherited_status`].
+/// - The caller decides what to do next based on the exit code or the
+///   child's stdout → use [`git_capture`]-family primitives above (or
+///   the raw `.output()` shape rooted through [`git_command_sync`]).
+pub fn git_status_discard_sync_in<I, S>(current_dir: impl AsRef<Path>, args: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let _ = git_command_sync()
+        .args(args)
+        .current_dir(current_dir.as_ref())
+        .status();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1660,6 +1727,156 @@ mod tests {
              verbatim — proves the sync constructor spawns the GIT_BIN \
              shim end-to-end, not a PATH-resolved `git`"
         );
+    }
+
+    /// [`git_status_discard_sync_in`] MUST spawn its child through the
+    /// canonical [`git_command_sync`] constructor — i.e. it inherits
+    /// the `GIT_BIN` env override the tools-registry idiom names as
+    /// the hermetic-runner contract for [`tools::GIT`], and never
+    /// hardcodes the literal `"git"` on the spawn path.
+    ///
+    /// End-to-end arm: sets `GIT_BIN` to a shim that appends its
+    /// positional args to an [`crate::test_support::ArgvLog`]-owned
+    /// hermetic `argv.log`, then invokes
+    /// `git_status_discard_sync_in` with a fixed argv slice; asserts
+    /// the log content is the exact argv slice, line-per-arg. The
+    /// spawn is DELIBERATELY end-to-end (not just a static
+    /// `Command::get_program()` check) so a regression that "tidied"
+    /// the primitive back to `Command::new("git")` would fail the
+    /// argv round-trip against the shim — the PATH-resolved `git`
+    /// would either refuse the `not-a-real-subcommand` argv or the
+    /// unresolvable working directory below, and the shim's write to
+    /// the hermetic log would not appear.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[test]
+    fn test_git_status_discard_sync_in_routes_through_git_bin_env_var() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let argv_log = crate::test_support::ArgvLog::reserve();
+        let (_shim_dir, shim) = make_git_shim(&argv_log.shim_body(""));
+        let _scope = GitBinScope::set(&shim);
+
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        git_status_discard_sync_in(cwd.path(), ["add", "kustomization.yaml"]);
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["add", "kustomization.yaml"],
+            "argv.log must round-trip the caller's argv slice verbatim, \
+             one line per positional arg — proves the primitive spawns \
+             the GIT_BIN-resolved shim and forwards args unchanged"
+        );
+    }
+
+    /// [`git_status_discard_sync_in`] MUST invoke its child with the
+    /// supplied `current_dir` set as the child's working directory.
+    ///
+    /// A shim body appends `PWD:$PWD` as the first log line so the
+    /// test can distinguish the working directory the child observed
+    /// from the process-wide cwd. `current_dir` is the tempdir's
+    /// canonical path (canonicalize resolves `/tmp` symlinks on
+    /// darwin/linux); the shim's `$PWD` is compared against the same
+    /// canonicalization on both sides.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[test]
+    fn test_git_status_discard_sync_in_uses_supplied_current_dir() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let log_dir = tempfile::tempdir().expect("log tempdir");
+        let log_path = log_dir.path().join("pwd.log");
+        let (_shim_dir, shim) = make_git_shim(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"PWD:$PWD\" >> '{}'\nexit 0\n",
+            log_path.display()
+        ));
+        let _scope = GitBinScope::set(&shim);
+
+        let cwd_dir = tempfile::tempdir().expect("cwd tempdir");
+        let cwd = std::fs::canonicalize(cwd_dir.path()).expect("canonicalize cwd tempdir");
+        git_status_discard_sync_in(&cwd, ["status", "--short"]);
+
+        let logged = std::fs::read_to_string(&log_path).expect("read pwd log");
+        let trimmed = logged.trim_end_matches('\n');
+        assert_eq!(
+            trimmed,
+            format!("PWD:{}", cwd.display()),
+            "child's $PWD must equal the caller's supplied current_dir \
+             (canonicalized), not the process-wide cwd — proves the \
+             primitive threads `current_dir` through to the spawn"
+        );
+    }
+
+    /// [`git_status_discard_sync_in`] MUST discard a non-zero exit
+    /// status without panicking or bailing. The pre-lift call sites
+    /// invoked the sync spawn with `let _ = …status();` so a
+    /// non-zero exit from `git add`/`commit`/`push` under the
+    /// advisory `--commit` flag never bubbled up as an error; the
+    /// primitive must preserve that best-effort semantics by
+    /// construction.
+    ///
+    /// Uses a shim exiting 77 (arbitrary non-zero, not a common
+    /// git failure code, so a false-match against an accidental
+    /// PATH-resolved `git` is easy to spot). The primitive's `()`
+    /// return type gives the assertion its shape: if the body ever
+    /// grew a `.expect(…)` or `.unwrap()` on the discarded
+    /// `.status()` result, this test would panic instead of
+    /// returning cleanly.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[test]
+    fn test_git_status_discard_sync_in_discards_non_zero_exit() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let (_shim_dir, shim) = make_git_shim("#!/bin/sh\nexit 77\n");
+        let _scope = GitBinScope::set(&shim);
+
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        // No `.expect(…)`, no `?` — the returned `()` is the whole
+        // contract. A regression that bailed on non-zero would
+        // panic here (the primitive returns `()`, not
+        // `anyhow::Result<()>`).
+        git_status_discard_sync_in(cwd.path(), ["push"]);
+    }
+
+    /// [`git_status_discard_sync_in`] MUST discard a spawn failure
+    /// (`fork+exec` failed — `GIT_BIN` resolves to a path that
+    /// doesn't exist) without panicking or bailing. Same best-effort
+    /// discipline as [`test_git_status_discard_sync_in_discards_non_zero_exit`],
+    /// but exercises the OTHER failure branch: the child never runs
+    /// because the binary can't spawn at all.
+    ///
+    /// The `GitBinScope::set("/nonexistent/git-binary-that-does-not-exist")`
+    /// forces the `Command::new(get_tool_path(tools::GIT))` resolution
+    /// to a path guaranteed absent; the `.status()` call then returns
+    /// `Err(io::Error)`. The primitive's `let _ = …` binding must
+    /// swallow it silently — a `.expect(…)` would panic here.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[test]
+    fn test_git_status_discard_sync_in_discards_spawn_failure() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let _scope = GitBinScope::set("/nonexistent/git-binary-that-does-not-exist-9a4c2f");
+
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        // No `.expect(…)`, no `?` — a regression that bailed on
+        // spawn failure would panic here (the primitive returns
+        // `()`, not `anyhow::Result<()>`).
+        git_status_discard_sync_in(cwd.path(), ["push"]);
     }
 
     /// Whole-module shield: no raw bare-literal `git` spawn may live on
