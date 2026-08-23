@@ -7,7 +7,7 @@
 //!
 //! Part of the pre-release gate system.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
 use std::time::Instant;
@@ -51,6 +51,85 @@ fn bun_bin() -> String {
     get_tool_path("BUN_BIN", "bun")
 }
 
+/// Async captured-output `bun` spawn that BAILS ON SPAWN ERROR ONLY
+/// and returns the raw [`std::process::Output`] with `output.status`
+/// intact for the caller to inspect. The bun-frontier sibling of
+/// [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`]
+/// (kubectl frontier, added at commit `0e2d0cf`), specialised on the
+/// `.current_dir(cwd)` variant every consumer here needs — a bun
+/// spawn in this module ALWAYS lands in the target web project's
+/// `web_dir`, never in the caller's cwd, so the primitive folds the
+/// `.current_dir(cwd)` into its body rather than making every call
+/// site spell it.
+///
+/// # Fusion of six occurrences past three-is-a-law
+///
+/// Pre-lift each of six consumer sites — `run_type_check` (`bun run
+/// type-check`), the ESLint arm of `run_lint_with_config` (`bun run
+/// lint`), `run_biome_lint`'s auto-fix (`bun x biome check --write
+/// src`) and verify (`bun x biome check src`) branches,
+/// `run_unit_tests` (`bun run test -- --run`), and
+/// `validate_frontend_with_config`'s `bun install --frozen-lockfile`
+/// preamble — spelled the same seven-line stanza verbatim modulo the
+/// argv and per-site `.with_context` string:
+///
+/// ```text
+/// let bun = bun_bin();
+/// let output = Command::new(&bun)
+///     .args([...])
+///     .current_dir(web_dir)
+///     .output()
+///     .await
+///     .with_context(|| format!("Failed to run <op> in {}", web_dir.display()))?;
+/// // caller then inspects `output.status.success()` to decide next step
+/// ```
+///
+/// Six occurrences past THEORY.md §VI.1's three-times threshold ("two
+/// occurrences is a coincidence; three is a law"). Each pre-lift site
+/// was one place a future consumer could drift: forget the
+/// `.current_dir(web_dir)` and spawn `bun` in the caller's cwd
+/// (silently discovering the wrong `package.json` if `forge
+/// prerelease` were ever invoked with a working directory that
+/// happened to contain a stray package manifest), forget the
+/// `.with_context(...)` and lose the operator's ability to tell WHICH
+/// bun invocation failed, or spell the context string inconsistently
+/// across sites and hide the site from a fleet-wide grep on a
+/// canonical envelope. Post-lift each site collapses to a
+/// `bun_output_at(&[...], web_dir, "bun <op>").await?` delegation and
+/// both disciplines (`BUN_BIN` routing via `bun_bin()`, canonical
+/// `"Failed to spawn {op}: {io_error}"` envelope via
+/// [`crate::retry::classify_spawn_anyhow`]) are inherited by
+/// construction.
+///
+/// # Envelope shape by construction
+///
+/// - Spawn `Err` (e.g., `BUN_BIN` resolves to an absent path on a
+///   Nix-hermetic runner) → `"Failed to spawn {op}: {io_error}"` via
+///   the shared [`crate::retry::classify_spawn_anyhow`] classifier,
+///   the same envelope the sibling
+///   [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`]
+///   emits on the kubectl frontier.
+/// - Spawn `Ok(output)` → `Ok(output)`, byte-verbatim on stdout AND
+///   stderr, with `output.status` (success OR non-zero exit OR signal
+///   termination) preserved for the caller. The bun-frontier callers
+///   drive downstream verdict-parsing off `output.status.success()`
+///   and per-tool stdout heuristics (`error TS` counting,
+///   vitest's `Tests  N passed` line, biome's `✖` markers), so the
+///   pass-through semantic is load-bearing — a bail-on-non-zero
+///   primitive would collapse every gate failure into the canonical
+///   envelope and discard the per-tool details the operator report
+///   depends on.
+async fn bun_output_at(args: &[&str], cwd: &Path, op: &str) -> Result<std::process::Output> {
+    crate::retry::classify_spawn_anyhow(
+        Command::new(bun_bin())
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .await,
+        op,
+    )
+}
+
 /// Result of frontend validation
 #[derive(Debug)]
 pub struct FrontendValidationResult {
@@ -87,13 +166,7 @@ pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
     let start = Instant::now();
 
     // Try bun run type-check first (defined in package.json)
-    let bun = bun_bin();
-    let output = Command::new(&bun)
-        .args(["run", "type-check"])
-        .current_dir(web_dir)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run type-check in {}", web_dir.display()))?;
+    let output = bun_output_at(&["run", "type-check"], web_dir, "bun run type-check").await?;
 
     let duration = start.elapsed();
 
@@ -161,13 +234,7 @@ pub async fn run_lint_with_config(web_dir: &Path, linter: &str) -> Result<(bool,
     }
 
     // ESLint: run via package.json script
-    let bun = bun_bin();
-    let output = Command::new(&bun)
-        .args(["run", "lint"])
-        .current_dir(web_dir)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run lint in {}", web_dir.display()))?;
+    let output = bun_output_at(&["run", "lint"], web_dir, "bun run lint").await?;
 
     let duration = start.elapsed();
 
@@ -219,13 +286,12 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
 
     // First, run biome auto-fix (safe fixes only by default)
     println!("   Running Biome auto-fix...");
-    let bun = bun_bin();
-    let fix_output = Command::new(&bun)
-        .args(["x", "biome", "check", "--write", "src"])
-        .current_dir(web_dir)
-        .output()
-        .await
-        .with_context(|| "Failed to run biome check --write")?;
+    let fix_output = bun_output_at(
+        &["x", "biome", "check", "--write", "src"],
+        web_dir,
+        "bun x biome check --write src",
+    )
+    .await?;
 
     // Auto-fix may report issues it couldn't fix - that's OK
     // We'll catch those in the verification step
@@ -253,12 +319,12 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
     println!("   Auto-fix complete, verifying...");
 
     // Then verify with biome check (no --write)
-    let check_output = Command::new(&bun)
-        .args(["x", "biome", "check", "src"])
-        .current_dir(web_dir)
-        .output()
-        .await
-        .with_context(|| "Failed to run biome check")?;
+    let check_output = bun_output_at(
+        &["x", "biome", "check", "src"],
+        web_dir,
+        "bun x biome check src",
+    )
+    .await?;
 
     let duration = start.elapsed();
 
@@ -314,13 +380,12 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
     println!("{}", "Running unit tests...".bold());
     let start = Instant::now();
 
-    let bun = bun_bin();
-    let output = Command::new(&bun)
-        .args(["run", "test", "--", "--run"]) // --run for non-watch mode
-        .current_dir(web_dir)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run tests in {}", web_dir.display()))?;
+    let output = bun_output_at(
+        &["run", "test", "--", "--run"], // --run for non-watch mode
+        web_dir,
+        "bun run test -- --run",
+    )
+    .await?;
 
     let duration = start.elapsed();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -430,13 +495,12 @@ pub async fn validate_frontend_with_config(
 
     // Ensure dependencies are installed
     println!("{}", "Ensuring dependencies are installed...".bold());
-    let bun = bun_bin();
-    let install = Command::new(&bun)
-        .args(["install", "--frozen-lockfile"])
-        .current_dir(web_dir)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run bun install in {}", web_dir.display()))?;
+    let install = bun_output_at(
+        &["install", "--frozen-lockfile"],
+        web_dir,
+        "bun install --frozen-lockfile",
+    )
+    .await?;
 
     if !install.status.success() {
         let stderr = String::from_utf8_lossy(&install.stderr);
@@ -588,6 +652,89 @@ mod tests {
              exactly ONCE in the module body (only in the `bun_bin()` \
              sigil), not {resolve_count} times — every consumer must route \
              through `bun_bin()`, not re-copy the resolve inline"
+        );
+    }
+
+    /// Whole-module shield: every captured-output `bun` spawn in this
+    /// module MUST route through the `bun_output_at` fusion primitive
+    /// — the bun-frontier sibling of
+    /// [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`]
+    /// added at commit `0e2d0cf`. The shield closes the composition
+    /// discipline the sibling `test_frontend_validation_routes_bun_through_bun_bin_sigil_not_raw_command`
+    /// (BUN_BIN routing at the sigil) leaves open: even after the
+    /// sigil ensures every spawn resolves the substrate-pinned `bun`
+    /// derivation, a call site could still (a) forget the
+    /// `.current_dir(web_dir)` and spawn `bun` in the caller's cwd,
+    /// (b) forget the `.with_context(...)` and lose the operator's
+    /// ability to tell WHICH bun invocation spawn-failed, or (c) spell
+    /// the context string inconsistently across sites and hide the
+    /// site from a fleet-wide grep on the canonical
+    /// `"Failed to spawn {op}: {io_error}"` envelope.
+    ///
+    /// # Two-arm pin
+    ///
+    /// Negative side pins that `.output()` appears exactly ONCE in
+    /// the module body — the fusion primitive's ONE body. Any new
+    /// bun spawn that hand-rolls the `.output().await` chain lands
+    /// as a second hit and trips the shield. Positive side pins ≥6
+    /// `bun_output_at(` delegation calls — a regression that dropped
+    /// every delegation could not leave the negative scan trivially
+    /// satisfied by absence. Both hits route through
+    /// [`crate::test_support::code_line_hits`] so this shield's own
+    /// docstring mentions of `.output()` and `bun_output_at(` (living
+    /// in `///`-prefixed comment lines) never self-match.
+    ///
+    /// # Boundary marker
+    ///
+    /// [`crate::test_support::module_body_before_tests`] slices from
+    /// file start to the `\n#[cfg(test)]\nmod tests {` marker above,
+    /// so this shield's own docstring stays out of scope AND every
+    /// current or future bun-spawning helper landing anywhere in the
+    /// top-level module body cannot silently ride along without
+    /// going through the fusion.
+    ///
+    /// # Fail-before-pass-after
+    ///
+    /// Pre-lift the six consumer sites (`run_type_check`, ESLint arm
+    /// of `run_lint_with_config`, `run_biome_lint` auto-fix + verify,
+    /// `run_unit_tests`, and `validate_frontend_with_config`'s `bun
+    /// install --frozen-lockfile` preamble) each spelled
+    /// `.output().await.with_context(...)?` verbatim — the shield's
+    /// `.output()` count-eq-1 assertion fails-before at 6+1=7 and
+    /// passes-after at 1. Mirrors the sibling shield discipline the
+    /// `run_inherited_status_sync` migrations landed across
+    /// `commands/{crossplane, e2e, gem, infra, pangea_infra, test_ci,
+    /// tool, local}.rs`.
+    #[test]
+    fn test_frontend_validation_bun_captured_spawns_route_through_bun_output_at() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("frontend_validation.rs"),
+            "commands/frontend_validation.rs",
+        );
+        let output_hits = crate::test_support::code_line_hits(body, ".output()");
+        assert_eq!(
+            output_hits.len(),
+            1,
+            "commands/frontend_validation.rs must carry exactly ONE \
+             `.output()` code-line hit in the module body — the `bun_output_at` \
+             fusion primitive's ONE body — not {} hit(s). Every captured-output \
+             `bun` spawn must route through the fusion so the canonical \
+             `\"Failed to spawn {{op}}: {{io_error}}\"` envelope (via \
+             `crate::retry::classify_spawn_anyhow`) and the `.current_dir(cwd)` \
+             discipline are inherited by construction. A raw \
+             `Command::new(&bun).args(...).current_dir(cwd).output().await.with_context(...)` \
+             stanza reopens the drift that pre-lift six sites spelled verbatim. \
+             Found: {output_hits:?}",
+            output_hits.len(),
+        );
+        let delegations = crate::test_support::code_line_hits(body, "bun_output_at(").len();
+        assert!(
+            delegations >= 6,
+            "commands/frontend_validation.rs must route captured-output \
+             `bun` spawns through the `bun_output_at` fusion — found only \
+             {delegations} delegation call(s); a dropped call would leave \
+             the negative `.output()`-count-eq-1 scan trivially satisfied \
+             by absence."
         );
     }
 
