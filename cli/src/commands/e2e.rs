@@ -123,6 +123,52 @@ fn bun_bin() -> String {
     get_tool_path("BUN_BIN", "bun")
 }
 
+/// Resolve the `nix` binary via the `NIX_BIN` env override, falling back
+/// to `nix` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
+/// the canonical env-var-or-PATH lookup every nix-invocation site in
+/// forge honors. Landing of the `nix_bin()` sigil onto
+/// `commands/e2e.rs` after the sibling landings on
+/// `commands/rust_service.rs::nix_bin` (63d4fe7),
+/// `commands/developer_tools.rs::nix_bin` (a12c172), and the core
+/// `cli/src/nix.rs::nix_bin` — the pattern is proven; `commands/e2e.rs`
+/// was the sole remaining sigil-bearing command module (already
+/// carrying `docker_bin` / `open_bin` / `cargo_bin` / `bun_bin`) still
+/// respelling the two-argument NIX_BIN resolve inline at its single
+/// `nix` spawn.
+///
+/// Solve-once at the sigil (THEORY §I.5 — duplication budget zero;
+/// every recurring shape becomes a helper before it becomes duplicated
+/// code) means a future added `nix` spawn in this module cannot
+/// silently re-copy the two-argument resolve and drift away from the
+/// `NIX_BIN` override at exactly the tier the hermetic-runner contract
+/// binds. The `nix_bin_routing_tests` shield below asserts three
+/// invariants via
+/// [`crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve`]:
+/// no bare-literal `nix` spawn in the module body (already landed
+/// pre-lift), `fn nix_bin()` is defined, and the two-argument resolve
+/// appears in EXACTLY one place — only the sigil body — so a future
+/// added spawn cannot silently re-copy the resolve inline. Pre-lift
+/// the sole consumer site (`build_and_load_image`'s
+/// `nix build <flake_attr> -o <path>` at the E2E-image materialization
+/// step `forge e2e run` invokes to load backend/web container images
+/// into the test daemon) fused the two-argument resolve inline at the
+/// spawn constructor, so a Nix-hermetic runner whose derivation exports
+/// `NIX_BIN=/nix/store/…-nix/bin/nix` but omits `nix` from `PATH` still
+/// resolved through the override — but any FUTURE `nix` spawn added to
+/// this module by copy-neighboring the existing shape would drift
+/// silently: the resolve had no single-point-of-truth for a
+/// substrate-path validation step, a per-spawn env-injection hook, or
+/// a telemetry sigil on the resolved path to hang off. Post-lift the
+/// resolve lives at ONE definition, the consumer is a one-line
+/// delegation, and the sigil shield holds any next nix-spawning site
+/// to the same contract by construction. Same silent-PATH-fallback
+/// bug class the sibling `docker_bin` (23241a6), `open_bin` (8f4c717),
+/// `cargo_bin` (170ecac), and `bun_bin` sigils on this same module
+/// already close for their respective spawn surfaces.
+fn nix_bin() -> String {
+    get_tool_path("NIX_BIN", "nix")
+}
+
 /// The typed exponential-backoff policy for [`ensure_docker_running`]'s
 /// macOS Docker Desktop startup-poll cadence — `initial_backoff` 2s ×
 /// `factor` 2 capped at `max_backoff` 30s. Consumes the pre-existing
@@ -932,7 +978,7 @@ fn build_and_load_image(repo_root: &str, name: &str, flake_attr: &str) -> Result
 
     // Build with Nix
     ui::print_info(&format!("Building {} image via Nix", name));
-    let mut build_cmd = Command::new(get_tool_path("NIX_BIN", "nix"));
+    let mut build_cmd = Command::new(nix_bin());
     build_cmd
         .current_dir(repo_root)
         .args(["build", flake_attr, "-o", &output_path_str]);
@@ -1350,73 +1396,61 @@ mod resolve_repo_root_git_bin_routing_tests {
 
 #[cfg(test)]
 mod nix_bin_routing_tests {
-    /// Whole-module shield: no raw `Command::new("nix")` may live in
-    /// `commands/e2e.rs`'s non-test body. Every `nix` spawn in this
-    /// module must first resolve `NIX_BIN` via
-    /// [`crate::repo::get_tool_path`] — the canonical env-var override
-    /// every other nix-invocation site in forge honors
-    /// (`commands/build.rs::execute` d8ef0d5,
-    /// `commands/tool.rs::build_lock_target`,
-    /// `commands/developer_tools.rs::rust_update_cargo_nix` and
-    /// siblings 4dfb2b3, `commands/rust_service.rs`'s three nix spawn
-    /// sites 7c34e57,
-    /// `commands/product_release.rs::run_nix_release_app` d0cd622,
-    /// `commands/nix_builder.rs::test`'s remote-build probe d930a5d,
-    /// `nix.rs::build_flake_attr_in` / `build_docker_image_from_dir`
-    /// / `path_info_recursive`, and
-    /// `nix_hooks.rs::NixHooks::build_and_get_path`).
+    /// Whole-module shield: no raw `Command::new("nix")` and no
+    /// inline respell of the two-argument `get_tool_path("NIX_BIN",
+    /// "nix")` resolve may live in `commands/e2e.rs`'s non-test body.
+    /// Every `nix` spawn in this module must first resolve `NIX_BIN`
+    /// through the local [`super::nix_bin`] sigil — the same
+    /// single-point-of-truth discipline the sibling `docker_bin` /
+    /// `open_bin` / `cargo_bin` / `bun_bin` sigils on this same
+    /// module carry, and the sibling `nix_bin()` landings on
+    /// `commands/rust_service.rs::nix_bin` (63d4fe7),
+    /// `commands/developer_tools.rs::nix_bin` (a12c172), and the
+    /// core `cli/src/nix.rs::nix_bin` established.
     ///
     /// Pre-lift this module carried one real `nix` spawn site:
-    /// `build_and_load_image`'s `nix build <flake_attr> -o <path>` at
-    /// line 660 — the E2E-image build step that `forge e2e run` (and
-    /// the auto-build fallback inside `run_test_pyramid`'s E2E phase)
+    /// `build_and_load_image`'s `nix build <flake_attr> -o <path>`
+    /// — the E2E-image build step that `forge e2e run` (and the
+    /// auto-build fallback inside `run_test_pyramid`'s E2E phase)
     /// invokes to materialize the backend/web container images that
     /// docker-load into the test daemon. The spawn spelled
-    /// `Command::new("nix")` verbatim, bypassing `NIX_BIN` at exactly
-    /// the moment hermetic-runner consistency matters most — the
-    /// step that produces the very images the E2E tier will exercise.
-    /// A Nix-hermetic runner with a store-path `nix` binary silently
-    /// fell through to whatever `nix` was first on `PATH` at this
-    /// site, diverging from every other nix-invocation surface in
-    /// forge and from the sibling KUBECTL_BIN / GIT_BIN / CARGO /
-    /// DOCKER_BIN / HELM_BIN frontier's uniform discipline.
+    /// `Command::new(get_tool_path("NIX_BIN", "nix"))` verbatim,
+    /// respelling the two-argument resolve inline — so a Nix-hermetic
+    /// runner with a store-path `nix` binary was still routed through
+    /// the override at that ONE site, but a FUTURE nix spawn added to
+    /// this module by copy-neighboring the existing shape would drift
+    /// silently: the resolve had no single-point-of-truth for a
+    /// substrate-path validation step, a per-spawn env-injection
+    /// hook, or a telemetry sigil on the resolved path to hang off.
+    /// The three sibling `docker_bin` / `open_bin` / `cargo_bin` /
+    /// `bun_bin` shields on this same module close exactly that
+    /// class for their respective spawn surfaces; this shield closes
+    /// it for `nix`.
     ///
-    /// The scan bounds on the whole-module boundary (from the file
-    /// start to the FIRST `\n#[cfg(test)]\n` marker in source order,
-    /// which lands at the sibling `resolve_repo_root_git_bin_routing_tests`
-    /// block above) so this shield's own docstring mentions of
-    /// `Command::new("nix")` — living in a `#[cfg(test)]` block below
-    /// that first marker — stay out of scope AND every current or
-    /// future nix-spawning helper landing anywhere in the top-level
-    /// module body cannot silently ride along without going through
-    /// `NIX_BIN`. Mirrors the sibling whole-module shields on
-    /// `commands/build.rs::test_execute_routes_nix_through_nix_bin_not_raw_command`
-    /// (d8ef0d5),
-    /// `commands/developer_tools.rs::test_developer_tools_routes_nix_through_nix_bin_not_raw_command`
-    /// (4dfb2b3),
+    /// The delegation to
+    /// [`crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve`]
+    /// asserts three invariants against the whole-module boundary
+    /// (from the file start to the FIRST `\n#[cfg(test)]\n` marker
+    /// in source order, which lands at the sibling
+    /// `resolve_repo_root_git_bin_routing_tests` block above): no
+    /// bare `Command::new("nix")` in the body, `fn nix_bin()` is
+    /// defined, and the two-argument resolve
+    /// `get_tool_path("NIX_BIN", "nix")` appears in EXACTLY ONE
+    /// place (only the sigil body). Both forbidden needles are
+    /// reconstructed by the helper via [`format!`] at test time so
+    /// this shield's own docstring citations do not false-match the
+    /// scan. Mirrors the sibling sigil-level `nix_bin` shield on
     /// `commands/rust_service.rs::test_rust_service_routes_nix_through_nix_bin_not_raw_command`
-    /// (7c34e57), and
-    /// `commands/nix_builder.rs::test_nix_builder_routes_nix_through_nix_bin_not_raw_command`
-    /// (d930a5d) — the whole-module-boundary scan discipline
-    /// pioneered on `commands/supergraph_verification.rs` (65283fb).
+    /// (7c34e57) and the module's own sigil-level `docker_bin` /
+    /// `open_bin` / `cargo_bin` / `bun_bin` shields already carrying
+    /// the same discipline for their respective tools.
     #[test]
     fn test_e2e_routes_nix_through_nix_bin_not_raw_command() {
-        const SOURCE: &str = include_str!("e2e.rs");
-        let body =
-            crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/e2e.rs");
-        assert!(
-            !body.contains("Command::new(\"nix\")"),
-            "commands/e2e.rs must not spawn `nix` via the bare \
-             literal — every `nix` spawn must resolve `NIX_BIN` via \
-             `crate::repo::get_tool_path(\"NIX_BIN\", \"nix\")` first. \
-             A raw `Command::new(\"nix\")` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            body.contains("get_tool_path(\"NIX_BIN\", \"nix\")"),
-            "commands/e2e.rs must resolve the nix binary via \
-             `get_tool_path(\"NIX_BIN\", \"nix\")` — the canonical \
-             lookup was not found in the module body."
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            include_str!("e2e.rs"),
+            "commands/e2e.rs",
+            "nix",
+            "NIX_BIN",
         );
     }
 }
