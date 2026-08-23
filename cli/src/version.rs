@@ -9785,8 +9785,47 @@ pub fn next_free_version(
     max_released: &str,
     tag_exists: &dyn Fn(&str) -> bool,
 ) -> Result<String> {
+    let typed: BumpLevel = level.parse()?;
+    next_free_version_typed(manifest_version, typed, max_released, tag_exists)
+}
+
+/// The typed peer of [`next_free_version`]: the same seeding-and-collision
+/// arithmetic, but the bump magnitude is a [`BumpLevel`] variant rather than
+/// a stringly-typed level string the loop body would otherwise re-parse via
+/// [`FromStr`] on every iteration.
+///
+/// # Why the typed peer
+///
+/// The stringly-typed [`next_free_version`] entry point (a) parses `level`
+/// via [`BumpLevel::from_str`] inside the seed bump AND (b) hardcodes the
+/// literal `"patch"` inside the collision-skip loop body, which re-parses
+/// the same string up to 1024 times per invocation on the pathological
+/// path. Neither parse can fail (the seed parse validates once, and the
+/// loop-body parse is a static literal), but both re-derive the
+/// [`BumpLevel`] enum from a string at a boundary where the typed variant
+/// is already available. The typed peer takes [`BumpLevel`] at the
+/// signature and delegates to [`bump_semver_typed`] at both bump sites, so
+/// the runtime FromStr dispatch never fires inside the loop — the typed
+/// primitive discipline the module opens with (THEORY §V.4 typed
+/// primitives; every named typed sum has both a `_typed` and a stringly
+/// entry point sharing ONE body) extended one function outward.
+///
+/// The stringly [`next_free_version`] retains its signature for the
+/// existing production caller (`commands/gem.rs` reads `--level` as a
+/// clap string), and delegates through this typed peer after a single
+/// top-level parse, so the module has ONE seeding-and-collision body at
+/// both entry points and every future consumer that already holds a
+/// typed [`BumpLevel`] (a clap `ValueEnum`, a `serde_yaml` deserialize,
+/// a downstream typed policy record) reaches the typed peer directly
+/// without a string round-trip.
+pub fn next_free_version_typed(
+    manifest_version: &str,
+    level: BumpLevel,
+    max_released: &str,
+    tag_exists: &dyn Fn(&str) -> bool,
+) -> Result<String> {
     let seed = bump_seed(manifest_version, max_released)?;
-    let mut candidate = bump_semver(seed, level)?;
+    let mut candidate = bump_semver_typed(seed, level)?;
     // Bounded rather than `loop`: a predicate that answers "exists" for
     // everything would otherwise hang a release job forever. 1024 is far above
     // any real tag run and small enough to fail fast.
@@ -9794,7 +9833,7 @@ pub fn next_free_version(
         if !tag_exists(&candidate) {
             return Ok(candidate);
         }
-        candidate = bump_semver(&candidate, "patch")?;
+        candidate = bump_semver_typed(&candidate, BumpLevel::Patch)?;
     }
     bail!(
         "could not find a free version after 1024 patch bumps from {} \
@@ -25812,7 +25851,7 @@ mod tests {
 
 #[cfg(test)]
 mod seeding_tests {
-    use super::{bump_seed, next_free_version};
+    use super::{bump_seed, next_free_version, next_free_version_typed, BumpLevel};
 
     /// No tag exists — isolates the seeding half.
     fn no_tags(_v: &str) -> bool {
@@ -25913,6 +25952,86 @@ mod seeding_tests {
                 }
             }
         }
+    }
+
+    /// The stringly and typed entry points share ONE seeding-and-collision
+    /// body: for every combination of (manifest, released, level, taken-set)
+    /// the fleet actually exercises, both entry points return byte-identical
+    /// strings. Pins the "the stringly entry point is a top-level parse plus
+    /// a delegation" contract against a future refactor that quietly forks
+    /// one of the two bodies (e.g., an off-by-one loop bound in only one
+    /// path, or a `bump_semver` vs `bump_semver_typed` swap that produced a
+    /// different arithmetic on the semver ladder).
+    #[test]
+    fn typed_and_stringly_next_free_version_return_byte_identical_strings() {
+        let shapes = [
+            ("0.2.5", "0.3.1"),
+            ("0.4.0", "0.3.1"),
+            ("0.1.0", ""),
+            ("0.9.0", "0.10.0"),
+            ("1.0.0", "1.0.0"),
+        ];
+        let taken_sets: &[&dyn Fn(&str) -> bool] = &[
+            &|_v: &str| false,
+            &|v: &str| matches!(v, "0.1.1" | "0.1.2"),
+            &|v: &str| matches!(v, "0.3.2" | "0.4.0" | "1.0.0"),
+        ];
+        for (manifest, released) in shapes {
+            for (level_str, level_typed) in [
+                ("patch", BumpLevel::Patch),
+                ("minor", BumpLevel::Minor),
+                ("major", BumpLevel::Major),
+            ] {
+                for taken in taken_sets {
+                    let by_str = next_free_version(manifest, level_str, released, taken).unwrap();
+                    let by_typed =
+                        next_free_version_typed(manifest, level_typed, released, taken).unwrap();
+                    assert_eq!(
+                        by_str, by_typed,
+                        "stringly({manifest},{level_str},{released}) vs \
+                         typed({manifest},{level_typed:?},{released})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The typed peer's collision-skip loop is bounded exactly like the
+    /// stringly one (1024 patch bumps then bail with the same message).
+    /// Pins that swapping the internal `bump_semver(&candidate, "patch")`
+    /// for `bump_semver_typed(&candidate, BumpLevel::Patch)` did not
+    /// silently widen or narrow the loop bound, and that the bail message
+    /// still names the seed for operator triage.
+    #[test]
+    fn typed_next_free_version_bails_at_the_same_bound_with_the_same_message() {
+        let all_taken = |_v: &str| true;
+        let err_str = next_free_version("0.1.0", "patch", "", &all_taken)
+            .unwrap_err()
+            .to_string();
+        let err_typed = next_free_version_typed("0.1.0", BumpLevel::Patch, "", &all_taken)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err_str, err_typed,
+            "same bail message on the pathological path"
+        );
+        assert!(err_typed.contains("refusing to loop"), "got: {err_typed}");
+        assert!(err_typed.contains("0.1.0"), "names the seed: {err_typed}");
+    }
+
+    /// The stringly entry point still refuses an unrecognized level string
+    /// at the top-level parse — the delegation-through-typed refactor did
+    /// not silently accept an invalid level by dropping it in the loop
+    /// body. Pins that a caller reading `--level` from clap and passing
+    /// through a typo still surfaces the parse error at the entry point,
+    /// not somewhere downstream.
+    #[test]
+    fn stringly_next_free_version_still_refuses_an_unrecognized_level() {
+        let err = next_free_version("0.1.0", "totally-bogus", "", &|_v: &str| false).unwrap_err();
+        // BumpLevel::from_str's grammar-oracle error mentions the offending
+        // string; we don't couple to the exact wording, only that it
+        // surfaces the input for operator triage.
+        assert!(err.to_string().contains("totally-bogus"), "got: {err}");
     }
 }
 
