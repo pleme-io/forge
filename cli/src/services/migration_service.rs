@@ -185,11 +185,11 @@ impl MigrationService {
     }
 
     async fn delete_existing_job(&self, name: &str, namespace: &str) -> Result<()> {
-        let output = crate::infrastructure::kubectl::kubectl_command_async()
-            .args(["delete", "job", name, "-n", namespace, "--ignore-not-found"])
-            .output()
-            .await
-            .context("Failed to delete existing job")?;
+        let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+            &["delete", "job", name, "-n", namespace, "--ignore-not-found"],
+            "kubectl delete job (pre-create cleanup)",
+        )
+        .await?;
 
         if !output.status.success() {
             warn!(
@@ -281,8 +281,8 @@ spec:
                 anyhow::bail!("Timeout waiting for migration job");
             }
 
-            let output = crate::infrastructure::kubectl::kubectl_command_async()
-                .args([
+            let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+                &[
                     "get",
                     "job",
                     name,
@@ -290,10 +290,10 @@ spec:
                     namespace,
                     "-o",
                     "jsonpath={.status.conditions[?(@.type==\"Complete\")].status}",
-                ])
-                .output()
-                .await
-                .context("Failed to check job status")?;
+                ],
+                "kubectl get job (Complete condition)",
+            )
+            .await?;
 
             let status = String::from_utf8_lossy(&output.stdout);
 
@@ -302,8 +302,8 @@ spec:
             }
 
             // Check for failure
-            let output = crate::infrastructure::kubectl::kubectl_command_async()
-                .args([
+            let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+                &[
                     "get",
                     "job",
                     name,
@@ -311,9 +311,10 @@ spec:
                     namespace,
                     "-o",
                     "jsonpath={.status.conditions[?(@.type==\"Failed\")].status}",
-                ])
-                .output()
-                .await?;
+                ],
+                "kubectl get job (Failed condition)",
+            )
+            .await?;
 
             let failed = String::from_utf8_lossy(&output.stdout);
             if failed.trim() == "True" {
@@ -326,11 +327,12 @@ spec:
     }
 
     async fn get_job_logs(&self, name: &str, namespace: &str) -> Result<String> {
-        let output = crate::infrastructure::kubectl::kubectl_command_async()
-            .args(["logs", &format!("job/{}", name), "-n", namespace])
-            .output()
-            .await
-            .context("Failed to get job logs")?;
+        let job_ref = format!("job/{}", name);
+        let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+            &["logs", &job_ref, "-n", namespace],
+            "kubectl logs (migration job)",
+        )
+        .await?;
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
