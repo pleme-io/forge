@@ -1338,26 +1338,24 @@ pub fn deploy(
         // `commands/federation.rs` git-mutation sites honor and the same
         // class of bug the free-function-`git` / `GitClient` migrations
         // at 818ed9a / badcdf4 / 8653403 / f6be190 / 81d7486 / 8a1958e
-        // redeemed on the async half. Retains the pre-migration `let _ =
-        // ….status()` best-effort shape — the deploy path's commit +
-        // push are advisory (invoked with `--commit`), and the operator
-        // sees the failure via inherited stderr; changing that shape
-        // belongs in a separate lift, not in this GIT_BIN-routing pass.
-        let _ = crate::git::git_command_sync()
-            .args(["add", kustomization_path])
-            .current_dir(k8s_repo)
-            .status();
+        // redeemed on the async half. The advisory `let _ = …
+        // .status()` best-effort shape (the deploy path's commit + push
+        // are advisory, invoked with `--commit`; the operator sees the
+        // failure via inherited stderr) now lives at ONE definition —
+        // [`crate::git::git_status_discard_sync_in`] — pinned by the
+        // sibling
+        // [`super::deploy_git_mutation_discard_status_spawn_routing_tests`]
+        // shield below. The three spawns collapse from a `let _ =
+        // git_command_sync().args(…).current_dir(…).status();` four-line
+        // stanza to a one-line delegation each; both disciplines
+        // (`GIT_BIN`-routing and best-effort-discard) are inherited by
+        // construction rather than re-hand-rolled per site.
+        crate::git::git_status_discard_sync_in(k8s_repo, ["add", kustomization_path]);
 
         let commit_msg = format!("deploy: update {} to {}", service, image_tag);
-        let _ = crate::git::git_command_sync()
-            .args(["commit", "-m", &commit_msg])
-            .current_dir(k8s_repo)
-            .status();
+        crate::git::git_status_discard_sync_in(k8s_repo, ["commit", "-m", &commit_msg]);
 
-        let _ = crate::git::git_command_sync()
-            .args(["push"])
-            .current_dir(k8s_repo)
-            .status();
+        crate::git::git_status_discard_sync_in(k8s_repo, ["push"]);
 
         info!("Changes committed and pushed");
     }
@@ -1606,11 +1604,15 @@ pub fn bump(
             .context("Failed to git add")?;
 
         if !status.success() {
-            // Fallback: add individual files
-            let _ = crate::git::git_command_sync()
-                .args(["add", "-A", charts_dir])
-                .current_dir(&repo_root)
-                .status();
+            // Fallback: add individual files. Advisory best-effort
+            // discard — routes through
+            // [`crate::git::git_status_discard_sync_in`], the sibling
+            // primitive the three deploy-path advisory git spawns
+            // (`git add` / `git commit` / `git push` under `--commit`)
+            // migrated onto in the same commit. Pinned by
+            // [`super::bump_git_add_fallback_discard_status_spawn_routing_tests`]
+            // below.
+            crate::git::git_status_discard_sync_in(&repo_root, ["add", "-A", charts_dir]);
         }
 
         let commit_msg = format!("release: {} v{}", lib_chart_name, new_version);
@@ -3603,6 +3605,174 @@ mod bump_git_commit_status_spawn_routing_tests {
              — the delegation string was not found in `bump`'s body. \
              A regression that dropped the delegation cannot leave the \
              negative scan trivially satisfied by absence."
+        );
+    }
+}
+
+#[cfg(test)]
+mod deploy_git_mutation_discard_status_spawn_routing_tests {
+    /// Function-scoped shield: `deploy`'s three advisory git-mutation
+    /// spawns — the consecutive `git add <kustomization>`, `git commit
+    /// -m <deploy: update … to …>`, and `git push` inside the
+    /// `if commit { ... }` block invoked under `forge helm deploy
+    /// --commit` — route through
+    /// [`crate::git::git_status_discard_sync_in`], never a hand-rolled
+    /// `let _ = crate::git::git_command_sync().args(…).current_dir(…)
+    /// .status();` four-line stanza.
+    ///
+    /// Pre-lift each spawn spelled the four-line
+    /// `let _ = crate::git::git_command_sync().args(…).current_dir(…)
+    /// .status();` stanza that fused two disciplines by hand at every
+    /// consumer:
+    ///
+    /// 1. `GIT_BIN`-routing via the [`crate::git::git_command_sync`]
+    ///    constructor (a regression that "tidied" the constructor back
+    ///    to `Command::new("git")` at any one site would silently
+    ///    downgrade that site to the PATH-resolved `git` and, on a
+    ///    Nix-hermetic runner with a substrate-derivation-pinned `git`
+    ///    on `GIT_BIN`, bypass the pinned binary).
+    /// 2. Best-effort discard via the `let _ = ….status();` binding
+    ///    (a regression that promoted the site to `.status()?` would
+    ///    bubble a spawn-only error out of an advisory spawn the
+    ///    operator can already see failing on inherited stderr, and
+    ///    turn a deploy that landed the manifest write into a
+    ///    non-zero-exit failure at the advisory-commit tail).
+    ///
+    /// Post-lift both disciplines live at ONE definition
+    /// ([`crate::git::git_status_discard_sync_in`] in `cli/src/git.rs`)
+    /// and every consumer inherits them by construction. The three
+    /// consumer sites collapse from a four-line stanza to a one-line
+    /// delegation each. Same three-times-is-a-law consolidation
+    /// discipline the sibling
+    /// [`super::bump_git_add_fallback_discard_status_spawn_routing_tests`]
+    /// applies at `bump`'s fourth consumer.
+    ///
+    /// Fn-scoping is load-bearing: the sibling `deploy` body carries
+    /// no other `.status()` sites that could false-fire this shield,
+    /// but the whole-module boundary in `commands/helm.rs` carries
+    /// legitimate `.status()` sites inside `bump` (the git-add
+    /// fallback interrogation and the warn-on-fail git-tag). Bounding
+    /// the scan to `deploy`'s body via
+    /// [`crate::test_support::fn_body_slice_between_markers`] with
+    /// open marker `"pub fn deploy("` and end marker
+    /// `"\n/// Full chart lifecycle:"` (the doc comment above the next
+    /// `pub fn release`) keeps this shield precise.
+    ///
+    /// Negative side scans for the pre-lift needle reconstructed at
+    /// test time via [`format!`] (so this shield's own docstring,
+    /// which names the pre-lift shape only in prose, does not
+    /// false-match): the four-line `let _ = crate::git::
+    /// git_command_sync()` builder-opener. Positive side pins that
+    /// `crate::git::git_status_discard_sync_in(` appears in the
+    /// sliced fn body at EXACTLY THREE lines — a regression that
+    /// dropped a delegation cannot leave the negative scan trivially
+    /// satisfied by absence, and a regression that duplicated one is
+    /// caught the same way.
+    #[test]
+    fn test_deploy_git_mutation_spawns_route_through_git_status_discard_sync_in() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/helm.rs",
+            "pub fn deploy(",
+            "\n/// Full chart lifecycle:",
+        );
+
+        let pre_lift_needle = format!("let _ = crate::git::git_command_sync{}", "()");
+        assert!(
+            !fn_body.contains(&pre_lift_needle),
+            "helm::deploy must not re-inline the pre-lift `let _ = \
+             crate::git::git_command_sync().args(…).current_dir(…) \
+             .status();` four-line stanza on ANY advisory git-mutation \
+             spawn — the shape must route through \
+             `crate::git::git_status_discard_sync_in`, which carries \
+             both the `GIT_BIN`-routing and best-effort-discard \
+             disciplines at ONE definition."
+        );
+
+        let delegation_needle = "crate::git::git_status_discard_sync_in(";
+        let delegation_hits = crate::test_support::code_line_hits(fn_body, delegation_needle);
+        assert_eq!(
+            delegation_hits.len(),
+            3,
+            "helm::deploy must dispatch EXACTLY THREE advisory \
+             git-mutation spawns (`git add` / `git commit` / `git push` \
+             inside `if commit {{ ... }}`) through \
+             `crate::git::git_status_discard_sync_in` — three \
+             delegations found: {delegation_hits:?}. Fewer means a \
+             delegation was silently dropped; more means a duplicate \
+             was introduced. Either regression is caught here rather \
+             than at review."
+        );
+    }
+}
+
+#[cfg(test)]
+mod bump_git_add_fallback_discard_status_spawn_routing_tests {
+    /// Function-scoped shield: `bump`'s fallback `git add -A
+    /// <charts_dir>` advisory spawn — the sole `let _ = ….status();`
+    /// binding inside `bump`, invoked when the primary
+    /// `git add <charts_dir>/*/Chart.yaml` glob-add exits non-zero —
+    /// routes through [`crate::git::git_status_discard_sync_in`],
+    /// never a hand-rolled `let _ = crate::git::git_command_sync()
+    /// .args(…).current_dir(…).status();` four-line stanza.
+    ///
+    /// Sibling of the three-consumer
+    /// [`super::deploy_git_mutation_discard_status_spawn_routing_tests`]
+    /// shield on `deploy`'s advisory git-mutation triple. Same
+    /// primitive, same disciplines, same anti-regression contract.
+    /// Fourth consumer post-lift, so both disciplines
+    /// (`GIT_BIN`-routing via [`crate::git::git_command_sync`] and
+    /// best-effort discard via the discarded `.status()`) live at ONE
+    /// definition and every consumer inherits them by construction.
+    ///
+    /// Fn-scoping is load-bearing: the same `bump` body carries two
+    /// legitimate `.status()` sites (the primary `git add
+    /// <charts_dir>/*/Chart.yaml` interrogation and the warn-on-fail
+    /// `git tag` non-zero degrade) that shape the fallback path this
+    /// shield certifies. A whole-module boundary would false-fire on
+    /// those two; bounding the scan to `bump`'s body via
+    /// [`crate::test_support::fn_body_slice_between_markers`] with
+    /// open marker `"pub fn bump("` and end marker `"\nfn
+    /// chart_version_at("` keeps this shield precise. Same marker-
+    /// scoped discipline the sibling
+    /// [`super::bump_git_commit_status_spawn_routing_tests`] uses.
+    #[test]
+    fn test_bump_git_add_fallback_routes_through_git_status_discard_sync_in() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/helm.rs",
+            "pub fn bump(",
+            "\nfn chart_version_at(",
+        );
+
+        let pre_lift_needle = format!("let _ = crate::git::git_command_sync{}", "()");
+        assert!(
+            !fn_body.contains(&pre_lift_needle),
+            "helm::bump must not re-inline the pre-lift `let _ = \
+             crate::git::git_command_sync().args(…).current_dir(…) \
+             .status();` four-line stanza on the fallback `git add -A \
+             <charts_dir>` advisory spawn — the shape must route \
+             through `crate::git::git_status_discard_sync_in`, which \
+             carries both the `GIT_BIN`-routing and best-effort- \
+             discard disciplines at ONE definition."
+        );
+
+        let delegation_needle = "crate::git::git_status_discard_sync_in(";
+        let delegation_hits = crate::test_support::code_line_hits(fn_body, delegation_needle);
+        assert_eq!(
+            delegation_hits.len(),
+            1,
+            "helm::bump must dispatch EXACTLY ONE advisory git-add \
+             fallback spawn through `crate::git::git_status_discard_\
+             sync_in` — {n} delegations found: {delegation_hits:?}. \
+             Zero means the delegation was silently dropped; more than \
+             one means a duplicate was introduced. Either regression \
+             is caught here rather than at review.",
+            n = delegation_hits.len()
         );
     }
 }
