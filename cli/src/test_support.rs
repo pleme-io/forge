@@ -1912,17 +1912,28 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
 ///   whichever the body slice actually covers — so a failing shield
 ///   points a reader at the exact scan window.
 /// - `min_delegations` — minimum number of delegation call sites the
-///   body MUST carry — summed across the three canonical entrypoints
+///   body MUST carry — summed across the four canonical entrypoints
 ///   `classify_capture_anyhow(` (the bare classifier over an already-
 ///   captured `Result<Output>`), `run_capture_anyhow(` (the async
-///   run-wrapper), and `run_capture_anyhow_sync(` (the sync run-
-///   wrapper). All three route through the ONE canonical
-///   `classify_capture_anyhow` body at `retry.rs`, so any of the three
-///   satisfies "the captured-output bail routes through the primitive"
-///   — a shield that only recognized the bare classifier would refuse
-///   a migration that spelled the higher-level run-wrapper (the
-///   canonical shape once the run-* algebra closed at 06cd778). A
-///   dropped delegation would leave the negative
+///   run-wrapper), `run_capture_anyhow_sync(` (the sync run-
+///   wrapper), and `kubectl_capture_anyhow(` (the
+///   `kubectl_command_async()`-fronted async fusion primitive on
+///   `infrastructure::kubectl` — a `run_capture_anyhow` composition
+///   pre-bound to a KUBECTL_BIN-resolved constructor). All four route
+///   through the ONE canonical `classify_capture_anyhow` body at
+///   `retry.rs`, so any of the four satisfies "the captured-output
+///   bail routes through the primitive" — a shield that only
+///   recognized the bare classifier would refuse a migration that
+///   spelled the higher-level run-wrapper (the canonical shape once
+///   the run-* algebra closed at 06cd778), and one that only
+///   recognized `run_capture_anyhow` would refuse a migration onto
+///   the `kubectl_capture_anyhow` fusion primitive that lifts the
+///   `kubectl_command_async() + args + run_capture_anyhow`
+///   three-line stanza to one line at the two kubectl-fronted
+///   control-flow-carrying capture sites
+///   (`commands/flux.rs::get_pod_status_full` +
+///   `commands/integration_tests.rs::fetch_secret`). A dropped
+///   delegation would leave the negative
 ///   `if !output.status.success` scan satisfied by absence — pinning a
 ///   positive floor guards against that regression class.
 ///
@@ -1942,16 +1953,19 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
 ///   result (`DriftCheckResult::error`, `WaitOutcome::Timeout`) rather
 ///   than a bail — precisely the shapes the shield MUST not false-match.
 /// - The sum of `code_line_hits` for `classify_capture_anyhow(`,
-///   `run_capture_anyhow(`, and `run_capture_anyhow_sync(` MUST hit
-///   at least `min_delegations` times. Pins the positive floor so a
-///   regression that both dropped the delegation AND accidentally left
-///   the negative side satisfied (e.g. by rewriting the bail into a
-///   `bail!("failed")` shape without `if !output.status.success`) fails
-///   here. The three needles are mutually exclusive on any code line —
-///   `classify_capture_anyhow` does not contain `run_capture_anyhow`
-///   as a substring, `run_capture_anyhow_sync(` does not contain
-///   `run_capture_anyhow(` (the char after `run_capture_anyhow` is
-///   `_` not `(`), so summing without dedup is correct.
+///   `run_capture_anyhow(`, `run_capture_anyhow_sync(`, and
+///   `kubectl_capture_anyhow(` MUST hit at least `min_delegations`
+///   times. Pins the positive floor so a regression that both dropped
+///   the delegation AND accidentally left the negative side satisfied
+///   (e.g. by rewriting the bail into a `bail!("failed")` shape
+///   without `if !output.status.success`) fails here. The four needles
+///   are mutually exclusive on any code line — `classify_capture_anyhow`
+///   does not contain `run_capture_anyhow` as a substring,
+///   `run_capture_anyhow_sync(` does not contain `run_capture_anyhow(`
+///   (the char after `run_capture_anyhow` is `_` not `(`), and
+///   `kubectl_capture_anyhow(` shares no substring with either
+///   `classify_capture_anyhow` or `run_capture_anyhow` (the `kubectl_`
+///   prefix is disjoint), so summing without dedup is correct.
 ///
 /// # Why one canonical helper
 ///
@@ -1986,16 +2000,18 @@ pub fn assert_source_routes_captured_bails_through_classify_capture_anyhow(
     let via_classify = code_line_hits(body, "classify_capture_anyhow(").len();
     let via_run = code_line_hits(body, "run_capture_anyhow(").len();
     let via_run_sync = code_line_hits(body, "run_capture_anyhow_sync(").len();
-    let delegations = via_classify + via_run + via_run_sync;
+    let via_kubectl = code_line_hits(body, "kubectl_capture_anyhow(").len();
+    let delegations = via_classify + via_run + via_run_sync + via_kubectl;
     assert!(
         delegations >= min_delegations,
         "{label} must route captured-output bails through \
          `classify_capture_anyhow` (or `run_capture_anyhow` / \
-         `run_capture_anyhow_sync`) — found only {delegations} \
-         delegation call(s) (classify={via_classify}, \
-         run={via_run}, run_sync={via_run_sync}); a dropped call would \
-         leave the negative `if !output.status.success` scan satisfied \
-         by absence"
+         `run_capture_anyhow_sync` / `kubectl_capture_anyhow`) — \
+         found only {delegations} delegation call(s) \
+         (classify={via_classify}, run={via_run}, \
+         run_sync={via_run_sync}, kubectl={via_kubectl}); a dropped \
+         call would leave the negative `if !output.status.success` \
+         scan satisfied by absence"
     );
 }
 
@@ -5453,6 +5469,32 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     ) {
         let body = "\
             let output = crate::retry::run_capture_anyhow_sync(cmd, \"doca inspect --tarball\")?;\n";
+        assert_source_routes_captured_bails_through_classify_capture_anyhow(
+            body,
+            "commands/fake.rs::fake_fn",
+            1,
+        );
+    }
+
+    /// Kubectl-fronted fusion sibling: a body that spells the
+    /// `kubectl_capture_anyhow(` fusion primitive
+    /// (`infrastructure::kubectl` — pre-binds
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`] to
+    /// the same `run_capture_anyhow` classifier the wrappers above
+    /// route through) MUST satisfy the positive floor. Pins the
+    /// substring-disjointness invariant the helper's summation
+    /// depends on: `kubectl_capture_anyhow(` shares no substring
+    /// with `classify_capture_anyhow(` or `run_capture_anyhow(`
+    /// (the `kubectl_` prefix is disjoint from both), so the sum
+    /// `via_classify + via_run + via_run_sync + via_kubectl` is
+    /// not inflated by double-counting on this line — the shield
+    /// sees exactly one delegation from the one kubectl-fronted
+    /// fusion call.
+    #[test]
+    fn test_assert_source_routes_captured_bails_through_classify_capture_anyhow_accepts_kubectl_capture_anyhow_fusion(
+    ) {
+        let body = "\
+            let output = crate::infrastructure::kubectl::kubectl_capture_anyhow(&[\"get\", \"pods\"], \"kubectl get pods\").await?;\n";
         assert_source_routes_captured_bails_through_classify_capture_anyhow(
             body,
             "commands/fake.rs::fake_fn",

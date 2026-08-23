@@ -12,7 +12,7 @@ use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
-use crate::infrastructure::kubectl::kubectl_command_async;
+use crate::infrastructure::kubectl::kubectl_capture_anyhow;
 use crate::retry::RetryPolicy;
 
 /// The typed exponential-backoff policy for [`execute_suite`]'s
@@ -684,26 +684,30 @@ async fn prepare_environment(config: &IntegrationTestConfig) -> Result<HashMap<S
 /// Fetch secret from Kubernetes
 async fn fetch_secret(secret_name: &str, key: &str) -> Result<String> {
     // Owns the async captured-output spawn + classify ritual at the
-    // canonical `crate::retry::run_capture_anyhow` primitive so the
-    // operator log line carries the exit code by construction — the
-    // pre-lift bail spelled `"Failed to fetch secret {name}/{key}"`
-    // and dropped BOTH the exit code AND the stderr; post-lift each
-    // surfaces at the canonical `"kubectl get secret failed (exit
-    // {code}): {stderr}"` envelope at `retry::classify_capture_anyhow`'s
-    // ONE body, with the outer `.with_context(...)` retaining the
-    // secret_name/key hint on the anyhow chain (strictly additive per
-    // the sibling `workspace_deps` migration).
-    let mut cmd = kubectl_command_async();
-    cmd.args(&[
-        "get",
-        "secret",
-        secret_name,
-        "-o",
-        &format!("jsonpath={{.data.{}}}", key),
-    ]);
-    let output = crate::retry::run_capture_anyhow(cmd, "kubectl get secret")
-        .await
-        .with_context(|| format!("fetch secret {}/{}", secret_name, key))?;
+    // canonical `crate::infrastructure::kubectl::kubectl_capture_anyhow`
+    // fusion primitive — the same `(op, exit_code, stderr)` envelope
+    // `retry::classify_capture_anyhow` produces, now available at the
+    // `(args, op)`-front on the `infrastructure::kubectl` surface this
+    // module already imports. The outer `.with_context(...)?` retains
+    // the secret_name/key hint on the anyhow chain (strictly additive
+    // per the sibling `workspace_deps` migration). Pre-lift the three-
+    // line `let mut cmd = <constructor>; cmd.args([...]); let output =
+    // run_capture_anyhow(cmd, "<op>").await.with_context(...)?;`
+    // stanza was one of the two occurrences the fusion primitive
+    // consolidates (sibling:
+    // `crate::commands::flux::get_pod_status_full`).
+    let output = kubectl_capture_anyhow(
+        &[
+            "get",
+            "secret",
+            secret_name,
+            "-o",
+            &format!("jsonpath={{.data.{}}}", key),
+        ],
+        "kubectl get secret",
+    )
+    .await
+    .with_context(|| format!("fetch secret {}/{}", secret_name, key))?;
 
     let base64_value = String::from_utf8(output.stdout)?;
 
@@ -2383,16 +2387,21 @@ mod pre_deployment_test_suite_retry_backoff_tests {
 mod kubectl_bin_routing_tests {
     /// Whole-module shield: no raw `Command::new`-with-bare-`kubectl`-
     /// literal may live in `commands/integration_tests.rs`. Every
-    /// `kubectl` spawn on this module — pre-lift the sole
-    /// `fetch_secret` `kubectl get secret … -o jsonpath={.data.<key>}`
-    /// call at line 442 (the Kubernetes-Secret-backed credential
-    /// resolver `build_env_vars` uses to inject `TEST_USER_EMAIL` /
-    /// `TEST_USER_PASSWORD` into every integration-test suite the
-    /// `forge test` flow spawns) — must resolve through
-    /// [`crate::infrastructure::kubectl::kubectl_command_async`] —
-    /// the async constructor that reads the `KUBECTL_BIN` env
-    /// override via [`crate::tools::get_tool_path`] on the canonical
-    /// `tools::KUBECTL` name.
+    /// `kubectl` spawn on this module — the sole `fetch_secret`
+    /// `kubectl get secret … -o jsonpath={.data.<key>}` call (the
+    /// Kubernetes-Secret-backed credential resolver `build_env_vars`
+    /// uses to inject `TEST_USER_EMAIL` / `TEST_USER_PASSWORD` into
+    /// every integration-test suite the `forge test` flow spawns) —
+    /// must resolve through the higher-level
+    /// [`crate::infrastructure::kubectl::kubectl_capture_anyhow`]
+    /// fusion primitive, which internally composes the
+    /// `KUBECTL_BIN`-honoring
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`]
+    /// constructor with the canonical
+    /// [`crate::retry::run_capture_anyhow`] classifier. Post-lift the
+    /// module has no direct call to `kubectl_command_async` anymore —
+    /// the fusion primitive is the module's sole kubectl spawn
+    /// frontier.
     ///
     /// Pre-lift the `kubectl` spawn site spelled the bare
     /// `"kubectl"` literal via `Command::new` (aliased through the
@@ -2425,9 +2434,9 @@ mod kubectl_bin_routing_tests {
     /// primitive is pinned separately by
     /// [`crate::infrastructure::kubectl::tests::test_kubectl_command_async_routes_through_kubectl_bin_env_var`];
     /// this shield only certifies that every `kubectl`-spawning site
-    /// in this module resolves through the constructor first.
+    /// in this module resolves through the fusion primitive first.
     #[test]
-    fn test_kubectl_spawn_routes_through_kubectl_command_async_not_raw_literal() {
+    fn test_kubectl_spawn_routes_through_kubectl_capture_anyhow_not_raw_literal() {
         const SOURCE: &str = include_str!("integration_tests.rs");
 
         crate::test_support::assert_source_forbids_bare_spawn_shapes(
@@ -2435,13 +2444,26 @@ mod kubectl_bin_routing_tests {
             "commands/integration_tests.rs",
             "kubectl",
             "resolve the substrate-exported `KUBECTL_BIN` env override via \
-             `kubectl_command_async`",
+             the `kubectl_capture_anyhow` fusion primitive on \
+             `infrastructure::kubectl`",
         );
-        crate::test_support::assert_source_delegates_via_constructor_call_code_line(
-            SOURCE,
-            "commands/integration_tests.rs",
-            "kubectl",
-            "kubectl_command_async",
+        // The fusion primitive takes `(&[&str], &str)`, so
+        // `constructor_call_needle`'s bare-`()` pattern does not
+        // match — pin the delegation at the open-paren spelling
+        // instead, matching every `kubectl_capture_anyhow(...)`
+        // call site regardless of the concrete argv.
+        let hits = crate::test_support::code_line_hits(SOURCE, "kubectl_capture_anyhow(");
+        assert!(
+            !hits.is_empty(),
+            "commands/integration_tests.rs must delegate every \
+             kubectl spawn to the \
+             `crate::infrastructure::kubectl::kubectl_capture_anyhow` \
+             fusion primitive at at least one *code* line — the \
+             required call form was not found in the module. A \
+             regression here would silently downgrade to the \
+             pre-lift raw-spawn shape or the `run_capture_anyhow` \
+             wrapper without the KUBECTL_BIN-honoring constructor \
+             fused in."
         );
     }
 }
