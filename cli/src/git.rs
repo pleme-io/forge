@@ -805,6 +805,90 @@ where
         .status();
 }
 
+/// `(args, op)`-front async fusion primitive over [`git_command_async`] +
+/// [`crate::retry::run_inherited_status` ]for the twelve production consumers
+/// that hand-fuse the three-line stanza
+///
+/// ```text
+/// let mut <name>_cmd = crate::git::git_command_async();
+/// <name>_cmd.args([...]);
+/// crate::retry::run_inherited_status(<name>_cmd, "git <op>")
+///     .await
+///     .context("...")?;
+/// ```
+///
+/// at the async git-mutation surface. The pre-lift sites — the `git add`
+/// / `git commit` / `git push` bail-on-non-zero triples on
+/// `commands/rollback.rs::execute` (2 sites: add + push; commit retains a
+/// bare `.status()` per its documented "commit with nothing to commit
+/// returns non-zero" idempotent-no-op carve-out),
+/// `commands/push.rs::update_kustomization` (2 sites: add + push; commit
+/// retains the same carve-out), `commands/rust_service.rs::
+/// deploy_rust_service_with_tag` (3 sites: add + commit + push), and
+/// `commands/federation.rs::deploy_federation` (5 sites: three
+/// `git add` + one commit + one push, all bail-on-non-zero) — collapse
+/// onto a single delegation
+/// `crate::git::git_run_inherited_status(&[...], "git <op>").await?` at
+/// every consumer, and every consumer inherits both disciplines by
+/// construction: `GIT_BIN`-routing via the delegated
+/// [`git_command_async`] and the canonical `(op, exit_code)` failure
+/// envelope via the delegated [`crate::retry::run_inherited_status`].
+/// Pre-lift each was hand-fused per-site; each such stanza is one place
+/// a future consumer can drift the `GIT_BIN`-routing off
+/// (`tokio::process::Command::new("git")` — the exact class of bug the
+/// original `git_command_async` migration redeemed at 818ed9a / badcdf4
+/// / 8653403 / f6be190 / 81d7486 / 8a1958e) or drift the envelope off
+/// (a bare `.status().await?` that silently accepts a denied push).
+///
+/// # Semantics — inherited stdio, structural failure envelope
+///
+/// - Both stdout and stderr inherit into the parent's terminal via the
+///   delegated [`crate::retry::run_inherited_status`], so the operator
+///   watching a `forge push` / `forge rollback` / `forge deploy` /
+///   `forge federation` invocation sees git's own output that names
+///   why the mutation failed (dirty tree, hook refusal, non-fast-
+///   forward push, auth denial).
+/// - Spawn failure raises the canonical `"Failed to run {op}"` chain
+///   (with the underlying `io::Error` as the `context` source) via
+///   [`crate::retry::classify_inherited_status`]; non-zero exit raises
+///   the canonical `"{op} failed (exit {code})"` chain; signal
+///   termination raises the canonical `"{op} failed (killed by signal)"`
+///   chain. Callers attach per-site context with
+///   `.with_context(|| ...)?` on the outer chain.
+///
+/// # When to reach for this vs the sibling primitives
+///
+/// This primitive is the async status-only sibling of
+/// [`crate::infrastructure::kubectl::kubectl_capture_anyhow`] (async
+/// captured-output on the kubectl frontier) and of
+/// [`git_status_discard_sync_in`] (sync best-effort-discard on the git
+/// frontier). Do NOT reach for this when:
+///
+/// - The caller wants the stdout back → use one of the
+///   [`git_capture`]-family primitives above.
+/// - The caller is on a sync (non-tokio) code path → build the
+///   `std::process::Command` through [`git_command_sync`] and dispatch
+///   through [`crate::retry::run_inherited_status_sync`].
+/// - The caller must configure `.current_dir(...)`, `.env(...)`, or a
+///   builder-driven argv (e.g. `cmd.arg(...); if flag { cmd.arg(...); }`)
+///   → keep the direct [`git_command_async`] +
+///   [`crate::retry::run_inherited_status`] surface. This helper only
+///   wraps the fixed-argv shape.
+/// - The caller documents an idempotent "non-zero is a benign no-op"
+///   carve-out (e.g. `git commit` re-run against an already-committed
+///   tree) → keep the bare `git_command_async().args(...).status()` +
+///   warn-on-non-zero shape; the fusion primitive would bail where the
+///   carve-out wants a warn.
+pub async fn git_run_inherited_status<I, S>(args: I, op: &str) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut cmd = git_command_async();
+    cmd.args(args);
+    crate::retry::run_inherited_status(cmd, op).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1665,6 +1749,133 @@ mod tests {
             msg.contains("git diff"),
             "run_inherited_status must surface the op label via the \
              anyhow message; got: {msg:?}"
+        );
+    }
+
+    /// [`git_run_inherited_status`] MUST spawn its child through the
+    /// canonical [`git_command_async`] constructor — i.e. it inherits
+    /// the `GIT_BIN` env override the tools-registry idiom names as the
+    /// hermetic-runner contract for [`tools::GIT`], and never hardcodes
+    /// the literal `"git"` on the spawn path. The end-to-end shape
+    /// (shim exits N, primitive surfaces exit code + op label via the
+    /// anyhow chain) also pins the delegation to
+    /// [`crate::retry::run_inherited_status`] — a regression that
+    /// swapped the classifier for a bare `.status().await?` would drop
+    /// the exit-code branch of the envelope.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_run_inherited_status_routes_through_git_bin_env_var() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let (_shim_dir, shim) = make_git_shim(
+            "#!/bin/sh\necho 'SIGIL_ROUTED_VIA_GIT_RUN_INHERITED_STATUS_b7c3a1' 1>&2\nexit 42\n",
+        );
+        let _scope = GitBinScope::set(&shim);
+
+        let err = git_run_inherited_status(["push", "origin", "main"], "git push")
+            .await
+            .expect_err("shim exits 42");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("exit 42"),
+            "git_run_inherited_status must surface the shim's exit \
+             code via the anyhow message — proves the primitive \
+             delegates through `retry::run_inherited_status`'s \
+             `classify_inherited_status` envelope, not a bare \
+             `.status().await?` that silently drops the exit code; \
+             got: {msg:?}"
+        );
+        assert!(
+            msg.contains("git push"),
+            "git_run_inherited_status must surface the op label via \
+             the anyhow message — proves the `(args, op)`-front \
+             surface forwards `op` verbatim to \
+             `retry::run_inherited_status`; got: {msg:?}"
+        );
+    }
+
+    /// [`git_run_inherited_status`] MUST forward its argv slice
+    /// verbatim to the spawned child. Pins the contract every consumer
+    /// site depends on — pre-lift each hand-fused the argv slice via
+    /// `<name>_cmd.args([...])`, so a regression that dropped,
+    /// reordered, or truncated the forwarded argv would silently
+    /// redirect the git mutation every deploy-frontier consumer
+    /// (`commands/rollback.rs::execute`,
+    /// `commands/push.rs::update_kustomization`,
+    /// `commands/rust_service.rs::deploy_rust_service_with_tag`,
+    /// `commands/federation.rs::deploy_federation`) depends on for
+    /// control flow.
+    ///
+    /// The shim body prints nothing but appends every positional arg on
+    /// its own line to the hermetic [`crate::test_support::ArgvLog`],
+    /// then exits 0 — so the primitive's `Ok(())` return path is
+    /// exercised alongside the argv round-trip. Uses `git add
+    /// <deep/path/with/slash>` to prove the primitive doesn't
+    /// re-tokenize its input on whitespace or path separators.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_run_inherited_status_forwards_args_and_returns_ok_on_zero_exit() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let argv_log = crate::test_support::ArgvLog::reserve();
+        let (_shim_dir, shim) = make_git_shim(&argv_log.shim_body(""));
+        let _scope = GitBinScope::set(&shim);
+
+        git_run_inherited_status(["add", "deploy/service.artifact.json"], "git add")
+            .await
+            .expect("zero-exit shim must surface as Ok(())");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["add", "deploy/service.artifact.json"],
+            "git_run_inherited_status must forward every argv slice \
+             element verbatim to the spawned git — proves the \
+             `(args, op)`-front surface routes `args` through the \
+             delegated `git_command_async().args(args)` at exactly one \
+             body, not re-tokenized on whitespace or path separators"
+        );
+    }
+
+    /// A spawn `Err` (`GIT_BIN` resolves to a nonexistent path) MUST
+    /// bail with the canonical `"Failed to spawn {op}: {io_error}"`
+    /// envelope — the SPAWN arm of
+    /// [`crate::retry::classify_inherited_status`]. Pins the shape
+    /// every consumer site depends on for the "developer has no `git`
+    /// on PATH / GIT_BIN points at an absent Nix derivation"
+    /// precondition to surface as an operator-actionable error rather
+    /// than a downstream silent-success against an unstaged /
+    /// uncommitted / unpushed tree.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_run_inherited_status_spawn_error_carries_op() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _scope = GitBinScope::set(
+            "/nonexistent/dir/absolutely-not-a-git-binary-forge-run-inherited-status-shim",
+        );
+
+        let err = git_run_inherited_status(["push", "origin", "main"], "git push")
+            .await
+            .expect_err("unresolvable GIT_BIN must produce Err");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to run git push"),
+            "canonical spawn-failure envelope `\"Failed to run \
+             {{op}}\"` from `retry::classify_inherited_status` must \
+             carry the op label, got: {msg}"
         );
     }
 
