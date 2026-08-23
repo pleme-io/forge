@@ -416,7 +416,7 @@ pub async fn kubectl_probe_stdout_capture(args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{make_executable_shim, ArgvLog};
+    use crate::test_support::{make_executable_shim, printf_only_shim, ArgvLog};
     use base64::{engine::general_purpose, Engine as _};
 
     /// On a successful kubectl invocation, `fetch_secret_value_with_bin`
@@ -429,8 +429,7 @@ mod tests {
     #[test]
     fn test_fetch_secret_value_with_bin_success_returns_decoded_utf8() {
         let encoded = general_purpose::STANDARD.encode(b"hunter2-token");
-        let body = format!("#!/bin/sh\nprintf '%s' '{}'\n", encoded);
-        let (_dir, shim) = make_executable_shim("kubectl", &body);
+        let (_dir, shim) = printf_only_shim("kubectl", &encoded);
 
         let got =
             fetch_secret_value_with_bin(&shim, "attic-secrets", "infrastructure", "server-token");
@@ -498,8 +497,7 @@ mod tests {
     fn test_fetch_secret_value_with_bin_decoded_non_utf8_returns_none() {
         // 0xff 0xfe 0xfd is not a valid UTF-8 sequence.
         let encoded = general_purpose::STANDARD.encode([0xffu8, 0xfe, 0xfd]);
-        let body = format!("#!/bin/sh\nprintf '%s' '{}'\n", encoded);
-        let (_dir, shim) = make_executable_shim("kubectl", &body);
+        let (_dir, shim) = printf_only_shim("kubectl", &encoded);
 
         let got = fetch_secret_value_with_bin(&shim, "name", "ns", "key");
         assert!(
@@ -586,10 +584,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_find_first_pod_name_async_with_bin_success_returns_trimmed_name() {
-        let (_dir, shim) = make_executable_shim(
-            "kubectl",
-            "#!/bin/sh\nprintf '%s' 'hive-router-7f9c8b6d-x2k4l'\n",
-        );
+        let (_dir, shim) = printf_only_shim("kubectl", "hive-router-7f9c8b6d-x2k4l");
         let got = find_first_pod_name_async_with_bin(&shim, "platform", "app=hive-router").await;
         assert_eq!(got, Some("hive-router-7f9c8b6d-x2k4l".to_string()));
     }
@@ -824,10 +819,7 @@ mod tests {
         let _guard = KUBECTL_BIN_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let (_dir, shim) = make_executable_shim(
-            "kubectl",
-            "#!/bin/sh\nprintf '%s' 'ns/deploy/pod-abc Ready'\n",
-        );
+        let (_dir, shim) = printf_only_shim("kubectl", "ns/deploy/pod-abc Ready");
         let _scope = KubectlBinScope::set(&shim);
 
         let out = kubectl_probe_stdout_capture(&["get", "pods", "-n", "ns"]).await;

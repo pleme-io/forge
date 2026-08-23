@@ -222,7 +222,7 @@ pub(crate) async fn find_first_image_id_by_name_async_with_bin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{make_executable_shim, ArgvLog};
+    use crate::test_support::{make_executable_shim, printf_only_shim, ArgvLog};
 
     // ---------------------------------------------------------------
     // sync primitive — find_first_image_id_by_name
@@ -237,8 +237,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_find_first_image_id_by_name_with_bin_success_returns_trimmed_id() {
-        let (_dir, shim) =
-            make_executable_shim("docker", "#!/bin/sh\nprintf '%s' 'sha256:abc123'\n");
+        let (_dir, shim) = printf_only_shim("docker", "sha256:abc123");
         let got = find_first_image_id_by_name_with_bin(&shim, "my-backend");
         assert_eq!(got, Some("sha256:abc123".to_string()));
     }
@@ -384,8 +383,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_find_first_image_id_by_name_async_with_bin_success_returns_trimmed_id() {
-        let (_dir, shim) =
-            make_executable_shim("docker", "#!/bin/sh\nprintf '%s' 'sha256:async-abc'\n");
+        let (_dir, shim) = printf_only_shim("docker", "sha256:async-abc");
         let got = find_first_image_id_by_name_async_with_bin(&shim, "my-backend").await;
         assert_eq!(got, Some("sha256:async-abc".to_string()));
     }
