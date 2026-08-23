@@ -170,9 +170,7 @@ pub async fn update_kustomization(
         // `commands/codegen_validation.rs` git-mutation sites honor and
         // the same class of bug the free-function-`git` / `GitClient`
         // migrations at 818ed9a / badcdf4 / 8653403 redeemed.
-        let mut add_cmd = crate::git::git_command_async();
-        add_cmd.args(["add", kustomization_path]);
-        crate::retry::run_inherited_status(add_cmd, "git add")
+        crate::git::git_run_inherited_status(["add", kustomization_path], "git add")
             .await
             .context("Failed to stage kustomization.yaml")?;
 
@@ -207,9 +205,7 @@ pub async fn update_kustomization(
         // the structural record rather than silently returning Ok and
         // letting the caller proceed to "Kustomization committed and
         // pushed" against an unpushed branch.
-        let mut push_cmd = crate::git::git_command_async();
-        push_cmd.args(["push", "origin", "main"]);
-        crate::retry::run_inherited_status(push_cmd, "git push")
+        crate::git::git_run_inherited_status(["push", "origin", "main"], "git push")
             .await
             .context("Failed to push kustomization changes to git")?;
 
@@ -505,15 +501,22 @@ mod tests {
         assert!(
             !fn_body.contains("Command::new(\"git\")"),
             "update_kustomization() must NOT spawn `git` directly — route \
-             through `crate::git::git_command_async()` so `GIT_BIN` \
-             overrides land at the shared primitive. Found the \
-             pre-migration spawn body in update_kustomization()."
+             through `crate::git::git_run_inherited_status(&[...], \
+             \"git …\")` (the async fusion primitive) or \
+             `crate::git::git_command_async()` so `GIT_BIN` overrides land \
+             at the shared primitive. Found the pre-migration spawn body \
+             in update_kustomization()."
         );
         assert!(
-            fn_body.contains("crate::git::git_command_async()"),
+            fn_body.contains("crate::git::git_run_inherited_status(")
+                || fn_body.contains("crate::git::git_command_async()"),
             "update_kustomization() must delegate every git spawn to \
-             `crate::git::git_command_async()` — the delegation string \
-             was not found in update_kustomization()."
+             `crate::git::git_run_inherited_status(&[...], \"git …\")` \
+             (the async fusion primitive, which internally routes through \
+             `git_command_async()` + `run_inherited_status`) OR to \
+             `crate::git::git_command_async()` for the documented \
+             idempotent-no-op bare-`.status()` `git commit` carve-out — \
+             neither delegation string was found in update_kustomization()."
         );
     }
 }

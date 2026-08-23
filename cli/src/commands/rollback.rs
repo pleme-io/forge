@@ -343,9 +343,7 @@ pub async fn execute(
     // "commit with nothing to commit returns non-zero" no-op.
     if !modified_files.is_empty() {
         for file in &modified_files {
-            let mut add_cmd = crate::git::git_command_async();
-            add_cmd.args(["add", file]);
-            crate::retry::run_inherited_status(add_cmd, "git add")
+            crate::git::git_run_inherited_status(["add", file.as_str()], "git add")
                 .await
                 .context("Failed to stage rollback artifact.json")?;
         }
@@ -373,9 +371,7 @@ pub async fn execute(
             );
         }
 
-        let mut push_cmd = crate::git::git_command_async();
-        push_cmd.args(["push", "origin", "main"]);
-        crate::retry::run_inherited_status(push_cmd, "git push")
+        crate::git::git_run_inherited_status(["push", "origin", "main"], "git push")
             .await
             .context("Failed to push rollback tags")?;
 
@@ -451,22 +447,33 @@ mod tests {
         assert!(
             !fn_body.contains("Command::new(\"git\")"),
             "execute() must NOT spawn `git` directly — route through \
-             `crate::git::git_command_async()` so `GIT_BIN` overrides \
-             land at the shared primitive. Found the pre-migration \
-             spawn body in execute()."
+             `crate::git::git_run_inherited_status(&[...], \"git …\")` \
+             (the async fusion primitive) or `crate::git::git_command_async()` \
+             so `GIT_BIN` overrides land at the shared primitive. Found the \
+             pre-migration spawn body in execute()."
         );
         assert!(
-            fn_body.contains("crate::git::git_command_async()"),
+            fn_body.contains("crate::git::git_run_inherited_status(")
+                || fn_body.contains("crate::git::git_command_async()"),
             "execute() must delegate every git spawn to \
-             `crate::git::git_command_async()` — the delegation string \
-             was not found in execute()."
+             `crate::git::git_run_inherited_status(&[...], \"git …\")` \
+             (the async fusion primitive, which internally routes through \
+             `git_command_async()` + `run_inherited_status`) OR to \
+             `crate::git::git_command_async()` for the documented \
+             idempotent-no-op bare-`.status()` `git commit` carve-out — \
+             neither delegation string was found in execute()."
         );
         assert!(
-            fn_body.contains("crate::retry::run_inherited_status"),
+            fn_body.contains("crate::git::git_run_inherited_status(")
+                || fn_body.contains("crate::retry::run_inherited_status"),
             "execute() must dispatch `git add` / `git push` through \
-             `crate::retry::run_inherited_status` so a non-zero exit \
-             bails with the structural `(op, exit_code)` record — the \
-             delegation string was not found in execute()."
+             the structural `(op, exit_code)`-envelope surface — either \
+             the async fusion primitive \
+             `crate::git::git_run_inherited_status(&[...], \"git …\")` \
+             (which internally delegates through \
+             `crate::retry::run_inherited_status`) or directly through \
+             `crate::retry::run_inherited_status`. Neither delegation \
+             string was found in execute()."
         );
     }
 }

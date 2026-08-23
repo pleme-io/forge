@@ -1938,22 +1938,16 @@ pub async fn deploy_rust_service_with_tag(
         // (f6be190), `commands/rollback.rs` (8a1958e),
         // `commands/codegen_validation.rs` (81d7486), and
         // `commands/federation.rs` (8653403) git-mutation sites honor.
-        let mut add_cmd = crate::git::git_command_async();
-        add_cmd.args(["add", &manifest]);
-        crate::retry::run_inherited_status(add_cmd, "git add")
+        crate::git::git_run_inherited_status(["add", &manifest], "git add")
             .await
             .context("Failed to stage manifest")?;
 
         let commit_msg = format!("Deploy {} {}", service, tag_suffix);
-        let mut commit_cmd = crate::git::git_command_async();
-        commit_cmd.args(["commit", "-m", &commit_msg]);
-        crate::retry::run_inherited_status(commit_cmd, "git commit")
+        crate::git::git_run_inherited_status(["commit", "-m", &commit_msg], "git commit")
             .await
             .context("Failed to commit manifest")?;
 
-        let mut push_cmd = crate::git::git_command_async();
-        push_cmd.args(["push", "origin", git_branch]);
-        crate::retry::run_inherited_status(push_cmd, "git push")
+        crate::git::git_run_inherited_status(["push", "origin", git_branch], "git push")
             .await
             .context("Failed to push manifest")?;
     }
@@ -2840,15 +2834,22 @@ mod deploy_rust_service_with_tag_git_bin_routing_tests {
         assert!(
             !fn_body.contains("Command::new(\"git\")"),
             "deploy_rust_service_with_tag() must NOT spawn `git` directly \
-             — route through `crate::git::git_command_async()` so \
-             `GIT_BIN` overrides land at the shared primitive. Found the \
-             pre-migration spawn body in deploy_rust_service_with_tag()."
+             — route through `crate::git::git_run_inherited_status(&[...], \
+             \"git …\")` (the async fusion primitive) or \
+             `crate::git::git_command_async()` so `GIT_BIN` overrides land \
+             at the shared primitive. Found the pre-migration spawn body \
+             in deploy_rust_service_with_tag()."
         );
         assert!(
-            fn_body.contains("crate::git::git_command_async()"),
+            fn_body.contains("crate::git::git_run_inherited_status(")
+                || fn_body.contains("crate::git::git_command_async()"),
             "deploy_rust_service_with_tag() must delegate every git \
-             spawn to `crate::git::git_command_async()` — the delegation \
-             string was not found in deploy_rust_service_with_tag()."
+             spawn to `crate::git::git_run_inherited_status(&[...], \
+             \"git …\")` (the async fusion primitive, which internally \
+             routes through `git_command_async()` + \
+             `run_inherited_status`) OR to `crate::git::git_command_async()` \
+             — neither delegation string was found in \
+             deploy_rust_service_with_tag()."
         );
     }
 }
