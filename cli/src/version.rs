@@ -9948,6 +9948,14 @@ pub fn bump_semver(version: &str, level: &str) -> Result<String> {
 /// published yields 0.2.6, which is behind. A 937-repo census (2026-07-27) found
 /// 527 inverted tag pairs on linear history, so this is the fleet's normal
 /// state, not an edge case.
+///
+/// After the [`bump_seed_typed`] lift, the sole production caller
+/// ([`next_free_version_typed`]) routes through the typed peer, so this
+/// stringly entry point is retained for the existing test callers that
+/// pin the `&'a str` return shape and for a future consumer that already
+/// holds a `(&str, &str)` pair without a typed [`SemverTriple`] on hand.
+/// Mirrors the [`parse_semver`] / [`parse_semver_typed`] surface pairing.
+#[allow(dead_code)]
 pub fn bump_seed<'a>(manifest_version: &'a str, max_released: &'a str) -> Result<&'a str> {
     if max_released.is_empty() {
         return Ok(manifest_version);
@@ -9966,6 +9974,53 @@ pub fn bump_seed<'a>(manifest_version: &'a str, max_released: &'a str) -> Result
     } else {
         manifest_version
     })
+}
+
+/// The typed-primitive peer of [`bump_seed`]: pick the higher of the
+/// manifest's typed [`SemverTriple`] and the highest-released typed
+/// [`SemverTriple`] (represented as `Option<SemverTriple>`, where `None`
+/// stands in for the "nothing released yet" case [`bump_seed`] represents
+/// with the empty string).
+///
+/// # Why the typed peer
+///
+/// [`next_free_version_typed`]'s pre-lift hot path parsed each input
+/// twice: once inside [`bump_seed`] (to compare the two triples), and
+/// once again at the caller (via `parse_semver_typed(seed)?` on the
+/// winning `&str` [`bump_seed`] returned). The second parse re-derives a
+/// [`SemverTriple`] the primitive had already built and discarded — the
+/// exact same string-surface round-trip the [`bump_semver`] /
+/// [`bump_semver_typed`] and [`parse_semver`] / [`parse_semver_typed`]
+/// pairs redeemed for their neighborhoods, here applied to the seed-
+/// selection primitive.
+///
+/// The typed peer takes typed [`SemverTriple`] inputs and returns a
+/// typed [`SemverTriple`] winner, so [`next_free_version_typed`] parses
+/// each input at most ONCE (never twice) and every future consumer that
+/// already holds a [`SemverTriple`] (a downstream typed policy record,
+/// a `serde_yaml` deserialize, an SLSA-provenance gate that reads a
+/// released version off an attestation) reaches the max-selection
+/// arithmetic directly without a `&str` layer.
+///
+/// The tie-break matches [`bump_seed`]'s: on `manifest == max_released`,
+/// the manifest wins. That is asymmetric on identity but not on value —
+/// both round-trip through the identical [`Display`](std::fmt::Display)
+/// form — so downstream string-surface consumers observe the same
+/// `MAJOR.MINOR.PATCH` byte sequence on the tie.
+///
+/// THEORY.md §V.4 typed primitives: the seed-selection surface carries a
+/// typed function (typed triples in, typed triple out), not a
+/// `(&str, &str) -> &str` shape that re-derives the shape check and the
+/// ordering discipline at every consumer boundary.
+/// THEORY.md §VI.1 one-oracle discipline: the `max(manifest,
+/// max_released)` decision lives at ONE body (this typed peer), which
+/// the stringly [`bump_seed`] and the typed-inside [`next_free_version_typed`]
+/// both route through — no forked comparison living at two sites.
+pub fn bump_seed_typed(manifest: SemverTriple, max_released: Option<SemverTriple>) -> SemverTriple {
+    match max_released {
+        Some(r) if r > manifest => r,
+        _ => manifest,
+    }
 }
 
 /// The next version that is both release-monotone AND not already tagged.
@@ -10031,7 +10086,22 @@ pub fn next_free_version_typed(
     max_released: &str,
     tag_exists: &dyn Fn(&str) -> bool,
 ) -> Result<String> {
-    let seed = bump_seed(manifest_version, max_released)?;
+    // Parse each input at most ONCE. The pre-lift path called
+    // [`bump_seed`] (which parsed BOTH inputs to [`SemverTriple`],
+    // compared, then returned an `&str` winner) and then re-parsed
+    // that winner via `parse_semver_typed(seed)?` at the call site —
+    // three parses across two sides, one of them redeeming a triple
+    // the primitive had just discarded. Routing through the typed
+    // peer [`bump_seed_typed`] keeps each side's parse at exactly one
+    // fire, and the winner is available as a typed
+    // [`SemverTriple`] straight into the arithmetic below.
+    let manifest = parse_semver_typed(manifest_version)?;
+    let max_released_typed = if max_released.is_empty() {
+        None
+    } else {
+        Some(parse_semver_typed(max_released)?)
+    };
+    let seed = bump_seed_typed(manifest, max_released_typed);
     // Hold the candidate as a typed [`SemverTriple`] across iterations
     // and route the collision-skip increment through [`SemverTriple::bumped`]
     // — the typed-arithmetic primitive at the bottom of the algebra.
@@ -10039,7 +10109,7 @@ pub fn next_free_version_typed(
     // `tag_exists` predicate and never fires from the loop back to the
     // parser: on the pathological path (1024 successive Patch bumps),
     // parse fires exactly once (on the seed) rather than 1024 times.
-    let mut triple = parse_semver_typed(seed)?.bumped(level);
+    let mut triple = seed.bumped(level);
     // Bounded rather than `loop`: a predicate that answers "exists" for
     // everything would otherwise hang a release job forever. 1024 is far above
     // any real tag run and small enough to fail fast.
@@ -26320,7 +26390,10 @@ mod tests {
 
 #[cfg(test)]
 mod seeding_tests {
-    use super::{bump_seed, next_free_version, next_free_version_typed, BumpLevel};
+    use super::{
+        bump_seed, bump_seed_typed, next_free_version, next_free_version_typed, parse_semver_typed,
+        BumpLevel, SemverTriple,
+    };
 
     /// No tag exists — isolates the seeding half.
     fn no_tags(_v: &str) -> bool {
@@ -26539,6 +26612,152 @@ mod seeding_tests {
             !body.contains("bump_semver(&candidate"),
             "next_free_version_typed's loop must NOT round-trip through \
              the stringly bump_semver either. Body:\n{body}",
+        );
+    }
+
+    /// [`bump_seed_typed`] returns the byte-equivalent seed
+    /// [`bump_seed`] surfaces, for every (manifest, max_released) shape
+    /// the fleet actually exercises. A parity shield: the typed peer's
+    /// arithmetic must not drift from the stringly entry point on any
+    /// input the release loop reaches. Same discipline the
+    /// `bump_semver_typed` / `bump_semver` and `next_free_version_typed`
+    /// / `next_free_version` peers established, here applied to the
+    /// seed-selection primitive.
+    #[test]
+    fn bump_seed_typed_matches_stringly_bump_seed_at_every_representative_shape() {
+        for (manifest, max_released) in [
+            ("0.2.5", "0.3.1"),
+            ("0.4.0", "0.3.1"),
+            ("0.3.1", "0.3.1"),
+            ("0.1.0", ""),
+            ("0.9.0", "0.10.0"),
+            ("1.0.0", "1.0.0"),
+            ("2.5.0", ""),
+            ("0.0.1", "999.999.999"),
+        ] {
+            let by_str = bump_seed(manifest, max_released).unwrap();
+            let m = parse_semver_typed(manifest).unwrap();
+            let r = if max_released.is_empty() {
+                None
+            } else {
+                Some(parse_semver_typed(max_released).unwrap())
+            };
+            let by_typed = bump_seed_typed(m, r).to_string();
+            assert_eq!(
+                by_str, by_typed,
+                "bump_seed({manifest:?},{max_released:?}) vs \
+                 bump_seed_typed({m:?},{r:?}).to_string() must be byte-equal",
+            );
+        }
+    }
+
+    /// [`bump_seed_typed`] with `max_released = None` returns the
+    /// manifest unchanged — the typed-primitive rendering of
+    /// [`bump_seed`]'s "empty string means nothing released yet"
+    /// convention. Pins that the None arm never accidentally
+    /// promotes a released version out of thin air.
+    #[test]
+    fn bump_seed_typed_returns_manifest_when_max_released_is_none() {
+        for start in [
+            SemverTriple::new(0, 0, 0),
+            SemverTriple::new(0, 1, 0),
+            SemverTriple::new(1, 0, 0),
+            SemverTriple::new(1, 2, 3),
+            SemverTriple::new(u64::MAX, 0, 0),
+        ] {
+            assert_eq!(
+                bump_seed_typed(start, None),
+                start,
+                "None max_released must return the manifest unchanged at {start:?}",
+            );
+        }
+    }
+
+    /// [`bump_seed_typed`] returns a triple that is
+    /// `>=` every input it saw — the release-monotone property the
+    /// release loop depends on. Pins that no reordering of the match
+    /// arms can walk a release backward: whichever branch fires, the
+    /// returned triple dominates the manifest AND (when supplied) the
+    /// max_released under the derived `Ord`.
+    #[test]
+    fn bump_seed_typed_never_walks_backward_below_either_input() {
+        let shapes = [
+            (SemverTriple::new(0, 2, 5), Some(SemverTriple::new(0, 3, 1))),
+            (SemverTriple::new(0, 4, 0), Some(SemverTriple::new(0, 3, 1))),
+            (SemverTriple::new(0, 3, 1), Some(SemverTriple::new(0, 3, 1))),
+            (SemverTriple::new(0, 1, 0), None),
+            (
+                SemverTriple::new(0, 9, 0),
+                Some(SemverTriple::new(0, 10, 0)),
+            ),
+            (SemverTriple::new(1, 0, 0), Some(SemverTriple::new(1, 0, 0))),
+        ];
+        for (manifest, max_released) in shapes {
+            let seed = bump_seed_typed(manifest, max_released);
+            assert!(
+                seed >= manifest,
+                "seed {seed:?} must not walk below manifest {manifest:?}",
+            );
+            if let Some(r) = max_released {
+                assert!(
+                    seed >= r,
+                    "seed {seed:?} must not walk below max_released {r:?}",
+                );
+            }
+        }
+    }
+
+    /// [`bump_seed_typed`]'s tie-break matches [`bump_seed`]'s: on
+    /// `manifest == max_released` the manifest is the winner. The
+    /// asymmetry is not observable through
+    /// [`Display`](std::fmt::Display) (both render the same string),
+    /// but it is observable through structural equality on the
+    /// returned typed [`SemverTriple`], which a downstream typed
+    /// policy record can pattern-match on for provenance-source
+    /// tracking. Pins that swapping the match order — `Some(r) if r
+    /// \>= manifest` for `Some(r) if r \> manifest` — would silently
+    /// flip which branch fires on the tie.
+    #[test]
+    fn bump_seed_typed_ties_break_toward_manifest() {
+        for t in [
+            SemverTriple::new(0, 0, 0),
+            SemverTriple::new(1, 2, 3),
+            SemverTriple::new(0, 10, 0),
+        ] {
+            let seed = bump_seed_typed(t, Some(t));
+            assert_eq!(
+                seed, t,
+                "on manifest == max_released tie, seed must be the manifest at {t:?}",
+            );
+        }
+    }
+
+    /// [`next_free_version_typed`]'s seeding step routes through
+    /// [`bump_seed_typed`] and NOT the stringly [`bump_seed`]. A
+    /// source-scan shield: pins that a future edit does not
+    /// silently reinstate the double-parse hot path
+    /// (`bump_seed(manifest_version, max_released)?` followed by
+    /// `parse_semver_typed(seed)?`) the typed peer redeemed.
+    #[test]
+    fn shield_next_free_version_typed_seeds_via_bump_seed_typed() {
+        let src = include_str!("version.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            src,
+            "version.rs",
+            "pub fn next_free_version_typed(",
+            "\npub enum CargoShape {",
+        );
+        assert!(
+            body.contains("bump_seed_typed("),
+            "next_free_version_typed must seed through bump_seed_typed — \
+             the typed peer that keeps each side's parse at exactly one \
+             fire. Body:\n{body}",
+        );
+        assert!(
+            !body.contains("bump_seed("),
+            "next_free_version_typed must NOT call the stringly bump_seed \
+             — routing through it reparses the winner at the call site, \
+             exactly the drift the typed peer redeemed. Body:\n{body}",
         );
     }
 }
