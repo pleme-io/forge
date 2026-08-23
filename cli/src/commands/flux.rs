@@ -10,7 +10,7 @@ use crate::flux_get::{
     get_kustomization_scoped, list_kustomizations_all_namespaces, list_kustomizations_in_namespace,
     FluxGetKustomizationsError, KustomizationRow,
 };
-use crate::infrastructure::kubectl::{kubectl_command_async, kubectl_probe_stdout_capture};
+use crate::infrastructure::kubectl::{kubectl_capture_anyhow, kubectl_probe_stdout_capture};
 use crate::retry::RetryPolicy;
 
 /// The typed exponential-backoff policy for the two deployment-pod-
@@ -670,26 +670,31 @@ struct PodStatus {
 
 /// Get comprehensive pod status for a deployment (image, phase, readiness, waiting reasons).
 async fn get_pod_status_full(namespace: &str, deployment_name: &str) -> Result<PodStatus> {
-    // Single kubectl call using JSON for all fields
+    // Single kubectl call using JSON for all fields.
     // Owns the async captured-output spawn + classify ritual at the
-    // canonical `crate::retry::run_capture_anyhow` primitive so the
-    // operator log line carries the exit code by construction — the
-    // pre-lift bail spelled `"kubectl get pods failed"` and dropped
-    // BOTH the exit code AND the stderr; post-lift each surfaces at
-    // the canonical `"kubectl get pods failed (exit {code}): {stderr}"`
-    // envelope at `retry::classify_capture_anyhow`'s ONE body.
-    let mut cmd = kubectl_command_async();
-    cmd.args([
-        "get",
-        "pods",
-        "-n",
-        namespace,
-        "-l",
-        &format!("app={}", deployment_name),
-        "-o",
-        "json",
-    ]);
-    let output = crate::retry::run_capture_anyhow(cmd, "kubectl get pods").await?;
+    // canonical `crate::infrastructure::kubectl::kubectl_capture_anyhow`
+    // fusion primitive — the same `(op, exit_code, stderr)` envelope
+    // `retry::classify_capture_anyhow` produces, now available at the
+    // `(args, op)`-front on the `infrastructure::kubectl` surface this
+    // module already imports. Pre-lift the three-line `let mut cmd =
+    // <constructor>; cmd.args([...]); let output =
+    // run_capture_anyhow(cmd, "<op>").await?;` stanza was one of the
+    // two occurrences the fusion primitive consolidates (sibling:
+    // `crate::commands::integration_tests::fetch_secret`).
+    let output = kubectl_capture_anyhow(
+        &[
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-l",
+            &format!("app={}", deployment_name),
+            "-o",
+            "json",
+        ],
+        "kubectl get pods",
+    )
+    .await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value =
@@ -1168,13 +1173,25 @@ mod tests {
     /// Regression shield: every `kubectl`-spawning site in
     /// `commands/flux.rs`'s two async diagnostic helpers
     /// (`get_pod_status_full`, `gather_deployment_diagnostics`) MUST
-    /// resolve the binary through
+    /// resolve the binary through the higher-level primitives on
+    /// [`crate::infrastructure::kubectl`] — post-lift the module has
+    /// no direct call to
     /// [`crate::infrastructure::kubectl::kubectl_command_async`]
-    /// rather than the pre-lift `Command::new("kubectl")` literal.
-    /// Pre-migration eight sites each spelled the bare
-    /// `Command::new("kubectl")` shape verbatim and thereby
-    /// bypassed the `KUBECTL_BIN` env override the tools-registry
-    /// idiom (`crate::tools::get_tool_path(tools::KUBECTL)`,
+    /// anymore. The control-flow-carrying capture at
+    /// `get_pod_status_full` rides on
+    /// [`crate::infrastructure::kubectl::kubectl_capture_anyhow`] (the
+    /// `kubectl_command_async()` + `.args()` + `run_capture_anyhow`
+    /// fusion primitive), and the seven best-effort diagnostic probes
+    /// at `gather_deployment_diagnostics` ride on
+    /// [`crate::infrastructure::kubectl::kubectl_probe_stdout_capture`]
+    /// (the sibling `(args)`-front async best-effort primitive). Both
+    /// primitives internally spawn through
+    /// [`crate::infrastructure::kubectl::kubectl_command_async`], so
+    /// the `KUBECTL_BIN` env override discipline is inherited by
+    /// construction. Pre-migration eight sites each spelled the bare
+    /// `Command::new("kubectl")` shape verbatim and thereby bypassed
+    /// the `KUBECTL_BIN` env override the tools-registry idiom
+    /// (`crate::tools::get_tool_path(tools::KUBECTL)`,
     /// cli/src/tools.rs:102-105) resolves — the same class of bug
     /// the sibling `commands/status.rs` /
     /// `commands/supergraph_verification.rs` /
@@ -1187,13 +1204,14 @@ mod tests {
     /// This test reads this module's own source via [`include_str!`]
     /// and asserts the raw `Command::new("kubectl")` string does not
     /// reappear anywhere in the module's non-test body while the
-    /// delegation to `kubectl_command_async()` does. A future
-    /// regression that re-fuses the raw-spawn body fails here, not
-    /// silently in production where a Nix-hermetic runner's
-    /// `KUBECTL_BIN`-provided `kubectl` would lose to whatever
-    /// `kubectl` is first on `PATH` at `forge deploy` diagnostic
-    /// invocation time (the diagnostics helper is the operator-facing
-    /// failure-triage surface for every deployment that goes red).
+    /// delegation to at least one of the two higher-level primitives
+    /// does. A future regression that re-fuses the raw-spawn body
+    /// fails here, not silently in production where a Nix-hermetic
+    /// runner's `KUBECTL_BIN`-provided `kubectl` would lose to
+    /// whatever `kubectl` is first on `PATH` at `forge deploy`
+    /// diagnostic invocation time (the diagnostics helper is the
+    /// operator-facing failure-triage surface for every deployment
+    /// that goes red).
     ///
     /// The scan is bounded strictly to the module's non-test body
     /// — from the file start to the `#[cfg(test)]` marker — so
@@ -1207,7 +1225,7 @@ mod tests {
     /// (c2760df) and `commands/supergraph_verification.rs`
     /// (65283fb) hold on the multi-function consumer surface.
     #[test]
-    fn test_flux_routes_kubectl_through_kubectl_command_async_not_raw_command() {
+    fn test_flux_routes_kubectl_through_infrastructure_primitives_not_raw_command() {
         let module_body = crate::test_support::module_body_before_tests(
             include_str!("flux.rs"),
             "commands/flux.rs",
@@ -1216,16 +1234,26 @@ mod tests {
         assert!(
             !module_body.contains("Command::new(\"kubectl\")"),
             "flux.rs must NOT spawn `kubectl` directly — route \
-             through \
-             `crate::infrastructure::kubectl::kubectl_command_async()` \
-             so `KUBECTL_BIN` overrides land at the shared primitive. \
-             Found the pre-migration spawn body in the module."
+             through one of the `crate::infrastructure::kubectl` \
+             higher-level primitives (`kubectl_capture_anyhow` for \
+             control-flow-carrying captures, `kubectl_probe_stdout_capture` \
+             for best-effort diagnostics) so `KUBECTL_BIN` overrides \
+             land at the shared constructor. Found the pre-migration \
+             spawn body in the module."
         );
+        let capture_hits =
+            crate::test_support::code_line_hits(module_body, "kubectl_capture_anyhow(").len();
+        let probe_hits =
+            crate::test_support::code_line_hits(module_body, "kubectl_probe_stdout_capture(").len();
         assert!(
-            module_body.contains("kubectl_command_async()"),
-            "flux.rs must delegate every kubectl spawn to \
-             `kubectl_command_async()` — the delegation string was \
-             not found in the module body."
+            capture_hits + probe_hits >= 1,
+            "flux.rs must delegate every kubectl spawn to one of the \
+             higher-level `crate::infrastructure::kubectl` primitives \
+             (`kubectl_capture_anyhow` for control-flow-carrying \
+             captures, `kubectl_probe_stdout_capture` for best-effort \
+             diagnostics) — neither delegation was found at any *code* \
+             line in the module body (capture_hits={capture_hits}, \
+             probe_hits={probe_hits})."
         );
     }
 

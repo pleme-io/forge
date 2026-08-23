@@ -413,6 +413,78 @@ pub async fn kubectl_probe_stdout_capture(args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Control-flow-carrying async captured-output `kubectl` spawn:
+/// compose [`kubectl_command_async`] with `args`, drive the
+/// spawn-plus-classify ritual at the canonical
+/// [`crate::retry::run_capture_anyhow`] primitive, and surface the raw
+/// [`std::process::Output`] on the success arm — bytes-verbatim so a
+/// caller consuming `output.stdout` as JSON (`serde_json::from_slice`),
+/// base64 (`base64::decode`), or lossy UTF-8 (`String::from_utf8_lossy`)
+/// picks the parse discipline itself.
+///
+/// # Fusion of two existing primitives
+///
+/// This primitive folds the three-line stanza
+///
+/// ```text
+/// let mut cmd = kubectl_command_async();
+/// cmd.args([...]);
+/// let output = crate::retry::run_capture_anyhow(cmd, "<op>").await?;
+/// ```
+///
+/// into one delegation. The `(args)`-front surface is `(args, op)`, and
+/// composes with `.with_context(|| ...)?` on the outer chain — same
+/// shape [`crate::commands::integration_tests::fetch_secret`] uses to
+/// attach the secret-name/key hint to the anyhow trace after the
+/// canonical primitive's `"(exit {code}): {stderr}"` envelope has
+/// already surfaced.
+///
+/// Lifts the two-occurrence three-line stanza that two control-flow-
+/// carrying `kubectl_command_async()` + `run_capture_anyhow`
+/// composition sites carry verbatim modulo the per-site argv, op label,
+/// and the trailing consumer block:
+/// [`crate::commands::flux::get_pod_status_full`] (pod-JSON pull that
+/// drives the deploy-health state machine — the load-bearing capture
+/// [`kubectl_probe_stdout_capture`]'s docstring names as the
+/// carve-out this primitive redeems) and
+/// [`crate::commands::integration_tests::fetch_secret`] (secret-data
+/// base64 pull that resolves an environment variable before the
+/// integration-test suite runs). Two occurrences already past
+/// THEORY §VI.1's three-times threshold in intent — a duplicate would
+/// drift the `(op, exit_code, stderr)` envelope discipline silently
+/// between the two production consumers; this lift is the
+/// law-anticipating consolidation on the `kubectl_command_async()`
+/// frontier.
+///
+/// # When to reach for this vs [`kubectl_probe_stdout_capture`]
+///
+/// This primitive is the CONTROL-FLOW-CARRYING sibling of
+/// [`kubectl_probe_stdout_capture`]. Reach for this when the caller
+/// decides what to do next based on the output (JSON body drives a
+/// state machine, base64 blob decodes to a required credential) — a
+/// spawn `Err` or non-zero exit MUST bail with the canonical
+/// `(op, exit_code, stderr)` envelope. Reach for the probe primitive
+/// instead when the caller renders the stdout into a best-effort
+/// diagnostic surface where a failure has no bearing on control flow.
+///
+/// # Envelope shape by construction
+///
+/// The success arm returns `Ok(Output)` byte-verbatim; the failure
+/// arms both bail through [`crate::retry::classify_capture_anyhow`]:
+///
+/// - spawn `Err` (e.g., `KUBECTL_BIN` resolves to an absent path on a
+///   Nix-hermetic runner) → `"Failed to spawn {op}: {io_error}"`;
+/// - non-zero exit → `"{op} failed (exit {code}): {stderr}"` (or
+///   `"killed by signal"` on signal termination).
+pub async fn kubectl_capture_anyhow(
+    args: &[&str],
+    op: &str,
+) -> anyhow::Result<std::process::Output> {
+    let mut cmd = kubectl_command_async();
+    cmd.args(args);
+    crate::retry::run_capture_anyhow(cmd, op).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,6 +1003,168 @@ mod tests {
              this branch, and the primitive's contract preserves that \
              swallow-every-spawn-error semantic so a diagnostic helper \
              never aborts on spawn Err"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // kubectl_capture_anyhow — the async control-flow-carrying
+    // captured-output composition. Fuses `kubectl_command_async()` +
+    // `.args()` + `crate::retry::run_capture_anyhow(cmd, op)` — same
+    // canonical `(op, exit_code, stderr)` envelope
+    // `classify_capture_anyhow` produces on the retry.rs frontier,
+    // now available at the `(args, op)`-front on the
+    // `infrastructure::kubectl` surface every consumer already imports.
+    // ---------------------------------------------------------------
+
+    /// The primitive's canonical happy path: a shim that exits zero
+    /// prints a stdout payload AND a stderr hint, and the primitive
+    /// surfaces both byte-verbatim on the intact
+    /// [`std::process::Output`]. Pins the shape both consumer sites
+    /// depend on — `commands/flux::get_pod_status_full` parses the
+    /// stdout as JSON via `serde_json::from_str(&stdout)` and
+    /// `commands/integration_tests::fetch_secret` consumes it as
+    /// `String::from_utf8(output.stdout)?` before base64-decode — so a
+    /// regression that switched the return type to
+    /// `String::from_utf8_lossy` would silently corrupt either
+    /// consumer's parse path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_capture_anyhow_success_returns_output_intact() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_dir, shim) = make_executable_shim(
+            "kubectl",
+            "#!/bin/sh\nprintf '{\"items\":[]}'\nprintf 'stderr-hint' 1>&2\nexit 0\n",
+        );
+        let _scope = KubectlBinScope::set(&shim);
+
+        let output = kubectl_capture_anyhow(&["get", "pods", "-o", "json"], "kubectl get pods")
+            .await
+            .expect("zero-exit shim must surface as Ok(Output)");
+        assert!(output.status.success());
+        assert_eq!(
+            output.stdout, b"{\"items\":[]}",
+            "stdout bytes must flow through unchanged for downstream \
+             byte-level parsing (`serde_json::from_slice`, base64 \
+             decode) rather than a UTF-8-lossy round trip"
+        );
+        assert_eq!(
+            output.stderr, b"stderr-hint",
+            "stderr bytes must survive on the success path — a caller \
+             that wants to log a successful-but-noisy kubectl's stderr \
+             still can"
+        );
+    }
+
+    /// A non-zero kubectl exit surfaces the canonical
+    /// `"{op} failed (exit {code}): {stderr}"` envelope from the shared
+    /// [`crate::retry::classify_capture_anyhow`] body — the exit code
+    /// and the stderr both survive to the operator log line. Pre-lift
+    /// the two consumer sites had this envelope by construction of
+    /// their delegation to `run_capture_anyhow`; this primitive
+    /// preserves that envelope by delegating to the same body.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_capture_anyhow_nonzero_exit_carries_op_exit_and_stderr() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_dir, shim) = make_executable_shim(
+            "kubectl",
+            "#!/bin/sh\nprintf 'Error from server (NotFound): pods not found' 1>&2\nexit 1\n",
+        );
+        let _scope = KubectlBinScope::set(&shim);
+
+        let err = kubectl_capture_anyhow(&["get", "pods", "-n", "missing"], "kubectl get pods")
+            .await
+            .expect_err("nonzero exit must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("kubectl get pods failed (exit 1)"),
+            "canonical envelope `\"{{op}} failed (exit {{code}})\"` must \
+             carry both the op label AND the exit code, got: {msg}"
+        );
+        assert!(
+            msg.contains("Error from server (NotFound): pods not found"),
+            "stderr must survive into the op-failure envelope, got: {msg}"
+        );
+    }
+
+    /// The `(args)`-front surface routes the argv slice verbatim to
+    /// the spawned kubectl. Pins the contract both consumer sites
+    /// rely on for their heterogeneous 8-element (`get pods -n <ns>
+    /// -l app=<name> -o json`) and 5-element (`get secret <name> -o
+    /// jsonpath={.data.<key>}`) argv slices — a regression that
+    /// dropped, reordered, or truncated the forwarded argv would
+    /// silently redirect the kubectl invocation both callers depend
+    /// on for control flow.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_capture_anyhow_forwards_args() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("kubectl", &argv_log.shim_body("ok"));
+        let _scope = KubectlBinScope::set(&shim);
+
+        let output = kubectl_capture_anyhow(
+            &[
+                "get",
+                "secret",
+                "attic-secrets",
+                "-o",
+                "jsonpath={.data.token}",
+            ],
+            "kubectl get secret",
+        )
+        .await
+        .expect("shim must succeed");
+        assert_eq!(output.stdout, b"ok");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "get",
+                "secret",
+                "attic-secrets",
+                "-o",
+                "jsonpath={.data.token}",
+            ],
+            "kubectl_capture_anyhow must forward every argv slice \
+             element verbatim to the spawned kubectl"
+        );
+    }
+
+    /// A spawn `Err` (`KUBECTL_BIN` resolves to a nonexistent path)
+    /// bails with the canonical
+    /// `"Failed to spawn {op}: {io_error}"` envelope — the SPAWN arm
+    /// of [`crate::retry::classify_capture_anyhow`]. Pins the shape
+    /// both consumer sites depend on for the "developer has no
+    /// kubectl on PATH / KUBECTL_BIN points at an absent Nix
+    /// derivation" precondition to surface as an operator-actionable
+    /// error rather than a downstream parse-of-empty-output crash.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_capture_anyhow_spawn_error_carries_op_and_io_error() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _scope = KubectlBinScope::set(
+            "/nonexistent/dir/absolutely-not-a-kubectl-binary-forge-capture-anyhow-shim",
+        );
+
+        let err = kubectl_capture_anyhow(&["get", "pods"], "kubectl get pods")
+            .await
+            .expect_err("unresolvable KUBECTL_BIN must produce Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Failed to spawn kubectl get pods"),
+            "canonical spawn-failure envelope `\"Failed to spawn \
+             {{op}}\"` must carry the op label, got: {msg}"
         );
     }
 
