@@ -10101,22 +10101,108 @@ pub fn next_free_version_typed(
     } else {
         Some(parse_semver_typed(max_released)?)
     };
-    let seed = bump_seed_typed(manifest, max_released_typed);
+    // Delegate to the fully-typed peer, which carries the seeding-and-
+    // collision loop over typed [`SemverTriple`] values and returns a
+    // typed winner. The predicate is bridged into the string-surface
+    // `tag_exists` via [`SemverTriple`]'s [`Display`](std::fmt::Display)
+    // — that render fires ONCE per iteration, exactly where the pre-lift
+    // typed peer already rendered for the same purpose. On canonical
+    // input the bail wording is byte-identical (every fleet input is
+    // canonical after `parse_semver_typed`), so the existing
+    // [`seeding_tests::typed_next_free_version_bails_at_the_same_bound_with_the_same_message`]
+    // shield continues to hold.
+    let tag_exists_typed = |t: SemverTriple| tag_exists(&t.to_string());
+    next_free_version_all_typed(manifest, level, max_released_typed, &tag_exists_typed)
+        .map(|t| t.to_string())
+}
+
+/// The fully-typed peer of [`next_free_version_typed`]: the seeding-and-
+/// collision arithmetic with typed [`SemverTriple`] inputs, typed
+/// [`BumpLevel`] level, typed [`Option<SemverTriple>`] max-released, a
+/// typed predicate that answers "does this triple's tag already exist,"
+/// and a typed [`SemverTriple`] return.
+///
+/// # Why the fully-typed peer
+///
+/// The prior [`next_free_version_typed`] carried the loop over typed
+/// [`SemverTriple`] values internally (the b3527d3 typed-peer lift on
+/// [`bump_seed_typed`] and the eec7dbe [`SemverTriple::bumped`] lift
+/// closed that inside the module), but its BOUNDARY was still stringly:
+/// `manifest_version: &str`, `max_released: &str`, `tag_exists: &dyn
+/// Fn(&str) -> bool`, `-> Result<String>`. Every consumer that already
+/// held typed values had to render them to strings at the entry point
+/// AND wrap its predicate to render at every iteration — three
+/// allocations per iteration on the pathological path — even though
+/// the loop body itself never needed a string layer.
+///
+/// The fully-typed peer takes the algebra to its natural boundary:
+/// typed in, typed out, typed predicate. A downstream consumer that
+/// already holds a [`SemverTriple`] (a `serde_yaml` deserialize of a
+/// release-config document, a clap `ValueEnum` handler with a typed
+/// version field, an SLSA-provenance gate that reads a released
+/// version off an attestation, a git-tag index keyed by typed
+/// [`SemverTriple`] rather than stringly `&str`) reaches the seeding
+/// arithmetic without a single `to_string()` or `parse` on the hot
+/// path — the predicate itself matches typed values, so the
+/// collision-skip loop runs without allocation and the release
+/// pipeline's provenance chain flows through as typed data end-to-end.
+///
+/// # Boundary discipline
+///
+/// The stringly [`next_free_version`] and the typed-level
+/// [`next_free_version_typed`] retain their signatures for the existing
+/// production caller (`commands/gem.rs` reads `--level` and the git-tag
+/// membership as strings from clap and [`crate::git::tag_exists_in`]),
+/// and both delegate through this fully-typed peer at the same body,
+/// so the seeding-and-collision arithmetic lives at ONE site —
+/// THEORY.md §VI.1 one-oracle discipline — and every future consumer
+/// that holds typed values reaches it directly without a `to_string()`
+/// round-trip at the boundary.
+///
+/// # Bail wording
+///
+/// On the pathological "every tag is taken" path, the bail message
+/// names the seed [`SemverTriple`] (via [`Display`](std::fmt::Display)),
+/// the manifest [`SemverTriple`], and the max_released
+/// [`Option<SemverTriple>`] (empty when `None`, byte-equivalent to the
+/// prior stringly `max_released == ""` case). On canonical fleet input
+/// this is byte-identical to the stringly [`next_free_version_typed`]
+/// wording — pinned by
+/// [`seeding_tests::typed_and_all_typed_next_free_version_bails_are_byte_identical_at_canonical_input`]
+/// against a future refactor that quietly forked one of the two
+/// message renderings.
+///
+/// THEORY.md §V.4 typed primitives: the seeding-and-collision surface
+/// now carries a fully typed function (typed triples in, typed level,
+/// typed max-released, typed predicate, typed triple out) — not a
+/// `(&str, BumpLevel, &str, &dyn Fn(&str) -> bool) -> Result<String>`
+/// shape that re-derives the parse discipline at every consumer.
+/// THEORY.md §VI.1 one-oracle discipline: the loop body lives at ONE
+/// site — this typed peer — which the stringly [`next_free_version`]
+/// and the typed-level [`next_free_version_typed`] both delegate
+/// through, no forked bail message or off-by-one loop bound at two
+/// bodies.
+pub fn next_free_version_all_typed(
+    manifest: SemverTriple,
+    level: BumpLevel,
+    max_released: Option<SemverTriple>,
+    tag_exists: &dyn Fn(SemverTriple) -> bool,
+) -> Result<SemverTriple> {
+    let seed = bump_seed_typed(manifest, max_released);
     // Hold the candidate as a typed [`SemverTriple`] across iterations
     // and route the collision-skip increment through [`SemverTriple::bumped`]
     // — the typed-arithmetic primitive at the bottom of the algebra.
-    // Rendering to a string fires exactly ONCE per iteration for the
-    // `tag_exists` predicate and never fires from the loop back to the
-    // parser: on the pathological path (1024 successive Patch bumps),
-    // parse fires exactly once (on the seed) rather than 1024 times.
+    // The predicate itself takes a typed [`SemverTriple`], so the loop
+    // fires zero allocations per iteration on the fully-typed path
+    // (the stringly delegator's per-iteration `to_string()` is the
+    // boundary projection, not this peer's cost).
     let mut triple = seed.bumped(level);
     // Bounded rather than `loop`: a predicate that answers "exists" for
     // everything would otherwise hang a release job forever. 1024 is far above
     // any real tag run and small enough to fail fast.
     for _ in 0..1024 {
-        let candidate = triple.to_string();
-        if !tag_exists(&candidate) {
-            return Ok(candidate);
+        if !tag_exists(triple) {
+            return Ok(triple);
         }
         triple = triple.bumped(BumpLevel::Patch);
     }
@@ -10124,8 +10210,8 @@ pub fn next_free_version_typed(
         "could not find a free version after 1024 patch bumps from {} \
          (manifest {}, max released {}) — refusing to loop",
         seed,
-        manifest_version,
-        max_released
+        manifest,
+        max_released.map(|t| t.to_string()).unwrap_or_default(),
     )
 }
 
@@ -26391,8 +26477,8 @@ mod tests {
 #[cfg(test)]
 mod seeding_tests {
     use super::{
-        bump_seed, bump_seed_typed, next_free_version, next_free_version_typed, parse_semver_typed,
-        BumpLevel, SemverTriple,
+        bump_seed, bump_seed_typed, next_free_version, next_free_version_all_typed,
+        next_free_version_typed, parse_semver_typed, BumpLevel, SemverTriple,
     };
 
     /// No tag exists — isolates the seeding half.
@@ -26730,6 +26816,204 @@ mod seeding_tests {
                 "on manifest == max_released tie, seed must be the manifest at {t:?}",
             );
         }
+    }
+
+    /// The fully-typed peer [`next_free_version_all_typed`] and the
+    /// stringly [`next_free_version`] return the byte-equivalent
+    /// answer at every fleet-representative shape × level × taken-set:
+    /// the fully-typed peer's [`Display`](std::fmt::Display) output
+    /// matches the stringly return, and the typed predicate reached
+    /// through the delegation boundary sees the same sequence of
+    /// candidates the stringly predicate did. Pins that the fully-
+    /// typed peer's seeding-and-collision body did not drift from the
+    /// stringly entry point on any input the release loop reaches —
+    /// the "one seeding-and-collision body" contract now anchored at
+    /// [`next_free_version_all_typed`] with the two stringly peers as
+    /// boundary projections.
+    #[test]
+    fn all_typed_and_stringly_next_free_version_agree_at_every_representative_shape() {
+        let shapes = [
+            ("0.2.5", "0.3.1"),
+            ("0.4.0", "0.3.1"),
+            ("0.1.0", ""),
+            ("0.9.0", "0.10.0"),
+            ("1.0.0", "1.0.0"),
+        ];
+        let taken_sets: &[&dyn Fn(&str) -> bool] = &[
+            &|_v: &str| false,
+            &|v: &str| matches!(v, "0.1.1" | "0.1.2"),
+            &|v: &str| matches!(v, "0.3.2" | "0.4.0" | "1.0.0"),
+        ];
+        for (manifest, released) in shapes {
+            let m = parse_semver_typed(manifest).unwrap();
+            let r = if released.is_empty() {
+                None
+            } else {
+                Some(parse_semver_typed(released).unwrap())
+            };
+            for (level_str, level_typed) in [
+                ("patch", BumpLevel::Patch),
+                ("minor", BumpLevel::Minor),
+                ("major", BumpLevel::Major),
+            ] {
+                for taken in taken_sets {
+                    let by_str = next_free_version(manifest, level_str, released, taken).unwrap();
+                    let by_all_typed =
+                        next_free_version_all_typed(m, level_typed, r, &|t| taken(&t.to_string()))
+                            .unwrap();
+                    assert_eq!(
+                        by_str,
+                        by_all_typed.to_string(),
+                        "stringly({manifest},{level_str},{released}) vs \
+                         all_typed({m:?},{level_typed:?},{r:?}): stringly {by_str:?}, \
+                         all_typed rendered {}",
+                        by_all_typed,
+                    );
+                }
+            }
+        }
+    }
+
+    /// The fully-typed peer accepts a predicate over typed
+    /// [`SemverTriple`] directly — a tag index keyed by
+    /// [`SemverTriple`] (e.g., a `HashSet<SemverTriple>` populated by
+    /// parsing the git-tag listing once at the entry point) reaches
+    /// the seeding arithmetic without a per-iteration
+    /// `to_string()` allocation. Pins that the typed predicate is the
+    /// signature, not merely a wrapper around the stringly one.
+    #[test]
+    fn all_typed_next_free_version_takes_typed_predicate_indexed_by_semver_triple() {
+        use std::collections::HashSet;
+        let mut taken: HashSet<SemverTriple> = HashSet::new();
+        taken.insert(SemverTriple::new(0, 1, 1));
+        taken.insert(SemverTriple::new(0, 1, 2));
+        let got =
+            next_free_version_all_typed(SemverTriple::new(0, 1, 0), BumpLevel::Patch, None, &|t| {
+                taken.contains(&t)
+            })
+            .unwrap();
+        assert_eq!(
+            got,
+            SemverTriple::new(0, 1, 3),
+            "typed predicate must skip typed-indexed taken tags without a stringly bridge",
+        );
+    }
+
+    /// The fully-typed peer's [`Option<SemverTriple>`] `max_released`
+    /// parameter treats [`None`] as "nothing released yet" — byte-
+    /// equivalent to the stringly [`next_free_version_typed`]'s
+    /// convention of `max_released == ""`. Pins the sentinel-as-type
+    /// lift at the seeding-and-collision boundary against a future
+    /// refactor that quietly promoted [`None`] to `SemverTriple::new(0, 0, 0)`,
+    /// which would be observationally identical on some fleet shapes
+    /// (any manifest whose triple dominates `(0, 0, 0)`) but would
+    /// silently walk the release backward on any manifest AT
+    /// `SemverTriple::new(0, 0, 0)` that already had a `v0.0.0` tag
+    /// cut.
+    #[test]
+    fn all_typed_next_free_version_treats_none_max_released_as_nothing_released_yet() {
+        let no_tags = |_t: SemverTriple| false;
+        for (manifest, level, want) in [
+            (
+                SemverTriple::new(0, 1, 0),
+                BumpLevel::Patch,
+                SemverTriple::new(0, 1, 1),
+            ),
+            (
+                SemverTriple::new(1, 0, 0),
+                BumpLevel::Minor,
+                SemverTriple::new(1, 1, 0),
+            ),
+            (
+                SemverTriple::new(1, 2, 3),
+                BumpLevel::Major,
+                SemverTriple::new(2, 0, 0),
+            ),
+        ] {
+            assert_eq!(
+                next_free_version_all_typed(manifest, level, None, &no_tags).unwrap(),
+                want,
+                "None max_released must seed from the manifest alone at ({manifest:?}, {level:?})",
+            );
+        }
+    }
+
+    /// The fully-typed peer's bail message on the pathological "every
+    /// tag is taken" path is byte-identical to the stringly
+    /// [`next_free_version`]'s at canonical input. Pins the delegation
+    /// boundary: after the [`next_free_version_all_typed`] lift, the
+    /// stringly entry point no longer owns the message-rendering
+    /// body — the fully-typed peer emits it via
+    /// [`SemverTriple`]'s [`Display`](std::fmt::Display) and the
+    /// [`Option<SemverTriple>`] `unwrap_or_default` — and that
+    /// rendering must reproduce the pre-lift wording on every
+    /// canonical fleet input, or a downstream operator's log-scraping
+    /// automation reading the "refusing to loop" line would fork.
+    #[test]
+    fn all_typed_next_free_version_bail_message_matches_stringly_at_canonical_input() {
+        for (manifest, released) in [("0.1.0", ""), ("0.2.5", "0.3.1"), ("1.0.0", "1.0.0")] {
+            let all_taken_str = |_v: &str| true;
+            let all_taken_typed = |_t: SemverTriple| true;
+            let m = parse_semver_typed(manifest).unwrap();
+            let r = if released.is_empty() {
+                None
+            } else {
+                Some(parse_semver_typed(released).unwrap())
+            };
+            let err_str = next_free_version(manifest, "patch", released, &all_taken_str)
+                .unwrap_err()
+                .to_string();
+            let err_all_typed =
+                next_free_version_all_typed(m, BumpLevel::Patch, r, &all_taken_typed)
+                    .unwrap_err()
+                    .to_string();
+            assert_eq!(
+                err_str, err_all_typed,
+                "bail wording must be byte-identical between stringly \
+                 next_free_version({manifest:?}, \"patch\", {released:?}) \
+                 and fully-typed next_free_version_all_typed({m:?}, Patch, {r:?})",
+            );
+        }
+    }
+
+    /// [`next_free_version_typed`]'s body delegates to
+    /// [`next_free_version_all_typed`] and no longer carries the
+    /// collision-skip loop itself. A source-scan shield: pins that a
+    /// future edit does not silently reinstate the loop-in-two-places
+    /// duplication (one body in `_typed`, one in `_all_typed`) that
+    /// this lift closed — the pre-lift bug this shield forecloses is
+    /// exactly the shape THEORY §VI.1 one-oracle discipline is
+    /// written to catch, where the same bail bound or the same
+    /// per-iteration increment lives at two sites and drifts silently
+    /// under a future edit.
+    #[test]
+    fn shield_next_free_version_typed_delegates_via_all_typed_peer() {
+        let src = include_str!("version.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            src,
+            "version.rs",
+            "pub fn next_free_version_typed(",
+            "\n/// The fully-typed peer of [`next_free_version_typed`]",
+        );
+        assert!(
+            body.contains("next_free_version_all_typed("),
+            "next_free_version_typed must delegate through \
+             next_free_version_all_typed — the fully-typed peer that \
+             carries the collision-skip loop at ONE site. Body:\n{body}",
+        );
+        assert!(
+            !body.contains("for _ in 0..1024"),
+            "next_free_version_typed must NOT carry its own \
+             collision-skip loop after the fully-typed peer lift — \
+             that would fork the loop bound and the bail wording across \
+             two sites. Body:\n{body}",
+        );
+        assert!(
+            !body.contains("triple.bumped(BumpLevel::Patch)"),
+            "next_free_version_typed must NOT carry the per-iteration \
+             SemverTriple::bumped call after the lift — that lives in \
+             next_free_version_all_typed's loop body. Body:\n{body}",
+        );
     }
 
     /// [`next_free_version_typed`]'s seeding step routes through
