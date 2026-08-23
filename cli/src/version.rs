@@ -107,6 +107,61 @@ impl SemverTriple {
             patch,
         }
     }
+
+    /// Increment the component named by `level`, returning the
+    /// resulting [`SemverTriple`]. The typed-primitive peer of
+    /// [`bump_semver_typed`]'s per-variant `format!` arithmetic, lifted
+    /// off the string surface and onto the triple itself. Every
+    /// [`BumpLevel`] variant is a `const`-arithmetic step over `u64`
+    /// components, so the function is TOTAL over the typed-level
+    /// domain (the compiler refuses a future match that drops a
+    /// variant) and pure — no parse, no format, no allocation.
+    ///
+    /// Semver cascade: bumping a higher component RESETS every lower
+    /// component to zero. `1.2.3.bumped(Minor) == 1.3.0`,
+    /// `1.2.3.bumped(Major) == 2.0.0`. Pinned by
+    /// [`seeding_tests::bumped_resets_lower_components_at_every_level`].
+    ///
+    /// # Why the typed peer
+    ///
+    /// The prior [`bump_semver_typed`] parsed the input string, ran
+    /// the arithmetic inline via one of three `format!` templates, and
+    /// returned a new string. Consumers that already held a
+    /// [`SemverTriple`] (a downstream typed policy record, a
+    /// collision-skip loop that just produced one) still round-tripped
+    /// through the string surface — parse, format, parse — costing
+    /// one allocation and one shape check per iteration on the
+    /// pathological collision-skip path where 1024 successive Patch
+    /// bumps fire before the bail.
+    ///
+    /// Lifting the arithmetic onto [`SemverTriple`] itself lets the
+    /// collision-skip loop in [`next_free_version_typed`] hold the
+    /// candidate as a typed triple across iterations, rendering to a
+    /// string ONCE per iteration (for the `tag_exists` predicate) and
+    /// never re-parsing what it just rendered. Same THEORY.md §V.4
+    /// typed-primitive discipline the [`FromStr`] / [`Display`] pair
+    /// and the [`bump_semver_typed`] / [`bump_semver`] pair already
+    /// established on this module, here applied to the bump-arithmetic
+    /// primitive at the bottom of the algebra.
+    pub const fn bumped(self, level: BumpLevel) -> Self {
+        match level {
+            BumpLevel::Patch => Self {
+                major: self.major,
+                minor: self.minor,
+                patch: self.patch + 1,
+            },
+            BumpLevel::Minor => Self {
+                major: self.major,
+                minor: self.minor + 1,
+                patch: 0,
+            },
+            BumpLevel::Major => Self {
+                major: self.major + 1,
+                minor: 0,
+                patch: 0,
+            },
+        }
+    }
 }
 
 impl std::fmt::Display for SemverTriple {
@@ -9863,16 +9918,7 @@ impl PartialEq<BumpLevel> for &[u8] {
 /// typed primitive so the level grammar (which strings map to which
 /// variant) is named at one site.
 pub fn bump_semver_typed(version: &str, level: BumpLevel) -> Result<String> {
-    let SemverTriple {
-        major,
-        minor,
-        patch,
-    } = parse_semver_typed(version)?;
-    Ok(match level {
-        BumpLevel::Patch => format!("{}.{}.{}", major, minor, patch + 1),
-        BumpLevel::Minor => format!("{}.{}.0", major, minor + 1),
-        BumpLevel::Major => format!("{}.0.0", major + 1),
-    })
+    Ok(parse_semver_typed(version)?.bumped(level).to_string())
 }
 
 /// Bump a version by the given level (patch, minor, major).
@@ -9986,15 +10032,23 @@ pub fn next_free_version_typed(
     tag_exists: &dyn Fn(&str) -> bool,
 ) -> Result<String> {
     let seed = bump_seed(manifest_version, max_released)?;
-    let mut candidate = bump_semver_typed(seed, level)?;
+    // Hold the candidate as a typed [`SemverTriple`] across iterations
+    // and route the collision-skip increment through [`SemverTriple::bumped`]
+    // — the typed-arithmetic primitive at the bottom of the algebra.
+    // Rendering to a string fires exactly ONCE per iteration for the
+    // `tag_exists` predicate and never fires from the loop back to the
+    // parser: on the pathological path (1024 successive Patch bumps),
+    // parse fires exactly once (on the seed) rather than 1024 times.
+    let mut triple = parse_semver_typed(seed)?.bumped(level);
     // Bounded rather than `loop`: a predicate that answers "exists" for
     // everything would otherwise hang a release job forever. 1024 is far above
     // any real tag run and small enough to fail fast.
     for _ in 0..1024 {
+        let candidate = triple.to_string();
         if !tag_exists(&candidate) {
             return Ok(candidate);
         }
-        candidate = bump_semver_typed(&candidate, BumpLevel::Patch)?;
+        triple = triple.bumped(BumpLevel::Patch);
     }
     bail!(
         "could not find a free version after 1024 patch bumps from {} \
@@ -13339,6 +13393,117 @@ mod tests {
                  byte-identical error chain `parse_semver` produced",
             );
         }
+    }
+
+    /// [`SemverTriple::bumped`] applied to `(1, 2, 3)` at every
+    /// [`BumpLevel`] variant returns the same triple the stringly
+    /// [`bump_semver`] entry point produces (parsed back into a
+    /// [`SemverTriple`]). Pins that the arithmetic lifted onto the
+    /// typed peer is byte-equivalent to the arithmetic
+    /// [`bump_semver_typed`] previously inlined — no drift between
+    /// the typed-primitive body and the string-surface entry point.
+    #[test]
+    fn test_semver_triple_bumped_matches_stringly_bump_semver_at_every_variant() {
+        let start = SemverTriple::new(1, 2, 3);
+        for (level_typed, level_str) in [
+            (BumpLevel::Patch, "patch"),
+            (BumpLevel::Minor, "minor"),
+            (BumpLevel::Major, "major"),
+        ] {
+            let by_typed = start.bumped(level_typed);
+            let by_str = parse_semver_typed(&bump_semver("1.2.3", level_str).unwrap()).unwrap();
+            assert_eq!(
+                by_typed, by_str,
+                "SemverTriple::bumped({level_typed:?}) must equal \
+                 parse(bump_semver(\"1.2.3\", {level_str:?}))",
+            );
+        }
+    }
+
+    /// [`SemverTriple::bumped`] resets every LOWER component to zero
+    /// at every level — the semver cascade `1.2.3.bumped(Minor) ==
+    /// 1.3.0`, `1.2.3.bumped(Major) == 2.0.0`. Pins the arithmetic
+    /// contract [`bump_semver_typed`]'s pre-lift `format!` templates
+    /// encoded at their `{}.{}.0` / `{}.0.0` right-hand sides, now
+    /// living exclusively at the typed-primitive body.
+    #[test]
+    fn test_semver_triple_bumped_resets_lower_components_at_every_level() {
+        let start = SemverTriple::new(1, 2, 3);
+        assert_eq!(
+            start.bumped(BumpLevel::Patch),
+            SemverTriple::new(1, 2, 4),
+            "Patch preserves major and minor",
+        );
+        assert_eq!(
+            start.bumped(BumpLevel::Minor),
+            SemverTriple::new(1, 3, 0),
+            "Minor resets patch to 0",
+        );
+        assert_eq!(
+            start.bumped(BumpLevel::Major),
+            SemverTriple::new(2, 0, 0),
+            "Major resets minor and patch to 0",
+        );
+    }
+
+    /// Bumping a level always yields a strictly greater
+    /// [`SemverTriple`] under the derived `Ord` — the ordering
+    /// discipline `#[derive(PartialOrd, Ord)]` establishes on the
+    /// field declaration order (major, minor, patch). Pins the
+    /// monotonicity property `next_free_version_typed`'s
+    /// collision-skip loop and `bump_seed`'s comparison depend on:
+    /// a successful bump can never land on a value BELOW the
+    /// starting one.
+    #[test]
+    fn test_semver_triple_bumped_is_strictly_monotone_at_every_variant() {
+        for start in [
+            SemverTriple::new(0, 0, 0),
+            SemverTriple::new(0, 0, 1),
+            SemverTriple::new(0, 1, 0),
+            SemverTriple::new(1, 0, 0),
+            SemverTriple::new(1, 2, 3),
+            SemverTriple::new(10, 20, 30),
+        ] {
+            for level in BumpLevel::ALL {
+                let after = start.bumped(level);
+                assert!(
+                    after > start,
+                    "{start:?}.bumped({level:?}) = {after:?} must be strictly \
+                     greater than {start:?} under derived Ord",
+                );
+            }
+        }
+    }
+
+    /// [`bump_semver_typed`] delegates to [`SemverTriple::bumped`] at
+    /// exactly one body — a source-scan shield. The stringly entry
+    /// point is a two-line `parse → bumped → to_string` chain: no
+    /// per-variant `format!` template inline, and the only `format!`
+    /// on the arithmetic surface lives in [`SemverTriple`]'s
+    /// [`Display`](std::fmt::Display) impl. A future edit that
+    /// re-inlines a `format!("{}.{}.{}", ...)` inside
+    /// `bump_semver_typed` — the exact drift shape the typed-peer
+    /// lift redeemed — trips this shield.
+    #[test]
+    fn shield_bump_semver_typed_delegates_to_semver_triple_bumped() {
+        let src = include_str!("version.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            src,
+            "version.rs",
+            "pub fn bump_semver_typed(version: &str, level: BumpLevel) -> Result<String> {",
+            "\npub fn bump_semver(",
+        );
+        assert!(
+            body.contains(".bumped(level)"),
+            "bump_semver_typed must route through SemverTriple::bumped — \
+             the typed-primitive peer of the arithmetic. Body:\n{body}",
+        );
+        assert!(
+            !body.contains("format!"),
+            "bump_semver_typed must NOT re-inline a `format!` template — \
+             the arithmetic lives at SemverTriple::bumped, and the render \
+             lives at SemverTriple's Display impl. Body:\n{body}",
+        );
     }
 
     #[test]
@@ -26336,6 +26501,45 @@ mod seeding_tests {
         // string; we don't couple to the exact wording, only that it
         // surfaces the input for operator triage.
         assert!(err.to_string().contains("totally-bogus"), "got: {err}");
+    }
+
+    /// [`next_free_version_typed`]'s collision-skip loop holds a
+    /// typed [`super::SemverTriple`] across iterations and routes the
+    /// per-iteration bump through [`super::SemverTriple::bumped`]. A
+    /// source-scan shield: the loop body must NOT re-enter
+    /// [`super::bump_semver_typed`] (or [`super::bump_semver`]), which
+    /// would round-trip the just-rendered candidate string back
+    /// through the parser at every iteration — exactly the parse-
+    /// format cycle the typed-arithmetic peer redeemed. Pins that a
+    /// future edit does not silently reinstate the string-surface
+    /// increment inside the loop.
+    #[test]
+    fn shield_next_free_version_typed_loop_holds_semver_triple() {
+        let src = include_str!("version.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            src,
+            "version.rs",
+            "pub fn next_free_version_typed(",
+            "\npub enum CargoShape {",
+        );
+        assert!(
+            body.contains("triple.bumped(BumpLevel::Patch)"),
+            "next_free_version_typed's loop must route the per-iteration \
+             bump through SemverTriple::bumped, holding a typed triple \
+             across iterations. Body:\n{body}",
+        );
+        assert!(
+            !body.contains("bump_semver_typed(&candidate"),
+            "next_free_version_typed's loop must NOT round-trip the \
+             candidate string back through bump_semver_typed — that \
+             re-enters the parser at every iteration, exactly the drift \
+             the typed-arithmetic peer redeemed. Body:\n{body}",
+        );
+        assert!(
+            !body.contains("bump_semver(&candidate"),
+            "next_free_version_typed's loop must NOT round-trip through \
+             the stringly bump_semver either. Body:\n{body}",
+        );
     }
 }
 
