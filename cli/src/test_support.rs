@@ -2714,6 +2714,85 @@ impl ArgvLog {
     }
 }
 
+/// Reserve a hermetic tempdir holding a shim named `tool` whose body
+/// ignores every positional argument and writes `stdout_payload` to
+/// stdout with **no trailing newline**, exiting zero. Returns the
+/// same `(TempDir, absolute path)` tuple as [`make_executable_shim`],
+/// so consumers keep the identical binding shape
+/// (`let (_dir, shim) = printf_only_shim(...)`) they already use for
+/// hand-rolled shim bodies.
+///
+/// # Why a primitive
+///
+/// Six sibling tests — [`infrastructure/docker.rs`]'s two
+/// `find_first_image_id_by_name`-classifier happy-path tests and
+/// [`infrastructure/kubectl.rs`]'s four
+/// `fetch_secret_value` / `find_first_pod_name_async` /
+/// `kubectl_probe_stdout_capture` happy-path tests — each spelled
+/// the same shim body verbatim:
+///
+/// ```ignore
+/// let (_dir, shim) = make_executable_shim(
+///     "<tool>",
+///     "#!/bin/sh\nprintf '%s' '<literal-payload>'\n",
+/// );
+/// // or, for a dynamic payload:
+/// let body = format!("#!/bin/sh\nprintf '%s' '{}'\n", <dynamic-payload>);
+/// let (_dir, shim) = make_executable_shim("<tool>", &body);
+/// ```
+///
+/// Four literal-payload copies plus two `format!`-derived copies is
+/// six copies of one shape past THEORY §VI.1's three-times-is-a-law
+/// threshold, each independently able to drift off:
+///
+/// 1. `printf '%s'` — not `echo` — so the emitted stdout carries **no
+///    trailing newline** (matching the classifier's `.trim()`-then-
+///    check-empty discipline; an `echo`-based shim would silently add
+///    a `\n` and a future classifier revision that stopped trimming
+///    would round-trip corrupt data through six tests at once).
+/// 2. `printf '%s'` (not `printf` alone, not `%b`) — no `\n` or `\t`
+///    escape expansion, so a payload containing a literal `\n` in its
+///    Rust-source spelling ships to stdout as a two-character
+///    backslash-n rather than a newline.
+/// 3. Single-quoting the payload — no shell interpolation, no `$`
+///    expansion. The primitive spells the single quotes once so a
+///    caller cannot forget them.
+///
+/// This primitive collects all three at ONE definition. A seventh
+/// print-a-fixed-payload consumer (a `cosign` classifier test, a
+/// `helm` classifier test, a `regctl` classifier test — every one of
+/// them a plausible follow-on) inherits every discipline in one call.
+///
+/// # Complement to [`ArgvLog`]
+///
+/// [`ArgvLog::shim_body`] is the argv-INSPECTING sibling: same
+/// `printf '%s' '<payload>'` trap-fix, plus an argv-side-channel
+/// write. `printf_only_shim` is the argv-IGNORING sibling for tests
+/// that only need to pin the stdout classifier's happy path (no argv
+/// assertion needed — that's a separate test). Both compose over
+/// [`make_executable_shim`] and share the same `(TempDir, String)`
+/// return-shape discipline: the tempdir MUST be bound to a local
+/// `_dir` (or longer-lived) variable, else the shim file is unlinked
+/// before the test spawns it.
+///
+/// # Payload safety
+///
+/// `stdout_payload` is spliced verbatim between single quotes in the
+/// emitted shim body. A payload containing an apostrophe (`'`) or a
+/// backslash would break the single-quoted section — every observed
+/// caller uses base64 output, SHA hex, kebab-case pod names, or
+/// `namespace/kind/name` strings, none of which contain an apostrophe.
+/// Callers with such payloads should reach for a hand-rolled shim
+/// body via [`make_executable_shim`] directly rather than escape-
+/// smuggling through this primitive.
+///
+/// [`infrastructure/docker.rs`]: crate::infrastructure::docker
+/// [`infrastructure/kubectl.rs`]: crate::infrastructure::kubectl
+pub fn printf_only_shim(tool: &str, stdout_payload: &str) -> (tempfile::TempDir, String) {
+    let body = format!("#!/bin/sh\nprintf '%s' '{stdout_payload}'\n");
+    make_executable_shim(tool, &body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4080,6 +4159,220 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "parent tempdir must be unlinked after ArgvLog drops, but \
              still exists at {parent:?}",
         );
+    }
+
+    /// `printf_only_shim` writes the payload to stdout **with no
+    /// trailing newline** — the load-bearing distinction from a naive
+    /// `echo`-based shim. Every one of the six pre-lift consumer
+    /// sites depended on this: the downstream classifier (`docker
+    /// images -q` output, kubectl jsonpath output) is fed into a
+    /// `.trim()`-then-decode chain that treats a trailing `\n` as
+    /// benign, but the argv-passes-canonical test suites elsewhere
+    /// pin the no-newline shape. A future edit that swapped `printf
+    /// '%s'` for `echo` would silently drift the emitted byte-string
+    /// by one `\n` and break this test rather than round-trip through
+    /// the six classifier callers as a slow-to-diagnose off-by-one
+    /// on trailing whitespace.
+    #[cfg(unix)]
+    #[test]
+    fn test_printf_only_shim_writes_payload_with_no_trailing_newline() {
+        let (_dir, shim) = printf_only_shim("probe", "no-newline");
+        let out = Command::new(&shim)
+            .output()
+            .expect("spawn printf-only shim");
+        assert!(out.status.success(), "shim exit was non-zero: {out:?}");
+        assert_eq!(
+            out.stdout, b"no-newline",
+            "shim stdout must be the payload verbatim with NO trailing \
+             newline; if the trailing `\\n` reappeared, the primitive \
+             reached for `echo` (which appends `\\n` unless given `-n`) \
+             and the six classifier consumers now silently ship one byte \
+             extra through their `.trim()` chain",
+        );
+    }
+
+    /// `printf_only_shim` IGNORES every positional argument the shim
+    /// receives. Pre-lift each consumer's happy-path test spawned
+    /// its classifier under a distinct argv slice (`images -q
+    /// my-image` / `get secret name -n ns -o jsonpath=...` / `get
+    /// pods -n ns` / `get events -n my-ns --sort-by=...`) and each
+    /// pinned the classifier's stdout-decoding branch, NOT the argv
+    /// forwarding. That's a separate concern shielded by the
+    /// `argv_log` sibling primitive.
+    ///
+    /// A regression that made `printf_only_shim` sensitive to argv
+    /// (e.g., accidentally consuming `$1` in the shim body) would
+    /// silently break every consumer whose classifier passes a
+    /// specific argv slice. This test pins the "shim body ignores
+    /// argv" contract independently.
+    #[cfg(unix)]
+    #[test]
+    fn test_printf_only_shim_ignores_argv() {
+        let (_dir, shim) = printf_only_shim("probe", "payload");
+        let out = Command::new(&shim)
+            .args(["--flag", "value", "and", "more"])
+            .output()
+            .expect("spawn printf-only shim with argv");
+        assert!(out.status.success());
+        assert_eq!(
+            out.stdout,
+            b"payload",
+            "shim stdout must be the payload verbatim regardless of \
+             positional arguments; got {:?}",
+            String::from_utf8_lossy(&out.stdout),
+        );
+    }
+
+    /// `printf_only_shim` SINGLE-QUOTES the payload in the emitted
+    /// shim body, so a payload containing shell metacharacters (`$`,
+    /// `` ` ``, `\`, `!`) is passed to `printf '%s'` verbatim rather
+    /// than expanded by the shell. Pins the discipline every one of
+    /// the six pre-lift sites relied on for their base64-encoded
+    /// payload (base64 alphabet is metacharacter-free, but a future
+    /// consumer whose payload IS a shell-quoted string would silently
+    /// have `$VAR` interpolated if the primitive dropped the
+    /// single-quoting).
+    ///
+    /// A payload containing `$HOME` reaches printf as the literal
+    /// six-character string `$HOME`, not the current-user's home
+    /// directory. If this test starts round-tripping the interpolated
+    /// value, the primitive dropped the single quotes and the six
+    /// consumers are one edit away from a payload-interpolation bug.
+    #[cfg(unix)]
+    #[test]
+    fn test_printf_only_shim_single_quotes_payload_against_shell_expansion() {
+        let (_dir, shim) = printf_only_shim("probe", "$HOME");
+        let out = Command::new(&shim)
+            .output()
+            .expect("spawn printf-only shim with dollar-var payload");
+        assert!(out.status.success());
+        assert_eq!(
+            out.stdout, b"$HOME",
+            "payload must reach stdout as the literal six-character \
+             string `$HOME`, not the interpolated home directory; if \
+             this test flips, the primitive dropped the single-quoting \
+             and future payloads carrying `$VAR` / backticks / `!` \
+             will silently expand",
+        );
+    }
+
+    /// Two independent `printf_only_shim` calls return
+    /// strictly-distinct shim paths — the `tempfile::tempdir()`-backed
+    /// `mkdtemp(3)` unique suffix carried by [`make_executable_shim`]
+    /// is the discipline the primitive inherits by construction. Two
+    /// concurrent test threads cannot alias one on-disk shim and race
+    /// each other's spawns.
+    #[test]
+    fn test_printf_only_shim_returns_distinct_paths_on_each_call() {
+        let (_dir_a, shim_a) = printf_only_shim("probe", "a");
+        let (_dir_b, shim_b) = printf_only_shim("probe", "b");
+        assert_ne!(
+            shim_a, shim_b,
+            "two printf_only_shim() calls must return distinct paths \
+             so concurrent test threads cannot race on one on-disk \
+             shim; got {shim_a:?} vs {shim_b:?}",
+        );
+    }
+
+    /// The six `printf_only_shim` consumer tests across
+    /// `infrastructure/docker.rs` and `infrastructure/kubectl.rs`,
+    /// as `(module path, source, `fn <name>(` open marker)` triples.
+    /// Same shape as [`ARGV_LOG_SITES`]; each entry's body is sliced
+    /// from its open marker to the first top-level `\n    }\n`.
+    ///
+    /// Adding a seventh `printf_only_shim` consumer means adding a
+    /// row here; the shield below then holds it to the same
+    /// delegation contract as the six that already exist.
+    const PRINTF_ONLY_SHIM_SITES: [(&str, &str, &str); 6] = [
+        (
+            "infrastructure/docker.rs",
+            include_str!("infrastructure/docker.rs"),
+            "fn test_find_first_image_id_by_name_with_bin_success_returns_trimmed_id(",
+        ),
+        (
+            "infrastructure/docker.rs",
+            include_str!("infrastructure/docker.rs"),
+            "fn test_find_first_image_id_by_name_async_with_bin_success_returns_trimmed_id(",
+        ),
+        (
+            "infrastructure/kubectl.rs",
+            include_str!("infrastructure/kubectl.rs"),
+            "fn test_fetch_secret_value_with_bin_success_returns_decoded_utf8(",
+        ),
+        (
+            "infrastructure/kubectl.rs",
+            include_str!("infrastructure/kubectl.rs"),
+            "fn test_fetch_secret_value_with_bin_decoded_non_utf8_returns_none(",
+        ),
+        (
+            "infrastructure/kubectl.rs",
+            include_str!("infrastructure/kubectl.rs"),
+            "fn test_find_first_pod_name_async_with_bin_success_returns_trimmed_name(",
+        ),
+        (
+            "infrastructure/kubectl.rs",
+            include_str!("infrastructure/kubectl.rs"),
+            "fn test_kubectl_probe_stdout_capture_zero_exit_returns_lossy_stdout(",
+        ),
+    ];
+
+    /// Cross-module shield: every `printf_only_shim` consumer on the
+    /// `infrastructure/` tree MUST reserve its shim through
+    /// [`printf_only_shim`], never a hand-rolled
+    /// `make_executable_shim("<tool>", "#!/bin/sh\nprintf '%s' '…'\n")`
+    /// literal (or the `format!("#!/bin/sh\nprintf '%s' '{}'\n", …)`
+    /// derivation the two base64-payload sites used pre-lift).
+    ///
+    /// Pre-lift all six sites spelled the same shim body verbatim,
+    /// varying only in the payload literal / expression — six copies
+    /// of one shape past THEORY §VI.1's three-times-is-a-law
+    /// threshold, each independently able to drift off:
+    ///
+    /// 1. `printf '%s'` (no `\n`, no `%b` escape expansion) — a
+    ///    future consumer that reached for `echo` would silently add
+    ///    a trailing newline.
+    /// 2. The single-quoted payload — a future consumer that dropped
+    ///    the single quotes would silently interpolate `$VAR` /
+    ///    backticks / `!` from the shell.
+    ///
+    /// Positive side: the delegation call `printf_only_shim(` must
+    /// appear at exactly ONE code line in each test-fn's body, so a
+    /// regression that deleted the delegation cannot leave the
+    /// negative scan trivially satisfied by absence.
+    ///
+    /// Negative side: no hand-rolled `#!/bin/sh\nprintf '%s'` shim
+    /// body may appear at any code line in any test-fn's body. The
+    /// needle is reconstructed at test time so this shield's own
+    /// docstring prose does not false-match itself (same discipline
+    /// the per-module consumer shields carry). [`code_line_hits`]
+    /// additionally filters `//` / `///` / `//!` lines, so
+    /// delegation comments inside each body are ignored.
+    #[test]
+    fn test_all_printf_only_shim_stanzas_route_through_printf_only_shim() {
+        let forbidden_body = format!("{}{}{}{}", "#!/bin/", "sh\\nprintf ", "'%", "s' '");
+        for (module_path, source, open_marker) in PRINTF_ONLY_SHIM_SITES {
+            let body = fn_body_slice_between_markers(source, module_path, open_marker, "\n    }\n");
+
+            let reserve_hits = code_line_hits(body, "printf_only_shim(");
+            assert_eq!(
+                reserve_hits.len(),
+                1,
+                "{module_path}'s `{open_marker}` test must delegate to \
+                 `printf_only_shim(` at exactly one code line; got {} \
+                 — hits: {reserve_hits:#?}",
+                reserve_hits.len(),
+            );
+
+            let hand_rolled_body = code_line_hits(body, &forbidden_body);
+            assert!(
+                hand_rolled_body.is_empty(),
+                "{module_path}'s `{open_marker}` test must NOT hand-roll \
+                 its own `#!/bin/sh\\nprintf '%s' '…'` shim body — the \
+                 shared primitive at `test_support::printf_only_shim` \
+                 carries the no-trailing-newline and single-quoting \
+                 discipline in one place; hits: {hand_rolled_body:#?}",
+            );
+        }
     }
 
     /// The four argv-shim tests across `infrastructure/docker.rs`
