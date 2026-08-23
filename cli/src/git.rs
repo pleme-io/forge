@@ -598,14 +598,25 @@ pub fn max_released_version(prefix: &str, workdir: Option<&Path>) -> Result<Stri
     let stdout = git_capture(&["tag", "--list", &pattern], workdir, "tag --list")?;
     let listing = String::from_utf8_lossy(&stdout);
 
-    let mut best: Option<(u64, u64, u64)> = None;
+    // Hold the running best as an `Option<SemverTriple>` rather than
+    // the raw `Option<(u64, u64, u64)>` the tuple form of
+    // `parse_semver` used to yield: `SemverTriple` derives `Ord` from
+    // the field declaration order `major, minor, patch`, so the
+    // `parsed > b` fold is a typed comparison whose semver-lex
+    // discipline is named at exactly ONE site (the struct
+    // declaration). The pre-lift shape happened to work only because
+    // the tuple was declared in that order; a future edit that
+    // destructured or re-ordered the tuple would have silently
+    // reversed this fold and picked the LOWEST tag rather than the
+    // highest.
+    let mut best: Option<crate::version::SemverTriple> = None;
     let mut best_str = String::new();
     for line in listing.lines() {
         let tag = line.trim();
         let Some(candidate) = tag.strip_prefix(prefix) else {
             continue;
         };
-        let Ok(parsed) = crate::version::parse_semver(candidate) else {
+        let Ok(parsed) = crate::version::parse_semver_typed(candidate) else {
             continue;
         };
         if best.is_none_or(|b| parsed > b) {

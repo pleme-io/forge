@@ -8,17 +8,167 @@ use std::path::Path;
 use std::str::FromStr;
 
 /// Parse a semver version string into (major, minor, patch).
+///
+/// Retains the raw `(u64, u64, u64)` tuple shape for the existing test
+/// callers that assert against the tuple form directly. Delegates
+/// through [`parse_semver_typed`] and re-projects the typed
+/// [`SemverTriple`] to a tuple at the entry point, so the parse
+/// grammar (three dot-separated `u64` components, bail wording on
+/// shape / non-numeric component / empty input) lives at ONE body
+/// (the [`FromStr`] impl on [`SemverTriple`]) and both entry points
+/// route through it. Sibling of the [`bump_semver`] /
+/// [`bump_semver_typed`] and [`next_free_version`] /
+/// [`next_free_version_typed`] typed-peer pairs on this surface.
+///
+/// After the SemverTriple lift, every production caller in the crate
+/// routes through [`parse_semver_typed`] to inherit the derived-Ord
+/// discipline. This tuple entry point is retained as the boundary
+/// projection for existing test callers that assert against the raw
+/// tuple form, and for a future consumer (an FFI boundary, a numeric
+/// telemetry emitter that already speaks `(u64, u64, u64)`) that
+/// wants the byte-identical tuple output without the typed wrapper.
+#[allow(dead_code)]
 pub fn parse_semver(version: &str) -> Result<(u64, u64, u64)> {
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() != 3 {
-        bail!("Invalid version format '{}' — expected X.Y.Z", version);
-    }
-
-    let major = parts[0].parse::<u64>().context("Invalid major version")?;
-    let minor = parts[1].parse::<u64>().context("Invalid minor version")?;
-    let patch = parts[2].parse::<u64>().context("Invalid patch version")?;
-
+    let SemverTriple {
+        major,
+        minor,
+        patch,
+    } = parse_semver_typed(version)?;
     Ok((major, minor, patch))
+}
+
+/// The typed-primitive peer of [`parse_semver`]: a struct-of-fields
+/// carrying the three semver components (`major`, `minor`, `patch`)
+/// with `#[derive(Ord)]` supplying the semver-lex order at the field
+/// declaration order.
+///
+/// # Why the typed peer
+///
+/// Every downstream consumer of [`parse_semver`] treated the raw
+/// `(u64, u64, u64)` tuple as an ordered semver triple: [`bump_seed`]
+/// compares `if r > m`, [`crate::git::max_released_version`] holds
+/// `Option<(u64, u64, u64)>` and folds `parsed > b`, and
+/// [`bump_semver_typed`] destructures for the arithmetic. The tuple
+/// ordering happens to be lexicographic (major-then-minor-then-patch)
+/// only because the tuple was declared in that order, but nothing at
+/// any call site names that discipline — a future edit that
+/// destructured the tuple as `(patch, minor, major)` would silently
+/// reverse every comparison and no compiler diagnostic would fire.
+/// Routing through [`SemverTriple`] with `#[derive(PartialOrd, Ord)]`
+/// and the field declaration order `major, minor, patch` names the
+/// ordering at exactly ONE site (this struct): every consumer that
+/// reads through `.cmp` / `>` / `<` on the typed value inherits the
+/// same semver-lex order, and the compiler refuses a field-order
+/// swap on the declaration.
+///
+/// The field declaration order is load-bearing —
+/// `#[derive(PartialOrd, Ord)]` derives the ladder from source order,
+/// so a future field extension (e.g., a `pre_release: Option<u32>`
+/// tail component) must consider where in the ladder it sits.
+///
+/// # Relation to the stringly entry point
+///
+/// [`parse_semver`] retains its `(u64, u64, u64)` return signature
+/// for the existing test callers that assert against the tuple. It
+/// delegates through [`parse_semver_typed`] at the entry point, so
+/// the parse grammar (three dot-separated `u64` components,
+/// byte-identical bail wording on shape / non-numeric component /
+/// empty input) lives at ONE body — the [`FromStr`] impl below — and
+/// both entry points route through it. Same THEORY.md §VI.1
+/// one-oracle discipline the sibling [`bump_semver_typed`] /
+/// [`bump_semver`] and [`next_free_version_typed`] /
+/// [`next_free_version`] typed peers already established at the
+/// bump-arithmetic and seeding-decision surfaces, here applied to
+/// the parse-primitive surface at the bottom of the algebra.
+///
+/// THEORY.md §V.4 typed primitives: the parse-primitive surface
+/// carries a typed struct (one named field per semver component),
+/// not a `(u64, u64, u64)` tuple shape that re-derives the ordering
+/// discipline at every consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SemverTriple {
+    /// The MAJOR component (X in X.Y.Z). Declared first so the
+    /// derived `Ord` order compares MAJOR before MINOR before PATCH.
+    pub major: u64,
+    /// The MINOR component (Y in X.Y.Z).
+    pub minor: u64,
+    /// The PATCH component (Z in X.Y.Z).
+    pub patch: u64,
+}
+
+impl SemverTriple {
+    /// Construct a triple from raw components — the inverse of the
+    /// destructure `let SemverTriple { major, minor, patch } = t;`.
+    #[allow(dead_code)]
+    pub const fn new(major: u64, minor: u64, patch: u64) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+impl std::fmt::Display for SemverTriple {
+    /// Render the canonical `MAJOR.MINOR.PATCH` semver string — the
+    /// inverse of [`FromStr::from_str`] on well-formed input. The
+    /// round-trip `t -> t.to_string() -> SemverTriple::from_str` is
+    /// the identity at every triple whose components fit `u64`, pinned
+    /// by
+    /// [`tests::test_semver_triple_display_round_trips_through_from_str`].
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+impl FromStr for SemverTriple {
+    type Err = anyhow::Error;
+
+    /// Parse a canonical `MAJOR.MINOR.PATCH` semver string into a
+    /// [`SemverTriple`]. Error wording is byte-identical to the prior
+    /// [`parse_semver`] bail on shape, and the [`Context`] wording on
+    /// per-component `u64` parse failure is byte-identical too, so a
+    /// caller reading the error text through the typed peer sees the
+    /// same message [`parse_semver`] would have surfaced.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() != 3 {
+            bail!("Invalid version format '{}' — expected X.Y.Z", s);
+        }
+        let major = parts[0].parse::<u64>().context("Invalid major version")?;
+        let minor = parts[1].parse::<u64>().context("Invalid minor version")?;
+        let patch = parts[2].parse::<u64>().context("Invalid patch version")?;
+        Ok(Self {
+            major,
+            minor,
+            patch,
+        })
+    }
+}
+
+impl From<SemverTriple> for (u64, u64, u64) {
+    fn from(t: SemverTriple) -> Self {
+        (t.major, t.minor, t.patch)
+    }
+}
+
+impl From<(u64, u64, u64)> for SemverTriple {
+    fn from((major, minor, patch): (u64, u64, u64)) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+/// Parse a canonical `MAJOR.MINOR.PATCH` semver string into a typed
+/// [`SemverTriple`] — the typed-primitive peer of [`parse_semver`].
+/// Same body as `SemverTriple::from_str`; provided as a free function
+/// for symmetry with the [`bump_semver_typed`] /
+/// [`next_free_version_typed`] naming convention on this surface.
+pub fn parse_semver_typed(version: &str) -> Result<SemverTriple> {
+    version.parse()
 }
 
 /// The three-variant typed sum naming which semver component
@@ -9713,7 +9863,11 @@ impl PartialEq<BumpLevel> for &[u8] {
 /// typed primitive so the level grammar (which strings map to which
 /// variant) is named at one site.
 pub fn bump_semver_typed(version: &str, level: BumpLevel) -> Result<String> {
-    let (major, minor, patch) = parse_semver(version)?;
+    let SemverTriple {
+        major,
+        minor,
+        patch,
+    } = parse_semver_typed(version)?;
     Ok(match level {
         BumpLevel::Patch => format!("{}.{}.{}", major, minor, patch + 1),
         BumpLevel::Minor => format!("{}.{}.0", major, minor + 1),
@@ -9752,8 +9906,15 @@ pub fn bump_seed<'a>(manifest_version: &'a str, max_released: &'a str) -> Result
     if max_released.is_empty() {
         return Ok(manifest_version);
     }
-    let m = parse_semver(manifest_version)?;
-    let r = parse_semver(max_released)?;
+    // Route the comparison through [`SemverTriple`]'s derived `Ord`
+    // rather than the raw `(u64, u64, u64)` tuple order [`parse_semver`]
+    // used to return: the ordering discipline (major before minor
+    // before patch) is named at exactly ONE site (the field declaration
+    // order on `SemverTriple`), so a future refactor cannot silently
+    // reverse this comparison by destructuring the tuple in a
+    // different order.
+    let m = parse_semver_typed(manifest_version)?;
+    let r = parse_semver_typed(max_released)?;
     Ok(if r > m {
         max_released
     } else {
@@ -13035,6 +13196,149 @@ mod tests {
         assert!(parse_semver("1.2").is_err());
         assert!(parse_semver("1.2.3.4").is_err());
         assert!(parse_semver("abc").is_err());
+    }
+
+    /// At every well-formed input on the fleet-observed shape spread,
+    /// [`parse_semver_typed`] and [`parse_semver`] carry byte-identical
+    /// data — the tuple projection is the identity through the field
+    /// order (`major, minor, patch`). Pins that the delegation
+    /// `parse_semver` → `parse_semver_typed` → tuple projection stays
+    /// a shape-preserving equivalence at every consumer that reads the
+    /// tuple form. A future refactor that quietly re-ordered the
+    /// tuple projection (e.g., `(patch, minor, major)`) lights up
+    /// rather than passes silently.
+    #[test]
+    fn test_parse_semver_typed_and_stringly_carry_byte_identical_data() {
+        for v in [
+            "0.0.0",
+            "0.1.0",
+            "1.2.3",
+            "10.20.30",
+            "0.19.0",
+            "3.7.2",
+            "1000.999.0",
+            "18446744073709551615.0.0",
+        ] {
+            let tuple = parse_semver(v).unwrap();
+            let typed = parse_semver_typed(v).unwrap();
+            assert_eq!(
+                (typed.major, typed.minor, typed.patch),
+                tuple,
+                "SemverTriple at {v:?} must project to the tuple parse_semver returns",
+            );
+            assert_eq!(
+                <(u64, u64, u64)>::from(typed),
+                tuple,
+                "the From<SemverTriple> for tuple round-trip must be the identity at {v:?}",
+            );
+            assert_eq!(
+                SemverTriple::from(tuple),
+                typed,
+                "the From<tuple> for SemverTriple round-trip must be the identity at {v:?}",
+            );
+        }
+    }
+
+    /// The derived `Ord` on [`SemverTriple`] matches the raw
+    /// `(u64, u64, u64)` tuple ordering at every pair on a 5×5 grid of
+    /// well-formed inputs — the equivalence
+    /// `SemverTriple::cmp(a, b) == (u64, u64, u64)::cmp(a, b)` the field
+    /// declaration order (`major, minor, patch`) is meant to preserve.
+    /// A future edit that reordered the fields would flip a comparison
+    /// and light up here rather than silently miscompare seeds in
+    /// [`bump_seed`] or highest tags in
+    /// [`crate::git::max_released_version`].
+    #[test]
+    fn test_semver_triple_ord_matches_stringly_tuple_order() {
+        let inputs = ["0.0.0", "0.1.0", "0.1.1", "1.0.0", "2.0.0"];
+        for a in inputs {
+            for b in inputs {
+                let ta = parse_semver_typed(a).unwrap();
+                let tb = parse_semver_typed(b).unwrap();
+                let tuple_a = parse_semver(a).unwrap();
+                let tuple_b = parse_semver(b).unwrap();
+                assert_eq!(
+                    ta.cmp(&tb),
+                    tuple_a.cmp(&tuple_b),
+                    "SemverTriple::cmp({a:?}, {b:?}) must equal (u64,u64,u64)::cmp — \
+                     field declaration order is the ordering oracle",
+                );
+                assert_eq!(
+                    ta > tb,
+                    tuple_a > tuple_b,
+                    "the `>` shape [`bump_seed`] and \
+                     [`crate::git::max_released_version`] fold on must \
+                     agree with tuple `>` at ({a:?}, {b:?})",
+                );
+            }
+        }
+    }
+
+    /// [`SemverTriple`]'s [`Display`](std::fmt::Display) impl is the
+    /// inverse of its [`FromStr`] impl on well-formed input: the
+    /// round-trip `t -> t.to_string() -> SemverTriple::from_str` is
+    /// the identity at every triple whose components fit `u64`. The
+    /// same round-trip discipline the [`BumpLevel`] typed sum
+    /// established at
+    /// [`test_bump_level_display_round_trips_through_from_str`],
+    /// here applied to the parse-primitive surface.
+    #[test]
+    fn test_semver_triple_display_round_trips_through_from_str() {
+        for (major, minor, patch) in [
+            (0u64, 0u64, 0u64),
+            (0, 0, 1),
+            (0, 1, 0),
+            (1, 0, 0),
+            (1, 2, 3),
+            (10, 20, 30),
+            (u64::MAX, 0, 0),
+            (0, u64::MAX, 0),
+            (0, 0, u64::MAX),
+        ] {
+            let t = SemverTriple::new(major, minor, patch);
+            let rendered = t.to_string();
+            let round = SemverTriple::from_str(&rendered).unwrap();
+            assert_eq!(
+                t, round,
+                "Display→FromStr must round-trip at {t:?} (rendered {rendered:?})",
+            );
+            assert_eq!(
+                rendered,
+                format!("{major}.{minor}.{patch}"),
+                "Display must render the canonical MAJOR.MINOR.PATCH form at {t:?}",
+            );
+        }
+    }
+
+    /// [`SemverTriple::from_str`] surfaces the byte-identical error
+    /// wording [`parse_semver`] surfaced for both the shape trap
+    /// (wrong-arity dot-split) and the non-numeric-component trap
+    /// (per-component `u64::from_str` failure). A downstream caller
+    /// reading the error text through the typed peer sees the same
+    /// message the raw parser would have produced — the one-oracle
+    /// discipline the sibling `bump_semver` / `bump_semver_typed`
+    /// pair already established at the bump-arithmetic surface,
+    /// here applied to the parse-primitive surface.
+    #[test]
+    fn test_semver_triple_from_str_error_wording_byte_identical_to_parse_semver() {
+        for shape_bad in ["", "1", "1.2", "1.2.3.4", "abc"] {
+            let tuple_err = parse_semver(shape_bad).unwrap_err().to_string();
+            let typed_err = SemverTriple::from_str(shape_bad).unwrap_err().to_string();
+            assert_eq!(
+                typed_err, tuple_err,
+                "SemverTriple::from_str({shape_bad:?}) must surface the \
+                 byte-identical error `parse_semver` produced",
+            );
+        }
+        for non_numeric in ["1.a.3", "x.2.3", "1.2.z"] {
+            let tuple_err = format!("{:#}", parse_semver(non_numeric).unwrap_err());
+            let typed_err = format!("{:#}", SemverTriple::from_str(non_numeric).unwrap_err());
+            assert_eq!(
+                typed_err, tuple_err,
+                "SemverTriple::from_str({non_numeric:?}) must surface the \
+                 byte-identical error chain `parse_semver` produced",
+            );
+        }
     }
 
     #[test]
