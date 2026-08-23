@@ -593,7 +593,69 @@ pub fn tag_exists_in(tag: &str, workdir: Option<&Path>) -> Result<bool> {
 /// parse as exact `X.Y.Z` (release candidates, dated tags, `v1.2`) are SKIPPED
 /// rather than failing the read — a repo is entitled to carry other tags, and
 /// refusing to bump because of one would be a false gate.
+///
+/// Retains the stringly return signature for the existing production caller
+/// (`commands/gem.rs` reads the value as a `&str` and pipes it into the
+/// stringly [`crate::version::next_free_version`] entry point), and delegates
+/// through [`max_released_version_typed`] at the entry point. The
+/// prefix-strip, per-tag parse, and `>` fold all live at ONE body — the
+/// typed peer below — and the stringly return here is the boundary
+/// projection: `.map(|t| t.to_string()).unwrap_or_default()`, so `None`
+/// (no matching tag) becomes the empty-string sentinel every existing
+/// caller already handles. Same THEORY.md §V.4 typed-primitive discipline
+/// the version.rs surface established across
+/// `parse_semver` / `parse_semver_typed`,
+/// `bump_semver` / `bump_semver_typed`,
+/// `bump_seed` / `bump_seed_typed`, and
+/// `next_free_version` / `next_free_version_typed` — here applied to the
+/// git-tag-scan primitive that feeds them.
 pub fn max_released_version(prefix: &str, workdir: Option<&Path>) -> Result<String> {
+    Ok(max_released_version_typed(prefix, workdir)?
+        .map(|t| t.to_string())
+        .unwrap_or_default())
+}
+
+/// The typed-primitive peer of [`max_released_version`]: the same
+/// `<prefix>X.Y.Z`-tag scan, but returns `Option<SemverTriple>` at the
+/// boundary rather than re-projecting the winner to a `String` and letting
+/// the caller re-parse it.
+///
+/// # Why the typed peer
+///
+/// The stringly [`max_released_version`] tracked the running best as an
+/// `Option<SemverTriple>` internally (for the derived-`Ord` discipline
+/// the fold needs), then re-projected the winner to a `String` at the
+/// return, discarding the typed triple the fold had just produced. Every
+/// downstream consumer that reasoned over the return either compared it
+/// against the empty-string sentinel (`if !max_released.is_empty()`) or
+/// re-parsed it back to a typed triple inside
+/// [`crate::version::next_free_version_typed`], redeeming a
+/// [`SemverTriple`] the primitive had already computed. The typed peer
+/// exposes the typed winner at the boundary so:
+/// - the "no released tag yet" state is a `None` at the type level, not
+///   a `""` sentinel string a future consumer might forget to check for;
+/// - a downstream caller that already holds a typed [`SemverTriple`]
+///   pipes it straight into
+///   [`crate::version::bump_seed_typed`] /
+///   [`crate::version::next_free_version_typed`] without a
+///   `to_string()` → parse round-trip;
+/// - the derived-`Ord` semver-lex discipline named at
+///   [`SemverTriple`]'s field declaration order flows through the
+///   boundary rather than being redeemed at every consumer.
+///
+/// The stringly [`max_released_version`] retains its `String` return for
+/// the existing production caller (`commands/gem.rs`), and delegates
+/// through this typed peer, so the prefix-strip, per-tag parse, and
+/// `parsed > b` fold live at ONE body — this one — and both entry points
+/// route through it. Same THEORY.md §VI.1 one-oracle discipline the
+/// sibling `parse_semver_typed`, `bump_semver_typed`, `bump_seed_typed`,
+/// and `next_free_version_typed` typed peers already established across
+/// the version.rs release-arithmetic surface, here applied to the
+/// git-tag-scan primitive at the source of the seed decision.
+pub fn max_released_version_typed(
+    prefix: &str,
+    workdir: Option<&Path>,
+) -> Result<Option<crate::version::SemverTriple>> {
     let pattern = format!("{}*", prefix);
     let stdout = git_capture(&["tag", "--list", &pattern], workdir, "tag --list")?;
     let listing = String::from_utf8_lossy(&stdout);
@@ -610,7 +672,6 @@ pub fn max_released_version(prefix: &str, workdir: Option<&Path>) -> Result<Stri
     // reversed this fold and picked the LOWEST tag rather than the
     // highest.
     let mut best: Option<crate::version::SemverTriple> = None;
-    let mut best_str = String::new();
     for line in listing.lines() {
         let tag = line.trim();
         let Some(candidate) = tag.strip_prefix(prefix) else {
@@ -621,10 +682,9 @@ pub fn max_released_version(prefix: &str, workdir: Option<&Path>) -> Result<Stri
         };
         if best.is_none_or(|b| parsed > b) {
             best = Some(parsed);
-            best_str = candidate.to_string();
         }
     }
-    Ok(best_str)
+    Ok(best)
 }
 
 /// Create an annotated git tag.
@@ -2269,5 +2329,120 @@ mod max_released_version_tests {
         let (_d, shim) = git_listing_shim("  v0.2.0  \\n\\nv0.5.0\\n  \\n");
         let _scope = GitBinScope::set(&shim);
         assert_eq!(max_released_version("v", None).unwrap(), "0.5.0");
+    }
+
+    /// Every listing that yields a non-empty `String` from the stringly
+    /// entry point must yield the byte-equal typed triple through
+    /// `Display` from the typed peer, and every listing that yields the
+    /// empty-string sentinel from the stringly entry point must yield
+    /// `None` from the typed peer. Pins that the delegation
+    /// `max_released_version → max_released_version_typed
+    /// .map(|t| t.to_string()).unwrap_or_default()` never drifts —
+    /// specifically that no representative shape crosses the None ↔
+    /// non-empty boundary asymmetrically.
+    #[test]
+    fn typed_and_stringly_max_released_version_agree_at_every_representative_shape() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for (label, listing, prefix) in [
+            ("numeric-lex ordering", "v0.3.0\\nv0.3.1\\nv0.10.0\\n", "v"),
+            (
+                "non-exact tags skipped",
+                "v1.2\\nv2.0.0-rc1\\nvNOPE\\nv0.1.0\\nv0.1.0.1\\n",
+                "v",
+            ),
+            ("empty listing → empty / None", "", "v"),
+            ("prefix mismatch → empty / None", "nightly\\nlatest\\n", "v"),
+            (
+                "non-v prefix",
+                "release-1.4.0\\nrelease-1.10.0\\n",
+                "release-",
+            ),
+            (
+                "surrounding whitespace tolerated",
+                "  v0.2.0  \\n\\nv0.5.0\\n  \\n",
+                "v",
+            ),
+        ] {
+            let (_d, shim) = git_listing_shim(listing);
+            let _scope = GitBinScope::set(&shim);
+            let by_str = max_released_version(prefix, None).unwrap();
+            let by_typed = max_released_version_typed(prefix, None).unwrap();
+            let projected = by_typed.map(|t| t.to_string()).unwrap_or_default();
+            assert_eq!(
+                by_str, projected,
+                "{label}: stringly return must byte-equal Display of typed peer"
+            );
+            assert_eq!(
+                by_str.is_empty(),
+                by_typed.is_none(),
+                "{label}: empty-string sentinel must correspond to None"
+            );
+        }
+    }
+
+    /// The typed peer returns the actual [`crate::version::SemverTriple`]
+    /// value, not just the `Display`-equivalent string. Pins that a
+    /// downstream caller destructuring `Some(SemverTriple { major,
+    /// minor, patch })` reads the field values the tag decoded to,
+    /// rather than needing to re-parse the projected string.
+    #[test]
+    fn typed_max_released_version_returns_semver_triple_fields_not_just_display() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_d, shim) = git_listing_shim("v0.3.0\\nv0.3.1\\nv0.10.0\\n");
+        let _scope = GitBinScope::set(&shim);
+        let winner = max_released_version_typed("v", None)
+            .unwrap()
+            .expect("v0.10.0 is the numeric max, not None");
+        assert_eq!(winner.major, 0);
+        assert_eq!(winner.minor, 10);
+        assert_eq!(winner.patch, 0);
+    }
+
+    /// The empty-listing case is `None` at the type level, so a
+    /// downstream typed caller distinguishes "no released tag" from
+    /// "released 0.0.0" without the empty-string convention every
+    /// caller had to remember. Pins the primary reason the typed peer
+    /// exists — the sentinel-as-type lift.
+    #[test]
+    fn typed_max_released_version_yields_none_not_zero_when_no_matching_tag() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_d, shim) = git_listing_shim("");
+        let _scope = GitBinScope::set(&shim);
+        assert!(
+            max_released_version_typed("v", None).unwrap().is_none(),
+            "no matching tag is None, distinct from Some(0.0.0)"
+        );
+
+        let (_d2, shim2) = git_listing_shim("v0.0.0\\n");
+        let _scope2 = GitBinScope::set(&shim2);
+        assert_eq!(
+            max_released_version_typed("v", None).unwrap(),
+            Some(crate::version::SemverTriple::new(0, 0, 0)),
+            "an explicit v0.0.0 tag reads as Some(0.0.0), distinct from None"
+        );
+    }
+
+    /// The `parsed > b` fold on the typed peer is a semver-lex
+    /// comparison via `SemverTriple`'s derived `Ord`, not a
+    /// lexicographic comparison on the stringly projection. Pins the
+    /// numeric-ordering rule (the ORIGINAL bug the primitive was
+    /// added to close) is honored by the typed peer directly, not
+    /// merely by the stringly delegator.
+    #[test]
+    fn typed_max_released_version_folds_via_semver_lex_ord_not_string_lex() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Lexicographically "0.3.1" > "0.10.0", so a string-lex fold
+        // would pick 0.3.1 and the released-version reader would seed
+        // the next bump BEHIND a published tag.
+        let (_d, shim) = git_listing_shim("v0.3.0\\nv0.3.1\\nv0.10.0\\n");
+        let _scope = GitBinScope::set(&shim);
+        let winner = max_released_version_typed("v", None)
+            .unwrap()
+            .expect("0.10.0 exists in the listing");
+        assert_eq!(
+            winner,
+            crate::version::SemverTriple::new(0, 10, 0),
+            "typed fold must pick 0.10.0 over 0.3.1 via derived Ord"
+        );
     }
 }
