@@ -193,9 +193,17 @@ pub async fn execute(
             })
             .ok_or_else(|| anyhow::anyhow!("ATTIC_TOKEN not found in env or kubernetes (tried github-actions namespace; set ATTIC_FALLBACK_NAMESPACE for additional namespace)"))?;
 
-        // Attic server alias — configurable via ATTIC_SERVER_NAME (default: "default")
-        let attic_server =
-            std::env::var("ATTIC_SERVER_NAME").unwrap_or_else(|_| "default".to_string());
+        // Attic server alias — routes through the crate-scoped
+        // `crate::infrastructure::attic::attic_server_alias` sigil so
+        // the `ATTIC_SERVER_NAME`-with-`"default"`-fallback contract is
+        // honored at exactly ONE code line across the crate (sibling
+        // consumer: `commands/build.rs::execute`). A future refinement
+        // of the alias contract (canonicalize hook, known-aliases
+        // enum, telemetry sigil, typed `substrate::AtticServerAlias`
+        // newtype) lands at the sigil body and reaches this consumer
+        // by construction — THEORY §V solve-once-at-the-primitive;
+        // §VI.1 recurring-shape-to-helper.
+        let attic_server = crate::infrastructure::attic::attic_server_alias();
 
         info!("🔧 Configuring Attic cache...");
 
@@ -1280,6 +1288,74 @@ mod tests {
             "execute() must delegate every kubectl spawn to \
              `kubectl_command_async()` — the delegation string was not \
              found in execute()."
+        );
+    }
+
+    /// Regression shield: `commands/github_runner_ci.rs::execute` must
+    /// resolve its Attic server alias via
+    /// [`crate::infrastructure::attic::attic_server_alias`] rather
+    /// than by hand-spelling `std::env::var("ATTIC_SERVER_NAME")
+    /// .unwrap_or_else(|_| "default".to_string())` inline. Pre-lift
+    /// this file and `commands/build.rs::execute` each carried a
+    /// byte-identical inline stanza; two consumers past THEORY §VI.1's
+    /// three-is-a-law threshold in intent — the pair had to agree on
+    /// both the env-var spelling AND the string fallback for their
+    /// respective `AtticClient` steps (this file: `login_with_retries`
+    /// and `use_cache`; `commands/build.rs`: `login_optional` and
+    /// `use_cache`) to compose against the same server alias.
+    ///
+    /// A drift at one site (a typo `ATTIC_SERVER`, a fallback of
+    /// `"main"`, a case-lowering rewrite) would silently misroute the
+    /// two attic steps at that consumer to a different server, and the
+    /// mismatch would only surface as an opaque substituter fetch
+    /// failure from the subsequent `nix build` — with no structural
+    /// link back to the alias mismatch. Post-lift both consumers route
+    /// through the ONE sigil body so a drift is impossible by
+    /// construction.
+    ///
+    /// Structural, not behavioral — reads this module's own source
+    /// via `include_str!` and inspects the `execute()` body slice
+    /// (bounded above by the fn header, below by the next top-level
+    /// function marker). The end-to-end env-var read semantics are
+    /// already pinned by
+    /// [`crate::infrastructure::attic::tests::test_attic_server_alias_default_when_unset`]
+    /// and its sibling on the sigil itself; this shield only certifies
+    /// that this `execute()` reads through the sigil, not through a
+    /// re-copied inline stanza.
+    ///
+    /// Sibling shield of the same discipline at
+    /// `commands/build.rs::tests::test_execute_routes_attic_server_alias_through_infrastructure_sigil_not_inline_env_var`
+    /// — the pair together pins the "no raw
+    /// `env::var(\"ATTIC_SERVER_NAME\")` read survives in an
+    /// `execute()` body that composes attic steps" floor across both
+    /// current consumers of the sigil.
+    #[test]
+    fn test_execute_routes_attic_server_alias_through_infrastructure_sigil_not_inline_env_var() {
+        // Bound at the next top-level function marker in source order.
+        // `push_with_retry` follows `execute`; using the fn-boundary
+        // keeps the shield scoped strictly to `execute()` so a future
+        // helper landing between the two functions cannot silently ride
+        // along without its own shield.
+        let execute_body = crate::test_support::fn_body_slice_between_markers(
+            include_str!("github_runner_ci.rs"),
+            "commands/github_runner_ci.rs",
+            "pub async fn execute(",
+            "\nasync fn push_with_retry(",
+        );
+
+        assert!(
+            !execute_body.contains("env::var(\"ATTIC_SERVER_NAME\")"),
+            "execute() must NOT read `ATTIC_SERVER_NAME` inline — route \
+             through `crate::infrastructure::attic::attic_server_alias()` \
+             so the env-var-with-`\"default\"`-fallback contract is honored \
+             at exactly ONE code line across the crate. Found the pre-lift \
+             inline `env::var(\"ATTIC_SERVER_NAME\")` read in execute()."
+        );
+        assert!(
+            execute_body.contains("attic_server_alias()"),
+            "execute() must resolve the Attic server alias via \
+             `crate::infrastructure::attic::attic_server_alias()` — the \
+             sigil call was not found in execute()."
         );
     }
 

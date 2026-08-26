@@ -48,6 +48,46 @@ fn attic_bin() -> String {
     get_tool_path("ATTIC_BIN", "attic")
 }
 
+/// Crate-scoped sigil: resolve the Attic server alias via
+/// `ATTIC_SERVER_NAME` with the `"default"` fallback. Every
+/// production site that resolves the Attic server alias — the
+/// `login`/`use` two-step at `commands/build.rs::execute` and the
+/// `login_with_retries`/`use_cache` two-step at
+/// `commands/github_runner_ci.rs::execute` — routes through this
+/// sigil, so the substrate-exported `ATTIC_SERVER_NAME` env-var
+/// contract is honored at exactly ONE code line in the crate
+/// regardless of which command is composing the attic step.
+///
+/// Pre-lift two byte-identical stanzas —
+/// `std::env::var("ATTIC_SERVER_NAME").unwrap_or_else(|_|
+/// "default".to_string())` — lived at
+/// `commands/build.rs::execute` and
+/// `commands/github_runner_ci.rs::execute`. Two occurrences past
+/// THEORY §VI.1's three-is-a-law threshold in intent — the pair had
+/// to agree on both the env-var spelling AND the string fallback for
+/// the two consumers to compose their `AtticClient` steps against
+/// the same server alias. A drift at one site (e.g., a typo
+/// `ATTIC_SERVER` or a fallback of `"main"`) would silently misroute
+/// the login vs. `use` steps at that consumer to a different server,
+/// and the mismatch would only surface as an opaque substituter
+/// failure from the subsequent `nix build`. Post-lift the pair
+/// collapses onto this ONE body — a future refinement of the alias
+/// contract (a canonicalize hook, a closed-enum of known aliases, a
+/// telemetry sigil on the resolved alias, or a swap to a typed
+/// `substrate::AtticServerAlias(String)` newtype) lands here and
+/// reaches every caller by construction.
+///
+/// Sibling of [`attic_bin`] on the ATTIC surface — same
+/// per-module-single-point-of-truth discipline, applied to the
+/// server-alias resolve instead of the binary resolve. Sibling of
+/// [`crate::repo::get_environment`] on the `FORGE_ENV` surface —
+/// same env-var-with-string-fallback shape lifted to one body.
+/// THEORY §V (solve-once-at-the-primitive); §VI.1 (recurring-shape-
+/// to-helper).
+pub fn attic_server_alias() -> String {
+    std::env::var("ATTIC_SERVER_NAME").unwrap_or_else(|_| "default".to_string())
+}
+
 /// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed
 /// `AtticError` variant whose structural shape matches the captured
 /// failure. Spawn-failure (attic not on PATH) routes to `ExecFailed`
@@ -2111,5 +2151,82 @@ mod tests {
             resolve_hits.len(),
             resolve_hits.len()
         );
+    }
+
+    /// Serial-safe guard for tests that mutate the `ATTIC_SERVER_NAME`
+    /// process env var. [`attic_server_alias`] reads it once per call;
+    /// concurrent tests that set / remove it would race the resolved
+    /// value observed by any test asserting on the primitive's return.
+    /// Same `unwrap_or_else(|p| p.into_inner())` recovery shape as
+    /// [`crate::test_support::GIT_BIN_ENV_LOCK`] and
+    /// [`crate::test_support::ROOT_FLAKE_ENV_LOCK`] so a prior
+    /// panicking test that poisoned the mutex does not chain-fail
+    /// every subsequent test sharing the lock.
+    static ATTIC_SERVER_NAME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII scope-guard that snapshots — and on drop restores — the
+    /// `ATTIC_SERVER_NAME` env var. Panic-safe by construction: drop
+    /// runs on both normal scope exit and unwind, so a test that
+    /// panics mid-body cannot leak `ATTIC_SERVER_NAME=<sentinel>` to
+    /// any subsequent test in the same process. Callers hold
+    /// [`ATTIC_SERVER_NAME_ENV_LOCK`] for the duration of the scope.
+    struct AtticServerNameSnapshot {
+        prior: std::result::Result<String, std::env::VarError>,
+    }
+
+    impl AtticServerNameSnapshot {
+        fn capture() -> Self {
+            Self {
+                prior: std::env::var("ATTIC_SERVER_NAME"),
+            }
+        }
+    }
+
+    impl Drop for AtticServerNameSnapshot {
+        fn drop(&mut self) {
+            match &self.prior {
+                Ok(v) => std::env::set_var("ATTIC_SERVER_NAME", v),
+                Err(_) => std::env::remove_var("ATTIC_SERVER_NAME"),
+            }
+        }
+    }
+
+    /// [`attic_server_alias`] returns the string `"default"` when
+    /// `ATTIC_SERVER_NAME` is unset. Pins the fallback string
+    /// verbatim so a future refactor cannot silently drift it to
+    /// e.g. `"main"` — both pre-lift consumers
+    /// (`commands/build.rs::execute` and
+    /// `commands/github_runner_ci.rs::execute`) hand-spelled this
+    /// exact fallback, and the two `AtticClient` steps at each
+    /// consumer (login + `use`) presuppose the two invocations
+    /// resolve to the SAME alias. A drift here would silently
+    /// mis-route the two steps to different servers.
+    #[test]
+    fn test_attic_server_alias_default_when_unset() {
+        let _guard = ATTIC_SERVER_NAME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _snapshot = AtticServerNameSnapshot::capture();
+        std::env::remove_var("ATTIC_SERVER_NAME");
+        assert_eq!(attic_server_alias(), "default");
+    }
+
+    /// [`attic_server_alias`] returns the value of `ATTIC_SERVER_NAME`
+    /// verbatim when the env var is set. Pins the env-var read path
+    /// so a future refactor (e.g., a canonicalize hook that
+    /// lowercases the alias, a "known aliases only" enum that
+    /// rewrites unrecognized inputs) is caught here rather than at
+    /// the consumer's downstream `AtticClient::new(alias).with_token(...)`
+    /// call — where a silently-rewritten alias would surface only as
+    /// a mysterious substituter-fetch failure from the subsequent
+    /// `nix build`.
+    #[test]
+    fn test_attic_server_alias_returns_env_value_when_set() {
+        let _guard = ATTIC_SERVER_NAME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _snapshot = AtticServerNameSnapshot::capture();
+        std::env::set_var("ATTIC_SERVER_NAME", "my-server-alias");
+        assert_eq!(attic_server_alias(), "my-server-alias");
     }
 }
