@@ -1814,8 +1814,16 @@ fn chart_published(reg: &str, name: &str, version: &str, timeout: Duration) -> b
 /// makes `version:` in a HelmRelease mean anything. `FORGE_HELM_REPUBLISH=1`
 /// re-enables the old overwrite-always behaviour for the rare case of
 /// repairing a corrupt upload (configure-off, not delete).
+///
+/// Post-lift the body delegates to [`crate::repo::truthy_flag_from_env`]
+/// so the `env::var(...).is_ok_and(|v| v == "1" ||
+/// v.eq_ignore_ascii_case("true"))` shape lives at ONE crate-wide body
+/// (siblings: `commands/prerelease.rs::SKIP_INTEGRATION`,
+/// `commands/prerelease.rs::SKIP_E2E`). The zero-arg wrapper name is
+/// preserved so `release_publish_tests::republish_is_off_unless_explicitly_enabled`
+/// and the module's inline call sites keep their pre-lift spelling.
 fn republish_enabled() -> bool {
-    std::env::var("FORGE_HELM_REPUBLISH").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    crate::repo::truthy_flag_from_env("FORGE_HELM_REPUBLISH")
 }
 
 /// Discover chart directories inside a parent directory.
@@ -2022,6 +2030,48 @@ mod release_publish_tests {
             Some(v) => unsafe { std::env::set_var("FORGE_HELM_REPUBLISH", v) },
             None => unsafe { std::env::remove_var("FORGE_HELM_REPUBLISH") },
         }
+    }
+
+    /// The post-lift body of `republish_enabled()` is a single-line
+    /// forward to [`crate::repo::truthy_flag_from_env`] — the sigil no
+    /// longer spells `env::var("FORGE_HELM_REPUBLISH")` inline.
+    /// Structural regression shield: without it, a future "just call
+    /// `std::env::var` directly, it's shorter" cleanup could silently
+    /// re-inline the `.is_ok_and(|v| v == "1" ||
+    /// v.eq_ignore_ascii_case("true"))` shape and reopen the duplication
+    /// class this lift closed against `SKIP_INTEGRATION` / `SKIP_E2E`.
+    /// Pre-lift the sigil's body carried the inline
+    /// `std::env::var("FORGE_HELM_REPUBLISH").is_ok_and(...)` spelling;
+    /// post-lift the body must contain the
+    /// `crate::repo::truthy_flag_from_env("FORGE_HELM_REPUBLISH")` call
+    /// site AND NOT the inline `env::var("FORGE_HELM_REPUBLISH")` needle.
+    #[test]
+    fn republish_enabled_body_delegates_to_truthy_flag_from_env_sigil() {
+        const SOURCE: &str = include_str!("helm.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/helm.rs",
+            "fn republish_enabled() -> bool {",
+            "\n}",
+        );
+        assert!(
+            body.contains("crate::repo::truthy_flag_from_env(\"FORGE_HELM_REPUBLISH\")"),
+            "republish_enabled() body must forward to \
+             `crate::repo::truthy_flag_from_env(\"FORGE_HELM_REPUBLISH\")` \
+             — the primitive body every crate-wide env-var-to-`bool` \
+             opt-in flag now delegates through. Post-lift body: {body}"
+        );
+        assert!(
+            !body.contains("std::env::var(\"FORGE_HELM_REPUBLISH\")")
+                && !body.contains("env::var(\"FORGE_HELM_REPUBLISH\")"),
+            "republish_enabled() body must NOT spell the inline \
+             `env::var(\"FORGE_HELM_REPUBLISH\").is_ok_and(|v| v == \"1\" \
+             || v.eq_ignore_ascii_case(\"true\"))` shape — that \
+             duplication was lifted onto \
+             [`crate::repo::truthy_flag_from_env`]. A re-inline would \
+             silently reopen the class this shield exists to close. \
+             Post-lift body: {body}"
+        );
     }
 
     /// `discover_charts` still excludes the library chart from the DEPENDENT

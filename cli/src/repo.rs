@@ -326,6 +326,78 @@ pub fn safe_mode_from_env() -> bool {
         .unwrap_or(true)
 }
 
+/// Resolve a "default FALSE — enable on `1` / `true` (case-insensitive)"
+/// env-var flag onto a `bool`.
+///
+/// Reads `env_var` and returns `true` iff its value is `"1"` or the letters
+/// `t-r-u-e` in any case (`true`, `TRUE`, `True`, `tRuE`, `TrUe`, …).
+/// Unset → `false`; every other value (`""`, `"0"`, `"false"`, `"yes"`,
+/// `"on"`, `"maybe"`, `"2"`) → `false`.
+///
+/// # The mirror-of-[`safe_mode_from_env`] contract
+///
+/// Peer to [`safe_mode_from_env`] on the flag-parsing surface: where
+/// `safe_mode_from_env` folds the DEFAULT-TRUE / disable-with-`false`-or-`0`
+/// operator toggle onto ONE body, `truthy_flag_from_env` folds the DEFAULT-
+/// FALSE / enable-with-`1`-or-`true` mirror toggle onto ONE body. The two
+/// primitives split the crate's opt-out (`SAFE`) versus opt-in
+/// (`FORGE_HELM_REPUBLISH`, `SKIP_INTEGRATION`, `SKIP_E2E`) env-var-to-bool
+/// surface exhaustively so a fresh consumer picks its primitive by asking
+/// "is the default TRUE (safety-on) or FALSE (opt-in-only)?" — the closed
+/// choice a per-module inline stanza does not present.
+///
+/// # Pre-lift stanzas fused into ONE body
+///
+/// Three byte-similar inline stanzas spelled the shape across three CLI
+/// entry points:
+///
+/// - `commands/helm.rs::republish_enabled` (`FORGE_HELM_REPUBLISH`) —
+///   `std::env::var("FORGE_HELM_REPUBLISH").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))`.
+///   Governs whether an already-published `(name, version)` Helm chart is
+///   force-re-uploaded to `oci://ghcr.io/pleme-io/charts` (immutable by
+///   default; enabling the flag is a "repair a corrupt upload"
+///   escape hatch).
+/// - `commands/prerelease.rs` `SKIP_INTEGRATION` — pre-lift
+///   `.map(|v| v == "true" || v == "1").unwrap_or(false)`. Governs whether
+///   the G13 gate (Postgres + Redis + NATS testcontainers) is skipped.
+/// - `commands/prerelease.rs` `SKIP_E2E` — same pre-lift shape. Governs
+///   whether the G14 gate (chromiumoxide + full stack) is skipped.
+///
+/// The two prerelease sites drifted from `helm.rs` on case-sensitivity: an
+/// operator's `SKIP_INTEGRATION=TRUE` / `SKIP_E2E=TRUE` (uppercase) was
+/// silently ignored — the `v == "true"` clause matches lowercase only —
+/// while `FORGE_HELM_REPUBLISH=TRUE` fired via `.eq_ignore_ascii_case`.
+/// Post-lift both consumers route through the case-insensitive body, so a
+/// mixed-case `TRUE` / `True` / `TrUe` export from any of the three
+/// operator-facing entry points behaves identically. That parity is a
+/// load-bearing behavioral improvement, not a shuffle: a CI operator's
+/// `SKIP_E2E=TRUE` now actually skips G14 instead of silently running it.
+///
+/// # Post-lift refinement surface
+///
+/// A future refinement of the shape (widening the enable set to include
+/// `yes` / `on`, adding a telemetry sigil separating explicit-value from
+/// default-fallback paths, a swap to a typed `substrate::FeatureFlag(bool)`
+/// newtype, canonicalizing the accepted values against a closed enum, or
+/// logging every resolve) lands at this body and reaches every consumer by
+/// construction — the same solve-once-at-the-primitive discipline
+/// [`safe_mode_from_env`] closes on the DEFAULT-TRUE mirror,
+/// [`env_var_or_default`] closes on the `String`-fallback surface,
+/// [`path_from_env`] closes on the `Result<PathBuf>` surface, and
+/// [`crate::git::release_git_sha_from_env`] closes on the
+/// empty-string-is-miss `Option<String>` surface (THEORY §V — solve-once-
+/// at-the-primitive; §VI.1 — recurring-shape-to-helper).
+///
+/// # The empty-string case
+///
+/// `""` → `false`: an operator's explicit-empty export (`SKIP_E2E=""`)
+/// does NOT enable the flag — `v == "1"` is false, and the empty string
+/// matched against `eq_ignore_ascii_case("true")` is false (lengths
+/// differ). Parity with every pre-lift consumer's inline behaviour.
+pub fn truthy_flag_from_env(env_var: &str) -> bool {
+    std::env::var(env_var).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 /// Which product-directory layouts [`find_product_dir`] accepts as terminal.
 ///
 /// The monorepo layout is universal — every consumer honors it. The
@@ -958,6 +1030,143 @@ mod tests {
                  leaves the default-true branch selected.",
             );
         }
+    }
+
+    /// [`truthy_flag_from_env`] returns `false` when the env var is unset.
+    /// Pins the DEFAULT-FALSE half of the contract every pre-lift consumer
+    /// (`commands/helm.rs::republish_enabled`,
+    /// `commands/prerelease.rs::SKIP_INTEGRATION`,
+    /// `commands/prerelease.rs::SKIP_E2E`) spelled inline as
+    /// `.is_ok_and(...)` / `.unwrap_or(false)` on the `Err` case. An
+    /// accidental default flip to `true` would silently re-enable Helm
+    /// republish (destroying the immutability invariant of the shared
+    /// `oci://ghcr.io/pleme-io/charts` registry) and silently skip G13 /
+    /// G14 on every direct-CLI call where the operator did not
+    /// explicitly opt in.
+    #[test]
+    fn truthy_flag_from_env_defaults_to_false_when_unset() {
+        let env_var = "TEST_TRUTHY_FLAG_UNSET_SIGIL_SHIELD";
+        std::env::remove_var(env_var);
+        assert!(
+            !truthy_flag_from_env(env_var),
+            "truthy_flag_from_env() must default to `false` when the env \
+             var is unset — matches every pre-lift consumer's \
+             `.is_ok_and(...)` / `.unwrap_or(false)` on the `Err` case."
+        );
+    }
+
+    /// [`truthy_flag_from_env`] returns `true` for the literal `"1"` —
+    /// the enable-with-`1` half of the contract every pre-lift consumer
+    /// spelled inline as `v == "1"`. A drop of the `"1"` clause would
+    /// silently disable the `FORGE_HELM_REPUBLISH=1` shape documented in
+    /// `helm.rs::republish_enabled`.
+    #[test]
+    fn truthy_flag_from_env_is_true_for_literal_one() {
+        let env_var = "TEST_TRUTHY_FLAG_ONE_SIGIL_SHIELD";
+        std::env::set_var(env_var, "1");
+        let result = truthy_flag_from_env(env_var);
+        std::env::remove_var(env_var);
+        assert!(
+            result,
+            "truthy_flag_from_env() must return `true` for value `\"1\"` \
+             — the enable-with-`1` half of the contract."
+        );
+    }
+
+    /// [`truthy_flag_from_env`] returns `true` for the literal lowercase
+    /// `"true"` — the enable-with-`true` half of the contract every
+    /// pre-lift consumer spelled inline (case-sensitively in the two
+    /// `prerelease.rs` sites, case-insensitively in `helm.rs`). Pins the
+    /// primary spelling the operator-facing docs `commands/prerelease.rs`
+    /// carry (`Skip with SKIP_INTEGRATION=true`,
+    /// `Skip with SKIP_E2E=true`).
+    #[test]
+    fn truthy_flag_from_env_is_true_for_literal_lowercase_true() {
+        let env_var = "TEST_TRUTHY_FLAG_TRUE_SIGIL_SHIELD";
+        std::env::set_var(env_var, "true");
+        let result = truthy_flag_from_env(env_var);
+        std::env::remove_var(env_var);
+        assert!(
+            result,
+            "truthy_flag_from_env() must return `true` for value \
+             `\"true\"` — the enable-with-`true` half of the contract."
+        );
+    }
+
+    /// [`truthy_flag_from_env`] is case-insensitive on `"true"` — every
+    /// mixed-case spelling (`TRUE`, `True`, `TrUe`, `tRuE`) enables the
+    /// flag. Load-bearing: pre-lift the two `commands/prerelease.rs`
+    /// consumers used case-sensitive `v == "true"` and silently ignored
+    /// `SKIP_INTEGRATION=TRUE` / `SKIP_E2E=TRUE` from operators who
+    /// capitalized the value; `commands/helm.rs::republish_enabled` used
+    /// `.eq_ignore_ascii_case("true")` and fired for the same input.
+    /// Post-lift the primitive fires for both, closing that inter-file
+    /// drift — a shield that fails if a future refactor of the primitive
+    /// reverts to case-sensitive comparison.
+    #[test]
+    fn truthy_flag_from_env_is_true_case_insensitive_on_true() {
+        let env_var = "TEST_TRUTHY_FLAG_CASE_SIGIL_SHIELD";
+        for spelling in ["TRUE", "True", "TrUe", "tRuE", "TRUe"] {
+            std::env::set_var(env_var, spelling);
+            let result = truthy_flag_from_env(env_var);
+            assert!(
+                result,
+                "truthy_flag_from_env() must return `true` for \
+                 `env_var={spelling}` — `.eq_ignore_ascii_case(\"true\")` \
+                 accepts every mixed-case spelling of the letters t-r-u-e."
+            );
+        }
+        std::env::remove_var(env_var);
+    }
+
+    /// [`truthy_flag_from_env`] returns `false` when the env var is set
+    /// to the empty string. Pins the empty-is-falsy parity: `"" == "1"`
+    /// is false, and `"".eq_ignore_ascii_case("true")` is false (lengths
+    /// differ), so an operator's explicit-empty export lands on the
+    /// default-false branch alongside an unset env var. Sibling to
+    /// [`safe_mode_from_env_is_true_for_empty_string`] on the opt-in
+    /// mirror — a swap to `.ok().filter(|s| !s.is_empty())`-style
+    /// dispatch would preserve this semantic; a hypothetical widen to
+    /// "empty means enable" would flip it.
+    #[test]
+    fn truthy_flag_from_env_is_false_for_empty_string() {
+        let env_var = "TEST_TRUTHY_FLAG_EMPTY_SIGIL_SHIELD";
+        std::env::set_var(env_var, "");
+        let result = truthy_flag_from_env(env_var);
+        std::env::remove_var(env_var);
+        assert!(
+            !result,
+            "truthy_flag_from_env() must return `false` for value `\"\"` \
+             — neither `\"1\"` nor `eq_ignore_ascii_case(\"true\")` \
+             accepts the empty string."
+        );
+    }
+
+    /// [`truthy_flag_from_env`] returns `false` for every value outside
+    /// the closed `{1, true (any case)}` enable set. Pins the closed-set
+    /// enable contract: only the two literal enable values flip the flag
+    /// on, and every other value (`"0"`, `"false"`, `"yes"`, `"on"`,
+    /// `"disable"`, `"2"`, a plausible `"y"`) leaves it OFF. A future
+    /// widening of the enable set to include `yes` / `on` must land at
+    /// the primitive body and break this shield, forcing an explicit
+    /// contract update — not drift silently at one consumer only.
+    #[test]
+    fn truthy_flag_from_env_is_false_for_non_enable_values() {
+        let env_var = "TEST_TRUTHY_FLAG_NON_ENABLE_SIGIL_SHIELD";
+        for spelling in [
+            "0", "false", "FALSE", "no", "off", "yes", "on", "disable", "2", "y",
+        ] {
+            std::env::set_var(env_var, spelling);
+            let result = truthy_flag_from_env(env_var);
+            assert!(
+                !result,
+                "truthy_flag_from_env() must return `false` for \
+                 `env_var={spelling}` — only literal `\"1\"` and \
+                 `\"true\"` (case-insensitive) flip the flag on; every \
+                 other value leaves the default-false branch selected."
+            );
+        }
+        std::env::remove_var(env_var);
     }
 
     /// The monorepo terminal fires at the `{product}` node when its parent

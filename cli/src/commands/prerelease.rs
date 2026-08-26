@@ -392,9 +392,7 @@ pub async fn execute(
     // Phase 0b: Integration tests (G13)
     // Requires Docker — testcontainers for Postgres, Redis, NATS
     // ========================================
-    let skip_integration = std::env::var("SKIP_INTEGRATION")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    let skip_integration = crate::repo::truthy_flag_from_env("SKIP_INTEGRATION");
 
     if skip_integration || !config.gates.integration.enabled {
         let reason = if skip_integration {
@@ -429,9 +427,7 @@ pub async fn execute(
     // Phase 0c: E2E tests (G14)
     // Requires Docker + Nix images + Chrome (headless)
     // ========================================
-    let skip_e2e = std::env::var("SKIP_E2E")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    let skip_e2e = crate::repo::truthy_flag_from_env("SKIP_E2E");
 
     if skip_e2e || !config.gates.e2e.enabled {
         let reason = if skip_e2e {
@@ -1878,5 +1874,57 @@ mod tests {
              {hits:?}",
             hits.len(),
         );
+    }
+
+    /// Whole-module shield: the `SKIP_INTEGRATION` and `SKIP_E2E`
+    /// operator-facing gate-skip flags MUST route through
+    /// [`crate::repo::truthy_flag_from_env`] — the crate-wide DEFAULT-
+    /// FALSE / enable-with-`1`-or-`true` (case-insensitive) sigil that
+    /// `commands/helm.rs::republish_enabled` also delegates through.
+    ///
+    /// Pre-lift each site spelled the inline shape
+    /// `std::env::var("<NAME>").map(|v| v == "true" || v == "1")
+    /// .unwrap_or(false)` (case-SENSITIVE on `"true"`, silently ignoring
+    /// an operator's `SKIP_INTEGRATION=TRUE` / `SKIP_E2E=TRUE`
+    /// uppercase export). The primitive is case-insensitive, so post-
+    /// lift the uppercase form fires as intended — a load-bearing
+    /// behavioral improvement, not a shuffle.
+    ///
+    /// The shield scans the whole file (production body + this
+    /// `#[cfg(test)]` module + docstrings, filtered through
+    /// [`crate::test_support::code_line_hits`] so `///` mentions of
+    /// `env::var("SKIP_INTEGRATION")` — living inside this test's own
+    /// docstring — stay out of scope). Both needles must be absent AND
+    /// the two canonical delegations must be present.
+    #[test]
+    fn skip_gate_flags_route_through_truthy_flag_from_env_sigil() {
+        const SOURCE: &str = include_str!("prerelease.rs");
+        for env_var in ["SKIP_INTEGRATION", "SKIP_E2E"] {
+            let raw_needle = format!("env::var(\"{env_var}\")");
+            let raw_hits = crate::test_support::code_line_hits(SOURCE, &raw_needle);
+            assert!(
+                raw_hits.is_empty(),
+                "commands/prerelease.rs must NOT spell the inline \
+                 `env::var(\"{env_var}\").map(|v| v == \"true\" || v == \
+                 \"1\").unwrap_or(false)` shape — that duplication was \
+                 lifted onto [`crate::repo::truthy_flag_from_env`], \
+                 which is case-INSENSITIVE and closes the pre-lift drift \
+                 vs. `commands/helm.rs::republish_enabled`. A re-inline \
+                 would silently reopen the class this shield exists to \
+                 close AND revert an operator's `{env_var}=TRUE` \
+                 (uppercase) from actually skipping the gate to silently \
+                 running it. Offending hits: {raw_hits:?}",
+            );
+            let sigil_needle = format!("crate::repo::truthy_flag_from_env(\"{env_var}\")");
+            let sigil_hits = crate::test_support::code_line_hits(SOURCE, &sigil_needle);
+            assert!(
+                !sigil_hits.is_empty(),
+                "commands/prerelease.rs must delegate the `{env_var}` \
+                 gate-skip flag through \
+                 `crate::repo::truthy_flag_from_env(\"{env_var}\")` — \
+                 the crate-wide DEFAULT-FALSE / enable-with-`1`-or-`true` \
+                 (case-insensitive) sigil. Found no delegation call site.",
+            );
+        }
     }
 }
