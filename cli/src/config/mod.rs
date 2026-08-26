@@ -284,13 +284,12 @@ impl DeployConfig {
     /// Returns error if SERVICE_DIR not set or product directory cannot be found
     pub fn load_for_service(service_name: &str) -> Result<Self> {
         // Root flake pattern: SERVICE_DIR environment variable is REQUIRED
-        let service_dir = std::env::var("SERVICE_DIR")
-            .context(
-                "SERVICE_DIR environment variable not set.\n  \
-                 This tool requires the root flake pattern with --service-dir and --repo-root parameters.\n  \
-                 Service-level flakes are no longer supported.",
-            )
-            .map(PathBuf::from)?;
+        let service_dir = crate::repo::path_from_env(
+            "SERVICE_DIR",
+            "SERVICE_DIR environment variable not set.\n  \
+             This tool requires the root flake pattern with --service-dir and --repo-root parameters.\n  \
+             Service-level flakes are no longer supported.",
+        )?;
 
         // Find product directory early so we can resolve deploy.yaml from
         // the deploy/ directory (outside the Nix source tree).
@@ -1264,6 +1263,117 @@ mod tests {
             "resolve_k8s_repo_root() must delegate the git spawn to \
              `crate::git::git_command_sync()` — the delegation string \
              was not found in resolve_k8s_repo_root()."
+        );
+    }
+
+    /// Whole-module shield: every read of the `SERVICE_DIR` env var in
+    /// this module's non-test body must route through the shared
+    /// [`crate::repo::path_from_env`] primitive (introduced at
+    /// `repo.rs:127` by d8e6626), never through an inline
+    /// `std::env::var("SERVICE_DIR").context(...).map(PathBuf::from)?`
+    /// stanza.
+    ///
+    /// Pre-lift the single consumer site — `DeployConfig::load_for_service`
+    /// at `config/mod.rs:287` — spelled the same
+    /// `env::var("SERVICE_DIR").context("SERVICE_DIR environment
+    /// variable not set.\n  ...")?` + `.map(PathBuf::from)?` stanza
+    /// verbatim, with a fourth distinct operator-facing miss wording
+    /// (the multi-line prose naming the root-flake pattern and the
+    /// removed service-level-flakes path) beyond the three d8e6626 and
+    /// 1452f53 catalogued (`developer_tools`, `schema_validation`,
+    /// `rust_service`). This shield closes the drift class at four on
+    /// the same idiom — the three sibling shields (`developer_tools.rs`
+    /// at 1121, `schema_validation.rs` at 450, `rust_service.rs` at
+    /// 3170) cover their respective modules; this shield covers the
+    /// last direct-inline caller of the pre-lift stanza.
+    ///
+    /// A future refinement of the `SERVICE_DIR` contract — a
+    /// canonicalize hook, a substrate-path validation step, a
+    /// telemetry sigil on the resolved path, or a swap to a typed
+    /// `substrate::ServiceDir(PathBuf)` newtype — lands at ONE body
+    /// ([`crate::repo::path_from_env`]) and reaches every consumer
+    /// (this call + the three sibling shields' delegating call sites)
+    /// by construction (THEORY §V — solve-once-at-the-primitive; §VI.1
+    /// — recurring-shape-to-helper).
+    ///
+    /// Slice via [`crate::test_support::module_body_before_tests`]
+    /// (`config/mod.rs` carries the canonical `#[cfg(test)]\nmod tests
+    /// {` marker at line 1014, so the longer marker is the correct
+    /// boundary and this shield's own docstring mentions of
+    /// `env::var("SERVICE_DIR")` — living inside `mod tests {}` below
+    /// that marker — stay out of scope). Every hit routes through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline.
+    #[test]
+    fn test_config_service_dir_routes_through_path_from_env() {
+        let body =
+            crate::test_support::module_body_before_tests(include_str!("mod.rs"), "config/mod.rs");
+        // Negative side: the raw `env::var("SERVICE_DIR")` needle must
+        // NOT appear anywhere in the module body post-lift — the read
+        // now lives at `crate::repo::path_from_env`, which owns the
+        // read at ONE body across the crate. A future consumer that
+        // re-copies the pre-lift stanza pushes this count above zero
+        // and fails the shield before it can drift the miss wording or
+        // the `PathBuf` projection away from the shared primitive's
+        // single point of truth. Substring match catches both
+        // `std::env::var("SERVICE_DIR")` and the shorter
+        // `env::var("SERVICE_DIR")` (sibling modules spell both forms
+        // and a future consumer here might spell either).
+        let raw_env_needle = "env::var(\"SERVICE_DIR\")";
+        let env_hits = crate::test_support::code_line_hits(body, raw_env_needle);
+        assert!(
+            env_hits.is_empty(),
+            "config/mod.rs must NOT spell `{raw_env_needle}` inline in \
+             the module body — every consumer must route through \
+             `crate::repo::path_from_env`, the shared primitive that \
+             owns the `env::var` read at ONE body across the crate. \
+             Found {} code-line hit(s): {env_hits:#?}. A hand-rolled \
+             inline copy re-opens the drift class the primitive was \
+             landed to close.",
+            env_hits.len()
+        );
+        // Positive side: the delegating call to
+        // `crate::repo::path_from_env(` must appear at EXACTLY one
+        // code line — the `DeployConfig::load_for_service` body. A
+        // regression that dropped the delegation would leave the
+        // negative scan trivially satisfied by absence (zero raw
+        // `env::var` hits, but also zero delegating calls), and the
+        // module would have stopped resolving `SERVICE_DIR` for
+        // deploy-config load at all.
+        let delegate_needle = "crate::repo::path_from_env(";
+        let delegate_hits = crate::test_support::code_line_hits(body, delegate_needle);
+        assert_eq!(
+            delegate_hits.len(),
+            1,
+            "config/mod.rs must delegate `SERVICE_DIR` resolution to \
+             `crate::repo::path_from_env(...)` at EXACTLY one code \
+             line — the `DeployConfig::load_for_service` body. Found \
+             {} code-line hit(s): {delegate_hits:#?}. A missing \
+             delegation would leave the negative scan above trivially \
+             satisfied by absence.",
+            delegate_hits.len()
+        );
+        // Wording-preservation side: the domain-specific miss wording
+        // — the fourth distinct wording across the SERVICE_DIR
+        // consumer family (after `developer_tools`,
+        // `schema_validation`, and `rust_service`) — must stay
+        // grep-visible verbatim at the delegating call. A future
+        // refactor that reshaped the miss wording (a swap to
+        // `.with_context(||)` with drifted text, a lift to a typed
+        // error variant, a canonicalize prefix landed in front) would
+        // silently drift the multi-line prose the operator has been
+        // coached to grep for. Match on the anchor phrase (the first
+        // sentence, which is short enough to appear on a single
+        // source line) rather than the whole multi-line wording so
+        // rustfmt line-wrapping cannot silently drift the scan.
+        let wording_needle = "SERVICE_DIR environment variable not set.";
+        let wording_hits = crate::test_support::code_line_hits(body, wording_needle);
+        assert!(
+            !wording_hits.is_empty(),
+            "config/mod.rs must preserve the canonical miss wording \
+             `{wording_needle}` verbatim at the delegating call so a \
+             refactor cannot silently drift the message every operator \
+             has been coached to grep for. Found no code-line hit."
         );
     }
 }
