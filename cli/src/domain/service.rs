@@ -7,7 +7,7 @@ use super::migration::DatabaseType;
 /// Get the registry base URL from environment or use a placeholder
 /// In production, this should be configured via deploy.yaml
 fn get_registry_base() -> String {
-    std::env::var("SERVICE_REGISTRY_BASE").unwrap_or_else(|_| "ghcr.io/org/project".to_string())
+    crate::repo::env_var_or_default("SERVICE_REGISTRY_BASE", "ghcr.io/org/project")
 }
 
 /// Types of services in the system

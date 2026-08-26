@@ -85,7 +85,7 @@ fn attic_bin() -> String {
 /// THEORY §V (solve-once-at-the-primitive); §VI.1 (recurring-shape-
 /// to-helper).
 pub fn attic_server_alias() -> String {
-    std::env::var("ATTIC_SERVER_NAME").unwrap_or_else(|_| "default".to_string())
+    crate::repo::env_var_or_default("ATTIC_SERVER_NAME", "default")
 }
 
 /// Dispatch a post-`retry_command` `CommandAttemptFailure` to the typed

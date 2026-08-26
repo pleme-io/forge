@@ -54,7 +54,7 @@ const PANGEA_COMPONENTS: &[PangeaComponent] = &[
 
 /// Registry base URL for Pangea components (from PANGEA_REGISTRY env var or default)
 fn get_registry_base() -> String {
-    std::env::var("PANGEA_REGISTRY").unwrap_or_else(|_| "ghcr.io/org/project".to_string())
+    crate::repo::env_var_or_default("PANGEA_REGISTRY", "ghcr.io/org/project")
 }
 
 /// Default architecture for Pangea binaries
