@@ -211,21 +211,25 @@ fn check_token(var_name: &str) -> bool {
 /// 1. RELEASE_GIT_SHA env var (set by Nix wrapper at release start)
 /// 2. git rev-parse --short HEAD (fallback for direct CLI usage)
 pub async fn get_tag_suffix() -> Result<String> {
-    // Check for RELEASE_GIT_SHA environment variable first
-    // This is set by the Nix release wrapper at the START of the release,
-    // ensuring we always use the code commit SHA, not any deploy commits made later
-    if let Ok(sha) = env::var("RELEASE_GIT_SHA") {
-        if !sha.is_empty() {
-            return Ok(sha);
-        }
+    // Check for RELEASE_GIT_SHA environment variable first — routed
+    // through the crate-scoped `crate::git::release_git_sha_from_env`
+    // sigil. The Nix release wrapper captures this at the START of
+    // the release, before any deploy commits shift HEAD, so this
+    // path always tags against the code commit SHA even when deploy
+    // steps have made later commits. Sibling consumers:
+    // `commands/push.rs::get_git_sha` and
+    // `commands/product_release.rs::execute` (both route through the
+    // same sigil).
+    if let Some(sha) = crate::git::release_git_sha_from_env() {
+        return Ok(sha);
     }
 
     // Fallback to git rev-parse for direct CLI usage — routed through
     // the canonical async sibling of `git::get_short_sha`. See
     // `cli/src/commands/push.rs::get_git_sha` for the corresponding
-    // lift; both consumers share the "RELEASE_GIT_SHA env first, then
-    // bare git rev-parse" priority shape but each defines its own
-    // env-var priority order locally.
+    // priority shape; both consumers share the "RELEASE_GIT_SHA env
+    // first, then bare git rev-parse" order but each defines its own
+    // env-var priority chain locally.
     let hash = crate::git::get_short_sha_async().await.context(
         "Failed to get git SHA for image tagging. \
          Ensure you're in a git repository with committed changes.",
@@ -3240,6 +3244,95 @@ mod service_dir_routing_tests {
              the delegation preserves it at the same grep-visible \
              surface.",
             wording_hits.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod release_git_sha_routing_tests {
+    /// Whole-module shield: every read of the `RELEASE_GIT_SHA` env
+    /// var in this module's non-test body must route through the
+    /// shared [`crate::git::release_git_sha_from_env`] sigil, never
+    /// through an inline
+    /// `env::var("RELEASE_GIT_SHA")` + `!sha.is_empty()` two-line
+    /// stanza.
+    ///
+    /// Pre-lift the single consumer site — `get_tag_suffix` — spelled
+    /// the same `if let Ok(sha) = env::var("RELEASE_GIT_SHA") { if
+    /// !sha.is_empty() { return Ok(sha); } }` stanza verbatim, sibling
+    /// to the byte-equivalent copies at
+    /// `commands/push.rs::get_git_sha` and
+    /// `commands/product_release.rs::execute`. Three consumers past
+    /// THEORY §VI.1's three-is-a-law threshold: the trio had to agree
+    /// on both the env-var spelling AND the empty-string-is-miss
+    /// semantic (the Nix release wrapper exports the var
+    /// unconditionally with an empty value on non-release
+    /// invocations) for the pushed image tag, the deployed image tag,
+    /// and the product-release-driven downstream tags to resolve to
+    /// the SAME code-commit SHA.
+    ///
+    /// A drift at this site (a typo `RELEASE_SHA`, or the empty-check
+    /// accidentally deleted so `Ok("")` — the shape the Nix release
+    /// wrapper exports on non-release invocations — leaks through as
+    /// a valid SHA) would silently render deploy-time image tags with
+    /// a bare `amd64-` suffix (no SHA) at this one consumer only,
+    /// even while the push-side and product-release consumers stayed
+    /// on the sigil.
+    ///
+    /// A future refinement of the `RELEASE_GIT_SHA` contract — a
+    /// canonicalize hook that truncates to 7 chars, a "known length
+    /// only" filter, a swap to a typed
+    /// `substrate::ReleaseGitSha(String)` newtype, a telemetry sigil
+    /// on the resolved SHA — lands at ONE body
+    /// ([`crate::git::release_git_sha_from_env`]) and reaches every
+    /// consumer by construction (THEORY §V —
+    /// solve-once-at-the-primitive; §VI.1 —
+    /// recurring-shape-to-helper).
+    ///
+    /// The scan bounds on the whole-module boundary (from file start
+    /// to the FIRST `\n#[cfg(test)]\n` marker in source order via
+    /// [`crate::test_support::module_body_before_first_cfg_test`]) so
+    /// this shield's own docstring mentions of
+    /// `env::var("RELEASE_GIT_SHA")` — living inside a `#[cfg(test)]`
+    /// block below that first marker — stay out of scope AND every
+    /// current or future `RELEASE_GIT_SHA`-reading consumer landing
+    /// anywhere in the top-level module body cannot silently ride
+    /// along without routing through the primitive. Every hit routes
+    /// through [`crate::test_support::code_line_hits`] for
+    /// anti-docstring-self-match discipline.
+    #[test]
+    fn test_rust_service_release_git_sha_routes_through_sigil() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+        let raw_env_needle = "env::var(\"RELEASE_GIT_SHA\")";
+        let env_hits = crate::test_support::code_line_hits(body, raw_env_needle);
+        assert!(
+            env_hits.is_empty(),
+            "commands/rust_service.rs must NOT spell \
+             `{raw_env_needle}` inline in the module body — every \
+             consumer must route through \
+             `crate::git::release_git_sha_from_env`, the shared \
+             sigil that owns the `env::var` read AND the \
+             empty-string-is-miss filter at ONE body across the \
+             crate. Found {} code-line hit(s): {env_hits:#?}. A \
+             hand-rolled inline copy re-opens the drift class the \
+             sigil was landed to close.",
+            env_hits.len()
+        );
+        let delegate_needle = "crate::git::release_git_sha_from_env()";
+        let delegate_hits = crate::test_support::code_line_hits(body, delegate_needle);
+        assert_eq!(
+            delegate_hits.len(),
+            1,
+            "commands/rust_service.rs must delegate `RELEASE_GIT_SHA` \
+             resolution to `crate::git::release_git_sha_from_env()` \
+             at EXACTLY one code line — the `get_tag_suffix` body. \
+             Found {} code-line hit(s): {delegate_hits:#?}. A \
+             missing delegation would leave the negative scan above \
+             trivially satisfied by absence.",
+            delegate_hits.len()
         );
     }
 }
