@@ -554,21 +554,21 @@ mod tests {
     /// duration of the env mutation — `SERVICE_DIR` is process-global
     /// state, and the sibling `RootFlakeEnvSnapshot` discipline
     /// guarantees no concurrent `SERVICE_DIR`-reading test races the
-    /// scope. Restores the pre-scope `SERVICE_DIR` value before the
-    /// assertion so a fail doesn't leak state.
+    /// scope. Restores the pre-scope `SERVICE_DIR` value on drop via
+    /// [`crate::test_support::EnvVarSnapshot`]'s RAII guard — the
+    /// panic-safe primitive that closes the pre-lift `let prior =
+    /// std::env::var("SERVICE_DIR"); ...; match &prior { Ok(v) =>
+    /// set_var, Err(_) => remove_var }` inline stanza's window where
+    /// an `unwrap_err()` panic between snapshot and restore silently
+    /// leaked `SERVICE_DIR=<unset>` to every subsequent test.
     #[test]
     fn test_service_path_from_env_surfaces_canonical_miss_wording_when_unset() {
         let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var("SERVICE_DIR");
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("SERVICE_DIR");
         std::env::remove_var("SERVICE_DIR");
         let err = super::service_path_from_env().unwrap_err();
-        // Restore before assertion so a fail doesn't leak state.
-        match &prior {
-            Ok(v) => std::env::set_var("SERVICE_DIR", v),
-            Err(_) => std::env::remove_var("SERVICE_DIR"),
-        }
         let msg = format!("{err:#}");
         assert!(
             msg.contains("SERVICE_DIR environment variable not set"),
@@ -593,15 +593,10 @@ mod tests {
         let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var("SERVICE_DIR");
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("SERVICE_DIR");
         let sentinel = "/tmp/forge-schema-validation-service-path-sigil-shield";
         std::env::set_var("SERVICE_DIR", sentinel);
         let result = super::service_path_from_env();
-        // Restore before assertion so a fail doesn't leak state.
-        match &prior {
-            Ok(v) => std::env::set_var("SERVICE_DIR", v),
-            Err(_) => std::env::remove_var("SERVICE_DIR"),
-        }
         let path = result.expect("service_path_from_env must succeed when SERVICE_DIR is set");
         assert_eq!(
             path,
