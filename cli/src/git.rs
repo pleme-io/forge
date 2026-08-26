@@ -2410,33 +2410,6 @@ mod tests {
     /// every subsequent test sharing the lock.
     static RELEASE_GIT_SHA_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// RAII scope-guard that snapshots — and on drop restores — the
-    /// `RELEASE_GIT_SHA` env var. Panic-safe by construction: drop
-    /// runs on both normal scope exit and unwind, so a test that
-    /// panics mid-body cannot leak `RELEASE_GIT_SHA=<sentinel>` to
-    /// any subsequent test in the same process. Callers hold
-    /// [`RELEASE_GIT_SHA_ENV_LOCK`] for the duration of the scope.
-    struct ReleaseGitShaSnapshot {
-        prior: std::result::Result<String, std::env::VarError>,
-    }
-
-    impl ReleaseGitShaSnapshot {
-        fn capture() -> Self {
-            Self {
-                prior: std::env::var("RELEASE_GIT_SHA"),
-            }
-        }
-    }
-
-    impl Drop for ReleaseGitShaSnapshot {
-        fn drop(&mut self) {
-            match &self.prior {
-                Ok(v) => std::env::set_var("RELEASE_GIT_SHA", v),
-                Err(_) => std::env::remove_var("RELEASE_GIT_SHA"),
-            }
-        }
-    }
-
     /// [`release_git_sha_from_env`] returns `None` when the
     /// `RELEASE_GIT_SHA` env var is unset. Pins the "unset is a
     /// miss" contract — every pre-lift consumer
@@ -2452,7 +2425,7 @@ mod tests {
         let _guard = RELEASE_GIT_SHA_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let _snapshot = ReleaseGitShaSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("RELEASE_GIT_SHA");
         std::env::remove_var("RELEASE_GIT_SHA");
         assert_eq!(release_git_sha_from_env(), None);
     }
@@ -2474,7 +2447,7 @@ mod tests {
         let _guard = RELEASE_GIT_SHA_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let _snapshot = ReleaseGitShaSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("RELEASE_GIT_SHA");
         std::env::set_var("RELEASE_GIT_SHA", "");
         assert_eq!(release_git_sha_from_env(), None);
     }
@@ -2491,7 +2464,7 @@ mod tests {
         let _guard = RELEASE_GIT_SHA_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let _snapshot = ReleaseGitShaSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("RELEASE_GIT_SHA");
         std::env::set_var("RELEASE_GIT_SHA", "abc1234");
         assert_eq!(release_git_sha_from_env(), Some("abc1234".to_string()));
     }

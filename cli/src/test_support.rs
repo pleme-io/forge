@@ -202,6 +202,76 @@ impl Drop for RootFlakeEnvSnapshot {
     }
 }
 
+/// RAII scope-guard that snapshots — and on drop restores — a single
+/// process env var identified by `name`. Panic-safe by construction:
+/// drop runs on both normal scope exit and unwind, so a test that
+/// panics mid-body cannot leak `<NAME>=<sentinel>` to any subsequent
+/// test in the same process. Callers hold the per-var lock (e.g.
+/// `crate::repo::tests::SAFE_ENV_LOCK`,
+/// `crate::git::tests::RELEASE_GIT_SHA_ENV_LOCK`,
+/// `crate::infrastructure::attic::tests::ATTIC_SERVER_NAME_ENV_LOCK`)
+/// for the duration of the scope; the guard does not lock the mutex
+/// itself, so the two disciplines compose without accidental
+/// re-entrancy.
+///
+/// # Why centralized
+///
+/// Three test modules — `cli/src/repo.rs` (`SafeEnvSnapshot`),
+/// `cli/src/git.rs` (`ReleaseGitShaSnapshot`), and
+/// `cli/src/infrastructure/attic.rs` (`AtticServerNameSnapshot`) —
+/// each carried a module-private RAII struct with a byte-equivalent
+/// `struct { prior: Result<String, VarError> }` + `capture()` +
+/// `Drop { match &self.prior { Ok(v) => set_var(NAME, v), Err(_) =>
+/// remove_var(NAME) } }` body, differing only in the hardcoded env-var
+/// name string. Three isomorphic copies past THEORY §VI.1's
+/// three-times threshold ("two occurrences is a coincidence; three is
+/// a law"). This helper is the law-redeeming carve-out: the shape
+/// (`prior: Result<String, VarError>` + snapshot-on-`capture` + restore-
+/// on-`Drop`) lives at exactly ONE code line across the crate, and a
+/// future refinement (e.g., telemetry on the restore path, an unset-
+/// vs-empty-string canonicalization hook, a switch to
+/// `std::env::VarError` recovery on the poisoned-mutex path) reaches
+/// every consumer by construction.
+///
+/// The empty-string round-trip is deliberate: `std::env::var` returns
+/// `Ok("")` when a caller explicitly exported the var to the empty
+/// string, so `Drop` restores it as `set_var(NAME, "")` rather than
+/// `remove_var(NAME)` — the observable state distinction between "set
+/// but empty" and "unset" is preserved verbatim.
+///
+/// Sibling of the compound [`RootFlakeEnvSnapshot`] (three surfaces:
+/// cwd + `REPO_ROOT` + `SERVICE_DIR`) and the set-then-restore
+/// [`GitBinScope`] (mutates on construction, not just on drop).
+/// THEORY §V (solve-once-at-the-primitive); §VI.1
+/// (recurring-shape-to-helper).
+pub struct EnvVarSnapshot {
+    name: &'static str,
+    prior: std::result::Result<String, std::env::VarError>,
+}
+
+impl EnvVarSnapshot {
+    /// Snapshot the current value of the `name` env var; the returned
+    /// guard restores it on drop. `name` is `&'static str` so the
+    /// caller's site-level intent (a specific env-var spelling) is
+    /// pinned at the type-check boundary and cannot be dynamically
+    /// constructed from a mutable string that later shifts.
+    pub fn capture(name: &'static str) -> Self {
+        Self {
+            name,
+            prior: std::env::var(name),
+        }
+    }
+}
+
+impl Drop for EnvVarSnapshot {
+    fn drop(&mut self) {
+        match &self.prior {
+            Ok(v) => std::env::set_var(self.name, v),
+            Err(_) => std::env::remove_var(self.name),
+        }
+    }
+}
+
 /// RAII scope-guard that sets `GIT_BIN=value` on construction and
 /// restores the pre-scope state (either the original value or unset) on
 /// drop — panic-safe by construction. Snapshots via `std::env::var` so
@@ -6202,5 +6272,226 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "zeta-widget",
             "route through `zeta_bin()`",
         );
+    }
+
+    /// [`EnvVarSnapshot`] restores an originally-unset env var to
+    /// unset on drop even after the guarded scope explicitly set it.
+    /// Pins the `Err(_) => remove_var(self.name)` half of the Drop
+    /// body — every pre-lift consumer
+    /// (`repo.rs::tests::SafeEnvSnapshot`,
+    /// `git.rs::tests::ReleaseGitShaSnapshot`,
+    /// `infrastructure/attic.rs::tests::AtticServerNameSnapshot`)
+    /// depends on this branch to keep an unset env var from leaking
+    /// into subsequent tests in the same process. A drift to
+    /// `Err(_) => set_var(self.name, "")` would leak `<NAME>=""` to
+    /// every subsequent test — silently misrouting a `.filter(|s|
+    /// !s.is_empty())` consumer at the primitive boundary.
+    ///
+    /// Uses a per-test-unique env-var name so no cross-test
+    /// serialization lock is needed — the same discipline as
+    /// `repo.rs::tests::truthy_flag_from_env_defaults_to_false_when_unset`.
+    #[test]
+    fn env_var_snapshot_restores_env_when_original_unset() {
+        let env_var = "TEST_ENV_VAR_SNAPSHOT_UNSET_ROUND_TRIP";
+        std::env::remove_var(env_var);
+        {
+            let _snap = EnvVarSnapshot::capture(env_var);
+            std::env::set_var(env_var, "sentinel-value");
+            assert_eq!(
+                std::env::var(env_var).ok().as_deref(),
+                Some("sentinel-value")
+            );
+        }
+        assert!(
+            std::env::var(env_var).is_err(),
+            "EnvVarSnapshot must restore `{env_var}` to unset on drop \
+             when the pre-capture state was unset — a drift to \
+             `set_var(name, \"\")` would leak `{env_var}=\"\"` into \
+             every subsequent test in this process."
+        );
+    }
+
+    /// [`EnvVarSnapshot`] restores an originally-set env var to its
+    /// pre-scope value on drop after the guarded scope overwrote it.
+    /// Pins the `Ok(v) => set_var(self.name, v)` half of the Drop
+    /// body. A drift here (e.g., `Ok(_) => remove_var(self.name)`)
+    /// would silently unset the operator's `SAFE=false` /
+    /// `RELEASE_GIT_SHA=<sha>` / `ATTIC_SERVER_NAME=<alias>` export
+    /// after any test that snapshots one of them ran — the exact
+    /// failure mode the pre-lift RAII scope-guards were introduced
+    /// to prevent.
+    #[test]
+    fn env_var_snapshot_restores_env_when_original_set() {
+        let env_var = "TEST_ENV_VAR_SNAPSHOT_SET_ROUND_TRIP";
+        std::env::set_var(env_var, "prior-value");
+        {
+            let _snap = EnvVarSnapshot::capture(env_var);
+            std::env::set_var(env_var, "sentinel-value");
+            assert_eq!(
+                std::env::var(env_var).ok().as_deref(),
+                Some("sentinel-value")
+            );
+        }
+        let restored = std::env::var(env_var);
+        std::env::remove_var(env_var);
+        assert_eq!(
+            restored.ok().as_deref(),
+            Some("prior-value"),
+            "EnvVarSnapshot must restore `{env_var}` to its pre-scope \
+             value on drop — an operator's explicit export must not \
+             be silently unset by a test that snapshots it."
+        );
+    }
+
+    /// [`EnvVarSnapshot`] preserves the observable distinction between
+    /// "set to empty string" and "unset" across the capture-and-restore
+    /// round trip. `std::env::var` returns `Ok("")` when a caller
+    /// explicitly exports `<NAME>=""`, so the Drop body's `Ok(v) =>
+    /// set_var(name, v)` branch must restore `""` — not fall through
+    /// to `remove_var`. A drift to `.filter(|s| !s.is_empty())` at the
+    /// capture boundary (folding `Ok("")` into `Err`) would silently
+    /// convert every explicit-empty export into an unset env var on
+    /// drop.
+    #[test]
+    fn env_var_snapshot_restores_env_when_original_empty_string() {
+        let env_var = "TEST_ENV_VAR_SNAPSHOT_EMPTY_ROUND_TRIP";
+        std::env::set_var(env_var, "");
+        {
+            let _snap = EnvVarSnapshot::capture(env_var);
+            std::env::set_var(env_var, "sentinel-value");
+        }
+        let restored = std::env::var(env_var);
+        std::env::remove_var(env_var);
+        assert_eq!(
+            restored.ok().as_deref(),
+            Some(""),
+            "EnvVarSnapshot must restore an originally-empty export \
+             (`{env_var}=\"\"`) verbatim on drop — the set-but-empty \
+             vs unset distinction is observable at the primitive \
+             boundary and must round-trip."
+        );
+    }
+
+    /// [`EnvVarSnapshot::drop`] fires on panic-unwind, not only on
+    /// normal scope exit — the exact panic-safety property every
+    /// pre-lift RAII scope-guard was introduced to provide. A drift
+    /// to a `Drop`-less implementation (e.g., a `fn restore(self)`
+    /// consuming call the caller has to remember) would silently
+    /// leak `<NAME>=<sentinel>` to every subsequent test in the
+    /// process after any panicking test that snapshotted it.
+    ///
+    /// `AssertUnwindSafe` on the closure — `EnvVarSnapshot` carries
+    /// only a `&'static str` and a `Result<String, VarError>`, both
+    /// unwind-safe, so no interior mutability crosses the boundary.
+    #[test]
+    fn env_var_snapshot_restores_on_panic_unwind() {
+        let env_var = "TEST_ENV_VAR_SNAPSHOT_PANIC_UNWIND";
+        std::env::remove_var(env_var);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _snap = EnvVarSnapshot::capture(env_var);
+            std::env::set_var(env_var, "sentinel-value");
+            panic!("intentional panic to drive unwind path");
+        }));
+        assert!(
+            result.is_err(),
+            "the guarded scope must have panicked as expected"
+        );
+        assert!(
+            std::env::var(env_var).is_err(),
+            "EnvVarSnapshot::drop must fire on panic-unwind — a leaked \
+             `{env_var}=<sentinel>` post-unwind means the panic-safety \
+             contract the RAII guard exists to provide has drifted."
+        );
+    }
+
+    /// Structural regression shield: the three pre-lift module-private
+    /// RAII structs (`repo.rs::tests::SafeEnvSnapshot`,
+    /// `git.rs::tests::ReleaseGitShaSnapshot`,
+    /// `infrastructure/attic.rs::tests::AtticServerNameSnapshot`) each
+    /// carried a `struct <X>Snapshot { prior: std::result::Result<String,
+    /// std::env::VarError> }` + `capture()` + panic-safe `Drop` triple —
+    /// the byte-equivalent snapshot-only shape this primitive redeems.
+    /// Post-lift no `.rs` file in `cli/src/` (other than `test_support.rs`
+    /// itself, which owns the primitive declaration) may re-introduce a
+    /// `struct <X>Snapshot { ... }` block carrying the `prior:
+    /// Result<String, VarError>` field: every snapshot-only consumer must
+    /// route through [`EnvVarSnapshot::capture`] instead.
+    ///
+    /// The needle spells `Snapshot` (not `Scope`) so the sibling
+    /// set-then-restore shape ([`GitBinScope`],
+    /// `infrastructure/kubectl.rs::KubectlBinScope`) — which shares the
+    /// `prior:` field spelling but adds a `fn set(value: &str)` mutating
+    /// constructor — is unaffected by this shield. That shape's future
+    /// lift is anticipated by `KubectlBinScope`'s own docstring but is
+    /// out of scope for this primitive.
+    ///
+    /// Walks the crate source tree via a shallow recursive scan so a
+    /// future file added under any subdirectory of `cli/src/` is
+    /// covered without a per-file shield update.
+    #[test]
+    fn env_var_snapshot_pre_lift_snapshot_struct_shape_confined_to_test_support() {
+        let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        walk_rs_files(&crate_src, &mut |path| {
+            if path.file_name().and_then(|s| s.to_str()) == Some("test_support.rs") {
+                return;
+            }
+            let contents =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            let lines: Vec<&str> = contents.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                let is_snapshot_struct = trimmed.starts_with("struct ")
+                    && trimmed.contains("Snapshot")
+                    && trimmed.trim_end().ends_with('{');
+                if !is_snapshot_struct {
+                    continue;
+                }
+                let has_prior_field =
+                    lines.iter().skip(i + 1).take(8).any(|l| {
+                        l.contains("prior: std::result::Result<String, std::env::VarError>")
+                    });
+                if has_prior_field {
+                    let rel = path
+                        .strip_prefix(&crate_src)
+                        .unwrap_or(path)
+                        .display()
+                        .to_string();
+                    offenders.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+                }
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "a `struct <X>Snapshot {{ ... prior: Result<String, VarError> ... }}` \
+             declaration is reserved for `test_support.rs` — the pre-lift \
+             `SafeEnvSnapshot` / `ReleaseGitShaSnapshot` / \
+             `AtticServerNameSnapshot` shape must not reappear anywhere \
+             else in `cli/src/`; every snapshot-only consumer routes \
+             through `crate::test_support::EnvVarSnapshot::capture(<NAME>)` \
+             instead. Offending sites:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// Recursively walk every `.rs` file under `dir`, invoking `visit`
+    /// on each. Skips `target/` directories defensively even though
+    /// none should live under `cli/src/`.
+    fn walk_rs_files(dir: &std::path::Path, visit: &mut dyn FnMut(&std::path::Path)) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().and_then(|s| s.to_str()) == Some("target") {
+                    continue;
+                }
+                walk_rs_files(&path, visit);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                visit(&path);
+            }
+        }
     }
 }

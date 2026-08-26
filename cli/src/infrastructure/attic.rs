@@ -2164,33 +2164,6 @@ mod tests {
     /// every subsequent test sharing the lock.
     static ATTIC_SERVER_NAME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// RAII scope-guard that snapshots — and on drop restores — the
-    /// `ATTIC_SERVER_NAME` env var. Panic-safe by construction: drop
-    /// runs on both normal scope exit and unwind, so a test that
-    /// panics mid-body cannot leak `ATTIC_SERVER_NAME=<sentinel>` to
-    /// any subsequent test in the same process. Callers hold
-    /// [`ATTIC_SERVER_NAME_ENV_LOCK`] for the duration of the scope.
-    struct AtticServerNameSnapshot {
-        prior: std::result::Result<String, std::env::VarError>,
-    }
-
-    impl AtticServerNameSnapshot {
-        fn capture() -> Self {
-            Self {
-                prior: std::env::var("ATTIC_SERVER_NAME"),
-            }
-        }
-    }
-
-    impl Drop for AtticServerNameSnapshot {
-        fn drop(&mut self) {
-            match &self.prior {
-                Ok(v) => std::env::set_var("ATTIC_SERVER_NAME", v),
-                Err(_) => std::env::remove_var("ATTIC_SERVER_NAME"),
-            }
-        }
-    }
-
     /// [`attic_server_alias`] returns the string `"default"` when
     /// `ATTIC_SERVER_NAME` is unset. Pins the fallback string
     /// verbatim so a future refactor cannot silently drift it to
@@ -2206,7 +2179,7 @@ mod tests {
         let _guard = ATTIC_SERVER_NAME_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let _snapshot = AtticServerNameSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("ATTIC_SERVER_NAME");
         std::env::remove_var("ATTIC_SERVER_NAME");
         assert_eq!(attic_server_alias(), "default");
     }
@@ -2225,7 +2198,7 @@ mod tests {
         let _guard = ATTIC_SERVER_NAME_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let _snapshot = AtticServerNameSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("ATTIC_SERVER_NAME");
         std::env::set_var("ATTIC_SERVER_NAME", "my-server-alias");
         assert_eq!(attic_server_alias(), "my-server-alias");
     }
