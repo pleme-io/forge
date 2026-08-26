@@ -3,7 +3,7 @@
 //! These commands are exposed via `nix run .#` apps for local development.
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -85,6 +85,36 @@ fn nix_bin() -> String {
 /// verbatim.
 fn docker_compose_bin() -> String {
     get_tool_path("DOCKER_COMPOSE_BIN", "docker-compose")
+}
+
+/// Resolve the service directory from the `SERVICE_DIR` env var,
+/// returning a [`PathBuf`] with the canonical
+/// `"SERVICE_DIR not set - this should be called via substrate wrapper"`
+/// context on the miss. Every command in this module that reads
+/// `SERVICE_DIR` routes through this sigil so the env-var name, the
+/// operator-facing miss wording, and the [`Path`] projection live at
+/// EXACTLY one body — mirrors the sibling `cargo_bin()` / `nix_bin()`
+/// / `docker_compose_bin()` sigils above, all four converging every
+/// substrate-declared environment contract in this module onto the
+/// solve-once-at-the-sigil idiom (THEORY §I.5 — duplication budget
+/// zero; every recurring shape becomes a helper before it becomes
+/// duplicated code). Pre-lift the four consumer sites
+/// (`rust_regenerate`, `rust_cargo_update`, `rust_dev`, `rust_dev_down`)
+/// each spelled the same two-line stanza
+/// `let service_dir = env::var("SERVICE_DIR").context(...)?; let
+/// service_path = Path::new(&service_dir);` verbatim, so the miss
+/// wording drifted only by convention — the shield below now enforces
+/// that convention structurally.
+///
+/// Post-lift a future refinement of the SERVICE_DIR contract — a
+/// canonicalize hook, a substrate-path validation step, a telemetry
+/// sigil on the resolved path, or a swap to a typed
+/// `substrate::ServiceDir(PathBuf)` newtype — lands at ONE body and
+/// reaches every consumer by construction.
+fn service_path_from_env() -> Result<PathBuf> {
+    let service_dir = env::var("SERVICE_DIR")
+        .context("SERVICE_DIR not set - this should be called via substrate wrapper")?;
+    Ok(PathBuf::from(service_dir))
 }
 
 /// Run Rust unit tests
@@ -240,10 +270,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     println!();
 
     // Get workspace root from environment (set by setup_service_directory)
-    let service_dir = env::var("SERVICE_DIR")
-        .context("SERVICE_DIR not set - this should be called via substrate wrapper")?;
-
-    let service_path = Path::new(&service_dir);
+    let service_path = service_path_from_env()?;
 
     // Workspace root is the parent directory of the service
     // Structure: {repo_root}/pkgs/products/{product}/services/rust/{service}
@@ -331,10 +358,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     println!();
 
     // Get workspace root from environment (set by setup_service_directory)
-    let service_dir = env::var("SERVICE_DIR")
-        .context("SERVICE_DIR not set - this should be called via substrate wrapper")?;
-
-    let service_path = Path::new(&service_dir);
+    let service_path = service_path_from_env()?;
 
     // Workspace root is the parent directory of the service
     // Structure: {repo_root}/pkgs/products/{product}/services/rust/{service}
@@ -415,9 +439,7 @@ pub async fn rust_dev(
     println!();
 
     // Get paths from environment
-    let service_dir = env::var("SERVICE_DIR")
-        .context("SERVICE_DIR not set - this should be called via substrate wrapper")?;
-    let service_path = Path::new(&service_dir);
+    let service_path = service_path_from_env()?;
 
     println!("📂 Service directory: {}", service_path.display());
 
@@ -426,11 +448,11 @@ pub async fn rust_dev(
     let local_config = &config.service.local;
 
     // Change to service directory for all operations
-    env::set_current_dir(service_path).context("Failed to change to service directory")?;
+    env::set_current_dir(&service_path).context("Failed to change to service directory")?;
 
     // Step 1: Start docker-compose if not skipped
     if !skip_docker {
-        let compose_file = find_compose_file(service_path)?;
+        let compose_file = find_compose_file(&service_path)?;
 
         if let Some(compose_path) = compose_file {
             println!();
@@ -555,7 +577,7 @@ pub async fn rust_dev(
     let bin_name = if let Some(ref name) = local_config.binary {
         name.clone()
     } else {
-        detect_binary_name(service_path, &service).await?
+        detect_binary_name(&service_path, &service).await?
     };
 
     // Step 5: Start cargo run
@@ -603,13 +625,11 @@ pub async fn rust_dev_down(service: String) -> Result<()> {
     );
 
     // Get paths from environment
-    let service_dir = env::var("SERVICE_DIR")
-        .context("SERVICE_DIR not set - this should be called via substrate wrapper")?;
-    let service_path = Path::new(&service_dir);
+    let service_path = service_path_from_env()?;
 
-    env::set_current_dir(service_path).context("Failed to change to service directory")?;
+    env::set_current_dir(&service_path).context("Failed to change to service directory")?;
 
-    let compose_file = find_compose_file(service_path)?;
+    let compose_file = find_compose_file(&service_path)?;
 
     if let Some(compose_path) = compose_file {
         crate::retry::run_bin_args_inherited_status(
@@ -1048,6 +1068,185 @@ mod tests {
              `rust_cargo_update`). Found {} code-line hit(s): \
              {canonical_hits:#?}.",
             canonical_hits.len()
+        );
+    }
+
+    /// Whole-module shield: every read of the `SERVICE_DIR` env var in
+    /// this module's non-test body must route through the module-local
+    /// [`super::service_path_from_env`] sigil, never through an inline
+    /// `env::var("SERVICE_DIR").context("SERVICE_DIR not set - this
+    /// should be called via substrate wrapper")?` +
+    /// `Path::new(&service_dir)` two-line stanza.
+    ///
+    /// Pre-lift the four consumer sites (`rust_regenerate`,
+    /// `rust_cargo_update`, `rust_dev`, `rust_dev_down`) each spelled
+    /// the same two-line stanza verbatim — a byte-identical
+    /// operator-facing miss wording that had drifted only by
+    /// convention. Four occurrences past THEORY §VI.1's
+    /// three-times-is-a-law threshold; the sigil is the archetype the
+    /// pillar demands, and post-lift every `SERVICE_DIR` read in this
+    /// module routes through it. A future refinement of the
+    /// `SERVICE_DIR` contract — a canonicalize hook, a substrate-path
+    /// validation step, a telemetry sigil on the resolved path, or a
+    /// swap to a typed `substrate::ServiceDir(PathBuf)` newtype — lands
+    /// at ONE body and reaches every consumer by construction.
+    ///
+    /// The scan bounds on the whole-module boundary (from the file
+    /// start to the FIRST `\n#[cfg(test)]\nmod tests {` marker in
+    /// source order, which lands at the parent `#[cfg(test)] mod tests`
+    /// opener above) so this shield's own docstring mentions of
+    /// `env::var("SERVICE_DIR")` — living inside a `#[cfg(test)]`
+    /// block below that first marker — stay out of scope AND every
+    /// current or future `SERVICE_DIR`-reading consumer landing anywhere
+    /// in the top-level module body cannot silently ride along without
+    /// routing through the sigil. Every hit routes through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-self-
+    /// match discipline. Mirrors the sibling `<tool>_bin()` sigil-shield
+    /// family above on this same module.
+    #[test]
+    fn test_developer_tools_service_dir_routes_through_service_path_from_env() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("developer_tools.rs"),
+            "commands/developer_tools.rs",
+        );
+        // Negative + sigil-uniqueness side: the raw
+        // `env::var("SERVICE_DIR")` needle must appear at EXACTLY one
+        // code line — the `service_path_from_env()` sigil body. Any
+        // future consumer that re-copies the two-line stanza pushes
+        // this count above one and fails the shield before it can
+        // drift the miss wording or the Path projection away from the
+        // sigil's single point of truth.
+        let raw_env_needle = "env::var(\"SERVICE_DIR\")";
+        let env_hits = crate::test_support::code_line_hits(body, raw_env_needle);
+        assert_eq!(
+            env_hits.len(),
+            1,
+            "commands/developer_tools.rs must read `SERVICE_DIR` at \
+             EXACTLY one code line (only in the `service_path_from_env()` \
+             sigil body), not {} — every consumer must route through \
+             `service_path_from_env()`, not re-copy the \
+             `env::var(\"SERVICE_DIR\").context(...)?` + `Path::new(...)` \
+             two-line stanza inline. Found {} code-line hit(s): \
+             {env_hits:#?}. A hand-rolled inline copy re-opens the drift \
+             class the sigil was landed to close (the env-var name, the \
+             operator-facing miss wording \
+             `\"SERVICE_DIR not set - this should be called via substrate \
+             wrapper\"`, and the `PathBuf::from(...)` projection all \
+             live at ONE body).",
+            env_hits.len(),
+            env_hits.len()
+        );
+        // Sigil-defined side: `fn service_path_from_env()` must be
+        // defined in the module body — a regression that removed the
+        // sigil would leave the negative scan trivially satisfied by
+        // absence (zero hits on the raw needle, not one), so pin the
+        // presence of the sigil definition too.
+        let sigil_def_needle = "fn service_path_from_env()";
+        let sigil_def_hits = crate::test_support::code_line_hits(body, sigil_def_needle);
+        assert_eq!(
+            sigil_def_hits.len(),
+            1,
+            "commands/developer_tools.rs must define \
+             `{sigil_def_needle}` at EXACTLY one code line — the \
+             sigil function that resolves `SERVICE_DIR` into a `PathBuf` \
+             for every `SERVICE_DIR`-reading consumer in this module. \
+             Found {} code-line hit(s): {sigil_def_hits:#?}. Mirrors \
+             the sibling `nix_bin()` / `cargo_bin()` / \
+             `docker_compose_bin()` sigils above on this same module.",
+            sigil_def_hits.len()
+        );
+        // Positive-side sibling: at least four consumers in this
+        // module route through the sigil. A regression that dropped
+        // every `service_path_from_env()` call from this module would
+        // leave the negative scan trivially satisfied by an
+        // env-var-free body, so pin the positive presence too — the
+        // four pre-lift sites (`rust_regenerate`, `rust_cargo_update`,
+        // `rust_dev`, `rust_dev_down`) each land one
+        // `service_path_from_env()?` hit.
+        let call_needle = "service_path_from_env()?";
+        let call_hits = crate::test_support::code_line_hits(body, call_needle);
+        assert!(
+            call_hits.len() >= 4,
+            "commands/developer_tools.rs must delegate `SERVICE_DIR` \
+             reads through `{call_needle}` at at least four code lines \
+             (one per pre-lift consumer: `rust_regenerate`, \
+             `rust_cargo_update`, `rust_dev`, `rust_dev_down`). Found \
+             {} code-line hit(s): {call_hits:#?}.",
+            call_hits.len()
+        );
+    }
+
+    /// Functional shield: [`super::service_path_from_env`] surfaces the
+    /// canonical
+    /// `"SERVICE_DIR not set - this should be called via substrate
+    /// wrapper"` context on a `SERVICE_DIR`-unset environment, byte-
+    /// identical to what each pre-lift consumer site spelled at its
+    /// own `.context(...)` call. Pins the operator-facing miss wording
+    /// at the sigil body so a future refactor that reshapes the sigil
+    /// (a swap from `.context()` to a `bail!` with drifted wording, a
+    /// canonicalize prefix landed in front of the context, a lift to a
+    /// typed error variant) cannot silently drift the message every
+    /// consumer's caller has been coached to grep for.
+    ///
+    /// Holds [`crate::test_support::ROOT_FLAKE_ENV_LOCK`] for the
+    /// duration of the env mutation — `SERVICE_DIR` is process-global
+    /// state, and the sibling `RootFlakeEnvSnapshot` discipline
+    /// guarantees no concurrent `SERVICE_DIR`-reading test races the
+    /// scope. Restores the pre-scope `SERVICE_DIR` value on drop via
+    /// the snapshot's RAII guard.
+    #[test]
+    fn test_service_path_from_env_surfaces_canonical_miss_wording_when_unset() {
+        let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("SERVICE_DIR");
+        std::env::remove_var("SERVICE_DIR");
+        let err = super::service_path_from_env().unwrap_err();
+        // Restore before assertion so a fail doesn't leak state.
+        match &prior {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("SERVICE_DIR not set - this should be called via substrate wrapper"),
+            "service_path_from_env() must surface the canonical miss \
+             wording on a `SERVICE_DIR`-unset environment — the same \
+             wording every pre-lift consumer site's `.context(...)` \
+             call spelled verbatim. Got: {msg}"
+        );
+    }
+
+    /// Functional shield: [`super::service_path_from_env`] returns a
+    /// [`PathBuf`] equal to `PathBuf::from(SERVICE_DIR)` when the env
+    /// var is set. Pins the `SERVICE_DIR` → `PathBuf` projection at the
+    /// sigil body so a future refinement (a canonicalize hook, a
+    /// substrate-path validation step) that drifts the projection is
+    /// caught here rather than at each consumer's downstream
+    /// `.parent()` / `.join(...)` call. Uses the same
+    /// [`crate::test_support::ROOT_FLAKE_ENV_LOCK`] discipline as the
+    /// sibling unset-side shield above.
+    #[test]
+    fn test_service_path_from_env_returns_path_of_set_env_var() {
+        let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("SERVICE_DIR");
+        let sentinel = "/tmp/forge-developer-tools-service-path-sigil-shield";
+        std::env::set_var("SERVICE_DIR", sentinel);
+        let result = super::service_path_from_env();
+        // Restore before assertion so a fail doesn't leak state.
+        match &prior {
+            Ok(v) => std::env::set_var("SERVICE_DIR", v),
+            Err(_) => std::env::remove_var("SERVICE_DIR"),
+        }
+        let path = result.expect("service_path_from_env must succeed when SERVICE_DIR is set");
+        assert_eq!(
+            path,
+            std::path::PathBuf::from(sentinel),
+            "service_path_from_env() must return `PathBuf::from(SERVICE_DIR)` \
+             verbatim — the projection every pre-lift consumer site \
+             spelled via `Path::new(&service_dir)`."
         );
     }
 }
