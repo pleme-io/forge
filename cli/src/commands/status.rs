@@ -230,7 +230,7 @@ pub async fn execute(
         serde_yaml::from_str(&yaml_content).context("Failed to parse deploy.yaml")?;
 
     // Get environment
-    let environment = std::env::var("FORGE_ENV").unwrap_or_else(|_| "staging".to_string());
+    let environment = crate::repo::get_environment();
 
     // Get namespace from config
     let namespace = raw_config
@@ -2655,6 +2655,91 @@ mod tests {
              construction through `crate::test_support::\
              synthetic_output` so a future reshape of the shape \
              lands at ONE body."
+        );
+    }
+
+    /// Whole-module shield: every read of the `FORGE_ENV` env var in
+    /// this module's non-test body must route through the shared
+    /// [`crate::repo::get_environment`] primitive, never through an
+    /// inline `std::env::var("FORGE_ENV").unwrap_or_else(|_|
+    /// "staging".to_string())` stanza.
+    ///
+    /// Pre-lift the single consumer site — the deploy-info fetch at
+    /// `commands/status.rs:233` — spelled the same
+    /// `env::var("FORGE_ENV").unwrap_or_else(|_| "staging".to_string())`
+    /// stanza verbatim as [`crate::repo::get_environment`]'s body, and
+    /// the primitive itself was marked `#[allow(dead_code)]` because
+    /// this direct-inline caller was the only consumer of the shape
+    /// but bypassed it. Post-lift the read lives at ONE body across
+    /// the crate ([`crate::repo::get_environment`]) and a future
+    /// refinement of the `FORGE_ENV` contract — logging the resolved
+    /// environment, canonicalizing it against a closed enum of known
+    /// environments, a telemetry sigil on the resolved value, or a
+    /// swap to a typed `substrate::Environment(String)` newtype —
+    /// lands at that one body and reaches this consumer (and any
+    /// future one) by construction (THEORY §V —
+    /// solve-once-at-the-primitive; §VI.1 —
+    /// recurring-shape-to-helper).
+    ///
+    /// Slice via [`crate::test_support::module_body_before_tests`]
+    /// (`commands/status.rs` carries the canonical
+    /// `#[cfg(test)]\nmod tests {` marker at line 1636, so the longer
+    /// marker is the correct boundary and this shield's own docstring
+    /// mentions of `env::var("FORGE_ENV")` — living inside `mod tests
+    /// {}` below that marker — stay out of scope). Every hit routes
+    /// through [`crate::test_support::code_line_hits`] for anti-
+    /// docstring-self-match discipline.
+    #[test]
+    fn test_status_forge_env_routes_through_repo_get_environment() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
+        );
+        // Negative side: the raw `env::var("FORGE_ENV")` needle must
+        // NOT appear anywhere in the module body post-lift — the read
+        // now lives at `crate::repo::get_environment`, which owns the
+        // `env::var("FORGE_ENV") + unwrap_or_else("staging")` shape at
+        // ONE body across the crate. A future consumer that re-copies
+        // the pre-lift stanza pushes this count above zero and fails
+        // the shield before it can drift the default wording ("staging"
+        // — matched by the clap `default_value = "staging"` at
+        // `cli.rs:397`) away from the shared primitive's single point
+        // of truth. Substring match catches both
+        // `std::env::var("FORGE_ENV")` and the shorter
+        // `env::var("FORGE_ENV")` (a future consumer here might spell
+        // either form).
+        let raw_env_needle = "env::var(\"FORGE_ENV\")";
+        let env_hits = crate::test_support::code_line_hits(body, raw_env_needle);
+        assert!(
+            env_hits.is_empty(),
+            "commands/status.rs must NOT spell `{raw_env_needle}` \
+             inline in the module body — every consumer must route \
+             through `crate::repo::get_environment`, the shared \
+             primitive that owns the `env::var + unwrap_or_else` shape \
+             at ONE body across the crate. Found {} code-line hit(s): \
+             {env_hits:#?}. A hand-rolled inline copy re-opens the \
+             drift class the primitive was landed to close.",
+            env_hits.len()
+        );
+        // Positive side: the delegating call to
+        // `crate::repo::get_environment(` must appear at EXACTLY one
+        // code line — the deploy-info fetch body. A regression that
+        // dropped the delegation would leave the negative scan
+        // trivially satisfied by absence (zero raw `env::var` hits,
+        // but also zero delegating calls), and the module would have
+        // stopped resolving `FORGE_ENV` for deploy-info fetch at all.
+        let delegate_needle = "crate::repo::get_environment(";
+        let delegate_hits = crate::test_support::code_line_hits(body, delegate_needle);
+        assert_eq!(
+            delegate_hits.len(),
+            1,
+            "commands/status.rs must delegate `FORGE_ENV` resolution \
+             to `crate::repo::get_environment()` at EXACTLY one code \
+             line — the deploy-info fetch body. Found {} code-line \
+             hit(s): {delegate_hits:#?}. A missing delegation would \
+             leave the negative scan above trivially satisfied by \
+             absence.",
+            delegate_hits.len()
         );
     }
 }

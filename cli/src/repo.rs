@@ -170,8 +170,22 @@ pub fn verify_directory(dir: &Path, required_files: &[&str]) -> Result<()> {
 
 /// Get the current environment (staging, production, etc.)
 ///
-/// Reads from FORGE_ENV environment variable, defaults to "staging".
-#[allow(dead_code)]
+/// Reads from `FORGE_ENV` environment variable, defaults to `"staging"`.
+///
+/// This is the ONE body across the crate that reads `FORGE_ENV` into a
+/// `String` with the `"staging"` default — the shape
+/// `commands/status.rs` spelled inline as `std::env::var("FORGE_ENV")
+/// .unwrap_or_else(|_| "staging".to_string())` before lifting through
+/// here. A future refinement of the `FORGE_ENV` contract — logging the
+/// resolved environment, canonicalizing it against a closed enum of
+/// known environments, a telemetry sigil on the value, or a swap to a
+/// typed `substrate::Environment(String)` newtype — lands at this one
+/// body and reaches every consumer by construction (THEORY §V —
+/// solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+///
+/// The `"staging"` default matches the `#[arg(long, env = "FORGE_ENV",
+/// default_value = "staging")]` clap attribute at `cli.rs:397` so the
+/// CLI-flag path and the env-read path agree on the fallback.
 pub fn get_environment() -> String {
     std::env::var("FORGE_ENV").unwrap_or_else(|_| "staging".to_string())
 }
