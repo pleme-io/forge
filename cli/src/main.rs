@@ -215,13 +215,18 @@ async fn main() -> Result<()> {
             timeout,
             rollback,
         } => {
-            // Check SAFE mode from environment (default: true)
-            let safe_mode = std::env::var("SAFE")
-                .map(|v| {
-                    let val = v.to_lowercase();
-                    val != "false" && val != "0"
-                })
-                .unwrap_or(true);
+            // Check SAFE mode from environment (default: true) — routes
+            // through the crate-scoped `crate::repo::safe_mode_from_env`
+            // sigil so the `SAFE`-env-var-with-`bool`-fallback contract
+            // (default TRUE, disable-with-`false`-or-`0` case-insensitive)
+            // is honored at exactly ONE code line across the crate
+            // (sibling consumer: `commands/github_runner_ci.rs::is_safe_mode`).
+            // A future refinement of the contract (widen the disable set,
+            // canonicalize hook, typed `substrate::SafeMode(bool)` newtype,
+            // telemetry sigil) lands at the sigil body and reaches this
+            // consumer by construction — THEORY §V solve-once-at-the-
+            // primitive; §VI.1 recurring-shape-to-helper.
+            let safe_mode = crate::repo::safe_mode_from_env();
 
             rollout::execute(namespace, name, interval, timeout, rollback, safe_mode).await?;
         }
@@ -1269,4 +1274,83 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod safe_mode_delegation_shield {
+    //! Structural regression shield: the `Commands::Rollout` arm's
+    //! `safe_mode` local MUST route through
+    //! `crate::repo::safe_mode_from_env()` — not the pre-lift inline
+    //! `std::env::var("SAFE").map(|v| { let val = v.to_lowercase(); val
+    //! != "false" && val != "0" }).unwrap_or(true)` stanza. Pre-lift
+    //! this file and `commands/github_runner_ci.rs::is_safe_mode` each
+    //! carried the same six-line stanza verbatim; post-lift both consume
+    //! the ONE sigil so a future refinement of the `SAFE`-env-var
+    //! contract lands at the primitive body and reaches every consumer
+    //! by construction. Sibling of
+    //! `test_is_safe_mode_body_delegates_to_repo_safe_mode_from_env_sigil`
+    //! at `commands/github_runner_ci.rs::tests` on the other current
+    //! consumer of the sigil.
+
+    /// The `Commands::Rollout` arm inside `main.rs::main` must NOT read
+    /// `SAFE` inline — route through `crate::repo::safe_mode_from_env`
+    /// so the `SAFE`-env-var-with-`bool`-fallback contract is honored
+    /// at exactly ONE code line across the crate. Scans the file up to
+    /// this shield's own module header (`\nmod
+    /// safe_mode_delegation_shield {`) so this shield's own diagnostic
+    /// prose and code-line mentions of `env::var("SAFE")` — living
+    /// inside the shield's `#[cfg(test)] mod ...` at the file tail —
+    /// stay out of scope. The coarser
+    /// [`crate::test_support::module_body_before_first_cfg_test`]
+    /// helper cannot be used here: `#[cfg(test)] mod test_support;` at
+    /// line 82 is the file's FIRST `#[cfg(test)]` marker (a test-only
+    /// sub-module declaration, not a shield block), and that helper
+    /// would cut the scan window above the `Commands::Rollout` arm at
+    /// line 218 and miss the delegation site entirely. Every hit
+    /// routes through [`crate::test_support::code_line_hits`] for
+    /// anti-comment-line-self-match discipline.
+    #[test]
+    fn test_rollout_arm_routes_safe_mode_through_repo_sigil_not_inline_env_var() {
+        const SOURCE: &str = include_str!("main.rs");
+        const SHIELD_MODULE_MARKER: &str = "\nmod safe_mode_delegation_shield {";
+        let module_body_end = SOURCE.find(SHIELD_MODULE_MARKER).unwrap_or_else(|| {
+            panic!(
+                "main.rs must contain `{}` — the shield's slice \
+                 boundary depends on this shield module's own header",
+                SHIELD_MODULE_MARKER
+            )
+        });
+        let module_body = &SOURCE[..module_body_end];
+
+        // Negative side: the raw `env::var("SAFE")` needle must NOT
+        // appear anywhere in the pre-shield module body post-lift — the
+        // read now lives at `crate::repo::safe_mode_from_env`, which
+        // owns the `env::var("SAFE") + unwrap_or(true)` shape at ONE
+        // body across the crate. A future consumer that re-copies the
+        // pre-lift stanza pushes this count above zero and fails the
+        // shield before it can drift the default (`unwrap_or(true)`),
+        // the disable set (`{false, 0}` case-insensitive), or the
+        // empty-string parity between consumer sites.
+        let raw_env_needle = "env::var(\"SAFE\")";
+        let env_hits = crate::test_support::code_line_hits(module_body, raw_env_needle);
+        assert!(
+            env_hits.is_empty(),
+            "main.rs must NOT read `SAFE` inline — route through \
+             `crate::repo::safe_mode_from_env()` so the \
+             `SAFE`-env-var-with-`bool`-fallback contract is honored at \
+             exactly ONE code line across the crate. Found the pre-lift \
+             inline `env::var(\"SAFE\")` read in the module body: {:#?}",
+            env_hits,
+        );
+
+        // Positive side: the delegation call must be present.
+        let delegation_hits =
+            crate::test_support::code_line_hits(module_body, "safe_mode_from_env()");
+        assert!(
+            !delegation_hits.is_empty(),
+            "main.rs must call `crate::repo::safe_mode_from_env()` in \
+             the `Commands::Rollout` arm — the sigil call was not found \
+             anywhere in the module body.",
+        );
+    }
 }

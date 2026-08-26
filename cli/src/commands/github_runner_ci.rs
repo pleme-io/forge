@@ -99,13 +99,24 @@ fn github_runner_rollout_poll_delay(attempt: u32) -> Duration {
 /// Check if SAFE mode is enabled (retry on errors)
 /// Default: true (retries enabled by default)
 /// Disable with: SAFE=false or SAFE=0
+///
+/// Body delegates to [`crate::repo::safe_mode_from_env`] so the
+/// `SAFE`-env-var-with-`bool`-fallback contract lives at exactly ONE
+/// code line across the crate. Sibling consumer of the same sigil:
+/// `main.rs::main`'s `Commands::Rollout` arm — pre-lift both this
+/// wrapper and that arm spelled the same
+/// `std::env::var("SAFE").map(|v| { let val = v.to_lowercase(); val !=
+/// "false" && val != "0" }).unwrap_or(true)` six-line stanza verbatim.
+/// The local `is_safe_mode()` wrapper is preserved so the file's
+/// internal callers (`execute` line 210, `push_with_retries` line
+/// 806) keep their zero-arg call spelling; the shape lives at the
+/// sigil so a future refinement (widening the disable set, canonicalize
+/// hook, typed `substrate::SafeMode(bool)` newtype, telemetry sigil)
+/// lands at the primitive and reaches every consumer by construction
+/// — THEORY §V solve-once-at-the-primitive; §VI.1 recurring-shape-
+/// to-helper.
 fn is_safe_mode() -> bool {
-    std::env::var("SAFE")
-        .map(|v| {
-            let val = v.to_lowercase();
-            val != "false" && val != "0"
-        })
-        .unwrap_or(true) // Default to true
+    crate::repo::safe_mode_from_env()
 }
 
 pub async fn execute(
@@ -1356,6 +1367,45 @@ mod tests {
             "execute() must resolve the Attic server alias via \
              `crate::infrastructure::attic::attic_server_alias()` — the \
              sigil call was not found in execute()."
+        );
+    }
+
+    /// The post-lift body of [`super::is_safe_mode`] is a single-line
+    /// forward to [`crate::repo::safe_mode_from_env`] — the wrapper no
+    /// longer spells the `env::var("SAFE").map(...).unwrap_or(true)`
+    /// shape inline. Structural regression shield: without it, a future
+    /// refactor could silently re-inline the shape (e.g. a helpful
+    /// "just call `std::env::var` directly, it's shorter" cleanup) and
+    /// reopen the duplication class this lift closed. Pre-lift the
+    /// wrapper body carried the same six-line inline stanza
+    /// `main.rs::main`'s `Commands::Rollout` arm carried; post-lift the
+    /// body must contain the `crate::repo::safe_mode_from_env()` call
+    /// site AND NOT any `env::var("SAFE")` needle. Sibling of the
+    /// `test_execute_routes_attic_server_alias_through_infrastructure_sigil_not_inline_env_var`
+    /// shield above on the same env-var-sigil-delegation surface.
+    #[test]
+    fn test_is_safe_mode_body_delegates_to_repo_safe_mode_from_env_sigil() {
+        let body = crate::test_support::fn_body_slice_between_markers(
+            include_str!("github_runner_ci.rs"),
+            "commands/github_runner_ci.rs",
+            "fn is_safe_mode() -> bool {",
+            "\n}",
+        );
+        assert!(
+            body.contains("crate::repo::safe_mode_from_env()"),
+            "is_safe_mode() body must forward to \
+             `crate::repo::safe_mode_from_env()` — the primitive body \
+             the `SAFE`-env-var-with-`bool`-fallback contract lives at \
+             across the crate. Post-lift body: {body}"
+        );
+        assert!(
+            !body.contains("env::var(\"SAFE\")"),
+            "is_safe_mode() body must NOT spell the inline \
+             `env::var(\"SAFE\").map(...).unwrap_or(true)` shape — that \
+             duplication was lifted onto \
+             `crate::repo::safe_mode_from_env`. A re-inline would \
+             silently reopen the class this shield exists to close. \
+             Post-lift body: {body}"
         );
     }
 

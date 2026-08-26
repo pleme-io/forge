@@ -260,6 +260,72 @@ pub fn get_environment() -> String {
     env_var_or_default("FORGE_ENV", "staging")
 }
 
+/// Resolve SAFE mode from the environment.
+///
+/// Reads the `SAFE` environment variable and folds it to a `bool` with
+/// the "default TRUE — disable with `false` or `0` (case-insensitive)"
+/// contract. Unset → `true`; `SAFE=false` / `SAFE=FALSE` / `SAFE=False`
+/// / `SAFE=0` → `false`; anything else (including `SAFE=""`, `SAFE=no`,
+/// `SAFE=off`, `SAFE=maybe`) → `true`.
+///
+/// This is the ONE body across the crate that reads `SAFE` into a
+/// `bool` with the disable-with-`false`-or-`0` semantic. Pre-lift two
+/// byte-equivalent inline stanzas spelled the shape:
+///
+/// ```text
+/// std::env::var("SAFE")
+///     .map(|v| {
+///         let val = v.to_lowercase();
+///         val != "false" && val != "0"
+///     })
+///     .unwrap_or(true)
+/// ```
+///
+/// at `main.rs::main` (the `Commands::Rollout` arm's `safe_mode` local)
+/// and `commands/github_runner_ci.rs::is_safe_mode`. Both consumers
+/// govern retry semantics on the same operator-facing toggle: the
+/// rollout dispatch's `RetryPolicy::network_or_immediate(safe_mode)`
+/// arm and the github-runner-CI Attic-login/push retry-budget
+/// partition. A drift at one site — a typo `SAFE_MODE`, a lost
+/// `to_lowercase()` making `SAFE=FALSE` silently truthy, a swap to
+/// `!= "0"` alone dropping the `"false"` half, an accidental default
+/// flip to `false` — would silently misroute the operator's `SAFE`
+/// toggle at one dispatch surface only, and the mismatch would surface
+/// as a rollout that retries where the operator asked it not to (or
+/// vice versa) on one CLI entry point while the other honors the
+/// override.
+///
+/// Post-lift a future refinement of the shape (logging every resolve,
+/// widening the disable set to `{no, off}`, a telemetry sigil
+/// separating explicit-value from default-fallback paths, or a swap to
+/// a typed `substrate::SafeMode(bool)` newtype) lands at this body and
+/// reaches every consumer by construction — the same
+/// solve-once-at-the-primitive discipline
+/// [`env_var_or_default`] closes on the `String`-fallback surface,
+/// [`path_from_env`] closes on the `Result<PathBuf>` surface, and
+/// [`crate::git::release_git_sha_from_env`] closes on the
+/// empty-string-is-miss `Option<String>` surface
+/// (THEORY §V — solve-once-at-the-primitive; §VI.1 —
+/// recurring-shape-to-helper).
+///
+/// The empty-string parity (`SAFE=""` → `true`) is deliberate: a
+/// `to_lowercase()`d empty string satisfies both `!= "false"` and
+/// `!= "0"`, so an operator's explicit-empty export lands on the
+/// default-true branch alongside an unset env var. A future primitive
+/// refinement that swapped the shape for `.ok().filter(|s|
+/// !s.is_empty()).map(...).unwrap_or(true)` would preserve this
+/// empty-is-truthy semantic; a swap to
+/// `.ok().is_some_and(...)`-style dispatch would flip it and misroute
+/// every `SAFE=""` export.
+pub fn safe_mode_from_env() -> bool {
+    std::env::var("SAFE")
+        .map(|v| {
+            let val = v.to_lowercase();
+            val != "false" && val != "0"
+        })
+        .unwrap_or(true)
+}
+
 /// Which product-directory layouts [`find_product_dir`] accepts as terminal.
 ///
 /// The monorepo layout is universal — every consumer honors it. The
@@ -728,6 +794,170 @@ mod tests {
              pre-lift sigil's `.unwrap_or_else(|_| ...)` semantics, \
              where the fallback fires only on the `Err` case."
         );
+    }
+
+    /// Serial-safe guard for tests that mutate the `SAFE` process env
+    /// var. [`safe_mode_from_env`] reads it once per call; concurrent
+    /// tests that set / remove it would race the resolved value observed
+    /// by any test asserting on the primitive's return. Same
+    /// `unwrap_or_else(|p| p.into_inner())` recovery shape as the
+    /// sibling [`crate::git::tests::RELEASE_GIT_SHA_ENV_LOCK`] and
+    /// [`crate::test_support::GIT_BIN_ENV_LOCK`] so a prior panicking
+    /// test that poisoned the mutex does not chain-fail every subsequent
+    /// test sharing the lock.
+    static SAFE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII scope-guard that snapshots — and on drop restores — the
+    /// `SAFE` env var. Panic-safe by construction: drop runs on both
+    /// normal scope exit and unwind, so a test that panics mid-body
+    /// cannot leak `SAFE=<sentinel>` to any subsequent test in the same
+    /// process. Callers hold [`SAFE_ENV_LOCK`] for the duration of the
+    /// scope.
+    struct SafeEnvSnapshot {
+        prior: std::result::Result<String, std::env::VarError>,
+    }
+
+    impl SafeEnvSnapshot {
+        fn capture() -> Self {
+            Self {
+                prior: std::env::var("SAFE"),
+            }
+        }
+    }
+
+    impl Drop for SafeEnvSnapshot {
+        fn drop(&mut self) {
+            match &self.prior {
+                Ok(v) => std::env::set_var("SAFE", v),
+                Err(_) => std::env::remove_var("SAFE"),
+            }
+        }
+    }
+
+    /// [`safe_mode_from_env`] returns `true` when the `SAFE` env var
+    /// is unset. Pins the default-TRUE half of the contract every
+    /// pre-lift consumer (`main.rs::main`'s `Commands::Rollout` arm,
+    /// `commands/github_runner_ci.rs::is_safe_mode`) spelled inline
+    /// as `.unwrap_or(true)` — an accidental default flip to `false`
+    /// would silently disable rollout retries and Attic-login/push
+    /// retries on every direct-CLI call where the operator did not
+    /// explicitly export `SAFE`, the exact scenario the wrapper
+    /// entrypoints treat as "retries on".
+    #[test]
+    fn safe_mode_from_env_defaults_to_true_when_unset() {
+        let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _snapshot = SafeEnvSnapshot::capture();
+        std::env::remove_var("SAFE");
+        assert!(
+            safe_mode_from_env(),
+            "safe_mode_from_env() must default to `true` when `SAFE` \
+             is unset — matches every pre-lift consumer's \
+             `.unwrap_or(true)` on the `Err` case."
+        );
+    }
+
+    /// [`safe_mode_from_env`] returns `false` when `SAFE=false`.
+    /// Pins the disable-with-`false` half; a drop of the `!= \"false\"`
+    /// clause would silently keep retries on even when the operator
+    /// explicitly disabled them.
+    #[test]
+    fn safe_mode_from_env_is_false_for_literal_false() {
+        let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _snapshot = SafeEnvSnapshot::capture();
+        std::env::set_var("SAFE", "false");
+        assert!(
+            !safe_mode_from_env(),
+            "safe_mode_from_env() must return `false` for `SAFE=false` \
+             — the disable-with-`false` half of the contract every \
+             pre-lift consumer spelled inline as `val != \"false\"`."
+        );
+    }
+
+    /// [`safe_mode_from_env`] returns `false` when `SAFE=0`. Pins the
+    /// disable-with-`0` half; a drop of the `!= \"0\"` clause would
+    /// silently keep retries on for operators who spell the disable as
+    /// the numeric zero.
+    #[test]
+    fn safe_mode_from_env_is_false_for_literal_zero() {
+        let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _snapshot = SafeEnvSnapshot::capture();
+        std::env::set_var("SAFE", "0");
+        assert!(
+            !safe_mode_from_env(),
+            "safe_mode_from_env() must return `false` for `SAFE=0` \
+             — the disable-with-`0` half of the contract every \
+             pre-lift consumer spelled inline as `val != \"0\"`."
+        );
+    }
+
+    /// [`safe_mode_from_env`] returns `false` for `SAFE=FALSE`,
+    /// `SAFE=False`, and every other mixed-case spelling of `false`.
+    /// Pins the `to_lowercase()` normalization step every pre-lift
+    /// consumer spelled inline as `let val = v.to_lowercase();` — a
+    /// drop of the normalizer would silently keep retries on for
+    /// operators who capitalize the disable value.
+    #[test]
+    fn safe_mode_from_env_is_false_case_insensitive() {
+        let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _snapshot = SafeEnvSnapshot::capture();
+        for spelling in ["FALSE", "False", "fAlSe", "FALSe"] {
+            std::env::set_var("SAFE", spelling);
+            assert!(
+                !safe_mode_from_env(),
+                "safe_mode_from_env() must return `false` for \
+                 `SAFE={spelling}` — the `to_lowercase()` normalization \
+                 step every pre-lift consumer spelled inline via `let \
+                 val = v.to_lowercase();`.",
+            );
+        }
+    }
+
+    /// [`safe_mode_from_env`] returns `true` when `SAFE=""` (an
+    /// operator's explicit-empty export). Pins the empty-is-truthy
+    /// parity: `"".to_lowercase()` is `""`, which satisfies both `!=
+    /// "false"` and `!= "0"`, so the empty-string case lands on the
+    /// default-true branch alongside an unset env var. A future
+    /// primitive refinement that swapped the shape for a
+    /// `.ok().filter(|s| !s.is_empty()).map(...).unwrap_or(true)`
+    /// preserves this semantic; a swap to
+    /// `.ok().is_some_and(...)`-style dispatch would flip it and
+    /// silently misroute every `SAFE=""` export.
+    #[test]
+    fn safe_mode_from_env_is_true_for_empty_string() {
+        let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _snapshot = SafeEnvSnapshot::capture();
+        std::env::set_var("SAFE", "");
+        assert!(
+            safe_mode_from_env(),
+            "safe_mode_from_env() must return `true` for `SAFE=\"\"` \
+             — an empty string is neither `\"false\"` nor `\"0\"`, so \
+             the empty-string case must land on the default-true branch."
+        );
+    }
+
+    /// [`safe_mode_from_env`] returns `true` for any value that is
+    /// neither `false` (any case) nor `0`. Pins the closed-set
+    /// disable contract: only the two literal disable values flip
+    /// retries off, and every other value (including plausible
+    /// alternate spellings like `no`, `off`, `disable`, or a raw `1`)
+    /// leaves retries ON. A future widening of the disable set to
+    /// include e.g. `no` / `off` must land at the primitive body and
+    /// break this shield, forcing an explicit contract update — not
+    /// drift silently at one consumer only.
+    #[test]
+    fn safe_mode_from_env_is_true_for_unknown_value() {
+        let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _snapshot = SafeEnvSnapshot::capture();
+        for spelling in ["no", "off", "disable", "1", "true", "yes"] {
+            std::env::set_var("SAFE", spelling);
+            assert!(
+                safe_mode_from_env(),
+                "safe_mode_from_env() must return `true` for \
+                 `SAFE={spelling}` — only literal `false` (any case) \
+                 and literal `0` flip retries off; every other value \
+                 leaves the default-true branch selected.",
+            );
+        }
     }
 
     /// The monorepo terminal fires at the `{product}` node when its parent
