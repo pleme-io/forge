@@ -290,17 +290,76 @@ pub fn bump(
         // `--level` alone bumps from the manifest and can land behind a
         // published release.
         None if seed_from_tags => {
-            let max_released = crate::git::max_released_version("v", Some(dir))?;
-            let tag_exists =
-                |v: &str| crate::git::tag_exists_in(&format!("v{}", v), Some(dir)).unwrap_or(false);
-            let next = version::next_free_version(&old_version, level, &max_released, &tag_exists)?;
-            if !max_released.is_empty() {
+            // The FULLY-TYPED bridge: `max_released_version_typed` returns
+            // an `Option<SemverTriple>` at the boundary and
+            // `next_free_version_all_typed` takes typed
+            // (`SemverTriple`, `BumpLevel`, `Option<SemverTriple>`,
+            // `&dyn Fn(SemverTriple) -> bool`) all the way through the
+            // seeding-and-collision arithmetic, returning a typed
+            // `SemverTriple` winner. Pre-lift this branch called the
+            // stringly `max_released_version` (`Option<SemverTriple>`
+            // rendered to a `String` via `to_string()`, "no tag"
+            // projected to the `""` empty-string sentinel) and the
+            // stringly `next_free_version` (re-parsed `manifest_version`
+            // and `max_released` via `parse_semver_typed` at every call,
+            // wrapped the string-surface `tag_exists` inside a
+            // `|t: SemverTriple| tag_exists(&t.to_string())` bridge
+            // that fired one `to_string()` per iteration on the
+            // pathological path, and re-rendered the typed winner to a
+            // `String` at the return) — three parse/render round-trips
+            // across a boundary the typed peers below the surface had
+            // already opened.
+            //
+            // Post-lift there is ONE typed parse per side (the
+            // `parse_semver_typed` on `old_version` and the
+            // `BumpLevel::from_str` on `level`), the collision-skip
+            // loop runs against a `HashSet`-style typed predicate at
+            // zero allocations per iteration, and the winner is
+            // available as a typed `SemverTriple` that renders to
+            // `String` exactly once at the `to_string()` boundary
+            // projection at the end of this arm — the boundary the
+            // splice-and-seal below needs. The "no released tag yet"
+            // state is `Option::None` at the type level, not the `""`
+            // empty-string sentinel the pre-lift `if
+            // !max_released.is_empty()` gate had to redeem at every
+            // consumer.
+            //
+            // THEORY.md §V.4 typed primitives: the seeding-decision
+            // arm at the last remaining stringly boundary in the
+            // release-arithmetic surface routes through the
+            // fully-typed peers end-to-end. THEORY.md §VI.1 one-oracle
+            // discipline: the seeding-and-collision loop still lives
+            // at ONE body (`next_free_version_all_typed` in
+            // `version.rs`) that both this typed caller and the
+            // stringly `next_free_version` / `next_free_version_typed`
+            // wrappers delegate through, so the migration is a
+            // caller-side lift with no forked oracle. Sibling of the
+            // six b68778b/b3527d3/c8bcdd5/eec7dbe/85f9b3d/c96c115
+            // typed-peer lifts on `parse_semver`, `bump_semver`,
+            // `bump_seed`, `next_free_version`, `SemverTriple::bumped`,
+            // and `max_released_version` that opened this typed peer
+            // path — this commit closes the last stringly caller
+            // that redeemed a rendered/re-parsed round-trip across
+            // the boundary.
+            let manifest = version::parse_semver_typed(&old_version)?;
+            let level_typed: version::BumpLevel = level.parse()?;
+            let max_released = crate::git::max_released_version_typed("v", Some(dir))?;
+            let tag_exists = |t: version::SemverTriple| {
+                crate::git::tag_exists_in(&format!("v{t}"), Some(dir)).unwrap_or(false)
+            };
+            let next = version::next_free_version_all_typed(
+                manifest,
+                level_typed,
+                max_released,
+                &tag_exists,
+            )?;
+            if let Some(max_r) = max_released {
                 info!(
                     "{}: seeding from max(manifest {}, released {}) -> {}",
-                    gem_name, old_version, max_released, next
+                    gem_name, old_version, max_r, next
                 );
             }
-            next
+            next.to_string()
         }
         None => version::bump_semver(&old_version, level)?,
     };
@@ -917,6 +976,114 @@ mod tests {
             3,
             "all three status-only spawns (`gem build` / `gem push` / \
              `bundle exec rake spec`)",
+        );
+    }
+
+    /// Whole-body shield: the `seed_from_tags` arm of [`super::bump`]
+    /// MUST route the tag-scan and the seeding-and-collision arithmetic
+    /// through the FULLY-TYPED peers
+    /// ([`crate::git::max_released_version_typed`] and
+    /// [`crate::version::next_free_version_all_typed`]), never the
+    /// stringly wrappers ([`crate::git::max_released_version`] /
+    /// [`crate::version::next_free_version`]) that render/re-parse a
+    /// `SemverTriple` across the boundary — three parse/render round-
+    /// trips per invocation on the pathological path — even though
+    /// the loop body itself never needs a string layer.
+    ///
+    /// Sibling of the six typed-peer lifts on the version.rs surface
+    /// (b68778b next_free_version_typed → next_free_version_all_typed,
+    /// b3527d3 max_released_version → max_released_version_typed,
+    /// c8bcdd5 bump_seed → bump_seed_typed, eec7dbe bump_semver_typed
+    /// → SemverTriple::bumped, 85f9b3d parse_semver →
+    /// parse_semver_typed, c96c115 next_free_version →
+    /// next_free_version_typed): closes the last stringly caller in
+    /// the release-arithmetic surface at the exact call site that
+    /// used to redeem a `SemverTriple → String → SemverTriple`
+    /// round-trip at every seeding decision.
+    ///
+    /// Fail-before-pass-after: with the pre-lift stringly bodies
+    /// (`crate::git::max_released_version("v", Some(dir))` /
+    /// `version::next_free_version(&old_version, level, &max_released,
+    /// &tag_exists)`) restored, the four `contains` / `!contains`
+    /// assertions below fire. Restoring the fully-typed routing
+    /// returns the shield to green.
+    ///
+    /// The scan bounds cover only [`super::bump`]'s body (from its
+    /// signature to the first `\n}\n` after its opening brace), so
+    /// this shield's own docstring — which names the forbidden
+    /// stringly forms verbatim — is out of scope. The stringly
+    /// wrappers themselves remain callable for other callers (an
+    /// FFI boundary that already speaks `&str`, a future consumer
+    /// that reads from a `HashMap<String, ...>`); this shield only
+    /// certifies that `bump`'s `seed_from_tags` arm — the ONE
+    /// production caller in the crate — reaches the typed peers
+    /// directly.
+    ///
+    /// THEORY.md §V.4 typed primitives: the seeding-decision arm at
+    /// the last remaining stringly boundary in the release-
+    /// arithmetic surface routes through the fully-typed peers
+    /// end-to-end. THEORY.md §VI.1 one-oracle discipline: the
+    /// seeding-and-collision loop still lives at ONE body
+    /// (`next_free_version_all_typed`) that both this typed caller
+    /// and the stringly wrappers delegate through, so the migration
+    /// is a caller-side lift with no forked oracle.
+    #[test]
+    fn bump_seed_from_tags_routes_through_fully_typed_peers_not_stringly_boundary() {
+        const SOURCE: &str = include_str!("gem.rs");
+        let signature = "pub fn bump(";
+        let start = SOURCE
+            .find(signature)
+            .expect("must find the public signature of gem::bump");
+        let after_brace = SOURCE[start..]
+            .find(" {\n")
+            .map(|o| start + o + 3)
+            .expect("must find the opening brace for gem::bump");
+        let body_end = SOURCE[after_brace..]
+            .find("\n}\n")
+            .map(|o| after_brace + o)
+            .expect("must find the closing brace for gem::bump");
+        let body = &SOURCE[after_brace..body_end];
+
+        // The stringly wrappers must NOT appear in gem::bump's body.
+        // `max_released_version(` matches only the stringly wrapper
+        // because the typed peer spells `max_released_version_typed(`
+        // — the `(` immediately after `_version` distinguishes them.
+        // Same discipline on `next_free_version(` vs
+        // `next_free_version_all_typed(`.
+        assert!(
+            !body.contains("crate::git::max_released_version("),
+            "gem::bump's seed_from_tags arm must NOT call the stringly \
+             `crate::git::max_released_version` wrapper — the typed peer \
+             `max_released_version_typed` returns `Option<SemverTriple>` \
+             at the boundary and skips the render-to-string projection. \
+             Got body: {body:?}"
+        );
+        assert!(
+            !body.contains("version::next_free_version("),
+            "gem::bump's seed_from_tags arm must NOT call the stringly \
+             `version::next_free_version` wrapper — the typed peer \
+             `next_free_version_all_typed` takes typed (`SemverTriple`, \
+             `BumpLevel`, `Option<SemverTriple>`, typed predicate) all \
+             the way through and skips the parse-render round-trips at \
+             the boundary. Got body: {body:?}"
+        );
+
+        // The fully-typed peers MUST appear in gem::bump's body —
+        // guards against a regression that dropped both stringly
+        // calls without wiring the typed replacements (which would
+        // leave the negative scan trivially satisfied by absence).
+        assert!(
+            body.contains("crate::git::max_released_version_typed("),
+            "gem::bump's seed_from_tags arm must call \
+             `crate::git::max_released_version_typed` — the typed peer \
+             that returns `Option<SemverTriple>` at the boundary. \
+             Got body: {body:?}"
+        );
+        assert!(
+            body.contains("version::next_free_version_all_typed("),
+            "gem::bump's seed_from_tags arm must call \
+             `version::next_free_version_all_typed` — the fully-typed \
+             peer that takes typed values end-to-end. Got body: {body:?}"
         );
     }
 }
