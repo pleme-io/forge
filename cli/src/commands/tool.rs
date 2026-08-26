@@ -7,6 +7,7 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
+use std::str::FromStr;
 use tracing::{info, warn};
 
 use crate::git;
@@ -15,6 +16,72 @@ use crate::repo::get_tool_path;
 use crate::retry::run_inherited_status_sync;
 use crate::store_path::StorePath;
 use crate::version;
+
+/// The closed `--language` domain every non-`lock` `tool` command reads.
+///
+/// The stringly `&str` grammar `"rust" | "zig"` is enforced at ONE site
+/// — the [`FromStr`] impl below — with the canonical
+/// `"Unsupported language '{}' — use rust or zig"` bail wording that
+/// FOUR pre-lift `match language {...}` arms in this module each
+/// spelled verbatim (`bump`, `check`, `regenerate`, and the private
+/// `read_version_for_language` helper). Every consumer parses ONCE
+/// at the entry-point (`let lang: ToolLanguage = language.parse()?;`)
+/// and matches on the typed variant — exhaustive, so adding a variant
+/// is a compile error at every consumer rather than a silent branch
+/// that reads as "handled" without doing anything, and the four
+/// duplicated bail literals collapse to ONE.
+///
+/// # Why this closed enum and not [`crate::error::ToolError::UnsupportedLanguage`]
+///
+/// [`crate::error::ToolError::UnsupportedLanguage`] is the anyhow-boundary
+/// typed error variant a future consumer would pattern-match on across
+/// the `Result` boundary. It carries the offending language `String` but
+/// does NOT carry the `use rust or zig` remediation clause the four
+/// pre-lift bail sites spelled verbatim — its `Display` reads
+/// `"Unsupported language: <language>"` (no em-dash tail, colon separator,
+/// no closed-domain hint). Preserving the four sites' byte-identical
+/// operator-facing wording under a `bail!` inside [`FromStr::from_str`]
+/// is the direct lift; a switch to the typed error would silently drop
+/// the remediation clause the four sites' users read in their terminals,
+/// which is a semantic change disguised as a typed lift.
+///
+/// # Why `lock` retains its stringly match
+///
+/// `lock`'s `match language {...}` at line ~397 reads a WIDER grammar
+/// (`"rust" | "zig" | "nix" | other`): the `"nix"` variant means
+/// build-only (the nix build itself IS the test), and `other` triggers
+/// a "(no test runner for {other})" info-log + `"skipped"` status
+/// rather than a bail. Neither fits the closed two-variant domain a
+/// [`FromStr`] on this enum carves out, so `lock` stays stringly and
+/// the shield below excludes it from the "must route through
+/// [`ToolLanguage`]" scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolLanguage {
+    /// Rust manifest (`Cargo.toml`) and toolchain (`cargo`).
+    Rust,
+    /// Zig manifest (`build.zig.zon`) and toolchain (`zig`).
+    Zig,
+}
+
+impl FromStr for ToolLanguage {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "rust" => Ok(Self::Rust),
+            "zig" => Ok(Self::Zig),
+            _ => bail!("Unsupported language '{}' — use rust or zig", s),
+        }
+    }
+}
+
+impl std::fmt::Display for ToolLanguage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Rust => "rust",
+            Self::Zig => "zig",
+        })
+    }
+}
 
 /// Resolve the `cargo` binary via the `CARGO` env override, falling
 /// back to PATH. Every `cargo` spawn in this module reads through this
@@ -243,8 +310,9 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
         bail!("Working directory not found: {}", working_dir);
     }
 
-    match language {
-        "rust" => {
+    let lang: ToolLanguage = language.parse()?;
+    match lang {
+        ToolLanguage::Rust => {
             // PORTED 1:1 off `cargo set-version` (cargo-edit) onto forge's own
             // typed writer, 2026-08-17. Deliberately semantics-preserving: the
             // new version is still `bump_semver(manifest, level)`, exactly what
@@ -284,14 +352,13 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
             let new_ver = version::read_cargo_version(&dir.join("Cargo.toml"))?;
             info!("{}: bumped to {} ({})", name, new_ver, level);
         }
-        "zig" => {
+        ToolLanguage::Zig => {
             let zon_path = dir.join("build.zig.zon");
             let old_ver = version::read_zig_version(&zon_path)?;
             let new_ver = version::bump_semver(&old_ver, level)?;
             version::write_zig_version(&zon_path, &new_ver)?;
             info!("{}: {} → {} ({})", name, old_ver, new_ver, level);
         }
-        _ => bail!("Unsupported language '{}' — use rust or zig", language),
     }
 
     Ok(())
@@ -304,8 +371,9 @@ pub fn check(name: &str, language: &str, working_dir: &str) -> Result<()> {
         bail!("Working directory not found: {}", working_dir);
     }
 
-    match language {
-        "rust" => {
+    let lang: ToolLanguage = language.parse()?;
+    match lang {
+        ToolLanguage::Rust => {
             let cargo = cargo_bin();
             info!("{}: running cargo fmt --check...", name);
             run_cmd(dir, &cargo, &["fmt", "--check"])?;
@@ -321,7 +389,7 @@ pub fn check(name: &str, language: &str, working_dir: &str) -> Result<()> {
 
             info!("{}: all checks passed", name);
         }
-        "zig" => {
+        ToolLanguage::Zig => {
             let zig = zig_bin();
             info!("{}: running zig build...", name);
             run_cmd(dir, &zig, &["build"])?;
@@ -331,7 +399,6 @@ pub fn check(name: &str, language: &str, working_dir: &str) -> Result<()> {
 
             info!("{}: all checks passed", name);
         }
-        _ => bail!("Unsupported language '{}' — use rust or zig", language),
     }
 
     Ok(())
@@ -344,17 +411,17 @@ pub fn regenerate(language: &str, working_dir: &str) -> Result<()> {
         bail!("Working directory not found: {}", working_dir);
     }
 
-    match language {
-        "rust" => {
+    let lang: ToolLanguage = language.parse()?;
+    match lang {
+        ToolLanguage::Rust => {
             let crate2nix = crate2nix_bin();
             info!("Running crate2nix generate...");
             run_cmd(dir, &crate2nix, &["generate"])?;
             info!("Cargo.nix regenerated");
         }
-        "zig" => {
+        ToolLanguage::Zig => {
             info!("No regeneration needed for Zig");
         }
-        _ => bail!("Unsupported language '{}' — use rust or zig", language),
     }
 
     Ok(())
@@ -363,10 +430,10 @@ pub fn regenerate(language: &str, working_dir: &str) -> Result<()> {
 // --- Helpers ---
 
 fn read_version_for_language(dir: &Path, language: &str) -> Result<String> {
-    match language {
-        "rust" => version::read_cargo_version(&dir.join("Cargo.toml")),
-        "zig" => version::read_zig_version(&dir.join("build.zig.zon")),
-        _ => bail!("Unsupported language '{}' — use rust or zig", language),
+    let lang: ToolLanguage = language.parse()?;
+    match lang {
+        ToolLanguage::Rust => version::read_cargo_version(&dir.join("Cargo.toml")),
+        ToolLanguage::Zig => version::read_zig_version(&dir.join("build.zig.zon")),
     }
 }
 
@@ -1386,6 +1453,165 @@ mod status_spawn_routing_tests {
             "all four status-only spawns (`gh release create <tag>` / \
              `crate2nix generate` / `cargo clippy -- -D warnings` / \
              the `run_cmd(program, args)` helper body)",
+        );
+    }
+}
+
+#[cfg(test)]
+mod language_typed_dispatch_tests {
+    use super::*;
+
+    /// Sanity: [`ToolLanguage::from_str`] recognizes the two members
+    /// of the closed `--language` domain the FOUR pre-lift `match
+    /// language { "rust" | "zig" | _ }` arms each spelled.
+    #[test]
+    fn tool_language_from_str_parses_rust_and_zig() {
+        assert_eq!(ToolLanguage::from_str("rust").unwrap(), ToolLanguage::Rust);
+        assert_eq!(ToolLanguage::from_str("zig").unwrap(), ToolLanguage::Zig);
+        assert_eq!("rust".parse::<ToolLanguage>().unwrap(), ToolLanguage::Rust);
+        assert_eq!("zig".parse::<ToolLanguage>().unwrap(), ToolLanguage::Zig);
+    }
+
+    /// The bail wording the ONE [`FromStr`] impl emits is
+    /// byte-identical to the wording each of the FOUR pre-lift sites
+    /// (`bump`, `check`, `regenerate`, `read_version_for_language`)
+    /// spelled verbatim as `bail!("Unsupported language '{}' — use
+    /// rust or zig", language)`. A downstream operator's
+    /// log-scraping automation (or a CI action grepping the
+    /// terminal on failure) reads this string, so any drift (colon
+    /// vs em-dash, dropped remediation clause, quote-style change,
+    /// switch to the sibling [`crate::error::ToolError::UnsupportedLanguage`]
+    /// variant whose `Display` reads `"Unsupported language: <language>"`)
+    /// is a semantic regression pinned here.
+    #[test]
+    fn tool_language_from_str_bail_wording_matches_pre_lift_verbatim() {
+        // `cobol` mirrors the sibling `error::test_tool_error_variants`
+        // probe at `cli/src/error.rs:1478` — same shape, same input,
+        // same "unknown language" surface, different (typed) error.
+        let err = ToolLanguage::from_str("cobol").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Unsupported language 'cobol' — use rust or zig",
+            "the FromStr bail wording must be byte-identical to the \
+             pre-lift `match language {{ _ => bail!(...) }}` message"
+        );
+
+        // Empty-string probe: pins the same wording under the shape
+        // a caller would hit if `--language` were an empty positional
+        // — still one the operator-facing message must name legibly.
+        let empty_err = ToolLanguage::from_str("").unwrap_err();
+        assert_eq!(
+            empty_err.to_string(),
+            "Unsupported language '' — use rust or zig",
+        );
+    }
+
+    /// The typed peer's [`Display`] output is the inverse of the
+    /// [`FromStr`] parse on well-formed input — the same round-trip
+    /// discipline every typed sum in this crate carries
+    /// ([`crate::version::BumpLevel`], [`crate::version::SemverTriple`]).
+    /// A future variant that added a [`Display`] arm without updating
+    /// the [`FromStr`] arm trips this shield at every variant.
+    #[test]
+    fn tool_language_display_round_trips_through_from_str() {
+        for lang in [ToolLanguage::Rust, ToolLanguage::Zig] {
+            let rendered = lang.to_string();
+            let reparsed: ToolLanguage = rendered
+                .parse()
+                .unwrap_or_else(|e| panic!("{rendered} must reparse: {e}"));
+            assert_eq!(
+                reparsed, lang,
+                "{lang:?}'s Display -> FromStr round-trip must be \
+                 identity; got {reparsed:?}"
+            );
+        }
+    }
+
+    /// Whole-module shield: the FOUR pre-lift `match language {
+    /// "rust" | "zig" | _ }` arms — `bump`, `check`, `regenerate`,
+    /// and the private `read_version_for_language` helper — each
+    /// route through [`ToolLanguage`]'s [`FromStr`] impl, so the
+    /// stringly `"Unsupported language '{}' — use rust or zig"` bail
+    /// literal lives at EXACTLY ONE code line (the [`FromStr`] body)
+    /// rather than being copy-edited across four sites the next time
+    /// the wording changes. Fail-before-pass-after: restoring the
+    /// pre-lift shape at any of the four consumer sites re-adds a
+    /// bail literal and trips the count-eq-1 assertion; deleting the
+    /// [`FromStr`] impl's bail literal drops the count to zero and
+    /// trips the ≥1 sibling assertion. The positive-side ≥4
+    /// `let lang: ToolLanguage = language.parse()?;` scan pins that
+    /// a regression that dropped every delegation cannot leave the
+    /// count-eq-1 needle trivially satisfied by absence.
+    ///
+    /// `lock`'s wider grammar (`"rust" | "zig" | "nix" | other`) is
+    /// EXCLUDED — its `match language {}` at ~line 464 retains the
+    /// stringly form under the closed-two-variant carve-out named in
+    /// the [`ToolLanguage`] docstring. The bail-literal needle this
+    /// shield scans (verbatim `"Unsupported language '{}' — use rust
+    /// or zig"`) is NOT one `lock`'s `other` arm spells (it emits
+    /// `info!("  (no test runner for {other})")` + `"skipped"` and
+    /// falls through without bailing), so `lock` is silent under this
+    /// scan whether it lives above or below the cutoff.
+    ///
+    /// Scan bounds via [`crate::test_support::module_body_before_tests`],
+    /// which slices to the FIRST `\n#[cfg(test)]\nmod tests {` marker
+    /// (the sibling opener at line ~641, above every `#[cfg(test)]`
+    /// block in this file). This shield's own body — the string
+    /// literals `"Unsupported language '{}' — use rust or zig"` and
+    /// `"let lang: ToolLanguage = language.parse()?;"` passed to
+    /// `code_line_hits`, the docstring mentions of the forbidden
+    /// wording — lives BELOW that marker in its own
+    /// `mod language_typed_dispatch_tests {}` block, so it stays out
+    /// of scope and cannot false-match itself. Both scans route
+    /// through [`crate::test_support::code_line_hits`] for
+    /// anti-docstring-self-match discipline: the docstring mentions
+    /// of `"Unsupported language '{}' — use rust or zig"` at
+    /// `ToolLanguage`'s definition site (lines ~24 and ~41 pre-lift)
+    /// are `///` prefixed and skipped by construction.
+    #[test]
+    fn tool_language_bail_wording_lives_at_exactly_one_site() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("tool.rs"),
+            "commands/tool.rs",
+        );
+
+        let bail_needle = "Unsupported language '{}' — use rust or zig";
+        let bail_hits = crate::test_support::code_line_hits(body, bail_needle);
+        assert_eq!(
+            bail_hits.len(),
+            1,
+            "commands/tool.rs must spell the `{bail_needle}` bail \
+             wording at EXACTLY one code line — the ONE `impl \
+             FromStr for ToolLanguage` body — not the FOUR pre-lift \
+             sites (`bump`, `check`, `regenerate`, \
+             `read_version_for_language`) that each spelled it \
+             verbatim. Hits: {bail_hits:?}"
+        );
+
+        assert!(
+            body.contains("pub enum ToolLanguage {"),
+            "commands/tool.rs must define `pub enum ToolLanguage {{ }}` \
+             — the typed sum every non-`lock` `--language` consumer \
+             parses through."
+        );
+
+        assert!(
+            body.contains("impl FromStr for ToolLanguage {"),
+            "commands/tool.rs must impl `FromStr for ToolLanguage` — \
+             the ONE site that enforces the `\"rust\" | \"zig\"` \
+             grammar and emits the canonical bail wording."
+        );
+
+        let parse_needle = "let lang: ToolLanguage = language.parse()?;";
+        let parse_hits = crate::test_support::code_line_hits(body, parse_needle);
+        assert!(
+            parse_hits.len() >= 4,
+            "commands/tool.rs must call `{parse_needle}` at ≥4 code \
+             lines — one per non-`lock` consumer site (`bump`, \
+             `check`, `regenerate`, `read_version_for_language`) — \
+             so a regression that dropped the delegation cannot \
+             leave the `Unsupported language` scan trivially \
+             satisfied by absence. Hits: {parse_hits:?}"
         );
     }
 }
