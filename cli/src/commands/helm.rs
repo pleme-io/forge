@@ -1456,6 +1456,43 @@ pub fn bump(
         bail!("Library chart not found: {}", lib_chart_yaml.display());
     }
 
+    // Parse `--level` at ONE top-of-fn site (before the manifest read via
+    // [`version::read_chart_version`] and before the writer + dependency
+    // walk), then thread the typed [`version::BumpLevel`] through the bump
+    // arm below via [`version::bump_semver_typed`]. Pre-lift the arm called
+    // the stringly [`version::bump_semver`] wrapper, which parses
+    // `level: &str` into [`version::BumpLevel`] INSIDE its own body via
+    // [`version::BumpLevel::from_str`] — so the level grammar was re-parsed
+    // at one further consumer, and an invalid `--level` fired AFTER the
+    // charts-dir walk + Chart.yaml locate + [`version::read_chart_version`]
+    // read (a wasted three-step I/O on a bogus input the parse alone could
+    // have refused).
+    //
+    // Post-lift the grammar is parsed at ONE site (this `level.parse()?`
+    // call) and the typed value dispatches directly to the const
+    // arithmetic on [`version::SemverTriple::bumped`] through the typed
+    // peer. This mirrors the sibling `commands/tool.rs::bump` (commit
+    // fa0c6d9) and `commands/gem.rs::bump` (commit bb87143) discipline
+    // which established the same top-of-fn parse and typed-peer dispatch
+    // off the same forbidden stringly-wrapper shape. The pre-lift shield
+    // [`helm_bump_rejects_unknown_level_with_canonical_wording`] pins the
+    // wording of the parse-error surface; hoisting the parse above the
+    // manifest read preserves that surface (invalid levels still bail
+    // with the byte-identical wording [`version::BumpLevel::from_str`]
+    // emits), it only moves the parse forward in the fn.
+    //
+    // THEORY.md §V.4 typed primitives: the `--level` argument surface at
+    // `commands/helm.rs::bump` now carries a typed peer parsed at ONE
+    // site (this call), matching the sibling `commands/tool.rs::bump`
+    // top-of-fn boundary parse.
+    // THEORY.md §VI.1 one-oracle discipline: the level grammar (which
+    // strings map to which [`version::BumpLevel`] variant) lives at ONE
+    // body ([`version::BumpLevel::from_str`]) that this fn — and every
+    // sibling `bump` fn — parses through, rather than at N stringly-
+    // wrapper call sites that each re-derive it via
+    // [`version::bump_semver`].
+    let level_typed: version::BumpLevel = level.parse()?;
+
     // Read current version. Routed through `version::read_chart_version` —
     // the family's shared form-preserving reader that mirrors the writer
     // `write_chart_version` this bump already rides. The pre-lift shape
@@ -1479,7 +1516,10 @@ pub fn bump(
     // Matches the routing `gem::bump` (commands/gem.rs) and `tool::bump`
     // (commands/tool.rs) already perform, closing this site's drift onto the
     // typed `BumpLevel` grammar named at one site (`BumpLevel::from_str`).
-    let new_version = version::bump_semver(&old_version, level)?;
+    // Consumes the typed `level_typed` bound at the top-of-fn boundary parse,
+    // so the level grammar is parsed at ONE site rather than being re-derived
+    // inside the stringly `version::bump_semver` wrapper per consumer.
+    let new_version = version::bump_semver_typed(&old_version, level_typed)?;
 
     info!("New version:     {}", new_version);
 
@@ -3104,6 +3144,133 @@ mod bump_routing_tests {
             after, unrelated_content,
             "a chart that does not depend on the library must be left \
              byte-for-byte untouched"
+        );
+    }
+
+    /// Regression-shield: [`super::bump`]'s function body MUST parse
+    /// `--level` at ONE top-of-fn site
+    /// (`let level_typed: version::BumpLevel = level.parse()?;`) and
+    /// dispatch its single bump call through the typed peer
+    /// [`crate::version::bump_semver_typed`], NEVER through the stringly
+    /// wrapper [`crate::version::bump_semver`] that re-parses the level
+    /// grammar inside its own body.
+    ///
+    /// Sibling of
+    /// [`crate::commands::tool::bump_level_typed_dispatch_tests`]
+    /// (commit fa0c6d9) at the two-consumer `commands/tool.rs::bump`
+    /// surface (Rust arm + Zig arm) and
+    /// `commands/gem.rs::tests::bump_routes_level_through_typed_peer_at_exactly_one_boundary_parse`
+    /// (commit bb87143) at the one-fallback-arm gem surface. Same
+    /// discipline: parse at the boundary, thread the typed variant
+    /// through every consumer, so a future grammar extension (a
+    /// `Prerelease` variant strictly below
+    /// [`crate::version::BumpLevel::Patch`], an `Epoch` ceiling strictly
+    /// above [`crate::version::BumpLevel::Major`] for semver4 /
+    /// `0ver`-style incompatible-by-design rewrites) is a compile error
+    /// at every consumer the exhaustive match on the typed sum reaches,
+    /// rather than a silent parse-error surface a stringly consumer
+    /// would leave unchecked.
+    ///
+    /// Negative side: pins that `version::bump_semver(&` — the
+    /// stringly-wrapper call form — does NOT appear as executable code
+    /// inside [`super::bump`]'s body. Positive side: pins that (a)
+    /// `version::bump_semver_typed(&` appears at EXACTLY one code line
+    /// (the sole bump arm at what was the pre-lift
+    /// `let new_version = version::bump_semver(&old_version, level)?;`
+    /// site) so a regression that dropped the delegation cannot leave
+    /// the negative scan trivially satisfied by absence, and a
+    /// regression that duplicated it into (say) an added second bump
+    /// path is caught the same way; and (b)
+    /// `let level_typed: version::BumpLevel = level.parse()?;` — the
+    /// typed parse itself — appears at EXACTLY one code line (the
+    /// top-of-fn boundary parse, placed one line below the
+    /// `lib_chart_yaml.exists()` bail and above
+    /// [`crate::version::read_chart_version`]). Both scans route through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-self-
+    /// match discipline: the `//` narration above the boundary parse
+    /// necessarily mentions the forbidden `version::bump_semver` wrapper
+    /// by name as the trap the lift closes, and those `//` prefixes are
+    /// skipped by construction.
+    ///
+    /// The behavioral sibling
+    /// [`helm_bump_routes_through_bump_semver_typed_at_every_variant`]
+    /// (above) drives `super::bump` end-to-end at every
+    /// [`crate::version::BumpLevel`] variant and asserts the result
+    /// matches [`crate::version::bump_semver_typed`]'s direct
+    /// arithmetic; this shield closes the structural side of the same
+    /// contract so a regression that re-fuses the stringly wrapper into
+    /// the body fails at test-time on the source scan even before the
+    /// behavioral test's `bump_semver_typed` equality would notice
+    /// (both would; the source scan diagnoses the site by line, the
+    /// behavioral test only diagnoses the value).
+    ///
+    /// Fail-before-pass-after: restoring the pre-lift shape at the bump
+    /// arm (`let new_version = version::bump_semver(&old_version, level)?;`)
+    /// fires the negative scan by naming the forbidden
+    /// `version::bump_semver(&` needle on an executable line, and drops
+    /// the positive `version::bump_semver_typed(&` count below the
+    /// pinned one; restoring the typed routing returns both scans to
+    /// green. Restoring the pre-lift shape at the parse site
+    /// (dropping the top-of-fn parse and re-inlining a per-arm
+    /// `let level_typed: version::BumpLevel = level.parse()?;` at the
+    /// bump arm) fires the positive count above (the typed peer's
+    /// second argument would no longer type-check on the untyped
+    /// `level: &str` at the bump-arm site, so the parse cannot be
+    /// dropped without also reverting the typed call).
+    #[test]
+    fn bump_routes_level_through_typed_peer_at_exactly_one_boundary_parse() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/helm.rs",
+            "pub fn bump(",
+            "\nfn chart_version_at(",
+        );
+
+        let stringly_needle = "version::bump_semver(&";
+        let stringly_hits = crate::test_support::code_line_hits(body, stringly_needle);
+        assert!(
+            stringly_hits.is_empty(),
+            "commands/helm.rs::bump must NOT call the stringly \
+             `version::bump_semver` wrapper — the typed peer \
+             `version::bump_semver_typed` takes an already-parsed \
+             `BumpLevel` and dispatches directly to the const \
+             arithmetic on `SemverTriple::bumped`, so parsing lives \
+             at ONE top-of-fn site rather than being re-derived \
+             inside the wrapper per consumer. Hits: {stringly_hits:?}"
+        );
+
+        let typed_needle = "version::bump_semver_typed(&";
+        let typed_hits = crate::test_support::code_line_hits(body, typed_needle);
+        assert_eq!(
+            typed_hits.len(),
+            1,
+            "commands/helm.rs::bump must call `{typed_needle}` at \
+             EXACTLY one code line — the sole bump arm's \
+             `version::bump_semver_typed(&old_version, level_typed)?` \
+             — so a regression that dropped that delegation cannot \
+             leave the negative `version::bump_semver(&` scan \
+             trivially satisfied by absence, and a regression that \
+             duplicated it into an added second bump path is caught \
+             the same way. Hits: {typed_hits:?}"
+        );
+
+        let parse_needle = "let level_typed: version::BumpLevel = level.parse()?;";
+        let parse_hits = crate::test_support::code_line_hits(body, parse_needle);
+        assert_eq!(
+            parse_hits.len(),
+            1,
+            "commands/helm.rs::bump must parse `--level` at EXACTLY \
+             one top-of-fn site (`{parse_needle}`) — the boundary \
+             parse placed one line below the `lib_chart_yaml.exists()` \
+             bail and above `version::read_chart_version`. A \
+             regression that (a) dropped the boundary parse would \
+             fire the positive `version::bump_semver_typed(&` count \
+             above (the typed peer's second argument would no longer \
+             type-check on the untyped `level: &str`), and (b) \
+             duplicated it into a per-arm parse would fire this \
+             count above 1. Hits: {parse_hits:?}"
         );
     }
 }
