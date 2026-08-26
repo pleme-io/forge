@@ -549,8 +549,8 @@ pub fn push(
         Some(k) => k,
         None => {
             // Try reading from file
-            let home = std::env::var("HOME").context("HOME not set")?;
-            let key_file = Path::new(&home).join(".config/rubygems/api-key");
+            let key_file = crate::repo::path_from_env("HOME", "HOME not set")?
+                .join(".config/rubygems/api-key");
 
             if key_file.exists() {
                 std::fs::read_to_string(&key_file)
@@ -567,8 +567,7 @@ pub fn push(
     };
 
     // Write credentials file (gem push reads from ~/.gem/credentials)
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let gem_dir = Path::new(&home).join(".gem");
+    let gem_dir = crate::repo::path_from_env("HOME", "HOME not set")?.join(".gem");
     std::fs::create_dir_all(&gem_dir)?;
     let creds_path = gem_dir.join("credentials");
     let creds_content = format!("---\n:rubygems_api_key: {}\n", key);
@@ -1321,6 +1320,84 @@ mod tests {
              duplicated it back inside the seed_from_tags arm — the \
              pre-lift shape — would fire this count above 1. Hits: \
              {parse_hits:?}"
+        );
+    }
+
+    /// Whole-module shield: every `HOME` env-var read in
+    /// `commands/gem.rs` routes through
+    /// [`crate::repo::path_from_env`], never a hand-rolled inline
+    /// `std::env::var("HOME").context("HOME not set")?` +
+    /// `Path::new(&home).join(...)` stanza.
+    ///
+    /// Pre-lift `push` spelled the two-line stanza verbatim at TWO
+    /// sites — the API-key file resolve
+    /// (`Path::new(&home).join(".config/rubygems/api-key")`) and the
+    /// credentials-dir resolve (`Path::new(&home).join(".gem")`). Both
+    /// consumers now delegate to
+    /// `crate::repo::path_from_env("HOME", "HOME not set")?.join(...)`,
+    /// the shared primitive that owns the `env::var` read at ONE body
+    /// across the crate (sibling of the SERVICE_DIR consumers landed
+    /// at ab5a8db / e9e0c5b / d8e6626 / 1452f53).
+    ///
+    /// Scan bounds at the whole-module boundary via
+    /// [`crate::test_support::module_body_before_first_cfg_test`] so
+    /// this shield's docstring mentions of `env::var("HOME")` — living
+    /// inside the `#[cfg(test)]` block below that first marker — stay
+    /// out of scope. Every hit routes through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline.
+    #[test]
+    fn test_gem_home_env_routes_through_path_from_env() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("gem.rs"),
+            "commands/gem.rs",
+        );
+        // Negative side: the raw `env::var("HOME")` needle must NOT
+        // appear anywhere in the module body post-lift — every read
+        // routes through `crate::repo::path_from_env`. Substring match
+        // catches both `std::env::var("HOME")` and `env::var("HOME")`.
+        let raw_env_needle = "env::var(\"HOME\")";
+        let env_hits = crate::test_support::code_line_hits(body, raw_env_needle);
+        assert!(
+            env_hits.is_empty(),
+            "commands/gem.rs must NOT spell `{raw_env_needle}` inline \
+             in the module body — every consumer must route through \
+             `crate::repo::path_from_env`. Found {} code-line hit(s): \
+             {env_hits:#?}",
+            env_hits.len()
+        );
+        // Positive side: the delegating call to
+        // `crate::repo::path_from_env("HOME"` must appear at EXACTLY
+        // TWO code lines — the two `push` consumer sites. A regression
+        // that dropped either delegation leaves the negative scan
+        // trivially satisfied by absence.
+        let delegate_needle = "crate::repo::path_from_env(\"HOME\"";
+        let delegate_hits = crate::test_support::code_line_hits(body, delegate_needle);
+        assert_eq!(
+            delegate_hits.len(),
+            2,
+            "commands/gem.rs must delegate `HOME` resolution to \
+             `crate::repo::path_from_env(\"HOME\", ...)` at EXACTLY \
+             two code lines — the two `push` consumer sites (API-key \
+             file resolve and credentials-dir resolve). Found {} \
+             code-line hit(s): {delegate_hits:#?}",
+            delegate_hits.len()
+        );
+        // Wording-preservation side: the canonical miss wording
+        // `"HOME not set"` must stay grep-visible at both delegating
+        // call sites so a future refactor that reshaped the wording
+        // cannot silently drift the message the operator has been
+        // coached to grep for.
+        let wording_needle = "\"HOME not set\"";
+        let wording_hits = crate::test_support::code_line_hits(body, wording_needle);
+        assert_eq!(
+            wording_hits.len(),
+            2,
+            "commands/gem.rs must spell the canonical miss wording \
+             `{wording_needle}` at EXACTLY two code lines — one per \
+             delegating call's second argument. Found {} code-line \
+             hit(s): {wording_hits:#?}",
+            wording_hits.len()
         );
     }
 }
