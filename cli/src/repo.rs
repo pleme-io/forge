@@ -81,6 +81,22 @@ pub fn find_repo_root() -> Result<PathBuf> {
 
 /// Get a tool binary path from environment or fallback to PATH
 ///
+/// Two-arg env-var-with-`String`-fallback sigil on the tool-name
+/// surface: where [`env_var_or_default`] takes an arbitrary
+/// substrate-supplied string as the fallback (an environment alias,
+/// a registry URL, a server name, a cluster name),
+/// [`get_tool_path`] takes a *command name* as the fallback (a
+/// shell-name used as a PATH lookup by the caller). Post-lift the
+/// body is `env_var_or_default(env_var, fallback)` — the
+/// `env::var → String` shape lives at the ONE primitive body so a
+/// future refinement of the shape (logging every resolve,
+/// canonicalizing the value against a closed enum, a telemetry
+/// sigil separating explicit-value from default-fallback paths, or
+/// a swap to a typed `substrate::EnvVar(String)` newtype) lands at
+/// [`env_var_or_default`] and reaches every sigil by construction
+/// (THEORY §V — solve-once-at-the-primitive; §VI.1 —
+/// recurring-shape-to-helper).
+///
 /// # Arguments
 ///
 /// * `env_var` - Environment variable name to check first
@@ -93,7 +109,7 @@ pub fn find_repo_root() -> Result<PathBuf> {
 /// let crate2nix = get_tool_path("CRATE2NIX", "crate2nix");
 /// ```
 pub fn get_tool_path(env_var: &str, fallback: &str) -> String {
-    std::env::var(env_var).unwrap_or_else(|_| fallback.to_string())
+    env_var_or_default(env_var, fallback)
 }
 
 /// Resolve a substrate-declared directory-path env var into a
@@ -613,6 +629,74 @@ mod tests {
              env var was set would misroute every downstream `format!` \
              at the sigils' consumers to the wrong registry / cluster \
              / server alias / environment."
+        );
+    }
+
+    /// [`get_tool_path`] treats an explicit empty-string `env::var`
+    /// value as a set env var and returns it verbatim — NOT the
+    /// fallback. Pins the delegation onto [`env_var_or_default`]:
+    /// post-lift the sigil's body is a single-line forward to the
+    /// primitive, so the `.unwrap_or_else(|_| ...)` empty-string-parity
+    /// semantics come from the primitive by construction. A future
+    /// refactor of the primitive that swapped `.unwrap_or_else` for
+    /// `.ok().filter(|s| !s.is_empty())` would silently reroute a
+    /// shell-exported `CARGO_BIN=""` / `CRATE2NIX_BIN=""` from
+    /// empty-string to the caller-supplied tool-name fallback, and
+    /// every consumer's downstream spawn would then invoke a bare
+    /// `cargo` / `crate2nix` off `PATH` where pre-lift the operator's
+    /// explicit empty override told it not to. Sibling shield to
+    /// [`env_var_or_default_returns_empty_string_when_env_var_set_empty`]
+    /// on the tool-name surface.
+    #[test]
+    fn get_tool_path_returns_empty_string_when_env_var_set_empty() {
+        let env_var = "TEST_GET_TOOL_PATH_EMPTY_SIGIL_SHIELD";
+        std::env::set_var(env_var, "");
+        let result = get_tool_path(env_var, "the-fallback-must-not-fire");
+        std::env::remove_var(env_var);
+        assert_eq!(
+            result, "",
+            "get_tool_path() must return the empty string verbatim \
+             when the env var is set to \"\" — matches the primitive \
+             [`env_var_or_default`]'s `.unwrap_or_else(|_| ...)` \
+             semantics, which the sigil delegates through post-lift."
+        );
+    }
+
+    /// The post-lift body of [`get_tool_path`] is a single-line forward
+    /// to [`env_var_or_default`] — the sigil no longer spells
+    /// `env::var(...)` inline. Structural regression shield: without
+    /// it, a future refactor could silently re-inline the shape (e.g.
+    /// a helpful "just call `std::env::var` directly, it's shorter"
+    /// cleanup) and reopen the duplication class this lift closed.
+    /// Pre-lift the sigil's body carried the inline
+    /// `std::env::var(env_var).unwrap_or_else(|_| fallback.to_string())`
+    /// spelling; post-lift the body must contain the
+    /// `env_var_or_default(env_var, fallback)` call site AND NOT the
+    /// inline `env::var(env_var)` needle.
+    #[test]
+    fn get_tool_path_body_delegates_to_env_var_or_default_sigil() {
+        const SOURCE: &str = include_str!("repo.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "repo.rs",
+            "pub fn get_tool_path(env_var: &str, fallback: &str) -> String {",
+            "\n}",
+        );
+        assert!(
+            body.contains("env_var_or_default(env_var, fallback)"),
+            "get_tool_path() body must forward to \
+             `env_var_or_default(env_var, fallback)` — the primitive \
+             body every env-var-with-`String`-fallback sigil in the \
+             crate now delegates through. Post-lift body: {body}"
+        );
+        assert!(
+            !body.contains("std::env::var(env_var)") && !body.contains("env::var(env_var)"),
+            "get_tool_path() body must NOT spell the inline \
+             `env::var(env_var).unwrap_or_else(|_| \
+             fallback.to_string())` shape — that duplication was lifted \
+             onto [`env_var_or_default`]. A re-inline would silently \
+             reopen the class this shield exists to close. \
+             Post-lift body: {body}"
         );
     }
 

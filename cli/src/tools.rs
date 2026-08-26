@@ -49,8 +49,6 @@
 //!
 //! No other changes needed - the pattern is fully generalized.
 
-use std::env;
-
 /// Get the path to an external tool
 ///
 /// Checks for an environment variable `{TOOL}_BIN` (uppercase tool name with
@@ -101,7 +99,7 @@ use std::env;
 /// ```
 pub fn get_tool_path(tool: &str) -> String {
     let env_var = format!("{}_BIN", tool.to_uppercase().replace("-", "_"));
-    env::var(&env_var).unwrap_or_else(|_| tool.to_string())
+    crate::repo::env_var_or_default(&env_var, tool)
 }
 
 /// Get the path to a tool with a custom environment variable name
@@ -125,7 +123,7 @@ pub fn get_tool_path(tool: &str) -> String {
 /// let path = get_tool_path_custom("skopeo", "CUSTOM_SKOPEO_PATH");
 /// ```
 pub fn get_tool_path_custom(tool: &str, env_var: &str) -> String {
-    env::var(env_var).unwrap_or_else(|_| tool.to_string())
+    crate::repo::env_var_or_default(env_var, tool)
 }
 
 /// Common tool names (for documentation and IDE autocomplete)
@@ -265,6 +263,125 @@ mod tests {
             "/nix/store/abc/bin/foo-bar-baz"
         );
         env::remove_var("FOO_BAR_BAZ_BIN");
+    }
+
+    /// [`get_tool_path`] treats an explicit empty-string env var value
+    /// as a set var and returns it verbatim — NOT the tool-name
+    /// fallback. Pins the delegation onto
+    /// [`crate::repo::env_var_or_default`]: post-lift the sigil's body
+    /// is a two-line stanza (derive `_BIN` name, then forward to the
+    /// primitive), so the `.unwrap_or_else(|_| ...)` empty-string
+    /// parity comes from the primitive by construction. A future
+    /// primitive refactor that swapped `.unwrap_or_else` for
+    /// `.ok().filter(|s| !s.is_empty())` would silently reroute a
+    /// shell-exported `<TOOL>_BIN=""` from empty-string to the
+    /// tool-name PATH fallback, defeating every operator's explicit
+    /// empty override. Sibling shield to
+    /// [`crate::repo::env_var_or_default_returns_empty_string_when_env_var_set_empty`]
+    /// on the tool-name surface.
+    #[test]
+    fn get_tool_path_returns_empty_string_when_env_var_set_empty() {
+        // Unique tool name so the derived env var
+        // `TEST_TOOLS_EMPTY_SIGIL_SHIELD_BIN` collides with no
+        // other test.
+        env::set_var("TEST_TOOLS_EMPTY_SIGIL_SHIELD_BIN", "");
+        let result = get_tool_path("test-tools-empty-sigil-shield");
+        env::remove_var("TEST_TOOLS_EMPTY_SIGIL_SHIELD_BIN");
+        assert_eq!(
+            result, "",
+            "get_tool_path() must return the empty string verbatim \
+             when the derived `_BIN` env var is set to \"\" — matches \
+             the primitive [`crate::repo::env_var_or_default`]'s \
+             `.unwrap_or_else(|_| ...)` semantics, which the sigil \
+             delegates through post-lift."
+        );
+    }
+
+    /// [`get_tool_path_custom`] treats an explicit empty-string env
+    /// var value as a set var and returns it verbatim — NOT the
+    /// tool-name fallback. Sibling of the
+    /// [`get_tool_path_returns_empty_string_when_env_var_set_empty`]
+    /// shield on the custom-env-var-name overload.
+    #[test]
+    fn get_tool_path_custom_returns_empty_string_when_env_var_set_empty() {
+        let env_var = "TEST_TOOLS_CUSTOM_EMPTY_SIGIL_SHIELD";
+        env::set_var(env_var, "");
+        let result = get_tool_path_custom("the-fallback-must-not-fire", env_var);
+        env::remove_var(env_var);
+        assert_eq!(
+            result, "",
+            "get_tool_path_custom() must return the empty string \
+             verbatim when the env var is set to \"\" — matches the \
+             primitive [`crate::repo::env_var_or_default`]'s \
+             `.unwrap_or_else(|_| ...)` semantics, which the sigil \
+             delegates through post-lift."
+        );
+    }
+
+    /// The post-lift bodies of [`get_tool_path`] and
+    /// [`get_tool_path_custom`] each forward to
+    /// [`crate::repo::env_var_or_default`] — neither sigil spells
+    /// `env::var(...)` inline any more. Structural regression shield:
+    /// without it, a future refactor could silently re-inline the
+    /// shape (e.g. "just call `std::env::var` directly, it's shorter")
+    /// and reopen the duplication class this lift closed. Pre-lift
+    /// each sigil carried the inline
+    /// `env::var(<name>).unwrap_or_else(|_| tool.to_string())`
+    /// spelling; post-lift the bodies must contain the
+    /// `crate::repo::env_var_or_default(...)` call site AND NOT the
+    /// inline `env::var(...)` needle.
+    #[test]
+    fn get_tool_path_and_custom_bodies_delegate_to_env_var_or_default_sigil() {
+        const SOURCE: &str = include_str!("tools.rs");
+
+        let derived_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "tools.rs",
+            "pub fn get_tool_path(tool: &str) -> String {",
+            "\n}",
+        );
+        assert!(
+            derived_body.contains("crate::repo::env_var_or_default(&env_var, tool)"),
+            "get_tool_path() body must forward its tail to \
+             `crate::repo::env_var_or_default(&env_var, tool)` — the \
+             primitive body every env-var-with-`String`-fallback \
+             sigil in the crate now delegates through. \
+             Post-lift body: {derived_body}"
+        );
+        assert!(
+            !derived_body.contains("env::var(&env_var)")
+                && !derived_body.contains("std::env::var(&env_var)"),
+            "get_tool_path() body must NOT spell the inline \
+             `env::var(&env_var).unwrap_or_else(|_| \
+             tool.to_string())` shape — that duplication was lifted \
+             onto [`crate::repo::env_var_or_default`]. A re-inline \
+             would silently reopen the class this shield exists to \
+             close. Post-lift body: {derived_body}"
+        );
+
+        let custom_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "tools.rs",
+            "pub fn get_tool_path_custom(tool: &str, env_var: &str) -> String {",
+            "\n}",
+        );
+        assert!(
+            custom_body.contains("crate::repo::env_var_or_default(env_var, tool)"),
+            "get_tool_path_custom() body must forward to \
+             `crate::repo::env_var_or_default(env_var, tool)` — \
+             sibling of the get_tool_path sigil on the custom-env- \
+             var-name overload. Post-lift body: {custom_body}"
+        );
+        assert!(
+            !custom_body.contains("env::var(env_var)")
+                && !custom_body.contains("std::env::var(env_var)"),
+            "get_tool_path_custom() body must NOT spell the inline \
+             `env::var(env_var).unwrap_or_else(|_| \
+             tool.to_string())` shape — that duplication was lifted \
+             onto [`crate::repo::env_var_or_default`]. A re-inline \
+             would silently reopen the class this shield exists to \
+             close. Post-lift body: {custom_body}"
+        );
     }
 }
 
