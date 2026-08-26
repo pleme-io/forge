@@ -134,10 +134,25 @@ fn compute_deploy_tag(tag_suffix: &str, arch: &str, deploy_only: bool, has_arm64
 }
 
 /// Resolve deploy.yaml path from SERVICE_DIR, checking deploy/{service_name}.yaml first.
+///
+/// Routes the `SERVICE_DIR` env-var read through the shared
+/// [`crate::repo::path_from_env`] primitive (introduced at `repo.rs:127`
+/// by d8e6626 and explicitly named in that commit's body as the
+/// three-times-is-a-law third caller pending migration), so the
+/// `env::var → Context::context → PathBuf::from` composition lives at
+/// EXACTLY one point across the crate. The module's domain-specific
+/// miss wording `"SERVICE_DIR not set - required for deploy.yaml
+/// lookup"` — the third distinct wording alongside
+/// `commands/developer_tools.rs`'s `"SERVICE_DIR not set - this should
+/// be called via substrate wrapper"` and `commands/schema_validation.rs`'s
+/// `"SERVICE_DIR environment variable not set"` — stays grep-visible
+/// verbatim at the delegating call so the operator-facing diagnostic
+/// prose the caller has been coached to grep for is preserved.
 fn resolve_deploy_yaml_from_service_dir() -> Result<PathBuf> {
-    let service_dir = std::env::var("SERVICE_DIR")
-        .context("SERVICE_DIR not set - required for deploy.yaml lookup")?;
-    let service_dir_path = Path::new(&service_dir);
+    let service_dir_path = crate::repo::path_from_env(
+        "SERVICE_DIR",
+        "SERVICE_DIR not set - required for deploy.yaml lookup",
+    )?;
     let service_name = service_dir_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -148,11 +163,11 @@ fn resolve_deploy_yaml_from_service_dir() -> Result<PathBuf> {
     // monorepo subtree OR as a standalone product repository whose root
     // carries both `deploy.yaml` and `.git`.
     let product_dir = crate::repo::find_product_dir(
-        service_dir_path,
+        &service_dir_path,
         crate::repo::ProductDirLayout::MonorepoOrStandalone,
     );
     let deploy_path = if let Some(pd) = product_dir {
-        resolve_deploy_yaml_path(&pd, service_name, service_dir_path)
+        resolve_deploy_yaml_path(&pd, service_name, &service_dir_path)
     } else {
         service_dir_path.join("deploy.yaml")
     };
@@ -3105,6 +3120,126 @@ mod status_spawn_routing_tests {
             "commands/rust_service.rs",
             1,
             "the federation-tests `nix run .#release` status-only spawn",
+        );
+    }
+}
+
+#[cfg(test)]
+mod service_dir_routing_tests {
+    /// Whole-module shield: every read of the `SERVICE_DIR` env var in
+    /// this module's non-test body must route through the shared
+    /// [`crate::repo::path_from_env`] primitive (introduced at
+    /// `repo.rs:127` by d8e6626), never through an inline
+    /// `std::env::var("SERVICE_DIR").context(...)?` + `Path::new(&_)` /
+    /// `PathBuf::from(_)` two-line stanza.
+    ///
+    /// Pre-lift the single consumer site — `resolve_deploy_yaml_from_service_dir`
+    /// (called by `deploy_rust_service_with_tag` and `deploy_rust_service`
+    /// at `commands/rust_service.rs:885, 936`) — spelled the same
+    /// `env::var("SERVICE_DIR").context("SERVICE_DIR not set - required
+    /// for deploy.yaml lookup")?` + `Path::new(&service_dir)` stanza
+    /// verbatim. d8e6626 introduced [`crate::repo::path_from_env`]
+    /// explicitly naming this site as the three-times-is-a-law third
+    /// caller pending migration (alongside the two per-module sigils in
+    /// `commands/developer_tools.rs` and `commands/schema_validation.rs`
+    /// the same commit lifted). This shield closes the drift class at
+    /// three on the same idiom — the sibling
+    /// `commands/developer_tools.rs:1121` and
+    /// `commands/schema_validation.rs:450` shields cover the sigil-
+    /// bearing modules; this shield covers the single-caller module
+    /// that inlines the delegation.
+    ///
+    /// A future refinement of the `SERVICE_DIR` contract — a canonicalize
+    /// hook, a substrate-path validation step, a telemetry sigil on the
+    /// resolved path, or a swap to a typed
+    /// `substrate::ServiceDir(PathBuf)` newtype — lands at ONE body
+    /// ([`crate::repo::path_from_env`]) and reaches every consumer by
+    /// construction (THEORY §V — solve-once-at-the-primitive; §VI.1 —
+    /// recurring-shape-to-helper).
+    ///
+    /// The scan bounds on the whole-module boundary (from file start
+    /// to the FIRST `\n#[cfg(test)]\n` marker in source order via
+    /// [`crate::test_support::module_body_before_first_cfg_test`]) so
+    /// this shield's own docstring mentions of `env::var("SERVICE_DIR")`
+    /// — living inside a `#[cfg(test)]` block below that first marker —
+    /// stay out of scope AND every current or future `SERVICE_DIR`-
+    /// reading consumer landing anywhere in the top-level module body
+    /// cannot silently ride along without routing through the primitive.
+    /// Every hit routes through [`crate::test_support::code_line_hits`]
+    /// for anti-docstring-self-match discipline.
+    #[test]
+    fn test_rust_service_service_dir_routes_through_path_from_env() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+        // Negative side: the raw `env::var("SERVICE_DIR")` needle must
+        // NOT appear anywhere in the module body post-lift — the read
+        // now lives at `crate::repo::path_from_env`, which owns the
+        // read at ONE body across the crate. A future consumer that
+        // re-copies the two-line stanza pushes this count above zero
+        // and fails the shield before it can drift the miss wording or
+        // the `PathBuf` projection away from the shared primitive's
+        // single point of truth. Substring match catches both
+        // `std::env::var("SERVICE_DIR")` and the shorter
+        // `env::var("SERVICE_DIR")` (this module carries
+        // `use std::env;` and consumers spell both forms elsewhere).
+        let raw_env_needle = "env::var(\"SERVICE_DIR\")";
+        let env_hits = crate::test_support::code_line_hits(body, raw_env_needle);
+        assert!(
+            env_hits.is_empty(),
+            "commands/rust_service.rs must NOT spell \
+             `{raw_env_needle}` inline in the module body — every \
+             consumer must route through `crate::repo::path_from_env`, \
+             the shared primitive that owns the `env::var` read at ONE \
+             body across the crate. Found {} code-line hit(s): \
+             {env_hits:#?}. A hand-rolled inline copy re-opens the \
+             drift class the primitive was landed to close.",
+            env_hits.len()
+        );
+        // Positive side: the delegating call to
+        // `crate::repo::path_from_env(` must appear at EXACTLY one code
+        // line — the `resolve_deploy_yaml_from_service_dir` body. A
+        // regression that dropped the delegation would leave the
+        // negative scan trivially satisfied by absence (zero raw
+        // `env::var` hits, but also zero delegating calls), and the
+        // module would have stopped resolving `SERVICE_DIR` for
+        // deploy.yaml lookup at all.
+        let delegate_needle = "crate::repo::path_from_env(";
+        let delegate_hits = crate::test_support::code_line_hits(body, delegate_needle);
+        assert_eq!(
+            delegate_hits.len(),
+            1,
+            "commands/rust_service.rs must delegate `SERVICE_DIR` \
+             resolution to `crate::repo::path_from_env(...)` at EXACTLY \
+             one code line — the `resolve_deploy_yaml_from_service_dir` \
+             body. Found {} code-line hit(s): {delegate_hits:#?}. A \
+             missing delegation would leave the negative scan above \
+             trivially satisfied by absence.",
+            delegate_hits.len()
+        );
+        // Wording-preservation side: the domain-specific miss wording
+        // `"SERVICE_DIR not set - required for deploy.yaml lookup"` —
+        // the third distinct wording d8e6626 catalogued alongside the
+        // two per-module sigils' wordings — must stay grep-visible
+        // verbatim at the delegating call. A future refactor that
+        // reshaped the miss wording (a swap to `.with_context(||)` with
+        // drifted text, a lift to a typed error variant, a canonicalize
+        // prefix landed in front) would silently drift the message the
+        // operator has been coached to grep for.
+        let wording_needle = "\"SERVICE_DIR not set - required for deploy.yaml lookup\"";
+        let wording_hits = crate::test_support::code_line_hits(body, wording_needle);
+        assert_eq!(
+            wording_hits.len(),
+            1,
+            "commands/rust_service.rs must spell the canonical miss \
+             wording `{wording_needle}` at EXACTLY one code line — the \
+             delegating call's second argument. Found {} code-line \
+             hit(s): {wording_hits:#?}. Every pre-lift caller site \
+             spelled this wording verbatim at its `.context(...)` call; \
+             the delegation preserves it at the same grep-visible \
+             surface.",
+            wording_hits.len()
         );
     }
 }
