@@ -868,33 +868,29 @@ mod tests {
     // KUBECTL_BIN-resolved path, never the literal "kubectl".
     // ---------------------------------------------------------------
 
-    /// RAII scope-guard that sets `KUBECTL_BIN=value` on construction
-    /// and restores the pre-scope state (either the original value or
-    /// unset) on drop — panic-safe by construction. Mirrors the
-    /// discipline of [`crate::test_support::GitBinScope`] without
-    /// pulling that scope into `test_support.rs` while there is only
-    /// one kubectl-env-touching test in the fleet; a second test
-    /// would trigger the lift to `test_support.rs`, same rule as
-    /// [`crate::test_support::make_executable_shim`] applied at the
-    /// three-times threshold.
-    struct KubectlBinScope {
-        prior: std::result::Result<String, std::env::VarError>,
-    }
+    /// `KubectlBinScope::set(value)` sets `KUBECTL_BIN=value` and
+    /// returns a [`crate::test_support::EnvVarScope`] that restores the
+    /// pre-scope state on drop — panic-safe by construction. Preserved
+    /// as a zero-cost named namespace so every existing call site
+    /// (`let _scope = KubectlBinScope::set(&shim);` — 13 spawn shields
+    /// in this module) keeps its identity-at-the-call-site spelling.
+    /// The env-var name lives at ONE body inside this impl rather than
+    /// being copy-pasted as a literal at every consumer, so a typo
+    /// `KUBECTL_BIN` → `KUBECTL_BINN` at a spawn shield is structurally
+    /// impossible.
+    ///
+    /// Sibling of [`crate::test_support::GitBinScope`]: both delegate
+    /// to the shared [`crate::test_support::EnvVarScope`] primitive so
+    /// the set-then-restore contract — mutate on construction, restore
+    /// on Drop (panic-safe by RAII, not by a `.restore()` call the
+    /// caller has to remember) — lives at exactly ONE body across the
+    /// crate. THEORY §V (solve-once-at-the-primitive); §VI.1
+    /// (recurring-shape-to-helper).
+    struct KubectlBinScope;
 
     impl KubectlBinScope {
-        fn set(value: &str) -> Self {
-            let prior = std::env::var("KUBECTL_BIN");
-            std::env::set_var("KUBECTL_BIN", value);
-            Self { prior }
-        }
-    }
-
-    impl Drop for KubectlBinScope {
-        fn drop(&mut self) {
-            match &self.prior {
-                Ok(v) => std::env::set_var("KUBECTL_BIN", v),
-                Err(_) => std::env::remove_var("KUBECTL_BIN"),
-            }
+        fn set(value: &str) -> crate::test_support::EnvVarScope {
+            crate::test_support::EnvVarScope::set("KUBECTL_BIN", value)
         }
     }
 
